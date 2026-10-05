@@ -1,52 +1,21 @@
-# ee/pocketpaw_ee/cloud/growth/domain.py — frozen value objects + pure
-# constants for the /growth outbound engine. Domain enforces tenancy at
-# construction (``workspace_id`` required, no default) per the cloud 4-file
-# rules. Pure Python — no Beanie / Pydantic / FastAPI imports — so the service
-# can be unit-tested without the ODM and the import-linter contract can depend
-# on it freely. Also home of ``GROWTH_QUEUE_NAME``, the dedicated arq queue the
-# growth worker seam listens on (later slices enqueue ingestion / draft / send
-# jobs there).
+# ee/pocketpaw_ee/cloud/growth/domain.py — frozen value objects and pure
+# constants for the /growth outbound engine. Pure Python (no Beanie / Pydantic /
+# FastAPI), so the service is unit-testable without the ODM and the
+# import-linter "Growth" contract can depend on it freely. Domain objects take
+# ``workspace_id`` as a required field: tenancy is enforced at construction.
 #
-# Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
-# store. Later slices add ingestion, drafts, and Instinct-gated sends.
-# Updated 2026-07-27 (feat/growth-g3): ``Draft`` — per-channel outreach copy
-# attached to a prospect, with the enforced status machine
-# (``DRAFT_TRANSITIONS``): draft→proposed→approved→sent, sent→replied, any
-# non-terminal→rejected. The transition table lives here (pure data) so the
-# service stays a dumb enforcer and G-4 can wire Instinct proposals on top.
-# Updated 2026-07-27 (feat/growth-g5): ``MessageLog`` — the audit value object
-# for ONE outbound delivery attempt (``MESSAGE_LOG_OUTCOMES``: sent | failed).
-# One row per attempt, not per draft, so a retried send keeps both records.
-# Updated 2026-07-27 (integration/growth-v1): the outcome vocabulary absorbs
-# G-6's WhatsApp send record — ``sending`` (written before the provider call)
-# and ``blocked`` (a guard refused; no provider call happened) join
-# ``MESSAGE_LOG_OUTCOMES``, and ``PROVIDER_REACHED_OUTCOMES`` names the subset
-# the WhatsApp rate cap counts.
-# Updated 2026-07-28 (feat/growth-api-scale): the prospect list's scale
-# vocabulary — ``ProspectSort`` (the four ordering modes the UI offers),
-# ``TIER_SORT_ORDER``, the DECLARED qualification rank a→b→c→unqualified, and
-# ``PROSPECT_STATUS_ORDER`` / ``PROSPECT_SOURCE_ORDER``, the facet display
-# orders derived from the Literals. The rank is data here rather than a
-# lexicographic accident in the query layer, so renaming a tier can't silently
-# reorder the list.
-# Updated 2026-07-28 (feat/growth-projects): ``Prospect.project_id`` — the
-# client a prospect belongs to, following the ``tasks`` / ``cycles`` consumer
-# pattern exactly (nullable, validated against the workspace at entry, an
-# optional filter on the reads). An agency runs one outbound pipeline per
-# client; the project primitive already models that container, so growth
-# consumes it rather than inventing a second scoping concept.
-# Updated 2026-07-29 (feat/growth-discovery): the ICP — a STANDING description
-# of who a workspace wants, plus a cadence. ``Icp`` (the value object),
-# ``IcpCadence`` / ``IcpStatus`` and their orders, and ``ProspectSource`` gains
-# ``discovery``. Plus the provenance vocabulary the discovery engine writes and
-# the UI reads: ``EmailEvidence`` (an address, how we know it, and WHERE it was
-# seen) and ``EMAIL_CONFIDENCE``. The email fields are the load-bearing part —
-# see ``EmailEvidence`` for why a guessed address is worse than an empty one.
-# Updated 2026-07-27 (feat/growth-g4): the Instinct send gate —
-# ``GATE_OWNED_TARGETS`` marks the statuses only the gate machinery may set
-# (``approved`` via an approved ``_growth_send`` proposal, ``sent`` via the
-# dispatch worker), and ``GROWTH_DISPATCH_JOB_NAME`` names the arq job the
-# approve path enqueues on the ``growth`` queue.
+# What lives here:
+#   * Prospect / Icp / Draft / MessageLog value objects and their vocabularies
+#     (tiers, statuses, sources, sort and facet orders, ICP cadences).
+#   * ``DRAFT_TRANSITIONS`` — the draft status machine the service enforces,
+#     and ``GATE_OWNED_TARGETS`` — ``approved`` / ``sent``, settable only by
+#     the Instinct send gate and the delivery paths, never the public route.
+#   * The delivery-attempt vocabulary: ``MESSAGE_LOG_OUTCOMES``,
+#     ``PROVIDER_REACHED_OUTCOMES`` (what the WhatsApp hourly cap counts), and
+#     the mock-delivery provider name + the channels it covers.
+#   * ``EmailEvidence`` / ``recordable_emails`` — a guessed address is never
+#     stored; only observed ones are.
+#   * Queue and job names for the dedicated ``growth`` arq queue.
 
 from __future__ import annotations
 
@@ -130,6 +99,10 @@ class Prospect:
     # nobody typed needs to open the source and check the claim. Empty on a
     # manually created prospect, which needs no such trail.
     source_urls: tuple[str, ...] = ()
+    # The structured profile from the last single-prospect research run, and
+    # when it ran. None until someone researches this row.
+    research: dict | None = None
+    researched_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -207,6 +180,8 @@ class Icp:
     max_per_run: int = DEFAULT_ICP_MAX_PER_RUN
     status: str = "active"  # IcpStatus
     last_run_at: datetime | None = None
+    last_preview: dict | None = None
+    last_preview_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -374,6 +349,15 @@ MESSAGE_LOG_OUTCOMES: frozenset[str] = frozenset({"sending", "sent", "failed", "
 # protects.
 PROVIDER_REACHED_OUTCOMES: frozenset[str] = frozenset({"sending", "sent", "failed"})
 
+# The fake provider a workspace's ``growth_mock_delivery`` setting routes
+# approved sends through (``growth/mock_delivery.py``). Its rows never count
+# against a real provider's budget, and the queue flags them ``mock``.
+MOCK_DELIVERY_PROVIDER = "mock"
+
+# Channels mock delivery covers. LinkedIn is absent on purpose: it is sent by
+# hand from its queue and recorded through mark-sent, mock mode or not.
+MOCK_DELIVERY_CHANNELS: frozenset[str] = frozenset({"email", "whatsapp"})
+
 
 @dataclass(frozen=True)
 class MessageLog:
@@ -390,7 +374,7 @@ class MessageLog:
     draft_id: str
     prospect_id: str
     channel: str  # DraftChannel
-    provider: str  # e.g. "mailtrap" (email) or "msg91" (whatsapp)
+    provider: str  # "mailtrap" (email), "msg91" (whatsapp) or "mock" (mock delivery)
     to_address: str
     outcome: str  # MessageOutcome
     provider_message_id: str | None = None
@@ -416,6 +400,8 @@ __all__ = [
     "ICP_STATUS_ORDER",
     "MAX_ICP_MAX_PER_RUN",
     "MESSAGE_LOG_OUTCOMES",
+    "MOCK_DELIVERY_CHANNELS",
+    "MOCK_DELIVERY_PROVIDER",
     "PROSPECT_SOURCE_ORDER",
     "PROSPECT_STATUS_ORDER",
     "PROVIDER_REACHED_OUTCOMES",

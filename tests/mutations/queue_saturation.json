@@ -74,7 +74,7 @@
   {
     "label": "the growth executor enqueues with no growth worker deployed, so the send waits in Redis forever while the Action reads executed",
     "file": "ee/pocketpaw_ee/cloud/growth/executor.py",
-    "find": "        if not _growth_worker_enabled():\n",
+    "find": "        if not mock and not _growth_worker_enabled():\n",
     "replace": "        if False:\n",
     "tests": [
       "tests/cloud/growth/test_gate.py"

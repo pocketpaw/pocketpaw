@@ -1,69 +1,24 @@
-# ee/pocketpaw_ee/cloud/growth/router.py — FastAPI router for the prospect
-# store. Thin shell over ``ee.cloud.growth.service``: parses requests,
-# delegates, returns DTOs. License gate + canonical ``request_context``
-# dependency on every route — services never see raw ``Request`` objects, and
-# every read/write is workspace-scoped inside the service (cross-tenant ids
-# 404). Mounted under ``/api/v1`` → final paths ``/api/v1/growth/prospects``.
+# ee/pocketpaw_ee/cloud/growth/router.py — FastAPI router for /growth, mounted
+# under ``/api/v1``. A thin shell over ``growth.service``: parse, delegate,
+# return DTOs. Every route carries the license gate, ``request_context`` and a
+# per-route RBAC guard (pinned by the guard-coverage test in test_gate.py):
+# reads ``growth.read`` (MEMBER), authoring ``growth.write`` (MEMBER), and the
+# verbs that decide what reaches a prospect ``growth.manage`` (ADMIN) — propose
+# and propose-batch (the tier the executor re-checks at approve time),
+# LinkedIn mark-sent, the growth settings PATCH and deliver-approved.
 #
-# Created 2026-07-27 (feat/growth-g1): first slice of /growth — create / get /
-# list (tier/status/source filters) / update. Later slices add ingestion,
-# drafts, and Instinct-gated sends.
-# Updated 2026-07-27 (feat/growth-g2): POST /bulk — batch ingestion (Clay /
-# directory imports) via the service's ``bulk_ingest``; 500-row cap on the DTO,
-# per-row errors in the response.
-# Updated 2026-07-27 (feat/growth-g3): drafts — POST /prospects/{id}/drafts,
-# GET /drafts (prospect/channel/status filters), POST /drafts/{id}/status
-# (illegal moves 422 ``draft.illegal_transition``). Router prefix widened from
-# ``/growth/prospects`` to ``/growth`` (routes now carry ``/prospects``
-# themselves) so drafts mount beside prospects — final URLs unchanged.
-# Updated 2026-07-27 (feat/growth-g4): POST /drafts/{id}/propose — files a
-# gated ``_growth_send`` Instinct proposal and flips the draft to ``proposed``.
-# The status route now refuses the gate-owned targets (``approved`` / ``sent``)
-# with 403 ``draft.gate_required`` — approval happens ONLY in the Instinct
-# Tray, and only the approved dispatch path may send.
-# Updated 2026-07-27 (feat/growth-g4, security review F3): per-route RBAC.
-# ``require_license`` alone left every route open to any authenticated member
-# of any workspace. Reads take ``growth.read`` (MEMBER), authoring writes
-# ``growth.write`` (MEMBER), and the OUTBOUND verb — POST
-# /drafts/{id}/propose — takes ``growth.manage`` (ADMIN): the propose route
-# has to sit at the same tier ``growth.executor`` re-checks at dispatch, or a
-# member-filed proposal would always fail closed at approve time.
-# Updated 2026-07-28 (feat/growth-mcp): PATCH /drafts/{id} — edit a draft's copy
-# (subject / body / demo_url) while it is still ``draft``. Anything past that is
-# 403 ``draft.not_editable``: from ``proposed`` on, the stored body is what the
-# Tray shows and what the worker sends. Declared ABOVE the /drafts/{id}/status
-# POST for readability only — different methods, no path-match ambiguity.
-# Updated 2026-07-28 (feat/growth-api-scale): GET /prospects grew the scale
-# query — ``q`` (search), ``sort`` (newest|oldest|company|tier), ``cursor`` —
-# and now returns ``ProspectPageResponse`` ({items, next_cursor, total})
-# instead of a bare array. BREAKING for any existing consumer of the list
-# route; the frontend list view is the only one and lands with it. Plus GET
-# /prospects/facets — tier/status/source counts for the filter chips, declared
-# ABOVE /prospects/{prospect_id} so the literal path wins the match. Plus POST
-# /drafts/propose-batch — up to 100 draft ids, each proposed through the SAME
-# gated path as the single-draft route (growth.manage, one Instinct proposal
-# per draft, per-draft error entries).
-# Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue — GET
-# /linkedin/queue (proposed/approved linkedin drafts joined with prospect
-# context; ``?format=md`` returns a paste-ready text/markdown export) and
-# POST /linkedin/{draft_id}/mark-sent (records a manual send via the G-3
-# transition machine). Deliberately manual — no LinkedIn API.
-# Updated 2026-07-28 (feat/growth-projects): GET /prospects and GET
-# /prospects/facets take an optional ``project_id`` — one client's pipeline.
-# Query params only; NO new route, so the guard-coverage test in
-# ``tests/cloud/growth/test_gate.py`` keeps its existing surface. Omitting it
-# means every project, so a workspace not using them sees no change.
-# Updated 2026-07-27 (integration/growth-v1): the G-8 LinkedIn routes carry the
-# G-4 per-route RBAC guards their branch predated — ``growth.read`` on the
-# queue, ``growth.manage`` on mark-sent (it is an OUTBOUND verb, same tier as
-# propose).
-# Updated 2026-07-29 (feat/growth-discovery): the ICP surface — POST/GET
-# /icps, GET/PATCH/DELETE /icps/{id}. Reads at ``growth.read``, mutations at
-# ``growth.write``: an ICP is a description of who you want, which is authoring
-# work, not the outbound verb. Turning a cadence on is an ordinary PATCH for
-# the same reason — the BOUNDS (per run, and per workspace per month) are what
-# make a standing schedule safe, not a second approval on the switch. Every one
-# of these has an entry in the guard-coverage test in test_gate.py.
+# Surfaces: prospects (CRUD, bulk ingest / delete, scale list with q / sort /
+# cursor, facets, research, writer-agent drafting, optional ``project_id``
+# scoping); ICPs (CRUD + preview); drafts (create, list, copy edit while still
+# ``draft``, lifecycle status moves, propose / propose-batch); the LinkedIn
+# manual queue (JSON or ``?format=md`` export, mark-sent); per-channel
+# delivery queues (``/queue/{channel}``, latest delivery attempt attached) and
+# ``deliver-approved``; and the workspace growth settings (mock delivery).
+#
+# Invariants: the status route refuses the gate-owned targets ``approved`` /
+# ``sent`` (403 ``draft.gate_required``) — approval happens only in the
+# Instinct Tray. Literal paths (``/prospects/facets``) are declared above the
+# ``{prospect_id}`` route they would otherwise be swallowed by.
 
 from __future__ import annotations
 
@@ -90,7 +45,14 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateIcpRequest,
     CreateProspectRequest,
+    DeleteProspectsRequest,
+    DeleteProspectsResponse,
+    DeliverApprovedResponse,
+    DeliveryQueueItemResponse,
+    DraftProspectRequest,
+    DraftProspectResponse,
     DraftResponse,
+    GrowthSettingsResponse,
     IcpPreviewResponse,
     IcpResponse,
     LinkedInQueueItemResponse,
@@ -102,6 +64,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     ProspectResponse,
     TransitionDraftRequest,
     UpdateDraftRequest,
+    UpdateGrowthSettingsRequest,
     UpdateIcpRequest,
     UpdateProspectRequest,
 )
@@ -135,6 +98,21 @@ async def bulk_ingest_prospects(
     error entries; the rest land. Idempotent — re-posting the same payload
     updates the existing rows instead of duplicating them."""
     return await growth_service.bulk_ingest(ctx, body)
+
+
+@router.post(
+    "/prospects/bulk-delete",
+    response_model=DeleteProspectsResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def bulk_delete_prospects(
+    body: DeleteProspectsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DeleteProspectsResponse:
+    """Delete up to 500 prospects and every draft on them. Ids that are
+    malformed, unknown or in another workspace are skipped; the counts say
+    what was actually removed. Message-log rows are kept."""
+    return await growth_service.delete_prospects(ctx, body.ids)
 
 
 @router.get(
@@ -231,6 +209,54 @@ async def update_prospect(
     return await growth_service.update(ctx, prospect_id, body)
 
 
+@router.delete(
+    "/prospects/{prospect_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def delete_prospect(
+    prospect_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Delete one prospect and its drafts, through the same service path as
+    bulk delete. 404 when the prospect is not in the caller's workspace."""
+    await growth_service.delete_prospect(ctx, prospect_id)
+    return Response(status_code=204)
+
+
+@router.post(
+    "/prospects/{prospect_id}/research",
+    response_model=ProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def research_prospect(
+    prospect_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> ProspectResponse:
+    """Research this one prospect and fold the findings in: a structured
+    ``research`` profile, gaps filled (never overwritten), and a tier
+    suggested to an unqualified row. 503 when no research backend is wired,
+    502 when the run fails or returns nothing for this domain."""
+    return await growth_service.research_prospect(ctx, prospect_id)
+
+
+@router.post(
+    "/prospects/{prospect_id}/draft",
+    response_model=DraftProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def draft_prospect(
+    prospect_id: str,
+    body: DraftProspectRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DraftProspectResponse:
+    """Write first-touch drafts for this prospect on every channel it can be
+    reached on (or the ``channels`` asked for). Channels it cannot be reached
+    on, or that already hold a first-touch draft, come back in ``skipped``.
+    422 ``prospect.no_channel`` when none is left to write for."""
+    return await growth_service.draft_prospect(ctx, prospect_id, body)
+
+
 # ---------------------------------------------------------------------------
 # ICPs (feat/growth-discovery)
 # ---------------------------------------------------------------------------
@@ -291,7 +317,9 @@ async def update_icp(
     ctx: RequestContext = Depends(request_context),
 ) -> IcpResponse:
     """Edit an ICP. Changing ``criteria`` does not re-run anything — the next
-    tick (or a preview) picks the new text up, so tuning stays free."""
+    tick (or a preview) picks the new text up, so tuning stays free. A change
+    to what the research reads (criteria, geography, exclusions,
+    ``max_per_run``) clears the ICP's ``last_preview``."""
     return await growth_service.update_icp(ctx, icp_id, body)
 
 
@@ -304,8 +332,11 @@ async def preview_icp(
     icp_id: str,
     ctx: RequestContext = Depends(request_context),
 ) -> IcpPreviewResponse:
-    """Dry-run this ICP: research once, return what it WOULD file, write
-    nothing.
+    """Dry-run this ICP: research once and return what it WOULD file. Writes
+    no prospects; records the result on the ICP as its last preview (a failed
+    attempt included), so ``GET /icps`` and ``GET /icps/{id}`` still carry it
+    after a refresh. Editing the criteria, geography, exclusions or
+    ``max_per_run`` clears it.
 
     This is how someone comes to trust an ICP before switching its cadence on
     — criteria are prose, and prose that reads precisely to its author
@@ -313,7 +344,7 @@ async def preview_icp(
     back flagged ``already_known`` rather than hidden, because a preview full
     of them is the useful signal.
 
-    A POST despite writing nothing: it spends a real research pass, so it is
+    A POST: it spends a real research pass and records its result, so it is
     not safe to retry blindly and does not belong on a GET. It sits at
     ``growth.write`` for the same reason — it is not the outbound verb (it
     cannot reach a prospect), but it is not free either."""
@@ -493,3 +524,66 @@ async def mark_linkedin_sent(
     machine, so anything but approved→sent is a 422
     ``draft.illegal_transition``."""
     return await growth_service.mark_linkedin_sent(ctx, draft_id)
+
+
+# ---------------------------------------------------------------------------
+# Per-channel delivery queues + growth settings
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/settings",
+    response_model=GrowthSettingsResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def get_growth_settings(
+    ctx: RequestContext = Depends(request_context),
+) -> GrowthSettingsResponse:
+    """The active workspace's growth settings. ``mock_delivery`` on means an
+    approved email / WhatsApp draft is delivered in-process by a fake
+    provider instead of the real one."""
+    return await growth_service.get_growth_settings(ctx)
+
+
+@router.patch(
+    "/settings",
+    response_model=GrowthSettingsResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def update_growth_settings(
+    body: UpdateGrowthSettingsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> GrowthSettingsResponse:
+    """Switch mock delivery on or off. ADMIN, like the outbound verbs: it
+    decides whether an approval reaches a real provider."""
+    return await growth_service.update_growth_settings(ctx, body)
+
+
+@router.get(
+    "/queue/{channel}",
+    response_model=list[DeliveryQueueItemResponse],
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def delivery_queue(
+    channel: DraftChannel,
+    limit: int = Query(default=100, ge=1, le=500),
+    ctx: RequestContext = Depends(request_context),
+) -> list[DeliveryQueueItemResponse]:
+    """One channel's proposed / approved / sent drafts, newest first, each with
+    its prospect, recipient (``to``), opt-in and latest delivery attempt."""
+    return await growth_service.delivery_queue(ctx, channel, limit=limit)
+
+
+@router.post(
+    "/queue/{channel}/deliver-approved",
+    response_model=DeliverApprovedResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def deliver_approved(
+    channel: DraftChannel,
+    ctx: RequestContext = Depends(request_context),
+) -> DeliverApprovedResponse:
+    """Start mock delivery for every approved draft on this channel with no
+    attempt in flight. 422 ``queue.not_deliverable`` for linkedin, 409
+    ``growth.mock_delivery_off`` when mock delivery is off."""
+    return await growth_service.deliver_approved(ctx, channel)

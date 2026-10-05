@@ -14,6 +14,9 @@ Surface: workspace CRUD (``create`` also rejects reserved slugs via
 ``slug_reason``, which backs the live slug-available check), members, invites,
 retention, branding, the instinct approval level, plan/seat/override helpers,
 and the id lists the realtime audience resolver uses as function refs.
+``get_settings`` / ``patch_settings`` expose the settings block alone, for a
+feature that owns one setting and gates its own route (growth's
+``growth_mock_delivery``); the patch merges.
 
 Invariants a reader must not break:
 - ``create`` seeds the default agent inline and mints the LiteLLM tenant key in
@@ -554,6 +557,41 @@ async def set_retention(
 
     count = await _count_members(workspace_id)
     return _workspace_to_domain(doc, member_count=count)
+
+
+async def get_settings(workspace_id: str) -> WorkspaceSettings:
+    """Read a workspace's settings block. NotFound for a missing,
+    soft-deleted or malformed id. Callers that own one setting (growth's
+    mock-delivery toggle) read through here rather than the doc class."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    return doc.settings
+
+
+async def patch_settings(ctx: RequestContext, workspace_id: str, patch: dict) -> WorkspaceSettings:
+    """Merge a partial settings patch, preserving sibling fields.
+
+    Same merge + re-validation as ``update`` (``_merge_settings``), without
+    the rest of the workspace update surface, for a caller that owns one
+    setting and gates its own route. Audited and emitted like ``update``.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    doc.settings = _merge_settings(doc.settings, patch)
+    await doc.save()
+
+    await emit(WorkspaceUpdated(data={"workspace_id": workspace_id, "settings": patch}))
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.settings_updated",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"patched": patch},
+    )
+    return doc.settings
 
 
 async def enforce_retention(workspace_id: str) -> dict:

@@ -960,6 +960,10 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/prospects/bulk"): "growth.write",
             ("POST", "/growth/prospects/{prospect_id}/drafts"): "growth.write",
             ("PATCH", "/growth/prospects/{prospect_id}"): "growth.write",
+            ("POST", "/growth/prospects/bulk-delete"): "growth.write",
+            ("DELETE", "/growth/prospects/{prospect_id}"): "growth.write",
+            ("POST", "/growth/prospects/{prospect_id}/research"): "growth.write",
+            ("POST", "/growth/prospects/{prospect_id}/draft"): "growth.write",
             ("POST", "/growth/drafts/{draft_id}/status"): "growth.write",
             # Editing a draft's COPY is authoring, not outbound — and the
             # service refuses it past ``draft`` anyway, so it can never touch
@@ -988,6 +992,13 @@ class TestGrowthRouteRbac:
             # Preview writes nothing, but it spends a real research pass — not
             # the outbound verb (it cannot reach a prospect), not free either.
             ("POST", "/growth/icps/{icp_id}/preview"): "growth.write",
+            # Per-channel delivery queues. Reading one is ordinary; starting
+            # deliveries and switching mock delivery on decide what an
+            # approval does, so both sit at the outbound ADMIN tier.
+            ("GET", "/growth/queue/{channel}"): "growth.read",
+            ("POST", "/growth/queue/{channel}/deliver-approved"): "growth.manage",
+            ("GET", "/growth/settings"): "growth.read",
+            ("PATCH", "/growth/settings"): "growth.manage",
         }
 
         seen: dict[tuple[str, str], str] = {}

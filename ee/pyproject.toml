@@ -1117,6 +1117,9 @@ name = "Growth — Beanie writes only from service.py"
 # ``followups`` does: it is the second cron on this queue, and a module that
 # files rows on a schedule is precisely where a direct doc write would be
 # least visible.
+# ``growth.mock_delivery`` (the in-process fake provider behind a workspace's
+# mock-delivery setting) records attempts and flips drafts through the same
+# service seams as the real dispatch branches.
 type = "forbidden"
 allow_indirect_imports = "true"
 # feat/growth-mcp — the agent surface joins the boundary:
@@ -1134,6 +1137,7 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.connector",
     "pocketpaw_ee.cloud.growth.discovery",
     "pocketpaw_ee.cloud.growth.email_dispatch",
+    "pocketpaw_ee.cloud.growth.mock_delivery",
     "pocketpaw_ee.cloud.growth.followups",
     "pocketpaw_ee.cloud.growth.whatsapp",
     "pocketpaw_ee.cloud.growth.msg91",

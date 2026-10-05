@@ -445,3 +445,34 @@ async def test_facets_path_is_not_swallowed_by_the_prospect_id_route(w1_client):
     resp = await w1_client.get(FACETS_URL)
     assert resp.status_code == 200
     assert set(resp.json()) == {"tier", "status", "source"}
+
+
+class _AsyncDriverCollection:
+    """The real async PyMongo collection: ``aggregate()`` is a coroutine that
+    resolves to the cursor. mongomock hands the cursor back directly, which is
+    the only reason the facets tests above pass against it."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def aggregate(self, pipeline: list[dict[str, Any]], *args: Any, **kwargs: Any) -> Any:
+        return self._inner.aggregate(pipeline, *args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_facets_work_when_aggregate_returns_a_coroutine(w1_client, monkeypatch):
+    """Against a real Mongo the facets endpoint 500'd with "'coroutine' object
+    has no attribute 'to_list'"."""
+    from pocketpaw_ee.cloud.models.prospect import Prospect
+
+    await _seed(w1_client, FACET_ROWS)
+    real = Prospect.get_pymongo_collection
+    monkeypatch.setattr(
+        Prospect,
+        "get_pymongo_collection",
+        classmethod(lambda cls: _AsyncDriverCollection(real())),
+    )
+
+    resp = await w1_client.get(FACETS_URL)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["tier"] == {"a": 2, "b": 2, "c": 1, "unqualified": 0}

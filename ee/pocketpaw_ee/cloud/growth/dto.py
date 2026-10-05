@@ -1,65 +1,27 @@
-# ee/pocketpaw_ee/cloud/growth/dto.py — request/response DTOs for the prospect
-# entity. Distinct Request and Response shapes per the ee/cloud rule — never
-# reuse a model for input and output. ``domain`` (the dedupe key) is normalised
-# to a bare lowercase hostname at the DTO boundary so every caller — router,
-# upsert, later ingestion slices — dedupes on the same canonical form.
+# ee/pocketpaw_ee/cloud/growth/dto.py — request/response DTOs for /growth.
+# Distinct Request and Response shapes per the ee/cloud rule; domain → DTO
+# mapping lives in ``service.py``.
 #
-# Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
-# store. Domain → DTO mapping lives in ``service.py`` as private helpers.
-# Updated 2026-07-27 (feat/growth-g2): bulk-ingestion DTOs — BulkIngestRequest
-# (raw rows, 500-row cap enforced at the DTO boundary so an oversized payload
-# 422s before any row is touched), BulkRowError, BulkIngestResponse. Rows are
-# deliberately ``dict`` (not CreateProspectRequest) so one invalid row becomes
-# a per-row error entry in the response instead of failing the whole payload.
-# Updated 2026-07-27 (feat/growth-g3): draft DTOs — CreateDraftRequest (subject
-# is email-only, enforced here at the boundary; body non-empty),
-# TransitionDraftRequest (the target status; legality is the SERVICE's job —
-# the DTO only checks it's a known status), DraftResponse.
-# Updated 2026-07-27 (feat/growth-g4): ProposeSendResponse — the Instinct
-# proposal id + the flipped draft returned by POST /growth/drafts/{id}/propose.
-# Updated 2026-07-28 (feat/growth-api-scale): ProspectPageResponse — the
-# cursor-paginated envelope GET /growth/prospects now returns
-# ({items, next_cursor, total}) in place of the bare array. Breaking on
-# purpose: "n of m" needs a filter-scoped total and reaching row 3,000 needs a
-# resume key, and neither fits in a naked list. ProspectFacetsResponse — the
-# per-tier / per-status / per-source counts behind the filter chips.
-# ProposeBatchRequest / ProposeBatchError / ProposeBatchResponse — proposing a
-# selection of drafts in one call, with per-draft error entries in the
-# bulk-ingest style (100-id cap enforced at the boundary).
-# Updated 2026-07-28 (feat/growth-mcp): UpdateDraftRequest — a partial edit of a
-# draft's COPY (subject / body / demo_url), the shape the agent surface needs to
-# revise a draft it wrote. No ``status`` field, deliberately: the lifecycle moves
-# through the transition route and the Instinct gate, never through an edit.
-# Updated 2026-07-27 (feat/growth-g8): LinkedInQueueItemResponse — one row of
-# the manual LinkedIn send queue: the draft envelope joined with the prospect
-# context the captain needs to send by hand (name, company, profile URL,
-# research brief, tier). Response-only; the queue has no request DTO.
-# Updated 2026-07-28 (feat/growth-projects): a prospect may be JUST A DOMAIN.
-# ``name`` and ``company`` on CreateProspectRequest lost their ``min_length=1``
-# and now default to ``""`` — "not yet known", the shape a pasted domain list
-# actually arrives in (bulk rows validate through this same model, so they
-# relax with it). ``domain`` stays required and still normalises: it is the
-# dedupe identity, and a row without one is not a prospect. The LinkedIn queue
-# row gained ``prospect_domain`` so an export can still title a section for a
-# prospect whose name nobody has filled in yet.
-# Updated 2026-07-29 (feat/growth-discovery): the ICP shapes — CreateIcpRequest
-# (name + criteria required, everything else optional; ``cadence`` defaults to
-# ``off`` and ``max_per_run`` is capped at the boundary), UpdateIcpRequest
-# (partial, ``project_id`` three-valued like the prospect update), IcpResponse.
-# Plus ``icp_id`` / ``source_urls`` on the prospect create + response: the
-# provenance of a row nobody typed. The DTO cannot enforce the observed-email
-# rule — by the time an address reaches ``emails`` it is a plain string — so
-# that filter lives one layer up, in ``domain.recordable_emails``, which the
-# discovery run is the only caller of.
-# Updated 2026-07-28 (feat/growth-projects): ``project_id`` on the create,
-# update and response shapes — the client a prospect belongs to. On the UPDATE
-# it is three-valued the way ``tasks`` does it (None = leave alone, an id =
-# reassign, "" = clear); on the CREATE it is a plain optional. Neither can
-# validate the id itself: only the service knows the caller's workspace.
+# Boundary rules enforced here: ``domain`` normalises to a bare lowercase
+# hostname (the dedupe key, so every caller dedupes on the same form); a
+# prospect may be just a domain (name / company default to ""); batch caps
+# (500 ingest / delete rows, 100 propose ids) 422 before anything is touched;
+# bulk rows are raw dicts so one bad row becomes an indexed error entry;
+# ``subject`` is email-only; ``UpdateDraftRequest`` has no ``status`` — the
+# lifecycle moves only through the status route and the Instinct gate.
+# ``project_id`` is three-valued on updates (None leave, id set, "" clear).
+# ``ProspectResearch`` coerces loose agent output rather than rejecting it.
+# What the DTO cannot check (an observed vs guessed email, a project in the
+# caller's workspace) is enforced one layer up.
+#
+# Response shapes include the cursor page envelope, facet counts, the LinkedIn
+# queue row, the per-channel ``DeliveryQueueItemResponse`` (with the latest
+# ``DeliveryStateResponse``), ``DeliverApprovedResponse`` and the growth
+# settings pair.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -178,6 +140,23 @@ class BulkIngestRequest(BaseModel):
     rows: list[dict[str, Any]] = Field(max_length=500)
 
 
+class DeleteProspectsRequest(BaseModel):
+    """Prospect ids to delete — 1 to 500, the same cap as bulk ingest. Ids stay
+    plain strings: malformed, unknown and cross-tenant ids are skipped by the
+    service, not rejected here."""
+
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class DeleteProspectsResponse(BaseModel):
+    """What a delete actually removed: prospects, their drafts, and the pending
+    Instinct send proposals withdrawn for those drafts."""
+
+    deleted: int
+    drafts_removed: int
+    proposals_withdrawn: int
+
+
 class BulkRowError(BaseModel):
     """One failed row in a bulk ingest: its position and why it was skipped."""
 
@@ -190,6 +169,171 @@ class BulkIngestResponse(BaseModel):
     created: int
     updated: int
     errors: list[BulkRowError]
+
+
+# ---------------------------------------------------------------------------
+# Single-prospect research profile. Every field is defaulted and every value is
+# coerced (clipped, capped, unknown literals folded) BEFORE validation, so a
+# model's loose output and an older stored dict both validate instead of 500ing.
+# ---------------------------------------------------------------------------
+
+RESEARCH_LIST_CAP = 15
+RESEARCH_PROSE_CAP = 600
+RESEARCH_SHORT_CAP = 200
+
+ResearchChannelKind = Literal[
+    "phone", "whatsapp", "email", "form", "chat", "booking", "social", "other"
+]
+SuggestedTier = Literal["a", "b", "c", ""]
+
+_CHANNEL_KINDS = frozenset(
+    ("phone", "whatsapp", "email", "form", "chat", "booking", "social", "other")
+)
+
+
+def _text(v: Any, cap: int) -> str:
+    if isinstance(v, bool) or v is None:
+        return ""
+    if isinstance(v, int | float):
+        v = str(v)
+    if not isinstance(v, str):
+        return ""
+    return v.strip()[:cap]
+
+
+def _texts(v: Any, cap: int) -> list[str]:
+    if not isinstance(v, list):
+        return []
+    return [t for t in (_text(item, cap) for item in v) if t][:RESEARCH_LIST_CAP]
+
+
+def _raw(data: Any) -> dict[str, Any]:
+    if isinstance(data, BaseModel):
+        return data.model_dump()
+    return data if isinstance(data, dict) else {}
+
+
+def _rows(v: Any) -> list[Any]:
+    if not isinstance(v, list):
+        return []
+    return [item for item in v if isinstance(item, dict | BaseModel)][:RESEARCH_LIST_CAP]
+
+
+class ResearchLocation(BaseModel):
+    name: str = ""
+    address: str = ""
+    hours: str = ""
+    notes: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce(cls, data: Any) -> dict[str, Any]:
+        d = _raw(data)
+        return {
+            "name": _text(d.get("name"), RESEARCH_SHORT_CAP),
+            "address": _text(d.get("address"), RESEARCH_SHORT_CAP),
+            "hours": _text(d.get("hours"), RESEARCH_SHORT_CAP),
+            "notes": _text(d.get("notes"), RESEARCH_PROSE_CAP),
+        }
+
+
+class ResearchPerson(BaseModel):
+    name: str = ""
+    role: str = ""
+    notes: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce(cls, data: Any) -> dict[str, Any]:
+        d = _raw(data)
+        return {
+            "name": _text(d.get("name"), RESEARCH_SHORT_CAP),
+            "role": _text(d.get("role"), RESEARCH_SHORT_CAP),
+            "notes": _text(d.get("notes"), RESEARCH_PROSE_CAP),
+        }
+
+
+class ResearchChannel(BaseModel):
+    kind: ResearchChannelKind = "other"
+    value: str = ""
+    notes: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce(cls, data: Any) -> dict[str, Any]:
+        d = _raw(data)
+        kind = _text(d.get("kind"), RESEARCH_SHORT_CAP).lower()
+        return {
+            "kind": kind if kind in _CHANNEL_KINDS else "other",
+            "value": _text(d.get("value"), RESEARCH_SHORT_CAP),
+            "notes": _text(d.get("notes"), RESEARCH_PROSE_CAP),
+        }
+
+
+class ResearchFact(BaseModel):
+    label: str = ""
+    value: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce(cls, data: Any) -> dict[str, Any]:
+        d = _raw(data)
+        return {
+            "label": _text(d.get("label"), RESEARCH_SHORT_CAP),
+            "value": _text(d.get("value"), RESEARCH_PROSE_CAP),
+        }
+
+
+class ProspectResearch(BaseModel):
+    """The structured profile a single-prospect research run produced."""
+
+    summary: str = ""
+    suggested_tier: SuggestedTier = ""
+    tier_reason: str = ""
+    fit: str = ""
+    hook: str = ""
+    caveats: list[str] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
+    locations: list[ResearchLocation] = Field(default_factory=list)
+    people: list[ResearchPerson] = Field(default_factory=list)
+    channels: list[ResearchChannel] = Field(default_factory=list)
+    facts: list[ResearchFact] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce(cls, data: Any) -> dict[str, Any]:
+        d = _raw(data)
+        tier = _text(d.get("suggested_tier"), RESEARCH_SHORT_CAP).lower()
+        return {
+            "summary": _text(d.get("summary"), RESEARCH_PROSE_CAP),
+            "suggested_tier": tier if tier in ("a", "b", "c") else "",
+            "tier_reason": _text(d.get("tier_reason"), RESEARCH_PROSE_CAP),
+            "fit": _text(d.get("fit"), RESEARCH_PROSE_CAP),
+            "hook": _text(d.get("hook"), RESEARCH_PROSE_CAP),
+            "caveats": _texts(d.get("caveats"), RESEARCH_PROSE_CAP),
+            "next_steps": _texts(d.get("next_steps"), RESEARCH_PROSE_CAP),
+            "locations": _rows(d.get("locations")),
+            "people": _rows(d.get("people")),
+            "channels": _rows(d.get("channels")),
+            "facts": _rows(d.get("facts")),
+            "sources": [
+                u
+                for u in _texts(d.get("sources"), 2048)
+                if u.lower().startswith(("https://", "http://"))
+            ],
+        }
+
+    @model_validator(mode="after")
+    def _drop_empty_rows(self) -> ProspectResearch:
+        self.locations = [r for r in self.locations if r.name or r.address]
+        self.people = [r for r in self.people if r.name or r.role]
+        self.channels = [r for r in self.channels if r.value]
+        self.facts = [r for r in self.facts if r.label and r.value]
+        return self
+
+    def is_empty(self) -> bool:
+        return self == ProspectResearch()
 
 
 class ProspectResponse(BaseModel):
@@ -209,6 +353,8 @@ class ProspectResponse(BaseModel):
     status: str
     icp_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
+    research: ProspectResearch | None = None
+    researched_at: str | None = None
     created_at: str | None
     updated_at: str | None
 
@@ -306,22 +452,6 @@ class UpdateIcpRequest(BaseModel):
         return v
 
 
-class IcpResponse(BaseModel):
-    id: str
-    workspace_id: str
-    name: str
-    criteria: str
-    project_id: str | None
-    geography: str
-    exclusions: str
-    cadence: str
-    max_per_run: int
-    status: str
-    last_run_at: str | None
-    created_at: str | None
-    updated_at: str | None
-
-
 class PreviewedProspectResponse(BaseModel):
     """One company as a run WOULD file it.
 
@@ -354,6 +484,39 @@ class IcpPreviewResponse(BaseModel):
     items: list[PreviewedProspectResponse]
     notes: str = ""
     error: str = ""
+
+
+class IcpLastPreviewResponse(BaseModel):
+    """The ICP's most recent preview, as recorded on the ICP itself.
+
+    The ``IcpPreviewResponse`` shape without ``icp_id`` — it rides on the ICP
+    it belongs to. A failed attempt is recorded too, with ``error`` set, so
+    "the last look failed" survives a page refresh. Cleared whenever the
+    criteria, geography, exclusions or ``max_per_run`` change: a stored
+    preview never vouches for criteria nobody previewed.
+    """
+
+    items: list[PreviewedProspectResponse] = Field(default_factory=list)
+    notes: str = ""
+    error: str = ""
+
+
+class IcpResponse(BaseModel):
+    id: str
+    workspace_id: str
+    name: str
+    criteria: str
+    project_id: str | None
+    geography: str
+    exclusions: str
+    cadence: str
+    max_per_run: int
+    status: str
+    last_run_at: str | None
+    last_preview: IcpLastPreviewResponse | None = None
+    last_preview_at: str | None = None
+    created_at: str | None
+    updated_at: str | None
 
 
 class CreateDraftRequest(BaseModel):
@@ -438,6 +601,25 @@ class DraftResponse(BaseModel):
     updated_at: str | None
 
 
+class DraftProspectRequest(BaseModel):
+    """Ask the writer agent for first-touch copy. ``channels=None`` means every
+    channel the prospect is eligible for; an explicit list is intersected with
+    the eligible set, and whatever falls out comes back in ``skipped``."""
+
+    channels: list[DraftChannel] | None = None
+    instructions: str = Field(default="", max_length=1000)
+
+
+class DraftSkipped(BaseModel):
+    channel: str
+    reason: str
+
+
+class DraftProspectResponse(BaseModel):
+    drafts: list[DraftResponse]
+    skipped: list[DraftSkipped] = Field(default_factory=list)
+
+
 class ProposeSendResponse(BaseModel):
     """Result of proposing a draft for sending (G-4): the Instinct proposal id
     a human approves/rejects in the Tray, plus the draft (now ``proposed``)."""
@@ -498,6 +680,46 @@ class LinkedInQueueItemResponse(BaseModel):
     tier: str
 
 
+class DeliveryStateResponse(BaseModel):
+    """The newest ``MessageLog`` row for a draft — what happened on its latest
+    delivery attempt. ``mock`` is true when the fake provider handled it."""
+
+    outcome: str  # sending | sent | failed | blocked
+    provider: str
+    mock: bool
+    error: str | None
+    sent_at: str | None
+    at: str | None  # when the row last changed (updatedAt, else createdAt)
+
+
+class DeliveryQueueItemResponse(BaseModel):
+    """One row of a per-channel delivery queue: a proposed / approved / sent
+    draft, its prospect, the resolved recipient, and its latest delivery."""
+
+    draft: DraftResponse
+    prospect_name: str
+    prospect_company: str
+    prospect_domain: str
+    tier: str
+    to: str | None  # email address / WhatsApp number / LinkedIn URL
+    opted_in: bool
+    delivery: DeliveryStateResponse | None
+
+
+class DeliverApprovedResponse(BaseModel):
+    """Draft ids a deliver-approved call started mock delivery for."""
+
+    started: list[str]
+
+
+class GrowthSettingsResponse(BaseModel):
+    mock_delivery: bool
+
+
+class UpdateGrowthSettingsRequest(BaseModel):
+    mock_delivery: bool
+
+
 __all__ = [
     "BulkIngestRequest",
     "BulkIngestResponse",
@@ -505,7 +727,17 @@ __all__ = [
     "CreateDraftRequest",
     "CreateIcpRequest",
     "CreateProspectRequest",
+    "DeleteProspectsRequest",
+    "DeleteProspectsResponse",
+    "DeliverApprovedResponse",
+    "DeliveryQueueItemResponse",
+    "DeliveryStateResponse",
+    "DraftProspectRequest",
+    "DraftProspectResponse",
     "DraftResponse",
+    "DraftSkipped",
+    "GrowthSettingsResponse",
+    "IcpLastPreviewResponse",
     "IcpPreviewResponse",
     "IcpResponse",
     "LinkedInQueueItemResponse",
@@ -516,9 +748,15 @@ __all__ = [
     "ProposeSendResponse",
     "ProspectFacetsResponse",
     "ProspectPageResponse",
+    "ProspectResearch",
     "ProspectResponse",
+    "ResearchChannel",
+    "ResearchFact",
+    "ResearchLocation",
+    "ResearchPerson",
     "TransitionDraftRequest",
     "UpdateDraftRequest",
+    "UpdateGrowthSettingsRequest",
     "UpdateIcpRequest",
     "UpdateProspectRequest",
 ]

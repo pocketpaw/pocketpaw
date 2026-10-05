@@ -75,6 +75,11 @@ Updated: 2026-10-01 (feat/rooms-read-tool) — added "Agent — Read Chat Rooms
 Updated: 2026-09-30 (feat/open-surface-tool) — added "Agent — Open an App Surface
   (`open_surface`)": the in-process MCP tool, the `open_surface` chat stream event
   it produces, and the checks between the two.
+Updated: 2026-09-29 (feat/growth-prospect-actions) — Growth — Prospects: added
+  POST /growth/prospects/{id}/research (one-prospect research run that fills
+  gaps and stores a `research` profile + `researched_at` on the envelope) and
+  POST /growth/prospects/{id}/draft (first-touch drafts from the tool-less
+  growth-writer agent, per eligible channel, with `skipped` reasons).
 Updated: 2026-09-28 (feat/concierge-knowledge-sources) — Paw Bar admin table: added
   the knowledge-source routes under /paw-bar/admin/site/{site_id}/knowledge/sources.
 Updated: 2026-09-28 (feat/concierge-pinned-faqs) — Paw Bar admin table: added
@@ -5949,10 +5954,12 @@ and Instinct-gated sends on the dedicated `growth` arq queue
 
 **RBAC (G-4).** Every `/growth` route carries a workspace-role guard on top of
 the license gate. Reads (`GET /growth/prospects`, `GET /growth/drafts`, …)
-require `growth.read` (MEMBER); authoring writes — create/update a prospect,
-bulk ingest, create a draft, non-gated lifecycle moves — require `growth.write`
-(MEMBER); and the outbound verbs — `POST /growth/drafts/{id}/propose` and
-`POST /growth/drafts/propose-batch` — require `growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
+require `growth.read` (MEMBER); authoring writes — create/update/delete a
+prospect, bulk ingest, create a draft, non-gated lifecycle moves — require `growth.write`
+(MEMBER); and the outbound verbs — `POST /growth/drafts/{id}/propose`,
+`POST /growth/drafts/propose-batch`, `POST /growth/linkedin/{id}/mark-sent`,
+`POST /growth/queue/{channel}/deliver-approved` and `PATCH /growth/settings` —
+require `growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
 `growth.executor` re-checks that same action against the proposer's *current*
 role at dispatch time, so a member-filed proposal would always fail closed at
 approve. A caller below the required tier gets
@@ -5998,7 +6005,11 @@ A duplicate `(workspace, domain)` returns `409 prospect.domain_taken` —
 create-or-update callers use the service's `upsert_by_domain` seam instead.
 
 Returns the prospect envelope: all fields above plus `id`, `workspace_id`,
-and ISO `created_at` / `updated_at`.
+and ISO `created_at` / `updated_at`. The envelope also carries `research`
+(the structured profile from the last research run, or `null`) and
+`researched_at` (ISO timestamp or `null`). Both are written only by
+`POST /growth/prospects/{id}/research` below and cannot be set by create,
+bulk or PATCH.
 
 ### `POST /api/v1/growth/prospects/bulk`
 
@@ -6177,6 +6188,154 @@ Un-assigning is deliberately explicit: a bulk upsert only ever *sets* the
 project, so an enrichment pass that carries no project can never orphan a
 client's prospect.
 
+### `POST /api/v1/growth/prospects/bulk-delete`
+
+Delete prospects and every draft attached to them. Requires `growth.write`.
+Body: `{"ids": ["<prospect id>", ...]}`, 1 to 500 ids. An empty list or more
+than 500 ids is a 422.
+
+Ids that are malformed, unknown, or belong to another workspace are skipped
+silently, and nothing outside the caller's workspace is ever touched. The
+counts in the response are the record of what was removed:
+
+```json
+{"deleted": 2, "drafts_removed": 3, "proposals_withdrawn": 1}
+```
+
+If any of those drafts is `proposed`, its pending `_growth_send` Instinct
+proposal is rejected with reason `prospect deleted`, and
+`proposals_withdrawn` counts the rejections. This step is best-effort. If
+the Instinct store fails, the delete still goes through and the executor
+fails closed when anyone approves a proposal whose draft is gone.
+`growth_message_logs` rows are kept, because they are the audit record of
+what was sent.
+
+### `DELETE /api/v1/growth/prospects/{prospect_id}`
+
+Delete one prospect and its drafts. It runs through the same service path as
+bulk delete, including proposal withdrawal. Returns `204` with no body.
+Requires `growth.write`. An id that is unknown, malformed, or in another
+workspace returns `404 prospect.not_found`.
+
+### `POST /api/v1/growth/prospects/{prospect_id}/research`
+
+Research one prospect with the workspace's `growth-researcher` agent (the one
+a hunt uses: web search and fetch only) and write what it found onto the row.
+No body. Requires `growth.write`. Returns the updated prospect envelope. The
+run is synchronous, so expect tens of seconds.
+
+The prospect's hunt (its ICP) is passed as context when one exists. A
+prospect with no hunt, or whose hunt was deleted, is researched without it.
+
+`research` holds the profile. Every field has a default, so a sparse answer
+still parses:
+
+```json
+{
+  "summary": "Three-chair family dental practice in Austin.",
+  "suggested_tier": "a",
+  "tier_reason": "Owner-run, books by phone only.",
+  "fit": "Matches the hunt: independent practice, no online booking.",
+  "hook": "Their booking page is a phone number.",
+  "caveats": ["Hours differ between the site and Google."],
+  "next_steps": ["Email the practice manager."],
+  "locations": [{"name": "Main office", "address": "…", "hours": "…", "notes": ""}],
+  "people": [{"name": "Dana Ruiz", "role": "Practice manager", "notes": ""}],
+  "channels": [{"kind": "phone", "value": "+1 512 555 0100", "notes": ""}],
+  "facts": [{"label": "Founded", "value": "2009"}],
+  "sources": ["https://acme-dental.com/about"]
+}
+```
+
+`suggested_tier` is `a | b | c | ""`, and anything else becomes `""`.
+`channels[].kind` is `phone | whatsapp | email | form | chat | booking |
+social | other`, and an unknown kind becomes `other`. Every list holds at most
+15 items. Prose (`summary`, `tier_reason`, `fit`, `hook`, each `caveats` and
+`next_steps` item, every `notes` and `facts[].value`) is cut at 600
+characters, and the short fields (names, roles, addresses, hours, channel
+values, fact labels) at 200.
+`sources` keeps only `http(s)` URLs.
+
+The run fills gaps and never overwrites what an operator entered:
+
+- `name` and `company` are set only when blank.
+- Emails the agent saw on a page (`confidence: observed` with a
+  `seen_at_url`) are merged into `emails`. Existing addresses are kept.
+  Guessed patterns are never recorded.
+- `linkedin_url` is set only when blank, and only to an `https` URL on
+  `linkedin.com`.
+- `research_brief` is rebuilt from `summary`, `fit` and `hook`. If all three
+  are empty, the old brief is kept.
+- `source_urls` becomes the ordered, de-duplicated union of the old and new
+  sources, capped at 50.
+- `tier` takes `suggested_tier` only while the prospect is `unqualified`.
+- `status` moves `new → qualified` and never goes backwards.
+- `research` is replaced and `researched_at` is set to now (UTC).
+
+The row is re-read after the run, so an edit made while the agent was working
+is kept.
+
+Errors: `404 prospect.not_found`; `503 prospect.research_unavailable` when no
+research backend is wired; `502 prospect.research_failed` when the run fails
+or returns no usable entry for this domain. A 502 writes nothing.
+
+### `POST /api/v1/growth/prospects/{prospect_id}/draft`
+
+Write first-touch copy for one prospect with the workspace's `growth-writer`
+agent and store it as drafts. Requires `growth.write`. Body (both fields
+optional):
+
+```json
+{"channels": ["email", "linkedin"], "instructions": "Mention the Austin office."}
+```
+
+`channels` is any of `email | linkedin | whatsapp`. Omitted or `null` means
+all three. `instructions` (max 1000 characters) are operator notes passed to
+the writer. They cannot override its rule against inventing facts.
+
+The writer has no tools. It works only from what is on the prospect: the
+research profile (or `research_brief`), name, company and the hunt's criteria.
+It is seeded into each workspace at boot and lazily on first use, with
+`tools: []`, `tool_mode: exclusive`, trust level 1, temperature 0.6 and soul
+off.
+
+A requested channel is drafted only when the prospect can be reached on it.
+Otherwise it is listed in `skipped` with a reason:
+
+| Channel | Needs | Skip reason |
+|---|---|---|
+| `email` | at least one address in `emails` | `no email address on file` |
+| `linkedin` | `linkedin_url` | `no LinkedIn profile on file` |
+| `whatsapp` | `whatsapp_number` | `no WhatsApp number on file` |
+| `whatsapp` | `opted_in: true` | `the prospect has not opted in to WhatsApp` |
+
+A channel that already has a `first_touch` draft in `draft`, `proposed`,
+`approved` or `sent` is skipped as `already drafted`. A `rejected` or
+`replied` draft does not block a new one. The writer is only asked for the
+eligible channels, and anything it returns for another channel is ignored. An
+eligible channel it leaves out is skipped with `the writer returned no draft
+for this channel`. An email with no subject is skipped with `the writer
+returned an email with no subject`.
+
+Each draft is stored through the same path as
+`POST /growth/prospects/{id}/drafts`: `variant: first_touch`, status `draft`,
+subject kept for email only. The prospect moves to `drafted` unless it is
+already further along. Nothing is proposed or sent. Response:
+
+```json
+{
+  "drafts": [ { ...draft envelope }, ... ],
+  "skipped": [ {"channel": "whatsapp", "reason": "no WhatsApp number on file"} ]
+}
+```
+
+Errors: `404 prospect.not_found`; `503 prospect.writer_unavailable` when no
+writer is wired; `422 prospect.no_channel` when no requested channel is
+eligible (this includes `channels: []` and the case where every requested
+channel is already drafted); `422` for `instructions` over 1000 characters;
+`502 prospect.draft_failed` when the run fails or returns no usable draft. A
+502 stores nothing.
+
 ## Growth — Drafts
 
 Third slice of the `/growth` outbound engine (G-3): per-channel outreach
@@ -6294,7 +6453,10 @@ Instinct Tray) the growth executor flips the draft to `approved` and
 enqueues the `growth.dispatch` job `{draft_id, channel}` on the dedicated
 `growth` arq queue — with an execute-time re-check that the proposer STILL
 holds `growth.manage` (a since-demoted proposer's approved send fails
-closed), and `mark_failed` on the Action if the enqueue fails. On
+closed), and `mark_failed` on the Action if the enqueue fails. In a
+workspace with mock delivery on (*Growth — Delivery queues*), an approved
+`email` or `whatsapp` draft is delivered in-process by a fake provider
+instead, and nothing is enqueued. On
 **reject** the draft flips to `rejected` and nothing is enqueued. The
 `email` branch is live (below) and the `whatsapp` branch is live (*Growth —
 WhatsApp dispatch*); `linkedin` keeps the logging stub on purpose — it is
@@ -6372,8 +6534,11 @@ failure record.
 
 **`MessageLog`** (collection `growth_message_logs`, one row per delivery
 **attempt**): `workspace`, `draft_id`, `prospect_id`, `channel`, `provider`
-(`"mailtrap"`), `provider_message_id`, `to_address`, `sent_at`, `outcome`
-(`sent | failed`), `error`. Written only by the growth service.
+(`"mailtrap"`, `"msg91"`, or `"mock"` for mock delivery),
+`provider_message_id`, `to_address`, `sent_at`, `outcome`
+(`sending | sent | failed | blocked`), `blocked_reason`, `error`. Email rows
+are written `sent` / `failed` directly; WhatsApp and mock rows start as
+`sending` and are finalised. Written only by the growth service.
 
 **Config — `GROWTH_SENDING_DOMAIN` (required to send).** The secondary
 sending domain outreach rides. Unset means nothing goes out; the dispatcher
@@ -6436,6 +6601,94 @@ gate seam rather than the public status route; the structural guarantee is
 unchanged (only an `approved` draft can move, and `approved` is reachable
 only through an approved `_growth_send` proposal). The queue read requires
 `growth.read` (MEMBER).
+
+## Growth — Delivery queues
+
+One outbound queue per channel, plus a per-workspace **mock delivery** mode
+that lets the whole prospect → draft → approve → send loop run without a real
+provider. Same gates as the rest of `/growth`.
+
+### `GET /api/v1/growth/queue/{channel}`
+
+`channel` is `email`, `whatsapp` or `linkedin` (anything else is a `422`).
+Query: `limit` (default 100, max 500). Requires `growth.read` (MEMBER).
+
+Returns that channel's drafts in `proposed`, `approved` or `sent`, newest
+first. Drafts whose prospect has been deleted are left out. Each item:
+
+```json
+{
+  "draft": { "id": "…", "channel": "email", "status": "approved", "…": "…" },
+  "prospect_name": "Sam Founder",
+  "prospect_company": "Acme Dental",
+  "prospect_domain": "acme-dental.com",
+  "tier": "a",
+  "to": "sam@acme-dental.com",
+  "opted_in": false,
+  "delivery": {
+    "outcome": "sent",
+    "provider": "mock",
+    "mock": true,
+    "error": null,
+    "sent_at": "2026-10-01T09:30:03+00:00",
+    "at": "2026-10-01T09:30:03+00:00"
+  }
+}
+```
+
+`to` is the recipient the delivery path would use: the prospect's first email
+entry containing `@`, its WhatsApp number, or its LinkedIn URL. `opted_in` is
+the prospect's WhatsApp opt-in. `delivery` is the newest `MessageLog` row for
+the draft (`null` before the first attempt); `at` is when that row last
+changed. The LinkedIn manual queue below is unchanged.
+
+### `GET /api/v1/growth/settings` / `PATCH /api/v1/growth/settings`
+
+The active workspace's growth settings: `{"mock_delivery": false}`. `PATCH`
+takes the same body and returns the stored value. It writes only
+`settings.growth_mock_delivery` on the workspace, leaving every other setting
+as it was, and records a `workspace.settings_updated` audit row. `GET`
+requires `growth.read` (MEMBER); `PATCH` requires `growth.manage` (ADMIN),
+because it decides whether an approval reaches a real provider. `404` when the
+workspace cannot be found.
+
+**What mock delivery does.** With it on, approving an `email` or `whatsapp`
+draft in the Tray no longer enqueues `growth.dispatch`. The executor starts an
+in-process delivery instead, and the Action's outcome reads
+`growth.mock_delivery started for draft <id> (<channel>)`. That delivery
+applies the same eligibility checks as real sending (email needs an address
+with `@`, a subject and a body; WhatsApp needs an opt-in and a number). A
+failed check writes a `blocked` `MessageLog` row with a readable `error` and
+leaves the draft `approved`. Otherwise it writes a `sending` row, waits
+`GROWTH_MOCK_DELIVERY_SECONDS`, finalises the row to `sent` with `sent_at` and
+a `mock-…` provider message id, and moves the draft to `sent`. Every row
+carries `provider: "mock"`. Nothing is sent to anyone. Mock rows never count
+toward the WhatsApp hourly cap, and a mock-sent draft gets follow-ups exactly
+like a real one. LinkedIn is never mock-delivered; it stays manual. With the
+setting off (the default), sending is unchanged.
+
+The delivery runs inside the web process, so a restart during the wait loses
+it. A graceful shutdown records the row as `failed`; a hard kill leaves it at
+`sending`.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `GROWTH_MOCK_DELIVERY_SECONDS` | `3` | Simulated provider latency between the `sending` and `sent` rows, in seconds (a float; `0` is allowed). A negative or non-numeric value falls back to the default. |
+
+### `POST /api/v1/growth/queue/{channel}/deliver-approved`
+
+Starts mock delivery for every `approved` draft on `email` or `whatsapp`
+whose newest `MessageLog` row is not `sending`. Use it for drafts approved
+before mock delivery was switched on, or whose delivery failed. No body.
+Requires `growth.manage` (ADMIN).
+
+```json
+{ "started": ["66a1…f3", "66a1…f4"] }
+```
+
+`linkedin` returns `422 queue.not_deliverable`. With mock delivery off it
+returns `409 growth.mock_delivery_off`. A draft that already has a delivery
+running in this process is not started twice.
 
 ## Growth — Follow-ups
 
@@ -6611,14 +6864,100 @@ the same prospect never learns someone else's outreach got a reply.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GROWTH_WHATSAPP_MAX_PER_HOUR` | `20` | Per-workspace outbound WhatsApp ceiling per rolling hour. WhatsApp quality rating is computed over a rolling window of recent business-initiated messages, and a burst (bulk approval, retry storm, mis-scoped follow-up cron) is exactly the shape that trips it — with the damage landing on the WABA, not the individual send. The cap bounds the blast radius of a bug. Attempts that reached the provider (`sending` / `sent` / `failed`) consume the window; refused attempts do not. There is no "disabled" value — `0` refuses every send rather than meaning unlimited, and a non-numeric or negative value falls back to the default, so a fat-fingered setting fails closed. |
+| `GROWTH_WHATSAPP_MAX_PER_HOUR` | `20` | Per-workspace outbound WhatsApp ceiling per rolling hour. WhatsApp quality rating is computed over a rolling window of recent business-initiated messages, and a burst (bulk approval, retry storm, mis-scoped follow-up cron) is exactly the shape that trips it — with the damage landing on the WABA, not the individual send. The cap bounds the blast radius of a bug. Attempts that reached the provider (`sending` / `sent` / `failed`) consume the window; refused attempts and mock-delivery rows (provider `"mock"`) do not. There is no "disabled" value — `0` refuses every send rather than meaning unlimited, and a non-numeric or negative value falls back to the default, so a fat-fingered setting fails closed. |
 | `GROWTH_MSG91_WEBHOOK_SECRET` | *(unset)* | Shared secret for the inbound webhook HMAC. **Required** — while unset, `POST /growth/webhooks/msg91` rejects every request with 403. |
 | `CLOUD_ENCRYPTION_KEY` | *(unset)* | Existing deployment-wide Fernet key. Needed to store the MSG91 authkey as `authkey_enc` rather than plaintext. |
+
+## Growth — Hunts (ICPs)
+
+A hunt is an Ideal Customer Profile: a standing, free-text description of who
+a workspace wants, plus the cadence the discovery cron runs it on. Discovery
+files what the research finds as `source: "discovery"` prospects at `status:
+new`; nothing is drafted or sent. Workspace-scoped: another tenant's id is a
+404 on every route. Reads need `growth.read`, writes and the preview need
+`growth.write`.
+
+| Route | What it does |
+|---|---|
+| `POST /api/v1/growth/icps` | Create. `name` + `criteria` required; `geography`, `exclusions`, `project_id`, `max_per_run` (1-100, default 10), `status` (`active`/`paused`) optional. `cadence` defaults to `off`, so a new hunt never runs by itself. |
+| `GET /api/v1/growth/icps` | The workspace's hunts, newest first, as a bare array. Filters: `project_id` (`""` = unassigned), `status`, `limit`. |
+| `GET /api/v1/growth/icps/{icp_id}` | One hunt. |
+| `PATCH /api/v1/growth/icps/{icp_id}` | Partial update; `null`/omitted leaves a field as-is. Nothing re-runs on an edit. |
+| `POST /api/v1/growth/icps/{icp_id}/preview` | Dry run (below). |
+| `DELETE /api/v1/growth/icps/{icp_id}` | Delete the hunt. Prospects it already filed stay. |
+
+**Response (`IcpResponse`)** — every route above except the preview and the
+delete returns this shape; the list returns an array of it:
+
+```json
+{
+  "id": "66f…",
+  "workspace_id": "w1",
+  "name": "Small dental practices",
+  "criteria": "Dental practices with 2-6 chairs that still book by phone.",
+  "project_id": null,
+  "geography": "",
+  "exclusions": "",
+  "cadence": "off",
+  "max_per_run": 10,
+  "status": "active",
+  "last_run_at": null,
+  "last_preview": {
+    "items": [
+      {
+        "domain": "acme-dental.com",
+        "name": "",
+        "company": "Acme Dental",
+        "research_brief": "Three chairs, books by phone.",
+        "source_urls": ["https://acme-dental.com/about"],
+        "emails": [],
+        "already_known": false
+      }
+    ],
+    "notes": "One strong fit.",
+    "error": ""
+  },
+  "last_preview_at": "2026-09-29T10:00:00Z",
+  "created_at": "2026-09-29T09:58:00Z",
+  "updated_at": "2026-09-29T10:00:00Z"
+}
+```
+
+`last_preview` / `last_preview_at` are `null` until the hunt is previewed.
+
+### `POST /api/v1/growth/icps/{icp_id}/preview`
+
+Runs the research once and returns what a run **would** file:
+`{icp_id, items, notes, error}`, with the same item shape as
+`last_preview.items` above. `emails` has already been through the
+observed-only filter, and a company already in the pipeline comes back with
+`already_known: true` rather than being hidden.
+
+It writes no prospects. It does record the result on the hunt as
+`last_preview` (`items` / `notes` / `error`, the response minus `icp_id`) and
+stamps `last_preview_at`, so a page refresh does not lose a research pass that
+was already paid for. A failed research attempt is recorded too, with `error`
+set, so "the last attempt failed" survives a refresh. Each preview replaces
+the previous one.
+
+The stored preview only ever describes the criteria it ran against:
+
+- A `PATCH` that actually changes `criteria`, `geography`, `exclusions` or
+  `max_per_run` clears `last_preview` and `last_preview_at`. Changing only
+  `name`, `cadence`, `status` or `project_id`, or re-sending an unchanged
+  value, keeps them.
+- If one of those four fields changes while the research is running, the
+  result is still returned to the caller but is not recorded.
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `icp.research_unavailable` | No research backend is wired on this deployment. Nothing is recorded. |
+| 404 | `icp.not_found` | Unknown id, or another workspace's hunt. |
 
 ## Growth — the agent surface (`pocketpaw_growth` MCP)
 
 The chat agent on the `/growth` rail reaches the same service layer through
-nine in-process MCP tools. It is the operator's assistant on that page: it can
+thirteen in-process MCP tools. It is the operator's assistant on that page: it can
 research and file a prospect, write and revise the copy, and put a send in
 front of a human. It cannot send.
 
@@ -6633,6 +6972,10 @@ front of a human. It cannot send.
 | `growth_update_draft` | `growth.write` | Revise copy, only while the draft is still `draft` |
 | `growth_propose_send` | `growth.manage` | Files one `_growth_send` Instinct proposal; returns `{status: "proposed", proposal_id}` |
 | `growth_propose_send_batch` | `growth.manage` | The same, over up to 100 draft ids — one proposal each |
+| `growth_list_icps` | `growth.read` | Hunts, each with a compact `last_preview` summary (`{found, error}` or `null`) and `last_preview_at` |
+| `growth_get_icp` | `growth.read` | One hunt in full, including its whole `last_preview` |
+| `growth_create_icp` | `growth.write` | Create a hunt. Takes no `cadence`; it lands `off` |
+| `growth_preview_icp` | `growth.write` | Dry-run a hunt. Writes no prospects; records the result on the hunt as its last preview |
 
 The agent's surface is deliberately **narrower than the HTTP one**:
 

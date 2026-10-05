@@ -19,6 +19,10 @@
 # the exact copy that was staged — plus the prospect's name/company so the
 # Tray card is reviewable without a lookup. No credential ever rides the blob.
 #
+# ``withdraw_growth_proposals`` is the reverse seam: when prospects are deleted
+# it rejects their drafts' still-pending proposals so the Tray stops offering
+# sends for rows that no longer exist.
+#
 # Created 2026-07-27 (feat/growth-g4): new module.
 # Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
 #   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
@@ -169,3 +173,40 @@ async def propose_growth_send(
         workspace_id,
     )
     return action_id
+
+
+async def withdraw_growth_proposals(
+    *, workspace_id: str, draft_ids: set[str], rejector: str
+) -> int:
+    """Reject the workspace's PENDING ``_growth_send`` proposals for ``draft_ids``.
+
+    Returns how many were rejected. Best-effort: any store failure is logged
+    and the count so far is returned, because the executor already fails
+    closed on an approval whose draft no longer exists.
+    """
+    withdrawn = 0
+    if not workspace_id or not draft_ids:
+        return withdrawn
+    try:
+        from pocketpaw.instinct.models import ActionStatus
+        from pocketpaw.stores import get_instinct_store
+
+        store = get_instinct_store(workspace_id=workspace_id)
+        actions = await store.list_actions(
+            status=ActionStatus.PENDING, workspace_id=workspace_id, limit=1000
+        )
+        for action in actions:
+            blob = (getattr(action, "parameters", None) or {}).get(GROWTH_SEND_PARAM_KEY)
+            if not isinstance(blob, dict) or str(blob.get("draft_id") or "") not in draft_ids:
+                continue
+            if await store.reject(action.id, reason="prospect deleted", rejector=rejector):
+                withdrawn += 1
+    except Exception:
+        logger.warning(
+            "growth: could not withdraw pending send proposals in workspace %s "
+            "(%d withdrawn before the failure)",
+            workspace_id,
+            withdrawn,
+            exc_info=True,
+        )
+    return withdrawn

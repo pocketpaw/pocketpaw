@@ -962,9 +962,16 @@ def mount_cloud(app: FastAPI) -> None:
     # ``growth/discovery.py``. The agent itself still has to be seeded per
     # workspace; a workspace without it stays idle rather than failing.
     from pocketpaw_ee.cloud.growth.discovery import set_production_research_fn
-    from pocketpaw_ee.cloud.growth.researcher import agent_research
+    from pocketpaw_ee.cloud.growth.researcher import (
+        agent_prospect_research,
+        agent_research,
+        set_production_prospect_research_fn,
+    )
+    from pocketpaw_ee.cloud.growth.writer import agent_write_drafts, set_production_writer_fn
 
     set_production_research_fn(agent_research)
+    set_production_prospect_research_fn(agent_prospect_research)
+    set_production_writer_fn(agent_write_drafts)
 
     # NOTE: Composio is wired per-backend via ``pocketpaw_ee.cloud.composio.providers``
     # — each agent backend (claude_sdk, openai_agents, google_adk,
