@@ -85,6 +85,9 @@ SURFACE_MODES = frozenset({"dark", "light", "auto"})
 # coarse pointer gets the full bar either way -- the widget will not hand a
 # touch device a control that only opens with a gesture it cannot make.
 BAR_RESTING = frozenset({"full", "compact"})
+# How large the bar renders. The frame emits it as ``barSize``; the widget owns
+# what each step measures.
+BAR_SIZES = frozenset({"sm", "md", "lg"})
 HERO_STYLES = frozenset({"gradient", "solid", "image"})
 # Motion presets. "none" is not the same as the visitor's reduced-motion
 # setting: this is the OWNER choosing a calmer bar for everyone, while the
@@ -435,9 +438,14 @@ class ConciergeAppearance(BaseModel):
     # How the docked bar rests: a narrow pill that widens on hover, or the full
     # composer at all times. See BAR_RESTING.
     bar_resting: str = "compact"
+    # Small, medium or large. See BAR_SIZES.
+    size: str = "sm"
     radius: int = 20
     blur: int = 28
     font: str = "system"
+    # "Powered by Paw Sites" under the bar. Hiding it is plan-gated like the site
+    # badge: the settings PATCH refuses False with a 402 on a site that is not
+    # entitled, and the frame emits ``poweredBy`` as this OR not entitled.
     show_branding: bool = True
     # Who the visitor is talking to. Rendered in the conversation header and the
     # Messages list; "" falls back to the widget's own generic copy.
@@ -474,6 +482,11 @@ class ConciergeAppearance(BaseModel):
     @classmethod
     def _known_resting(cls, v: str) -> str:
         return v if v in BAR_RESTING else "compact"
+
+    @field_validator("size")
+    @classmethod
+    def _known_size(cls, v: str) -> str:
+        return v if v in BAR_SIZES else "sm"
 
     @field_validator("font")
     @classmethod

@@ -736,6 +736,20 @@ class Site(TimestampedDocument):
     # the field): the model is never told about actions and any it writes is
     # dropped.
     concierge_page_actions: bool = False
+    # Visitor options the frame passes to the bar (``router._pawbar_frame_config``).
+    # The two texts are validated on the settings PATCH
+    # (``pocketpaw.paw_bar.concierge_fields``). The disclosure is the bar's AI
+    # line ("" = the widget's own wording; it can be reworded, never removed);
+    # the privacy URL is "" or an https link. Every default is today's bar, so
+    # rows older than the fields need no migration.
+    concierge_disclosure: str = ""
+    concierge_privacy_url: str = ""
+    # Ask the visitor to agree before the first message.
+    concierge_consent_required: bool = False
+    # Voice dictation in the composer.
+    concierge_voice: bool = True
+    # The bar's full-screen button.
+    concierge_expandable: bool = True
     # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
     # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
     # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted
