@@ -70,5 +70,50 @@
     "tests": [
       "tests/cloud/test_belt_develop_station.py::test_foreman_validates_recipe_names_and_lists_them"
     ]
+  },
+  {
+    "label": "backlog: a landed task does not resolve its sightings",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if t[\"status\"] == \"landed\" and t[\"run_id\"]:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_backlog_carries_open_sightings_and_resolves_landed_ones"
+    ]
+  },
+  {
+    "label": "backlog: the shift never records a resolved sighting, so an aged-out run reopens it",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        persist=True,\n",
+    "replace": "        persist=False,\n",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_backlog_carries_open_sightings_and_resolves_landed_ones"
+    ]
+  },
+  {
+    "label": "backlog: a plan waiting at the plan gate is not read, so its tasks are not in flight",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "plan_ids.update(p for p in (*history_plan_ids, *(g.plan_action_id for g in gated)) if p)",
+    "replace": "plan_ids.update(p for p in history_plan_ids if p)",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_backlog_carries_open_sightings_and_resolves_landed_ones"
+    ]
+  },
+  {
+    "label": "backlog: the history drops a failed run's reason",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "\"error\": (run or {}).get(\"error\"),",
+    "replace": "\"error\": None,",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_backlog_carries_open_sightings_and_resolves_landed_ones"
+    ]
+  },
+  {
+    "label": "backlog: gate teaching sightings count as open backlog",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "return ev.get(\"source\") == \"gate\" and ev.get(\"shift_no\") is not None",
+    "replace": "return False",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_gate_rejection_is_shift_history_not_backlog"
+    ]
   }
 ]
