@@ -508,16 +508,18 @@ async def test_several_sections_of_one_document_reach_a_concierge_turn_whole(mon
     ]
     assert all(len(f"## {t}\n{b}") <= concierge_runtime._ITEM_CHARS for t, b in zip(titles, bodies))
     hits = [{"id": _slug(t), "title": t, "summary": "s"} for t in titles]
-    context = "\n\n---\n\n".join(f"## {t}\n{b}" for t, b in zip(titles, bodies))
+    entries = [{"id": h["id"], "title": t, "text": b} for h, t, b in zip(hits, titles, bodies)]
 
     async def articles(scope, query, limit=5):
         return hits if scope.startswith("pocket:") else []
 
-    async def search_context(scope, query, limit=3):
-        return context if scope.startswith("pocket:") else ""
+    async def search_context(scope, query, limit=3, **_kw):
+        return entries if scope.startswith("pocket:") else []
 
     monkeypatch.setattr(KnowledgeService, "search_articles_for_scope", staticmethod(articles))
-    monkeypatch.setattr(KnowledgeService, "search_context_for_scope", staticmethod(search_context))
+    monkeypatch.setattr(
+        KnowledgeService, "search_context_entries_for_scope", staticmethod(search_context)
+    )
 
     items = await concierge_runtime.retrieve(SimpleNamespace(pocket_id="p1"), "tail facts")
     chosen = concierge_runtime.select_knowledge(items)

@@ -17,7 +17,8 @@
 # <visitor-message>. Those tags are neutralized inside every block.
 #
 # Knowledge (``retrieve`` is a FROZEN SEAM) is pinned FAQs, then the visitor's
-# page article, then KB hits, in one budget (``select_knowledge``).
+# page article, then KB hits, in one budget (``select_knowledge``). A KB hit's
+# body comes from kb-go's context entries, at most ``_ITEM_CHARS`` each.
 # ``resolve_page`` accepts the request's page only on an allowed origin;
 # ``with_page_product`` finds its catalog item. <catalog> comes per turn from
 # ``catalog_for_turn``: a small catalog whole, else the page's product plus FTS
@@ -345,7 +346,13 @@ def _pinned_faqs(site: Any) -> list[KnowledgeItem]:
 
 async def _search_scope(scope: str, query: str, k: int, timeout: float) -> list[KnowledgeItem]:
     """One scope's ranked items: ids from the article search, bodies from the
-    context search (zipped by title), each under ``timeout``."""
+    context search, each under ``timeout``.
+
+    kb-go is asked for at most ``_ITEM_CHARS`` per body (``--context-chars``; a
+    newer binary then returns a query-focused excerpt of a long article instead of
+    its summary) and for entries (``--context --json``), matched to hits by
+    article id, else by title. The ``_ITEM_CHARS`` slice stays as a safety net for
+    an old binary that ignores the budget."""
     from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
 
     async def _bounded(coro: Any) -> Any:
@@ -355,17 +362,25 @@ async def _search_scope(scope: str, query: str, k: int, timeout: float) -> list[
             logger.warning("concierge knowledge search failed for scope %s", scope, exc_info=True)
             return None
 
-    hits, context = await asyncio.gather(
+    hits, entries = await asyncio.gather(
         _bounded(KnowledgeService.search_articles_for_scope(scope, query, limit=k)),
-        _bounded(KnowledgeService.search_context_for_scope(scope, query, limit=k)),
+        _bounded(
+            KnowledgeService.search_context_entries_for_scope(
+                scope, query, limit=k, context_chars=_ITEM_CHARS
+            )
+        ),
     )
-    bodies = _context_bodies(context if isinstance(context, str) else "")
+    by_id, by_title = _context_bodies(entries if isinstance(entries, list) else [])
     items: list[KnowledgeItem] = []
     for rank, hit in enumerate(hits if isinstance(hits, list) else []):
         if not isinstance(hit, dict) or not hit.get("id"):
             continue
         title = str(hit.get("title") or "").strip()
-        body = bodies.get(title) or str(hit.get("summary") or "").strip()
+        body = (
+            by_id.get(str(hit["id"]))
+            or by_title.get(title)
+            or str(hit.get("summary") or "").strip()
+        )
         text = f"## {title}\n{body}".strip() if title else body
         if not text:
             continue
@@ -380,19 +395,26 @@ async def _search_scope(scope: str, query: str, k: int, timeout: float) -> list[
     return items
 
 
-def _context_bodies(context: str) -> dict[str, str]:
-    """``{title: body}`` from kb-go's ``--context`` output (``## Title\\nbody``
-    blocks joined by ``---``). A title kb-go printed twice keeps the first body."""
-    bodies: dict[str, str] = {}
-    for block in context.split("\n\n---\n\n"):
-        block = block.strip()
-        if not block.startswith("## "):
+def _context_bodies(entries: list[Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """``({id: body}, {title: body})`` from the context search's entries
+    (``KnowledgeService.search_context_entries_for_scope``). An old kb-go's
+    entries carry no id, so they match by title only. The first body for an id or
+    a title wins."""
+    by_id: dict[str, str] = {}
+    by_title: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
             continue
-        head, _, body = block.partition("\n")
-        title = head[3:].strip()
-        if title and title not in bodies:
-            bodies[title] = body.strip()
-    return bodies
+        body = str(entry.get("text") or "").strip()
+        if not body:
+            continue
+        article_id = str(entry.get("id") or "").strip()
+        title = str(entry.get("title") or "").strip()
+        if article_id:
+            by_id.setdefault(article_id, body)
+        if title:
+            by_title.setdefault(title, body)
+    return by_id, by_title
 
 
 # --------------------------------------------------------------------------- #

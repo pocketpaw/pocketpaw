@@ -12,6 +12,7 @@
 #   * the byte cap, the zip-bomb ceiling, and the per-plan count cap;
 #   * the MIME is sniffed from the bytes: a disguised file is refused whatever its
 #     extension or the client's Content-Type say;
+#   * a linked HTML page reaches the kb as Markdown, its tables and headings kept;
 #   * links go through the SSRF-safe fetcher: loopback, private ranges, metadata
 #     and non-http schemes are refused at add time, and a redirect to a private
 #     address is caught by the per-hop re-check during the fetch;
@@ -31,9 +32,11 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import socket
 import zipfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -586,6 +589,23 @@ async def test_a_link_is_fetched_as_text_and_indexed(owner, caps, jobs, kb, web)
     assert "evil()" not in text and "<p>" not in text
     [row] = (await _list(owner, sid))["sources"]
     assert (row["status"], row["mime"]) == ("ready", "text/html")
+
+
+@pytest.mark.asyncio
+async def test_a_linked_page_keeps_its_tables_as_markdown(web):
+    """A linked size chart reaches the kb as a Markdown table, not one cell per
+    line (the same extraction the page sync uses)."""
+    from pocketpaw_ee.paw_bar.knowledge_sources import fetch_link_text
+
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "size_guide.html"
+    web.serve("https://public.example/size-guide", fixture.read_text(encoding="utf-8"))
+
+    text, mime = await fetch_link_text("https://public.example/size-guide", max_bytes=1_000_000)
+
+    assert mime == "text/html"
+    assert re.search(r"\|\s*10\s*\|\s*11\.5\s*\|\s*9\s*\|\s*44\s*\|\s*28\.0\s*\|", text), text
+    assert re.search(r"^#{1,6} Footwear\s*$", text, re.MULTILINE)
+    assert "__sveltekit" not in text
 
 
 @pytest.mark.asyncio

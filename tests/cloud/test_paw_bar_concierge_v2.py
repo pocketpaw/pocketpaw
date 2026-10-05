@@ -179,8 +179,17 @@ def _seed_kb(monkeypatch, articles: dict[str, list[dict[str, str]]]) -> list[tup
             f"## {a['title']}\n{a['content']}" for a in articles.get(scope, [])[:limit]
         )
 
+    async def _entries(scope: str, query: str, limit: int = 3, **_kw: Any) -> list[dict]:
+        return [
+            {"id": a["id"], "title": a["title"], "text": a["content"], "truncated": False}
+            for a in articles.get(scope, [])[:limit]
+        ]
+
     monkeypatch.setattr(KnowledgeService, "search_articles_for_scope", staticmethod(_articles))
     monkeypatch.setattr(KnowledgeService, "search_context_for_scope", staticmethod(_context))
+    monkeypatch.setattr(
+        KnowledgeService, "search_context_entries_for_scope", staticmethod(_entries)
+    )
     return seen
 
 
@@ -864,8 +873,91 @@ async def test_retrieve_is_fail_soft(monkeypatch):
         raise RuntimeError("kb binary missing")
 
     monkeypatch.setattr(KnowledgeService, "search_articles_for_scope", staticmethod(_boom))
-    monkeypatch.setattr(KnowledgeService, "search_context_for_scope", staticmethod(_boom))
+    monkeypatch.setattr(KnowledgeService, "search_context_entries_for_scope", staticmethod(_boom))
     assert await retrieve(SimpleNamespace(pocket_id="pocket-1"), "q") == []
+
+
+# A size-guide body with a Markdown horizontal rule in it: kb-go's old text
+# ``--context`` output joins articles with exactly this separator.
+_RULED_BODY = (
+    "Measure over a base layer.\n\n---\n\n"
+    "| US men's | US women's | UK | EU | Foot length (cm) |\n"
+    "| --- | --- | --- | --- | --- |\n"
+    "| 10 | 11.5 | 9 | 44 | 28.0 |"
+)
+
+
+def _fake_kb_binary(monkeypatch, context_output: Any) -> list[tuple[str, ...]]:
+    """Fake ``knowledge._kb`` (the kb-go call) so the real KnowledgeService search
+    methods run. ``context_output`` is what ``search --context`` prints: a list
+    for a kb-go that honours --json there, a string for an old binary."""
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    calls: list[tuple[str, ...]] = []
+    hits = [{"id": "size-guide", "title": "Size guide", "summary": "Size charts."}]
+
+    def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> Any:
+        calls.append(args)
+        return context_output if "--context" in args else hits
+
+    monkeypatch.setattr(knowledge, "_kb", _kb)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_knowledge_body_with_a_markdown_rule_stays_whole(monkeypatch):
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    calls = _fake_kb_binary(
+        monkeypatch,
+        [{"id": "size-guide", "title": "Size guide", "text": _RULED_BODY, "truncated": False}],
+    )
+
+    [item] = await concierge_runtime._search_scope("pocket:p1", "shoe sizes", 3, 5.0)
+
+    assert item.id == "size-guide"
+    assert item.text == f"## Size guide\n{_RULED_BODY}"
+    [context_call] = [c for c in calls if "--context" in c]
+    assert context_call[:2] == ("search", "shoe sizes")
+    i = context_call.index("--context-chars")
+    assert context_call[i + 1] == str(concierge_runtime._ITEM_CHARS)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_bodies_map_by_article_id_before_title(monkeypatch):
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    _fake_kb_binary(
+        monkeypatch,
+        [{"id": "size-guide", "title": "Sizing", "text": "The chart.", "truncated": True}],
+    )
+
+    [item] = await concierge_runtime._search_scope("pocket:p1", "shoe sizes", 3, 5.0)
+
+    assert item.text == "## Size guide\nThe chart."
+
+
+@pytest.mark.asyncio
+async def test_knowledge_still_reads_an_old_kb_text_context(monkeypatch):
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    _fake_kb_binary(monkeypatch, "## Size guide\nShoe chart: US 10 is EU 44.")
+
+    [item] = await concierge_runtime._search_scope("pocket:p1", "shoe sizes", 3, 5.0)
+
+    assert item.text == "## Size guide\nShoe chart: US 10 is EU 44."
+
+
+@pytest.mark.asyncio
+async def test_knowledge_item_text_is_still_capped(monkeypatch):
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    big = "x" * (concierge_runtime._ITEM_CHARS * 2)
+    _fake_kb_binary(monkeypatch, [{"id": "size-guide", "title": "Size guide", "text": big}])
+
+    [item] = await concierge_runtime._search_scope("pocket:p1", "shoe sizes", 3, 5.0)
+
+    assert len(item.text) == concierge_runtime._ITEM_CHARS
 
 
 # --------------------------------------------------------------------------- #

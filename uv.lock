@@ -2567,6 +2567,19 @@ wheels = [
 ]
 
 [[package]]
+name = "html-to-markdown"
+version = "3.10.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/6e/fa83a7a4d17b86ccd3cbf15246fd81cf3dbd94fa16e1c91194eeab8deb27/html_to_markdown-3.10.6.tar.gz", hash = "sha256:544b4739676cfd2bd45e564127d18559758e2d34d49aa2c0cef3688cb0200b07", size = 6088644, upload-time = "2026-08-05T19:37:31.351Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/f8/8c39298dd83c5fb176fc99739bd55734ae15504c8b2de9385c2be8d3f263/html_to_markdown-3.10.6-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:ab3781c67bbce7018ca2cd3aa56e4b6a492107d9362dfac3ee6986fd76e8ee1b", size = 7812547, upload-time = "2026-08-05T19:37:23.291Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/32/bea823db133ad9b31a510a7ae9f24c8984c82be0d6ca1e1b973f018eaaa2/html_to_markdown-3.10.6-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:7603a3eb814d4be8e5e45ccad3d2461ba24a2ef60629fe500da3a030779d5c4b", size = 7320429, upload-time = "2026-08-05T19:37:25.217Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/12/15e39abfb1a79c04188a15804a8985d060a85362c482a0629ed2eeb8e583/html_to_markdown-3.10.6-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:2b7591fa0b4f5f6576dfcb03f9a19a61f93886d98ea35643f189c6bd1adbca15", size = 7560231, upload-time = "2026-08-05T19:37:26.734Z" },
+    { url = "https://files.pythonhosted.org/packages/80/d9/e5ff6a2b5e4b714fda24c6667878b501db94e7f8620b665720d91261f55b/html_to_markdown-3.10.6-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:9a8a5ee959bd220b29ed6a64d6299515e80a19625025c516340357e87e239a7b", size = 8053251, upload-time = "2026-08-05T19:37:28.314Z" },
+    { url = "https://files.pythonhosted.org/packages/77/82/50d60e1c1889b5738bb9891b3364bf7042fac53d5f2e69a45111900dedb3/html_to_markdown-3.10.6-cp310-abi3-win_amd64.whl", hash = "sha256:26e571aaa004c70987440b6e8724136e8f8b9b08f43620af4c1c6bec7fc29bf5", size = 8049573, upload-time = "2026-08-05T19:37:29.758Z" },
+]
+
+[[package]]
 name = "html2text"
 version = "2025.4.15"
 source = { registry = "https://pypi.org/simple" }
@@ -5570,6 +5583,7 @@ image = [
 ]
 knowledge = [
     { name = "bm25s" },
+    { name = "html-to-markdown" },
     { name = "openpyxl" },
     { name = "pillow-heif" },
     { name = "pypdf" },
@@ -5762,6 +5776,7 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'all-tools'", specifier = ">=1.0.0" },
     { name = "google-genai", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "google-genai", marker = "extra == 'image'", specifier = ">=1.0.0" },
+    { name = "html-to-markdown", marker = "extra == 'knowledge'", specifier = ">=3.10" },
     { name = "html2text", marker = "extra == 'all'", specifier = ">=2020.1.16" },
     { name = "html2text", marker = "extra == 'all-tools'", specifier = ">=2020.1.16" },
     { name = "html2text", marker = "extra == 'dev'", specifier = ">=2020.1.16" },
@@ -5986,6 +6001,7 @@ requires-dist = [
     { name = "google-cloud-firestore", marker = "extra == 'firestore'", specifier = ">=2.27.0" },
     { name = "google-cloud-storage", specifier = ">=2.14.0" },
     { name = "hcloud", specifier = ">=2.23.0" },
+    { name = "html-to-markdown", marker = "extra == 'extraction'", specifier = ">=3.10" },
     { name = "igraph", specifier = ">=0.11" },
     { name = "livekit-agents", extras = ["codecs"], specifier = ">=1.5.9" },
     { name = "livekit-api", specifier = ">=0.6.0" },

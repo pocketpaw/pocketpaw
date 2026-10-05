@@ -142,7 +142,7 @@ async def ingest_url(
 ) -> dict:
     """Fetch and ingest a URL into the workspace knowledge base.
 
-    Extraction stays here (trafilatura via ``_extract_url``); the ingest
+    Extraction stays here (HTML as Markdown via ``_extract_url``); the ingest
     itself goes through the hardened funnel like every other path.
     """
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")

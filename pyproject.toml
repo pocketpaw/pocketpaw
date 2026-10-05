@@ -113,6 +113,9 @@ vector = ["chromadb", "bm25s"]
 # resolves only the ROOT project's extras and never ee's.
 knowledge = [
     "trafilatura",
+    # HTML pages (site crawl, concierge links, URL ingest) reach the KB as
+    # Markdown, so tables and headings survive. Rust core, MIT, Linux wheels.
+    "html-to-markdown>=3.10",
     "bm25s",
     "pypdf",
     "python-pptx>=1.0.0",

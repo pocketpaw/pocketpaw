@@ -119,6 +119,7 @@ def _seams(settings: Any, replay: str | None, seen: dict[str, Any]) -> Iterator[
         for name in (
             "search_articles_for_scope",
             "search_context_for_scope",
+            "search_context_entries_for_scope",
             "get_article_for_scope",
         ):
             stack.enter_context(patch.object(KnowledgeService, name, getattr(kb, name)))

@@ -259,6 +259,14 @@ class FakeKnowledge:
             f"## {a['title']}\n{a['content']}" for a in self._ranked(scope, query, limit)
         )
 
+    async def search_context_entries_for_scope(
+        self, scope: str, query: str, limit: int = 3, **_kw: Any
+    ) -> list[dict]:
+        return [
+            {"id": a["id"], "title": a["title"], "text": a["content"], "truncated": False}
+            for a in self._ranked(scope, query, limit)
+        ]
+
     async def get_article_for_scope(self, scope: str, article_id: str) -> dict:
         for article in self.scopes.get(scope, []):
             if article["id"] == article_id:
