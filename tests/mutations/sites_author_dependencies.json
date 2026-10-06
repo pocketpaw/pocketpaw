@@ -74,7 +74,7 @@
   {
     "label": "PP-1 sandbox-only: the host generator client installs author packages on the API host",
     "file": "ee/pocketpaw_ee/sites/generator_client.py",
-    "find": "        if needs_node_build(engine) and has_author_dependencies(source):",
+    "find": "        if needs_node_build(engine) and requires_sandbox(source):",
     "replace": "        if False:",
     "tests": [
       "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_the_host_client_refuses_to_install_author_packages",
@@ -94,7 +94,7 @@
   {
     "label": "PP-1 sandbox-only: a static svelte pocket with packages stays on the inline (host) publish path when the SL-4 flag is off",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        and has_author_dependencies(source)\n        and pattern != \"dynamic\"",
+    "find": "        and requires_sandbox(source)\n        and pattern != \"dynamic\"",
     "replace": "        and False\n        and pattern != \"dynamic\"",
     "tests": [
       "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_static_svelte_with_packages_goes_to_the_sandbox_lane_flag_off",
@@ -135,6 +135,16 @@
     "replace": "    DEPENDENCY_MANIFEST_PATH,\n)",
     "tests": [
       "tests/ee/sites/test_dependency_manifest.py::test_svelte_and_react_reserve_lockfiles"
+    ]
+  },
+  {
+    "label": "PP-1 sandbox-only: an authored package.json / .npmrc / vite or svelte config no longer forces the sandbox, so it builds on the API host",
+    "file": "ee/pocketpaw_ee/sites/dependency_manifest.py",
+    "find": "    return has_author_dependencies(source) or bool(author_build_shell_files(source))",
+    "replace": "    return has_author_dependencies(source)",
+    "tests": [
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_the_host_client_refuses_an_authored_build_shell",
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_static_svelte_with_an_authored_npmrc_goes_to_the_sandbox_lane"
     ]
   }
 ]

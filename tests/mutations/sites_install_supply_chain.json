@@ -20,7 +20,7 @@
   {
     "label": "bunfig drops out of the install fingerprint - introducing the floor moves no hash, so every already-built site skips the reinstall and keeps its unfloored node_modules while the suite stays green",
     "file": "ee/pocketpaw_ee/sites/generator_client.py",
-    "find": "    BUILD_BUNFIG_REL,",
+    "find": "    BUILD_BUNFIG_REL,\n    \".npmrc\",",
     "replace": "",
     "tests": [
       "tests/ee/sites/test_generator_client_supply_chain.py::test_the_floor_participates_in_the_install_cache_decision"
@@ -52,6 +52,42 @@
     "replace": "minimumReleaseAge = 60",
     "tests": [
       "tests/ee/sites/test_generator_client_supply_chain.py::test_install_writes_the_supply_chain_bunfig_before_spawning"
+    ]
+  },
+  {
+    "label": "the host bunfig stops pinning the public registry, so a stray registry setting decides where the host installs from",
+    "file": "ee/pocketpaw_ee/sites/bun_supply_chain.py",
+    "find": "registry = \"https://registry.npmjs.org/\"",
+    "replace": "# registry unpinned",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_the_host_bunfig_pins_the_public_registry"
+    ]
+  },
+  {
+    "label": "a project .npmrc survives into the host install and can repoint the registry with a token from the host env",
+    "file": "ee/pocketpaw_ee/sites/bun_supply_chain.py",
+    "find": "            entry.unlink()",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_a_project_npmrc_is_removed_before_the_host_install"
+    ]
+  },
+  {
+    "label": "host bun install inherits the API's full environment, secrets included",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "            env=host_build_env(),  # no API secrets reach the package manager",
+    "replace": "            env=None,",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_the_host_install_runs_without_api_secrets"
+    ]
+  },
+  {
+    "label": "host bun run build inherits the API's full environment while running site code",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "            env=host_build_env(),  # the build runs site code: no API secrets",
+    "replace": "            env=None,",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_the_host_build_runs_without_api_secrets"
     ]
   }
 ]

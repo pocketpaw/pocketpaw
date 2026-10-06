@@ -71,9 +71,9 @@ from pocketpaw_ee.sites import project_zip
 from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
 from pocketpaw_ee.sites.dependency_manifest import (
     DEPENDENCY_MANIFEST_PATH,
-    has_author_dependencies,
     parse_manifest,
     render_manifest,
+    requires_sandbox,
 )
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
@@ -4454,8 +4454,9 @@ def build_runs_async(
         return True
     if normalized != "svelte":
         return False
-    # PP-1: a static svelte pocket that declares author packages goes to the sandbox
-    # lane WHATEVER the staging flag says. Its install must never run on the API host
+    # PP-1: a static svelte pocket that declares author packages or carries an
+    # authored build-shell file (``requires_sandbox``) goes to the sandbox lane
+    # WHATEVER the staging flag says. Its install must never run on the API host
     # (``generator_client.HostInstallRefused`` refuses it there), so the inline path is
     # not an option for it; the flag only decides for pockets with nothing to install
     # beyond the vetted toolchain. A DYNAMIC one still falls through to the checks
@@ -4463,7 +4464,7 @@ def build_runs_async(
     # worker-rendered artifact can deploy from the lane.
     if (
         source is not None
-        and has_author_dependencies(source)
+        and requires_sandbox(source)
         and pattern != "dynamic"
         and not svelte_source_is_dynamic(source)
     ):

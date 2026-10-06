@@ -334,8 +334,12 @@ from typing import Any, Protocol
 from urllib.parse import unquote
 
 from pocketpaw_ee.sites import vetted_pins
-from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG_REL, write_host_bunfig
-from pocketpaw_ee.sites.dependency_manifest import has_author_dependencies
+from pocketpaw_ee.sites.bun_supply_chain import (
+    BUILD_BUNFIG_REL,
+    host_build_env,
+    write_host_bunfig,
+)
+from pocketpaw_ee.sites.dependency_manifest import requires_sandbox
 from pocketpaw_ee.sites.engines import (
     candidate_static_output_rels,
     is_source_engine,
@@ -495,6 +499,7 @@ _INSTALL_INPUT_FILES = (
     "bun.lockb",
     "package-lock.json",
     BUILD_BUNFIG_REL,
+    ".npmrc",
 )
 
 # Known workerd SSR-render failure markers (mirrors paw-sites/src/smoke.ts). A
@@ -1530,6 +1535,7 @@ class _SubprocessRunner:
             "install",
             "--no-save",
             cwd=project_dir,
+            env=host_build_env(),  # no API secrets reach the package manager
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -1576,6 +1582,7 @@ class _SubprocessRunner:
             "run",
             "build",
             cwd=project_dir,
+            env=host_build_env(),  # the build runs site code: no API secrets
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -1987,16 +1994,18 @@ class GeneratorClient:
         static_build: bool = True,
         assets: dict[str, str] | None = None,
     ) -> BuildResult:
-        # PP-1: author-declared packages install ONLY in the Daytona sandbox. This
-        # client installs on whatever host it runs on, so a node build of a source
-        # that declares any is refused here, before generate — nothing is written and
-        # nothing installs. html is exempt: it never installs (its packages load from
-        # the CDN through an importmap). Fails closed: an unreadable manifest counts
-        # as declaring packages (``has_author_dependencies``).
-        if needs_node_build(engine) and has_author_dependencies(source):
+        # PP-1: author packages AND authored build-shell files (package.json,
+        # vite.config.*, svelte.config.*, bunfig.toml, .npmrc) build ONLY in the
+        # Daytona sandbox. This client installs on whatever host it runs on, so a
+        # node build of such a source is refused here, before generate — nothing is
+        # written and nothing installs. html is exempt: it never installs (its
+        # packages load from the CDN through an importmap). Fails closed
+        # (``requires_sandbox``).
+        if needs_node_build(engine) and requires_sandbox(source):
             raise HostInstallRefused(
-                "this site declares npm packages (paw.dependencies.json), and those "
-                "install only in the isolated build sandbox — never on the API host. "
+                "this site declares npm packages or carries its own build config "
+                "(package.json, vite/svelte config, bunfig.toml, .npmrc), and those "
+                "build only in the isolated build sandbox — never on the API host. "
                 "Publish it through the build lane instead."
             )
         # PERF-3: stable per-pocket working dir (overwrite the source each build)
