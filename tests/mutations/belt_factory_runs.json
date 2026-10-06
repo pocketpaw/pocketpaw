@@ -115,5 +115,122 @@
     "tests": [
       "tests/cloud/test_belt_mandates.py::test_gate_rejection_is_shift_history_not_backlog"
     ]
+  },
+  {
+    "label": "owner: a planted .mcp.json is not removed before the next claude call",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_TRUST_NAMES = frozenset({\".claude\", \"CLAUDE.md\", \"CLAUDE.local.md\", \"AGENTS.md\", \".mcp.json\"})",
+    "replace": "_TRUST_NAMES = frozenset({\".claude\", \"CLAUDE.md\", \"CLAUDE.local.md\", \"AGENTS.md\"})",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: the restore never deletes planted agent config",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "for path in _trust_entries(worktree):",
+    "replace": "for path in _trust_entries(worktree)[:0]:",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: the restore never checks the committed copies back out",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "if trust.tracked:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: a claude call runs without the restore",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "await self._restore_trusted(cwd, trust)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: the restore follows a planted symlink",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "if path.is_symlink() or not path.is_dir():",
+    "replace": "if not path.is_dir():",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: nested planted CLAUDE.md files survive the restore",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "dirnames[:] = [d for d in dirnames if d not in _TRUST_NAMES and d != \".git\"]",
+    "replace": "dirnames[:] = []",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: owner setup keeps the isolation flags",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "isolated=trust is None",
+    "replace": "isolated=True",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_drops_isolation_and_keeps_the_tool_rules"
+    ]
+  },
+  {
+    "label": "owner: owner setup wires without a worktree root",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "if owner_setup() and owner_worktree_root() is None:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_without_a_worktree_root_is_refused"
+    ]
+  },
+  {
+    "label": "orient: the develop prompt drops the architecture block",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "f\"{_charter_block(charter)}\\n\\n{_architecture(orient)}\"",
+    "replace": "f\"{_charter_block(charter)}\\n\\n\"",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_orient_brief_lands_in_the_develop_and_review_prompts"
+    ]
+  },
+  {
+    "label": "orient: the review prompt drops the architecture block",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "f\"DIFF:\\n{_untrusted(shown)}\\n\\n{_architecture(orient)}\"",
+    "replace": "f\"DIFF:\\n{_untrusted(shown)}\\n\\n\"",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_orient_brief_lands_in_the_develop_and_review_prompts"
+    ]
+  },
+  {
+    "label": "orient: a task starting with - can be read as a loom flag",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "\"-json\", \"--\", task[:_TASK_CHARS]",
+    "replace": "\"-json\", task[:_TASK_CHARS]",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_orient_brief_lands_in_the_develop_and_review_prompts"
+    ]
+  },
+  {
+    "label": "orient: a failed loom orient fails the run instead of falling back",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "note = f\"loom orient failed (exit {code}); \"",
+    "replace": "raise RuntimeError(\"loom\")",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_orient_degrades_without_a_world_model"
+    ]
+  },
+  {
+    "label": "foreman: the shift drops the repo's C4 components",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "architecture=c4_lines(doc.surface.repo_id),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_shift_gives_the_foreman_the_repo_c4_components"
+    ]
   }
 ]
