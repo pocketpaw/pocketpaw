@@ -19,8 +19,8 @@ and only then dispatches work.
 The **craft factory** is mandates running unattended: a cadence scheduler fires
 shifts, patrols (including `upstream`, which watches pinned GitHub engines)
 feed the foreman, and the headless develop station turns each approved task into
-a checked, reviewed diff that still waits at the per-diff Instinct gate. A
-digest route reports the day. Nothing lands on its own: every plan and every
+a checked diff (reviewed by an LLM seat too, unless it came from a recipe) that
+still waits at the per-diff Instinct gate. A digest route reports the day. Nothing lands on its own: every plan and every
 diff passes a human gate, and nothing merges.
 
 ## Anatomy
@@ -80,7 +80,9 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   `{"bump-photo": "node scripts/bump-craft-engine.mjs photo"}`. The foreman may
   name a recipe on a plan task (the validator rejects an unknown name); the
   station then runs that command instead of an LLM develop, and the checks
-  still gate it.
+  still gate it. A recipe run skips ORIENT, FIX and REVIEW: the command lands
+  certified block code, so no LLM seat reads or edits it, and a red check fails
+  the run. The human diff gate still reviews every recipe diff.
 
 Checks and recipes are argv strings split with `shlex` and never run through a
 shell. The create DTO rejects (422) one that does not split, or whose program
@@ -110,20 +112,25 @@ commands, nothing else:
   refuses the run with `DONE: the change produced an empty diff`. One recipe
   can land more than one block: `add-roles` on a bare app brings auth and org
   with it.
-- **check** `belt doctor --app . --json --env-advisory`: lock and disk agree,
-  no drift, the generated shell, routes, barrels, hooks and adapters regions
-  match the installed blocks, npm requirements are recorded, framework floors
-  hold, and every required port has at least one adapter to select.
+- **checks**, in this order: `bun install --frozen-lockfile`, then
+  `belt doctor --app . --json --env-advisory`. A recipe's lockfile changes
+  come from `belt add` itself: pulley installs the npm deps the blocks it adds
+  declare, so `package.json` and `bun.lock` move together in the same diff. The
+  frozen install fails a run whose lockfile drifted from `package.json`. Doctor
+  then checks that lock and disk agree, no drift, the generated shell, routes,
+  barrels, hooks and adapters regions match the installed blocks, npm
+  requirements are recorded, framework floors hold, and every required port has
+  at least one adapter to select.
 
 Why the CLI and not Pulley's MCP server: the strict station runs every claude
 seat with no MCP servers, and DONE refuses any diff touching `.mcp.json` (owner
 setup restores it to base before every claude call). A recipe needs no LLM at
-all; the station runs the command and the checks gate it, so an MCP server would
-add a process and a trust surface for nothing.
+all: the station runs the command, skips ORIENT, FIX and REVIEW, and the checks
+gate it, so an MCP server would add a process and a trust surface for nothing.
 
 What the station needs from the factory host: `bun link` in a pulley checkout
-puts `belt` on PATH (`belt` is on the default allowlist, and the station env
-keeps PATH), and `belt add` with no `--registry` reads that checkout's own
+puts `belt` on PATH (`belt` and `bun` are on the default allowlist, and the
+station env keeps PATH), and `belt add` with no `--registry` reads that checkout's own
 `registry/`, so a charter string carries no machine path. `--env-advisory`
 exists because the station judges install state in a throwaway worktree with a
 scrubbed env and no `.env`: without it doctor fails every install on the
@@ -448,9 +455,11 @@ WORK     a recipe task runs the charter's recipe command; otherwise
          develop feed (see "The develop feed")
 CHECK    run every charter check
 FIX ≤2   a red check, or a failed review, sends the failure back to
-         `claude -p`, then CHECK again; at most 2 attempts (recipes get none)
-REVIEW   an independent read-only `claude -p` judges the diff against the task
-         and fails a duplicate of existing code:
+         `claude -p`, then CHECK again; at most 2 attempts (recipes skip it:
+         a red check fails the run)
+REVIEW   LLM work only (recipes skip it; the human diff gate still applies):
+         an independent read-only `claude -p` judges the diff against the
+         task and fails a duplicate of existing code:
          strict {"verdict": "pass"|"fail", "notes": [...]}
 DONE     git add -A; git diff --cached --binary against the base sha; refused
          if it touches .claude/, .mcp.json, .git or .gitmodules, or adds a
@@ -936,9 +945,11 @@ untracked `.mcp.json` are all back to base before FIX and REVIEW), ORIENT (the
 loom argv, the block in the develop and review prompts, the review's duplicate
 rule, the C4 fallback, the "no world model" note, recipes skipping it), the
 foreman's C4 list (`test_belt_mandates.py` checks the shift wires it in) and the
-Pulley app line (its `belt` recipe and doctor check pass the default
-allowlist; a faked `belt` lands `add-auth` as a diff, a red doctor fails CHECK,
-and a second `add-auth` ends as an empty diff);
+Pulley app line (its `belt` recipes and both checks, the frozen `bun install`
+and doctor, pass the default allowlist; a faked `belt` and `bun` land
+`add-auth` as a diff with ORIENT and REVIEW skipped, a red frozen install or a
+red doctor fails CHECK with no FIX, and a second `add-auth` ends as an empty
+diff);
 `test_belt_pulley_c4.py` maps the seven real Pulley manifests through
 `block_component` and reads the result back with `c4_lines`;
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the

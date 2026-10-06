@@ -14,9 +14,9 @@
 #            scrubbed + capped, stored before any error is raised, emptied when a
 #            develop starts; a failed save never fails the run). Seat output and
 #            error tails get worktree/repo paths relative, the OS user as ``user`` in ls -l/home.
-#   CHECK    every charter check; FIX (``claude -p`` with the failure) while
-#            attempts last. REVIEW: read-only ``claude -p`` judges the diff,
-#            failing duplicates of existing code; strict ``{"verdict","notes"}``.
+#   CHECK    every charter check. LLM work only (a recipe skips both): FIX
+#            (``claude -p`` + the failure) while attempts last; REVIEW, read-only
+#            ``claude -p``, fails duplicates; strict ``{"verdict","notes"}``.
 #   DONE     ``git diff --cached --binary <base>``; refused when it touches
 #            ``.claude/``, ``.mcp.json``, ``.git``, ``.gitmodules`` or adds a secret.
 #   CLEANUP  always: remove the temp dir, then ``git worktree prune``.

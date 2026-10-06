@@ -665,5 +665,24 @@
     "tests": [
       "tests/cloud/test_belt_develop_station.py::test_pulley_line_charter_passes_the_default_allowlist"
     ]
+  },
+  {
+    "label": "station allowlist: bun is no longer a default command (the Pulley line's frozen install)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/dto.py",
+    "find": "\"uv,uvx,bun,bunx,belt",
+    "replace": "\"uv,uvx,bunx,belt",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_pulley_line_charter_passes_the_default_allowlist"
+    ]
+  },
+  {
+    "label": "a recipe run gets an LLM REVIEW (recipes skip ORIENT, FIX and REVIEW)",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "                if request.recipe:\n                    verdict = \"skipped (recipe)\"",
+    "replace": "                if False:\n                    verdict = \"skipped (recipe)\"",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_recipe_runs_charter_command_without_claude",
+      "tests/cloud/test_belt_develop_station.py::test_pulley_recipe_lands_a_block_and_the_checks_gate_it"
+    ]
   }
 ]

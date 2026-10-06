@@ -15,9 +15,10 @@
 # setup section pins the trust restore (planted agent config never loads) and the
 # worktree-root refusal; the ORIENT section pins the architecture block in the
 # develop/review prompts, its degraded paths, and the foreman's C4 list. The
-# Pulley app line section drives the template's ``belt`` recipe and doctor check
-# (a faked ``belt``) through the station, ends a re-run on an installed block as
-# an empty diff, and pins that the default allowlist accepts them.
+# Pulley app line section drives the template's ``belt`` recipe and its two
+# checks (frozen ``bun install``, then doctor; ``belt`` and ``bun`` faked) through
+# the station with no ORIENT, FIX or REVIEW, ends a re-run on an installed block
+# as an empty diff, and pins that the default allowlist accepts them.
 
 from __future__ import annotations
 
@@ -1216,9 +1217,13 @@ def test_foreman_prompt_carries_the_repo_c4_components(tmp_path):
 # Pulley app line — blocks land through charter recipes, doctor gates them
 # ---------------------------------------------------------------------------
 
-# The "Pulley app line" template's strings (paw-enterprise mandate-templates.ts).
+# The "Pulley app line" template's strings (paw-enterprise mandate-templates.ts),
+# checks in the template's order: a lockfile that drifted from package.json
+# fails the frozen install before doctor reads the install state.
 PULLEY_BLOCKS = ("auth", "org", "roles", "notify", "files", "audit")
+PULLEY_FROZEN = "bun install --frozen-lockfile"
 PULLEY_DOCTOR = "belt doctor --app . --json --env-advisory"
+PULLEY_CHECKS = [PULLEY_FROZEN, PULLEY_DOCTOR]
 PULLEY_RECIPES = {f"add-{b}": f"belt add {b} --app . --json" for b in PULLEY_BLOCKS}
 PULLEY_FIXTURES = Path(__file__).parent / "fixtures" / "pulley_blocks"
 
@@ -1226,13 +1231,18 @@ PULLEY_FIXTURES = Path(__file__).parent / "fixtures" / "pulley_blocks"
 class FakeBelt(FakeClaude):
     """Answers ``belt`` the way pulley's CLI does for the station: ``add <block>``
     copies the real manifest into ``src/blocks/<block>/`` and records ``belt.lock``;
-    ``doctor`` exits ``doctor_exit``. Everything else (git) runs for real."""
+    ``doctor`` exits ``doctor_exit``. ``bun`` (the tmp repo has no package.json
+    to install) exits ``frozen_exit``. Everything else (git) runs for real."""
 
-    def __init__(self, doctor_exit: int = 0):
+    def __init__(self, doctor_exit: int = 0, frozen_exit: int = 0):
         super().__init__()
-        self.doctor_exit = doctor_exit
+        self.doctor_exit, self.frozen_exit = doctor_exit, frozen_exit
 
     async def __call__(self, argv, *, cwd, timeout, stdin=None):
+        if argv[0] == "bun":
+            self.argvs.append(list(argv))
+            drift = "error: lockfile had changes, but lockfile is frozen"
+            return self.frozen_exit, "", drift if self.frozen_exit else ""
         if argv[0] != "belt":
             return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin)
         self.argvs.append(list(argv))
@@ -1251,29 +1261,39 @@ def test_pulley_line_charter_passes_the_default_allowlist(monkeypatch):
     from pocketpaw_ee.cloud.mandates.dto import CharterRequest
 
     monkeypatch.delenv("POCKETPAW_FACTORY_ALLOWED_COMMANDS", raising=False)
-    CharterRequest(goal="g", checks=[PULLEY_DOCTOR], recipes=PULLEY_RECIPES)
-    for command in [PULLEY_DOCTOR, *PULLEY_RECIPES.values()]:
-        assert ds._charter_argv(command, "WORK")[0] == "belt"
+    CharterRequest(goal="g", checks=PULLEY_CHECKS, recipes=PULLEY_RECIPES)
+    for command in [*PULLEY_CHECKS, *PULLEY_RECIPES.values()]:
+        assert ds._charter_argv(command, "WORK") == shlex.split(command)
 
 
-@pytest.mark.parametrize("doctor_exit", [0, 1])
-async def test_pulley_recipe_lands_a_block_and_doctor_gates_it(repo, monkeypatch, doctor_exit):
+@pytest.mark.parametrize(
+    ("frozen_exit", "doctor_exit", "red"),
+    [(0, 0, None), (0, 1, r"belt doctor"), (1, 0, r"bun install --frozen-lockfile")],
+)
+async def test_pulley_recipe_lands_a_block_and_the_checks_gate_it(
+    repo, monkeypatch, frozen_exit, doctor_exit, red
+):
     monkeypatch.delenv("POCKETPAW_FACTORY_ALLOWED_COMMANDS", raising=False)
-    fake = FakeBelt(doctor_exit=doctor_exit)
-    station = _station(fake, repo, checks=[PULLEY_DOCTOR], recipes=PULLEY_RECIPES)
+    fake = FakeBelt(doctor_exit=doctor_exit, frozen_exit=frozen_exit)
+    station = _station(fake, repo, checks=PULLEY_CHECKS, recipes=PULLEY_RECIPES)
 
-    if doctor_exit:
-        with pytest.raises(ds.DevelopStationError, match=r"^CHECK: `belt doctor .*after 0 fix"):
+    if red:
+        # A recipe gets no FIX: the first red check fails the run.
+        with pytest.raises(ds.DevelopStationError, match=rf"^CHECK: `{red}.*after 0 fix"):
             await station(_request(repo, recipe="add-auth"))
     else:
         result = await station(_request(repo, recipe="add-auth"))
         assert "+++ b/src/blocks/auth/manifest.json" in result.diff
         assert "+++ b/belt.lock" in result.diff
-        assert f"check `{PULLEY_DOCTOR}`: pass" in result.summary
+        for check in PULLEY_CHECKS:
+            assert f"check `{check}`: pass" in result.summary
         assert "recipe: add-auth" in result.summary
+        assert "orient: skipped (recipe)" in result.summary
+        assert "review: skipped (recipe)" in result.summary
     assert fake.claude_calls == []
-    belts = [a for a in fake.argvs if a[0] == "belt"]
-    assert belts == [shlex.split(PULLEY_RECIPES["add-auth"]), shlex.split(PULLEY_DOCTOR)]
+    ran = [a for a in fake.argvs if a[0] in ("belt", "bun")]
+    expected = [PULLEY_RECIPES["add-auth"], *PULLEY_CHECKS]
+    assert ran == [shlex.split(c) for c in expected]
     _assert_clean(repo, fake)
 
 
@@ -1282,7 +1302,7 @@ async def test_pulley_recipe_on_an_installed_block_is_an_empty_diff(repo, monkey
     # no writes), so the station refuses the run instead of attaching a diff.
     monkeypatch.delenv("POCKETPAW_FACTORY_ALLOWED_COMMANDS", raising=False)
     fake = FakeBelt()
-    station = _station(fake, repo, checks=[PULLEY_DOCTOR], recipes=PULLEY_RECIPES)
+    station = _station(fake, repo, checks=PULLEY_CHECKS, recipes=PULLEY_RECIPES)
     first = await station(_request(repo, recipe="add-auth"))
     subprocess.run(["git", "apply", "--index"], input=first.diff, text=True, cwd=repo, check=True)
     subprocess.run(
