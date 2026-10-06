@@ -138,12 +138,25 @@ def _env_seconds(name: str, default: float) -> float:
         return default
 
 
+LineFn = Callable[[str], Awaitable[None]]
+
+
 class Runner(Protocol):
     """The ONE subprocess seam: argv in, ``(returncode, stdout, stderr)`` out.
-    A timeout returns a non-zero code with the reason in stderr."""
+    A timeout returns a non-zero code with the reason in stderr. ``on_line``,
+    when given, is awaited with each stdout line (no newline) as it arrives,
+    before the process exits; the station only passes it for a run with a live
+    feed, so a runner that ignores it still works (the feed reads the final
+    stdout instead)."""
 
     async def __call__(
-        self, argv: list[str], *, cwd: Path, timeout: float, stdin: str | None = None
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+        stdin: str | None = None,
+        on_line: LineFn | None = None,
     ) -> tuple[int, str, str]: ...
 
 
@@ -170,12 +183,56 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
         os.killpg(proc.pid, signal.SIGKILL)
 
 
+async def _read_lines(stream: asyncio.StreamReader, on_line: LineFn) -> bytes:
+    """All of ``stream``, handing each complete line to ``on_line`` as it lands.
+    Chunked reads, not ``readline``: a stream-json line carrying a file read
+    outgrows the reader's 64 KiB line limit."""
+    chunks: list[bytes] = []
+    pending = b""
+    while chunk := await stream.read(65536):
+        chunks.append(chunk)
+        *lines, pending = (pending + chunk).split(b"\n")
+        for line in lines:
+            await on_line(line.decode("utf-8", "replace"))
+    if pending:
+        await on_line(pending.decode("utf-8", "replace"))
+    return b"".join(chunks)
+
+
+async def _communicate(
+    proc: asyncio.subprocess.Process, stdin: str | None, on_line: LineFn
+) -> tuple[bytes, bytes]:
+    """``proc.communicate`` with stdout delivered line by line. stdin is written
+    alongside the reads (a large prompt never waits on a full stdout pipe)."""
+
+    async def feed() -> None:
+        if proc.stdin is None:
+            return
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            proc.stdin.write((stdin or "").encode())
+            await proc.stdin.drain()
+        proc.stdin.close()
+
+    assert proc.stdout is not None and proc.stderr is not None
+    out, err, _ = await asyncio.gather(
+        _read_lines(proc.stdout, on_line), proc.stderr.read(), feed()
+    )
+    await proc.wait()
+    return out, err
+
+
 async def run_subprocess(
-    argv: list[str], *, cwd: Path, timeout: float, stdin: str | None = None
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    stdin: str | None = None,
+    on_line: LineFn | None = None,
 ) -> tuple[int, str, str]:
     """Default ``Runner`` — ``create_subprocess_exec`` (never a shell) with the
     scrubbed env, in its own session so a timeout or a cancelled run kills the
-    whole process group (a check's grandchildren too), not just the child."""
+    whole process group (a check's grandchildren too), not just the child.
+    ``on_line`` gets each stdout line live (see ``Runner``)."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
@@ -186,9 +243,11 @@ async def run_subprocess(
         start_new_session=True,
     )
     try:
-        out_b, err_b = await asyncio.wait_for(
-            proc.communicate(stdin.encode() if stdin is not None else None), timeout=timeout
-        )
+        if on_line is None:
+            talk = proc.communicate(stdin.encode() if stdin is not None else None)
+        else:
+            talk = _communicate(proc, stdin, on_line)
+        out_b, err_b = await asyncio.wait_for(talk, timeout=timeout)
     except TimeoutError:
         _kill_group(proc)
         await proc.wait()
