@@ -34,6 +34,41 @@ def test_registry_includes_every_subclass_with_event_type():
         )
 
 
+def test_every_event_type_has_exactly_one_owning_class():
+    """Two classes sharing an EVENT_TYPE make the registry order-dependent:
+    ``__init_subclass__`` keeps whichever module imported last, so
+    ``rebuild_event`` and the registry test change with test ordering.
+    Import every module that declares events, then require one owner per type.
+    """
+    import importlib
+    import re
+    from collections import defaultdict
+    from pathlib import Path
+
+    import pocketpaw_ee
+
+    # Explicit: the pair that collided on meeting.* before the fix.
+    import pocketpaw_ee.cloud._core.realtime.events  # noqa: F401
+    import pocketpaw_ee.cloud.meetings.events  # noqa: F401
+
+    # Plus every other module that subclasses Event, found by a source scan so
+    # we import only those (walking every package drags in the whole app).
+    root = Path(pocketpaw_ee.__path__[0])
+    for path in root.rglob("*.py"):
+        if re.search(r"^class \w+\((\w+\.)?Event\):", path.read_text(), re.M):
+            rel = path.relative_to(root.parent).with_suffix("")
+            importlib.import_module(".".join(rel.parts))
+
+    owners: dict[str, list[str]] = defaultdict(list)
+    for cls in _all_event_subclasses(Event):
+        evt_type = getattr(cls, "EVENT_TYPE", "")
+        if evt_type and cls.__module__.startswith("pocketpaw"):
+            owners[evt_type].append(f"{cls.__module__}.{cls.__qualname__}")
+
+    dupes = {t: names for t, names in owners.items() if len(names) > 1}
+    assert not dupes, f"EVENT_TYPE declared by more than one class: {dupes}"
+
+
 def test_rebuild_event_round_trips_through_dict():
     original = GroupCreated(data={"id": "g1", "name": "team"})
     payload = {
