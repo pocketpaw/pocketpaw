@@ -244,13 +244,15 @@ jobs:
         # The mandate shift loop, the headless develop runner, the cadence
         # scheduler, the develop station (real tmp git repo, real check
         # commands, a faked claude binary), its develop step feed, the crew
-        # roster (agents as workers), the upstream patrol (a faked gh) and the
-        # Pulley block manifest -> C4 mapper. tests/cloud is excluded by the
+        # roster (agents as workers), the mandate line branch (real tmp repos and
+        # a bare origin), the upstream patrol (a faked gh) and the Pulley block
+        # manifest -> C4 mapper. tests/cloud is excluded by the
         # pyproject addopts; mongomock stands in for Mongo.
         run: >-
           uv run pytest tests/cloud/test_belt_develop_station.py
           tests/cloud/test_belt_crew.py
           tests/cloud/test_belt_headless.py
+          tests/cloud/test_belt_line.py
           tests/cloud/test_belt_mandates.py
           tests/cloud/test_belt_pulley_c4.py
           tests/cloud/test_belt_scheduler.py

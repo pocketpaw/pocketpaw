@@ -37,7 +37,8 @@
 #     by a restart shows in the digest; a crashed task is logged at ERROR.
 #     ``develop(run_ref)`` is the same step for an existing run: the belt
 #     executor re-queues an approved headless run whose diff no longer applies
-#     on the moved base and hands it back here (once; see ``belt/executor.py``).
+#     on the moved base or line and hands it back here (once; see
+#     ``belt/executor.py``).
 #
 # Blob writes go through ``InstinctStore.update_parameters`` (same pattern as
 # ``belt/executor.py::_persist_run_result``).
