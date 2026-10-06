@@ -28,15 +28,18 @@
 # (``plan_action_id`` + ``task_index``) to the ``belt_plan`` tasks' evidence refs;
 # the shift trigger persists what it finds resolved on the sighting
 # (``resolved_by_run``), because the runs list only reaches the newest actions.
+# A task landed on the mandate's line is built either way; its ``line`` says
+# whether the base holds it yet (``belt.executor.line_merged``). The detail's
+# ``line`` block and the Foreman's THE LINE read git (``line_status``).
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
 # charter_for_mandate (the develop station's checks/recipes/goal read),
-# crew_seat_for_task, crew_worker,
-# list_autopilot_enabled, executor_revalidate, mark_shift, and list_cadence_due —
-# the cadence scheduler's cross-workspace read of ACTIVE mandates whose cadence
-# interval (daily = 1 day, weekly = 7 days; manual never) has elapsed since their
-# last shift. ``list_cadence_due`` is N+1 (one shift read per mandate), fine at
-# current mandate counts.
+# crew_seat_for_task, crew_worker, file_station_sighting (the develop station's
+# line conflict, deduped like a patrol's), list_autopilot_enabled,
+# executor_revalidate, mark_shift, and list_cadence_due — the cadence
+# scheduler's cross-workspace read of ACTIVE mandates whose cadence interval
+# (daily = 1 day, weekly = 7 days; manual never) has elapsed since their last
+# shift (N+1, one shift read per mandate; fine at current mandate counts).
 #
 # Conventions (cloud entity rules): validate body at entry
 # (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
@@ -309,8 +312,10 @@ async def get_mandate(workspace_id: str, user_id: str, mandate_id: str) -> dict[
 
 
 async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
-    """Build the detail wire dict for a mandate doc — recent shifts + sightings
-    grouped by patrol."""
+    """Build the detail wire dict for a mandate doc — recent shifts, sightings
+    grouped by patrol, and its ``line`` block as git has it (never raises)."""
+    from pocketpaw_ee.cloud.belt.executor import line_status
+
     mandate_id = str(doc.id)
     workspace_id = doc.workspace
     recent_shifts = (
@@ -349,6 +354,7 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
         ],
         "sightings_by_patrol": by_patrol,
         "created_at": doc.createdAt,
+        "line": await line_status(doc.surface.repo_id, mandate_id),
     }
 
 
@@ -540,6 +546,48 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
             )
         )
     return {"sightings": [_sighting_to_wire(s) for s in created]}
+
+
+async def file_station_sighting(
+    workspace_id: str, mandate_id: str, draft: dict[str, Any]
+) -> dict[str, Any] | None:
+    """A sighting a factory station files (the develop station's base conflict
+    on a mandate's line). ``draft`` is shaped like a patrol's (``patrol``,
+    ``severity``, ``summary``, ``evidence``) and dedups like ``run_patrols``:
+    ``None`` when the same signal from the same patrol is already on file."""
+    await _fetch_mandate(workspace_id, mandate_id)
+    patrol = str(draft.get("patrol") or "station")
+    evidence = dict(draft.get("evidence") or {})
+    summary = str(draft.get("summary") or "")[:280]
+    signal = _dedup_signal(evidence, summary)
+    existing = await SightingDoc.find(
+        SightingDoc.workspace == workspace_id,
+        SightingDoc.mandate_id == mandate_id,
+        SightingDoc.patrol == patrol,
+    ).to_list()
+    if any(_dedup_signal(s.evidence, s.summary) == signal for s in existing):
+        return None  # no-event: nothing written
+    sighting = SightingDoc(
+        workspace=workspace_id,
+        mandate_id=mandate_id,
+        patrol=patrol,
+        severity=int(draft.get("severity") or 3),
+        summary=summary,
+        evidence=evidence,
+    )
+    await sighting.insert()
+    await emit(
+        mandate_events.MandateSightingAdded(
+            data={
+                "workspace_id": workspace_id,
+                "mandate_id": mandate_id,
+                "sighting_id": str(sighting.id),
+                "patrol": patrol,
+                "severity": sighting.severity,
+            }
+        )
+    )
+    return _sighting_to_wire(sighting)
 
 
 async def set_autopilot(
@@ -822,6 +870,24 @@ def _task_status(run: dict[str, Any]) -> str:
     return "pending at gate" if status == "proposed" else status
 
 
+async def _line_state(run: dict[str, Any] | None, line_merged: Any) -> str | None:
+    """Where a landed run's commit stands when it landed on its mandate's line:
+    in the base yet, or on the line awaiting the captain's merge. Either way it
+    is built; ``None`` for a run that did not land on a line."""
+    run = run or {}
+    line, base = str(run.get("branch") or ""), str(run.get("base_branch") or "")
+    if not line.startswith("belt/line/"):
+        return None
+    try:
+        merged = await line_merged(
+            str(run.get("repo") or ""), base, str(run.get("commit_sha") or "")
+        )
+    except Exception:  # noqa: BLE001 — an unreadable repo reads as not merged yet
+        logger.debug("mandate: line state read failed", exc_info=True)
+        merged = False
+    return f"merged into {base}" if merged else f"on the line {line}, awaiting merge into {base}"
+
+
 def _is_gate_teaching(s: SightingDoc) -> bool:
     """A gate rejection/edit filed as a sighting is shift history, not backlog
     work: no task can resolve it. Without a ``shift_no`` it stays in the
@@ -842,6 +908,7 @@ async def _planned_tasks(
     executor dispatches the list a resolve kept). A task with no run takes the
     plan Action's status (pending at the plan gate, rejected, ...)."""
     from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.cloud.belt.executor import line_merged
     from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
 
     newest: dict[tuple[str, int], dict[str, Any]] = {}
@@ -878,6 +945,7 @@ async def _planned_tasks(
                     "in_flight": status in _IN_FLIGHT,
                     "error": (run or {}).get("error"),
                     "run_id": (run or {}).get("action_id"),
+                    "line": await _line_state(run, line_merged) if status == "landed" else None,
                 }
             )
     out.sort(key=lambda t: t["shift_no"])
@@ -1036,6 +1104,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     #    foreman reads the open backlog (every sighting no landed task has
     #    resolved), not just what arrived since the last shift.
     from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.belt.executor import line_status
     from pocketpaw_ee.cloud.belt.orient import c4_lines
 
     charter_wire = _charter_to_wire(doc.charter)
@@ -1083,6 +1152,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         sightings=backlog["open"][:_BACKLOG_CAP],
         open_total=len(backlog["open"]),
         history=history,
+        line=await line_status(doc.surface.repo_id, mandate_id),
         soul_context=soul_context,
         architecture=c4_lines(doc.surface.repo_id),
     )

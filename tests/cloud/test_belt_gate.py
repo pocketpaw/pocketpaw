@@ -11,8 +11,8 @@
 #     INJECTED fake opener, mark_executed with {pr_url, branch, files_changed};
 #     the branch + commit land in the bare origin and the worktree is removed.
 #   * no-origin repos land locally: no push, no PR, the branch survives in the
-#     repo at the recorded commit (promote is idempotent, no warning), and the
-#     runs read model shows a branch chip (pr_url=None).
+#     repo at the recorded commit, and the runs read model shows a branch
+#     chip (pr_url=None).
 #   * two actions back-to-back don't cross-contaminate; reject round-trips; an
 #     apply conflict fails the action, cleans the worktree and leaves no belt
 #     branch behind; size cap, missing identity and out-of-allowlist refusals.
@@ -632,22 +632,6 @@ async def test_local_only_landing_commits_locally_no_push_no_pr(
 
     # Still no origin remote was added.
     assert _git(local_repo, "remote").strip() == ""
-
-
-async def test_promote_branch_is_idempotent_and_never_moves_a_branch(local_repo):
-    """Same sha: no-op. Missing: created. Different sha: an error, branch untouched."""
-    base = _git(local_repo, "rev-parse", "main").strip()
-    (local_repo / "app.py").write_text("x = 1\n", encoding="utf-8")
-    _git(local_repo, "commit", "-am", "second")
-    second = _git(local_repo, "rev-parse", "main").strip()
-
-    assert await belt_executor._promote_branch(local_repo, "feat/belt-new", base) is None
-    assert _git(local_repo, "rev-parse", "feat/belt-new").strip() == base
-    assert await belt_executor._promote_branch(local_repo, "feat/belt-new", base) is None
-
-    err = await belt_executor._promote_branch(local_repo, "feat/belt-new", second)
-    assert err and "already exists" in err
-    assert _git(local_repo, "rev-parse", "feat/belt-new").strip() == base
 
 
 async def test_local_only_runs_read_model_branch_chip_no_pr(

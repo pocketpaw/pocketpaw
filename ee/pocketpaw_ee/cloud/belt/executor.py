@@ -6,34 +6,43 @@
 #   1. refuses a malformed or stale-schema blob and a QUEUED station run
 #      (``station_pending``: no diff yet), and re-resolves the repo inside the
 #      allowlist (defense in depth);
-#   2. adds a throwaway worktree DETACHED at ``origin/<base>`` (after a fetch)
-#      or, with no ``origin`` remote, at the local ``<base>`` commit;
-#   3. applies the diff from a temp file (``git apply --3way``), branches
-#      ``feat/belt-<id>`` and commits it: the subject is ``feat: <task title>``
-#      when the blob carries a ``title`` (mandate tasks), else
-#      ``feat(belt): <summary>``; the body is the task's why plus the summary
-#      (the develop station's check/review report). No AI attribution;
-#   4. with a remote: pushes and opens a PR through an injectable ``PrOpener``;
-#      local-only: keeps the branch in the repo (``_promote_branch``) and records
-#      branch + commit sha instead of a PR url;
-#   5. back-writes the landing fields onto the blob for the runs read model,
-#      fires ``belt_run_updated`` and closes the Decision-Graph chain once.
+#   2. picks the TARGET branch: a mandate's run lands on the mandate's LINE,
+#      ``belt/line/<mandate id>`` (``line_branch``: the id must be a Mongo
+#      ObjectId, never user text); a run with no mandate gets ``feat/belt-<id>``;
+#   3. adds a throwaway worktree DETACHED at the line tip (``line_tip``: the
+#      local line, or ``origin/<line>`` when the pushed one is ahead), else at
+#      ``origin/<base>`` (fetched) or the local ``<base>`` commit;
+#   4. applies the diff from a temp file (``git apply --3way``) and commits it:
+#      ``feat: <task title>`` with a ``title``, else ``feat(belt): <summary>``;
+#      the body is the why plus the develop report. No AI attribution;
+#   5. moves the target ref by compare-and-swap (``move_ref``: ``update-ref``
+#      with the expected old sha, "" = create), so two landings can't both win
+#      and nothing needs the branch checked out;
+#   6. with an ``origin``: pushes the target and opens its PR (``GhCliPrOpener``
+#      reuses the open PR of a branch, so a line keeps one PR); local-only: no
+#      push, no PR;
+#   7. back-writes ``branch`` / ``commit_sha`` / ``pr_url`` / ``files_changed``
+#      onto the blob, fires ``belt_run_updated`` (naming the branch) and closes
+#      the Decision-Graph chain once.
 # Every failure goes through ``_fail`` (mark_failed + one chain close + a
-# ``failed`` run event). The worktree is always removed, and the belt branch is
-# deleted when the run did not land, so a retry of the same action starts clean.
+# ``failed`` run event). The worktree is always removed. A per-run branch is
+# deleted when the run did not land (a retry starts clean); a line is never
+# deleted, and once its ref moved the run IS landed: a push or PR failure after
+# that is noted on the outcome, never a failed run (the Foreman would re-plan
+# work the line already holds). ``line_merged`` answers "is this run's commit in
+# the base yet"; ``line_status`` reads a whole line from git (ahead, merged,
+# subjects, its open PR) for the mandate page and the Foreman's THE LINE.
 #
-# RE-DEVELOP: a headless run (blob ``headless``) whose patch no longer applies on
-# the current base (``git apply --check`` and ``--3way`` both fail: an earlier
-# run landed on it) is not failed. ``_requeue_for_redevelop`` clears its diff,
-# counts ``redevelop`` and sends it back to pending; after cleanup the headless
-# dispatcher's ``develop`` regenerates the diff against the current base, and
-# it waits at the per-diff gate for a fresh approval. No chain close: it is not
-# a terminal. A second conflict on the same run fails with "base moved twice";
-# with no develop loop wired it fails with that reason.
+# RE-DEVELOP (``_moved``): a headless run whose diff no longer fits where it
+# lands (``git apply --check`` and ``--3way`` both fail on the moved base or
+# line, or the line moved between read and swap) is sent back to the develop
+# station once (``_requeue_for_redevelop``), then waits at the per-diff gate for
+# a fresh approval. A second time fails with "base moved twice"; with no develop
+# loop wired it fails with that reason.
 #
 # Security: argv-only subprocesses (never a shell); the diff is data in a temp
 # file, never on a command line or in a log; destructive git ops stay inside
-# the throwaway worktree.
+# the throwaway worktree; refs move only by compare-and-swap.
 
 from __future__ import annotations
 
@@ -42,6 +51,7 @@ import logging
 import re
 import shutil
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -102,6 +112,11 @@ class GhCliPrOpener:
         title: str,
         body: str,
     ) -> str:
+        # A branch that already has an open PR into the base (a mandate line
+        # after its first landing) keeps it: the push above updated it.
+        existing = await _open_pr_url(repo_path, branch, base_branch)
+        if existing:
+            return existing
         code, out, err = await _run(
             [
                 "gh",
@@ -127,6 +142,34 @@ class GhCliPrOpener:
             if line.startswith("http"):
                 return line
         return out.strip() or "<pr-created>"
+
+
+async def _open_pr_url(repo_path: Path, branch: str, base_branch: str) -> str | None:
+    """The open PR of ``branch`` into ``base_branch`` (``gh pr list``), or None:
+    no PR, no ``gh``, or any gh failure."""
+    try:
+        code, out, _err = await _run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--base",
+                base_branch,
+                "--state",
+                "open",
+                "--json",
+                "url",
+                "--jq",
+                ".[0].url // empty",
+            ],
+            cwd=repo_path,
+        )
+    except Exception:  # noqa: BLE001 — gh missing or timed out reads as no PR
+        return None
+    url = out.strip()
+    return url if code == 0 and url.startswith("http") else None
 
 
 async def _run(
@@ -161,6 +204,151 @@ async def _run(
         out_b.decode("utf-8", "replace"),
         err_b.decode("utf-8", "replace"),
     )
+
+
+# A mandate's runs land on its LINE branch. The name comes from the mandate id
+# alone, and only a Mongo ObjectId (24 lowercase hex) makes one: anything else
+# (a hand-proposed change has no mandate) lands on its own ``feat/belt-<id>``.
+_LINE_ID = re.compile(r"[0-9a-f]{24}")
+_SHA = re.compile(r"[0-9a-f]{7,64}")
+
+# ``git(*args) -> (code, stdout, stderr)`` bound to one repo. The executor's
+# runs with the full env (push and fetch need the owner's credentials); the
+# develop station passes its hardened, env-scrubbed runner.
+GitFn = Callable[..., Awaitable[tuple[int, str, str]]]
+
+
+class LineError(RuntimeError):
+    """A line that can't be built on: its local and pushed tips diverged."""
+
+
+def line_branch(mandate_id: str) -> str | None:
+    """``belt/line/<mandate id>``, or ``None`` when the id is not a mandate's."""
+    return f"belt/line/{mandate_id}" if _LINE_ID.fullmatch(mandate_id or "") else None
+
+
+def _git_in(repo: Path) -> GitFn:
+    async def git(*args: str) -> tuple[int, str, str]:
+        return await _run(["git", *args], cwd=repo)
+
+    return git
+
+
+async def commit_of(git: GitFn, ref: str) -> str:
+    """The commit ``ref`` names, or "" when there is none."""
+    code, out, _err = await git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    return out.strip() if code == 0 else ""
+
+
+async def is_ancestor(git: GitFn, older: str, newer: str) -> bool:
+    code, _out, _err = await git("merge-base", "--is-ancestor", older, newer)
+    return code == 0
+
+
+async def line_tip(git: GitFn, line: str, *, has_origin: bool) -> tuple[str, str]:
+    """``(tip, local)``: the commit a run on ``line`` builds on, and the local
+    ref's sha a landing swaps from ("" = no line yet). With an origin the pushed
+    line counts too, refetched (a tracking ref left by a deleted remote branch
+    never does): the newer of the two when one contains the other. Diverged
+    tips raise ``LineError``; a human merges them."""
+    local = await commit_of(git, f"refs/heads/{line}")
+    remote = ""
+    if has_origin:
+        code, _out, _err = await git(
+            "fetch", "origin", f"+refs/heads/{line}:refs/remotes/origin/{line}"
+        )
+        if code == 0:
+            remote = await commit_of(git, f"refs/remotes/origin/{line}")
+    if not remote or remote == local:
+        return local, local
+    if not local or await is_ancestor(git, local, remote):
+        return remote, local
+    if await is_ancestor(git, remote, local):
+        return local, local
+    raise LineError(f"{line} and origin/{line} have diverged; merge them by hand, then re-run")
+
+
+async def move_ref(git: GitFn, branch: str, new: str, old: str) -> bool:
+    """Compare-and-swap ``refs/heads/<branch>`` from ``old`` to ``new`` (``old``
+    "" = create only). False = the ref was not where expected; nothing moved."""
+    code, _out, _err = await git("update-ref", f"refs/heads/{branch}", new, old)
+    return code == 0
+
+
+async def line_merged(repo: str, base_branch: str, commit_sha: str) -> bool:
+    """Whether a commit landed on a line is in the base yet: in ``origin/<base>``
+    (as last fetched) or the local ``<base>``. A squash or rebase merge leaves
+    the commit outside the base, so it reads False ("awaiting merge")."""
+    repo_path, _err = _re_resolve_repo(repo)
+    if repo_path is None or not base_branch or not _SHA.fullmatch(commit_sha or ""):
+        return False
+    git = _git_in(repo_path)
+    for ref in (f"refs/remotes/origin/{base_branch}", f"refs/heads/{base_branch}"):
+        if await commit_of(git, ref) and await is_ancestor(git, commit_sha, ref):
+            return True
+    return False
+
+
+_LINE_SUBJECTS = 30  # cap on the commit subjects ``line_status`` returns
+
+
+async def line_status(repo: str, mandate_id: str) -> dict[str, Any]:
+    """A mandate's line as git has it now (no fetch), for the mandate page and
+    the Foreman: ``branch``; ``base``, the repo's checked-out branch (the
+    develop station's default base); ``exists``; ``ahead``, commits on the line
+    that neither ``origin/<base>`` (as last fetched) nor the local base holds,
+    the line's own base-sync merges included; ``merged`` (``ahead`` is 0: the
+    tip is in the base); ``subjects``, those commits' subjects without the
+    merges, newest first, capped; ``pr_url``, the line's open PR, looked up with
+    an origin while unmerged. Any git failure or timeout reads ``exists=False``."""
+    branch = line_branch(mandate_id)
+    out: dict[str, Any] = {
+        "branch": branch,
+        "base": None,
+        "exists": False,
+        "ahead": 0,
+        "merged": False,
+        "pr_url": None,
+        "subjects": [],
+    }
+    try:
+        repo_path, _err = _re_resolve_repo(repo) if branch else (None, None)
+        if repo_path is None or branch is None:
+            return out
+        git = _git_in(repo_path)
+        tip = await commit_of(git, f"refs/heads/{branch}")
+        code, head, _err = await git("rev-parse", "--abbrev-ref", "HEAD")
+        base = head.strip()
+        if not tip or code != 0 or base in ("", "HEAD", branch):
+            return out
+        bases = [
+            ref
+            for ref in (f"refs/remotes/origin/{base}", f"refs/heads/{base}")
+            if await commit_of(git, ref)
+        ]
+        if not bases:
+            return out
+        span = [tip, "--not", *bases, "--"]
+        code, count, _err = await git("rev-list", "--count", *span)
+        if code != 0:
+            return out
+        code, log, _err = await git(
+            "log", "--no-merges", f"--max-count={_LINE_SUBJECTS}", "--format=%s", *span
+        )
+        if code != 0:
+            return out
+        ahead = int(count.strip())
+        subjects = [s[:200] for s in log.splitlines() if s.strip()]
+        has_origin = await _has_origin(repo_path)
+    except Exception:  # noqa: BLE001 — a timeout or an unreadable repo reads as no line
+        logger.debug("belt: line status read failed", exc_info=True)
+        return out
+    out.update(exists=True, base=base, ahead=ahead, merged=ahead == 0, subjects=subjects)
+    if ahead and has_origin:
+        # ponytail: one gh call per read, bounded by _SUBPROCESS_TIMEOUT; cache
+        # it on the line tip if mandate detail reads get hot.
+        out["pr_url"] = await _open_pr_url(repo_path, branch, base)
+    return out
 
 
 def _re_resolve_repo(repo: str) -> tuple[Path | None, str | None]:
@@ -295,8 +483,10 @@ async def _emit_run_updated(
     status: str,
     stage: str,
     pr_url: str | None = None,
+    branch: str | None = None,
 ) -> None:
-    """Publish ``belt_run_updated`` for an executor lifecycle terminal.
+    """Publish ``belt_run_updated`` for an executor lifecycle terminal (a
+    landing names its ``branch``: the line, for a mandate run).
 
     Thin wrapper over ``belt_service.emit_belt_run_updated`` (the WORKSPACE
     REALTIME BUS path + an in-turn SSE) so the executor has one call site per
@@ -313,6 +503,7 @@ async def _emit_run_updated(
             status=status,
             stage=stage,
             pr_url=pr_url,
+            branch=branch,
         )
     except Exception:  # noqa: BLE001 — emit must never break the apply path
         logger.debug("belt: belt_run_updated emit failed (non-fatal)", exc_info=True)
@@ -336,11 +527,10 @@ async def _persist_run_result(
     write failure leaves the run without the structured fields (the read model
     falls back to None) but never breaks the approve response.
 
-    Two landing shapes share this writer:
-      * WITH-REMOTE — ``pr_url`` + ``branch`` are set; ``commit_sha`` is omitted.
-      * LOCAL-ONLY (no ``origin``) — ``branch`` + ``commit_sha`` are set; ``pr_url``
-        stays absent so the read model emits ``pr_url=None`` and the page renders
-        a branch chip instead of a PR link.
+    Every landing sets ``branch`` + ``commit_sha``. WITH-REMOTE also sets
+    ``pr_url`` (absent when the PR open failed after the line moved); LOCAL-ONLY
+    (no ``origin``) never does, so the read model emits ``pr_url=None`` and the
+    page renders a branch chip instead of a PR link.
     """
 
     try:
@@ -493,7 +683,12 @@ async def execute_approved_change(
         )
         return
 
-    branch = f"feat/belt-{_short_id(str(action.id))}"
+    # A mandate's run lands on its line; any other run on its own branch.
+    line = line_branch(str(blob.get("mandate_id") or ""))
+    target = line or f"feat/belt-{_short_id(str(action.id))}"
+    # What a stale diff no longer applies on (for the re-develop reasons).
+    where = line or base_branch
+    git = _git_in(repo_path)
 
     # One throwaway worktree dir per action id, under a tmp/belt-actions root.
     # NEVER the repo's live checkout. Cleaned up in the finally block below.
@@ -506,20 +701,48 @@ async def execute_approved_change(
     landed = False
     redevelop_with: Any = None
 
+    async def _moved(detail: str) -> None:
+        """The diff no longer fits where it lands (the base or the line moved
+        under a headless run): send it back to re-develop against the new tip,
+        once. A second time, or with no develop loop wired, fails with why."""
+        nonlocal redevelop_with
+        if int(blob.get("redevelop") or 0) >= 1:
+            await _fail(
+                f"base moved twice: the re-developed diff no longer applies on "
+                f"{where} either. Re-run the shift. {detail}",
+                error_class="BaseMovedTwice",
+            )
+            return
+        redeveloper = _headless_redeveloper()
+        if redeveloper is None:
+            await _fail(
+                f"diff no longer applies on the moved {where} and the headless "
+                f"develop station is not wired to re-develop it. Re-run the shift. {detail}",
+                error_class="ApplyConflict",
+            )
+            return
+        requeue_err = await _requeue_for_redevelop(store, str(action.id))
+        if requeue_err:
+            await _fail(requeue_err, error_class="RedevelopFailed")
+            return
+        await _emit_run_updated(
+            workspace_id=workspace_id,
+            action_id=str(action.id),
+            status="queued",
+            stage="station",
+        )
+        redevelop_with = redeveloper  # handed off after the cleanup below
+        logger.info("belt: action %s no longer fits the moved %s; re-developing", action.id, where)
+
     try:
-        # 0. LOCAL-ONLY DETECTION — does the repo have an ``origin`` remote? A
-        #    repo with no origin is a local-only landing: we branch off the LOCAL
-        #    base ref (never ``origin/<base>``, which doesn't exist) and skip the
-        #    push + PR entirely (handled after the commit, step 6).
+        # 0. LOCAL-ONLY DETECTION — a repo with no ``origin`` lands locally: no
+        #    fetch, no push, no PR (step 6).
         has_origin = await _has_origin(repo_path)
 
-        # 1. With a remote: fetch the latest base so we branch off the freshest
-        #    origin tip, then base the worktree on ``origin/<base>`` (a remote-
-        #    tracking ref — ``worktree add`` checks it out DETACHED, never as a
-        #    local branch). Local-only: no fetch, resolve the LOCAL ``<base>``
-        #    branch to its commit sha so the worktree can check it out DETACHED —
-        #    we MUST NOT ``worktree add`` a local branch name that is already
-        #    checked out in the repo's live working tree (git refuses it).
+        # 1. The start: with a remote, the freshly fetched ``origin/<base>`` (a
+        #    remote-tracking ref, checked out DETACHED); local-only, the LOCAL
+        #    ``<base>`` commit (never the branch name: it may be checked out in
+        #    the live working tree). A line that exists replaces either.
         if has_origin:
             code, _out, err = await _run(["git", "fetch", "origin", base_branch], cwd=repo_path)
             if code != 0:
@@ -540,11 +763,17 @@ async def execute_approved_change(
                 )
                 return
             worktree_base = out.strip()
+        expected = ""  # the target's sha the swap expects ("" = create it)
+        if line:
+            try:
+                tip, expected = await line_tip(git, line, has_origin=has_origin)
+            except LineError as exc:
+                await _fail(str(exc), error_class="LineDiverged")
+                return
+            worktree_base = tip or worktree_base
 
-        # 2. Fresh worktree DETACHED at the base ref. If the dir somehow exists
-        #    from a prior crash, remove it first so add doesn't refuse. ``--detach``
-        #    keeps it a detached HEAD so step 3 can create the belt branch without
-        #    colliding with a branch already checked out in the live working tree.
+        # 2. Fresh worktree DETACHED at the start. A dir left by a prior crash
+        #    is removed first so add doesn't refuse.
         if worktree_dir.exists():
             await _force_remove_worktree(repo_path, worktree_dir)
         code, _out, err = await _run(
@@ -559,23 +788,13 @@ async def execute_approved_change(
             return
         worktree_created = True
 
-        # 3. Branch off the detached worktree head.
-        code, _out, err = await _run(["git", "checkout", "-b", branch], cwd=worktree_dir)
-        if code != 0:
-            await _fail(
-                f"git checkout -b {branch} failed: {err.strip()[:300]}",
-                error_class="GitCheckoutFailed",
-            )
-            return
-        branch_created = True
-
-        # 4. Write the diff to a temp FILE and apply it — the diff is DATA, it
+        # 3. Write the diff to a temp FILE and apply it — the diff is DATA, it
         #    never touches a command line beyond the file path argument.
         fd_path = worktree_dir / ".belt-change.diff"
         fd_path.write_text(diff, encoding="utf-8")
         diff_file = fd_path
         # ``--check`` on the still-clean tree says whether the patch fits this
-        # base as written (``--3way`` leaves conflict markers when it fails).
+        # start as written (``--3way`` leaves conflict markers when it fails).
         check_code, _out, _err = await _run(
             ["git", "apply", "--check", "--whitespace=nowarn", str(fd_path)], cwd=worktree_dir
         )
@@ -587,52 +806,18 @@ async def execute_approved_change(
             fd_path.unlink()
             diff_file = None
         if code != 0 and check_code != 0 and blob.get("headless"):
-            # The base moved under a headless run (an earlier run landed on
-            # it): re-develop it against the current base, once.
-            if int(blob.get("redevelop") or 0) >= 1:
-                await _fail(
-                    f"base moved twice: the re-developed diff no longer applies on "
-                    f"{base_branch} either. Re-run the shift. git apply: {err.strip()[:300]}",
-                    error_class="BaseMovedTwice",
-                )
-                return
-            redeveloper = _headless_redeveloper()
-            if redeveloper is None:
-                await _fail(
-                    f"diff no longer applies on the moved {base_branch} and the headless "
-                    "develop station is not wired to re-develop it. Re-run the shift. "
-                    f"git apply: {err.strip()[:300]}",
-                    error_class="ApplyConflict",
-                )
-                return
-            requeue_err = await _requeue_for_redevelop(store, str(action.id))
-            if requeue_err:
-                await _fail(requeue_err, error_class="RedevelopFailed")
-                return
-            await _emit_run_updated(
-                workspace_id=workspace_id,
-                action_id=str(action.id),
-                status="queued",
-                stage="station",
-            )
-            redevelop_with = redeveloper  # handed off after the cleanup below
-            logger.info(
-                "belt: action %s no longer applies on the moved %s; re-developing",
-                action.id,
-                base_branch,
-            )
+            await _moved(f"git apply: {err.strip()[:300]}")
             return
         if code != 0:
             await _fail(
                 "diff did not apply cleanly (conflict or stale base) — "
-                f"re-propose against the current {base_branch}. git apply: {err.strip()[:300]}",
+                f"re-propose against the current {where}. git apply: {err.strip()[:300]}",
                 error_class="ApplyConflict",
             )
             return
 
-        # 5. Stage everything the diff touched, capture the changed-file list,
-        #    then commit. Conventional Commits; the agent's summary as the body;
-        #    NO AI attribution.
+        # 4. Stage everything the diff touched, capture the changed-file list,
+        #    then commit (detached). Conventional Commits; NO AI attribution.
         code, _out, err = await _run(["git", "add", "-A"], cwd=worktree_dir)
         if code != 0:
             await _fail(f"git add failed: {err.strip()[:300]}", error_class="GitAddFailed")
@@ -657,25 +842,32 @@ async def execute_approved_change(
 
         commit_sha = await _head_sha(worktree_dir)
 
-        # 6. LOCAL-ONLY GATE MODE — a repo with NO ``origin`` remote can't be
-        #    pushed and has no PR target. Approve = apply + commit on the belt
-        #    branch LOCALLY. We detected the missing remote BEFORE the push step
-        #    (step 0) so the push / PR path is skipped entirely (never attempted).
-        #    The outcome carries the branch + commit sha instead of a pr_url; the
-        #    run still lands as executed and ``belt_run_updated`` still fires.
-        if not has_origin:
-            promote_err = await _promote_branch(repo_path, branch, commit_sha)
-            if promote_err:
-                branch_created = False  # not ours any more: never delete it
-                await _fail(promote_err, error_class="BranchPromoteFailed")
+        # 5. Move the target ref by compare-and-swap. A line that moved since it
+        #    was read (another landing, a base sync) is the moved-line case.
+        if not commit_sha or not await move_ref(git, target, commit_sha, expected):
+            if line and blob.get("headless"):
+                await _moved(f"{line} moved while this run landed")
                 return
+            await _fail(
+                f"branch '{target}' moved or already exists; it was left alone. Re-run.",
+                error_class="RefMoved",
+            )
+            return
+        if line:
+            landed = True  # the commit is on the line from here on
+        else:
+            branch_created = True
+
+        # 6. LOCAL-ONLY — no ``origin``: the change stays on the target branch
+        #    in the repo; the outcome carries the branch + commit sha.
+        if not has_origin:
             landed = True
             await _land_local_only(
                 store=store,
                 action=action,
                 worktree_dir=worktree_dir,
                 repo_path=repo_path,
-                branch=branch,
+                branch=target,
                 commit_sha=commit_sha,
                 files_changed=files_changed,
                 workspace_id=workspace_id,
@@ -685,63 +877,72 @@ async def execute_approved_change(
             )
             return
 
-        # 7. Push the branch.
-        code, _out, err = await _run(["git", "push", "-u", "origin", branch], cwd=worktree_dir)
-        if code != 0:
-            await _fail(f"git push failed: {err.strip()[:300]}", error_class="GitPushFailed")
-            return
-
-        # 8. Open the PR via the injectable opener.
+        # 7. Push the target and open (or reuse) its PR. A per-run branch that
+        #    fails here fails the run; a line keeps the landing with a note.
+        pr_url: str | None = None
+        note = ""
         try:
-            pr_url = await opener.open_pr(
-                repo_path=worktree_dir,
-                branch=branch,
-                base_branch=base_branch,
-                title=commit_title,
-                body=commit_body,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("belt: PR open failed for action %s", action.id, exc_info=True)
-            # The branch is pushed but no PR — record the partial so a human can
-            # open the PR by hand. This is NOT a clean success.
-            await _fail(
-                f"branch '{branch}' pushed but PR open failed: {exc}. "
-                "Open the PR manually or re-propose.",
-                error_class="PrOpenFailed",
-            )
-            return
+            code, _out, err = await _run(["git", "push", "-u", "origin", target], cwd=worktree_dir)
+        except RuntimeError as exc:  # a timed-out push
+            code, err = 1, str(exc)
+        if code != 0:
+            if not line:
+                await _fail(f"git push failed: {err.strip()[:300]}", error_class="GitPushFailed")
+                return
+            note = f"push failed: {err.strip()[:300]}"
+        else:
+            try:
+                pr_url = await opener.open_pr(
+                    repo_path=worktree_dir,
+                    branch=target,
+                    base_branch=base_branch,
+                    title=commit_title,
+                    body=commit_body,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("belt: PR open failed for action %s", action.id, exc_info=True)
+                if not line:
+                    # Pushed but no PR: a human opens it by hand. Not a success.
+                    await _fail(
+                        f"branch '{target}' pushed but PR open failed: {exc}. "
+                        "Open the PR manually or re-propose.",
+                        error_class="PrOpenFailed",
+                    )
+                    return
+                note = f"pushed, but the PR open failed: {exc}"
 
-        # 9. Mark executed with the structured outcome.
+        # 8. Mark executed with the structured outcome.
         landed = True
-        await store.mark_executed(
-            action.id,
-            f"PR opened: {pr_url} (branch '{branch}', {len(files_changed)} file(s) changed)",
-        )
-        # SC-2 — back-write the PR result onto the blob so the runs read model
-        # reads pr_url / branch / files_changed STRUCTURALLY (no free-text
-        # parsing). Best-effort: a write failure leaves the run without the
-        # structured fields but the free-text outcome above still records it.
+        if pr_url:
+            outcome = (
+                f"PR opened: {pr_url} (branch '{target}', {len(files_changed)} file(s) changed)"
+            )
+        else:
+            outcome = (
+                f"Landed on '{target}' ({commit_sha[:12]}, {len(files_changed)} file(s) "
+                f"changed); {note}. The next landing pushes the line again."
+            )
+        await store.mark_executed(action.id, outcome)
+        # Back-write the landing onto the blob so the runs read model reads
+        # pr_url / branch / commit_sha / files_changed STRUCTURALLY.
         await _persist_run_result(
             store=store,
             action_id=str(action.id),
-            branch=branch,
+            branch=target,
             files_changed=len(files_changed),
             pr_url=pr_url,
+            commit_sha=commit_sha,
         )
-        # SC-2 — publish ``belt_run_updated`` (status=landed, stage=done) on the
-        # workspace bus so the /belt page reflects the landed PR live. Best-effort.
         await _emit_run_updated(
             workspace_id=workspace_id,
             action_id=str(action.id),
             status="landed",
             stage="done",
             pr_url=pr_url,
+            branch=target,
         )
-        # BS-4 — close the chain on the SUCCESS path. ``action_outcome="landed"``
-        # + the PR url / branch / file count ride on the payload for the explain
-        # narrator. This is the ONLY terminal on the happy path (every failure
-        # path above closed via ``_fail`` and returned), so exactly one
-        # ``decision.completed`` lands per run.
+        # The ONLY terminal on the happy path (every failure above closed via
+        # ``_fail`` and returned), so exactly one ``decision.completed`` per run.
         _emit_chain_close(
             passed=True,
             action_outcome="landed",
@@ -752,13 +953,14 @@ async def execute_approved_change(
             user_id=requested_by,
             causation_id=causation,
             pr_url=pr_url,
-            branch=branch,
+            branch=target,
+            commit_sha=commit_sha,
             files_changed=len(files_changed),
         )
         logger.info(
             "belt: applied code_change action %s → branch %s, %d file(s), PR %s",
             action.id,
-            branch,
+            target,
             len(files_changed),
             pr_url,
         )
@@ -776,14 +978,13 @@ async def execute_approved_change(
                 diff_file.unlink()
         if worktree_created or worktree_dir.exists():
             await _force_remove_worktree(repo_path, worktree_dir)
-        # The worktree's ``checkout -b`` created the branch in the repo's shared
-        # refs; a run that did not land must not leave it behind (a retry of the
-        # same action reuses the name).
+        # A per-run branch that did not land must not stay behind (a retry of
+        # the same action reuses the name). A line is never deleted.
         if branch_created and not landed:
             with _suppress():
-                await _run(["git", "branch", "-D", branch], cwd=repo_path)
-        # A re-queued run develops only after this worktree and branch are gone
-        # (the develop station adds its own worktree in the same repo).
+                await _run(["git", "branch", "-D", target], cwd=repo_path)
+        # A re-queued run develops only after this worktree is gone (the
+        # develop station adds its own worktree in the same repo).
         if redevelop_with is not None:
             try:
                 await redevelop_with.develop(str(action.id), workspace_id=workspace_id)
@@ -836,11 +1037,10 @@ async def _land_local_only(
 ) -> None:
     """Land a local-only (no-origin) Belt code change.
 
-    The change is already committed on ``branch`` and the caller has made sure
-    the branch exists in the real repo (``_promote_branch``), so it survives the
-    worktree teardown. A local-only repo has no push target and no PR, so this
-    records the executed outcome carrying the branch + commit sha INSTEAD of a
-    pr_url:
+    The change is already committed on ``branch``, whose ref the caller moved in
+    the real repo (``move_ref``), so it survives the worktree teardown. A
+    local-only repo has no push target and no PR, so this records the executed
+    outcome carrying the branch + commit sha INSTEAD of a pr_url:
 
       * ``mark_executed`` free-text outcome names the branch + sha (The Tray).
       * ``_persist_run_result`` back-writes ``branch`` + ``commit_sha`` (and NOT
@@ -873,13 +1073,14 @@ async def _land_local_only(
         files_changed=n_files,
         commit_sha=commit_sha,
     )
-    # Publish belt_run_updated (status=landed, stage=done) — NO pr_url for a
-    # local-only landing. Best-effort.
+    # Publish belt_run_updated (status=landed, stage=done, the branch) — NO
+    # pr_url for a local-only landing. Best-effort.
     await _emit_run_updated(
         workspace_id=workspace_id,
         action_id=str(action.id),
         status="landed",
         stage="done",
+        branch=branch,
     )
     # Close the Decision-Graph chain once on the success path — branch + sha
     # ride the payload (no pr_url) for the explain narrator.
@@ -948,32 +1149,6 @@ async def _requeue_for_redevelop(store: Any, action_id: str) -> str | None:
     )
     if reopened is None:
         return "could not send the run back to the develop station (no longer approved)"
-    return None
-
-
-async def _promote_branch(repo_path: Path, branch: str, commit_sha: str) -> str | None:
-    """Make sure ``branch`` exists in the real repo at ``commit_sha`` so the
-    landed commit outlives the worktree teardown. Returns an error, or ``None``.
-
-    Linked worktrees share ``refs/heads``, so the worktree's ``checkout -b``
-    usually created it already: same sha is a no-op, a missing branch is
-    created, a branch at a DIFFERENT sha is a real error (never moved)."""
-    if not commit_sha:
-        return None
-    code, out, _err = await _run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo_path
-    )
-    if code == 0:
-        existing = out.strip()
-        if existing == commit_sha:
-            return None
-        return (
-            f"branch '{branch}' already exists at {existing[:12]}, not at the landed "
-            f"commit {commit_sha[:12]}; leaving it alone"
-        )
-    code, _out, err = await _run(["git", "branch", branch, commit_sha], cwd=repo_path)
-    if code != 0:
-        return f"could not keep branch '{branch}' in the repo: {err.strip()[:200]}"
     return None
 
 

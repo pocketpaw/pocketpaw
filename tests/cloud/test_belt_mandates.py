@@ -26,11 +26,15 @@
 # deps patrol against a real manifest; tenant isolation on every read; the
 # digest route (sightings, shifts, runs and waiting gates per mandate); the
 # foreman's backlog (open sightings carry over across shifts, a landed task
-# resolves its sightings, in-flight work is marked, the list is capped).
+# resolves its sightings, in-flight work is marked, the list is capped); the
+# mandate's line (work landed on it is built, awaiting merge or merged; THE LINE
+# and the detail's ``line`` block read git) and the develop station's deduped
+# line-conflict sighting.
 
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1409,3 +1413,141 @@ async def test_gate_rejection_is_shift_history_not_backlog(
     assert h2["no"] == shift2["no"] and h2["state"] == "in_gate"
     assert [(t["status"], t["in_flight"]) for t in h2["tasks"]] == [("pending at plan gate", True)]
     assert all(s["in_flight"] for s in call.context.sightings)
+
+
+# ---------------------------------------------------------------------------
+# The mandate's LINE — what landed on it is built, merged or not
+# ---------------------------------------------------------------------------
+
+
+def _toy_git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+
+
+async def test_foreman_counts_line_work_as_built_and_sees_the_merge(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch, foreman_calls
+):
+    """A task landed on the mandate's line resolves its sighting and reads as on
+    the line, awaiting merge into the base; THE LINE and the mandate detail's
+    ``line`` block come from git (a commit no run recorded shows too); once the
+    captain merges the line, both read merged."""
+    from pocketpaw.config import get_settings
+
+    real = get_settings()
+
+    class _S:
+        belt_repo_allowlist = [str(tmp_path)]
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+    monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "station")
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "toy"
+    repo.mkdir()
+    _toy_git(repo, "init", "-q", "-b", "main")
+    _toy_git(repo, "config", "user.name", "t")
+    _toy_git(repo, "config", "user.email", "t@t")
+    (repo / "README.md").write_text("toy\n")
+    _toy_git(repo, "add", "-A")
+    _toy_git(repo, "commit", "-q", "-m", "init")
+    mandate_id = _create_mandate(client, repo, budget=1)
+    sid = client.post(
+        f"/belt/mandates/{mandate_id}/feedback",
+        json={"text": "no login", "severity": 4, "source": "support"},
+    ).json()["id"]
+
+    shift1 = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+    _resolve_all(client, mandate_id, shift1)
+    (run,) = await _shift_runs(1)
+    # What the executor does on landing: a commit on the line, recorded on the run.
+    line = f"belt/line/{mandate_id}"
+    _toy_git(repo, "checkout", "-q", "-b", line)
+    (repo / "auth.txt").write_text("auth\n")
+    _toy_git(repo, "add", "auth.txt")
+    _toy_git(repo, "commit", "-q", "-m", "feat: add auth")
+    sha = _toy_git(repo, "rev-parse", "HEAD").strip()
+    (repo / "fixup.txt").write_text("by hand\n")
+    _toy_git(repo, "add", "fixup.txt")
+    _toy_git(repo, "commit", "-q", "-m", "fix: by hand")
+    _toy_git(repo, "checkout", "-q", "main")
+    await store.approve(run["action_id"])
+    await store.mark_executed(run["action_id"], f"Landed on '{line}'")
+    await _patch_run(store, run["action_id"], branch=line, commit_sha=sha, base_branch="main")
+
+    waiting = f"on the line {line}, awaiting merge into main"
+    client.post(f"/belt/mandates/{mandate_id}/shift")
+    call = foreman_calls[-1]
+    assert call.context.line == {
+        "branch": line,
+        "base": "main",
+        "exists": True,
+        "ahead": 2,
+        "merged": False,
+        "pr_url": None,
+        "subjects": ["fix: by hand", "feat: add auth"],
+    }
+    assert f"{line}: 2 commit(s) not in main yet" in call.prompt
+    assert "- fix: by hand\n- feat: add auth\n" in call.prompt
+    assert f"(cites {sid}): landed ({waiting})" in call.prompt
+    assert f"id={sid}" not in call.prompt, "line work is built: its sighting is resolved"
+    assert "never plan that work again" in call.prompt.lower()
+    assert client.get(f"/belt/mandates/{mandate_id}").json()["line"] == call.context.line
+
+    _toy_git(repo, "merge", "-q", "--no-ff", "-m", "merge the line", line)
+    client.post(f"/belt/mandates/{mandate_id}/shift")
+    call = foreman_calls[-1]
+    assert (call.context.line["ahead"], call.context.line["merged"]) == (0, True)
+    assert f"everything on {line} is merged into main" in call.prompt
+    assert "(cites" in call.prompt and "landed (merged into main)" in call.prompt
+    assert client.get(f"/belt/mandates/{mandate_id}").json()["line"]["merged"] is True
+
+
+async def test_mandate_detail_line_block_reads_no_line_without_one(tmp_path, mongo_db, monkeypatch):
+    """A repo with no line (here: not even a git repo) reads exists=false; the
+    branch is still named, so the page can say where runs will land."""
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "toy"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+    line = client.get(f"/belt/mandates/{mandate_id}").json()["line"]
+    assert line == {
+        "branch": f"belt/line/{mandate_id}",
+        "base": None,
+        "exists": False,
+        "ahead": 0,
+        "merged": False,
+        "pr_url": None,
+        "subjects": [],
+    }
+
+
+async def test_station_sighting_files_once_per_signal(tmp_path, mongo_db, store, monkeypatch):
+    """The develop station's line conflict lands in the backlog once: the same
+    dedup key again files nothing; a new key files a new sighting."""
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+    from pocketpaw_ee.cloud.mandates.domain import SightingDoc
+
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "toy"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+    draft = {
+        "patrol": "line",
+        "severity": 4,
+        "summary": "main conflicts with the line in README.md",
+        "evidence": {"dedup_key": "line-conflict:belt/line/x:aaa", "files": ["README.md"]},
+    }
+    first = await mandate_service.file_station_sighting(WS, mandate_id, draft)
+    assert first and first["patrol"] == "line" and first["severity"] == 4
+    assert await mandate_service.file_station_sighting(WS, mandate_id, draft) is None
+    moved = {**draft, "evidence": {**draft["evidence"], "dedup_key": "line-conflict:x:bbb"}}
+    assert await mandate_service.file_station_sighting(WS, mandate_id, moved)
+    rows = await SightingDoc.find(SightingDoc.mandate_id == mandate_id).to_list()
+    assert sorted(r.evidence["dedup_key"] for r in rows) == [
+        "line-conflict:belt/line/x:aaa",
+        "line-conflict:x:bbb",
+    ]

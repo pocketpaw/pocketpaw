@@ -4,8 +4,10 @@
 # sighting no landed task has resolved, capped, each marked new or carried over
 # and annotated with the tasks that cite it), the last 3 shifts' outcomes (each
 # task's run result: landed, failed with its reason, rejected, or in flight; and
-# what a human said at the gate), the bound repo's C4 components, and (when a
-# soul is bound) the soul recall, then makes EXACTLY ONE LLM call that returns a
+# what a human said at the gate), the mandate's LINE as git has it (the
+# subjects of its commits not in the base yet, awaiting the captain's merge;
+# built either way), the bound repo's C4 components, and (when a soul is bound) the soul
+# recall, then makes EXACTLY ONE LLM call that returns a
 # strict-JSON PlanProposal: a FEW tasks (≤ the charter's budget) or an explicit
 # empty plan with a reason. A task may name a charter ``recipe`` (a
 # deterministic command) instead of LLM develop work.
@@ -38,8 +40,9 @@
 # expected KPI direction; an EMPTY plan with a reason is correct when signals are
 # quiet or all in flight; boundaries override KPI opportunities; never repeat a
 # failed approach without saying what changed; tasks in one shift are independent
-# of each other (they develop from the same base and land separately; dependent
-# follow-up waits for a later shift, which validation cannot detect); an
+# of each other (they develop from the same line tip and land separately;
+# dependent follow-up waits for a later shift, which validation cannot detect);
+# work on the line is built and never re-planned; an
 # in-flight task is never planned again; a task extends the repo's existing C4
 # components (listed in the prompt) and never plans a duplicate; strict JSON only.
 
@@ -113,6 +116,10 @@ class ForemanContext:
     # their run results ({title, evidence_refs, status, in_flight, error});
     # gate is what a human said when rejecting or editing its plan.
     history: list[dict[str, Any]] = field(default_factory=list)
+    # The mandate's line as git has it (``belt.executor.line_status``):
+    # {branch, base, exists, ahead, merged, pr_url, subjects}; ``subjects`` are
+    # the commits not in the base yet, newest first. Built either way.
+    line: dict[str, Any] = field(default_factory=dict)
     # Soul recall lines (empty when no soul bound).
     soul_context: list[str] = field(default_factory=list)
     # The bound repo's C4 containers/components, one line each, capped
@@ -373,6 +380,8 @@ def _history_lines(h: dict[str, Any]) -> str:
     for t in h.get("tasks") or []:
         refs = ", ".join(t.get("evidence_refs") or []) or "none"
         line = f'    - task "{t.get("title")}" (cites {refs}): {t.get("status")}'
+        if t.get("line"):
+            line += f" ({t['line']})"
         if t.get("error"):
             line += f" — reason: {str(t['error'])[:300]}"
         if t.get("in_flight"):
@@ -401,6 +410,19 @@ def build_prompt(context: ForemanContext) -> str:
             "highest severity first, then oldest)"
         )
     history_lines = "\n".join(_history_lines(h) for h in context.history) or "(no prior shifts)"
+    line = context.line
+    if not line.get("exists"):
+        line_lines = "(nothing has landed on the line yet)"
+    elif line.get("merged"):
+        line_lines = f"(everything on {line['branch']} is merged into {line['base']})"
+    else:
+        line_lines = "\n".join(
+            [
+                f"{line['branch']}: {line['ahead']} commit(s) not in {line['base']} yet, "
+                "awaiting the captain's merge:",
+                *(f"- {s}" for s in line.get("subjects") or []),
+            ]
+        )
     soul_lines = "\n".join(f"- {line}" for line in context.soul_context) or "(none)"
     recipe_names = sorted((charter.get("recipes") or {}).keys())
     recipe_lines = "\n".join(f"- {name}" for name in recipe_names) or "(none)"
@@ -430,6 +452,11 @@ rejected did not resolve its sighting.
 Never repeat an approach that already failed above without explicitly stating in the task's \
 "why" what is different this time.
 
+== THE LINE (this mandate's branch; every commit here is BUILT) ==
+{line_lines}
+Each run starts from the line, so later tasks build on what landed there. Never plan that \
+work again, merged or not; merging the line into the base is the captain's call.
+
 == SOUL CONTEXT (long-lived memory of this mandate) ==
 {soul_lines}
 
@@ -451,7 +478,7 @@ sighting is already IN FLIGHT) and the KPIs are healthy, set "no_action": true w
 4. Boundaries override KPI opportunities — a boundary-crossing task is never worth it.
 5. This is shift number {context.shift_no}; set "shift_no" to exactly {context.shift_no}.
 6. Tasks in one shift must be INDEPENDENT of each other. Each is developed from the same \
-starting code and lands on its own, so a task never sees another task's change from this \
+line tip and lands on its own, so a task never sees another task's change from this \
 shift. Never plan a task that builds on, extends, or needs another task in this shift; \
 plan the first step now and leave the dependent follow-up for a later shift.
 7. A task that is IN FLIGHT (queued, developing, approved, or pending at a gate) is already \
