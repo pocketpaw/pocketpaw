@@ -29,13 +29,16 @@
 #
 # Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — authors can declare
 # npm packages. New tool ``set_site_dependencies`` (add ``[{name, range?}]`` /
-# remove ``[name]``) resolves each request against the registry and the supply-chain
-# policy and writes the result as the reserved ``paw.dependencies.json``; it is the
-# only writer of that file. ``create_{svelte,react,html}_site`` gained an optional
+# remove ``[name]``) resolves each request against the npm registry (any public
+# package, version, range or dist-tag since 2026-10-07) and writes the result as the
+# reserved ``paw.dependencies.json``; it is the only writer of that file.
+# ``create_{svelte,react,html}_site`` gained an optional
 # ``dependencies`` param that runs the same resolver before the pocket is persisted:
 # a rejected package lands in ``rejected`` with its reason and the create still
-# succeeds without it. A ``source`` map that hand-writes the manifest (or, on svelte,
-# the newly reserved build shell) is refused. ``edit_svelte_component`` on a pocket
+# succeeds without it. A ``source`` map that hand-writes the manifest is refused;
+# package.json / vite.config.* / svelte.config.js / bunfig.toml / .npmrc are
+# author-writable (the generator merges them with its toolchain).
+# ``edit_svelte_component`` on a pocket
 # that declares packages persists the draft without the local preview build and says
 # so (``site`` is null) — installing those packages is sandbox-only.
 #
@@ -100,11 +103,10 @@
 #   * It runs ``_require_sites_plan_or_error``. ``edit_svelte_component`` does not,
 #     which is an asymmetry in that tool rather than a precedent for this one.
 # The reserved-path guard is the load-bearing part: without the same normalization
-# create uses, ``edit_react_component(component_path="package.json", create=true)``
-# writes the dependency manifest, defeating the generator's dependency allowlist
-# and with it the supply-chain release-age floor. So the policy moved OUT of this
-# file into ``pocketpaw_ee.sites.react_paths`` and both writers call it — the
-# constants below are now re-exports.
+# create uses, an edit could shadow the prerender shell (index.html,
+# paw-prerender.mjs, ``src/paw/``) or hand-write paw.dependencies.json. So the policy
+# lives in ``pocketpaw_ee.sites.react_paths`` and both writers call it — the
+# constants below are re-exports.
 #
 # Updated: 2026-08-07 (RX-2 — the agent can select the react engine) — added a
 # FIFTH create tool ``create_react_site`` for the Paw Sites "react track" (the
@@ -533,12 +535,13 @@ DEPENDENCY_REQUESTS_SCHEMA: dict[str, Any] = {
     "type": "array",
     "description": (
         "Optional npm packages this site's code imports, as [{name, range?}] — e.g. "
-        '[{"name": "three"}, {"name": "gsap", "range": "^3.12"}]. '
-        "Each is checked against the npm registry and the supply-chain policy (at "
-        "least 7 days old, no install scripts or native code, popular enough, no "
-        "known advisory) and pinned to an exact version. Toolchain packages "
-        "(svelte, react, vite, tailwindcss, ...) are already provided — do not "
-        "list them. A refused package comes back in `rejected` with the reason."
+        '[{"name": "three"}, {"name": "gsap", "range": "^3.12"}, '
+        '{"name": "bits-ui", "range": "next"}]. Any public npm package works, at any '
+        "version, range or dist-tag; each is resolved on the npm registry and pinned "
+        "to an exact version. Toolchain packages (svelte, react, vite, tailwindcss, "
+        "...) are already provided — do not list them. A package that cannot be "
+        "resolved (misspelt name, no matching version) comes back in `rejected`; "
+        "security advisories come back in `warnings` and do not block."
     ),
     "items": {
         "type": "object",
@@ -546,7 +549,10 @@ DEPENDENCY_REQUESTS_SCHEMA: dict[str, Any] = {
             "name": {"type": "string", "description": "The npm package name."},
             "range": {
                 "type": "string",
-                "description": "Optional semver range; omit for the newest eligible version.",
+                "description": (
+                    "Optional exact version, semver range or dist-tag (`next`, "
+                    "`beta`); omit for `latest`."
+                ),
             },
         },
         "required": ["name"],
@@ -595,7 +601,11 @@ async def _resolve_create_dependencies(
     from pocketpaw_ee.sites import dependency_resolver
 
     requests, rejected = dependency_resolver.coerce_requests(raw)
-    report: dict[str, Any] = {"packages": {}, "rejected": [r.as_dict() for r in rejected]}
+    report: dict[str, Any] = {
+        "packages": {},
+        "rejected": [r.as_dict() for r in rejected],
+        "warnings": [],
+    }
     if not requests:
         return source, report
     if engine == "svelte" and _has_svelte_bindings(source):
@@ -611,6 +621,7 @@ async def _resolve_create_dependencies(
         return source, report
     result = await dependency_resolver.resolve_dependencies(requests, engine)
     report["rejected"] += [r.as_dict() for r in result.rejected]
+    report["warnings"] += list(getattr(result, "warnings", None) or [])
     if not result.packages:
         return source, report
     entries = {name: pkg.manifest_entry() for name, pkg in result.packages.items()}
@@ -626,6 +637,8 @@ def _with_dependency_report(body: dict[str, Any], report: dict[str, Any] | None)
     if report is None:
         return body
     body = {**body, "packages": report["packages"], "rejected": report["rejected"]}
+    if report.get("warnings"):
+        body["warnings"] = report["warnings"]
     if report["rejected"]:
         body["message"] = (
             "The site was created, but some packages were refused (see `rejected`). "
@@ -1290,7 +1303,7 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "+layout.svelte (imports app.css), +page.ts (prerender=true), app.css, "
             "and at least one section component."
         )
-    # PP-1: the manifest and the build shell are the generator's (contract §2). The
+    # The manifest and the prerender shell are the generator's (contract §2). The
     # generator throws on them at build time; naming them here is the actionable form.
     if manifest_keys := _manifest_keys(source):
         return _manifest_in_source_error("create_svelte_site", manifest_keys)
@@ -1300,10 +1313,10 @@ async def _create_svelte_site_handler(args: dict) -> dict:
     if reserved:
         return _error_response(
             "create_svelte_site `source` may not write generator-owned paths: "
-            f"{', '.join(reserved)}. The build shell (package.json, vite.config.ts/.js, "
-            "svelte.config.js, src/routes/+layout.ts/.js), the auth files and the "
-            "`src/lib/paw/` namespace are generated. Author routes under `src/routes/` "
-            "(a +layout.svelte is fine) and components under `src/lib/`."
+            f"{', '.join(reserved)}. src/routes/+layout.ts/.js, lockfiles, the auth "
+            "files and the `src/lib/paw/` namespace are generated. Author routes under "
+            "`src/routes/` (a +layout.svelte is fine), components under `src/lib/`, "
+            "and package.json / vite.config.* / svelte.config.js at the root."
         )
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
@@ -1430,10 +1443,12 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
             "because the page is PRERENDERED and onMount does not run at prerender "
             "time (a count-up initialized to 0 bakes '$0.00'; initialize it to the "
             "final value). PACKAGES: declare npm packages in `dependencies` (or later "
-            "with set_site_dependencies; not on a dynamic site) and import client-only "
-            "ones (three, gsap, anything touching window) inside onMount, never at "
-            "top level. Returns {ok, pocket_id, pocket, verification}; hand "
-            "`pocket_id` to "
+            "with set_site_dependencies; not on a dynamic site) — any npm package, "
+            "version or dist-tag — and import them normally; only a browser-only "
+            "library that touches window at import time goes inside onMount or a "
+            "dynamic import(). You may also write package.json, vite.config.* and "
+            "svelte.config.js at the project root. Returns {ok, pocket_id, pocket, "
+            "verification}; hand `pocket_id` to "
             "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
             "asks to go live (draft-first: a plain create stops at the draft for "
             "in-app preview). ok=false with an "
@@ -1799,11 +1814,11 @@ async def _create_react_site_handler(args: dict) -> dict:
     if reserved:
         return _error_response(
             "create_react_site `source` may not write generator-owned paths: "
-            f"{', '.join(reserved)}. The build shell (index.html, package.json, "
-            "vite.config.ts, paw-prerender.mjs) and the `src/paw/` namespace are "
-            "generated — they carry the prerender contract that keeps the page "
-            "from shipping blank without JavaScript. Author under `src/` (outside "
-            "`src/paw/`) and `public/`."
+            f"{', '.join(reserved)}. index.html, paw-prerender.mjs, lockfiles and the "
+            "`src/paw/` namespace are generated — they carry the prerender contract "
+            "that keeps the page from shipping blank without JavaScript. Author under "
+            "`src/` (outside `src/paw/`) and `public/`; package.json and "
+            "vite.config.* at the root are yours too."
         )
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
@@ -1925,13 +1940,14 @@ def make_create_react_site_tool(tool: Any) -> Any:
             "The map MUST include `src/App.tsx` (the composition root both generated "
             "entries import); add section components under `src/components/*.tsx` "
             "and a stylesheet App.tsx imports — every value is a content STRING. The "
-            "build shell is GENERATED and reserved: the map may NOT write "
-            "index.html, package.json, vite.config.ts, paw-prerender.mjs, or "
-            "anything under `src/paw/`. The project provides react, react-dom and "
-            "vite; it is ONE page. Declare any other npm package in `dependencies` "
-            "(or later with set_site_dependencies) and load client-only ones (three, "
-            "gsap, anything touching window) with a dynamic import() inside "
-            "useEffect, never at top level. CRITICAL "
+            "prerender shell is GENERATED and reserved: the map may NOT write "
+            "index.html, paw-prerender.mjs, or anything under `src/paw/`; it MAY "
+            "write package.json, vite.config.*, bunfig.toml and .npmrc at the root. "
+            "The project provides react, react-dom and vite; it is ONE page. Declare "
+            "any other npm package (any version or dist-tag) in `dependencies` (or "
+            "later with set_site_dependencies) and import it normally; only a "
+            "browser-only library that touches window at import time needs a "
+            "dynamic import() inside useEffect. CRITICAL "
             "authoring rule: the page is PRERENDERED, so every component must render "
             "its resting/final state in its RETURNED MARKUP — useEffect does not run "
             "at prerender time (a count-up initialized to 0 bakes '0'; initialize it "
@@ -2247,12 +2263,14 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
             "rejected so you cannot overwrite a component by accident. Without "
             "`create` the path must already exist, so a typo is an error and never "
             "a stray new file.\n"
-            "You may only write under `src/`. `package.json`, `vite.config.ts`, "
-            "`svelte.config.js`, `src/lib/paw/`, `src/hooks.server.ts`, "
+            "You may write under `src/` and the root build files `package.json`, "
+            "`vite.config.*`, `svelte.config.js`, `bunfig.toml`, `.npmrc`. "
+            "`src/lib/paw/`, `src/routes/+layout.ts`, `src/hooks.server.ts`, "
             "`src/lib/auth.ts` and `src/app.d.ts` are GENERATED and rejected — they "
-            "carry the adapter/prerender configuration and a gated site's session "
-            "gate. To add an npm package call set_site_dependencies, then import it "
-            "(client-only libraries inside onMount).\n"
+            "carry the prerender configuration and a gated site's session gate. To "
+            "add an npm package call set_site_dependencies, then import it normally "
+            "(only a browser-only library that touches window at import time goes "
+            "inside onMount).\n"
             "Other args: `pocket_id` (the svelte site pocket), `component_path` (the "
             "relative path of the file to write, e.g. "
             "'src/lib/components/Hero.svelte'), optional `create`, optional `name`. "
@@ -2573,11 +2591,13 @@ def make_edit_react_component_tool(tool: Any) -> Any:
             "rejected so you cannot overwrite a component by accident. Without "
             "`create` the path must already exist, so a typo is an error and never "
             "a stray new file.\n"
-            "You may only write under `src/` (outside `src/paw/`) and `public/`. "
-            "`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` "
-            "and `src/paw/` are GENERATED and rejected — they carry the prerender "
-            "contract. To add an npm package call set_site_dependencies, then load "
-            "client-only ones with a dynamic import() inside useEffect. "
+            "You may write under `src/` (outside `src/paw/`) and `public/`, plus the "
+            "root build files `package.json`, `vite.config.*`, `bunfig.toml`, "
+            "`.npmrc`. `index.html`, `paw-prerender.mjs` and `src/paw/` are "
+            "GENERATED and rejected — they carry the prerender contract. To add an "
+            "npm package call set_site_dependencies, then import it normally (only a "
+            "browser-only library that touches window at import time needs a "
+            "dynamic import() inside useEffect). "
             "PRERENDER RULE (same as create_react_site): every "
             "component must render its resting/final state in its RETURNED MARKUP, "
             "because `useEffect` does not run at prerender time.\n"
@@ -3033,8 +3053,10 @@ async def _set_site_dependencies_handler(args: dict) -> dict:
         )
     else:
         body["message"] = (
-            "Declared on the site's draft. Import each package inside onMount / "
-            "useEffect (client-side), never at module top level of a prerendered page."
+            "Declared on the site's draft. Import packages the normal way (top-level "
+            "imports are fine for component libraries); only a browser-only library "
+            "that touches `window` at import time needs onMount / useEffect or a "
+            "dynamic import on a prerendered page."
         )
     return _success_response(body)
 
@@ -3050,16 +3072,17 @@ def make_set_site_dependencies_tool(tool: Any) -> Any:
         (
             "Declare or drop npm packages on an EXISTING svelte, react or html Paw "
             "Site (not ripple/landing sites). `add` is [{name, range?}]; `remove` is "
-            "a list of names. Each added package is checked against the npm registry "
-            "and the supply-chain policy — at least 7 days old, no install scripts "
-            "or native code, at least 500 weekly downloads, no moderate-or-worse "
-            "advisory, at most 20 per site — and pinned to an exact version. This is "
-            "the ONLY way to change the site's dependencies: paw.dependencies.json "
-            "cannot be written with the edit tools. Toolchain packages (svelte, "
-            "react, vite, tailwindcss, ...) are provided already; do not declare "
-            "them. Not available on a dynamic (live-data) svelte site. Returns {ok, "
-            "packages, rejected, changed, verification}; a refused package is "
-            "listed in `rejected` with the reason, and must not be imported."
+            "a list of names. Any public npm package works, at any exact version, "
+            "semver range or dist-tag (`next`, `beta`); each is resolved on the npm "
+            "registry and pinned to an exact version. paw.dependencies.json is "
+            "written only by this tool; you may also edit package.json and the "
+            "build config (vite.config.*, svelte.config.js) with the edit tools. "
+            "Toolchain packages (svelte, react, vite, tailwindcss, ...) are "
+            "provided already; do not declare them. Not available on a dynamic "
+            "(live-data) svelte site. Returns {ok, packages, rejected, warnings, "
+            "changed, verification}; a package in `rejected` (misspelt, no matching "
+            "version) must not be imported, and `warnings` (security advisories, "
+            "deprecation) are worth passing on to the user."
         ),
         {
             "type": "object",

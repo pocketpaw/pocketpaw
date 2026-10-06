@@ -71,9 +71,9 @@ from pocketpaw_ee.sites import project_zip
 from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
 from pocketpaw_ee.sites.dependency_manifest import (
     DEPENDENCY_MANIFEST_PATH,
-    has_author_dependencies,
     parse_manifest,
     render_manifest,
+    requires_sandbox,
 )
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
@@ -4454,8 +4454,9 @@ def build_runs_async(
         return True
     if normalized != "svelte":
         return False
-    # PP-1: a static svelte pocket that declares author packages goes to the sandbox
-    # lane WHATEVER the staging flag says. Its install must never run on the API host
+    # PP-1: a static svelte pocket that declares author packages or carries an
+    # authored build-shell file (``requires_sandbox``) goes to the sandbox lane
+    # WHATEVER the staging flag says. Its install must never run on the API host
     # (``generator_client.HostInstallRefused`` refuses it there), so the inline path is
     # not an option for it; the flag only decides for pockets with nothing to install
     # beyond the vetted toolchain. A DYNAMIC one still falls through to the checks
@@ -4463,7 +4464,7 @@ def build_runs_async(
     # worker-rendered artifact can deploy from the lane.
     if (
         source is not None
-        and has_author_dependencies(source)
+        and requires_sandbox(source)
         and pattern != "dynamic"
         and not svelte_source_is_dynamic(source)
     ):
@@ -10308,7 +10309,8 @@ async def set_site_dependencies(
     ``dependencies`` param, which runs the same resolver. ``add`` is a list of
     ``{name, range?}`` requests; ``remove`` is a list of names. Removes apply first,
     then every add goes through :func:`dependency_resolver.resolve_dependencies`
-    (registry metadata only — nothing installs). A rejected add is reported in
+    (registry metadata only — nothing installs). Any public npm package resolves; a
+    rejected add (bad spec, unknown name, unresolvable range) is reported in
     ``rejected`` with an actionable reason and changes nothing; the rest still land.
 
     The manifest is rewritten whole, in canonical form, through the pockets
@@ -10324,7 +10326,8 @@ async def set_site_dependencies(
     ``_pockets`` / ``_resolve`` are injectable seams for tests.
 
     Returns ``{pocket_id, packages: {name: {version}}, rejected: [{name, code,
-    reason}], changed}``.
+    reason}], warnings: [{name, code, message}], changed}``. ``warnings`` (advisories,
+    deprecation) are about packages that WERE declared.
     """
     from pocketpaw_ee.sites import dependency_resolver
 
@@ -10379,9 +10382,11 @@ async def set_site_dependencies(
             for req in requests
         ]
         requests = []
+    warnings: list[dict[str, str]] = []
     if requests:
         result = await resolve(requests, engine, already_declared=packages.keys())
         rejected += [r.as_dict() for r in result.rejected]
+        warnings += list(getattr(result, "warnings", None) or [])
         for name, resolved in result.packages.items():
             packages[name] = resolved.manifest_entry()
 
@@ -10401,6 +10406,7 @@ async def set_site_dependencies(
             name: {"version": entry["version"]} for name, entry in sorted(packages.items())
         },
         "rejected": rejected,
+        "warnings": warnings,
         "changed": changed,
     }
 

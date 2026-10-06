@@ -129,6 +129,12 @@ agent tool, and the counts-only `verification` field on
 `GET /sites/by-pocket/{pocket_id}/status`. Rewrote the PP-1 note on
 `edit_svelte_component`, which now verifies instead of building locally.
 
+Updated: 2026-10-07 (fix/sites-open-dependencies) — `set_site_dependencies` follows
+the "open everything" policy: any public npm package, version, range or dist-tag;
+advisories and deprecation come back as `warnings`; no age, size, downloads, script
+or count gate. react / svelte authors may write `package.json`, `vite.config.*`,
+`svelte.config.js`, `bunfig.toml` and `.npmrc`.
+
 Updated: 2026-09-24 (PP-1, feat/sites-author-dependencies) — added the
 `set_site_dependencies` agent tool and the `dependencies` argument on the three
 source-engine create tools, under "Sites — Agent Editing Tools".
@@ -4837,15 +4843,15 @@ back from — a rollback fired on enqueue-success would revert a good edit.
 Persisting the draft is the whole job (the same shape the leaf-edits route
 documents). Publishing stays an explicit `publish` call the user asks for.
 
-**Write scope is enforced, not advisory.** The generator owns the build shell, so
-`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` and everything
-under `src/paw/` are rejected, and the resolved path must land under `src/` or
-`public/`. Paths are normalized (backslashes, `.`/`..`) before the check, so
-`./package.json` and `src/paw/../paw/entry.tsx` are rejected too. This is the same
+**Write scope is enforced, not advisory.** The generator owns the prerender shell,
+so `index.html`, `paw-prerender.mjs`, `paw.dependencies.json`, lockfiles and
+everything under `src/paw/` are rejected. The resolved path must land under `src/`
+or `public/`, or be one of the root build files the author owns (`package.json`,
+`vite.config.*`, `bunfig.toml`, `.npmrc`; the generator merges them with its
+toolchain). Paths are normalized (backslashes, `.`/`..`) before the check, so
+`./index.html` and `src/paw/../paw/entry.tsx` are rejected too. This is the same
 policy `create_react_site` applies, shared through
-`ee/pocketpaw_ee/sites/react_paths.py` — an edit that could write `package.json`
-would be writing the dependency manifest, which is where the supply-chain
-release-age floor is enforced.
+`ee/pocketpaw_ee/sites/react_paths.py`.
 
 Errors (relayed to the agent as `is_error` with the code, so it can fix and retry):
 
@@ -4854,7 +4860,7 @@ Errors (relayed to the agent as `is_error` with the code, so it can fix and retr
 | `site_edit.invalid_args` | Not exactly one of `edits` / `new_source`. |
 | `site_edit.create_needs_source` | `create` without `new_source`. |
 | `site_edit.reserved_path` | The resolved path is generator-owned. |
-| `site_edit.path_outside_source` | The resolved path is outside `src/` and `public/`. |
+| `site_edit.path_outside_source` | The resolved path is outside `src/` and `public/` and is not a root build file. |
 | `site_edit.no_match` / `site_edit.ambiguous_match` | An `old_string` matched 0 or >1 times. Make it more specific and retry. |
 | `pocket.not_react_site` | The pocket is not a react Paw Site. |
 | `pocket.react_component_exists` | `create` on a path that already exists. |
@@ -4954,41 +4960,43 @@ above refuses that path in any spelling, case included.
 | Arg | Type | Notes |
 |-----|------|-------|
 | `pocket_id` | string | Required. A svelte, react or html site pocket. ripple is refused (`site_deps.engine_unsupported`). |
-| `add` | array | `[{name, range?}]`. `range` is an npm semver range; omit it for the newest eligible version. `"name@range"` strings are accepted too. |
+| `add` | array | `[{name, range?}]`. `range` is an exact version, an npm semver range or a dist-tag (`next`, `beta`); omit it for `latest`. `"name@range"` strings are accepted too. |
 | `remove` | array | Package names to drop. Dropping the last one removes the file. |
 
 Returns `{ok, pocket_id, packages: {name: {version}}, rejected: [{name, code,
-reason}], changed, message}`. A refused package is not an error: `ok` stays true,
-and the others still land.
+reason}], warnings: [{name, code, message}], changed, message}`. A refused package
+is not an error: `ok` stays true, and the others still land.
 
-Each add is resolved from registry metadata only. Nothing is installed. The
-resolver picks the highest version that satisfies the range, was published at
-least 7 days ago (the same floor as the build sandbox's `bunfig.toml`), and is
-not deprecated. It then refuses the package when:
+Each add is resolved from registry metadata only. Nothing is installed. Any public
+npm package is allowed (the policy since 2026-10-07): there is no release-age,
+size, downloads, install-script, native-addon or package-count gate, because
+author packages install only in the Daytona build sandbox, which is the isolation
+boundary. `latest` and other dist-tags resolve through the packument's
+`dist-tags`; a range picks the highest matching version, preferring one that is
+not deprecated. The result is always pinned to an exact version. A package is
+refused only when:
 
 | `code` | When |
 |--------|------|
-| `invalid_name` / `invalid_range` | Not a valid npm name, or not a semver range (dist-tags other than `latest` are refused). |
+| `invalid_name` / `invalid_range` | Not a valid npm name, or not a version, range or dist-tag. |
 | `non_registry_spec` | git, url, file, tarball, `npm:` alias or GitHub shorthand. |
 | `toolchain_reserved` | svelte, `@sveltejs/*`, vite, react, react-dom, `@vitejs/*`, tailwindcss, `@tailwindcss/*`, `@ripple-ui/*`, valibot, `@noble/hashes`, `@cloudflare/*`. The generator provides these. |
-| `not_found` / `no_eligible_version` | Not on the registry, or nothing matches the range once the 7-day floor is applied. The reason names the newest eligible version. |
-| `deprecated` | Every matching version is deprecated. |
-| `install_scripts` / `native_build` | The chosen version has `preinstall` / `install` / `postinstall` scripts, a `gypfile` or a `binary`. |
-| `too_large` | Unpacked size over 25 MB. |
-| `low_downloads` | Under 500 downloads last week. This is the typosquat guard. |
-| `advisory` | A moderate-or-worse advisory from npm's bulk advisory endpoint affects the chosen version. |
-| `too_many` | More than 20 packages on the site. |
-| `registry_unavailable` | The registry, downloads API, advisory endpoint or (html) jsdelivr could not be read. The package is refused, never accepted unvetted. |
+| `not_found` / `no_eligible_version` | Not on the registry, or no version matches the range / the dist-tag does not exist. The reason names `latest` (or the known tags). |
+| `registry_unavailable` | The registry could not be read and the request was a range or tag, which needs it. Retryable. An exact version is accepted as given instead, with an `unverified` warning. |
+
+`warnings` carry `advisory` (a moderate-or-worse npm advisory affects the chosen
+version), `deprecated` and `unverified`. They never block. An advisory-endpoint or
+jsDelivr outage is ignored rather than refusing the package.
 
 For html, each entry also carries `esm`
-(`https://cdn.jsdelivr.net/npm/<name>@<version>/+esm`) and `integrity` (sha384 of
-the bytes jsdelivr serves at that URL), which the generator turns into an
-importmap.
+(`https://cdn.jsdelivr.net/npm/<name>@<version>/+esm`), which the generator turns
+into an importmap, and `integrity` (sha384 of the bytes jsDelivr serves at that
+URL) when jsDelivr answered. `integrity` is optional.
 
 `create_svelte_site`, `create_react_site` and `create_html_site` take the same
 requests as an optional `dependencies` argument. They resolve them before the
-pocket is saved and return `packages` and `rejected` in the create body. A refused
-package never fails the create.
+pocket is saved and return `packages` and `rejected` (and `warnings` when there are
+any) in the create body. A refused package never fails the create.
 
 **Author packages install only in the build sandbox.** A static svelte site that
 declares packages publishes through the ephemeral build lane even with

@@ -1528,13 +1528,15 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "intent (no slash command). YOU write premium hand-written React "
             "components from your art direction and tokens + your asset URLs, and "
             "assemble a `source` map rooted at `src/App.tsx` (the composition "
-            "root; sections under `src/components/*.tsx`). The build shell is "
+            "root; sections under `src/components/*.tsx`). The prerender shell is "
             "GENERATED and reserved — your map may NOT write `index.html`, "
-            "`package.json`, `vite.config.ts`, `paw-prerender.mjs`, or anything "
-            "under `src/paw/`. The project provides react, react-dom and vite "
-            "and it is ONE page (no router). Declare any other npm package in "
-            "`dependencies` (or later with set_site_dependencies) and load "
-            "client-only ones via a dynamic import() inside useEffect. Persist it "
+            "`paw-prerender.mjs`, or anything under `src/paw/` (package.json and "
+            "vite.config.* are yours if you need them). The project provides "
+            "react, react-dom and vite and it is ONE page (no router). Declare any "
+            "other npm package (any version or dist-tag) in `dependencies` (or "
+            "later with set_site_dependencies) and import it normally; only a "
+            "browser-only library that touches window at import time needs a "
+            "dynamic import() inside useEffect. Persist it "
             "with `mcp__pocketpaw_sites_manager__create_react_site`, which stamps "
             'the source pocket `type="site"` + `pattern="landing"` + '
             '`engine="react"` as a reviewable DRAFT — it does NOT publish (see the '
@@ -1994,13 +1996,15 @@ def _react_write_scope() -> str:
         f"YOU MAY ONLY WRITE under {authorable}, and never under "
         f"`{REACT_RESERVED_PREFIX}`. {reserved} and everything under "
         f"`{REACT_RESERVED_PREFIX}` are GENERATED and will be rejected — they carry "
-        "the prerender contract and the dependency list. Paths are normalized "
-        "before that check, so a `./` prefix or a `..` segment does not get around "
-        "it. The project provides react, react-dom and vite (no router, ONE page). "
-        "To add any other npm package call "
-        "`mcp__pocketpaw_sites_manager__set_site_dependencies` first, then load "
-        "client-only ones via a dynamic import() inside useEffect; a package it "
-        "returns in `rejected` must not be imported.\n"
+        "the prerender contract. The root build files (package.json, "
+        "vite.config.*, bunfig.toml, .npmrc) are yours to edit. Paths are "
+        "normalized before that check, so a `./` prefix or a `..` segment does not "
+        "get around it. The project provides react, react-dom and vite (no router, "
+        "ONE page). To add any other npm package call "
+        "`mcp__pocketpaw_sites_manager__set_site_dependencies` first, then import "
+        "it normally (a browser-only library that touches window at import time "
+        "goes in a dynamic import() inside useEffect); a package it returns in "
+        "`rejected` must not be imported.\n"
     )
 
 
@@ -2200,7 +2204,8 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             '`status:"rolled_back"` means the edit failed the static or build '
             "check, so fix `verification.errors` and send it again. A browser-layer "
             "failure keeps the edit staged: fix it with a follow-up edit. To add an "
-            "npm package call set_site_dependencies, then import it inside onMount. "
+            "npm package call set_site_dependencies, then import it (a browser-only "
+            "library that touches window at import time goes inside onMount). "
             + _VERIFY_RULE
             + "\n"
         )

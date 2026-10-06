@@ -7,16 +7,10 @@
 # to blame) is testable without a sandbox, and this part is testable with a fake
 # client.
 #
-# Edited 2026-08-10 (SL-3 — the install-time supply-chain floor): the upload step now
-# writes a ``bunfig.toml`` into the sandbox project (see :data:`SANDBOX_BUNFIG`).
-#
-# WHY IT BELONGS HERE rather than in the generated project or the image: this
-# workspace's install protections live in the DEVELOPER'S HOME DIR (``~/.npmrc``,
-# ``~/.bunfig.toml``) and are in no repo, so a fresh container inherited none of them.
-# The captain's ruling that Daytona is ALWAYS the build host is what turns that from a
-# footnote into the whole exposure — the build box was weaker than the runtime image
-# beside it. Injecting at this boundary means a template change cannot silently drop it,
-# and it keeps a build-host control out of the customer's source tree.
+# The upload step writes the sandbox ``bunfig.toml`` (see :data:`SANDBOX_BUNFIG`) when
+# the project ships none. Since 2026-10-07 it is OPEN — no release-age floor, install
+# scripts allowed — because author packages install only here and the sandbox is the
+# isolation boundary. An author-supplied bunfig.toml is respected.
 #
 # NOT DONE, and deliberately not faked: ``--frozen-lockfile``. The generator emits no
 # lockfile — verified, nothing under paw-sites writes one — so the flag would fail every
@@ -168,15 +162,9 @@ SANDBOX_PROJECT_DIR = "/home/daytona/paw-build"
 SANDBOX_WRAPPER_PATH = "/tmp/paw-build.sh"
 SANDBOX_ARTIFACT_PATH = "/tmp/paw-artifact.tgz"
 
-#: SL-3 — the install-time supply-chain floor, uploaded INTO the sandbox project.
-#:
-#: MOVED 2026-09-12 to ``bun_supply_chain`` and re-exported here under the original
-#: names, so nothing that imported ``dr.SANDBOX_BUNFIG`` had to change. The sandbox
-#: was never the only host that runs ``bun install``, and the other one had no copy
-#: of this floor. One constant with two call sites cannot drift; two constants that
-#: agree today can. Read ``bun_supply_chain``'s module docstring for why each control
-#: is here, and why the file is written at the build boundary rather than templated
-#: into the generated project.
+#: The sandbox bunfig, uploaded INTO the sandbox project when it ships none. Lives in
+#: ``bun_supply_chain`` (next to the host floor it deliberately differs from) and is
+#: re-exported here under the original names.
 #:
 #: Deliberately NOT naming that other runner here: this module is the Daytona lane,
 #: and ``test_fault_ladder_build`` text-scans it to keep a local build fallback from
@@ -375,31 +363,14 @@ async def run_build(
             )
             for rel, contents in files.items()
         ]
-        # SL-3 — the supply-chain floor. OURS WINS, and the conflict is resolved HERE
-        # rather than by upload ordering.
-        #
-        # ``bulk_upload`` hands the whole list to the Daytona SDK in ONE batch call, so
-        # which write survives for a duplicate destination is the SDK's business and is
-        # not specified by anything we control. Relying on "later overwrites earlier"
-        # would be a guess dressed as a guarantee, so the caller's copy is dropped
-        # explicitly instead — deterministic, and visible in the log when it happens.
-        #
-        # Ours wins because this is a FLOOR: a control the built project can override is
-        # not one. The trade is that a legitimate project-level bun setting would be
-        # discarded, which is why the drop is logged at WARNING rather than passed over in
-        # silence. No generated project emits a bunfig.toml today, so this is a guard
-        # against a future template or a hostile source map, not a live collision.
+        # The sandbox bunfig is OPEN (no release-age floor, scripts allowed): the
+        # sandbox is the isolation boundary for author packages. An author may ship
+        # their own bunfig.toml, and theirs wins — ours is uploaded only when the
+        # project has none, so there is exactly one bunfig destination either way
+        # (``bulk_upload`` gives no ordering guarantee for duplicates).
         bunfig_dst = f"{SANDBOX_PROJECT_DIR}/{SANDBOX_BUNFIG_REL}"
-        displaced = [u for u in uploads if u[1] == bunfig_dst]
-        if displaced:
-            logger.warning(
-                "sites: dropped a project-supplied %s in favour of the lane's "
-                "supply-chain floor (sandbox %s)",
-                SANDBOX_BUNFIG_REL,
-                sandbox_id,
-            )
-            uploads = [u for u in uploads if u[1] != bunfig_dst]
-        uploads.append((SANDBOX_BUNFIG.encode(), bunfig_dst))
+        if not any(u[1] == bunfig_dst for u in uploads):
+            uploads.append((SANDBOX_BUNFIG.encode(), bunfig_dst))
         uploads.append((wrapper.encode(), SANDBOX_WRAPPER_PATH))
         await client.bulk_upload(sandbox_id, uploads)
         t_uploaded = time.monotonic()

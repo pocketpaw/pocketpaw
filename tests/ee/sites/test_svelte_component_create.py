@@ -216,11 +216,10 @@ _RESERVED_SPELLINGS = [
     "src/hooks.server.ts",
     "src/lib/auth.ts",
     "src/app.d.ts",
-    "package.json",
-    "./package.json",
-    "src/../package.json",
-    "vite.config.ts",
-    "svelte.config.js",
+    "src/routes/+layout.ts",
+    "./src/routes/+layout.js",
+    "bun.lock",
+    "src/../bun.lock",
 ]
 
 
@@ -258,11 +257,25 @@ async def test_the_guard_runs_before_the_pocket_is_read(beanie_test_db):
     with pytest.raises(CloudError) as exc:
         await _edit(
             "pocket-that-does-not-exist",
-            component_path="package.json",
+            component_path="src/lib/paw/x.ts",
             new_source="{}",
             create=True,
         )
     assert exc.value.code == "site_edit.reserved_path"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["package.json", "vite.config.ts", "svelte.config.js", "bunfig.toml", ".npmrc"]
+)
+async def test_the_author_may_create_root_build_files(beanie_test_db, path: str):
+    """Open everything (2026-10-07): the generator merges these with its toolchain."""
+    pocket_id = await _make_svelte_pocket("w1", "u1")
+
+    await _edit(pocket_id, component_path=path, new_source="{}", create=True)
+
+    pocket = await pockets_service.get(pocket_id, "u1")
+    assert pocket["source"][path] == "{}"
 
 
 @pytest.mark.asyncio

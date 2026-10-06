@@ -74,10 +74,6 @@ def test_html_root_files_stay_writable():
 @pytest.mark.parametrize(
     "path",
     [
-        "package.json",
-        "vite.config.ts",
-        "vite.config.js",
-        "svelte.config.js",
         "src/routes/+layout.ts",
         "src/routes/+layout.js",
         "./src/routes/+layout.ts",
@@ -89,6 +85,16 @@ def test_the_svelte_build_shell_is_reserved(path):
     """Contract §2's svelte shell. A +layout.ts could switch prerendering off."""
     assert svelte_paths.is_reserved_svelte_path(path)
     assert svelte_paths.svelte_path_rejection(path) is not None
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["package.json", "vite.config.ts", "vite.config.js", "svelte.config.js", "./package.json"],
+)
+def test_the_svelte_root_build_files_are_author_writable(path):
+    """Open everything (2026-10-07): the generator merges these with its toolchain."""
+    assert not svelte_paths.is_reserved_svelte_path(path)
+    assert svelte_paths.svelte_path_rejection(path) is None
 
 
 def test_svelte_layout_svelte_and_nested_layouts_stay_writable():
@@ -169,20 +175,30 @@ def test_the_toolchain_list_matches_the_contract():
 # Mirror of paw-sites PS-1's wider reserved set (case-insensitive everywhere)
 # ---------------------------------------------------------------------------
 
-_INSTALL_CONFIG = ["bunfig.toml", ".npmrc", "bun.lock", "bun.lockb", "package-lock.json"]
+_LOCKFILES = ["bun.lock", "bun.lockb", "package-lock.json", "Bun.Lock"]
+_AUTHOR_INSTALL_CONFIG = ["bunfig.toml", ".npmrc", "BUNFIG.TOML", ".\\.npmrc"]
 _VITE = [f"vite.config.{e}" for e in ("ts", "js", "mjs", "mts", "cjs", "cts")]
 
 
-@pytest.mark.parametrize(
-    "path", _INSTALL_CONFIG + _VITE + ["Package.JSON", "BUNFIG.TOML", ".\\.npmrc"]
-)
-def test_svelte_and_react_reserve_install_config_and_every_vite_spelling(path):
-    """An authored bunfig/.npmrc/lockfile would change how the sandbox resolves —
-    the release-age floor included. Mutation: drop ``*INSTALL_CONFIG_FILES``."""
+@pytest.mark.parametrize("path", _LOCKFILES)
+def test_svelte_and_react_reserve_lockfiles(path):
+    """The generator merges the author's package.json with its toolchain, so an
+    authored lockfile would pin a tree that no longer matches. Mutation: drop
+    ``*LOCKFILES``."""
     assert svelte_paths.is_reserved_svelte_path(path), path
     assert react_paths.is_reserved_react_path(path), path
     assert svelte_paths.svelte_path_rejection(path) is not None
     assert react_paths.react_path_rejection(path) is not None
+
+
+@pytest.mark.parametrize("path", _AUTHOR_INSTALL_CONFIG + _VITE + ["Package.JSON"])
+def test_svelte_and_react_let_authors_write_install_config_and_vite_config(path):
+    """Open everything (2026-10-07). bunfig.toml/.npmrc only take effect in the
+    sandbox; a host install displaces bunfig.toml with the host floor."""
+    assert not svelte_paths.is_reserved_svelte_path(path), path
+    assert not react_paths.is_reserved_react_path(path), path
+    assert svelte_paths.svelte_path_rejection(path) is None
+    assert react_paths.react_path_rejection(path) is None
 
 
 @pytest.mark.parametrize(

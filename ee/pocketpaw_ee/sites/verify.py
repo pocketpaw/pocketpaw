@@ -421,7 +421,11 @@ async def verify_pocket(
     # A dynamic svelte site holding packages can only have got them from outside the
     # declaration tools (which refuse it). It can never publish, so say so as a static
     # error the agent can act on (drop the packages) rather than let a build run.
-    from pocketpaw_ee.sites.dependency_manifest import has_author_dependencies
+    from pocketpaw_ee.sites.dependency_manifest import (
+        author_build_shell_files,
+        has_author_dependencies,
+        requires_sandbox,
+    )
 
     # PP-4's legacy build-shell files: the generator refuses them at build time, so
     # name them here as a static error and spend no sandbox finding out.
@@ -435,15 +439,25 @@ async def verify_pocket(
         ]
         static = _layer("static", "failed", "static_check_failed:reserved_path")
 
-    if site_refuses_author_packages(pocket) and has_author_dependencies(inputs.source):
-        errors = [
-            {
-                "layer": "static",
+    # The same predicate the routing uses (``requires_sandbox``): a dynamic site
+    # cannot build in the sandbox, so authored build-shell files refuse it too.
+    if site_refuses_author_packages(pocket) and requires_sandbox(inputs.source):
+        if has_author_dependencies(inputs.source):
+            refusal = {
                 "file": "paw.dependencies.json",
-                "code": "engine_unsupported",
                 "message": DYNAMIC_PACKAGES_REASON
                 + " Remove them with set_site_dependencies(remove=[...]).",
-            },
+            }
+        else:
+            shell = author_build_shell_files(inputs.source)
+            refusal = {
+                "file": shell[0],
+                "message": "a dynamic (live-data) svelte site cannot carry its own build "
+                f"config ({', '.join(shell)}): those files build only in the isolated "
+                "sandbox, whose output cannot deploy a Worker. Delete them.",
+            }
+        errors = [
+            {"layer": "static", "code": "engine_unsupported", **refusal},
             *errors,
         ]
         static = _layer("static", "failed", "static_check_failed:engine_unsupported")
