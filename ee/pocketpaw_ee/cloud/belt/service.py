@@ -27,6 +27,9 @@
 #     shares ``get_run``'s tenancy 404 and returns chat-shaped steps.
 #   * ``open_run_stream`` — the same feed live: the run's stream as SSE, the
 #     newest attempt replayed from its start, same tenancy 404.
+#   * ``get_run_blueprint`` — the bound repo's C4 model as committed on the
+#     run's base (``git cat-file``, nothing from the repo runs) and the run's
+#     touched files joined to its components by their ``paths`` globs.
 #
 # Security: git runs through ``create_subprocess_exec`` with argv lists; a
 # submitted path is realpath-resolved and confirmed to be a git repo before it
@@ -858,6 +861,100 @@ async def get_run_feed(workspace_id: str, action_id: str, stage: str) -> dict[st
     return out
 
 
+# ---------------------------------------------------------------------------
+# the run's blueprint — the bound repo's C4 model at the run's base, files joined
+# ---------------------------------------------------------------------------
+
+_MODEL_PATH = "docs/c4/model.json"
+MAX_MODEL_BYTES = 1_000_000
+# A base branch as git would accept it, never an option (no leading ``-``).
+_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}")
+# A file a unified diff touches: its ``+++ b/`` line, or the ``diff --git``
+# header (a binary patch or a pure mode change has no ``+++``).
+_DIFF_FILE_RE = re.compile(r"^(?:\+\+\+ b/|diff --git a/.* b/)(.+)$", re.MULTILINE)
+# Station git: no fsmonitor command, no hooks.
+_READ_GIT = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
+
+async def _base_model(blob: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    """``(ref, model)``: the bound repo's ``docs/c4/model.json`` as committed on
+    the run's base, ``origin/<base>`` when it exists, else ``<base>`` (the
+    station's rule, without its fetch). Read with ``git cat-file`` (no
+    textconv, no filters), nothing from the repo runs. ``(None, None)`` for a
+    repo outside the allowlist or a base git would read as an option; the ref
+    with ``None`` when the base has no readable model (over ``MAX_MODEL_BYTES``
+    counts as unreadable)."""
+    from pocketpaw_ee.cloud.belt.executor import _re_resolve_repo, _run
+    from pocketpaw_ee.cloud.belt.orient import load_model
+
+    base = str(blob.get("base_branch") or "")
+    repo, _err = _re_resolve_repo(str(blob.get("repo") or ""))
+    if repo is None or not _REF_RE.fullmatch(base) or ".." in base:
+        return None, None
+    try:
+        for ref in (f"origin/{base}", base):
+            argv = [*_READ_GIT, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"]
+            code, sha, _ = await _run(argv, cwd=repo)
+            if code == 0:
+                break
+        else:
+            return None, None
+        argv = [*_READ_GIT, "cat-file", "blob", f"{sha.strip()}:{_MODEL_PATH}"]
+        code, text, _ = await _run(argv, cwd=repo)
+    except (OSError, RuntimeError):  # git missing, or the 120 s timeout
+        logger.debug("belt: could not read the blueprint", exc_info=True)
+        return None, None
+    if code != 0 or len(text.encode("utf-8")) > MAX_MODEL_BYTES:
+        return ref, None
+    return ref, load_model(text)
+
+
+async def _touched_files(workspace_id: str, action_id: str, blob: dict[str, Any]) -> list[str]:
+    """The run's files, first touch first: every Edit/Write/MultiEdit its
+    develop and fix seats stored, then every file its diff writes (a recipe
+    edits through ``Bash``, so only the diff names its files). Repo-relative;
+    a path outside the repo is dropped."""
+    from pocketpaw_ee.cloud.belt.feed import EDIT_TOOLS
+    from pocketpaw_ee.cloud.belt.orient import repo_path
+    from pocketpaw_ee.cloud.models.belt_run_feed import BeltRunFeed
+
+    raw: list[str] = []
+    for stage in ("develop", "fix"):
+        doc = await BeltRunFeed.find_one(
+            BeltRunFeed.workspace == workspace_id,
+            BeltRunFeed.action_id == action_id,
+            BeltRunFeed.stage == stage,
+        )
+        for step in doc.steps if doc is not None else []:
+            tool_input = step.get("input")
+            if step.get("tool") in EDIT_TOOLS and isinstance(tool_input, dict):
+                raw.append(str(tool_input.get("file_path") or ""))
+    diff = blob.get("diff")
+    raw += _DIFF_FILE_RE.findall(diff if isinstance(diff, str) else "")
+    return list(dict.fromkeys(p for r in raw if (p := repo_path(r))))
+
+
+async def get_run_blueprint(workspace_id: str, action_id: str) -> dict[str, Any]:
+    """The run on its line's blueprint: ``{action_id, ref, model, files}``.
+    ``model`` is ``{scope, model}`` from the bound repo's C4 model at the run's
+    base (``_base_model``; ``None`` without one), ``paths`` globs included;
+    ``files`` is ``[{path, component}]`` (``_touched_files``, each joined by
+    ``orient.component_for``; ``None`` when no glob owns it). The same tenancy
+    404 as ``get_run``."""
+    from pocketpaw_ee.cloud.belt.orient import component_for, path_index
+
+    _action, blob = await _owned_run(workspace_id, action_id)
+    ref, model = await _base_model(blob)
+    index = path_index(model)
+    files = await _touched_files(workspace_id, action_id, blob)
+    return {
+        "action_id": action_id,
+        "ref": ref,
+        "model": {"scope": model.get("scope"), "model": model["model"]} if model else None,
+        "files": [{"path": p, "component": component_for(p, index)} for p in files],
+    }
+
+
 # How long one scan read waits for more entries: the scan only walks what is
 # already on the stream, so it must never park (``XREAD BLOCK 0`` is forever).
 _SCAN_BLOCK_MS = 5
@@ -922,6 +1019,7 @@ __all__ = [
     "discover_repos",
     "emit_belt_run_updated",
     "get_run",
+    "get_run_blueprint",
     "get_run_feed",
     "init_repo",
     "list_runs",

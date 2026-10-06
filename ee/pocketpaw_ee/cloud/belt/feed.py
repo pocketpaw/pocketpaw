@@ -22,7 +22,9 @@
 #     ``RunStreamTransport``, so Redis in production); ``stage`` opens a step
 #     (and marks the run ``running`` there: ``service.mark_run_stage``, which
 #     emits ``belt_run_updated``); ``add`` keeps a frame for its stage and
-#     publishes it scrubbed (``steps.scrub_frame``) and stage-tagged; ``save``
+#     publishes it scrubbed (``steps.scrub_frame``) and stage-tagged, and after
+#     an Edit/Write/MultiEdit call ``file_touched`` (the file and the component
+#     the base blueprint's ``paths`` give it, ``orient.component_for``); ``save``
 #     folds the stage's frames of this call into its stored row; ``end`` closes
 #     the attempt with ``stream_end``. Frames reach it already path-relative
 #     (the station strips worktree/repo paths and the host account first).
@@ -45,6 +47,7 @@ from typing import Any
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.security.redact import redact_output
 from pocketpaw.tools.narration import Narration, render
+from pocketpaw_ee.cloud.belt.orient import PathIndex, component_for, repo_path
 from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder, agent_event_frame, scrub_frame
 
 logger = logging.getLogger(__name__)
@@ -57,10 +60,13 @@ STAGES = ("orient", "develop", "check", "fix", "review")
 # two fixes, three reviews, the checks between), then an hour after it ends.
 _LIVE_TTL = 6 * 3600
 _ENDED_TTL = 3600
+# The tools that change a file: each call also publishes ``file_touched``.
+EDIT_TOOLS = frozenset({"Edit", "MultiEdit", "Write"})
 # A tool row's narration: its verb and the input arg it reads.
 _LABELS = {
     "Read": ("Read", "file_path"),
     "Edit": ("Edit", "file_path"),
+    "MultiEdit": ("Edit", "file_path"),
     "Write": ("Write", "file_path"),
     "Bash": ("Run", "command"),
     "Grep": ("Grep", "pattern"),
@@ -242,6 +248,7 @@ class RunFeed:
     action_id: str
     save_fn: SaveFn
     stage_name: str = ""
+    paths: PathIndex = field(default_factory=list)  # the base blueprint's file join
     _frames: dict[str, list[Frame]] = field(default_factory=dict)
     _rounds: dict[str, int] = field(default_factory=dict)
     _stored: dict[str, tuple[int, int]] = field(default_factory=dict)  # stage -> (steps, bytes)
@@ -282,6 +289,27 @@ class RunFeed:
             return
         self._frames[self.stage_name].append((event, data, at))
         await self._send(event, {**scrub_frame(event, data), "stage": self.stage_name})
+        if event == "tool_start" and data.get("tool") in EDIT_TOOLS:
+            await self._touched(data)
+
+    async def _touched(self, data: dict[str, Any]) -> None:
+        """``file_touched`` for an edit call: the file and the blueprint
+        component it maps to (``None``: no glob owns it). Published only; the
+        stored rows keep the call itself. A path outside the worktree is not a
+        repo file and sends nothing."""
+        tool_input = data.get("input")
+        raw = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        path = repo_path(raw) if isinstance(raw, str) else None
+        if path is None:
+            return
+        touched = {
+            "stage": self.stage_name,
+            "path": redact_output(path),
+            "component": component_for(path, self.paths),
+            "tool": data.get("tool"),
+            "call_id": data.get("call_id"),
+        }
+        await self._send("file_touched", touched)
 
     async def begin(self, tool: str, tool_input: dict[str, Any], narration: str = "") -> str:
         """A station-run step (a check, the recipe, orient) starts; its call id."""
@@ -350,6 +378,7 @@ class RunFeed:
 
 
 __all__ = [
+    "EDIT_TOOLS",
     "FEED_MAX_BYTES",
     "FEED_MAX_STEPS",
     "STAGES",
