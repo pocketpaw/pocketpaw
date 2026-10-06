@@ -102,12 +102,14 @@ commands, nothing else:
 
 - **recipes** `add-<block>` → `belt add <block> --app . --json` for the six
   universal blocks. `add` resolves the dependency closure and checks every
-  block's bytes against the integrity pinned in the registry index, so what
-  lands is what the certifier passed.
+  block's bytes against the integrity pinned in `registry/index.json` of the
+  same pulley checkout. That proves the bytes match that checkout's index, not
+  that they were certified: what lands is the certified set only while the
+  host's checkout sits at a certified commit, and nothing pins it there.
 - **check** `belt doctor --app . --json --env-advisory`: lock and disk agree,
   no drift, the generated shell, routes, barrels, hooks and adapters regions
   match the installed blocks, npm requirements are recorded, framework floors
-  hold.
+  hold, and every required port has at least one adapter to select.
 
 Why the CLI and not Pulley's MCP server: the strict station runs every claude
 seat with no MCP servers, and DONE refuses any diff touching `.mcp.json` (owner
@@ -122,21 +124,33 @@ keeps PATH), and `belt add` with no `--registry` reads that checkout's own
 exists because the station judges install state in a throwaway worktree with a
 scrubbed env and no `.env`: without it doctor fails every install on the
 deployment config a block declares (`DATABASE_URL`, `BETTER_AUTH_SECRET`,
-`PULLEY_PORT_MAIL` for auth); with it those findings are reported as info and
-the run's check passes. (`bin`, the registry default and `--env-advisory` are
-pulley's contract 1.1.0, branch `feat/belt-recipes`.)
+`PULLEY_PORT_MAIL` for auth). With it, exactly two kinds become info: a
+required env var that is unset (`env-required-unset`) and a port whose adapter
+is not selected while one exists to select (`port-unconfigured`). A port that
+no adapter implements is `port-no-adapter`, an error the flag never softens: no
+env value fixes it, and the app cannot start. (`bin`, the registry default,
+`--env-advisory` and `port-no-adapter` are pulley's contract 1.1.0, branch
+`feat/belt-recipes`, not yet on GitHub.)
 
 Pulley's certifier (`bun scripts/certify.ts --all`) is not a charter check: it
 certifies the registry's blocks, not the line app, and needs `bun install` and
-Postgres. It is pulley's promotion gate (all seven blocks pass it), upstream of
-any shift. `add` on a block the line already has changes nothing, and the
+Postgres. It is pulley's promotion gate, upstream of any shift. Last run
+2026-10-06: at pulley 99e5186 (dev), then again at `feat/belt-recipes` 4c2222f
+(99e5186 + d897db2 + the `port-no-adapter` fix), both with a local Postgres 14
+as `PULLEY_TEST_DB`. Both runs: 7 of 7 blocks certifiable, 49 of 49 checks
+passed (spec, contract tests, solo install, pairwise combos, licence audit,
+standalone build, removal), none failed or unverified. The second run's verdicts
+are in `docs/internal/2026-10-06-pulley-certify.json` (trimmed from the
+`--json-out` report: per-check status only). `add` on a block the line already has changes nothing, and the
 station refuses the empty diff (`DONE: the change produced an empty diff`).
 
 `orient.block_component` maps a block manifest onto a C4 component (id, name,
 description, technology) and its `deps` onto sync relationships; routes,
 endpoints, the table prefix and events ride the description after the block's
-own first sentence. It is what writes installed blocks into a line app's
-`docs/c4/model.json`, which ORIENT and the foreman then read.
+own first sentence. It is a pure mapper and has no caller yet. It is meant for
+blueprint drafting (BF-14) and the writer that puts installed blocks into a line
+app's `docs/c4/model.json` (BF-15). Until that writer exists, ORIENT and the
+foreman see a line's blocks only if someone writes the model by hand.
 
 ### Decision chains (RFC 09)
 

@@ -16,11 +16,12 @@
 #       container/component (name + first sentence), capped. The foreman gets
 #       these in its prompt; ORIENT uses them as its fallback.
 #
-# One writer: ``block_component`` maps a Pulley block manifest onto c4-gen's
+# One pure mapper: ``block_component`` turns a Pulley block manifest into c4-gen's
 # ``Component`` (id, name, description, technology) plus its ``deps`` as sync
-# relationships, so a Pulley app's installed blocks can be written into its C4
-# model. C4 has no slot for routes, tables or events, so they ride the
-# description after the block's own first sentence (the part ``c4_lines`` shows).
+# relationships. It writes nothing and has no caller yet: it is for blueprint
+# drafting (BF-14) and the line app's docs/c4/model.json writer (BF-15). C4 has no
+# slot for routes, tables or events, so they ride the description after the
+# block's own first sentence (the part ``c4_lines`` shows).
 #
 # Both blocks are owner-authored repo data (C4, symbols, shared-soul rules), so
 # they ride the prompt unfenced, after the task and charter.
@@ -92,8 +93,9 @@ def c4_lines(repo: str | Path) -> list[str]:
 def block_component(manifest: dict[str, Any]) -> tuple[dict[str, str], list[dict[str, str]]]:
     """A Pulley block manifest as ``(component, relationships)``: the c4-gen
     ``Component`` fields, and one sync ``block -> dependency`` relationship per
-    entry in ``deps``. Pulley declares a table PREFIX, not tables, so tables
-    render as ``<prefix>*``."""
+    entry in ``deps``. Pure: the caller decides where they go (blueprint
+    drafting, a line app's model.json). Pulley declares a table PREFIX, not
+    tables, so tables render as ``<prefix>*``."""
     name = str(manifest["name"])
     events = manifest.get("events") or {}
     prefix = manifest.get("tablePrefix")
