@@ -434,21 +434,27 @@ def _user(role: str, workspace_id: str = "ws-1", user_id: str = "u-1"):
     )
 
 
-def test_the_router_refuses_a_member_and_allows_an_admin():
+async def test_the_router_refuses_a_member_and_allows_an_admin(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from pocketpaw_ee.guards import deps as guards_deps
     from pocketpaw_ee.sites.router import _may_buy_site_plan
 
-    assert _may_buy_site_plan(_user("member"), "ws-1") is False
-    assert _may_buy_site_plan(_user("editor"), "ws-1") is False
-    assert _may_buy_site_plan(_user("admin"), "ws-1") is True
-    assert _may_buy_site_plan(_user("owner"), "ws-1") is True
+    # Per-member overrides are a separate mechanism; pin them off so the role
+    # alone decides, without a live Mongo lookup.
+    monkeypatch.setattr(guards_deps, "_has_action_override", AsyncMock(return_value=False))
+    assert await _may_buy_site_plan(_user("member"), "ws-1") is False
+    assert await _may_buy_site_plan(_user("editor"), "ws-1") is False
+    assert await _may_buy_site_plan(_user("admin"), "ws-1") is True
+    assert await _may_buy_site_plan(_user("owner"), "ws-1") is True
 
 
-def test_the_router_refuses_a_non_member_and_a_broken_user():
+async def test_the_router_refuses_a_non_member_and_a_broken_user():
     """Fail closed on anything it cannot read a role from. A predicate that
     answers True when it does not know is a predicate that sells a plan to a
     stranger."""
     from pocketpaw_ee.sites.router import _may_buy_site_plan
 
-    assert _may_buy_site_plan(_user("admin", workspace_id="someone-else"), "ws-1") is False
-    assert _may_buy_site_plan(object(), "ws-1") is False
-    assert _may_buy_site_plan(None, "ws-1") is False
+    assert await _may_buy_site_plan(_user("admin", workspace_id="someone-else"), "ws-1") is False
+    assert await _may_buy_site_plan(object(), "ws-1") is False
+    assert await _may_buy_site_plan(None, "ws-1") is False
