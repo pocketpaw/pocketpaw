@@ -9753,7 +9753,7 @@ async def get_native_artifact(
 
 #: Bump when the html draft materialization changes (import map, bridge, layout), so
 #: drafts re-materialize under a new content hash and a new preview URL.
-_HTML_PREVIEW_VERSION = "html-preview-1"
+_HTML_PREVIEW_VERSION = "html-preview-2"
 
 
 async def _html_draft_artifact(

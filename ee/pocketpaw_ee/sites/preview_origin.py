@@ -13,8 +13,11 @@
 # What this module owns:
 #   * the base-URL setting and the token <-> host mapping;
 #   * packing a draft's files into the tgz the artifact store keeps per content hash;
-#   * html drafts: the declared-package import map and (for ``?paw_edit=1``) the
-#     vendored edit-bridge (``edit_bridge.js``), since html drafts never build;
+#   * html drafts (they never build): the declared-package import map and the
+#     vendored runtime-error reporter (``runtime_reporter.js``) in every page, plus an
+#     ``?paw_edit=1`` variant stamped with data-uid (paw-sites ``arm-html``, else the
+#     ``html_uid_stamp`` port) carrying the vendored edit-bridge (``edit_bridge.js``).
+#     Both scripts are pinned to a paw-sites commit (paw-sites-edit-bridge.pin.json).
 #   * ``preview_app`` — the ASGI app that serves a draft — and
 #     ``PreviewHostDispatch``, the middleware that routes preview-host requests to it
 #     inside the main API process.
@@ -345,25 +348,36 @@ def inject_import_map(html: str, packages: Mapping[str, Mapping[str, str]]) -> s
 
 _BRIDGE_PLACEHOLDER = '"__PAW_BUILDER_ORIGIN__"'
 _BRIDGE_SCRIPT_ID = "paw-edit-bridge"
-_bridge_template: str | None = None
+_REPORTER_SCRIPT_ID = "paw-runtime-reporter"
+_vendored_cache: dict[str, str] = {}
+_DOCTYPE_RE = re.compile(r"<!doctype[^>]*>", re.IGNORECASE)
 
 
-def _bridge_source() -> str:
-    global _bridge_template
-    if _bridge_template is None:
-        text = Path(__file__).with_name("edit_bridge.js").read_text(encoding="utf-8")
-        # Drop the leading // header comment block; the page gets the IIFE only.
+def _vendored(name: str) -> str:
+    """A vendored paw-sites script (``edit_bridge.js`` / ``runtime_reporter.js``)
+    without its leading ``//`` header block."""
+    if name not in _vendored_cache:
+        text = Path(__file__).with_name(name).read_text(encoding="utf-8")
         lines = text.splitlines()
         while lines and (lines[0].startswith("//") or not lines[0].strip()):
             lines.pop(0)
-        _bridge_template = "\n".join(lines)
-    return _bridge_template
+        _vendored_cache[name] = "\n".join(lines)
+    return _vendored_cache[name]
 
 
 def edit_bridge_script(builder_origin: str) -> str:
-    """The edit-bridge IIFE posting only to ``builder_origin`` (inert without
-    ``?paw_edit=1``, same as the armed svelte/react builds)."""
-    return _bridge_source().replace(_BRIDGE_PLACEHOLDER, _script_json(builder_origin))
+    """The edit-bridge IIFE posting only to ``builder_origin`` (its commands and
+    hover/click reports are inert without ``?paw_edit=1``, same as the armed
+    svelte/react builds)."""
+    return _vendored("edit_bridge.js").replace(_BRIDGE_PLACEHOLDER, _script_json(builder_origin))
+
+
+def runtime_reporter_script(builder_origin: str) -> str:
+    """The runtime-error reporter IIFE (``__pawRuntime`` messages to ``builder_origin``).
+    Installs once per window, so it coexists with the copy inside the bridge."""
+    return _vendored("runtime_reporter.js").replace(
+        _BRIDGE_PLACEHOLDER, _script_json(builder_origin)
+    )
 
 
 def inject_edit_bridge(html: str, builder_origin: str) -> str:
@@ -376,13 +390,35 @@ def inject_edit_bridge(html: str, builder_origin: str) -> str:
     return html[:idx] + tag + html[idx:]
 
 
+def inject_runtime_reporter(html: str, builder_origin: str) -> str:
+    """Put the reporter first in ``<head>`` so it sees errors from every later script.
+    No ``<head>`` tag: right after the doctype (never before it, which would flip the
+    page into quirks mode), else at the very start."""
+    if f'id="{_REPORTER_SCRIPT_ID}"' in html:
+        return html
+    tag = f'<script id="{_REPORTER_SCRIPT_ID}">{runtime_reporter_script(builder_origin)}</script>'
+    head = _HEAD_OPEN_RE.search(html)
+    if head is not None:
+        at = head.end()
+    else:
+        doctype = _DOCTYPE_RE.search(html)
+        at = doctype.end() if doctype and not html[: doctype.start()].strip() else 0
+    return html[:at] + tag + html[at:]
+
+
 async def materialize_html_draft(
     source: Mapping[str, Any], builder_origin: str, *, arm: Any = None
 ) -> dict[str, bytes]:
-    """The served file set of an html draft: its source files, the import map in
-    every page, and an ``?paw_edit=1`` variant of each page (data-uid stamped through
-    ``arm`` when it is available, plus the edit bridge) under ``.paw-edit/``."""
+    """The served file set of an html draft: its source files with the import map and
+    the runtime-error reporter in every page, and an ``?paw_edit=1`` variant of each
+    page under ``.paw-edit/`` that also carries data-uid stamps and the edit bridge.
+
+    Stamping prefers ``arm`` (paw-sites ``arm-html``); a page it cannot stamp (no
+    toolchain on this host, or a refusal) falls back to the Python port
+    (``html_uid_stamp``), which produces the same uids or refuses the page. A page
+    neither can stamp is served unstamped: picks work, they just carry no uid."""
     from pocketpaw_ee.sites import dependency_manifest as dm
+    from pocketpaw_ee.sites.html_uid_stamp import stamp_html_data_uids
 
     try:
         packages = dm.parse_manifest(dm.manifest_text(source))
@@ -395,7 +431,7 @@ async def materialize_html_draft(
             continue
         if _HTML_RE.search(rel):
             pages[rel] = inject_import_map(contents, packages) if packages else contents
-            files[rel] = pages[rel].encode("utf-8")
+            files[rel] = inject_runtime_reporter(pages[rel], builder_origin).encode("utf-8")
         else:
             files[rel] = contents.encode("utf-8")
 
@@ -405,12 +441,13 @@ async def materialize_html_draft(
             out = await arm(source=dict(pages))
             armed = out.get("source") or {}
         except Exception as exc:
-            # No toolchain on this host, or a page the stamper refused: the bridge
-            # still loads, it just has no data-uid leaves to report.
-            logger.warning("sites.preview_origin: html arming unavailable (%s)", exc)
+            logger.info("sites.preview_origin: arm-html unavailable, using the port (%s)", exc)
     for rel, page in pages.items():
-        stamped = armed.get(rel) if isinstance(armed.get(rel), str) else page
-        files[f"{EDIT_VARIANT_DIR}/{rel}"] = inject_edit_bridge(stamped, builder_origin).encode(
+        stamped = armed.get(rel)
+        if not isinstance(stamped, str):
+            stamped = stamp_html_data_uids(page, rel) or page
+        edit_page = inject_runtime_reporter(stamped, builder_origin)
+        files[f"{EDIT_VARIANT_DIR}/{rel}"] = inject_edit_bridge(edit_page, builder_origin).encode(
             "utf-8"
         )
     return files
@@ -591,6 +628,7 @@ __all__ = [
     "existing_preview_url",
     "inject_edit_bridge",
     "inject_import_map",
+    "inject_runtime_reporter",
     "materialize_html_draft",
     "pack_dir",
     "pack_files",

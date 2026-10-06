@@ -166,14 +166,22 @@ class _NoPool:
         raise AssertionError("a landed draft must not queue another build")
 
 
-async def _artifact(pocket_id: str, pool: Any | None = None) -> dict[str, Any]:
+async def _artifact(
+    pocket_id: str, pool: Any | None = None, arm: Any | None = None
+) -> dict[str, Any]:
     return await sites_service.get_native_artifact(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         builder_origin=ORIGIN,
         _pool=pool or _NoPool(),
+        _arm=arm,
     )
+
+
+async def _no_arm(**_kw: Any) -> dict[str, Any]:
+    """An API host with no paw-sites CLI: arm-html is unavailable."""
+    raise RuntimeError("arm-html failed: bun not found")
 
 
 def _preview_app():
@@ -481,7 +489,7 @@ async def test_an_edit_gets_a_new_preview_url(beanie_test_db):
 async def test_html_preview_arms_the_edit_bridge_only_under_paw_edit(beanie_test_db):
     page = "<!DOCTYPE html><html><head></head><body><h1>Hi</h1></body></html>"
     pocket_id = await _make_pocket("html", {"index.html": page})
-    url = (await _artifact(pocket_id)).get("preview_url")
+    url = (await _artifact(pocket_id, arm=_no_arm)).get("preview_url")
     assert isinstance(url, str)
 
     plain = await _fetch(url)
@@ -493,6 +501,75 @@ async def test_html_preview_arms_the_edit_bridge_only_under_paw_edit(beanie_test
     # The bridge posts only to the builder origin, never "*".
     assert f"var ORIGIN = {json.dumps(ORIGIN)};" in armed.text
     assert armed.text.index("paw-edit-bridge") < armed.text.lower().rindex("</body>")
+    # ... and takes builder commands (highlight / inline edit) over the same trust.
+    assert "__pawEditCmd" in armed.text
+
+
+_DESIGN_PAGE = (
+    "<!DOCTYPE html><html><head><title>Bright</title></head><body>"
+    '<section class="hero"><span class="eyebrow">Hi</span><h1>Smile</h1>'
+    '<p>Body <b>copy</b></p><a class="btn" href="/book">Book</a></section>'
+    "</body></html>"
+)
+
+
+@pytest.mark.asyncio
+async def test_html_edit_variant_is_stamped_without_the_paw_sites_cli(beanie_test_db):
+    """No CLI on the API host: the Python port stamps the paw-sites uids."""
+    pocket_id = await _make_pocket("html", {"index.html": _DESIGN_PAGE})
+    url = (await _artifact(pocket_id, arm=_no_arm)).get("preview_url")
+
+    armed = (await _fetch(url + "?paw_edit=1")).text
+    plain = (await _fetch(url)).text
+
+    assert re.findall(r'data-uid="([^"]+)"', armed) == [
+        "index:title:0",
+        "index:eyebrow:0",
+        "index:headline:0",
+        "index:b:0",
+        "index:cta:0",
+    ]
+    # Browse serves the author's bytes: no stamps.
+    assert "data-uid" not in plain
+
+
+@pytest.mark.asyncio
+async def test_html_edit_variant_prefers_arm_html_when_it_is_available(beanie_test_db):
+    calls: list[dict[str, str]] = []
+
+    async def _arm(*, source: dict[str, str]) -> dict[str, Any]:
+        calls.append(source)
+        stamped = '<h1 data-uid="from:cli:0">'
+        return {"source": {k: v.replace("<h1>", stamped) for k, v in source.items()}}
+
+    pocket_id = await _make_pocket("html", {"index.html": _DESIGN_PAGE})
+    url = (await _artifact(pocket_id, arm=_arm)).get("preview_url")
+
+    armed = (await _fetch(url + "?paw_edit=1")).text
+    assert calls and 'data-uid="from:cli:0"' in armed
+    assert "index:headline:0" not in armed
+
+
+@pytest.mark.asyncio
+async def test_every_html_preview_page_reports_runtime_errors(beanie_test_db):
+    """Browse and Design both carry the reporter, first in <head>, so the builder
+    sees script errors from the page's own scripts in either mode."""
+    pages = {
+        "index.html": "<!DOCTYPE html><html><head><script>boom()</script></head><body></body>",
+        "about.html": "<!doctype html><p>No head tag</p>",
+    }
+    pocket_id = await _make_pocket("html", pages)
+    url = (await _artifact(pocket_id, arm=_no_arm)).get("preview_url")
+
+    for path in ("/index.html", "/index.html?paw_edit=1", "/about.html", "/about.html?paw_edit=1"):
+        text = (await _fetch(urljoin(url, path))).text
+        assert text.count('id="paw-runtime-reporter"') == 1, path
+        assert "__pawRuntime" in text and f"var TARGET = {json.dumps(ORIGIN)};" in text, path
+    index = (await _fetch(url)).text
+    assert index.index("paw-runtime-reporter") < index.index("boom()")
+    about = (await _fetch(urljoin(url, "/about.html"))).text
+    # Never ahead of the doctype: that would put the page in quirks mode.
+    assert about.lower().startswith('<!doctype html><script id="paw-runtime-reporter">')
 
 
 @pytest.mark.asyncio
