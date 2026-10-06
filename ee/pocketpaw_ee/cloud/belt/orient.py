@@ -94,8 +94,10 @@ def block_component(manifest: dict[str, Any]) -> tuple[dict[str, str], list[dict
     """A Pulley block manifest as ``(component, relationships)``: the c4-gen
     ``Component`` fields, and one sync ``block -> dependency`` relationship per
     entry in ``deps``. Pure: the caller decides where they go (blueprint
-    drafting, a line app's model.json). Pulley declares a table PREFIX, not
-    tables, so tables render as ``<prefix>*``."""
+    drafting, a line app's model.json). ``name``, ``version``, ``description``
+    and ``kind`` are required by Pulley's manifest schema, so they are indexed
+    directly. Pulley declares a table PREFIX, not tables, so tables render as
+    ``<prefix>*``."""
     name = str(manifest["name"])
     events = manifest.get("events") or {}
     prefix = manifest.get("tablePrefix")
@@ -107,7 +109,7 @@ def block_component(manifest: dict[str, Any]) -> tuple[dict[str, str], list[dict
         ("Emits", events.get("emits") or []),
         ("Consumes", events.get("consumes") or []),
     ]
-    first = str(manifest.get("description") or name).strip()
+    first = str(manifest["description"]).strip()
     if not first.endswith((".", "!", "?")):
         first += "."
     rest = [f"{label}: {', '.join(values)}." for label, values in facts if values]
@@ -115,7 +117,7 @@ def block_component(manifest: dict[str, Any]) -> tuple[dict[str, str], list[dict
         "id": name,
         "name": name,
         "description": " ".join([first, *rest]),
-        "technology": f"Pulley {manifest.get('kind') or 'block'} block {manifest.get('version')}",
+        "technology": f"Pulley {manifest['kind']} block {manifest['version']}",
     }
     relationships = [
         {"source": name, "target": dep, "description": f"depends on {dep} {rng}", "style": "sync"}

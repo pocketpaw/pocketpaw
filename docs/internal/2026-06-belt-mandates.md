@@ -106,6 +106,10 @@ commands, nothing else:
   same pulley checkout. That proves the bytes match that checkout's index, not
   that they were certified: what lands is the certified set only while the
   host's checkout sits at a certified commit, and nothing pins it there.
+  `add` on a block the line already has changes nothing, so the station
+  refuses the run with `DONE: the change produced an empty diff`. One recipe
+  can land more than one block: `add-roles` on a bare app brings auth and org
+  with it.
 - **check** `belt doctor --app . --json --env-advisory`: lock and disk agree,
   no drift, the generated shell, routes, barrels, hooks and adapters regions
   match the installed blocks, npm requirements are recorded, framework floors
@@ -141,8 +145,7 @@ as `PULLEY_TEST_DB`. Both runs: 7 of 7 blocks certifiable, 49 of 49 checks
 passed (spec, contract tests, solo install, pairwise combos, licence audit,
 standalone build, removal), none failed or unverified. The second run's verdicts
 are in `docs/internal/2026-10-06-pulley-certify.json` (trimmed from the
-`--json-out` report: per-check status only). `add` on a block the line already has changes nothing, and the
-station refuses the empty diff (`DONE: the change produced an empty diff`).
+`--json-out` report: per-check status only).
 
 `orient.block_component` maps a block manifest onto a C4 component (id, name,
 description, technology) and its `deps` onto sync relationships; routes,
@@ -933,8 +936,9 @@ untracked `.mcp.json` are all back to base before FIX and REVIEW), ORIENT (the
 loom argv, the block in the develop and review prompts, the review's duplicate
 rule, the C4 fallback, the "no world model" note, recipes skipping it), the
 foreman's C4 list (`test_belt_mandates.py` checks the shift wires it in) and the
-Pulley app line (its `belt` recipe and doctor check pass the default allowlist; a
-faked `belt` lands `add-auth` as a diff and a red doctor fails CHECK);
+Pulley app line (its `belt` recipe and doctor check pass the default
+allowlist; a faked `belt` lands `add-auth` as a diff, a red doctor fails CHECK,
+and a second `add-auth` ends as an empty diff);
 `test_belt_pulley_c4.py` maps the seven real Pulley manifests through
 `block_component` and reads the result back with `c4_lines`;
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the

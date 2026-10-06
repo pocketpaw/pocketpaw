@@ -16,8 +16,8 @@
 # worktree-root refusal; the ORIENT section pins the architecture block in the
 # develop/review prompts, its degraded paths, and the foreman's C4 list. The
 # Pulley app line section drives the template's ``belt`` recipe and doctor check
-# (a faked ``belt``) through the station, and pins that the default allowlist
-# accepts them.
+# (a faked ``belt``) through the station, ends a re-run on an installed block as
+# an empty diff, and pins that the default allowlist accepts them.
 
 from __future__ import annotations
 
@@ -1239,7 +1239,7 @@ class FakeBelt(FakeClaude):
         app = Path(cwd)
         if argv[1] == "add":
             dest = app / "src" / "blocks" / argv[2]
-            dest.mkdir(parents=True)
+            dest.mkdir(parents=True, exist_ok=True)
             (dest / "manifest.json").write_text((PULLEY_FIXTURES / f"{argv[2]}.json").read_text())
             (app / "belt.lock").write_text(json.dumps({"blocks": {argv[2]: {}}}))
             return 0, json.dumps({"ok": True, "command": "add"}), ""
@@ -1274,4 +1274,23 @@ async def test_pulley_recipe_lands_a_block_and_doctor_gates_it(repo, monkeypatch
     assert fake.claude_calls == []
     belts = [a for a in fake.argvs if a[0] == "belt"]
     assert belts == [shlex.split(PULLEY_RECIPES["add-auth"]), shlex.split(PULLEY_DOCTOR)]
+    _assert_clean(repo, fake)
+
+
+async def test_pulley_recipe_on_an_installed_block_is_an_empty_diff(repo, monkeypatch):
+    # belt add on a block the line already has changes nothing (real belt: ok, skipped,
+    # no writes), so the station refuses the run instead of attaching a diff.
+    monkeypatch.delenv("POCKETPAW_FACTORY_ALLOWED_COMMANDS", raising=False)
+    fake = FakeBelt()
+    station = _station(fake, repo, checks=[PULLEY_DOCTOR], recipes=PULLEY_RECIPES)
+    first = await station(_request(repo, recipe="add-auth"))
+    subprocess.run(["git", "apply", "--index"], input=first.diff, text=True, cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add auth"],
+        cwd=repo,
+        check=True,
+    )
+
+    with pytest.raises(ds.DevelopStationError, match=r"^DONE: the change produced an empty diff"):
+        await station(_request(repo, recipe="add-auth"))
     _assert_clean(repo, fake)
