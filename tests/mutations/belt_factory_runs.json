@@ -23,7 +23,7 @@
     "find": "if branch_created and not landed:",
     "replace": "if branch_created and not landed and False:",
     "tests": [
-      "tests/cloud/test_belt_headless.py::test_moved_base_redevelops_and_returns_to_the_gate"
+      "tests/cloud/test_belt_line.py::test_a_run_without_a_mandate_line_keeps_its_own_branch"
     ]
   },
   {
@@ -683,6 +683,151 @@
     "tests": [
       "tests/cloud/test_belt_develop_station.py::test_recipe_runs_charter_command_without_claude",
       "tests/cloud/test_belt_develop_station.py::test_pulley_recipe_lands_a_block_and_the_checks_gate_it"
+    ]
+  },
+  {
+    "label": "line: a mandate run lands on a per-run branch instead of its line",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "target = line or f\"feat/belt-{_short_id(str(action.id))}\"",
+    "replace": "target = f\"feat/belt-{_short_id(str(action.id))}\"",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_second_run_starts_from_the_line_and_stacks_on_it"
+    ]
+  },
+  {
+    "label": "line: any mandate id makes a line, so user text can reach a ref name",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "_LINE_ID = re.compile(r\"[0-9a-f]{24}\")",
+    "replace": "_LINE_ID = re.compile(r\".+\")",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_line_name_is_derived_from_a_real_mandate_id_only"
+    ]
+  },
+  {
+    "label": "line: the develop starts from the base, not the line",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "line = line_branch(request.mandate_id)",
+    "replace": "line = None",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_second_run_starts_from_the_line_and_stacks_on_it"
+    ]
+  },
+  {
+    "label": "line: a line the base already holds is not moved to the base",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            await self._move_line(git, line, base_sha, local)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_a_merged_line_moves_to_the_base"
+    ]
+  },
+  {
+    "label": "line: a base ahead of the line is not merged into it",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "merged = await self._merge_base_into(repo, request, line, tip, base, base_sha)",
+    "replace": "merged = tip",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_base_commits_the_line_lacks_are_merged_into_it"
+    ]
+  },
+  {
+    "label": "line: a base conflict does not stand the run down",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            raise DevelopStationError(f\"PREPARE: {what}\")",
+    "replace": "            return tip",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_a_base_conflict_stands_the_run_down_with_a_sighting"
+    ]
+  },
+  {
+    "label": "line: a base conflict files no sighting",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "await self.file_sighting(",
+    "replace": "None and await self.file_sighting(",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_a_base_conflict_stands_the_run_down_with_a_sighting"
+    ]
+  },
+  {
+    "label": "line: the ref moves without compare-and-swap",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "await git(\"update-ref\", f\"refs/heads/{branch}\", new, old)",
+    "replace": "await git(\"update-ref\", f\"refs/heads/{branch}\", new)",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_the_ref_move_is_a_compare_and_swap",
+      "tests/cloud/test_belt_line.py::test_a_line_moved_mid_landing_redevelops_and_leaves_the_line_alone"
+    ]
+  },
+  {
+    "label": "line: a line moved mid-landing fails instead of re-developing",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if line and blob.get(\"headless\"):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_a_line_moved_mid_landing_redevelops_and_leaves_the_line_alone"
+    ]
+  },
+  {
+    "label": "line: a PR failure after the line moved fails the run (the Foreman re-plans built work)",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "note = f\"pushed, but the PR open failed: {exc}\"",
+    "replace": "return await _fail(str(exc), error_class=\"PrOpenFailed\")",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_a_line_pr_failure_keeps_the_landing"
+    ]
+  },
+  {
+    "label": "line: the gh opener opens a second PR for a branch that has one",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if code == 0 and out.strip().startswith(\"http\"):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_gh_opener_reuses_the_open_pr_for_a_branch"
+    ]
+  },
+  {
+    "label": "line: a pushed line ahead of the local one is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "        return remote, local",
+    "replace": "        return local, local",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_a_line_pushed_ahead_on_origin_is_where_the_next_run_starts"
+    ]
+  },
+  {
+    "label": "line: the foreman prompt drops the line block",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "{line_lines}\n",
+    "replace": "\n",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_foreman_counts_line_work_as_built_and_sees_the_merge"
+    ]
+  },
+  {
+    "label": "line: work on the line reads merged before the captain merges it",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if merged else f\"on the line",
+    "replace": "if True else f\"on the line",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_foreman_counts_line_work_as_built_and_sees_the_merge"
+    ]
+  },
+  {
+    "label": "line: a merged line never reads merged",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if await commit_of(git, ref) and await is_ancestor(git, commit_sha, ref):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_foreman_counts_line_work_as_built_and_sees_the_merge"
+    ]
+  },
+  {
+    "label": "line: a station sighting files again for the same signal",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if any(_dedup_signal(s.evidence, s.summary) == signal for s in existing):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_station_sighting_files_once_per_signal"
     ]
   }
 ]
