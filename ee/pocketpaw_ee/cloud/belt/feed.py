@@ -18,6 +18,11 @@
 #     per-field caps, same scrub/redact (inputs and outputs), same wire mapper.
 #     The developer's prose between tool calls has no chat-step kind; it is
 #     recorded as a ``thinking`` step so the run page shows the why with the what.
+#     Each tool step's ``narration`` is its subject, so a collapsed row reads
+#     more than the tool's kind: the path (Read/Edit/Write), the command's first
+#     line (Bash) or the pattern (Grep/Glob), cut to 80 chars by the chat
+#     narration renderer. The recorder never redacts a narration, so it is
+#     redacted here first.
 #   * Caps: ``FEED_MAX_STEPS`` steps and ``FEED_MAX_BYTES`` per stored feed; the
 #     overflow is counted in ``steps_omitted``. BF-3 stores one stage (develop),
 #     so the per-stage cap is the per-run cap.
@@ -30,10 +35,21 @@ from datetime import datetime
 from typing import Any
 
 from pocketpaw.agents.protocol import AgentEvent
+from pocketpaw.security.redact import redact_output
+from pocketpaw.tools.narration import Narration, render
 from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder, record_agent_event
 
 FEED_MAX_STEPS = 2_000
 FEED_MAX_BYTES = 2_000_000
+# The input arg a Claude Code tool's row label reads.
+_LABEL_ARGS = {
+    "Read": "file_path",
+    "Edit": "file_path",
+    "Write": "file_path",
+    "Bash": "command",
+    "Grep": "pattern",
+    "Glob": "pattern",
+}
 
 
 def _parse_time(raw: Any) -> datetime | None:
@@ -57,6 +73,17 @@ def _result_text(content: Any) -> str:
             if isinstance(b, dict) and b.get("type") == "text"
         )
     return "" if content is None else str(content)
+
+
+def _label(tool: str, tool_input: Any) -> str | None:
+    """A tool row's narration (see the header), or ``None``."""
+    arg = _LABEL_ARGS.get(tool)
+    value = tool_input.get(arg) if arg and isinstance(tool_input, dict) else None
+    if not isinstance(value, str):
+        return None
+    lines = value.strip().splitlines()
+    first = redact_output(lines[0]) if lines else ""
+    return render(Narration(active=f"{{{arg}}}", bare="", safe_args=(arg,)), {arg: first})
 
 
 def stream_events(stdout: str) -> Iterator[AgentEvent]:
@@ -124,8 +151,9 @@ def fold_feed(events: Iterator[AgentEvent] | list[AgentEvent]) -> StepRecorder:
             continue
         prose_open = False
         if event.type == "tool_use":
+            name, tool_input = event.metadata.get("name", ""), event.metadata.get("input")
             record_agent_event(
-                recorder, event, event.metadata.get("name", ""), event.metadata.get("input"), now=at
+                recorder, event, name, tool_input, narration=_label(name, tool_input), now=at
             )
             continue
         record_agent_event(recorder, event, now=at)

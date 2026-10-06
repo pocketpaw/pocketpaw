@@ -254,6 +254,29 @@ async def test_check_red_then_fix_then_green(repo):
     _assert_clean(repo, fake)
 
 
+async def test_every_claude_seat_leaves_no_session_on_disk(repo):
+    """A persisted session keeps the whole prompt (task, crew instructions)
+    under ``~/.claude/projects`` on the factory host: develop, fix, review and
+    the foreman's tool-less call all pass ``--no-session-persistence`` (owner
+    setup too: see its test)."""
+    fake = FakeClaude(develop=[_write("broken"), _write("ok")])
+    await _station(fake, repo)(_request(repo))
+    assert [s for s, _ in fake.claude_calls] == ["develop", "fix", "review"]
+
+    seen: dict = {}
+
+    async def fake_run(argv, *, cwd, timeout, stdin=None):
+        seen["argv"] = list(argv)
+        return 0, json.dumps({"type": "result", "result": "{}"}), ""
+
+    ctx = foreman.ForemanContext(shift_no=1, charter={"goal": "g"})
+    await foreman.ClaudeCliLlm(run=fake_run).plan(prompt="p", context=ctx)
+    seats = [a for a in fake.argvs if a[0] == FAKE_CLAUDE] + [seen["argv"]]
+    assert len(seats) == 4
+    for argv in seats:
+        assert "--no-session-persistence" in argv, argv
+
+
 async def test_checks_still_red_after_two_fixes_names_the_check(repo):
     fake = FakeClaude(develop=[_write("broken"), _write("still"), _write("nope")])
     with pytest.raises(ds.DevelopStationError) as exc:
@@ -934,6 +957,7 @@ async def test_owner_setup_drops_isolation_and_keeps_the_tool_rules(repo, owner)
     for argv in claude_argvs:
         assert "--setting-sources" not in argv and "--strict-mcp-config" not in argv
         assert "--settings" not in argv and "--bare" not in argv
+        assert "--no-session-persistence" in argv
         denied = argv[argv.index("--disallowedTools") + 1 : argv.index("--output-format")]
         assert denied == ["WebFetch", "WebSearch", "Task"]
         assert "Read(./**)" in argv

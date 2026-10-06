@@ -15,7 +15,10 @@
 #     bare paths (``cd <wt>``, a ``pwd`` result, ``in <wt>.``) read ``.``; the
 #     bound repo the ``.git`` file names goes too, but only as a whole path
 #     (``src/app/x`` survives a ``/app`` root); same for headless_error (claude's words or
-#     stderr, never stream-json) and a failing check's tail;
+#     stderr, never stream-json) and a failing check's tail; the host's OS
+#     account name reads ``user`` there too;
+#   * each tool row's narration is its subject (path, command's first line,
+#     pattern), capped and redacted;
 #   * secrets in a tool result or input reach neither storage nor the response;
 #   * the stage row is the latest attempt: a failed, timed-out, or pre-seat
 #     failing re-develop replaces it; the upsert keeps one row per
@@ -409,6 +412,10 @@ async def test_develop_feed_is_stored_in_order_and_served(
     assert str(repo) not in stored_text
     assert write["output"] == "File created at feature.txt"
     assert edit["input"]["old_string"] == "draft" and edit["status"] == "complete"
+    # A collapsed row reads its subject, from the relativised input.
+    labels = ["README.md", "feature.txt", "feature.txt", ".git"]
+    labels += ["cd . && uv run pytest -q", "pwd", "x"]
+    assert [s["narration"] for s in doc.steps[1:8]] == labels
     assert str(read["started_at"]).startswith("2026-10-06 08:00:02")
 
     with TestClient(_build_app(role="member")) as client:
@@ -428,6 +435,7 @@ async def test_develop_feed_is_stored_in_order_and_served(
         "",
     ]
     assert body["steps"][1]["startedAt"].startswith("2026-10-06T08:00:02")
+    assert [s["narration"] for s in body["steps"][1:8]] == labels
     assert "stepsOmitted" not in body
 
     # The planted secrets (a tool result, a tool input) never reach either.
@@ -523,6 +531,31 @@ def test_parallel_same_name_calls_pair_by_id():
     assert got == [("a.txt", "A"), ("b.txt", "B")]
 
 
+def test_tool_rows_are_labelled_by_their_subject():
+    """Read/Edit/Write read their path, Bash its first line (capped, secrets
+    redacted: the recorder never redacts a narration), Grep/Glob the pattern;
+    another tool or a missing arg gets no label."""
+    long = "uv run pytest " + "tests/x.py " * 20
+    calls = [
+        ("Read", {"file_path": "src/a.py"}),
+        ("Edit", {"file_path": "src/b.py", "old_string": "x", "new_string": "y"}),
+        ("Write", {"file_path": "c.txt", "content": "z"}),
+        ("Bash", {"command": f"export KEY={_SECRET}\nrm -rf build", "description": "d"}),
+        ("Bash", {"command": long}),
+        ("Grep", {"pattern": "def main"}),
+        ("Glob", {"pattern": "**/*.py"}),
+        ("TodoWrite", {"todos": []}),
+        ("Read", {}),
+    ]
+    events = [AgentEvent("tool_use", n, {"name": n, "input": i}) for n, i in calls]
+    labels = [s["narration"] for s in fold_feed(events).steps]
+    assert labels[:3] == ["src/a.py", "src/b.py", "c.txt"]
+    assert labels[3] == "export KEY=[REDACTED]" and _SECRET not in json.dumps(labels)
+    assert len(labels[4]) <= 80 and labels[4].startswith("uv run pytest tests/x.py")
+    assert labels[4].endswith("…")
+    assert labels[5:] == ["def main", "**/*.py", "", ""]
+
+
 async def test_a_short_repo_root_only_strips_whole_paths(repo, mongo_db, tmp_path):  # noqa: F811
     """A ``/app`` repo root (a container mount): ``/app/src/x.py`` -> ``src/x.py``
     even at the start of a line inside stream-json, while ``src/app/page.tsx``
@@ -573,6 +606,24 @@ async def test_a_check_tail_carries_no_worktree_path(repo, store, monkeypatch, l
     assert "belt-develop-" not in error and str(linked_tmp) not in error
 
 
+async def test_a_check_tail_carries_no_host_user_name(repo, store, monkeypatch):  # noqa: F811
+    """An ``ls -la`` line names the factory's OS account in its owner column:
+    the CHECK error on the run reads ``user`` there instead."""
+    import getpass
+    import sys
+
+    me = getpass.getuser()
+    line = f"drwxr-xr-x  5 {me}  staff  160 Oct  6 08:00 ."
+    check = f'{sys.executable} -c "import sys; print({line!r}); sys.exit(1)"'
+    action_id = await _queue_run(monkeypatch, repo, recipe="")
+    station = _station(StreamingClaude(develop=[_write("ok")]), repo, checks=(check,))
+    await HeadlessDevelopRunner(develop_fn=station).run(action_id)
+
+    error = (await store.get_action(action_id)).parameters["_code_change"]["headless_error"]
+    assert "CHECK:" in error and "drwxr-xr-x  5 user  staff  160" in error
+    assert me not in error.replace(check, "")
+
+
 async def test_save_run_feed_upserts_per_workspace_and_keeps_created_at(mongo_db):
     """One row per (workspace, run, stage): an update keeps ``createdAt`` and
     replaces the steps; another workspace's same run/stage is its own row."""
@@ -616,6 +667,8 @@ def test_worktree_paths_are_relative_whatever_the_prefix_order(tmp_path):
     """Both spellings of the worktree go, for many dir names (a set's iteration
     order differs per string; neither order may mangle ``/private/var`` into
     ``/p...README.md``), bare roots read ``.``, and a sibling keeps its path."""
+    import getpass
+
     link = _linked_dir(tmp_path)
     for i in range(24):
         cwd = link / f"belt-develop-{i:02d}x" / "wt"
@@ -635,8 +688,25 @@ def test_worktree_paths_are_relative_whatever_the_prefix_order(tmp_path):
             "b": "src/x.py",
             "c": "cd . && pwd",
             "d": ".",
-            "e": f"{cwd}-old/y",  # a sibling keeps its path
+            # A sibling keeps its path (pytest's tmp dir names the OS account).
+            "e": f"{cwd}-old/y".replace(getpass.getuser(), "user"),
         }
+
+
+def test_the_host_user_name_reads_user_after_the_paths_go(tmp_path):
+    """Whole word (a line opening after a literal ``\\n`` in stream-json counts)
+    and case-sensitive. Paths go first: pytest's tmp dir holds the user name
+    (``pytest-of-<user>``), so redacting it first would leave every worktree
+    path whole."""
+    import getpass
+
+    me = getpass.getuser()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    text = f"drwxr-xr-x  5 {me}  staff  160 .\n{cwd}/a.py\n{me}x x{me} {me.upper()}\\n{me}"
+    assert ds._relative_paths(text, cwd) == (
+        f"drwxr-xr-x  5 user  staff  160 .\na.py\n{me}x x{me} {me.upper()}\\nuser"
+    )
 
 
 # ---------------------------------------------------------------------------

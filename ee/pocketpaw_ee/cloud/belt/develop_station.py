@@ -14,7 +14,8 @@
 #            (``belt/feed.py``, scrubbed + capped), stored via the belt service
 #            before any error is raised (the stage is emptied when a develop
 #            starts); a failed save never fails the run. Seat output and every
-#            error tail have the worktree and repo paths made relative.
+#            error tail have the worktree and repo paths made relative and the
+#            host's OS account name replaced by ``user``.
 #   CHECK    every charter check; FIX (``claude -p`` with the failure) while
 #            attempts last. REVIEW: read-only ``claude -p`` judges the diff,
 #            failing duplicates of existing code; strict ``{"verdict","notes"}``.
@@ -49,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import getpass
 import json
 import logging
 import os
@@ -596,6 +598,8 @@ _PATH_START = r"(?:(?<=\\[nrt])|(?<![\w.\-/~]))"
 # A bare root ends where its name does: a sentence's full stop (``in <wt>.``)
 # still ends it, a sibling's name (``<wt>.bak``, ``<wt>_v2``, ``<wt>-old``) doesn't.
 _BARE_END = r"(?![\w\-]|\.[\w\-])"
+# A word starts after a non-word char, or after a ``\n`` / ``\t`` escape.
+_WORD_START = r"(?:(?<=\\[nrt])|(?<!\w))"
 
 
 def _relative_paths(text: str, *roots: Path) -> str:
@@ -603,12 +607,20 @@ def _relative_paths(text: str, *roots: Path) -> str:
     ``x`` and a bare ``<root>`` (``cd <root> &&``, a ``pwd`` result) -> ``.``.
     Only whole paths match (``_PATH_START`` / ``_BARE_END``). The CLI reports the
     PHYSICAL path (macOS: ``/private/var/...`` for a ``/var/...`` temp dir), so
-    both spellings go, the longer first."""
+    both spellings go, the longer first. Then the host's OS account name (an
+    ``ls -l`` owner column, a ``whoami``) reads ``user``: whole word,
+    case-sensitive, and only after the roots, which can hold it."""
     spellings = {str(r) for r in roots} | {os.path.realpath(r) for r in roots}
     for root in sorted(spellings, key=len, reverse=True):
         escaped = re.escape(root)
         text = re.sub(_PATH_START + escaped + "/", "", text)
         text = re.sub(_PATH_START + escaped + _BARE_END, ".", text)
+    try:
+        me = getpass.getuser()
+    except (OSError, KeyError):  # no login name and no passwd entry
+        me = ""
+    if me:
+        text = re.sub(_WORD_START + re.escape(me) + r"(?!\w)", "user", text)
     return text
 
 

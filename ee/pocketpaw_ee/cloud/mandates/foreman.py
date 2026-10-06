@@ -21,7 +21,8 @@
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
 # and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
 # set), and they pin every seat to no settings files, no MCP and no hooks (only
-# the develop station's owner setup opts out). ``run_claude_no_tools`` is the sandboxed
+# the develop station's owner setup opts out) and no persisted session (no seat
+# opts out). ``run_claude_no_tools`` is the sandboxed
 # tool-less call the foreman and the autopilot personas share. Prompts ride
 # stdin, never argv or a shell.
 #
@@ -151,7 +152,9 @@ def claude_cli_argv(*args: str, isolated: bool = True, stream: bool = False) -> 
 
     Every factory LLM seat (foreman, develop, fix, review) builds its command
     here: ``<bin> -p <args...> <isolation flags> --output-format json
-    [--model M]``. The binary is ``POCKETPAW_FACTORY_CLAUDE_BIN``, else
+    --no-session-persistence [--model M]``. No seat persists its session: the
+    transcript would keep the whole prompt (task, crew instructions) under
+    ``~/.claude/projects`` on the host. The binary is ``POCKETPAW_FACTORY_CLAUDE_BIN``, else
     ``claude`` on PATH — never the SDK's bundled copy, which goes stale.
     Resolved per call so env changes apply. ``isolated=False`` drops the
     isolation flags: only the develop station's owner setup passes it, and only
@@ -163,6 +166,7 @@ def claude_cli_argv(*args: str, isolated: bool = True, stream: bool = False) -> 
     isolation = _ISOLATION_FLAGS if isolated else ()
     output = ("stream-json", "--verbose") if stream else ("json",)
     argv = [binary, "-p", *args, *isolation, "--output-format", *output]
+    argv.append("--no-session-persistence")
     model = (os.environ.get("POCKETPAW_FACTORY_CLAUDE_MODEL") or "").strip()
     if model:
         argv += ["--model", model]
