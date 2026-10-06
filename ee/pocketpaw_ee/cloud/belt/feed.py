@@ -101,14 +101,22 @@ def stream_events(stdout: str) -> Iterator[AgentEvent]:
 
 
 def fold_feed(events: Iterator[AgentEvent] | list[AgentEvent]) -> StepRecorder:
-    """Fold events into a finalized, capped ``StepRecorder``."""
+    """Fold events into a finalized, capped ``StepRecorder``. Consecutive whole
+    prose/thinking blocks land in one thinking step, a blank line apart (the
+    recorder itself concatenates, being built for streamed deltas)."""
     recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=FEED_MAX_BYTES)
+    prose_open = False
     for event in events:
         at = _parse_time(event.metadata.get("timestamp"))
-        if event.type == "message":
-            # The developer's prose: kept as a thought (see the header).
-            recorder.observe("thinking", {"content": event.content}, at)
+        if event.type in ("message", "thinking"):
+            # The developer's prose is kept as a thought (see the header).
+            text = event.content if isinstance(event.content, str) else ""
+            if text:
+                sep = "\n\n" if prose_open else ""
+                recorder.observe("thinking", {"content": sep + text}, at)
+                prose_open = True
             continue
+        prose_open = False
         if event.type == "tool_use":
             record_agent_event(
                 recorder, event, event.metadata.get("name", ""), event.metadata.get("input"), now=at

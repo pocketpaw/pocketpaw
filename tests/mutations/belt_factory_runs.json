@@ -263,8 +263,8 @@
   {
     "label": "feed: a failed develop raises before its feed is stored",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        if feed_for is not None:\n            await self._store_feed(feed_for, step, out, cwd)\n        if code != 0:\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(err or out)}\")\n",
-    "replace": "        if code != 0:\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(err or out)}\")\n        if feed_for is not None:\n            await self._store_feed(feed_for, step, out, cwd)\n",
+    "find": "        if feed_for is not None:\n            await self._store_feed(feed_for, step, out, cwd)\n        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n",
+    "replace": "        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n        if feed_for is not None:\n            await self._store_feed(feed_for, step, out, cwd)\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
     ]
@@ -312,6 +312,51 @@
     "replace": "    doc = await BeltRunFeed.find_one(\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_feed_route_tenancy_and_empty"
+    ]
+  },
+  {
+    "label": "feed: worktree prefixes are stripped in set order, so a /private/var path loses its middle",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "    for prefix in sorted({f\"{cwd}/\", f\"{os.path.realpath(cwd)}/\"}, key=len, reverse=True):\n",
+    "replace": "    for prefix in {f\"{cwd}/\", f\"{os.path.realpath(cwd)}/\"}:\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_worktree_paths_are_relative_whatever_the_prefix_order"
+    ]
+  },
+  {
+    "label": "feed: the worktree prefix is left on stored paths",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        stdout = _relative_paths(stdout, cwd)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: a failing save fails the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        except Exception:  # noqa: BLE001 — the feed is a view; it never fails a run\n",
+    "replace": "        except ValueError:  # noqa: BLE001 — the feed is a view; it never fails a run\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_failing_save_never_fails_the_run"
+    ]
+  },
+  {
+    "label": "feed: a failed develop records raw stream-json as its error",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            said = err or _claude_said(out)\n",
+    "replace": "            said = err or out\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: back-to-back prose blocks run together",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "                sep = \"\\n\\n\" if prose_open else \"\"\n",
+    "replace": "                sep = \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
     ]
   }
 ]

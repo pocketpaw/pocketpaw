@@ -539,8 +539,11 @@ once it exits the station folds its stdout into steps and stores them. Path:
   shape with the same per-field caps and the same scrub: secret-named input
   keys masked, and every string in a tool input and every result redacted
   with `security.redact` patterns. The developer's prose between tool calls
-  has no chat-step kind and is stored as a `thinking` step. Worktree paths are
-  shown relative.
+  has no chat-step kind and is stored as a `thinking` step; back-to-back
+  prose and thinking blocks share one step, a blank line apart. Worktree paths
+  are shown relative: both the station's spelling and the physical one the CLI
+  reports (macOS `/private/var/...` for a `/var/...` temp dir) are stripped,
+  the longer first, so neither cuts into the other.
 - Caps: 2,000 steps and 2 MB per stored feed (`FEED_MAX_STEPS`,
   `FEED_MAX_BYTES`); what is dropped is counted in `steps_omitted`. Only the
   develop stage is captured today, so that is also the per-run budget.
@@ -555,8 +558,12 @@ once it exits the station folds its stdout into steps and stores them. Path:
 - The feed is stored before a failed seat raises, so a develop that died
   mid-tool still shows its steps (the open call reads `missing_result`). The
   save is best-effort: a fold or Mongo failure is logged and never fails the
-  run. A seat killed by the timeout prints nothing the station keeps, so it
-  stores no feed.
+  run. A failed seat's `headless_error` carries what claude said (the result
+  envelope's text, else its last prose, redacted), never the raw stream-json.
+- Known gap: a seat killed by the timeout or a cancel stores no feed, because
+  `run_subprocess` collects stdout only when the process exits and discards it
+  on a kill. Reading the stream line by line as it arrives (BF-4's per-line
+  callback) closes it, along with live tailing.
 - `GET /api/v1/belt/runs/{id}/feed?stage=develop` (`belt.read`) returns
   `{action_id, stage, steps?, stepsOmitted?}`, the steps in the chat history
   wire shape (`steps_wire_fields`), so the UI maps them with
@@ -780,13 +787,18 @@ base, the first landed and merged, the second re-developed once and back at the
 gate, a second conflict failing with "base moved twice", and no develop loop
 failing with its reason. `tests/cloud/test_belt_feed.py` drives a queued run
 through the real runner and station with a `claude` that prints captured-shape
-stream-json: steps stored in order and served by the feed route, relative
-paths, secrets planted in a tool result and a tool input absent from storage
+stream-json: steps stored in order and served by the feed route, prose blocks
+a blank line apart, relative paths (the run's temp dir reached through a
+symlink whose physical path ends with it, and 24 such dirs for the prefix
+order), secrets planted in a tool result and a tool input absent from storage
 and the response, the result envelope read past the trailing system line, a
-failed develop still storing its feed, a failing save not failing the run, the
-step and byte caps, and the route's tenancy 404.
-`tests/mutations/belt_factory_runs.json` breaks each of these on purpose. CI runs these in the "Belt mandates and the craft factory
-develop station" step (`tests/cloud` is outside the default addopts).
+failed develop still storing its feed and recording claude's words rather than
+stream-json, a failing save not failing the run, the step and byte caps, and
+the route's tenancy 404.
+`tests/mutations/belt_factory_runs.json` breaks each of these on purpose
+(the `feed:` entries for the feed). CI runs these in the "Belt mandates and the
+craft factory develop station" step (`tests/cloud` is outside the default
+addopts).
 
 `tests/cloud/test_belt_autopilot.py` (feat/belt-autopilot) pins both new pieces:
 autopilot start persists state + runs an immediate cycle whose sightings carry

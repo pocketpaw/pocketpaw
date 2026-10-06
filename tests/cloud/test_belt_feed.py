@@ -8,14 +8,20 @@
 # the tool_use_id, the result envelope, then one more system line). Pins: the
 # develop seat streams and the station still reads the result envelope; the
 # steps are stored per run + stage in order (mongomock) and served by
-# ``GET /belt/runs/{id}/feed`` in the chat wire shape; worktree paths show
-# relative; a secret planted in a tool result or a tool input reaches neither
-# storage nor the response; a failed develop still stores its feed; a failing
-# save never fails the run; the step cap; and the route's tenancy 404.
+# ``GET /belt/runs/{id}/feed`` in the chat wire shape, back-to-back prose
+# blocks a blank line apart; worktree paths show relative even when the temp
+# dir is reached through a symlink and the CLI reports the physical path (the
+# macOS ``/var`` -> ``/private/var`` case); a secret planted in a tool result
+# or a tool input reaches neither storage nor the response; a failed develop
+# still stores its feed and records what claude said, not raw stream-json; a
+# failing save never fails the run; the step and byte caps; and the route's
+# tenancy 404.
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -58,6 +64,11 @@ def _stream(cwd: Path, *, is_error: bool = False, cut: bool = False) -> str:
             "type": "assistant",
             "timestamp": _t(0),
             "message": {"content": [{"type": "thinking", "thinking": "", "signature": "x"}]},
+        },
+        {
+            "type": "assistant",
+            "timestamp": _t(0),
+            "message": {"content": [{"type": "thinking", "thinking": "The task wants a file."}]},
         },
         {
             "type": "assistant",
@@ -184,7 +195,29 @@ class StreamingClaude(FakeClaude):
         await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin)
         if fmt[:2] != ["stream-json", "--verbose"]:
             return 0, json.dumps({"type": "result", "result": "done"}), ""
-        return self.code, _stream(Path(cwd), is_error=self.is_error, cut=self.cut), ""
+        # The CLI reports the physical path, as ``getcwd`` does.
+        cwd = Path(os.path.realpath(cwd))
+        return self.code, _stream(cwd, is_error=self.is_error, cut=self.cut), ""
+
+
+def _linked_dir(tmp_path: Path) -> Path:
+    """A dir reached through a symlink whose physical path ENDS with the link's
+    path: the shape of macOS ``/var`` -> ``/private/var``, where stripping the
+    shorter prefix first corrupts paths (``/privateREADME.md``)."""
+    link = tmp_path / "v"
+    real = Path(f"{tmp_path}/p{tmp_path}/v")
+    real.mkdir(parents=True)
+    link.symlink_to(real)
+    assert os.path.realpath(link) == f"{tmp_path}/p{link}"
+    return link
+
+
+@pytest.fixture
+def linked_tmp(tmp_path: Path, monkeypatch) -> Path:
+    """Station temp dirs (``mkdtemp``) land under ``_linked_dir``."""
+    link = _linked_dir(tmp_path)
+    monkeypatch.setattr(tempfile, "tempdir", str(link))
+    return link
 
 
 @pytest.fixture
@@ -207,7 +240,13 @@ async def _feed_doc(action_id: str):
 # ---------------------------------------------------------------------------
 
 
-async def test_develop_feed_is_stored_in_order_and_served(repo, store, mongo_db, monkeypatch):  # noqa: F811
+async def test_develop_feed_is_stored_in_order_and_served(
+    repo,  # noqa: F811
+    store,
+    mongo_db,
+    monkeypatch,
+    linked_tmp,
+):
     action_id = await _queue_run(monkeypatch, repo, recipe="")
     fake = StreamingClaude(develop=[_write("ok")])
     await HeadlessDevelopRunner(develop_fn=_station(fake, repo)).run(action_id)
@@ -221,7 +260,7 @@ async def test_develop_feed_is_stored_in_order_and_served(repo, store, mongo_db,
     assert doc is not None and doc.stage == "develop" and doc.steps_omitted == 0
     shape = [(s["kind"], s["tool"] or s["text"]) for s in doc.steps]
     assert shape == [
-        ("thinking", "I'll add feature.txt."),
+        ("thinking", "The task wants a file.\n\nI'll add feature.txt."),
         ("tool", "Read"),
         ("tool", "Write"),
         ("tool", "Edit"),
@@ -269,6 +308,9 @@ async def test_failed_develop_still_stores_its_feed(repo, store, mongo_db, monke
 
     blob = (await store.get_action(action_id)).parameters["_code_change"]
     assert "DEVELOP: claude exited 1" in blob["headless_error"]
+    # What claude last said, not the raw stream-json it printed.
+    assert "I'll add feature.txt." in blob["headless_error"]
+    assert '"type"' not in blob["headless_error"]
     doc = await _feed_doc(action_id)
     assert [s["tool"] for s in doc.steps] == ["", "Read", "Write"]
     # The call the CLI died in says so instead of spinning.
@@ -287,6 +329,19 @@ async def test_a_failing_save_never_fails_the_run(repo, store, monkeypatch, capl
     blob = (await store.get_action(action_id)).parameters["_code_change"]
     assert "+ok" in blob["diff"] and not blob.get("headless_error")
     assert "could not store the develop feed" in caplog.text
+
+
+def test_worktree_paths_are_relative_whatever_the_prefix_order(tmp_path):
+    """Both spellings of the worktree go, longest first, for many dir names: a
+    set's iteration order differs per string, so a station that relied on it
+    would mangle some of these (``/p...README.md``) in any process."""
+    link = _linked_dir(tmp_path)
+    for i in range(24):
+        cwd = link / f"belt-develop-{i:02d}x" / "wt"
+        cwd.mkdir(parents=True)
+        physical = os.path.realpath(cwd)
+        text = json.dumps({"a": f"{physical}/README.md", "b": f"{cwd}/src/x.py"})
+        assert json.loads(ds._relative_paths(text, cwd)) == {"a": "README.md", "b": "src/x.py"}
 
 
 # ---------------------------------------------------------------------------

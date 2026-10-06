@@ -492,11 +492,12 @@ class ClaudeCodeDevelop:
         if feed_for is not None:
             await self._store_feed(feed_for, step, out, cwd)
         if code != 0:
-            raise DevelopStationError(f"{step}: claude exited {code}: {_tail(err or out)}")
+            said = err or _claude_said(out)
+            raise DevelopStationError(f"{step}: claude exited {code}: {_tail(said)}")
         envelope = claude_result_envelope(out)
         if envelope is not None and envelope.get("is_error"):
             raise DevelopStationError(
-                f"{step}: claude reported an error: {_tail(str(envelope.get('result') or out))}"
+                f"{step}: claude reported an error: {_tail(_claude_said(out))}"
             )
         return claude_result_text(out)
 
@@ -506,8 +507,7 @@ class ClaudeCodeDevelop:
         ``action_id`` stores nothing, and a fold or save failure is logged."""
         if not request.action_id or not stdout:
             return
-        for prefix in {f"{cwd}/", f"{os.path.realpath(cwd)}/"}:
-            stdout = stdout.replace(prefix, "")
+        stdout = _relative_paths(stdout, cwd)
         try:
             # Parsing and redacting a few MB is CPU work; keep it off the loop.
             recorder = await asyncio.to_thread(lambda: fold_feed(stream_events(stdout)))
@@ -559,6 +559,29 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"REVIEW: unparseable verdict: {text[:300]!r}")
         notes = [str(n) for n in verdict.get("notes") or []]
         return verdict["verdict"] == "pass", notes
+
+
+def _relative_paths(text: str, cwd: Path) -> str:
+    """``text`` with the worktree prefix stripped from every path in it. The CLI
+    reports the PHYSICAL path (macOS: ``/private/var/...`` for a ``/var/...``
+    temp dir), so both spellings go, the longer first: replacing the shorter one
+    first would cut it out of the middle of the longer (``/privateREADME.md``)."""
+    for prefix in sorted({f"{cwd}/", f"{os.path.realpath(cwd)}/"}, key=len, reverse=True):
+        text = text.replace(prefix, "")
+    return text
+
+
+def _claude_said(stdout: str) -> str:
+    """What a failed claude call said, for an error message: the result
+    envelope's text, else a stream's last assistant prose, else a bare-text
+    stdout. Never raw stream-json (callers redact it through ``_tail``)."""
+    envelope = claude_result_envelope(stdout)
+    if envelope is not None:
+        return str(envelope.get("result") or envelope.get("subtype") or "no message")
+    prose = [e.content for e in stream_events(stdout) if e.type == "message"]
+    if prose:
+        return str(prose[-1])
+    return "no message" if stdout.lstrip().startswith("{") else stdout
 
 
 @dataclass(frozen=True)
