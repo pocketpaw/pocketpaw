@@ -139,7 +139,24 @@ ROUTER_MODULES = [
     ("sessions", "pocketpaw_ee.cloud.sessions.router"),
     ("site_templates", "pocketpaw_ee.cloud.site_templates.router"),
     ("workspace", "pocketpaw_ee.cloud.workspace.router"),
+    # Mounted without joining this list while CI never ran the coverage
+    # ratchet. Every route on each was walked by hand: all are session-guarded
+    # except the five public ones named in the allowlist below.
+    ("partners", "pocketpaw_ee.cloud.partners.router"),
+    ("studio_templates", "pocketpaw_ee.cloud.studio_templates.router"),
+    ("discover", "pocketpaw_ee.cloud.discover.router"),
+    ("ai_visibility", "pocketpaw_ee.cloud.ai_visibility.router"),
+    ("lead_notifications", "pocketpaw_ee.cloud.leads.notifications_router"),
+    ("lens", "pocketpaw_ee.cloud.lens.router"),
+    ("paw_bar_knowledge", "pocketpaw_ee.paw_bar.knowledge_routes"),
+    ("paw_bar_catalog", "pocketpaw_ee.paw_bar.catalog_routes"),
 ]
+
+#: Modules that mount more than their ``router`` attribute. Anything not named
+#: here is audited through ``router`` alone.
+ROUTER_ATTRS: dict[str, tuple[str, ...]] = {
+    "pocketpaw_ee.cloud.ai_visibility.router": ("router", "site_router"),
+}
 
 #: Routes that are public BY DESIGN, each with the reason it has to be.
 #: Anything not here must require a session.
@@ -190,6 +207,17 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     "GET /agents/backends": "static list of backend names",
     "GET /pockets/builtin-widgets": "static widget catalogue",
     "GET /decisions/_ping": "liveness probe",
+    # --- public indexes and tools, each behind its own abuse control ---
+    "GET /discover": "public index of shareable items; per-IP limit (rate_limit_discover_public)",
+    "GET /discover/{listing_id}": "one public listing; same per-IP limit",
+    "POST /tools/ai-check": (
+        "free AI check; per-IP limit (rate_limit_ai_check_public) and the daily USD "
+        "spend cap always apply, Turnstile when POCKETPAW_TURNSTILE_SECRET is set"
+    ),
+    "GET /lead-notifications/confirm/{token}": (
+        "emailed confirm link; the 7-day token is the credential, GET has no side effect"
+    ),
+    "POST /lead-notifications/confirm/{token}": "confirms; the emailed 7-day token authorises",
     # --- git smart-HTTP: authenticates in-handler, not via a FastAPI dep ---
     "GET /codegit/{owner}/{repo}/info/refs": "git protocol; own token auth in-handler",
     "POST /codegit/{owner}/{repo}/git-upload-pack": "git protocol; own token auth in-handler",
@@ -251,10 +279,11 @@ def _collect() -> list[tuple[str, str]]:
     unguarded: list[tuple[str, str]] = []
     for name, module_path in ROUTER_MODULES:
         try:
-            router = importlib.import_module(module_path).router
+            module = importlib.import_module(module_path)
+            routers = [getattr(module, a) for a in ROUTER_ATTRS.get(module_path, ("router",))]
         except Exception as exc:  # noqa: BLE001 — reported, not swallowed
             pytest.fail(f"router {name} ({module_path}) failed to import: {exc}")
-        for route in router.routes:
+        for route in (r for router in routers for r in router.routes):
             # WebSockets authenticate in-handler (ticket / JWT / cookie), since
             # a dependency cannot 401 a socket. Covered by the chat WS tests.
             if not isinstance(route, APIRoute):

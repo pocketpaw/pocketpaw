@@ -310,6 +310,19 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run route auth audit and coverage ratchet
+        # Same addopts escape. The audit asserts every route on an audited
+        # router has a session guard or a named allowlist reason; the coverage
+        # file pins how many mounted routers sit outside that audit, so a PR
+        # that mounts a router without auditing it fails here. Neither ran in
+        # CI before, so eight routers were mounted past the pin unnoticed.
+        run: >-
+          uv run pytest tests/cloud/auth/test_route_auth_coverage.py
+          tests/cloud/auth/test_route_auth_audit.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run paw-lens proxy tests
         # Same addopts escape. Proves the lens proxy injects the caller's
         # workspace_id (never a client-supplied one), degrades to a 503, never a
