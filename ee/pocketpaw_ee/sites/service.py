@@ -1409,6 +1409,8 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # A connected (foreign-origin) site — see SiteResponse.foreign_origin.
         foreign_origin=bool(getattr(doc, "foreign_origin", False)),
         allowed_origins=list(getattr(doc, "allowed_origins", None) or []),
+        # The connected site's own page title; "" on every row that predates it.
+        origin_title=getattr(doc, "origin_title", "") or "",
         # SL-3: the build lane's state, straight off the persisted row. These three
         # were declared on the DTO by SG-9i and never populated here, so every
         # response carried the DEFAULTS — ``build_status`` frozen at "none" no matter
@@ -2107,6 +2109,7 @@ async def bind_foreign_concierge(
             )
             return existing
 
+        minted = True
         try:
             site = await mint_foreign_site(
                 workspace_id=workspace_id,
@@ -2142,6 +2145,7 @@ async def bind_foreign_concierge(
                     scopes=scopes,
                 )
             else:
+                minted = False
                 site = adopted
                 logger.info(
                     "sites.bind_foreign: lost the insert race for pocket %s; adopted "
@@ -2150,6 +2154,13 @@ async def bind_foreign_concierge(
                     str(site.id),
                 )
 
+    if minted:
+        # A connected site never deploys, so nothing else gives its card a title,
+        # an icon and a picture. Background, never raises; the winner of a race
+        # schedules its own, so an adopted row does not schedule a second.
+        from pocketpaw_ee.sites import connected_card
+
+        connected_card.schedule_connected_card(site)
     return site
 
 
@@ -2273,7 +2284,37 @@ async def rebind_foreign_concierge(
         str(site.id),
         bound or "<none>",
     )
+    from pocketpaw_ee.sites import connected_card
+
+    connected_card.schedule_connected_card(site)
     return bound
+
+
+async def schedule_connected_cards_for_origin(workspace_id: str, host: str) -> int:
+    """Refresh the card of every connected site in this workspace served on ``host``.
+
+    Called after an origin is (re-)verified: a fresh proof is what lets the card
+    refresh read the customer's page, so a site whose proof had gone stale picks up
+    its title, icon and picture here. Returns how many were scheduled. Never raises
+    to the caller's request: the verification already succeeded.
+    """
+    from pocketpaw_ee.sites import connected_card
+
+    wanted = (host or "").strip().lower()
+    if not workspace_id or not wanted:
+        return 0
+    try:
+        docs = await _SiteDoc.find({"workspace": workspace_id, "foreign_origin": True}).to_list()
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.connected_card: could not list connected sites", exc_info=True)
+        return 0
+    count = 0
+    for doc in docs:
+        hosts = {str(h).strip().lower() for h in (getattr(doc, "allowed_origins", None) or [])}
+        if wanted in hosts:
+            connected_card.schedule_connected_card(doc)
+            count += 1
+    return count
 
 
 async def publish(
@@ -4160,6 +4201,21 @@ async def refresh_site_preview(*, workspace_id: str, site_id: str) -> SitePrevie
                 "The site isn't answering yet. A deploy can take a moment to go "
                 "live at the edge — try the refresh again shortly.",
             )
+        if target.foreign:
+            # A connected site's card also carries the customer's page title and
+            # icon; one safe fetch of the homepage refreshes both. Best-effort: a
+            # failed read keeps the stored values and never changes this
+            # endpoint's error contract, which is about the picture.
+            from pocketpaw_ee.sites import connected_card
+
+            try:
+                await connected_card.refresh_card_meta(site)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "sites.preview_refresh: title/icon refresh failed for site %s",
+                    site_id,
+                    exc_info=True,
+                )
         # A single confirming probe immediately before the paid render, so the gate
         # has no bypass path: every call into ``take_site_screenshot`` is gated.
         image_url = await take_site_screenshot(site, ready_delays=())

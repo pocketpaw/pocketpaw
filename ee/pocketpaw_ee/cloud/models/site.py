@@ -812,6 +812,11 @@ class Site(TimestampedDocument):
     # back to the globe on empty, so this is never a gate on publishing. Defaults ""
     # so every existing row reads "no icon" — no migration.
     favicon_url: str = ""
+    # What a CONNECTED site's own homepage calls itself (its <title>, else
+    # og:title), sanitised and capped. Written by ``sites.connected_card`` from one
+    # safe fetch of the verified origin. Never the owner's ``name``: the card shows
+    # name, then this, then the host. "" for hosted sites and rows that predate it.
+    origin_title: str = ""
     # The site owner's record of WHO this site is for, and what they have billed
     # them. Two billing relationships meet on this document and they are not the
     # same one: ``plan_tier`` / ``subscription_status`` above are what the owner
