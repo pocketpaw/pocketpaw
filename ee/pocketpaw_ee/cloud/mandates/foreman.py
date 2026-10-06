@@ -179,16 +179,23 @@ def claude_cli_argv(
     return argv
 
 
-_CLI_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$")
+# A Claude model the CLI runs: a ``claude-*`` id (optionally region/provider
+# dotted, e.g. ``us.anthropic.claude-…``) or a CLI alias, with an optional
+# ``[1m]`` context suffix. Lowercase only; nothing that could read as a flag.
+_CLI_MODEL = re.compile(
+    r"^(?:(?:[a-z0-9-]+\.)*claude-[a-z0-9.:-]+|default|sonnet|opus|haiku|opusplan|fable)"
+    r"(?:\[1m\])?$"
+)
 
 
 def cli_model(model: str) -> str:
     """An Agent's model id as the claude CLI takes it, or ``""`` (use the env).
 
     Agent models are catalog ids (``anthropic/claude-sonnet-4-5``), so the
-    ``anthropic/`` prefix is dropped. Anything else with a provider prefix, or a
-    value that could read as a flag (``-x``), is not a claude model: ``""``."""
-    model = (model or "").strip().removeprefix("anthropic/")
+    ``anthropic/`` prefix is dropped and the id lowercased. Only a Claude model
+    passes (``claude-*`` or a CLI alias); another provider's model (``gpt-4o``,
+    ``openai/gpt-4o``) or a value that could read as a flag is ``""``."""
+    model = (model or "").strip().lower().removeprefix("anthropic/")
     return model if _CLI_MODEL.match(model) else ""
 
 

@@ -288,10 +288,21 @@ async def test_worker_model_wins_over_env_which_stays_the_fallback(repo, monkeyp
     develop, review = _claude_argvs(fake)
     assert _model(develop) == "claude-sonnet-4-5" and _model(review) == "opus"
 
-    for model in ("", "openai/gpt-4o", "--dangerously-skip-permissions"):
+    for model in ("", "openai/gpt-4o", "gpt-4o", "--dangerously-skip-permissions"):
         fake = FakeClaude(develop=[_write("ok")])
         await _station(fake, repo)(replace(_request(repo), model=model))
         assert _model(_claude_argvs(fake)[0]) == "opus", model
+
+
+async def test_a_non_claude_worker_model_falls_back_and_the_report_says_why(repo, monkeypatch):
+    """A worker on another provider's model (``gpt-4o``, no prefix) can't run on
+    the claude CLI: the develop runs on the factory model instead of failing,
+    and the report names the reason."""
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLAUDE_MODEL", "opus")
+    fake = FakeClaude(develop=[_write("ok")])
+    result = await _station(fake, repo)(replace(_request(repo), worker="Ada", model="gpt-4o"))
+    assert _model(_claude_argvs(fake)[0]) == "opus"
+    assert "worker: Ada (model default: 'gpt-4o' is not a Claude model)" in result.summary
 
 
 async def test_seat_setup_selects_the_claude_setup(repo, tmp_path, monkeypatch):
@@ -323,7 +334,11 @@ def test_cli_model_maps_catalog_ids_and_refuses_the_rest():
     assert foreman.cli_model("sonnet") == "sonnet"
     assert foreman.cli_model(" anthropic/claude-sonnet-4-5 ") == "claude-sonnet-4-5"
     assert foreman.cli_model("claude-opus-4-1[1m]") == "claude-opus-4-1[1m]"
-    for refused in ("", "openai/gpt-4o", "-p", "--model", "a b", "x;y"):
+    assert foreman.cli_model("Opus") == "opus" and foreman.cli_model("fable") == "fable"
+    assert foreman.cli_model("us.anthropic.claude-sonnet-4-5-v1:0") == (
+        "us.anthropic.claude-sonnet-4-5-v1:0"
+    )
+    for refused in ("", "openai/gpt-4o", "gpt-4o", "o3", "claude", "-p", "--model", "a b", "x;y"):
         assert foreman.cli_model(refused) == "", refused
 
 

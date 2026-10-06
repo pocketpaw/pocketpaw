@@ -449,10 +449,13 @@ the factory env for everything, setup included, and the report says
 
 - `model` sets `--model` on the DEVELOP and FIX calls, over
   `POCKETPAW_FACTORY_CLAUDE_MODEL`. Agent models are catalog ids, so
-  `anthropic/claude-sonnet-4-5` becomes `claude-sonnet-4-5`; a model the CLI
-  can't run (another provider, or a value that reads as a flag) falls back to
-  the env (`foreman.cli_model`). REVIEW keeps the factory model: the reviewer
-  stays independent of the worker.
+  `anthropic/claude-sonnet-4-5` becomes `claude-sonnet-4-5`. Only a Claude
+  model passes (`claude-*`, optionally region-dotted, or a CLI alias: sonnet,
+  opus, haiku, opusplan, fable, default); another provider's model (`gpt-4o`,
+  `openai/gpt-4o`) or a value that reads as a flag falls back to the env
+  (`foreman.cli_model`) and the report says `model default: 'gpt-4o' is not a
+  Claude model`. REVIEW keeps the factory model: the reviewer stays
+  independent of the worker.
 - `instructions` (capped at 4,000 chars) ride the develop and fix prompts as
   style notes, after the charter, INSIDE the `<untrusted>` fence: an agent's
   owner edits them without `belt.manage` and they are re-read at every

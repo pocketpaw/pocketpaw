@@ -415,8 +415,7 @@ class ClaudeCodeDevelop:
                 lines.append(f"recipe: {request.recipe}")
             lines.append(f"setup: {'owner' if trust else 'strict'}")
             if request.worker:
-                note = request.worker_note or f"model {cli_model(request.model) or 'default'}"
-                lines.append(f"worker: {request.worker} ({note})")
+                lines.append(f"worker: {request.worker} ({_worker_note(request)})")
             lines.append(f"orient: {orient_note}")
             lines += [f"check `{r.command}`: {'pass' if r.ok else 'fail'}" for r in results]
             lines.append(f"review: {verdict}")
@@ -793,6 +792,18 @@ def _architecture(orient: str) -> str:
 
 
 _INSTRUCTIONS_CHARS = 4000
+
+
+def _worker_note(request: DevelopRequest) -> str:
+    """The report's word on the worker: why its settings were not used, else
+    the model its develop and fix ran on (and why that is the default)."""
+    if request.worker_note:
+        return request.worker_note
+    if model := cli_model(request.model):
+        return f"model {model}"
+    if raw := request.model.strip():
+        return f"model default: {raw[:60]!r} is not a Claude model"
+    return "model default"
 
 
 def _worker_block(request: DevelopRequest) -> str:
