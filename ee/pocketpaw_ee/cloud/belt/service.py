@@ -20,10 +20,12 @@
 #     ``headless_error`` / ``headless_state`` / ``redevelop``) are read
 #     STRUCTURALLY off the blob; ``error`` is the failure reason (``Action.error``, else
 #     ``headless_error``). The mandates digest reads this same list.
-#   * ``save_run_feed`` / ``get_run_feed`` — a run stage's step feed (what the
-#     develop station's claude seat did), one ``BeltRunFeed`` row per (workspace,
-#     run, stage), kept out of the Action blob that ``list_runs`` reads in bulk.
-#     The read shares ``get_run``'s tenancy 404 and returns chat-shaped steps.
+#   * ``save_run_feed`` / ``get_run_feed`` — a run stage's step feed (what one
+#     station step did), one ``BeltRunFeed`` row per (workspace, run, stage),
+#     kept out of the Action blob that ``list_runs`` reads in bulk. The read
+#     shares ``get_run``'s tenancy 404 and returns chat-shaped steps.
+#   * ``open_run_stream`` — the same feed live: the run's stream as SSE, the
+#     newest attempt replayed from its start, same tenancy 404.
 #
 # Security: git runs through ``create_subprocess_exec`` with argv lists; a
 # submitted path is realpath-resolved and confirmed to be a git repo before it
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -806,7 +809,7 @@ async def save_run_feed(
         },
         upsert=True,
     )
-    # no-event: the run page reads the feed on open; live tailing is a later slice.
+    # no-event: live frames ride the run stream (``belt/feed.RunFeed``); this row is the record.
 
 
 async def get_run_feed(workspace_id: str, action_id: str, stage: str) -> dict[str, Any]:
@@ -829,6 +832,60 @@ async def get_run_feed(workspace_id: str, action_id: str, stage: str) -> dict[st
     return out
 
 
+# How long one scan read waits for more entries: the scan only walks what is
+# already on the stream, so it must never park (``XREAD BLOCK 0`` is forever).
+_SCAN_BLOCK_MS = 5
+
+
+async def _attempt_cursor(transport: Any, sid: str) -> str:
+    """The cursor just before the run stream's newest ``start`` frame (``"0"``
+    when it is the first). A re-developed run holds one attempt after another,
+    each ending in a terminal ``stream_end``, and a read stops at a terminal,
+    so the scan re-reads from each cursor until a read brings nothing."""
+    cursor = start = "0"
+    while True:
+        moved = False
+        async for ev in transport.read_events(sid, after=cursor, block_ms=_SCAN_BLOCK_MS):
+            if ev.event == "start":
+                start = cursor
+            cursor = ev.entry_id
+            moved = True
+        if not moved:
+            return start
+
+
+async def open_run_stream(workspace_id: str, action_id: str, after: str = "0") -> Any:
+    """A run's live feed as SSE bytes (an async iterator), for
+    ``GET /belt/runs/{id}/stream``. The tenancy 404 is raised HERE, before any
+    response starts (``_owned_run``, same as ``get_run``).
+
+    ``after="0"`` replays the newest attempt from its ``start`` frame, so a
+    reload shows what a viewer saw live; a client cursor resumes after it. A
+    run with no stream that is not being developed (no ``headless_state``)
+    gets one ``stream_end {from_history: true}``: its stored stage rows
+    (``GET /feed?stage=``) are the record. A run being developed whose stream
+    does not exist yet is waited on. Tail, heartbeat and lifetime are the chat
+    run stream's (``transport.sse_tail``)."""
+    from pocketpaw_ee.cloud.belt.feed import stream_id
+    from pocketpaw_ee.cloud.chat.runs.domain import stream_max_lifetime_seconds
+    from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport, sse_frame, sse_tail
+
+    _action, blob = await _owned_run(workspace_id, action_id)
+    transport = get_stream_transport()
+    sid = stream_id(action_id)
+    exists = await transport.stream_exists(sid)
+    if not exists and not blob.get("headless_state"):
+
+        async def history() -> Any:
+            yield sse_frame("0-0", "stream_end", {"from_history": True})
+
+        return history()
+    if exists and after in ("", "0"):
+        after = await _attempt_cursor(transport, sid)
+    deadline = time.monotonic() + stream_max_lifetime_seconds()
+    return sse_tail(transport, sid, after, deadline)
+
+
 __all__ = [
     "BeltConsoleError",
     "GhCliRepoCreator",
@@ -842,6 +899,7 @@ __all__ = [
     "get_run_feed",
     "init_repo",
     "list_runs",
+    "open_run_stream",
     "resolve_allowlist_roots",
     "save_run_feed",
 ]

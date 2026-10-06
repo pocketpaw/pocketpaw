@@ -417,7 +417,7 @@ class ClaudeCodeDevelop:
                         f"WORK: recipe {request.recipe!r} is not declared in the charter"
                     )
                 await feed.stage("develop")
-                call = await feed.begin("Bash", {"command": command})
+                call = await feed.begin("Bash", {"command": _relative_paths(command, repo)})
                 code, out, err = await self.run(
                     _charter_argv(command, "WORK"),
                     cwd=worktree,
@@ -447,7 +447,7 @@ class ClaudeCodeDevelop:
             attempts = 0
             review_notes: list[str] = []
             while True:
-                results = await self._checks(worktree, checks, feed)
+                results = await self._checks(worktree, checks, feed, repo)
                 failed = [r for r in results if not r.ok]
                 if failed:
                     if request.recipe or attempts >= self.max_fix_attempts:
@@ -688,15 +688,18 @@ class ClaudeCodeDevelop:
             )
         return out
 
-    async def _checks(self, cwd: Path, checks: list[str], feed: RunFeed) -> list[CheckResult]:
+    async def _checks(
+        self, cwd: Path, checks: list[str], feed: RunFeed, repo: Path
+    ) -> list[CheckResult]:
         """Every charter check, in order, each a ``Run <command>`` row of the
-        ``check`` stage that shows running, then its tail and exit code."""
+        ``check`` stage that shows running, then its tail and exit code. The
+        command is scrubbed like seat output (repo path, host account)."""
         if not checks:
             return []
         await feed.stage("check")
         results: list[CheckResult] = []
         for command in checks:
-            call = await feed.begin("Bash", {"command": command})
+            call = await feed.begin("Bash", {"command": _relative_paths(command, repo)})
             result = await self._check(cwd, command)
             await feed.finish(call, "Bash", _exit_output(result.tail, result.code))
             results.append(result)

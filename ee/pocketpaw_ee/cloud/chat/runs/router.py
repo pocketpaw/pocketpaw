@@ -25,7 +25,6 @@ Changes:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -37,17 +36,13 @@ from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import stream_max_lifetime_seconds
 from pocketpaw_ee.cloud.chat.runs.dto import StopRunResponse
-from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
+from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport, sse_frame, sse_tail
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Cloud Agent Chat"], dependencies=[Depends(require_license)])
-
-
-def _sse(entry_id: str, event: str, data: dict) -> bytes:
-    return f"id: {entry_id}\nevent: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
 async def _authorize(run_id: str, workspace_id: str, user_id: str):
@@ -96,7 +91,7 @@ async def get_run_stream(
         # hasn't XADD'd its first event yet.
         is_terminal = doc.status not in ("queued", "running")
         if is_terminal and not await transport.stream_exists(run_id):
-            yield _sse(
+            yield sse_frame(
                 "0-0",
                 "stream_end",
                 {
@@ -110,44 +105,13 @@ async def get_run_stream(
                 },
             )
             return
-        # Hard ceiling on this subscription. Without it the loop below never
-        # exits on its own: a run whose terminal event never arrives (the
-        # worker was OOM-killed AFTER the events key existed, so the
-        # ``stream_exists`` fallback above does not trigger) heartbeats
-        # forever. Each iteration holds a Redis connection blocked for 15s and
-        # a live asyncio task, and disconnect is only noticed when a ``yield``
-        # fails — so an abandoned tab is retained indefinitely, not collected.
+        # Hard ceiling on this subscription (see ``sse_tail``): a run whose
+        # terminal event never arrives (the worker was OOM-killed AFTER the
+        # events key existed, so the ``stream_exists`` fallback above does not
+        # trigger) would otherwise heartbeat forever.
         deadline = time.monotonic() + stream_max_lifetime_seconds()
-        while True:
-            saw_terminal = False
-            async for ev in transport.read_events(run_id, after=cursor, block_ms=15000):
-                cursor = ev.entry_id
-                yield _sse(ev.entry_id, ev.event, ev.data)
-                if ev.is_terminal:
-                    saw_terminal = True
-            if saw_terminal:
-                return
-            if time.monotonic() >= deadline:
-                # Terminate with a real ``error`` frame rather than closing
-                # silently: ``error`` is in TERMINAL_EVENTS, so the client
-                # stops waiting and surfaces a retry instead of showing a run
-                # that appears to still be thinking.
-                logger.warning(
-                    "run stream exceeded max lifetime; closing run_id=%s cursor=%s",
-                    run_id,
-                    cursor,
-                )
-                yield _sse(
-                    cursor,
-                    "error",
-                    {
-                        "code": "run.stream_timeout",
-                        "message": "This run's stream was open too long and was closed.",
-                    },
-                )
-                return
-            # heartbeat so proxies keep the connection open
-            yield b": ping\n\n"
+        async for chunk in sse_tail(transport, run_id, cursor, deadline):
+            yield chunk
 
     return StreamingResponse(
         gen(),
