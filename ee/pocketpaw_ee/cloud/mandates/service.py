@@ -9,8 +9,16 @@
 # that accept ``workspace_id`` / ``user_id`` / ``upstream`` get them via
 # signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
 # (sense → foreman → plan gate); prepare_plan_resolution; get_pawprints;
-# set_autopilot; digest (the morning report, composed only from the read
-# functions above plus the belt runs list).
+# set_autopilot; set_crew (the roster; every agent must be one the caller can
+# read in this workspace); digest (the morning report, composed only from the
+# read functions above plus the belt runs list).
+#
+# The CREW: a roster of cloud Agents on the mandate (``MandateDoc.crew``). The
+# dispatcher seats each plan task on a dev (``crew_seat_for_task``: live dev
+# seats in roster order, ``pick_dev`` round-robin by task index); the headless
+# runner then reads that agent's CURRENT model + instructions
+# (``crew_worker``) so an edit in the agent editor reaches the next develop.
+# Agents are read through ``agents.service`` (never its Beanie doc).
 #
 # The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands.
 # The foreman and the digest both read it by joining the mandate's belt run rows
@@ -20,6 +28,7 @@
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
 # charter_for_mandate (the develop station's checks/recipes/goal read),
+# crew_seat_for_task, crew_worker,
 # list_autopilot_enabled, executor_revalidate, mark_shift, and list_cadence_due —
 # the cadence scheduler's cross-workspace read of ACTIVE mandates whose cadence
 # interval (daily = 1 day, weekly = 7 days; manual never) has elapsed since their
@@ -39,7 +48,7 @@ import asyncio
 import inspect
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -47,6 +56,7 @@ from pocketpaw_ee.cloud.mandates import events as mandate_events
 from pocketpaw_ee.cloud.mandates.domain import (
     Budget,
     Charter,
+    CrewMember,
     Kpi,
     MandateDoc,
     ShiftDoc,
@@ -56,11 +66,14 @@ from pocketpaw_ee.cloud.mandates.domain import (
 )
 from pocketpaw_ee.cloud.mandates.dto import (
     CreateMandateRequest,
+    CrewMemberRequest,
     FeedbackRequest,
     TeachingFeedbackRequest,
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +186,7 @@ async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str
     bound repo must sit inside the workspace's allowed roots (422 otherwise)."""
     body = CreateMandateRequest.model_validate(body)
     await _require_allowed_repo(workspace_id, body.surface.repo_id)
+    crew = await _crew_from_request(workspace_id, user_id, body.crew)
 
     doc = MandateDoc(
         workspace=workspace_id,
@@ -183,6 +197,7 @@ async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str
         soul_path=body.soul_path,
         patrols=list(body.patrols),
         upstream=[UpstreamPin(repo=u.repo, pin_file=u.pin_file) for u in body.upstream],
+        crew=crew,
     )
     await doc.insert()
 
@@ -318,6 +333,7 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
         "patrols": list(doc.patrols),
         "autopilot": _autopilot_to_wire(doc),
         "upstream": [u.model_dump() for u in doc.upstream],
+        "crew": [m.model_dump() for m in doc.crew],
         "recent_shifts": [
             {
                 "id": str(s.id),
@@ -596,6 +612,135 @@ async def set_autopilot(
     # UI contract — the autopilot response wraps the detail in a ``mandate``
     # envelope (same shape as create), so the console can re-render the row.
     return {"mandate": await _mandate_detail_wire(doc)}
+
+
+# ---------------------------------------------------------------------------
+# Crew — cloud Agents seated on the mandate
+# ---------------------------------------------------------------------------
+
+
+async def _crew_from_request(
+    workspace_id: str, user_id: str, members: list[CrewMemberRequest]
+) -> list[CrewMember]:
+    """The roster to store. Each agent must be one the caller can read AND live
+    in this workspace (a public agent from another workspace is refused), so a
+    leaked id never seats a foreign agent. 422 on a miss."""
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
+    for m in members:
+        try:
+            agent = await agents_service.get_for_viewer(m.agent_id, workspace_id, user_id)
+        except NotFound:
+            agent = None
+        if agent is None or agent.workspace_id != workspace_id:
+            raise ValidationError(
+                "mandate.crew_agent_not_found",
+                f"crew: agent {m.agent_id!r} is not an agent in this workspace",
+            )
+    return [CrewMember(**m.model_dump()) for m in members]
+
+
+async def set_crew(workspace_id: str, user_id: str, mandate_id: str, body: Any) -> dict[str, Any]:
+    """Replace a mandate's crew roster. Body: ``{crew: [{agent_id, role,
+    concurrency, setup?}]}``. Returns ``{"mandate": <detail>}`` (the autopilot
+    envelope). A bad body or an unreadable agent is a 422; a cross-tenant
+    mandate a 404."""
+    from pydantic import ValidationError as PydanticValidationError
+
+    from pocketpaw_ee.cloud.mandates.dto import SetCrewRequest
+
+    try:
+        req = SetCrewRequest.model_validate(body)
+    except PydanticValidationError as exc:
+        raise ValidationError("mandate.crew_invalid", _first_pydantic_msg(exc)) from exc
+
+    doc = await _fetch_mandate(workspace_id, mandate_id)
+    doc.crew = await _crew_from_request(workspace_id, user_id, req.crew)
+    await doc.save()
+    await emit(
+        mandate_events.MandateCrewChanged(
+            data={
+                "workspace_id": workspace_id,
+                "mandate_id": mandate_id,
+                "crew": [m.model_dump() for m in doc.crew],
+            }
+        )
+    )
+    logger.info(
+        "mandate: crew set on %s (workspace=%s, %d seat(s))",
+        mandate_id,
+        workspace_id,
+        len(doc.crew),
+    )
+    return {"mandate": await _mandate_detail_wire(doc)}
+
+
+def pick_dev(devs: list[_T], index: int) -> _T | None:
+    """The SEAT RULE: plan task ``index`` (1-based, the plan's order) goes to
+    dev ``(index - 1) % len(devs)`` — round-robin in roster order, so two devs
+    split a two-task shift. ``None`` when there are no devs."""
+    return devs[(index - 1) % len(devs)] if devs else None
+
+
+async def _live_agent(workspace_id: str, agent_id: str) -> Any | None:
+    """The agent behind a seat, or ``None`` when it is gone, disabled or no
+    longer in this workspace (internal read: the roster route already checked
+    the admin could read it)."""
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
+    try:
+        agent = await agents_service.get(agent_id)
+    except NotFound:
+        return None
+    if agent.workspace_id != workspace_id or agent.disabled:
+        return None
+    return agent
+
+
+async def crew_seat_for_task(
+    workspace_id: str, mandate_id: str, index: int
+) -> dict[str, Any] | None:
+    """The dev seat plan task ``index`` runs on: ``{agent_id, name, setup}``,
+    or ``None`` (no crew, or no live dev) so the factory's env defaults apply.
+    Dead seats (deleted / disabled agents) are skipped before ``pick_dev``."""
+    # no-event: read-only path; emit only on writes.
+    try:
+        doc = await MandateDoc.find_one(
+            MandateDoc.workspace == workspace_id, MandateDoc.id == _as_object_id(mandate_id)
+        )
+    except Exception:  # noqa: BLE001 — malformed id == miss
+        doc = None
+    if doc is None:
+        return None
+    live = []
+    for seat in doc.crew:
+        if seat.role != "dev":
+            continue
+        agent = await _live_agent(workspace_id, seat.agent_id)
+        if agent is not None:
+            live.append((seat, agent))
+    picked = pick_dev(live, index)
+    if picked is None:
+        return None
+    seat, agent = picked
+    return {"agent_id": seat.agent_id, "name": agent.name, "setup": seat.setup or ""}
+
+
+async def crew_worker(workspace_id: str, agent_id: str) -> dict[str, str] | None:
+    """A seated worker's CURRENT settings for a develop: ``{name, model,
+    instructions}`` (the agent's ``config.model`` and ``config.system_prompt``),
+    or ``None`` when the agent is gone or disabled. Read at develop time, not
+    stored on the run, so a private agent's instructions never land on a run
+    blob and an editor change applies to the next develop."""
+    # no-event: read-only path; emit only on writes.
+    agent = await _live_agent(workspace_id, agent_id)
+    if agent is None:
+        return None
+    return {
+        "name": agent.name,
+        "model": agent.config.model,
+        "instructions": agent.config.system_prompt,
+    }
 
 
 def _sighting_to_wire(s: SightingDoc) -> dict[str, Any]:
@@ -1945,6 +2090,8 @@ def _utcnow() -> datetime:
 
 __all__ = [
     "charter_for_mandate",
+    "crew_seat_for_task",
+    "crew_worker",
     "create_mandate",
     "digest",
     "executor_revalidate",
@@ -1956,10 +2103,12 @@ __all__ = [
     "list_mandates",
     "list_sightings",
     "mark_shift",
+    "pick_dev",
     "prepare_plan_resolution",
     "repo_for_mandate",
     "run_patrols",
     "set_autopilot",
+    "set_crew",
     "shift_wire",
     "trigger_shift",
 ]

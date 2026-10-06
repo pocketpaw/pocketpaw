@@ -191,8 +191,8 @@
   {
     "label": "orient: the develop prompt drops the architecture block",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "f\"{_charter_block(charter)}\\n\\n{_architecture(orient)}\"",
-    "replace": "f\"{_charter_block(charter)}\\n\\n\"",
+    "find": "{_worker_block(request)}{_architecture(orient)}\"",
+    "replace": "{_worker_block(request)}\"",
     "tests": [
       "tests/cloud/test_belt_develop_station.py::test_orient_brief_lands_in_the_develop_and_review_prompts"
     ]
@@ -562,6 +562,53 @@
     "tests": [
       "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account",
       "tests/cloud/test_belt_feed.py::test_a_check_tail_carries_no_host_user_name"
+    ]
+  },
+  {
+    "label": "the crew worker's model is ignored; every seat runs the env model",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "model = cli_model(model) or (os.environ.get(\"POCKETPAW_FACTORY_CLAUDE_MODEL\") or \"\").strip()",
+    "replace": "model = (os.environ.get(\"POCKETPAW_FACTORY_CLAUDE_MODEL\") or \"\").strip()",
+    "tests": [
+      "tests/cloud/test_belt_crew.py::test_worker_model_and_instructions_reach_develop_and_fix_not_review",
+      "tests/cloud/test_belt_crew.py::test_roster_dev_develops_with_its_agent_model"
+    ]
+  },
+  {
+    "label": "every plan task lands on the first dev instead of round-robin",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "return devs[(index - 1) % len(devs)] if devs else None",
+    "replace": "return devs[0] if devs else None",
+    "tests": [
+      "tests/cloud/test_belt_crew.py::test_seat_picker_gives_two_tasks_two_different_devs"
+    ]
+  },
+  {
+    "label": "a crew seat's Claude setup is ignored; the env setup always wins",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "owner = request.setup == \"owner\" if request.setup else owner_setup()",
+    "replace": "owner = owner_setup()",
+    "tests": [
+      "tests/cloud/test_belt_crew.py::test_seat_setup_selects_the_claude_setup"
+    ]
+  },
+  {
+    "label": "a seated agent's disabled flag is ignored when seating and developing",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if agent.workspace_id != workspace_id or agent.disabled:",
+    "replace": "if agent.workspace_id != workspace_id:",
+    "tests": [
+      "tests/cloud/test_belt_crew.py::test_seat_picker_gives_two_tasks_two_different_devs",
+      "tests/cloud/test_belt_crew.py::test_no_crew_and_a_gone_agent_keep_the_env_defaults"
+    ]
+  },
+  {
+    "label": "the roster accepts another workspace's public agent",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if agent is None or agent.workspace_id != workspace_id:",
+    "replace": "if agent is None:",
+    "tests": [
+      "tests/cloud/test_belt_crew.py::test_crew_route_refuses_agents_outside_the_callers_reach"
     ]
   }
 ]

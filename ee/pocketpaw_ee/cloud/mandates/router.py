@@ -4,10 +4,11 @@
 # Routes are THIN: read identity (workspace + user) from the cloud deps,
 # delegate to ``mandates.service``, return its wire dict. RBAC mirrors the belt
 # console — ``belt.read`` (MEMBER) on reads, ``belt.manage`` (ADMIN) on
-# mutations (create, shift trigger, feedback intake, plan resolve, autopilot).
+# mutations (create, shift trigger, feedback intake, plan resolve, autopilot,
+# crew).
 # Errors propagate as ``CloudError``; the router never raises HTTPException.
 #
-# Envelopes (UI contract): create and autopilot return ``{"mandate"}``, shift
+# Envelopes (UI contract): create, autopilot and crew return ``{"mandate"}``, shift
 # and plan/resolve return ``{"shift"}``; GET detail stays bare. The feedback
 # route takes the general ``{text, severity?, source}`` and the teaching
 # ``{kind, reason, shift_no?, task_title?}`` shapes (the service discriminates
@@ -205,6 +206,21 @@ async def set_autopilot(
     STOP cancels the background task and persists the off state. Returns
     ``{"mandate": <detail>}`` (UI contract envelope)."""
     return await mandate_service.set_autopilot(workspace_id, user_id, mandate_id, body)
+
+
+@router.put("/{mandate_id}/crew")
+async def set_crew(
+    mandate_id: str,
+    body: dict[str, Any],
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Replace the mandate's CREW roster (admin-gated): the cloud Agents that
+    work its plan tasks. Body: ``{crew: [{agent_id, role: dev|reviewer|foreman,
+    concurrency, setup?: owner|strict}]}``; every agent must be readable by the
+    caller in this workspace (422 otherwise). Returns ``{"mandate": <detail>}``."""
+    return await mandate_service.set_crew(workspace_id, user_id, mandate_id, body)
 
 
 @router.get("/{mandate_id}/pawprints")

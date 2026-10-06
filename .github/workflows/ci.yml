@@ -243,11 +243,13 @@ jobs:
       - name: Belt mandates and the craft factory develop station
         # The mandate shift loop, the headless develop runner, the cadence
         # scheduler, the develop station (real tmp git repo, real check
-        # commands, a faked claude binary), its develop step feed and the
-        # upstream patrol (a faked gh). tests/cloud is excluded by the
-        # pyproject addopts; mongomock stands in for Mongo.
+        # commands, a faked claude binary), its develop step feed, the crew
+        # roster (agents as workers) and the upstream patrol (a faked gh).
+        # tests/cloud is excluded by the pyproject addopts; mongomock stands
+        # in for Mongo.
         run: >-
           uv run pytest tests/cloud/test_belt_develop_station.py
+          tests/cloud/test_belt_crew.py
           tests/cloud/test_belt_headless.py
           tests/cloud/test_belt_mandates.py
           tests/cloud/test_belt_scheduler.py

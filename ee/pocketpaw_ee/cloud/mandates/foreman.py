@@ -19,8 +19,9 @@
 # ``claude_cli_argv`` / ``claude_result_text`` (``claude_result_envelope``
 # underneath, ``json`` and ``stream-json`` alike) are the ONE place the factory
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
-# and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
-# set), and they pin every seat to no settings files, no MCP and no hooks (only
+# and model (a crew worker's own model when the caller passes one, else
+# ``POCKETPAW_FACTORY_CLAUDE_MODEL``; ``--model`` only when either is set), and
+# they pin every seat to no settings files, no MCP and no hooks (only
 # the develop station's owner setup opts out) and no persisted session (no seat
 # opts out). ``run_claude_no_tools`` is the sandboxed
 # tool-less call the foreman and the autopilot personas share. Prompts ride
@@ -147,7 +148,9 @@ _ISOLATION_FLAGS = (
 )
 
 
-def claude_cli_argv(*args: str, isolated: bool = True, stream: bool = False) -> list[str]:
+def claude_cli_argv(
+    *args: str, isolated: bool = True, stream: bool = False, model: str = ""
+) -> list[str]:
     """argv for one headless call to the SYSTEM Claude Code CLI.
 
     Every factory LLM seat (foreman, develop, fix, review) builds its command
@@ -161,16 +164,32 @@ def claude_cli_argv(*args: str, isolated: bool = True, stream: bool = False) -> 
     after restoring the worktree's agent config to the base commit.
     ``stream=True`` asks for ``stream-json`` (one JSON event per line; ``-p``
     needs ``--verbose`` for it) so the develop seat's tool calls can be read
-    back as a feed; ``claude_result_text`` reads both formats."""
+    back as a feed; ``claude_result_text`` reads both formats.
+
+    ``model`` is a crew worker's Agent model; it wins over
+    ``POCKETPAW_FACTORY_CLAUDE_MODEL`` when ``cli_model`` accepts it."""
     binary = os.environ.get("POCKETPAW_FACTORY_CLAUDE_BIN") or shutil.which("claude") or "claude"
     isolation = _ISOLATION_FLAGS if isolated else ()
     output = ("stream-json", "--verbose") if stream else ("json",)
     argv = [binary, "-p", *args, *isolation, "--output-format", *output]
     argv.append("--no-session-persistence")
-    model = (os.environ.get("POCKETPAW_FACTORY_CLAUDE_MODEL") or "").strip()
+    model = cli_model(model) or (os.environ.get("POCKETPAW_FACTORY_CLAUDE_MODEL") or "").strip()
     if model:
         argv += ["--model", model]
     return argv
+
+
+_CLI_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$")
+
+
+def cli_model(model: str) -> str:
+    """An Agent's model id as the claude CLI takes it, or ``""`` (use the env).
+
+    Agent models are catalog ids (``anthropic/claude-sonnet-4-5``), so the
+    ``anthropic/`` prefix is dropped. Anything else with a provider prefix, or a
+    value that could read as a flag (``-x``), is not a claude model: ``""``."""
+    model = (model or "").strip().removeprefix("anthropic/")
+    return model if _CLI_MODEL.match(model) else ""
 
 
 def claude_result_envelope(stdout: str) -> dict[str, Any] | None:
@@ -549,6 +568,7 @@ __all__ = [
     "build_prompt",
     "claude_cli_argv",
     "claude_result_text",
+    "cli_model",
     "parse_plan",
     "plan_shift",
     "resolve_llm",
