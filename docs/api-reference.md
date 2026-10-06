@@ -2897,7 +2897,7 @@ so the refusal code is now `pocket.not_editable_site`. Note the two questions ar
 still separate and neither implies the other: **react** can be selected and
 refined through chat (it has an armed build) but has no TSX splice, so it is still
 refused here; **html** has a splice but no armed build, so it is accepted here and
-absent from `/native-artifact`.
+served by `/native-artifact` only as a `preview_url` (no body/css).
 
 ### `GET /sites/by-pocket/{pocket_id}/html-armed-source`
 
@@ -2913,9 +2913,9 @@ the DOM (`<section>:<tag>:<ordinal>`) while `/leaf-edits` resolves by manifest u
 something the splice could never find. This returns the document the builder
 should actually render, so both sides agree by construction.
 
-It is **not** the html branch of `/native-artifact`. That serves a built, armed
-tree for shadow-rendering and is gated on `has_native_edit_lane`, which html sits
-outside of deliberately. This is a parse and an offset splice over the source map:
+It is **not** the html branch of `/native-artifact`. That one answers an html
+pocket with a `preview_url` on the draft preview origin (no body/css to
+shadow-render). This is a parse and an offset splice over the source map:
 no bun build, no Daytona, no artifact cache — cheap enough to call when the
 operator opens Design mode.
 
@@ -3003,15 +3003,31 @@ Errors:
 
 ### `GET /sites/by-pocket/{pocket_id}/native-artifact`
 
-Serve the armed build's body markup and CSS so the native editor can
-shadow-render the site.
+Serve a site draft: its `preview_url` on the draft preview origin, plus (svelte and
+react) the armed build's body markup and CSS so the native editor can shadow-render
+the site.
 
-Available on engines with a **native edit lane** — `svelte`, and `react` since
-RX-2. Not `html` (its served artifact IS its source, so it is selected through its
-own sandboxed `srcdoc` and has no build to render) and not `ripple` (no source
-map). Both armable engines emit a prerendered `index.html`; only the build output
-directory differs (`.svelte-kit/cloudflare` or `build` vs `dist`), and the server
-resolves that per engine.
+Available on `svelte`, `react` and `html`. Not `ripple` (no source map). The two
+built engines emit a prerendered `index.html`; only the build output directory
+differs (`.svelte-kit/cloudflare` or `build` vs `dist`), and the server resolves
+that per engine.
+
+**`preview_url` — the full draft on its own origin.** An absolute URL of the form
+`https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/index.html`: the draft's
+`index.html` with its `<head>` and module scripts intact, every JS chunk, stylesheet,
+image and public file beside it, served with `Access-Control-Allow-Origin: *` and no
+cookies. `<token>` is a 32-hex-char capability minted per content hash, so an edit
+gets a new URL. `null` while a build is pending or failed; show the build state
+then. Also `null` beside a served render (`build_status: "none"`) when the artifact
+store refused or failed to keep the draft's files, or the preview base URL is
+misconfigured: the server retries that at most once per draft every 10 minutes
+rather than rebuilding on every view. Append `?paw_edit=1` (and the usual `paw_nonce`) to arm the edit bridge,
+which talks to the builder over `postMessage` exactly like the live lane. Setup:
+`docs/deployment/sites-draft-preview-origin.md`.
+
+**html never builds.** An html pocket always answers `build_status: "none"`,
+empty `body_html` / `css`, and a `preview_url` that serves its source files with the
+declared packages' import map injected.
 
 **Two response shapes, and `build_status` says which.** A warm read returns the
 render; a cold one returns a build to poll.
@@ -3025,7 +3041,8 @@ Response `200` — the **render** (cache hit):
   "css": "/* concatenated stylesheets */",
   "build_status": "none",
   "build_reason": null,
-  "build_job_id": null
+  "build_job_id": null,
+  "preview_url": "https://3f9c0d5e8a1b4c7d9e2f6a0b1c3d5e7f.paw-preview.example/index.html"
 }
 ```
 
@@ -3045,7 +3062,8 @@ Response `200` — **build pending** (cache miss, SP-2):
   "css": "",
   "build_status": "queued",
   "build_reason": null,
-  "build_job_id": "site-preview-p_abc123-9f2c…"
+  "build_job_id": "site-preview-p_abc123-9f2c…",
+  "preview_url": null
 }
 ```
 
@@ -3193,7 +3211,7 @@ Errors:
 
 | HTTP | Code | When |
 |------|------|------|
-| 422 | `pocket.no_native_edit_lane` | The pocket's engine has no armable build to render (html, ripple). Renamed from `pocket.not_svelte_site` in RX-2, when react joined the lane. |
+| 422 | `pocket.no_native_edit_lane` | The pocket has no source map to serve (ripple). Renamed from `pocket.not_svelte_site` in RX-2, when react joined the lane. |
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 503 | `sites.preview_build_unavailable` | The armed build could not be QUEUED (the job queue is unreachable). Retryable. A failed enqueue is deliberately an error rather than a pending response — a job id for a job nobody will run makes a client poll forever. A build that queues and then FAILS is not an error here: it comes back `200` with `build_status: "failed"` and a rung in `build_reason`. |

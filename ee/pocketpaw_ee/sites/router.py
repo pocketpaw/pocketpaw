@@ -399,10 +399,15 @@ async def native_artifact_by_pocket(
     needs to stamp data-uid + the manifest — is resolved from the request's ``Origin``
     header, with the service applying the ``PAW_SITES_BUILDER_ORIGIN`` env fallback when
     it is absent (the same precedence as ``/editable`` / ``/dev-preview``), so the call
-    works with no header. A pocket with no native edit lane is a 422 — svelte and
-    react are armable, html (served straight from its source) and ripple are not;
+    works with no header. A pocket with no native edit lane is a 422 — svelte, react
+    and html are served, ripple is not;
     a missing / access-denied pocket surfaces as a 404 / 403 (the pockets service
-    raises it inside the service)."""
+    raises it inside the service).
+
+    DRAFT PREVIEW ORIGIN: every engine, html included, also answers ``preview_url`` —
+    the draft's index.html on the cookieless preview host (``preview_origin.py``),
+    ``None`` while a build is pending or failed. html never builds, so it is always
+    ``build_status="none"`` with a URL and empty body/css. Ripple still 422s."""
     # Mirror /editable + /dev-preview origin resolution: the request Origin header
     # here; the service applies the PAW_SITES_BUILDER_ORIGIN env fallback when blank.
     builder_origin = request.headers.get("origin") or ""

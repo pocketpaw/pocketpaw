@@ -104,6 +104,13 @@ def install_cors(app: FastAPI) -> None:
     ``CloudError``) then ships its ``Access-Control-Allow-Origin`` on the way
     out. The error handler covers the one case the middleware structurally
     cannot: the unhandled 500 minted above it.
+
+    One exception to "CORS is outermost": middleware classes an extension listed
+    in ``app.state.outermost_middleware`` (set while its routes mount, e.g. the EE
+    sites draft-preview host router) are added AFTER CORS, so they wrap it and
+    every other layer. A layer that routes whole hosts away from the API needs
+    that: inside CORS / body-limit / auth it would get the API's 401s and rate
+    limits. The seam keeps this module free of any EE import.
     """
     from fastapi.middleware.cors import CORSMiddleware
 
@@ -118,6 +125,8 @@ def install_cors(app: FastAPI) -> None:
         allow_headers=["*"],
     )
     add_cors_aware_error_handler(app, origins)
+    for middleware_cls in getattr(app.state, "outermost_middleware", ()):
+        app.add_middleware(middleware_cls)
 
 
 def add_cors_aware_error_handler(app: FastAPI, origins: list[str]) -> None:

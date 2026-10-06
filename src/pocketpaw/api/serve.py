@@ -77,8 +77,10 @@ def create_api_app():
     # either of those cannot stop the buffering it exists to prevent.
     #
     # mount_cloud() and install_cors() add their layers after this one, so the
-    # final order is CORS → CSRF → RequestLog → Timing → EEAuthBridge → this →
-    # Auth. None of those four cloud layers touches the body, so it is still
+    # final order is [EE PreviewHostDispatch →] CORS → CSRF → RequestLog → Timing →
+    # EEAuthBridge → this → Auth (the preview dispatch routes whole draft hosts away
+    # before any of these run; see install_cors). None of those four cloud layers
+    # touches the body, so it is still
     # unread when this runs — and CORS being outermost means a 413 keeps its
     # headers, which matters because a header-less rejection reads to the
     # browser as a CORS failure rather than as the size limit it is.

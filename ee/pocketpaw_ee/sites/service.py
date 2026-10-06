@@ -33,6 +33,7 @@ import logging
 import re
 import secrets
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -67,7 +68,7 @@ from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.cloud.models.site_export import SiteExport as _SiteExportDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _SiteRateCounterDoc
-from pocketpaw_ee.sites import project_zip
+from pocketpaw_ee.sites import preview_origin, project_zip
 from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
 from pocketpaw_ee.sites.dependency_manifest import (
     DEPENDENCY_MANIFEST_PATH,
@@ -519,22 +520,130 @@ class _FilesystemArtifactStore:
             return
         self._evict(pocket_dir)
 
-    def _evict(self, pocket_dir: Path) -> None:
-        """Keep only the newest ``_artifact_keep()`` artifact files (current + previous
-        by default) in the pocket dir, deleting the oldest by mtime. Best-effort."""
+    # -- Draft preview origin (preview_origin.py) ---------------------------------
+    # Beside ``<hash>.json`` a draft keeps ``<hash>.dist.tgz`` (its full served file
+    # set) and ``<hash>.token`` (its preview capability token); the token's reverse
+    # pointer lives in ``artifact_home()/_preview_tokens/<token>.json``. All three are
+    # evicted together, per content hash.
+
+    _TOKEN_DIR = "_preview_tokens"
+
+    @staticmethod
+    def _atomic_write(path: Path, data: bytes) -> None:
+        import os
+        import tempfile
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
-            files = sorted(
-                (p for p in pocket_dir.glob("*.json") if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, str(path))
         except OSError:
-            return
-        for stale in files[_artifact_keep() :]:
             try:
-                stale.unlink()
+                os.unlink(tmp)
             except OSError:
                 pass
+            raise
+
+    def write_dist(self, pocket_id: str, content_hash: str, data: bytes) -> bool:
+        """Store a draft's packed files. True when they are on disk."""
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        pocket_dir = artifact_home() / pocket_id
+        try:
+            self._atomic_write(pocket_dir / f"{content_hash}.dist.tgz", data)
+        except OSError:
+            logger.warning(
+                "sites.artifact_store: dist write failed for pocket %s", pocket_id, exc_info=True
+            )
+            return False
+        self._evict(pocket_dir)
+        return True
+
+    def read_dist(self, pocket_id: str, content_hash: str) -> bytes | None:
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        try:
+            return (artifact_home() / pocket_id / f"{content_hash}.dist.tgz").read_bytes()
+        except OSError:
+            return None
+
+    def write_preview_token(self, pocket_id: str, content_hash: str, token: str) -> bool:
+        """Record a draft's token (reverse pointer, then forward). True when both are
+        written, i.e. the token now resolves."""
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        home = artifact_home()
+        pointer = json.dumps({"pocket_id": pocket_id, "content_hash": content_hash})
+        try:
+            # Pointer first: a token the forward file names must always resolve.
+            self._atomic_write(home / self._TOKEN_DIR / f"{token}.json", pointer.encode())
+            self._atomic_write(home / pocket_id / f"{content_hash}.token", token.encode())
+        except OSError:
+            logger.warning(
+                "sites.artifact_store: token write failed for pocket %s", pocket_id, exc_info=True
+            )
+            return False
+        return True
+
+    def read_preview_token(self, pocket_id: str, content_hash: str) -> str | None:
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        try:
+            raw = (artifact_home() / pocket_id / f"{content_hash}.token").read_text("utf-8")
+        except OSError:
+            return None
+        return raw.strip() or None
+
+    def resolve_preview_token(self, token: str) -> tuple[str, str] | None:
+        from pocketpaw_ee.sites.generator_client import artifact_home
+        from pocketpaw_ee.sites.preview_origin import TOKEN_RE
+
+        if not TOKEN_RE.fullmatch(token):
+            return None
+        try:
+            data = json.loads(
+                (artifact_home() / self._TOKEN_DIR / f"{token}.json").read_text("utf-8")
+            )
+            pocket_id, content_hash = data["pocket_id"], data["content_hash"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if not isinstance(pocket_id, str) or not isinstance(content_hash, str):
+            return None
+        # The token must still be the one this draft holds (evicted drafts 404).
+        if self.read_preview_token(pocket_id, content_hash) != token:
+            return None
+        return pocket_id, content_hash
+
+    def _evict(self, pocket_dir: Path) -> None:
+        """Keep only the newest ``_artifact_keep()`` content hashes (current + previous
+        by default) in the pocket dir — their ``.json``, ``.dist.tgz`` and ``.token``
+        together — deleting the oldest by mtime. Best-effort."""
+        groups: dict[str, list[Path]] = {}
+        newest: dict[str, float] = {}
+        try:
+            for p in pocket_dir.iterdir():
+                if not p.is_file() or not p.name.endswith((".json", ".dist.tgz", ".token")):
+                    continue
+                key = p.name.split(".", 1)[0]
+                groups.setdefault(key, []).append(p)
+                newest[key] = max(newest.get(key, 0.0), p.stat().st_mtime)
+        except OSError:
+            return
+        ordered = sorted(groups, key=lambda k: newest[k], reverse=True)
+        for stale_key in ordered[_artifact_keep() :]:
+            for stale in groups[stale_key]:
+                try:
+                    if stale.name.endswith(".token"):
+                        token = stale.read_text("utf-8").strip()
+                        if token:
+                            (pocket_dir.parent / self._TOKEN_DIR / f"{token}.json").unlink(
+                                missing_ok=True
+                            )
+                    stale.unlink()
+                except OSError:
+                    pass
 
 
 _DEFAULT_ARTIFACT_STORE = _FilesystemArtifactStore()
@@ -9475,9 +9584,17 @@ async def get_native_artifact(
     builder_origin: str | None = None,
     _store: Any | None = None,
     _pool: Any | None = None,
+    _arm: Any | None = None,
 ) -> dict[str, Any]:
-    """Serve a svelte Paw Site's ARMED render as ``{pocket_id, body_html, css}`` so the
-    native editor can shadow-render it (NE-5b) instead of framing an iframe.
+    """Serve a Paw Site draft's ARMED render as ``{pocket_id, body_html, css,
+    preview_url}``.
+
+    ``preview_url`` (draft preview origin, ``preview_origin.py``) is the absolute URL of
+    the draft's index.html on the cookieless preview host — the FULL draft, head and
+    JS intact. ``None`` while a build is pending or failed. html drafts never build:
+    their source files are served directly (import map injected), so an html pocket
+    answers ``build_status="none"`` with a ``preview_url`` and empty body/css.
+    ``body_html`` / ``css`` stay for svelte/react until the builder stops reading them.
 
     READ-THROUGH cache (feat/sites-native-artifact-no-build). Viewing a site must NOT
     trigger a build — the prior behaviour ran a full SvelteKit build on EVERY call
@@ -9537,6 +9654,14 @@ async def get_native_artifact(
     # site's served artifact IS its source, so it is selected through its own srcdoc
     # and has no build to render here.
     engine = normalize_engine(pocket.get("engine"))
+    if engine == "html" and isinstance(pocket.get("source"), dict):
+        return await _html_draft_artifact(
+            pocket_id=pocket_id,
+            source=pocket["source"],
+            builder_origin=(builder_origin or "").strip() or _builder_origin(),
+            store=_store or _default_artifact_store(),
+            arm=_arm or generator_client.arm_html,
+        )
     if not has_native_edit_lane(engine) or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
             "pocket.no_native_edit_lane",
@@ -9572,6 +9697,22 @@ async def get_native_artifact(
     # sandbox, no build. This is what makes a VIEW instant, and since SP-2 it is also
     # what keeps an editing session from billing a sandbox per keystroke.
     cached = store.read(pocket_id, content_hash)
+    preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+    if (
+        cached is not None
+        and preview_url is None
+        and preview_origin.store_supports_preview(store)
+        and preview_origin.preview_base_problem() is None
+        and _claim_preview_retry(pocket_id, content_hash)
+    ):
+        # A cached render with no preview URL: either its files landed but the token
+        # write failed (mint it now, no build), or it has no files (cached before the
+        # preview origin existed, or the store refused them). Rebuild that at most
+        # once per retry window; past it, serve the render with a null preview_url
+        # instead of billing a sandbox on every view for files the store won't keep.
+        preview_url = preview_origin.repair_preview_url(store, pocket_id, content_hash)
+        if preview_url is None:
+            cached = None
     if cached is not None:
         body_html, css = cached
         return {
@@ -9584,6 +9725,7 @@ async def get_native_artifact(
             "build_status": "none",
             "build_reason": None,
             "build_job_id": None,
+            "preview_url": preview_url,
         }
 
     # MISS: queue the armed build and hand back a handle. The job writes {body_html, css}
@@ -9623,6 +9765,74 @@ async def get_native_artifact(
         "build_status": enqueued.status,
         "build_reason": enqueued.reason,
         "build_job_id": enqueued.job_id,
+        "preview_url": None,
+    }
+
+
+#: (pocket, content hash) -> monotonic time of the last attempt to give a draft a
+#: preview URL it lacked (a rebuild, or an html re-materialize). Per process, bounded.
+_preview_retry_at: OrderedDict[tuple[str, str], float] = OrderedDict()
+_PREVIEW_RETRY_WINDOW = 600.0
+_PREVIEW_RETRY_ENTRIES = 4096
+
+
+def _claim_preview_retry(pocket_id: str, content_hash: str) -> bool:
+    """True (and the window starts) when this draft may try again to get a preview
+    URL; False while a previous attempt is inside ``_PREVIEW_RETRY_WINDOW``."""
+    key, now = (pocket_id, content_hash), time.monotonic()
+    last = _preview_retry_at.get(key)
+    if last is not None and now - last < _PREVIEW_RETRY_WINDOW:
+        return False
+    _preview_retry_at[key] = now
+    _preview_retry_at.move_to_end(key)
+    while len(_preview_retry_at) > _PREVIEW_RETRY_ENTRIES:
+        _preview_retry_at.popitem(last=False)
+    return True
+
+
+#: Bump when the html draft materialization changes (import map, bridge, layout), so
+#: drafts re-materialize under a new content hash and a new preview URL.
+_HTML_PREVIEW_VERSION = "html-preview-2"
+
+
+async def _html_draft_artifact(
+    *,
+    pocket_id: str,
+    source: dict[str, Any],
+    builder_origin: str,
+    store: Any,
+    arm: Any,
+) -> dict[str, Any]:
+    """An html draft on the preview origin: no build, no sandbox. The source files are
+    materialized once per (source, builder origin) hash and served from there."""
+    content_hash = _artifact_content_hash(
+        source=source,
+        theme={},
+        builder_origin=builder_origin,
+        gen_version=_HTML_PREVIEW_VERSION,
+        engine="html",
+    )
+    preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+    if (
+        preview_url is None
+        and preview_origin.store_supports_preview(store)
+        and preview_origin.preview_base_problem() is None
+        and _claim_preview_retry(pocket_id, content_hash)
+    ):
+        # Bounded like the built lane: a store that refuses or fails the write is not
+        # re-materialized (an arm-html run) on every view.
+        files = await preview_origin.materialize_html_draft(source, builder_origin, arm=arm)
+        preview_url = preview_origin.publish_draft(
+            store, pocket_id, content_hash, preview_origin.pack_files(files)
+        )
+    return {
+        "pocket_id": pocket_id,
+        "body_html": "",
+        "css": "",
+        "build_status": "none",
+        "build_reason": None,
+        "build_job_id": None,
+        "preview_url": preview_url,
     }
 
 

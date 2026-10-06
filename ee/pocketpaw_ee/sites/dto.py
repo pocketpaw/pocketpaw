@@ -1032,11 +1032,12 @@ class SiteInvoiceCreate(BaseModel):
 
 
 class NativeArtifactResponse(BaseModel):
-    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the armed
-    svelte build's body + CSS, so the native editor can shadow-render the site
-    instead of framing an iframe. ``body_html`` is the built page's ``<body>`` INNER
-    HTML — the data-uid-stamped editable leaves plus the embedded
-    ``<script id="paw-edit-manifest">`` — which the FE injects into a shadow root.
+    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the draft's
+    ``preview_url`` on the preview origin, plus (svelte/react) the armed build's body +
+    CSS, so the native editor can shadow-render the site instead of framing an iframe.
+    ``body_html`` is the built page's ``<body>`` INNER HTML — the data-uid-stamped
+    editable leaves plus the embedded ``<script id="paw-edit-manifest">`` — which the
+    FE injects into a shadow root.
     ``css`` is the built stylesheet(s) concatenated into one string the FE injects as
     a single ``<style>``.
 
@@ -1059,6 +1060,11 @@ class NativeArtifactResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+    # Absolute URL of the draft's index.html on the cookieless preview origin
+    # (``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/index.html``), the full
+    # draft with its <head> and JS. Every engine including html. ``None`` while the
+    # build is pending or failed. Append ``?paw_edit=1`` to arm the edit bridge.
+    preview_url: str | None = None
 
 
 class SiteAssetResponse(BaseModel):

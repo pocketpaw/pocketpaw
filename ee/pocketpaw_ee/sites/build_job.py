@@ -1080,7 +1080,9 @@ def _store_preview_artifact(
     output_rel: str,
     store: Any,
 ) -> None:
-    """Turn the built tar into ``{body_html, css}`` and cache it under the content hash.
+    """Turn the built tar into ``{body_html, css}`` and cache it under the content hash,
+    together with the full static tree + its preview token for the draft preview
+    origin (``preview_origin``) when the store can hold them.
 
     The preview lane's answer to :func:`_deploy_built_artifact`, and it borrows that
     function's two hard-won decisions rather than re-deciding them: the tar is unpacked
@@ -1103,12 +1105,22 @@ def _store_preview_artifact(
     Raises on an unreadable tree or a failed read; the caller settles that as
     :data:`RUNG_PREVIEW_UNREADABLE`.
     """
-    from pocketpaw_ee.sites import artifact_preview
+    from pocketpaw_ee.sites import artifact_preview, preview_origin
+    from pocketpaw_ee.sites.engines import resolve_static_output_rel
 
     project_dir = tempfile.mkdtemp(prefix="paw-preview-")
     try:
         unpacked = artifact_preview.unpack_artifact(artifact, Path(project_dir, output_rel))
         body_html, css = sites_service._read_native_artifact(project_dir, engine)
+        # The FULL static tree for the draft preview origin, re-packed from the
+        # guarded extraction (so no link, escape or ``_worker.js`` reaches the store).
+        dist = (
+            preview_origin.pack_dir(
+                Path(project_dir, resolve_static_output_rel(project_dir, engine))
+            )
+            if preview_origin.store_supports_preview(store)
+            else None
+        )
         logger.info(
             "sites.preview: materialised %d entries (%d bytes) under %s for pocket %s",
             unpacked.entries,
@@ -1118,6 +1130,10 @@ def _store_preview_artifact(
         )
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
+    # Draft files + token BEFORE the body/css entry: a reader that sees the entry
+    # must also see the preview URL, or it would rebuild a draft that just landed.
+    if dist is not None:
+        preview_origin.publish_draft(store, pocket_id, content_hash, dist)
     store.write(pocket_id, content_hash, body_html, css)
 
 
