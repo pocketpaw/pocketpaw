@@ -411,6 +411,21 @@ prompt also tells it to show any product it names, compares or recommends in one
 `product-card` (so the visitor gets the Add to cart buttons), never as a markdown table
 or a list of names and prices.
 
+### Links and page actions
+
+The concierge only links to pages it was shown. Every knowledge item that came from a
+crawled page of the site carries that page's path, so when the search finds the size
+guide, the model can link to it. An owner's upload or a pinned FAQ has no page, so it
+gets no path.
+
+With "Guide visitors around your site" on (`concierge_page_actions`), the prompt also
+has a `<site-pages>` block with the fence formats and a short list of pages. A
+`navigate` action may name a path from that list, from a knowledge item or product, or
+the page the visitor is on. The server checks it against the site's whole crawl index,
+not just the pages the prompt listed, plus the turn's catalog urls and the visitor's
+page, and it must stay on the visitor's origin. A path the site never indexed is
+dropped.
+
 ### Code examples from your docs
 
 A documentation site usually wants its concierge to show the site's own examples. The

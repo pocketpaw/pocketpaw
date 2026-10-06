@@ -8,9 +8,10 @@
 # the SSE ``action`` frame, or None to drop it (logged, never shown):
 #
 #   * ``navigate`` needs ``to``: a site path or absolute http(s) url that resolves
-#     to ``site_origin`` AND names a known page (a crawled page or a catalog
-#     item's url), compared on origin + path with a trailing slash ignored. The
-#     emitted ``to`` is always absolute, query dropped, an ``#id`` fragment kept.
+#     to ``site_origin`` AND names a known page (any page in the crawl index or
+#     a catalog item's url; the runner adds the visitor's page), compared on
+#     origin + path with a trailing slash ignored. The emitted ``to`` is always
+#     absolute, query dropped, an ``#id`` fragment kept.
 #   * ``scroll_to`` / ``highlight`` need ``target``: ``#id`` (``TARGET_ID_RE``) or
 #     heading text, one line, at most ``TARGET_MAX`` chars, no ``<`` or ``>``.
 #   * ``tool`` needs ``name``, one of this turn's declared tools, and ``args``
@@ -29,8 +30,10 @@
 # The host script (paw-bar ``actions/``) checks again on the page; the server is
 # the authority on which pages exist. ``site_pages`` lists the pages the prompt
 # offers (crawled pages shallowest first, then catalog products) and
-# ``known_urls`` is what ``render_action`` accepts; both read only the crawl index
-# and the turn's catalog items. Verdicts shared with paw-bar live in
+# ``known_urls`` is what ``render_action`` accepts: the WHOLE crawl index, never
+# capped (it costs no prompt tokens), plus the turn's catalog items, so a page
+# the prompt names only as a knowledge item's path still validates. Verdicts
+# shared with paw-bar live in
 # tests/fixtures/action_parity/ (cases.json + expected.json, the same files as
 # paw-bar's app/tests/fixtures/action_parity); server-only ones in
 # server_cases.json beside them.

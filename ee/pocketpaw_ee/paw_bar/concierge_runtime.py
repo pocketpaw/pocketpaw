@@ -10,11 +10,12 @@
 # Instructions: one of eight constants picked by ``frame_for(site)`` (doc-code
 # rule 2, lead rule and page-action rule in rule 5), the cache-stable prefix;
 # nothing an owner or visitor writes reaches them. Data (``build_prompt``):
-# <owner-settings>, <page>, <knowledge>, <catalog>, <site-pages> (page actions on:
-# the fence forms, the pages ``navigate`` may name, and the tool rule when the
-# page declared a valid tool), <page-tools> (page actions on and at least one of
-# the request's ``page.tools`` through ``action_spec.valid_tools``), <history>,
-# <visitor-message>. Those tags are neutralized inside every block.
+# <owner-settings>, <page>, <knowledge> (an item for a crawled page carries its
+# site path), <catalog>, <site-pages> (page actions on: the fence forms, a short
+# list of pages, and the tool rule when the page declared a valid tool),
+# <page-tools> (page actions on and at least one of the request's ``page.tools``
+# through ``action_spec.valid_tools``), <history>, <visitor-message>. Those tags
+# are neutralized inside every block.
 #
 # Model (``_turn_model_spec``, memoized ``_AGENT_MODEL_TTL_S`` per agent): the
 # provider + model the owner picked on the concierge agent (the widget's bound one,
@@ -33,9 +34,10 @@
 # Output passes ``FenceFilter``: a ```pawbar-card is validated and hydrated from
 # the catalog store; any other code fence becomes ``CODE_REPLACEMENT`` unless doc
 # code is allowed and ``is_grounded_code`` finds it in this turn's knowledge. The
-# first ```pawbar-action goes through ``action_spec.render_action`` (known pages,
-# bounded targets, a ``tool`` only by a declared name with schema-checked args)
-# into the ``action`` frame; others, and all with page actions off, are dropped.
+# first ```pawbar-action goes through ``action_spec.render_action`` (any page in
+# the full crawl index, a catalog url or the visitor's page; bounded targets; a
+# ``tool`` only by a declared name with schema-checked args) into the ``action``
+# frame; others, and all with page actions off, are dropped.
 # The model only writes a fence; the page runs a declared tool, after the
 # visitor's confirm in the bar unless the page opted out.
 #
@@ -78,7 +80,9 @@ FRAME = (
     "1. Answer only about this site, and only from the facts in the <page>, "
     "<knowledge> and <catalog> blocks. If they do not contain the answer, say briefly that "
     "you don't have that information and offer what you can help with instead. Never "
-    "guess, and never invent products, prices, policies, people or links. Offer a way "
+    "guess, and never invent products, prices, policies, people or links; link only "
+    "to a page path shown on a <knowledge> item, a <catalog> product or in "
+    "<site-pages>. Offer a way "
     "to reach the business only when the visitor asks for a person, contact details or "
     "a callback, or the request needs the business itself (an existing order, a "
     "complaint, a custom quote); otherwise never add contact details or offer to pass "
@@ -620,6 +624,34 @@ def _retrieval_query(
     return "\n".join(p.strip() for p in parts if p and p.strip())
 
 
+def _indexed_pages(site: Any) -> dict[str, tuple[str, str]]:
+    """``{article id: (page key, title)}`` for every page the site sync recorded
+    in ``kb_page_index``: the one article-to-page link, read by the ``sources``
+    event and by the knowledge items' paths."""
+    return {
+        str(entry["id"]): (str(key), str(entry.get("title") or "").strip())
+        for key, entry in (getattr(site, "kb_page_index", None) or {}).items()
+        if isinstance(entry, dict) and entry.get("id")
+    }
+
+
+def _item_paths(items: Sequence[KnowledgeItem], site: Any) -> dict[tuple[str, str], str]:
+    """``{(article id, source): site path}`` for each item that is a crawled page
+    of this site (an article of the site's pocket scope in ``kb_page_index``). An
+    owner upload, a pinned FAQ or an item from another scope gets none."""
+    if site is None:
+        return {}
+    from urllib.parse import quote
+
+    scope = f"pocket:{getattr(site, 'pocket_id', '') or ''}"
+    pages = _indexed_pages(site)
+    return {
+        (item.id, item.source): "/" + quote(pages[item.id][0], safe=_PATH_SAFE)
+        for item in items
+        if item.source == scope and item.id in pages
+    }
+
+
 def _source_items(
     items: Sequence[KnowledgeItem], site: Any, page: PageContext | None
 ) -> list[dict[str, str]]:
@@ -631,11 +663,7 @@ def _source_items(
     from urllib.parse import quote, urlsplit
 
     scope = f"pocket:{getattr(site, 'pocket_id', '') or ''}"
-    pages = {
-        str(entry["id"]): (key, str(entry.get("title") or "").strip())
-        for key, entry in (getattr(site, "kb_page_index", None) or {}).items()
-        if isinstance(entry, dict) and entry.get("id")
-    }
+    pages = _indexed_pages(site)
     base = str(getattr(site, "url", "") or "").strip().rstrip("/")
     if not base and page is not None:
         parts = urlsplit(page.url)
@@ -708,13 +736,20 @@ def select_knowledge(
     return _within_budget(ordered)
 
 
-def _knowledge_block(items: Sequence[KnowledgeItem]) -> str:
+def _knowledge_block(items: Sequence[KnowledgeItem], site: Any = None) -> str:
+    """The turn's knowledge as data. An item that is a crawled page of ``site``
+    carries its site path (``path="/size-guide"``), so the reply can link to it
+    and a ``navigate`` can name it."""
+    kept = _within_budget(items)
+    paths = _item_paths(kept, site)
     lines = ["<knowledge>"]
-    for item in _within_budget(items):
+    for item in kept:
         text = _data(item.text)
         ident = html.escape(item.id, quote=True)
         source = html.escape(item.source, quote=True)
-        lines.append(f'<item id="{ident}" source="{source}">\n{text}\n</item>')
+        path = paths.get((item.id, item.source))
+        where = f' path="{html.escape(path, quote=True)}"' if path else ""
+        lines.append(f'<item id="{ident}" source="{source}"{where}>\n{text}\n</item>')
     if len(lines) == 1:
         lines.append("(no matching knowledge for this message)")
     lines.append("</knowledge>")
@@ -878,19 +913,22 @@ def _site_pages_block(
     catalog: Sequence[Any],
     tools: Sequence[dict[str, Any]] = (),
 ) -> str:
-    """How to write the one ```pawbar-action fence, and the pages ``navigate`` may
-    name (``action_spec.site_pages``), as data. Titles only appear «quoted». With
+    """How to write the one ```pawbar-action fence, and a short list of pages
+    (``action_spec.site_pages``), as data. A ``navigate`` may also name a path on a
+    <knowledge> item or the visitor's page; the server accepts any page in the
+    full crawl index. Titles only appear «quoted». With
     declared ``tools`` (already valid) it also shows the ``tool`` form and the one
     rule for using it; the tools themselves are in <page-tools>."""
     from pocketpaw_ee.paw_bar.action_spec import LABEL_MAX, TARGET_MAX, site_pages
     from pocketpaw_ee.paw_bar.concierge_prompt import quote
 
-    pages = site_pages(site, catalog, action_origin(site, page))
+    origin = action_origin(site, page)
+    pages = site_pages(site, catalog, origin)
     lines = [
         "<site-pages>",
         "   Page actions: to take the visitor to a page or show them part of the page "
         "they are on, write at most ONE ```pawbar-action block holding one JSON object:",
-        '   {"do": "navigate", "to": "<a path listed below>", "label": "<where to>"}',
+        '   {"do": "navigate", "to": "<a page path>", "label": "<where to>"}',
         '   {"do": "scroll_to", "target": "#<element id> or a heading on this page", '
         '"label": "<what>"}',
         '   {"do": "highlight", "target": "#<element id> or a heading on this page", '
@@ -905,13 +943,16 @@ def _site_pages_block(
             '"args": {<its arguments>}, "label": "<what will happen>"}',
             f"   {_TOOL_RULE}",
         ]
-    if pages:
-        lines.append("   navigate only to one of these pages, never to any other path:")
+    if not origin:
+        lines.append("   No pages are listed, so do not use navigate.")
+    else:
+        lines.append(
+            "   navigate only to a path shown on a <knowledge> item, a <catalog> product "
+            "or in this list, or to the page the visitor is on; never to any other path."
+        )
         lines += [
             f"   - {path} {quote(title, 120)}" if title else f"   - {path}" for path, title in pages
         ]
-    else:
-        lines.append("   No pages are listed, so do not use navigate.")
     lines.append("</site-pages>")
     return _data_block(lines)
 
@@ -1023,8 +1064,9 @@ def build_prompt(
     then tagged data blocks in the PRD's fixed order (page, knowledge, catalog and
     actions, history), then the visitor's message. The frame is NOT here; it rides
     as the run's instructions, ahead of all of this. ``items`` is the turn's
-    ``select_knowledge`` list; no ``page`` means no <page> block; ``catalog`` is
-    the turn's ``catalog_for_turn`` items. A site with page actions on also gets
+    ``select_knowledge`` list (an item for a crawled page carries its path); no
+    ``page`` means no <page> block; ``catalog`` is the turn's ``catalog_for_turn``
+    items. A site with page actions on also gets
     the <site-pages> block, after the catalog, and, when ``tools`` (the request's
     ``page.tools``) has a tool ``action_spec.valid_tools`` keeps, <page-tools>
     after it."""
@@ -1034,7 +1076,7 @@ def build_prompt(
     blocks = [owner] if owner else []
     if page is not None:
         blocks.append(_page_block(page))
-    blocks.append(_knowledge_block(items))
+    blocks.append(_knowledge_block(items, site))
     catalog_block = _catalog_and_actions_block(
         widget, catalog, lead_capture=site is not None and lead_capture_on(site)
     )
