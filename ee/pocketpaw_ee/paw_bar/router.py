@@ -2704,6 +2704,10 @@ class SiteOverviewResponse(BaseModel):
     # The dashboard picks the create empty state off ``concierge_exists``.
     concierge_exists: bool = False
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
+    # v2 only: the ``provider:model`` visitors are answered with right now (the
+    # concierge agent's model, else the deployment's), so the owner never has to
+    # guess. "" on legacy, where the agent's own run answers.
+    answer_model: str = ""
     # The third owner setting, alongside ``enabled`` and ``greeting``: whether the
     # visitor's own messages are stored. Carried here so the dashboard renders all
     # three from the one call it already makes rather than a second round trip for
@@ -3184,13 +3188,20 @@ async def get_site_overview(
     # Conversations are pocket-scoped (a Site is 1:1 with its pocket), so the
     # count stands even when the widget row is absent.
     counts.conversations = await _count_conversations(site.pocket_id, workspace_id)
+    from pocketpaw_ee.paw_bar import concierge_runtime as v2_runtime
+
+    runtime = _site_concierge_runtime(site)
+    answer_model = (
+        await v2_runtime.answer_model(widget, site, workspace_id) if runtime == "v2" else ""
+    )
 
     return SiteOverviewResponse(
         widget=widget_view,
         enabled=site.concierge_enabled,
         greeting=site.concierge_greeting,
         concierge_exists=getattr(site, "concierge_created_at", None) is not None,
-        concierge_runtime=_site_concierge_runtime(site),
+        concierge_runtime=runtime,
+        answer_model=answer_model,
         store_transcripts=site.concierge_store_transcripts,
         counts=counts,
     )
