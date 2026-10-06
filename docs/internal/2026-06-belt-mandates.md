@@ -4,8 +4,8 @@
      crew (cloud Agents as workers: roster, seat rule, per-worker model,
      instructions and setup), the headless develop station (strict and owner
      Claude setups, the trust restore, ORIENT) and its security posture, the
-     architecture context the foreman and review get, landing and re-develop,
-     endpoints (incl. the digest), env vars, and the remaining demo-bar
+     architecture context the foreman and review get, the mandate's line
+     branch (base sync, landing, re-develop, one PR), endpoints (incl. the digest), env vars, and the remaining demo-bar
      concessions. -->
 
 # Belt Mandates — the standing JOB primitive
@@ -198,9 +198,10 @@ prominent; at most `budget.max_tasks_per_shift` tasks; every task cites
 sighting ids and names an expected KPI direction; an empty plan with a reason
 is correct and respected; boundaries override KPI opportunities; never repeat
 a failed approach without stating what changed; tasks in one shift are
-independent of each other (they develop from the same base and land
+independent of each other (they develop from the same line tip and land
 separately, so dependent follow-up work waits for a later shift; plan
-validation cannot detect a dependency, so only the prompt says it); a task in
+validation cannot detect a dependency, so only the prompt says it); work on
+the mandate's line is built and never planned again; a task in
 flight is never planned again; a task extends an existing component and never
 plans a duplicate of one (rule 8, below); strict JSON only.
 
@@ -240,6 +241,15 @@ shift, so work it skipped or that failed comes back on the next shift:
   status, the cited sighting ids and, on failure, the run's `error`. Prompt
   rule 7 says an in-flight task is never planned again, and the existing rule
   says a failed approach is not repeated without stating what changed.
+- **The line.** Every task landed on the mandate's line branch is listed under
+  `THE LINE` (and suffixed on its history row) as `on the line
+  belt/line/<id>, awaiting merge into <base>`, or `merged into <base>` once
+  the base holds its commit (`belt.executor.line_merged`: an ancestor of
+  `origin/<base>` as last fetched, or of the local base). Either way it is
+  built: its sightings are resolved like any landed task's, and the prompt says
+  never to plan that work again. A squash or rebase merge leaves the commit
+  outside the base, so such a line keeps reading "awaiting merge"; merge line
+  PRs with a merge commit.
 - **Gate teaching.** A rejection or edit at the plan gate is filed as a
   feedback sighting with `evidence.source == "gate"`. Those with a `shift_no`
   are history, not backlog: they show under that shift as
@@ -633,33 +643,76 @@ and `worldmodel-ripple.json` are built from C4, kb and the shared soul alone
 (`loom build <repo> --scope <scope> --out <model>` from the workspace root);
 their briefs name components, not files, and nothing refreshes them yet.
 
-### Landing and re-develop
+### The line: one branch per mandate
 
-When a human approves a run at the per-diff gate, `belt/executor.py` applies it
-in a throwaway worktree and commits it on `feat/belt-<id>`. A run that carries
-a `title` (every mandate task) commits as `feat: <title>` (kept as written when
-the title already has a Conventional-Commits type), trimmed to 72 chars; the
-body is the task's why followed by the station report. The PR title and body on
-the remote path are the same. A hand-proposed change (no title) keeps
-`feat(belt): <summary>`. A local-only landing keeps the branch the worktree
-created (linked worktrees share `refs/heads`); a run that does not land deletes
-its branch, so a retry of the same action can branch again.
+Every mandate's runs land on one branch, its **line**: `belt/line/<mandate id>`.
+The name comes from the mandate id alone, and only a Mongo ObjectId (24
+lowercase hex) makes one (`belt.executor.line_branch`), so no task or user text
+reaches a ref name. A run with no mandate (a hand-proposed change) keeps its
+own `feat/belt-<id>` branch. Runs stack on the line; the captain merges the
+line into the base when ready. The alternative, planning nothing while a
+landing is unmerged, stalls the factory overnight.
 
-Two runs of one shift develop from the same base. Once the first lands and is
-merged, the second's patch may no longer apply. For a headless run (blob
-`headless`) the executor checks the patch with `git apply --check` before the
-`--3way` apply; when both fail it does not fail the run. It **re-develops** it:
+**Develop** (`develop_station._resolve_base`). When the line exists, a run
+starts from its tip: the local branch, or `origin/<line>` when the repo has a
+remote and the pushed line is ahead (refetched each time; a tracking ref left
+by a deleted remote branch never counts; diverged local and pushed tips stop
+the run until a human merges them). Before that the line is synced with the
+base:
 
 ```
-approved ──apply conflict──▶ blob: diff cleared, station_pending, redevelop=1,
-                                   summary back to the expected outcome
+line tip already in the base (merged)  ──▶ the line moves to the base
+base has commits the line lacks        ──▶ base merged into the line
+                                           (throwaway worktree, merge commit)
+that merge conflicts                   ──▶ the run stands down (headless_error),
+                                           a "line" sighting is filed, the line
+                                           is untouched
+```
+
+Refs only move by compare-and-swap (`git update-ref <ref> <new> <old>`), and
+history is never rewritten. The conflict sighting goes through
+`mandates.service.file_station_sighting`, deduped on the line tip, so a
+standing conflict files once. The develop report gains a `line:` row saying
+which case ran.
+
+**Landing** (`belt/executor.py`). The approved diff is applied in a throwaway
+worktree detached at the line tip (or the base when there is no line yet),
+committed, and the line ref moves by compare-and-swap from the sha it was read
+at, so nothing needs the line checked out and two landings can't both win. A
+run that carries a `title` (every mandate task) commits as `feat: <title>`
+(kept as written when the title already has a Conventional-Commits type),
+trimmed to 72 chars; the body is the task's why followed by the station
+report. A hand-proposed change (no title) keeps `feat(belt): <summary>`. The
+run's blob records `branch` (the line), `commit_sha` (the run's own commit)
+and `pr_url`.
+
+**Remote.** With an `origin` the line is pushed after every landing, and the
+first landing opens its PR; `GhCliPrOpener` returns the branch's open PR when
+there is one, so later pushes update the same PR and every run on the line
+carries its url. Local-only repos keep the line local. Once the line ref has
+moved the run **is** landed: a push or PR failure after that is written into
+the outcome (`pr_url` stays empty) and the next landing pushes again. Failing
+the run would make the Foreman re-plan work the line already holds. A per-run
+`feat/belt-<id>` branch keeps the old rule: a push or PR failure fails the run
+and deletes the local branch, so a retry can branch again.
+
+**Re-develop.** Two runs of one shift develop from the same line tip. Once the
+first lands, the second's patch may no longer apply on the moved line (or,
+for a hand-proposed run, the moved base). For a headless run (blob `headless`)
+the executor checks the patch with `git apply --check` before the `--3way`
+apply; when both fail it does not fail the run. The same happens when the line
+moved between the read and the swap. It **re-develops** it:
+
+```
+approved ──apply conflict / line moved──▶ blob: diff cleared, station_pending,
+                                   redevelop=1, summary back to the expected outcome
                              status: approved → pending  (event action_redevelop)
                              belt_run_updated(queued, station)
          ──after cleanup──▶  headless dispatcher develop(run_ref): the station
-                             regenerates the diff against the current base
+                             regenerates the diff against the current line
                              ──▶ pending at the per-diff gate (fresh approval)
-second apply conflict on the same run ──▶ failed: "base moved twice: …"
-no develop loop wired              ──▶ failed: "… not wired to re-develop it"
+second conflict on the same run ──▶ failed: "base moved twice: …"
+no develop loop wired           ──▶ failed: "… not wired to re-develop it"
 ```
 
 The re-develop is not a terminal, so the Decision-Graph chain stays open and
@@ -741,8 +794,10 @@ once it exits the station folds its stdout into steps and stores them. Path:
 `GET /api/v1/belt/runs` and `GET /api/v1/belt/runs/{id}` rows carry, besides
 status, stage and the landing fields: `title` (the task title, `null` on a
 hand-driven run), `files_changed` (from the attached diff, replaced by the
-staged count on landing), `redevelop` (how many times the run went back to the
-develop station on a moved base: 0 or 1), `plan_action_id` / `task_index` (the
+staged count on landing), `branch` / `commit_sha` / `pr_url` (a mandate run's
+`branch` is its line, `belt/line/<mandate id>`, and `pr_url` the line's one PR;
+a hand-driven run's is `feat/belt-<id>`), `redevelop` (how many times the run
+went back to the develop station on a moved base or line: 0 or 1), `plan_action_id` / `task_index` (the
 mandate plan task it works, `null` on a hand-driven run), and `error`: why the
 run failed, which is the executor's reason (`Action.error`) or, for a develop
 that failed, the `headless_error`. `null` when nothing failed.
@@ -970,8 +1025,20 @@ re-develop replacing the earlier feed, parallel same-name calls answered out
 of order pairing by id, a stream cut after `system/init` not read as a result,
 a failing save not failing the run, the step and byte caps (by id too), and
 the route's tenancy 404.
+`tests/cloud/test_belt_line.py` drives the line on real tmp repos (a bare
+repo as origin, charter recipes as the develop work, a fake PR opener): two
+runs of one mandate stack on the line with no re-added lines; a merged line
+moves to the base; base commits the line lacks are merged in; a base conflict
+stands the run down with one sighting and leaves the line alone; a line moved
+between read and swap re-develops and keeps the other landing; the line is
+pushed and one PR is reused; a line pushed ahead on origin is where the next
+run starts; a PR failure after the swap keeps the landing; a run with no
+mandate keeps its own branch (a PR failure fails it and deletes the branch);
+the ref move is a compare-and-swap; the line name only comes from a real
+mandate id. `test_belt_mandates.py` checks the Foreman reads line work as
+built, awaiting merge then merged, and that a station sighting files once.
 `tests/mutations/belt_factory_runs.json` breaks each of these on purpose
-(the `feed:` entries for the feed). CI runs these in the "Belt mandates and the
+(the `feed:` entries for the feed, the `line:` ones for the line). CI runs these in the "Belt mandates and the
 craft factory develop station" step (`tests/cloud` is outside the default
 addopts).
 
