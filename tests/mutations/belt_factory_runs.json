@@ -610,5 +610,15 @@
     "tests": [
       "tests/cloud/test_belt_crew.py::test_crew_route_refuses_agents_outside_the_callers_reach"
     ]
+  },
+  {
+    "label": "a crew agent's instructions ride the develop prompt outside the untrusted fence",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "f\"boundaries win):\\n{_untrusted(text)}\\n\\n\"",
+    "replace": "f\"boundaries win):\\n{text}\\n\\n\"",
+    "tests": [
+      "tests/cloud/test_belt_crew.py::test_worker_instructions_are_fenced_as_untrusted_data",
+      "tests/cloud/test_belt_crew.py::test_worker_model_and_instructions_reach_develop_and_fix_not_review"
+    ]
   }
 ]
