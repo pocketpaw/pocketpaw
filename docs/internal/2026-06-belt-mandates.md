@@ -914,7 +914,8 @@ repo-relative globs.
   `tests/cloud/fixtures/chai_ledger_c4.json`.
 
 Live: at PREPARE, before any agent step, the station reads the worktree's
-`docs/c4/model.json` (the base commit's) into the run's feed. Each `Edit`,
+`docs/c4/model.json` (where the run starts: its line, else its base) into the
+run's feed. Each `Edit`,
 `Write` or `MultiEdit` call a seat makes (develop or fix; review is read-only)
 then publishes `file_touched {stage, path, component, tool, call_id}` on the
 run stream right after its `tool_start`. The path is the one the station
@@ -929,7 +930,7 @@ blueprint read below joins on a reload.
 | Field | Shape |
 |---|---|
 | `action_id` | the run |
-| `ref` | the base the model was read at: `origin/<base>` when that ref exists in the bound repo, else `<base>` (the station's rule, without its fetch); `null` when the repo is outside the allowlist or the base is not a safe ref name |
+| `ref` | where the model was read: a mandate run's line (`belt/line/<id>`) when the local line exists, since the station moves it to the run's start; else `origin/<base>` when that ref exists in the bound repo, else `<base>` (the station's rule, without its fetch); `null` when the repo is outside the allowlist or the base is not a safe ref name |
 | `model` | `{scope, model: {people, systems, relationships}}`, the c4-gen model as committed at `ref`, `paths` included; `null` when there is none, it is not a C4 model, or it is over 1 MB |
 | `files` | `[{path, component}]`, first touch first: the `Edit`/`Write`/`MultiEdit` calls the develop then fix rows stored, then every file the run's diff writes (`+++ b/` and `diff --git` headers, so a binary patch and a recipe's files count) |
 
@@ -938,10 +939,13 @@ and hooks off; no textconv or filters), never from the owner's working tree,
 and nothing from the repo runs. The repo is re-resolved inside
 `POCKETPAW_BELT_REPO_ALLOWLIST` on every read (the executor's
 `_re_resolve_repo`), and a base that is not a plain ref name (`-` first, `..`,
-anything outside `[A-Za-z0-9._/-]`) never reaches git. The read follows the
-base branch's tip, so a model changed on the base after the run maps the
-run's files by the new model; recording the run's base sha on the blob would
-pin it.
+anything outside `[A-Za-z0-9._/-]`) never reaches git. A mandate run is
+queued with its base already set (the repo's checked-out branch, the
+station's default), so the blueprint is there from the moment the run is
+filed, not only once its diff attaches. The read follows the line's or the
+base branch's tip, so a model changed there after the run maps the run's
+files by the new model; recording the run's start sha on the blob would pin
+it.
 
 ### Runs read model
 

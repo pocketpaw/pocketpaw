@@ -12,8 +12,8 @@
 #                                 chat-shaped ``steps``
 #   * GET  /belt/runs/{action_id}/stream?after= — the run's feed live, as SSE
 #                                 (``service.open_run_stream`` has the replay rules)
-#   * GET  /belt/runs/{action_id}/blueprint — the bound repo's C4 model at the
-#                                 run's base, with the run's files joined to it
+#   * GET  /belt/runs/{action_id}/blueprint — the bound repo's C4 model where the
+#                                 run starts, with the run's files joined to it
 #
 # Routes are THIN: they read identity (workspace + user) from the cloud deps,
 # delegate to ``ee.cloud.belt.service``, and return what the service built. RBAC

@@ -12,8 +12,10 @@
 #     run's stream with the component it maps to (none for a Read, a path
 #     outside the repo or a cut input), its path scrubbed.
 #   * ``GET /belt/runs/{id}/blueprint`` serves the bound repo's model as
-#     committed on the run's base (never the working tree) with the run's
-#     touched files mapped, and 404s a foreign run.
+#     committed where the run starts, its mandate's line or its base (never
+#     the working tree), with the run's touched files mapped, and 404s a
+#     foreign run. A mandate run is queued on the repo's checked-out branch,
+#     so the blueprint is there before its develop starts.
 
 from __future__ import annotations
 
@@ -392,3 +394,54 @@ async def test_a_hostile_base_branch_is_never_passed_to_git(
     run = await _propose_run(store, repo=str(repo))
     assert (await belt_service.get_run_blueprint("w1", run.id))["ref"] == "main"
     assert calls  # the spy sees a real read
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+
+async def test_a_queued_mandate_run_has_its_base_and_blueprint_before_it_develops(
+    repo,  # noqa: F811
+    store,  # noqa: F811
+    mongo_db,
+    monkeypatch,
+):
+    """The dispatcher queues a run on the repo's checked-out branch (the
+    station's default base), so its blueprint is there for the whole develop;
+    a detached checkout leaves the base empty for the station to refuse."""
+    _commit_model(repo, _model(("app", ["app.py"])))
+    action_id = await _queue_run(monkeypatch, repo, recipe="")
+    run = await belt_service.get_run("w1", action_id)
+    assert run["status"] == "queued" and run["base_branch"] == "main"
+    blueprint = await belt_service.get_run_blueprint("w1", action_id)
+    assert blueprint["ref"] == "main" and blueprint["model"]["scope"] == "app"
+
+    _git(repo, "checkout", "-q", "--detach")
+    detached = await _queue_run(monkeypatch, repo, recipe="")
+    assert (await belt_service.get_run("w1", detached))["base_branch"] == ""
+
+
+async def test_a_mandate_run_reads_the_blueprint_on_its_line(
+    repo,  # noqa: F811
+    store,  # noqa: F811
+    mongo_db,
+):
+    """A mandate run starts from its line once the line exists (the station
+    syncs the local line ref to the run's start), so the blueprint is the
+    line's; with no line yet it is the base's."""
+    mandate_id = "6ac540bef3a7bf6c44d65c0c"
+    _commit_model(repo, _model(("app", ["app.py"])))
+    run = await _propose_run(store, repo=str(repo))
+    params = dict(run.parameters)
+    params["_code_change"] = {**params["_code_change"], "mandate_id": mandate_id}
+    await store.update_parameters(run.id, params)
+    assert (await belt_service.get_run_blueprint("w1", run.id))["ref"] == "main"
+
+    line = f"belt/line/{mandate_id}"
+    _git(repo, "checkout", "-q", "-b", line)
+    _commit_model(repo, _model(("app", ["app.py"]), ("tests", ["tests/**"])))
+    _git(repo, "checkout", "-q", "main")
+    blueprint = await belt_service.get_run_blueprint("w1", run.id)
+    assert blueprint["ref"] == line
+    comps = blueprint["model"]["model"]["systems"][1]["containers"][0]["components"]
+    assert [c["id"] for c in comps] == ["app", "tests"]

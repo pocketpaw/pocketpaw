@@ -10,9 +10,11 @@
 #   3. Dispatches each task through a ``TaskDispatcher`` (``resolve_dispatcher``,
 #      env ``POCKETPAW_MANDATE_DISPATCHER``):
 #        * ``station`` (default) — ``StationTaskDispatcher`` files a QUEUED
-#          ``code_change`` Action (``station_pending=True``, no diff) carrying
-#          the task text, its ``title`` (the commit subject when it lands) and
-#          ``expected_outcome``, its ``recipe`` (if any), the crew ``worker``
+#          ``code_change`` Action (``station_pending=True``, no diff, based on
+#          the repo's checked-out branch: ``belt.service.default_base``)
+#          carrying the task text, its ``title`` (the commit subject when it
+#          lands) and ``expected_outcome``, its ``recipe`` (if any), the crew
+#          ``worker``
 #          seat (``{agent_id, name, setup, seated_by}``; task N goes to live dev seat
 #          ``(N-1) % devs``, see ``mandates.service.pick_dev``) and the mandate
 #          provenance, and fires ``belt_run_updated``. A human drives ``/belt``
@@ -169,7 +171,9 @@ class StationTaskDispatcher:
             # A station-queued run carries the task text instead of a diff.
             "station_pending": True,
             "repo": repo or "",
-            "base_branch": "",
+            # The station's default base, resolved now so every reader of the
+            # queued run (its blueprint above all) has it before the develop.
+            "base_branch": await belt_service.default_base(repo) if repo else "",
             "diff": "",
             "task": f"{title}\n\n{why}".strip(),
             "summary": expected or title,

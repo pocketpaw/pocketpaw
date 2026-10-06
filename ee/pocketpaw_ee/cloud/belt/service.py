@@ -27,9 +27,11 @@
 #     shares ``get_run``'s tenancy 404 and returns chat-shaped steps.
 #   * ``open_run_stream`` — the same feed live: the run's stream as SSE, the
 #     newest attempt replayed from its start, same tenancy 404.
-#   * ``get_run_blueprint`` — the bound repo's C4 model as committed on the
-#     run's base (``git cat-file``, nothing from the repo runs) and the run's
-#     touched files joined to its components by their ``paths`` globs.
+#   * ``get_run_blueprint`` — the bound repo's C4 model as committed where the
+#     run starts, its mandate's line or its base (``git cat-file``, nothing from
+#     the repo runs), and the run's touched files joined to its components by
+#     their ``paths`` globs. ``default_base`` is the station's default base (the
+#     repo's checked-out branch), which a mandate run is queued on.
 #
 # Security: git runs through ``create_subprocess_exec`` with argv lists; a
 # submitted path is realpath-resolved and confirmed to be a git repo before it
@@ -261,6 +263,23 @@ async def _current_branch(path: Path) -> str:
     if code != 0:
         return ""
     return out.strip()
+
+
+async def default_base(repo: str) -> str:
+    """The develop station's default base for ``repo``: its checked-out
+    branch, re-resolved inside the allowlist. "" for a detached HEAD, a repo
+    outside the allowlist or a failed read (the station then decides, and
+    refuses a detached HEAD itself)."""
+    from pocketpaw_ee.cloud.belt.executor import _re_resolve_repo
+
+    path, _err = _re_resolve_repo(repo)
+    if path is None:
+        return ""
+    try:
+        branch = await _current_branch(path)
+    except (OSError, RuntimeError):  # git missing, or the 120 s timeout
+        return ""
+    return "" if branch == "HEAD" else branch
 
 
 async def _branches(path: Path) -> list[str]:
@@ -862,7 +881,7 @@ async def get_run_feed(workspace_id: str, action_id: str, stage: str) -> dict[st
 
 
 # ---------------------------------------------------------------------------
-# the run's blueprint — the bound repo's C4 model at the run's base, files joined
+# the run's blueprint — the bound repo's C4 model where the run starts, files joined
 # ---------------------------------------------------------------------------
 
 _MODEL_PATH = "docs/c4/model.json"
@@ -877,23 +896,27 @@ _READ_GIT = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/nul
 
 
 async def _base_model(blob: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
-    """``(ref, model)``: the bound repo's ``docs/c4/model.json`` as committed on
-    the run's base, ``origin/<base>`` when it exists, else ``<base>`` (the
-    station's rule, without its fetch). Read with ``git cat-file`` (no
-    textconv, no filters), nothing from the repo runs. ``(None, None)`` for a
-    repo outside the allowlist or a base git would read as an option; the ref
-    with ``None`` when the base has no readable model (over ``MAX_MODEL_BYTES``
-    counts as unreadable)."""
-    from pocketpaw_ee.cloud.belt.executor import _re_resolve_repo, _run
+    """``(ref, model)``: the bound repo's ``docs/c4/model.json`` as committed
+    where the run starts: its mandate's line when the local line ref exists
+    (the station moves it to the run's start), else ``origin/<base>`` when it
+    exists, else ``<base>`` (the station's rule, without its fetch). Read with
+    ``git cat-file`` (no textconv, no filters), nothing from the repo runs.
+    ``(None, None)`` for a repo outside the allowlist or a base git would read
+    as an option; the ref with ``None`` when it has no readable model (over
+    ``MAX_MODEL_BYTES`` counts as unreadable)."""
+    from pocketpaw_ee.cloud.belt.executor import _re_resolve_repo, _run, line_branch
     from pocketpaw_ee.cloud.belt.orient import load_model
 
     base = str(blob.get("base_branch") or "")
     repo, _err = _re_resolve_repo(str(blob.get("repo") or ""))
     if repo is None or not _REF_RE.fullmatch(base) or ".." in base:
         return None, None
+    line = line_branch(str(blob.get("mandate_id") or ""))
+    refs = [(line, f"refs/heads/{line}")] if line else []
+    refs += [(f"origin/{base}", f"origin/{base}"), (base, base)]
     try:
-        for ref in (f"origin/{base}", base):
-            argv = [*_READ_GIT, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"]
+        for ref, rev in refs:
+            argv = [*_READ_GIT, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"]
             code, sha, _ = await _run(argv, cwd=repo)
             if code == 0:
                 break
@@ -936,8 +959,8 @@ async def _touched_files(workspace_id: str, action_id: str, blob: dict[str, Any]
 
 async def get_run_blueprint(workspace_id: str, action_id: str) -> dict[str, Any]:
     """The run on its line's blueprint: ``{action_id, ref, model, files}``.
-    ``model`` is ``{scope, model}`` from the bound repo's C4 model at the run's
-    base (``_base_model``; ``None`` without one), ``paths`` globs included;
+    ``model`` is ``{scope, model}`` from the bound repo's C4 model where the
+    run starts (``_base_model``; ``None`` without one), ``paths`` globs included;
     ``files`` is ``[{path, component}]`` (``_touched_files``, each joined by
     ``orient.component_for``; ``None`` when no glob owns it). The same tenancy
     404 as ``get_run``."""
@@ -1016,6 +1039,7 @@ __all__ = [
     "MAX_DIFF_BYTES",
     "RepoCreator",
     "add_repo",
+    "default_base",
     "discover_repos",
     "emit_belt_run_updated",
     "get_run",

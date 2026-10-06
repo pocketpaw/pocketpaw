@@ -385,7 +385,8 @@ class ClaudeCodeDevelop:
             # an agent that rewrites it could aim station git at a config of
             # its own. Snapshot it now, re-check after every agent step.
             git_snapshot = (worktree / ".git").read_bytes()
-            # The base's blueprint, read before any agent step can edit it:
+            # The blueprint where the run starts (its line, else its base), read
+            # before any agent step can edit it:
             # every edit's ``file_touched`` names the component that owns it.
             with contextlib.suppress(OSError, ValueError):  # none, or not text
                 model = load_model((worktree / "docs" / "c4" / "model.json").read_text())

@@ -179,5 +179,32 @@
     "tests": [
       "tests/cloud/test_belt_live_atlas.py::test_an_edit_with_no_blueprint_still_reports_the_file"
     ]
+  },
+  {
+    "label": "live atlas: a mandate run is queued with no base",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "            \"base_branch\": await belt_service.default_base(repo) if repo else \"\",\n",
+    "replace": "            \"base_branch\": \"\",\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_queued_mandate_run_has_its_base_and_blueprint_before_it_develops"
+    ]
+  },
+  {
+    "label": "live atlas: a detached checkout queues the run on HEAD",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    return \"\" if branch == \"HEAD\" else branch\n",
+    "replace": "    return branch\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_queued_mandate_run_has_its_base_and_blueprint_before_it_develops"
+    ]
+  },
+  {
+    "label": "live atlas: a mandate run's blueprint ignores its line",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    refs = [(line, f\"refs/heads/{line}\")] if line else []\n",
+    "replace": "    refs = []\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_mandate_run_reads_the_blueprint_on_its_line"
+    ]
   }
 ]

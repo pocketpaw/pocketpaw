@@ -24,7 +24,7 @@
 #     emits ``belt_run_updated``); ``add`` keeps a frame for its stage and
 #     publishes it scrubbed (``steps.scrub_frame``) and stage-tagged, and after
 #     an Edit/Write/MultiEdit call ``file_touched`` (the file and the component
-#     the base blueprint's ``paths`` give it, ``orient.component_for``); ``save``
+#     the start blueprint's ``paths`` give it, ``orient.component_for``); ``save``
 #     folds the stage's frames of this call into its stored row; ``end`` closes
 #     the attempt with ``stream_end``. Frames reach it already path-relative
 #     (the station strips worktree/repo paths and the host account first).
