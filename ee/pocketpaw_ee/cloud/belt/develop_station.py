@@ -10,13 +10,10 @@
 #   ORIENT   LLM work only: ``orient.orient_block`` (loom world model, else the
 #            repo's C4 list) rides the develop + review prompts; a miss is a note.
 #   WORK     a charter recipe → that command; else DEVELOP → ``claude -p`` in
-#            ``stream-json``: its events fold into the run's step feed
-#            (``belt/feed.py``, scrubbed + capped), stored via the belt service
-#            before any error is raised (the stage is emptied when a develop
-#            starts); a failed save never fails the run. Seat output and every
-#            error tail have the worktree and repo paths made relative and the
-#            host's OS account name, where it names the account (``ls -l``
-#            owner/group, a home dir), replaced by ``user``.
+#            ``stream-json``, folded into the run's step feed (``belt/feed.py``,
+#            scrubbed + capped, stored before any error is raised, emptied when a
+#            develop starts; a failed save never fails the run). Seat output and
+#            error tails get worktree/repo paths relative, the OS user as ``user`` in ls -l/home.
 #   CHECK    every charter check; FIX (``claude -p`` with the failure) while
 #            attempts last. REVIEW: read-only ``claude -p`` judges the diff,
 #            failing duplicates of existing code; strict ``{"verdict","notes"}``.
