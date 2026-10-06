@@ -14,7 +14,10 @@
 # containment, process-group kills, and logged background crashes. The owner
 # setup section pins the trust restore (planted agent config never loads) and the
 # worktree-root refusal; the ORIENT section pins the architecture block in the
-# develop/review prompts, its degraded paths, and the foreman's C4 list.
+# develop/review prompts, its degraded paths, and the foreman's C4 list. The
+# Pulley app line section drives the template's ``belt`` recipe and doctor check
+# (a faked ``belt``) through the station, and pins that the default allowlist
+# accepts them.
 
 from __future__ import annotations
 
@@ -1207,3 +1210,68 @@ def test_foreman_prompt_carries_the_repo_c4_components(tmp_path):
     assert "Never plan a new component, module or service that duplicates one listed" in prompt
     bare = foreman.build_prompt(foreman.ForemanContext(shift_no=1, charter={"goal": "g"}))
     assert "(no C4 model for this repo)" in bare
+
+
+# ---------------------------------------------------------------------------
+# Pulley app line — blocks land through charter recipes, doctor gates them
+# ---------------------------------------------------------------------------
+
+# The "Pulley app line" template's strings (paw-enterprise mandate-templates.ts).
+PULLEY_BLOCKS = ("auth", "org", "roles", "notify", "files", "audit")
+PULLEY_DOCTOR = "belt doctor --app . --json --env-advisory"
+PULLEY_RECIPES = {f"add-{b}": f"belt add {b} --app . --json" for b in PULLEY_BLOCKS}
+PULLEY_FIXTURES = Path(__file__).parent / "fixtures" / "pulley_blocks"
+
+
+class FakeBelt(FakeClaude):
+    """Answers ``belt`` the way pulley's CLI does for the station: ``add <block>``
+    copies the real manifest into ``src/blocks/<block>/`` and records ``belt.lock``;
+    ``doctor`` exits ``doctor_exit``. Everything else (git) runs for real."""
+
+    def __init__(self, doctor_exit: int = 0):
+        super().__init__()
+        self.doctor_exit = doctor_exit
+
+    async def __call__(self, argv, *, cwd, timeout, stdin=None):
+        if argv[0] != "belt":
+            return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin)
+        self.argvs.append(list(argv))
+        app = Path(cwd)
+        if argv[1] == "add":
+            dest = app / "src" / "blocks" / argv[2]
+            dest.mkdir(parents=True)
+            (dest / "manifest.json").write_text((PULLEY_FIXTURES / f"{argv[2]}.json").read_text())
+            (app / "belt.lock").write_text(json.dumps({"blocks": {argv[2]: {}}}))
+            return 0, json.dumps({"ok": True, "command": "add"}), ""
+        ok = self.doctor_exit == 0
+        return self.doctor_exit, json.dumps({"ok": ok, "command": "doctor", "findings": []}), ""
+
+
+def test_pulley_line_charter_passes_the_default_allowlist(monkeypatch):
+    from pocketpaw_ee.cloud.mandates.dto import CharterRequest
+
+    monkeypatch.delenv("POCKETPAW_FACTORY_ALLOWED_COMMANDS", raising=False)
+    CharterRequest(goal="g", checks=[PULLEY_DOCTOR], recipes=PULLEY_RECIPES)
+    for command in [PULLEY_DOCTOR, *PULLEY_RECIPES.values()]:
+        assert ds._charter_argv(command, "WORK")[0] == "belt"
+
+
+@pytest.mark.parametrize("doctor_exit", [0, 1])
+async def test_pulley_recipe_lands_a_block_and_doctor_gates_it(repo, monkeypatch, doctor_exit):
+    monkeypatch.delenv("POCKETPAW_FACTORY_ALLOWED_COMMANDS", raising=False)
+    fake = FakeBelt(doctor_exit=doctor_exit)
+    station = _station(fake, repo, checks=[PULLEY_DOCTOR], recipes=PULLEY_RECIPES)
+
+    if doctor_exit:
+        with pytest.raises(ds.DevelopStationError, match=r"^CHECK: `belt doctor .*after 0 fix"):
+            await station(_request(repo, recipe="add-auth"))
+    else:
+        result = await station(_request(repo, recipe="add-auth"))
+        assert "+++ b/src/blocks/auth/manifest.json" in result.diff
+        assert "+++ b/belt.lock" in result.diff
+        assert f"check `{PULLEY_DOCTOR}`: pass" in result.summary
+        assert "recipe: add-auth" in result.summary
+    assert fake.claude_calls == []
+    belts = [a for a in fake.argvs if a[0] == "belt"]
+    assert belts == [shlex.split(PULLEY_RECIPES["add-auth"]), shlex.split(PULLEY_DOCTOR)]
+    _assert_clean(repo, fake)

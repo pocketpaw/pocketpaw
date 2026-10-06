@@ -638,5 +638,32 @@
     "tests": [
       "tests/cloud/test_belt_crew.py::test_a_non_claude_worker_model_falls_back_and_the_report_says_why"
     ]
+  },
+  {
+    "label": "pulley c4: deps no longer become relationships",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "for dep, rng in sorted((manifest.get(\"deps\") or {}).items())",
+    "replace": "for dep, rng in sorted({}.items())",
+    "tests": [
+      "tests/cloud/test_belt_pulley_c4.py"
+    ]
+  },
+  {
+    "label": "pulley c4: the table prefix drops out of the description",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "(\"Tables\", [f\"{prefix}*\"] if prefix else []),",
+    "replace": "(\"Tables\", []),",
+    "tests": [
+      "tests/cloud/test_belt_pulley_c4.py"
+    ]
+  },
+  {
+    "label": "station allowlist: belt is no longer a default command",
+    "file": "ee/pocketpaw_ee/cloud/mandates/dto.py",
+    "find": "uv,uvx,bun,bunx,belt,node",
+    "replace": "uv,uvx,bun,bunx,node",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_pulley_line_charter_passes_the_default_allowlist"
+    ]
   }
 ]

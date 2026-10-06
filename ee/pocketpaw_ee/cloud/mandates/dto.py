@@ -121,9 +121,10 @@ def _require_argv(cmd: str) -> None:
 
 # Programs a charter check/recipe may start, by basename. No shells, ``env``,
 # ``sudo``, downloaders, or ``git`` (a check-run git would honour hooks and
-# config the agent can plant). Operators override the whole list with
+# config the agent can plant). ``belt`` is Pulley's block CLI (``bun link`` in a
+# pulley checkout puts it on PATH). Operators override the whole list with
 # ``POCKETPAW_FACTORY_ALLOWED_COMMANDS`` (comma-separated basenames).
-_DEFAULT_ALLOWED_COMMANDS = "uv,uvx,bun,bunx,node,npm,pnpm,python,python3,pytest,cargo,make,go"
+_DEFAULT_ALLOWED_COMMANDS = "uv,uvx,bun,bunx,belt,node,npm,pnpm,python,python3,pytest,cargo,make,go"
 
 
 def command_refusal(program: str) -> str | None:

@@ -1,9 +1,9 @@
 <!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
      craft factory built on it: anatomy, charter (cadence, checks, recipes),
-     patrols (incl. upstream), the crew (cloud Agents as workers: roster, seat
-     rule, per-worker model, instructions and setup), the headless develop
-     station (strict and owner Claude setups, the trust restore, ORIENT) and its
-     security posture, the
+     Pulley blocks installed through recipes, patrols (incl. upstream), the
+     crew (cloud Agents as workers: roster, seat rule, per-worker model,
+     instructions and setup), the headless develop station (strict and owner
+     Claude setups, the trust restore, ORIENT) and its security posture, the
      architecture context the foreman and review get, landing and re-develop,
      endpoints (incl. the digest), env vars, and the remaining demo-bar
      concessions. -->
@@ -86,11 +86,57 @@ Checks and recipes are argv strings split with `shlex` and never run through a
 shell. The create DTO rejects (422) one that does not split, or whose program
 (argv[0]) is not on `POCKETPAW_FACTORY_ALLOWED_COMMANDS`: by basename for a bare
 name or an absolute path, and never a relative path, which would resolve into
-the agent's worktree. The default list is `uv, uvx, bun, bunx, node, npm, pnpm,
-python, python3, pytest, cargo, make, go`: no shells, `env`, `sudo`, `curl`,
-`wget` or `git`. Create also rejects (422) a `surface.repo_id` that does not
-resolve inside the workspace's belt allowlist roots. Only `belt.manage`
+the agent's worktree. The default list is `uv, uvx, bun, bunx, belt, node, npm,
+pnpm, python, python3, pytest, cargo, make, go`: no shells, `env`, `sudo`,
+`curl`, `wget` or `git`. Create also rejects (422) a `surface.repo_id` that does
+not resolve inside the workspace's belt allowlist roots. Only `belt.manage`
 (admin) can write a charter.
+
+### Pulley blocks through recipes
+
+Pulley (`qbtrix/pulley`) supplies certified copy-in building blocks (auth, org,
+roles, notify, files, audit, hello) and the `belt` CLI that installs them into
+a SvelteKit app made from its `template/`. A mandate assembling such an app (the
+"Pulley app line" template in paw-enterprise) drives that CLI as charter
+commands, nothing else:
+
+- **recipes** `add-<block>` → `belt add <block> --app . --json` for the six
+  universal blocks. `add` resolves the dependency closure and checks every
+  block's bytes against the integrity pinned in the registry index, so what
+  lands is what the certifier passed.
+- **check** `belt doctor --app . --json --env-advisory`: lock and disk agree,
+  no drift, the generated shell, routes, barrels, hooks and adapters regions
+  match the installed blocks, npm requirements are recorded, framework floors
+  hold.
+
+Why the CLI and not Pulley's MCP server: the strict station runs every claude
+seat with no MCP servers, and DONE refuses any diff touching `.mcp.json` (owner
+setup restores it to base before every claude call). A recipe needs no LLM at
+all; the station runs the command and the checks gate it, so an MCP server would
+add a process and a trust surface for nothing.
+
+What the station needs from the factory host: `bun link` in a pulley checkout
+puts `belt` on PATH (`belt` is on the default allowlist, and the station env
+keeps PATH), and `belt add` with no `--registry` reads that checkout's own
+`registry/`, so a charter string carries no machine path. `--env-advisory`
+exists because the station judges install state in a throwaway worktree with a
+scrubbed env and no `.env`: without it doctor fails every install on the
+deployment config a block declares (`DATABASE_URL`, `BETTER_AUTH_SECRET`,
+`PULLEY_PORT_MAIL` for auth); with it those findings are reported as info and
+the run's check passes. (`bin`, the registry default and `--env-advisory` are
+pulley's contract 1.1.0, branch `feat/belt-recipes`.)
+
+Pulley's certifier (`bun scripts/certify.ts --all`) is not a charter check: it
+certifies the registry's blocks, not the line app, and needs `bun install` and
+Postgres. It is pulley's promotion gate (all seven blocks pass it), upstream of
+any shift. `add` on a block the line already has changes nothing, and the
+station refuses the empty diff (`DONE: the change produced an empty diff`).
+
+`orient.block_component` maps a block manifest onto a C4 component (id, name,
+description, technology) and its `deps` onto sync relationships; routes,
+endpoints, the table prefix and events ride the description after the block's
+own first sentence. It is what writes installed blocks into a line app's
+`docs/c4/model.json`, which ORIENT and the foreman then read.
 
 ### Decision chains (RFC 09)
 
@@ -796,7 +842,7 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_MANDATE_DISPATCHER` | `station` | `station` / `headless` / `bus` (above) |
 | `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`) |
 | `POCKETPAW_FACTORY_DEDICATED_HOST` | unset | `1` lets the station wire in a process serving cloud tenants; set it only on a dedicated single-tenant host |
-| `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
+| `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,belt,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
 | `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
 | `POCKETPAW_FACTORY_CLAUDE_BIN` | `claude` on PATH | The Claude Code CLI every factory LLM seat shells (foreman, develop, fix, review) |
 | `POCKETPAW_FACTORY_CLAUDE_MODEL` | the CLI's built-in default | Passed as `--model` when set (in the strict setup user settings don't load, so a model set there is ignored); a seated crew dev's own model wins on develop/fix |
@@ -871,8 +917,12 @@ worktree-root refusal) and the trust restore (planted `.claude/settings.json`,
 `CLAUDE.md`, nested and gitignored plants, a symlinked `.claude` and an
 untracked `.mcp.json` are all back to base before FIX and REVIEW), ORIENT (the
 loom argv, the block in the develop and review prompts, the review's duplicate
-rule, the C4 fallback, the "no world model" note, recipes skipping it) and the
-foreman's C4 list (`test_belt_mandates.py` checks the shift wires it in);
+rule, the C4 fallback, the "no world model" note, recipes skipping it), the
+foreman's C4 list (`test_belt_mandates.py` checks the shift wires it in) and the
+Pulley app line (its `belt` recipe and doctor check pass the default allowlist; a
+faked `belt` lands `add-auth` as a diff and a red doctor fails CHECK);
+`test_belt_pulley_c4.py` maps the seven real Pulley manifests through
+`block_component` and reads the result back with `c4_lines`;
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
 cadence scheduler; the headless file also lands a run (commit subject from the
 title) and drives the re-develop against a real tmp repo: two diffs from one
