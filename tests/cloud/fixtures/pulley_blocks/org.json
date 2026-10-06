@@ -1,0 +1,84 @@
+{
+  "$comment": "pulley/registry/blocks/org/manifest.json \u2014 created 2026-08-12 (T-11), updated 2026-08-13 (T-10b: the nav entry carries its own href, so the routes below are ordered for reading rather than to steer the nav link). The org core block \u2014 organizations, membership, invitations, and org switching. DEPENDS ON auth: it references auth_user by id and never re-declares a person. This dep is what makes the block pair exercise the resolver for real \u2014 auth must install first and its migrations must run first, or the org_member foreign key has nothing to point at. DATABASE_URL is declared here with flags identical to auth's, which the resolver treats as a shared variable (a warning) rather than a conflict. `packages`/`devPackages` follow the T-11 contract; shared ranges are byte-identical to auth's because the installer refuses incompatible 0.x caret keys. Updated 2026-08-17 (G7): `hooks.init` points at server/eventsInit.ts, which puts this block's emitted events on the app's event bus at startup — that is how another block reacts to org.member.joined without importing org. The kit floor comes with it: the server `init` hook landed in @sveltejs/kit 2.10, and an older app would drop the wiring silently.",
+  "name": "org",
+  "version": "0.1.0",
+  "description": "Organizations, membership roles, single-use invitations, and server-checked org switching.",
+  "kind": "core",
+  "deps": {
+    "auth": "^0.1.0"
+  },
+  "provides": [
+    "org.membership",
+    "org.current"
+  ],
+  "tablePrefix": "org_",
+  "packages": {
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.22.0"
+  },
+  "devPackages": {
+    "@types/pg": "^8.20.4"
+  },
+  "routes": [
+    {
+      "path": "/org",
+      "page": "OrgSettingsPage"
+    },
+    {
+      "path": "/org/members",
+      "page": "OrgMembersPage"
+    },
+    {
+      "path": "/org/invite/[token]",
+      "page": "InviteAcceptPage"
+    }
+  ],
+  "nav": [
+    {
+      "slot": "main",
+      "label": "Organization",
+      "icon": "building",
+      "href": "/org",
+      "order": 20
+    }
+  ],
+  "env": [
+    {
+      "name": "DATABASE_URL",
+      "required": true,
+      "description": "Postgres connection string the org tables live in. Same database as the auth block \u2014 org_member holds a foreign key into auth_user.",
+      "secret": true
+    },
+    {
+      "name": "ORG_INVITE_TTL_HOURS",
+      "required": false,
+      "description": "How many hours an invitation stays valid. Defaults to 72. Must be a positive integer.",
+      "secret": false
+    }
+  ],
+  "perms": [
+    "org.read",
+    "org.update",
+    "org.member.invite",
+    "org.member.remove",
+    "org.member.role.update",
+    "org.invite.revoke"
+  ],
+  "ports": [
+    "mail"
+  ],
+  "framework": {
+    "@sveltejs/kit": ">=2.10.0"
+  },
+  "hooks": {
+    "init": "eventsInit.ts"
+  },
+  "events": {
+    "emits": [
+      "org.created",
+      "org.member.joined",
+      "org.invite.expired"
+    ]
+  },
+  "skill": "SKILL.md"
+}

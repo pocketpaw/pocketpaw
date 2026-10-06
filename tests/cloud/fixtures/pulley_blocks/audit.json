@@ -1,0 +1,64 @@
+{
+  "$comment": "pulley/registry/blocks/audit/manifest.json — created 2026-08-13 (T-15): the audit core block. An append-only record of who did what to which record, in which organization. DEPENDS ON auth (an entry names its actor) AND org (an entry is scoped to one organization, and the viewer is org-scoped). Those deps are REAL for install order, barrel imports and migration order — but, unlike every sibling block, they are NOT enforced by foreign keys. An audit log whose rows vanish with the record they describe is not an audit log, and every FK mode loses: CASCADE wipes the history, SET NULL erases the actor id the entry exists to preserve, and RESTRICT makes a user undeletable. schema/migrations/0001_audit.sql therefore contains no REFERENCES clause at all, deliberately, and the block's suite asserts it stays that way. NO `endpoints`: the only write path is record(), imported from the barrel by other blocks, and the only read path is the page load — so there is no HTTP verb to PATCH or DELETE an entry, which makes append-only structural rather than a promise. NO `ports` — an audit log needs no vendor. Permission to READ the log is checked server-side against roles' ability through the injected resolver seam in server/guard.ts (roles is deliberately not a dep; see SKILL.md 'Wire-up'). DATABASE_URL is declared with flags byte-identical to auth's, org's and roles', which the resolver treats as a shared variable (warning) rather than a conflict.",
+  "name": "audit",
+  "version": "0.1.0",
+  "description": "Append-only audit log: who did what to which record, scoped to an organization, with a filterable server-rendered viewer.",
+  "kind": "core",
+  "deps": {
+    "auth": "^0.1.0",
+    "org": "^0.1.0"
+  },
+  "provides": [
+    "audit.record",
+    "audit.actions"
+  ],
+  "tablePrefix": "audit_",
+  "packages": {
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.22.0"
+  },
+  "devPackages": {
+    "@types/pg": "^8.20.4"
+  },
+  "framework": {
+    "@sveltejs/kit": ">=2.15.0"
+  },
+  "routes": [
+    {
+      "path": "/audit",
+      "page": "AuditLogPage",
+      "load": "auditLoad.ts"
+    }
+  ],
+  "nav": [
+    {
+      "slot": "main",
+      "label": "Audit log",
+      "icon": "clipboard-list",
+      "href": "/audit",
+      "order": 60
+    }
+  ],
+  "env": [
+    {
+      "name": "DATABASE_URL",
+      "required": true,
+      "description": "Postgres connection string the audit_ tables live in. Same database as auth and org — audit entries carry their ids, though not as foreign keys (an audit row must outlive its subject).",
+      "secret": true
+    }
+  ],
+  "perms": [
+    "audit.read"
+  ],
+  "events": {
+    "consumes": [
+      "auth.user.created",
+      "auth.session.revoked",
+      "org.created",
+      "org.member.joined",
+      "roles.assigned",
+      "roles.revoked"
+    ]
+  },
+  "skill": "SKILL.md"
+}

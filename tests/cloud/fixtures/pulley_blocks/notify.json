@@ -1,0 +1,109 @@
+{
+  "$comment": "pulley/registry/blocks/notify/manifest.json \u2014 created 2026-08-13 (T-13): the notify core block. An in-app inbox per user plus outbound email through the MAIL PORT, and the first block that both CONSUMES a port and SHIPS an adapter for it. `providesAdapters` puts a Resend adapter in the app's registry; `ports:[\"mail\"]` says the block needs a selection; PULLEY_PORT_MAIL is what actually picks one. That chain \u2014 ship, select, resolve, with no vendor import anywhere in block code \u2014 is the end-to-end proof that T-10b/G6 closed. Depends on auth: notify_notification references auth_user by id and the inbox is session-scoped, so auth installs and migrates first. `packages` ranges are byte-identical to auth's and org's on purpose (the installer refuses incompatible ranges of one package across blocks). DATABASE_URL is declared with flags identical to auth's, which the resolver treats as a shared variable rather than a conflict. Updated 2026-08-17 (G7): `events.consumes` is no longer documentation. `hooks.init` points at server/eventsInit.ts, which subscribes this block to the app's event bus at startup, so an org.member.joined event becomes an inbox row with no import between the two blocks — and note that org is NOT a dep: an app without org just never fires the subscription.",
+  "name": "notify",
+  "version": "0.1.0",
+  "description": "Per-user notification inbox with mark-read endpoints, plus transactional email through the mail port and a Resend adapter.",
+  "kind": "core",
+  "deps": {
+    "auth": "^0.1.0"
+  },
+  "provides": [
+    "notify.inbox",
+    "notify.send"
+  ],
+  "tablePrefix": "notify_",
+  "packages": {
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.22.0"
+  },
+  "devPackages": {
+    "@types/pg": "^8.20.4"
+  },
+  "framework": {
+    "@sveltejs/kit": ">=2.15.0"
+  },
+  "routes": [
+    {
+      "path": "/inbox",
+      "page": "InboxPage",
+      "load": "inboxLoad.ts"
+    }
+  ],
+  "endpoints": [
+    {
+      "path": "/api/notify/read",
+      "module": "readEndpoint.ts"
+    },
+    {
+      "path": "/api/notify/read-all",
+      "module": "readAllEndpoint.ts"
+    }
+  ],
+  "nav": [
+    {
+      "slot": "main",
+      "label": "Inbox",
+      "icon": "bell",
+      "href": "/inbox",
+      "order": 40
+    }
+  ],
+  "env": [
+    {
+      "name": "DATABASE_URL",
+      "required": true,
+      "description": "Postgres connection string the notification inbox lives in. Same database as the auth block \u2014 notify_notification holds a foreign key into auth_user.",
+      "secret": true
+    },
+    {
+      "name": "RESEND_API_KEY",
+      "required": false,
+      "description": "API key for the Resend mail adapter this block ships. Required only when PULLEY_PORT_MAIL=resend; an app on the memory adapter never reads it, which is why this is requiredWhen rather than required (G26).",
+      "secret": true,
+      "requiredWhen": {
+        "port": "mail",
+        "adapter": "resend"
+      }
+    },
+    {
+      "name": "NOTIFY_MAIL_FROM",
+      "required": false,
+      "description": "Default sender address for notification email, e.g. \"Acme <alerts@acme.com>\". Required in practice whenever PULLEY_PORT_MAIL=resend and a caller does not set a per-message from; the adapter refuses to send without one rather than guessing.",
+      "secret": false
+    },
+    {
+      "name": "NOTIFY_DEDUPE_WINDOW_MINUTES",
+      "required": false,
+      "description": "How long a notification's dedupe key suppresses an identical repeat. Defaults to 60. Must be a non-negative integer; 0 disables suppression.",
+      "secret": false
+    }
+  ],
+  "perms": [
+    "notify.inbox.read",
+    "notify.inbox.update",
+    "notify.send"
+  ],
+  "ports": [
+    "mail"
+  ],
+  "providesAdapters": [
+    {
+      "port": "mail",
+      "name": "resend",
+      "module": "adapters/resend.ts"
+    }
+  ],
+  "hooks": {
+    "init": "eventsInit.ts"
+  },
+  "events": {
+    "emits": [
+      "notify.created",
+      "notify.read"
+    ],
+    "consumes": [
+      "org.member.joined"
+    ]
+  },
+  "skill": "SKILL.md"
+}

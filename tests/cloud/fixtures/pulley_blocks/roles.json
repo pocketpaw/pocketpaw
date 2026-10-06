@@ -1,0 +1,81 @@
+{
+  "$comment": "pulley/registry/blocks/roles/manifest.json — created 2026-08-13 (T-12): the roles core block. Org-scoped permissions on CASL. DEPENDS ON auth (the subject of a grant is an auth_user) AND org (the scope of a grant is an org_organization) — both foreign keys are real, so the install order auth -> org -> roles is enforced by the database, not by convention. Written against the T-10b manifest surfaces from the start: `endpoints` mounts the two HTTP surfaces, `routes[].load` feeds each page its server data with the data type exported beside the load, and `nav.href` names the target instead of inheriting whichever route is listed first. No `ports` — permissions need no vendor. No `providesAdapters` — this block ships none. DATABASE_URL is declared with flags byte-identical to auth's and org's, which the resolver treats as a shared variable (warning) rather than a conflict.",
+  "name": "roles",
+  "version": "0.1.0",
+  "description": "Org-scoped roles and permissions: CASL abilities composed from membership plus custom role assignments, enforced by a server guard.",
+  "kind": "core",
+  "deps": {
+    "auth": "^0.1.0",
+    "org": "^0.1.0"
+  },
+  "provides": [
+    "roles.policy",
+    "roles.ability"
+  ],
+  "tablePrefix": "roles_",
+  "packages": {
+    "@casl/ability": "^6.8.1",
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.22.0"
+  },
+  "devPackages": {
+    "@types/pg": "^8.20.4"
+  },
+  "framework": {
+    "@sveltejs/kit": ">=2.15.0"
+  },
+  "routes": [
+    {
+      "path": "/roles",
+      "page": "RolesPage",
+      "load": "rolesLoad.ts"
+    },
+    {
+      "path": "/roles/assignments",
+      "page": "RoleAssignmentsPage",
+      "load": "assignmentsLoad.ts"
+    }
+  ],
+  "endpoints": [
+    {
+      "path": "/api/roles",
+      "module": "rolesEndpoint.ts"
+    },
+    {
+      "path": "/api/roles/assignments",
+      "module": "assignmentsEndpoint.ts"
+    }
+  ],
+  "nav": [
+    {
+      "slot": "main",
+      "label": "Roles",
+      "icon": "shield-check",
+      "href": "/roles",
+      "order": 30
+    }
+  ],
+  "env": [
+    {
+      "name": "DATABASE_URL",
+      "required": true,
+      "description": "Postgres connection string the roles tables live in. Same database as auth and org — role assignments hold foreign keys into auth_user and org_organization.",
+      "secret": true
+    }
+  ],
+  "perms": [
+    "roles.read",
+    "roles.create",
+    "roles.update",
+    "roles.delete",
+    "roles.assign",
+    "roles.revoke"
+  ],
+  "events": {
+    "emits": [
+      "roles.assigned",
+      "roles.revoked"
+    ]
+  },
+  "skill": "SKILL.md"
+}
