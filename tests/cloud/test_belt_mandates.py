@@ -1057,11 +1057,24 @@ async def test_digest_reports_orphaned_background_develops_as_stuck(
     await _seed_run(
         store, mandate, "orphaned develop", station_pending=True, diff="", headless_state="queued"
     )
+    # One a restart dropped mid-stage reads running at that stage: still stuck.
+    await _seed_run(
+        store, mandate, "dropped mid-check", station_pending=True, diff="", headless_state="check"
+    )
     row = client.get("/belt/mandates/digest").json()["mandates"][0]
-    assert [(r["title"], r["headless_state"]) for r in row["stuck"]] == [
-        ("orphaned develop", "queued")
+    assert sorted((r["title"], r["status"], r["headless_state"]) for r in row["stuck"]) == [
+        ("dropped mid-check", "running", "check"),
+        ("orphaned develop", "queued", "queued"),
     ]
     assert row["stuck"][0]["headless_error"] is None
+
+
+def test_a_running_run_is_a_task_in_flight():
+    """The foreman reads a run its develop is working (``running`` at a stage)
+    as ``developing``, in flight, so it never plans the task again."""
+    status = mandate_service._task_status({"status": "running", "headless_state": "check"})
+    assert status == "developing"
+    assert status in mandate_service._IN_FLIGHT
 
 
 async def test_digest_default_window_is_24h(tmp_path, mongo_db, store, monkeypatch):

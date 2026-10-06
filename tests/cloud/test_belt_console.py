@@ -511,6 +511,27 @@ async def test_list_runs_shape_and_status_derivation(store):
     assert row["error"] is None
 
 
+async def test_a_headless_run_reads_running_at_its_live_stage(store):
+    """A queued station run reads ``queued`` at ``station`` until a develop
+    starts it (``headless_state`` "queued" = handed over, not started), then
+    ``running`` at the stage its ``headless_state`` names."""
+    from pocketpaw_ee.cloud.belt.service import list_runs
+
+    run = await _propose_run(store, task="t-live", base_branch="", diff="")
+    params = dict(run.parameters)
+    for state, want in (
+        (None, ("queued", "station")),
+        ("queued", ("queued", "station")),
+        ("develop", ("running", "develop")),
+        ("review", ("running", "review")),
+    ):
+        blob = {**params["_code_change"], "station_pending": True, "headless_state": state}
+        await store.update_parameters(run.id, {**params, "_code_change": blob})
+        row = (await list_runs("w1"))["runs"][0]
+        assert (row["status"], row["stage"]) == want, state
+        assert row["headless_state"] == state
+
+
 async def test_list_runs_newest_first(store):
     """Runs come back newest-first. The store orders by ``created_at DESC``;
     two proposes in the SAME wall-clock second tie (SQLite second resolution),

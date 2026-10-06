@@ -18,8 +18,8 @@
 #     stderr, never stream-json) and a failing check's tail; the host's OS
 #     account name reads ``user`` there too, but only in an ``ls -l`` owner/group
 #     column or a home dir (the images run as ``pocketpaw``, also a package);
-#   * each tool row's narration is its subject (path, command's first line,
-#     pattern), capped and redacted;
+#   * each tool row's narration is its verb and subject (``Read <path>``,
+#     ``Run <command's first line>``, ``Grep <pattern>``), capped and redacted;
 #   * secrets in a tool result or input reach neither storage nor the response;
 #   * the stage row is the latest attempt: a failed, timed-out, or pre-seat
 #     failing re-develop replaces it; the upsert keeps one row per
@@ -311,7 +311,7 @@ class StreamingClaude(FakeClaude):
         self.stderr, self.timed_out = stderr, timed_out
         self.formats: list[list[str]] = []
 
-    async def __call__(self, argv, *, cwd, timeout, stdin=None):
+    async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
         if argv[0] != FAKE_CLAUDE or "Edit" not in argv[argv.index("--tools") + 1]:
             return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin)
         fmt = argv[argv.index("--output-format") + 1 :]
@@ -327,6 +327,8 @@ class StreamingClaude(FakeClaude):
         git_file = cwd / ".git"
         git_text = git_file.read_text() if git_file.is_file() else ""
         stream = _stream(cwd, is_error=self.is_error, cut=self.cut, git_text=git_text)
+        for line in stream.splitlines() if on_line is not None else ():
+            await on_line(line)  # as the real runner hands them over
         return self.code, stream, stderr
 
 
@@ -357,11 +359,13 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     return st
 
 
-async def _feed_doc(action_id: str):
+async def _feed_doc(action_id: str, stage: str = "develop"):
     from pocketpaw_ee.cloud.models.belt_run_feed import BeltRunFeed
 
     return await BeltRunFeed.find_one(
-        BeltRunFeed.workspace == "w1", BeltRunFeed.action_id == action_id
+        BeltRunFeed.workspace == "w1",
+        BeltRunFeed.action_id == action_id,
+        BeltRunFeed.stage == stage,
     )
 
 
@@ -414,8 +418,8 @@ async def test_develop_feed_is_stored_in_order_and_served(
     assert write["output"] == "File created at feature.txt"
     assert edit["input"]["old_string"] == "draft" and edit["status"] == "complete"
     # A collapsed row reads its subject, from the relativised input.
-    labels = ["README.md", "feature.txt", "feature.txt", ".git"]
-    labels += ["cd . && uv run pytest -q", "pwd", "x"]
+    labels = ["Read README.md", "Write feature.txt", "Edit feature.txt", "Read .git"]
+    labels += ["Run cd . && uv run pytest -q", "Run pwd", "Grep x"]
     assert [s["narration"] for s in doc.steps[1:8]] == labels
     assert str(read["started_at"]).startswith("2026-10-06 08:00:02")
 
@@ -450,12 +454,12 @@ async def test_stream_result_envelope_is_the_seat_result(repo):  # noqa: F811
     """The station reads the result line of a stream (not the trailing system
     line), and an ``is_error`` result still fails the seat."""
     station = _station(StreamingClaude(), repo)
-    req = _request(repo)
-    text = await station._claude("p", cwd=repo, step="DEVELOP", feed_for=req)
+    feed = station.feed_for(_request(repo))
+    text = await station._claude("p", cwd=repo, step="DEVELOP", feed=feed)
     assert text == "Done: feature.txt says ok."
     with pytest.raises(ds.DevelopStationError, match="DEVELOP: claude reported an error"):
         await _station(StreamingClaude(is_error=True), repo)._claude(
-            "p", cwd=repo, step="DEVELOP", feed_for=req
+            "p", cwd=repo, step="DEVELOP", feed=feed
         )
     # A run killed right after ``system/init`` is one JSON line, not a result.
     init = json.dumps({"type": "system", "subtype": "init", "cwd": "/x"})
@@ -533,9 +537,10 @@ def test_parallel_same_name_calls_pair_by_id():
 
 
 def test_tool_rows_are_labelled_by_their_subject():
-    """Read/Edit/Write read their path, Bash its first line (capped, secrets
-    redacted: the recorder never redacts a narration), Grep/Glob the pattern;
-    another tool or a missing arg gets no label."""
+    """Rows keep their verb: Read/Edit/Write and the path, ``Run`` and a Bash
+    command's first line (capped, secrets redacted: the recorder never redacts a
+    narration), Grep/``Find`` (Glob) and the pattern; another tool or a missing
+    arg gets no label."""
     long = "uv run pytest " + "tests/x.py " * 20
     calls = [
         ("Read", {"file_path": "src/a.py"}),
@@ -550,11 +555,11 @@ def test_tool_rows_are_labelled_by_their_subject():
     ]
     events = [AgentEvent("tool_use", n, {"name": n, "input": i}) for n, i in calls]
     labels = [s["narration"] for s in fold_feed(events).steps]
-    assert labels[:3] == ["src/a.py", "src/b.py", "c.txt"]
-    assert labels[3] == "export KEY=[REDACTED]" and _SECRET not in json.dumps(labels)
-    assert len(labels[4]) <= 80 and labels[4].startswith("uv run pytest tests/x.py")
+    assert labels[:3] == ["Read src/a.py", "Edit src/b.py", "Write c.txt"]
+    assert labels[3] == "Run export KEY=[REDACTED]" and _SECRET not in json.dumps(labels)
+    assert len(labels[4]) <= 84 and labels[4].startswith("Run uv run pytest tests/x.py")
     assert labels[4].endswith("…")
-    assert labels[5:] == ["def main", "**/*.py", "", ""]
+    assert labels[5:] == ["Grep def main", "Find **/*.py", "", ""]
 
 
 async def test_a_short_repo_root_only_strips_whole_paths(repo, mongo_db, tmp_path):  # noqa: F811
@@ -563,10 +568,9 @@ async def test_a_short_repo_root_only_strips_whole_paths(repo, mongo_db, tmp_pat
     keeps its middle."""
     from dataclasses import replace
 
-    req = replace(_request(repo), action_id="run-app")
-    await _station(StreamingClaude(), repo)._claude(
-        "p", cwd=tmp_path, step="DEVELOP", feed_for=req, repo=Path("/app")
-    )
+    station = _station(StreamingClaude(), repo)
+    feed = station.feed_for(replace(_request(repo), action_id="run-app"))
+    await station._claude("p", cwd=tmp_path, step="DEVELOP", feed=feed, repo=Path("/app"))
     grep = (await _feed_doc("run-app")).steps[7]
     assert grep["tool"] == "Grep" and grep["output"] == "src/app/page.tsx\nsrc/x.py"
 

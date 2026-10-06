@@ -117,7 +117,9 @@ class FakeClaude:
         self.argvs: list[list[str]] = []
         self.claude_calls: list[tuple[str, str]] = []  # (seat, prompt)
 
-    async def __call__(self, argv, *, cwd, timeout, stdin=None):
+    async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
+        # ``on_line`` is accepted and never called: the station then reads the
+        # seat's final stdout, the path a runner without live lines takes.
         self.argvs.append(list(argv))
         if argv[0] == FAKE_LOOM:
             code, out = self.loom or (1, "")

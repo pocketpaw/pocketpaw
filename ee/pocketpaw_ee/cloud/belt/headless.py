@@ -20,13 +20,15 @@
 #     run's ``action_id`` (the develop feed's key),
 #     then back-writes diff + base_branch + ``files_changed`` (the DevelopFn's
 #     count, else the diff's ``+++`` headers) onto the SAME action, clears
-#     ``station_pending`` and mints a Decision-Graph ``correlation_id``. Never
-#     raises: a DevelopFn error (or empty diff / no base) leaves the run queued
-#     and records the reason (secrets redacted) as ``headless_error`` on the
-#     blob, where the console and digest read it. The diff is stored verbatim
-#     (only a trailing newline is ensured — stripping corrupts it for
-#     ``git apply``). A best-effort ``headless_diff_attached`` audit entry marks
-#     LLM content entering the store.
+#     ``station_pending``, mints a Decision-Graph ``correlation_id`` and emits
+#     ``belt_run_updated`` proposed/gate. Never raises: a DevelopFn error (or
+#     empty diff / no base) leaves the run queued (``belt_run_updated``
+#     queued/station) and records the reason (secrets redacted) as
+#     ``headless_error`` on the blob, where the console and digest read it.
+#     While it runs, each station stage marks ``headless_state`` (``feed.py``).
+#     The diff is stored verbatim (only a trailing newline is ensured —
+#     stripping corrupts it for ``git apply``). A best-effort
+#     ``headless_diff_attached`` audit entry marks LLM content entering the store.
 #   * ``HeadlessTaskDispatcher`` — the mandates ``TaskDispatcher`` that files the
 #     queued run via ``StationTaskDispatcher`` then runs the runner on it. The
 #     production dispatcher (``resolve_headless_dispatcher``) runs the develop in
@@ -336,6 +338,7 @@ class HeadlessDevelopRunner:
                 store, action_id, "headless failed to persist the produced diff"
             )
             return
+        await _emit(workspace_id, action_id, "proposed", "gate")
 
         # Audit trail — this is the FIRST place LLM-produced content enters the
         # Instinct store without a human typing it, so leave an operator trail of
@@ -419,6 +422,16 @@ class HeadlessDevelopRunner:
             await store.update_parameters(action_id, params)
         except Exception:  # noqa: BLE001 — never crash on the failure-note path
             logger.debug("headless: failed to record headless_error note", exc_info=True)
+            return
+        await _emit(str(blob.get("workspace_id") or ""), action_id, "queued", "station")
+
+
+async def _emit(workspace_id: str, action_id: str, status: str, stage: str) -> None:
+    from pocketpaw_ee.cloud.belt.service import emit_belt_run_updated
+
+    await emit_belt_run_updated(
+        workspace_id=workspace_id, action_id=action_id, status=status, stage=stage
+    )
 
 
 async def _default_worker_for(

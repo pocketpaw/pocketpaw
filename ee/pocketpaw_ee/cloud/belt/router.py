@@ -1,32 +1,24 @@
-# ee/pocketpaw_ee/cloud/belt/router.py
-# Created: 2026-06-10 (feat/belt-console-backend, SC-1 + SC-2) — the Belt &
-# Pulley console REST surface. The /belt page builds against exactly these
-# endpoints (a sibling frontend PR pins the contract):
+# ee/pocketpaw_ee/cloud/belt/router.py — the Belt & Pulley console REST surface.
+#
+# The /belt pages build against exactly these endpoints:
 #   * GET  /belt/repos          — discover git repos under the allowlist roots
 #   * POST /belt/repos {path}   — add a new repo root (admin/owner-gated)
 #   * POST /belt/repos/init     — CREATE a new git repo under an allowlist root
-#                                 (admin-gated); optional GitHub remote
+#                                 (admin-gated); optional GitHub remote through the
+#                                 injectable ``RepoCreator`` (tests fake ``gh``)
 #   * GET  /belt/runs           — list this workspace's station runs (newest-first)
 #   * GET  /belt/runs/{action_id} — one run + its proposed diff (capped ~200 KB)
-#   * GET  /belt/runs/{action_id}/feed?stage=develop — what a station step did,
-#                                 as chat-shaped ``steps`` (``belt.read``)
-#
-# Updated: 2026-06-11 (feat/belt-repo-init) — added ``POST /belt/repos/init``.
-# Same ADMIN gate as the add-repo mutation (``belt.manage``) and the same
-# realpath discipline (the service validates the name + location_root). The
-# ``RepoCreator`` is injected via a dependency so tests can fake the ``gh repo
-# create`` shell-out; production gets the default ``GhCliRepoCreator``.
+#   * GET  /belt/runs/{action_id}/feed?stage= — what one station step stored, as
+#                                 chat-shaped ``steps``
+#   * GET  /belt/runs/{action_id}/stream?after= — the run's feed live, as SSE
+#                                 (``service.open_run_stream`` has the replay rules)
 #
 # Routes are THIN: they read identity (workspace + user) from the cloud deps,
-# delegate to ``ee.cloud.belt.service``, and return the wire dict the service
-# built. RBAC is enforced via ``require_action_any_workspace`` route deps —
-# ``belt.read`` (MEMBER) on the read routes, ``belt.manage`` (ADMIN) on the
-# add-repo route — mirroring how the instinct / connector / skills routers gate
-# (the instinct router lives at ``pocketpaw_ee.instinct.router``; the gate
-# pattern is the same). Errors propagate via ``CloudError`` so the central cloud
-# error handler maps them to the JSON envelope — the router never raises
-# ``HTTPException`` (entity rule 10). A service-level ``BeltConsoleError`` (the
-# add-repo validation failures) is translated to a ``CloudError`` here.
+# delegate to ``ee.cloud.belt.service``, and return what the service built. RBAC
+# is ``require_action_any_workspace``: ``belt.read`` (MEMBER) on the reads,
+# ``belt.manage`` (ADMIN) on the repo mutations. A service ``BeltConsoleError``
+# is translated to a ``CloudError`` here (never ``HTTPException``), so a foreign
+# or non-belt run is the same 404 on every run route, the stream included.
 
 """FastAPI router for the Belt & Pulley console (repos + runs)."""
 
@@ -35,6 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud._core.deps import (
@@ -198,6 +191,32 @@ async def get_run(
         return await belt_service.get_run(workspace_id, action_id)
     except belt_service.BeltConsoleError as exc:
         raise _to_cloud_error(exc) from exc
+
+
+@router.get("/runs/{action_id}/stream")
+async def get_run_stream(
+    action_id: str,
+    after: str = Query(default="0", max_length=64),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> StreamingResponse:
+    """The run's feed as it happens (``text/event-stream``): ``start``,
+    ``stage``, ``thinking`` / ``tool_start`` / ``tool_result`` and a terminal
+    ``stream_end``, each ``id`` a cursor to resume ``after``. A foreign or
+    non-belt run is a 404 before the stream opens."""
+    try:
+        body = await belt_service.open_run_stream(workspace_id, action_id, after)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+    return StreamingResponse(
+        body,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/runs/{action_id}/feed")

@@ -13,20 +13,20 @@
 #            ``git worktree add --detach`` there.
 #   ORIENT   LLM work only: ``orient.orient_block`` (loom, else C4) rides the
 #            develop + review prompts; a miss is a note.
-#   WORK     a charter recipe → that command; else DEVELOP → ``claude -p`` in
-#            ``stream-json``, folded into the run's step feed (``belt/feed.py``,
-#            scrubbed + capped, stored before any error is raised, emptied when a
-#            develop starts; a failed save never fails the run). Seat output and
-#            error tails get worktree/repo paths relative, the OS user as ``user``.
+#   WORK     a charter recipe → that command; else DEVELOP → ``claude -p``.
 #   CHECK    every charter check. LLM work only (a recipe skips both): FIX
 #            (``claude -p`` + the failure) while attempts last; REVIEW, read-only
 #            ``claude -p``, fails duplicates; strict ``{"verdict","notes"}``.
+# Each step is a stage of the run's feed (``belt/feed.RunFeed``): seats stream and
+# each stdout line is published as it arrives (``on_line``); checks, the recipe
+# and orient are station rows; stage rows are stored before any error is raised.
+# Output, tails and feed lines get worktree/repo paths relative and the OS user
+# as ``user`` in ls -l/home first. The feed never fails a run.
 #   DONE     ``git diff --cached --binary <start>``; refused when it touches agent
 #            config (a ``_TRUST_NAMES`` name, any case), ``.git``, ``.gitmodules``, a secret.
 #   CLEANUP  always: remove the temp dir, then ``git worktree prune``.
-# Task text is injection-screened before PREPARE and fenced ``<untrusted>`` in
-# every prompt; failures raise ``DevelopStationError`` naming the step (tails
-# redacted), recorded as ``headless_error`` on the run.
+# Task text is injection-screened before PREPARE and fenced ``<untrusted>``; failures
+# raise ``DevelopStationError`` naming the step (tails redacted) -> ``headless_error``.
 #
 # Claude setup (the crew worker's, else ``POCKETPAW_FACTORY_CLAUDE_SETUP``):
 # ``strict`` (default, hosted) runs every seat with no settings files, MCP
@@ -77,7 +77,7 @@ from pocketpaw_ee.cloud.belt.executor import (
     line_tip,
     move_ref,
 )
-from pocketpaw_ee.cloud.belt.feed import fold_feed, stream_events
+from pocketpaw_ee.cloud.belt.feed import FrameReader, RunFeed, stream_events
 from pocketpaw_ee.cloud.belt.headless import DevelopRequest, DevelopResult
 from pocketpaw_ee.cloud.belt.orient import orient_block
 from pocketpaw_ee.cloud.mandates.dto import command_refusal
@@ -138,12 +138,25 @@ def _env_seconds(name: str, default: float) -> float:
         return default
 
 
+LineFn = Callable[[str], Awaitable[None]]
+
+
 class Runner(Protocol):
     """The ONE subprocess seam: argv in, ``(returncode, stdout, stderr)`` out.
-    A timeout returns a non-zero code with the reason in stderr."""
+    A timeout returns a non-zero code with the reason in stderr. ``on_line``,
+    when given, is awaited with each stdout line (no newline) as it arrives,
+    before the process exits; the station only passes it for a run with a live
+    feed, so a runner that ignores it still works (the feed reads the final
+    stdout instead)."""
 
     async def __call__(
-        self, argv: list[str], *, cwd: Path, timeout: float, stdin: str | None = None
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+        stdin: str | None = None,
+        on_line: LineFn | None = None,
     ) -> tuple[int, str, str]: ...
 
 
@@ -170,12 +183,56 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
         os.killpg(proc.pid, signal.SIGKILL)
 
 
+async def _read_lines(stream: asyncio.StreamReader, on_line: LineFn) -> bytes:
+    """All of ``stream``, handing each complete line to ``on_line`` as it lands.
+    Chunked reads, not ``readline``: a stream-json line carrying a file read
+    outgrows the reader's 64 KiB line limit."""
+    chunks: list[bytes] = []
+    pending = b""
+    while chunk := await stream.read(65536):
+        chunks.append(chunk)
+        *lines, pending = (pending + chunk).split(b"\n")
+        for line in lines:
+            await on_line(line.decode("utf-8", "replace"))
+    if pending:
+        await on_line(pending.decode("utf-8", "replace"))
+    return b"".join(chunks)
+
+
+async def _communicate(
+    proc: asyncio.subprocess.Process, stdin: str | None, on_line: LineFn
+) -> tuple[bytes, bytes]:
+    """``proc.communicate`` with stdout delivered line by line. stdin is written
+    alongside the reads (a large prompt never waits on a full stdout pipe)."""
+
+    async def feed() -> None:
+        if proc.stdin is None:
+            return
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            proc.stdin.write((stdin or "").encode())
+            await proc.stdin.drain()
+        proc.stdin.close()
+
+    assert proc.stdout is not None and proc.stderr is not None
+    out, err, _ = await asyncio.gather(
+        _read_lines(proc.stdout, on_line), proc.stderr.read(), feed()
+    )
+    await proc.wait()
+    return out, err
+
+
 async def run_subprocess(
-    argv: list[str], *, cwd: Path, timeout: float, stdin: str | None = None
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    stdin: str | None = None,
+    on_line: LineFn | None = None,
 ) -> tuple[int, str, str]:
     """Default ``Runner`` — ``create_subprocess_exec`` (never a shell) with the
     scrubbed env, in its own session so a timeout or a cancelled run kills the
-    whole process group (a check's grandchildren too), not just the child."""
+    whole process group (a check's grandchildren too), not just the child.
+    ``on_line`` gets each stdout line live (see ``Runner``)."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
@@ -186,9 +243,11 @@ async def run_subprocess(
         start_new_session=True,
     )
     try:
-        out_b, err_b = await asyncio.wait_for(
-            proc.communicate(stdin.encode() if stdin is not None else None), timeout=timeout
-        )
+        if on_line is None:
+            talk = proc.communicate(stdin.encode() if stdin is not None else None)
+        else:
+            talk = _communicate(proc, stdin, on_line)
+        out_b, err_b = await asyncio.wait_for(talk, timeout=timeout)
     except TimeoutError:
         _kill_group(proc)
         await proc.wait()
@@ -265,11 +324,26 @@ class ClaudeCodeDevelop:
     file_sighting: Callable[[str, str, dict[str, Any]], Awaitable[Any]] = _default_file_sighting
     max_fix_attempts: int = 2
 
+    def feed_for(self, request: DevelopRequest) -> RunFeed:
+        """The run's feed for one station call (inert without an ``action_id``)."""
+        return RunFeed(request.workspace_id, request.action_id, self.save_feed)
+
     async def __call__(self, request: DevelopRequest) -> DevelopResult:
-        # A re-develop starts from an empty feed, so a run that fails before
-        # its develop seat (screen, charter, base fetch, recipe) never shows
-        # the previous attempt's steps as this one's.
-        await self._store_feed(request, "DEVELOP", "")
+        # A re-develop starts from empty stage rows and a new attempt on the
+        # stream, so a run that fails before its develop seat (screen, charter,
+        # base fetch, recipe) never shows the previous attempt's steps as this
+        # one's; every attempt ends with ``stream_end``, however it ends.
+        feed = self.feed_for(request)
+        await feed.start()
+        ok = False
+        try:
+            result = await self._develop(request, feed)
+            ok = True
+            return result
+        finally:
+            await feed.end(ok)
+
+    async def _develop(self, request: DevelopRequest, feed: RunFeed) -> DevelopResult:
         _screen_task(request)
         found = await self.charter_for(request.workspace_id, request.mandate_id)
         if found is None:
@@ -326,9 +400,14 @@ class ClaudeCodeDevelop:
             # ORIENT (LLM work only): the repo's architecture, as the source of truth.
             orient, orient_note = "", "skipped (recipe)"
             if not request.recipe:
+                await feed.stage("orient")
+                call = await feed.begin("Orient", {})
                 orient, orient_note = await orient_block(
                     self.run, repo, f"{request.task}\n{request.summary}", cwd=worktree
                 )
+                shown = _relative_paths(f"{orient_note}\n\n{orient}".strip(), worktree, repo)
+                await feed.finish(call, "Orient", shown)
+                await feed.save()
 
             # WORK
             if request.recipe:
@@ -337,15 +416,19 @@ class ClaudeCodeDevelop:
                     raise DevelopStationError(
                         f"WORK: recipe {request.recipe!r} is not declared in the charter"
                     )
+                await feed.stage("develop")
+                call = await feed.begin("Bash", {"command": _relative_paths(command, repo)})
                 code, out, err = await self.run(
                     _charter_argv(command, "WORK"),
                     cwd=worktree,
                     timeout=_env_seconds("POCKETPAW_FACTORY_CHECK_TIMEOUT", 600),
                 )
+                tail = _tail(out + err, worktree)
+                await feed.finish(call, "Bash", _exit_output(tail, code))
+                await feed.save()
                 if code != 0:
                     raise DevelopStationError(
-                        f"WORK: recipe {request.recipe!r} ({command}) exited {code}:\n"
-                        f"{_tail(out + err, worktree)}"
+                        f"WORK: recipe {request.recipe!r} ({command}) exited {code}:\n{tail}"
                     )
             else:
                 await self._claude(
@@ -354,7 +437,7 @@ class ClaudeCodeDevelop:
                     step="DEVELOP",
                     checks=checks,
                     trust=trust,
-                    feed_for=request,
+                    feed=feed,
                     repo=repo,
                     model=request.model,
                 )
@@ -364,7 +447,7 @@ class ClaudeCodeDevelop:
             attempts = 0
             review_notes: list[str] = []
             while True:
-                results = [await self._check(worktree, c) for c in checks]
+                results = await self._checks(worktree, checks, feed, repo)
                 failed = [r for r in results if not r.ok]
                 if failed:
                     if request.recipe or attempts >= self.max_fix_attempts:
@@ -380,6 +463,7 @@ class ClaudeCodeDevelop:
                         step="FIX",
                         checks=checks,
                         trust=trust,
+                        feed=feed,
                         repo=repo,
                         model=request.model,
                     )
@@ -392,7 +476,7 @@ class ClaudeCodeDevelop:
                 await self._git(worktree, "add", "-A")
                 diff = await self._git(worktree, "diff", "--cached", base_sha)
                 passed, review_notes = await self._review(
-                    request, diff, worktree, orient=orient, trust=trust, repo=repo
+                    request, diff, worktree, orient=orient, trust=trust, repo=repo, feed=feed
                 )
                 if passed:
                     verdict = "pass"
@@ -409,6 +493,7 @@ class ClaudeCodeDevelop:
                     step="FIX",
                     checks=checks,
                     trust=trust,
+                    feed=feed,
                     repo=repo,
                     model=request.model,
                 )
@@ -603,6 +688,24 @@ class ClaudeCodeDevelop:
             )
         return out
 
+    async def _checks(
+        self, cwd: Path, checks: list[str], feed: RunFeed, repo: Path
+    ) -> list[CheckResult]:
+        """Every charter check, in order, each a ``Run <command>`` row of the
+        ``check`` stage that shows running, then its tail and exit code. The
+        command is scrubbed like seat output (repo path, host account)."""
+        if not checks:
+            return []
+        await feed.stage("check")
+        results: list[CheckResult] = []
+        for command in checks:
+            call = await feed.begin("Bash", {"command": _relative_paths(command, repo)})
+            result = await self._check(cwd, command)
+            await feed.finish(call, "Bash", _exit_output(result.tail, result.code))
+            results.append(result)
+        await feed.save()
+        return results
+
     async def _check(self, cwd: Path, command: str) -> CheckResult:
         code, out, err = await self.run(
             _charter_argv(command, "CHECK"),
@@ -620,18 +723,34 @@ class ClaudeCodeDevelop:
         checks: list[str] | tuple[str, ...] = (),
         edits: bool = True,
         trust: _Trust | None = None,
-        feed_for: DevelopRequest | None = None,
+        feed: RunFeed | None = None,
         repo: Path | None = None,
         model: str = "",
     ) -> str:
         """One claude seat. ``trust`` set = owner setup: the worktree's agent
         config is restored to the base commit first, and only then does the
-        call drop the isolation flags (the two never come apart). ``feed_for``
-        set = the seat streams and its steps are stored as that run's feed for
-        this step, before any failure below is raised. ``repo`` (the bound
-        repo, which the worktree's ``.git`` file names) is stripped from the
-        output like the worktree. ``model`` is the crew worker's (empty = the
-        factory default)."""
+        call drop the isolation flags (the two never come apart). ``feed`` set =
+        the seat streams as the ``step`` stage: each stdout line, paths made
+        relative, is published as it arrives, and the stage's steps are stored
+        before any failure below is raised. ``repo`` (the bound repo, which the
+        worktree's ``.git`` file names) is stripped from the output like the
+        worktree. ``model`` is the crew worker's (empty = the factory default)."""
+        # Worktree paths read relative everywhere downstream: the feed, the
+        # error tails that land on the run blob, the returned text.
+        roots = (cwd, repo) if repo is not None else (cwd,)
+        reader = FrameReader()
+        heard = False
+
+        async def on_line(line: str) -> None:
+            nonlocal heard
+            heard = True
+            for frame in reader.line(_relative_paths(line, *roots)):
+                if feed is not None:
+                    await feed.add(*frame)
+
+        live = feed is not None and feed.live
+        if feed is not None:
+            await feed.stage(step.lower())
         if trust is not None:
             await self._restore_trusted(cwd, trust)
         mode = ["--permission-mode", "acceptEdits"] if edits else []
@@ -639,7 +758,7 @@ class ClaudeCodeDevelop:
             *mode,
             *_tool_flags(edits=edits, checks=checks),
             isolated=trust is None,
-            stream=feed_for is not None,
+            stream=feed is not None,
             model=model,
         )
         code, out, err = await self.run(
@@ -647,13 +766,15 @@ class ClaudeCodeDevelop:
             cwd=cwd,
             timeout=_env_seconds("POCKETPAW_FACTORY_DEVELOP_TIMEOUT", 900),
             stdin=prompt,
+            **({"on_line": on_line} if live else {}),
         )
-        # Worktree paths read relative everywhere downstream: the feed, the
-        # error tails that land on the run blob, the returned text.
-        roots = (cwd, repo) if repo is not None else (cwd,)
         out, err = _relative_paths(out, *roots), _relative_paths(err, *roots)
-        if feed_for is not None:
-            await self._store_feed(feed_for, step, out)
+        if live and feed is not None:
+            if not heard:  # a runner that ignores on_line: read the final stdout
+                for line in out.splitlines():
+                    for frame in reader.line(line):
+                        await feed.add(*frame)
+            await feed.save()
         if code != 0:
             said = err or _claude_said(out)
             raise DevelopStationError(f"{step}: claude exited {code}: {_tail(said)}")
@@ -663,32 +784,6 @@ class ClaudeCodeDevelop:
                 f"{step}: claude reported an error: {_tail(_claude_said(out))}"
             )
         return claude_result_text(out)
-
-    async def _store_feed(self, request: DevelopRequest, step: str, stdout: str) -> None:
-        """Fold a seat's stream-json into steps and store them under the run,
-        replacing the stage's last feed even when this attempt printed nothing
-        (a timeout), so the page never shows a previous attempt as this one.
-        Best-effort: a run without an ``action_id`` stores nothing, and a fold
-        or save failure is logged."""
-        if not request.action_id:
-            return
-        try:
-            # Parsing and redacting a few MB is CPU work; keep it off the loop.
-            recorder = await asyncio.to_thread(lambda: fold_feed(stream_events(stdout)))
-            await self.save_feed(
-                request.workspace_id,
-                request.action_id,
-                step.lower(),
-                recorder.steps,
-                recorder.steps_omitted,
-            )
-        except Exception:  # noqa: BLE001 — the feed is a view; it never fails a run
-            logger.warning(
-                "belt: could not store the %s feed for run %s",
-                step.lower(),
-                request.action_id,
-                exc_info=True,
-            )
 
     async def _restore_trusted(self, worktree: Path, trust: _Trust) -> None:
         """Delete every ``_TRUST_NAMES`` entry on disk (tracked, untracked or
@@ -711,6 +806,7 @@ class ClaudeCodeDevelop:
         orient: str = "",
         trust: _Trust | None = None,
         repo: Path | None = None,
+        feed: RunFeed | None = None,
     ) -> tuple[bool, list[str]]:
         text = await self._claude(
             _review_prompt(request, diff, orient),
@@ -718,6 +814,7 @@ class ClaudeCodeDevelop:
             step="REVIEW",
             edits=False,
             trust=trust,
+            feed=feed,
             repo=repo,
         )
         start, end = text.find("{"), text.rfind("}")
@@ -728,7 +825,12 @@ class ClaudeCodeDevelop:
         if not isinstance(verdict, dict) or verdict.get("verdict") not in ("pass", "fail"):
             raise DevelopStationError(f"REVIEW: unparseable verdict: {text[:300]!r}")
         notes = [str(n) for n in verdict.get("notes") or []]
-        return verdict["verdict"] == "pass", notes
+        passed = verdict["verdict"] == "pass"
+        if feed is not None:  # the verdict as a row of its own, not only the seat's prose
+            call = await feed.begin("Review", {}, f"Review: {'pass' if passed else 'fail'}")
+            await feed.finish(call, "Review", "\n".join(notes) or "no notes")
+            await feed.save()
+        return passed, notes
 
 
 # A root counts only where a path STARTS: not mid-path (``src/app/x`` with a
@@ -971,6 +1073,11 @@ def _fix_prompt(request: DevelopRequest, checks: list[str], failure: str) -> str
         f"{_worker_block(request)}Fix it so these checks pass: {json.dumps(checks)}. "
         "Keep the change focused on the task. Do NOT commit, push or create branches."
     )
+
+
+def _exit_output(tail: str, code: int) -> str:
+    """A station-run command's feed output: its tail, then how it exited."""
+    return f"{tail}\n(exit {code})" if tail else f"(exit {code})"
 
 
 def _check_failures(failed: list[CheckResult]) -> str:

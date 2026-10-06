@@ -1,0 +1,230 @@
+[
+  {
+    "label": "live feed: the runner ignores on_line, so lines exist only after exit",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            talk = _communicate(proc, stdin, on_line)\n",
+    "replace": "            talk = proc.communicate(stdin.encode() if stdin is not None else None)\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_lines_arrive_before_the_process_exits"
+    ]
+  },
+  {
+    "label": "live feed: a last line with no newline never reaches on_line",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "    if pending:\n        await on_line(",
+    "replace": "    if False:\n        await on_line(",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_lines_arrive_before_the_process_exits"
+    ]
+  },
+  {
+    "label": "live feed: frames are published unscrubbed",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "        await self._send(event, {**scrub_frame(event, data), \"stage\": self.stage_name})\n",
+    "replace": "        await self._send(event, {**data, \"stage\": self.stage_name})\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live feed: frames are published without their stage",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "        await self._send(event, {**scrub_frame(event, data), \"stage\": self.stage_name})\n",
+    "replace": "        await self._send(event, scrub_frame(event, data))\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live feed: live lines keep the worktree and repo paths",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            for frame in reader.line(_relative_paths(line, *roots)):\n",
+    "replace": "            for frame in reader.line(line):\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live feed: a recipe row shows the charter command with the host account",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "                call = await feed.begin(\"Bash\", {\"command\": _relative_paths(command, repo)})\n",
+    "replace": "                call = await feed.begin(\"Bash\", {\"command\": command})\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_a_recipe_run_has_no_orient_fix_or_review"
+    ]
+  },
+  {
+    "label": "live feed: a failed run never ends its stream",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        finally:\n            await feed.end(ok)\n",
+    "replace": "        finally:\n            pass\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_a_failed_run_still_ends_its_stream",
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live feed: a run that attached its diff ends as not ok",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            ok = True\n            return result\n",
+    "replace": "            return result\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live feed: a second round of a stage replaces the first in its row",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "        self._frames.setdefault(name, [])\n",
+    "replace": "        self._frames[name] = []\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live feed: a stage start sends no belt_run_updated",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "            await _notify(self.workspace_id, self.action_id, name)\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live feed: the per-call frame cap is lifted",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "            if self._sent >= FEED_MAX_STEPS or self._sent_bytes + size > FEED_MAX_BYTES:\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_the_live_frame_cap_counts_what_it_drops"
+    ]
+  },
+  {
+    "label": "live feed: the cap can drop the terminal stream_end",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "            await self._send(\"stream_end\", {\"ok\": ok, \"omitted\": self._omitted}, cap=False)\n",
+    "replace": "            await self._send(\"stream_end\", {\"ok\": ok, \"omitted\": self._omitted})\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_the_live_frame_cap_counts_what_it_drops"
+    ]
+  },
+  {
+    "label": "live feed: rows lose their verb (three rows read the same path)",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "active=f\"{verb} {{{arg}}}\"",
+    "replace": "active=f\"{{{arg}}}\"",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_tool_rows_are_labelled_by_their_subject",
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live feed: a reload replays the oldest attempt",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            if ev.event == \"start\":\n                start = cursor\n",
+    "replace": "            if ev.event == \"start\":\n                pass\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_replay_serves_only_the_newest_attempt"
+    ]
+  },
+  {
+    "label": "live feed: the replay scan stops at the first attempt's stream_end",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        if not moved:\n            return start\n",
+    "replace": "        return start\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_replay_serves_only_the_newest_attempt"
+    ]
+  },
+  {
+    "label": "live feed: a run being developed reads from history instead of waiting",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    if not exists and not blob.get(\"headless_state\"):\n",
+    "replace": "    if not exists:\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_a_run_with_no_stream_reads_from_history_unless_it_is_developing"
+    ]
+  },
+  {
+    "label": "live feed: the stream route serves another workspace's run",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    _action, blob = await _owned_run(workspace_id, action_id)\n    transport = get_stream_transport()\n",
+    "replace": "    blob: dict = {}\n    transport = get_stream_transport()\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_the_stream_route_404s_a_foreign_run"
+    ]
+  },
+  {
+    "label": "live feed: the review verdict is not a row of its own",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        if feed is not None:  # the verdict as a row of its own, not only the seat's prose\n",
+    "replace": "        if False:  # the verdict as a row of its own, not only the seat's prose\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: a running headless run reads queued at the station",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            return (\"running\", live) if live and live != \"queued\" else (\"queued\", \"station\")\n",
+    "replace": "            return (\"queued\", \"station\")\n",
+    "tests": [
+      "tests/cloud/test_belt_console.py::test_a_headless_run_reads_running_at_its_live_stage",
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: a stage start never records the stage on the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            params[_CODE_CHANGE_PARAM_KEY] = {**blob, \"headless_state\": stage}\n",
+    "replace": "            params[_CODE_CHANGE_PARAM_KEY] = dict(blob)\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: a stage start still says queued on the bus",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        workspace_id=workspace_id, action_id=action_id, status=\"running\", stage=stage\n",
+    "replace": "        workspace_id=workspace_id, action_id=action_id, status=\"queued\", stage=stage\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: an attached diff sends no proposed belt_run_updated",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "        await _emit(workspace_id, action_id, \"proposed\", \"gate\")\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: a failed develop sends no queued belt_run_updated",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "        await _emit(str(blob.get(\"workspace_id\") or \"\"), action_id, \"queued\", \"station\")\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_a_failed_run_still_ends_its_stream"
+    ]
+  },
+  {
+    "label": "live status: the foreman reads a running run as not in flight",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    if status == \"running\":\n        return \"developing\"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_a_running_run_is_a_task_in_flight"
+    ]
+  },
+  {
+    "label": "live status: the digest misses a run dropped mid-stage",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            if r.get(\"status\") in (\"queued\", \"running\")\n",
+    "replace": "            if r.get(\"status\") == \"queued\"\n",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_digest_reports_orphaned_background_develops_as_stuck"
+    ]
+  }
+]

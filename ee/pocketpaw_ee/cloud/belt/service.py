@@ -14,16 +14,19 @@
 #     failure keeps the local repo and returns ``remote_error``).
 #   * ``list_runs`` / ``get_run`` — the runs read model over ``code_change``
 #     Instinct Actions, newest-first. Status/stage derive from the Action
-#     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``);
+#     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``,
+#     or ``running``/<stage> once ``mark_run_stage`` names a develop's stage);
 #     ``title``, ``files_changed``, landing fields (``pr_url`` / ``branch`` /
 #     ``commit_sha``) and mandate provenance (``mandate_id`` / ``shift_no`` /
 #     ``headless_error`` / ``headless_state`` / ``redevelop``) are read
 #     STRUCTURALLY off the blob; ``error`` is the failure reason (``Action.error``, else
 #     ``headless_error``). The mandates digest reads this same list.
-#   * ``save_run_feed`` / ``get_run_feed`` — a run stage's step feed (what the
-#     develop station's claude seat did), one ``BeltRunFeed`` row per (workspace,
-#     run, stage), kept out of the Action blob that ``list_runs`` reads in bulk.
-#     The read shares ``get_run``'s tenancy 404 and returns chat-shaped steps.
+#   * ``save_run_feed`` / ``get_run_feed`` — a run stage's step feed (what one
+#     station step did), one ``BeltRunFeed`` row per (workspace, run, stage),
+#     kept out of the Action blob that ``list_runs`` reads in bulk. The read
+#     shares ``get_run``'s tenancy 404 and returns chat-shaped steps.
+#   * ``open_run_stream`` — the same feed live: the run's stream as SSE, the
+#     newest attempt replayed from its start, same tenancy 404.
 #
 # Security: git runs through ``create_subprocess_exec`` with argv lists; a
 # submitted path is realpath-resolved and confirmed to be a git repo before it
@@ -38,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -123,6 +127,27 @@ async def emit_belt_run_updated(
         push_sse_event("belt_run_updated", dict(data))
     except Exception:  # noqa: BLE001 — SSE push must never break a lifecycle path
         logger.debug("belt: belt_run_updated SSE push failed (non-fatal)", exc_info=True)
+
+
+async def mark_run_stage(workspace_id: str, action_id: str, stage: str) -> None:
+    """A headless develop started ``stage`` on the run: its blob's
+    ``headless_state`` names the stage (so the runs list reads it ``running``
+    there) and ``belt_run_updated`` says so. Best-effort; never raises."""
+    from pocketpaw.stores import get_instinct_store
+
+    try:
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        action = await store.get_action(action_id)
+        params = dict(getattr(action, "parameters", None) or {})
+        blob = params.get(_CODE_CHANGE_PARAM_KEY)
+        if isinstance(blob, dict):
+            params[_CODE_CHANGE_PARAM_KEY] = {**blob, "headless_state": stage}
+            await store.update_parameters(action_id, params)
+    except Exception:  # noqa: BLE001 — the live stage is a view; never fail the run
+        logger.debug("belt: could not mark run %s at %s", action_id, stage, exc_info=True)
+    await emit_belt_run_updated(
+        workspace_id=workspace_id, action_id=action_id, status="running", stage=stage
+    )
 
 
 class BeltConsoleError(Exception):
@@ -638,7 +663,9 @@ def _derive_status_stage(action: Any, blob: dict[str, Any] | None = None) -> tup
     A QUEUED STATION RUN — a pending ``code_change`` Action whose blob carries
     ``station_pending=True`` (filed by the mandate ``StationTaskDispatcher`` with
     no diff yet) — reads as ``("queued", "station")`` so the console shows it as
-    waiting for a human to open the develop station, not sitting at the gate."""
+    waiting for a station, not sitting at the gate. Once a headless develop
+    starts a stage (``headless_state`` names it; "queued" = handed over, not
+    started) it reads as ``("running", <that stage>)``."""
     if blob is not None and blob.get("station_pending"):
         raw = getattr(getattr(action, "status", None), "value", None) or str(
             getattr(action, "status", "")
@@ -646,7 +673,8 @@ def _derive_status_stage(action: Any, blob: dict[str, Any] | None = None) -> tup
         # Only a still-pending queued run reads as "queued"; once the human drives
         # the station and a diff is proposed, a fresh non-pending row supersedes it.
         if raw == "pending":
-            return ("queued", "station")
+            live = str(blob.get("headless_state") or "")
+            return ("running", live) if live and live != "queued" else ("queued", "station")
     raw = getattr(getattr(action, "status", None), "value", None) or str(
         getattr(action, "status", "")
     )
@@ -701,7 +729,8 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "plan_action_id": str(blob.get("plan_action_id") or "") or None,
         "task_index": blob.get("task_index"),
         "headless_error": str(blob.get("headless_error") or "") or None,
-        # "queued" while a background develop owns the run; left behind = orphan.
+        # "queued" once handed to a background develop, then the live stage;
+        # left behind = orphan.
         "headless_state": str(blob.get("headless_state") or "") or None,
         # How many times the executor sent it back to re-develop on a moved base.
         "redevelop": int(blob.get("redevelop") or 0),
@@ -806,7 +835,7 @@ async def save_run_feed(
         },
         upsert=True,
     )
-    # no-event: the run page reads the feed on open; live tailing is a later slice.
+    # no-event: live frames ride the run stream (``belt/feed.RunFeed``); this row is the record.
 
 
 async def get_run_feed(workspace_id: str, action_id: str, stage: str) -> dict[str, Any]:
@@ -829,6 +858,60 @@ async def get_run_feed(workspace_id: str, action_id: str, stage: str) -> dict[st
     return out
 
 
+# How long one scan read waits for more entries: the scan only walks what is
+# already on the stream, so it must never park (``XREAD BLOCK 0`` is forever).
+_SCAN_BLOCK_MS = 5
+
+
+async def _attempt_cursor(transport: Any, sid: str) -> str:
+    """The cursor just before the run stream's newest ``start`` frame (``"0"``
+    when it is the first). A re-developed run holds one attempt after another,
+    each ending in a terminal ``stream_end``, and a read stops at a terminal,
+    so the scan re-reads from each cursor until a read brings nothing."""
+    cursor = start = "0"
+    while True:
+        moved = False
+        async for ev in transport.read_events(sid, after=cursor, block_ms=_SCAN_BLOCK_MS):
+            if ev.event == "start":
+                start = cursor
+            cursor = ev.entry_id
+            moved = True
+        if not moved:
+            return start
+
+
+async def open_run_stream(workspace_id: str, action_id: str, after: str = "0") -> Any:
+    """A run's live feed as SSE bytes (an async iterator), for
+    ``GET /belt/runs/{id}/stream``. The tenancy 404 is raised HERE, before any
+    response starts (``_owned_run``, same as ``get_run``).
+
+    ``after="0"`` replays the newest attempt from its ``start`` frame, so a
+    reload shows what a viewer saw live; a client cursor resumes after it. A
+    run with no stream that is not being developed (no ``headless_state``)
+    gets one ``stream_end {from_history: true}``: its stored stage rows
+    (``GET /feed?stage=``) are the record. A run being developed whose stream
+    does not exist yet is waited on. Tail, heartbeat and lifetime are the chat
+    run stream's (``transport.sse_tail``)."""
+    from pocketpaw_ee.cloud.belt.feed import stream_id
+    from pocketpaw_ee.cloud.chat.runs.domain import stream_max_lifetime_seconds
+    from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport, sse_frame, sse_tail
+
+    _action, blob = await _owned_run(workspace_id, action_id)
+    transport = get_stream_transport()
+    sid = stream_id(action_id)
+    exists = await transport.stream_exists(sid)
+    if not exists and not blob.get("headless_state"):
+
+        async def history() -> Any:
+            yield sse_frame("0-0", "stream_end", {"from_history": True})
+
+        return history()
+    if exists and after in ("", "0"):
+        after = await _attempt_cursor(transport, sid)
+    deadline = time.monotonic() + stream_max_lifetime_seconds()
+    return sse_tail(transport, sid, after, deadline)
+
+
 __all__ = [
     "BeltConsoleError",
     "GhCliRepoCreator",
@@ -842,6 +925,7 @@ __all__ = [
     "get_run_feed",
     "init_repo",
     "list_runs",
+    "open_run_stream",
     "resolve_allowlist_roots",
     "save_run_feed",
 ]
