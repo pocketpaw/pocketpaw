@@ -355,3 +355,34 @@ class TestSelectingTheStore:
         assert mod.shared_artifact_store() is None
 
         assert len(calls) == 1, "a box with no S3 config must not rebuild (and log) per view"
+
+
+class TestDraftPreviewFiles:
+    """The draft preview origin's files + token ride the same store (preview_origin)."""
+
+    def test_dist_and_token_round_trip(self, store_and_adapter):
+        from pocketpaw_ee.sites.preview_origin import pack_files, unpack_files
+
+        store, _adapter = store_and_adapter
+        packed = pack_files({"index.html": b"<h1>hi</h1>", "assets/a.js": b"x=1"})
+        token = "a" * 32
+
+        store.write_dist("pocketA", "hash1", packed)
+        store.write_preview_token("pocketA", "hash1", token)
+
+        assert unpack_files(store.read_dist("pocketA", "hash1"))["assets/a.js"] == b"x=1"
+        assert store.read_preview_token("pocketA", "hash1") == token
+        assert store.resolve_preview_token(token) == ("pocketA", "hash1")
+        assert store.resolve_preview_token("b" * 32) is None
+        assert store.resolve_preview_token("../../etc") is None
+
+    def test_draft_files_carrying_a_capture_key_are_never_stored(self, store_and_adapter):
+        from pocketpaw_ee.sites.preview_origin import pack_files
+
+        store, adapter = store_and_adapter
+        key = f"site_key_{secrets.token_urlsafe(24)}"
+
+        store.write_dist("pocketA", "hash1", pack_files({"index.html": key.encode()}))
+
+        assert adapter.puts == []
+        assert store.read_dist("pocketA", "hash1") is None

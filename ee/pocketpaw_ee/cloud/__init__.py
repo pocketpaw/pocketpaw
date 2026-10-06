@@ -267,6 +267,15 @@ def mount_cloud(app: FastAPI) -> None:
     # (Tauri, MCP, scripts) bypass entirely. See ``ee/cloud/_core/csrf.py``.
     app.add_middleware(CSRFMiddleware)
 
+    # Draft preview origin — requests for ``<token>.<PAW_SITES_PREVIEW_BASE_URL host>``
+    # go straight to the sites preview app, OUTSIDE CSRF / auth / request-log, so the
+    # untrusted-content origin never touches a session, cookie or audit row. Only CORS
+    # (installed after this) wraps it, and the preview host is not a CORS-allowed
+    # origin, so CORS passes those requests through untouched.
+    from pocketpaw_ee.sites.preview_origin import PreviewHostDispatch
+
+    app.add_middleware(PreviewHostDispatch)
+
     # Global error handler — extracted to ee.cloud._core.http
     add_error_handler(app)
 

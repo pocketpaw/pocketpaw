@@ -20,8 +20,9 @@
 #
 #   * ``PAW_SITES_PREVIEW_BASE_URL`` — the preview host base URL setting;
 #   * ``pocketpaw_ee.sites.preview_origin.preview_app`` — the ASGI app the preview host
-#     runs. It is requested with the ABSOLUTE ``preview_url`` and no auth overrides, so
-#     the token may live in the path or in a subdomain;
+#     runs. It is requested with the ABSOLUTE ``preview_url`` and no auth overrides. The
+#     token lives in the SUBDOMAIN (``https://<token>.<base host>/index.html``), so
+#     root-absolute refs resolve exactly as they do once published;
 #   * the worker's ``build_job._store_preview_artifact`` + the default artifact store
 #     (pointed at tmp by the conftest) — the draft is seeded exactly as the preview
 #     lane seeds it when a sandbox build lands.
@@ -29,6 +30,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import tarfile
 from typing import Any
@@ -392,7 +394,7 @@ async def test_the_preview_host_never_sets_a_cookie_even_on_a_404(beanie_test_db
 async def test_native_artifact_route_carries_preview_url(beanie_test_db, monkeypatch):
     from tests.ee.sites.test_router import _build_app
 
-    url = f"{PREVIEW_BASE}/tok_abcdefghijklmnop/index.html"
+    url = "https://0123456789abcdef0123456789abcdef.preview.paw-sites.test/index.html"
 
     async def _served(**kw):
         return {
@@ -440,3 +442,111 @@ async def test_native_artifact_route_serves_an_html_pocket(beanie_test_db):
 
     assert resp.status_code == 200, resp.text
     assert isinstance(resp.json().get("preview_url"), str)
+
+
+# ---------------------------------------------------------------------------
+# Subdomain token, edit bridge, host dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_token_is_a_subdomain_label_not_a_path_segment(beanie_test_db):
+    _pid, url = await _react_draft()
+
+    parts = urlsplit(url)
+    label = parts.hostname.split(".")[0]
+    assert re.fullmatch(r"[a-f0-9]{32}", label), url
+    assert parts.hostname == f"{label}.preview.paw-sites.test"
+    assert parts.path == "/index.html"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_gets_a_new_preview_url(beanie_test_db):
+    pocket_id = await _make_pocket("html", {"index.html": "<h1>one</h1>"})
+    first = (await _artifact(pocket_id)).get("preview_url")
+    again = (await _artifact(pocket_id)).get("preview_url")
+    await pockets_service.set_html_source_file(
+        pocket_id, "u1", file_path="index.html", new_source="<h1>two</h1>"
+    )
+    second = (await _artifact(pocket_id)).get("preview_url")
+
+    assert first == again, "an unchanged draft must keep its URL"
+    assert second and second != first
+    # The old URL keeps serving its own immutable build.
+    assert "one" in (await _fetch(first)).text
+    assert "two" in (await _fetch(second)).text
+
+
+@pytest.mark.asyncio
+async def test_html_preview_arms_the_edit_bridge_only_under_paw_edit(beanie_test_db):
+    page = "<!DOCTYPE html><html><head></head><body><h1>Hi</h1></body></html>"
+    pocket_id = await _make_pocket("html", {"index.html": page})
+    url = (await _artifact(pocket_id)).get("preview_url")
+    assert isinstance(url, str)
+
+    plain = await _fetch(url)
+    armed = await _fetch(url + "?paw_edit=1")
+
+    assert 'id="paw-edit-bridge"' not in plain.text
+    _assert_public_asset(armed, "text/html")
+    assert 'id="paw-edit-bridge"' in armed.text
+    # The bridge posts only to the builder origin, never "*".
+    assert f"var ORIGIN = {json.dumps(ORIGIN)};" in armed.text
+    assert armed.text.index("paw-edit-bridge") < armed.text.lower().rindex("</body>")
+
+
+@pytest.mark.asyncio
+async def test_the_edit_variant_is_not_addressable_by_path(beanie_test_db):
+    pocket_id = await _make_pocket("html", {"index.html": "<h1>hi</h1>"})
+    url = (await _artifact(pocket_id)).get("preview_url")
+
+    resp = await _fetch(urljoin(url, "/.paw-edit/index.html"))
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_hashed_assets_are_immutable_and_unknown_files_404(beanie_test_db):
+    _pid, url = await _react_draft()
+
+    asset = await _fetch(urljoin(url, "/assets/index-9f8e7d.js"))
+    missing = await _fetch(urljoin(url, "/assets/nope.js"))
+
+    assert "immutable" in asset.headers.get("cache-control", "")
+    assert asset.headers.get("x-content-type-options") == "nosniff"
+    assert "x-frame-options" not in {k.lower() for k in asset.headers.keys()}
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_the_preview_host_ignores_cookies_and_auth(beanie_test_db):
+    _pid, url = await _react_draft()
+
+    async with AsyncClient(transport=ASGITransport(app=_preview_app())) as client:
+        resp = await client.get(
+            url, headers={"Cookie": "session=abc", "Authorization": "Bearer nope"}
+        )
+
+    _assert_public_asset(resp, "text/html")
+
+
+@pytest.mark.asyncio
+async def test_host_dispatch_sends_only_preview_hosts_to_the_preview_app(beanie_test_db):
+    from fastapi import FastAPI
+    from pocketpaw_ee.sites.preview_origin import PreviewHostDispatch
+
+    _pid, url = await _react_draft()
+    api = FastAPI()
+
+    @api.get("/index.html")
+    async def _api_route():
+        return {"served_by": "api"}
+
+    api.add_middleware(PreviewHostDispatch)
+    async with AsyncClient(transport=ASGITransport(app=api)) as client:
+        preview = await client.get(url)
+        app_host = await client.get("https://dash.paw.example/index.html")
+
+    _assert_public_asset(preview, "text/html")
+    assert 'data-uid="App:h1:0"' in preview.text
+    assert app_host.json() == {"served_by": "api"}
