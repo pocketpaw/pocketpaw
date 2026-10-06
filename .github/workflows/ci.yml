@@ -187,7 +187,7 @@ jobs:
             --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
             --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
           )
-          if uv run pytest tests/ -m serial --co -q "${scope[@]}" 2>/dev/null | grep -q '::'; then
+          if grep -rqE --include='*.py' 'mark\.serial' tests/; then
             uv run pytest tests/ -m serial "${scope[@]}" -q --tb=short
           fi
         env:
@@ -249,7 +249,7 @@ jobs:
             --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
             --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
           )
-          if uv run pytest tests/ -m serial --co -q "${scope[@]}" 2>/dev/null | grep -q '::'; then
+          if grep -rqE --include='*.py' 'mark\.serial' tests/; then
             uv run pytest tests/ -m serial "${scope[@]}" -q --tb=short
           fi
         env:
