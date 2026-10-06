@@ -119,8 +119,8 @@
   {
     "label": "owner: a planted .mcp.json is not removed before the next claude call",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "_TRUST_NAMES = frozenset({\".claude\", \"CLAUDE.md\", \"CLAUDE.local.md\", \"AGENTS.md\", \".mcp.json\"})",
-    "replace": "_TRUST_NAMES = frozenset({\".claude\", \"CLAUDE.md\", \"CLAUDE.local.md\", \"AGENTS.md\"})",
+    "find": "_TRUST_NAMES = frozenset({\".claude\", \"claude.md\", \"claude.local.md\", \"agents.md\", \".mcp.json\"})",
+    "replace": "_TRUST_NAMES = frozenset({\".claude\", \"claude.md\", \"claude.local.md\", \"agents.md\"})",
     "tests": [
       "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
     ]
@@ -164,7 +164,7 @@
   {
     "label": "owner: nested planted CLAUDE.md files survive the restore",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "dirnames[:] = [d for d in dirnames if d not in _TRUST_NAMES and d != \".git\"]",
+    "find": "dirnames[:] = [d for d in dirnames if d.casefold() not in _TRUST_NAMES and d != \".git\"]",
     "replace": "dirnames[:] = []",
     "tests": [
       "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
@@ -847,6 +847,24 @@
     "tests": [
       "tests/cloud/test_belt_develop_station.py::test_diff_touching_agent_config_is_refused",
       "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_from_the_base_never_the_line"
+    ]
+  },
+  {
+    "label": "line: a diff writing agents.md / .Claude/ (another letter case) is attached",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "path.strip().strip('\"').casefold().split(\"/\")",
+    "replace": "path.strip().strip('\"').split(\"/\")",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_diff_touching_agent_config_is_refused"
+    ]
+  },
+  {
+    "label": "owner: a planted agents.md / .MCP.JSON (another letter case) survives the restore",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "if n.casefold() in _TRUST_NAMES]",
+    "replace": "if n in _TRUST_NAMES]",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
     ]
   },
   {

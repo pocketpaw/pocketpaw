@@ -595,15 +595,17 @@ develop, fix and review calls run the Claude Code CLI.
 sits in the worktree, and the agent can write to the worktree. So immediately
 before every owner-mode claude call (DEVELOP, each FIX, REVIEW) the station
 deletes every entry named `.claude`, `CLAUDE.md`, `CLAUDE.local.md`,
-`AGENTS.md` or `.mcp.json`, at any depth, whether tracked, untracked or
-gitignored (a symlink is unlinked, never followed), then runs
+`AGENTS.md` or `.mcp.json`, at any depth and in any letter case (on a
+case-insensitive volume such as macOS APFS the CLI opening `AGENTS.md` reads an
+`agents.md`), whether tracked, untracked or gitignored (a symlink is unlinked,
+never followed), then runs
 `git checkout <base sha> -- <those paths tracked at base>`. The base sha is
 the BASE's commit (`origin/<base>` with a remote, else the local base), never
 the mandate's line: the line holds commits a gate approved but the captain has
 not merged. The settings, hooks, MCP servers and instructions that load are
 always the base's committed ones. The `.git`-file integrity check stays, and
 DONE refuses any diff touching one of those names (`.claude/`, `.mcp.json`,
-CLAUDE.md, CLAUDE.local.md, AGENTS.md, at any depth) in both setups, so no
+CLAUDE.md, CLAUDE.local.md, AGENTS.md, at any depth, any case) in both setups, so no
 factory run puts agent instructions on a line. For LLM runs in owner setup the
 restore before REVIEW already reverts any plant, so the DONE rule is defense in
 depth there (a recipe, which has no claude step, still meets it). Two
@@ -891,7 +893,7 @@ What the station scrubs or blocks:
   re-checked after every agent step.
 - **The diff.** Refused if it touches agent config (`.claude/`, `.mcp.json`,
   CLAUDE.md, CLAUDE.local.md, AGENTS.md), `.git` or `.gitmodules` at any
-  depth, or if an added line matches a `security.redact` credential pattern
+  depth and in any letter case, or if an added line matches a `security.redact` credential pattern
   (the error never echoes the value).
 - **Text.** Output tails, prompts' failure text and `headless_error` go through
   `security.redact`. Task text, check output and the diff sit in `<untrusted>`

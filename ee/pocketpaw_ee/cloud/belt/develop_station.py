@@ -22,7 +22,7 @@
 #            (``claude -p`` + the failure) while attempts last; REVIEW, read-only
 #            ``claude -p``, fails duplicates; strict ``{"verdict","notes"}``.
 #   DONE     ``git diff --cached --binary <start>``; refused when it touches agent
-#            config (any ``_TRUST_NAMES`` entry), ``.git``, ``.gitmodules`` or a secret.
+#            config (a ``_TRUST_NAMES`` name, any case), ``.git``, ``.gitmodules``, a secret.
 #   CLEANUP  always: remove the temp dir, then ``git worktree prune``.
 # Task text is injection-screened before PREPARE and fenced ``<untrusted>`` in
 # every prompt; failures raise ``DevelopStationError`` naming the step (tails
@@ -110,8 +110,10 @@ _CLAUDE_AUTH_KEYS = ("ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR")
 # Owner setup: before every claude call, any entry with one of these names, at
 # any depth of the worktree, is deleted and the base commit's copies restored,
 # so the settings, hooks, MCP servers and instructions that load are committed
-# ones, never agent-planted.
-_TRUST_NAMES = frozenset({".claude", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json"})
+# ones, never agent-planted. Spelled casefolded and matched against casefolded
+# names: on a case-insensitive volume (macOS) the CLI opening AGENTS.md or
+# .claude/settings.json reads an agent's agents.md or .Claude/settings.json.
+_TRUST_NAMES = frozenset({".claude", "claude.md", "claude.local.md", "agents.md", ".mcp.json"})
 
 
 def owner_setup() -> bool:
@@ -315,7 +317,9 @@ class ClaudeCodeDevelop:
                 # commits a gate approved but the captain has not merged.
                 listed = await self._git(worktree, "ls-tree", "-r", "--name-only", "-z", trust_sha)
                 tracked = [
-                    p for p in listed.split("\0") if p and _TRUST_NAMES.intersection(p.split("/"))
+                    p
+                    for p in listed.split("\0")
+                    if p and _TRUST_NAMES.intersection(p.casefold().split("/"))
                 ]
                 trust = _Trust(base_sha=trust_sha, tracked=tracked)
 
@@ -795,12 +799,12 @@ class _Trust:
 
 
 def _trust_entries(worktree: Path) -> list[Path]:
-    """Every entry under the worktree named in ``_TRUST_NAMES`` (``.git`` and
-    the matched dirs themselves are not descended into)."""
+    """Every entry under the worktree named in ``_TRUST_NAMES``, in any letter
+    case (``.git`` and the matched dirs themselves are not descended into)."""
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(worktree):
-        found += [Path(dirpath, n) for n in (*dirnames, *filenames) if n in _TRUST_NAMES]
-        dirnames[:] = [d for d in dirnames if d not in _TRUST_NAMES and d != ".git"]
+        found += [Path(dirpath, n) for n in (*dirnames, *filenames) if n.casefold() in _TRUST_NAMES]
+        dirnames[:] = [d for d in dirnames if d.casefold() not in _TRUST_NAMES and d != ".git"]
     return found
 
 
@@ -837,12 +841,12 @@ _PROTECTED_NAMES = _TRUST_NAMES | {".git", ".gitmodules"}
 
 
 def _is_protected(path: str) -> bool:
-    """A path a produced diff may never carry, at any depth: agent config a
-    later CLI run would load (every ``_TRUST_NAMES`` entry: ``.claude/``,
-    ``.mcp.json``, CLAUDE.md, CLAUDE.local.md, AGENTS.md) or git plumbing
-    (``.git``, ``.gitmodules``). It keeps factory-written instructions off a
-    mandate's line, where later owner-mode seats would build on them."""
-    return bool(_PROTECTED_NAMES.intersection(path.strip().strip('"').split("/")))
+    """A path a produced diff may never carry, at any depth and in any letter
+    case: agent config a later CLI run would load (every ``_TRUST_NAMES`` entry:
+    ``.claude/``, ``.mcp.json``, CLAUDE.md, CLAUDE.local.md, AGENTS.md) or git
+    plumbing (``.git``, ``.gitmodules``). It keeps factory-written instructions
+    off a mandate's line, where later owner-mode seats would build on them."""
+    return bool(_PROTECTED_NAMES.intersection(path.strip().strip('"').casefold().split("/")))
 
 
 def _assert_intact(worktree: Path, snapshot: bytes) -> None:
