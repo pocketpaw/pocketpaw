@@ -1010,9 +1010,12 @@ class Settings(BaseSettings):
         default=False,
         description=(
             "Withhold a Paw Site's authored SOURCE from the wire unless the "
-            "workspace is entitled to read it (``Entitlements."
-            "site_source_visible``, which every paid rung grants and ``free`` "
-            "does not). OFF by default so turning the gate on is a separate, "
+            "SITE is entitled to it: its own per-site tier is ``site`` or "
+            "``staff`` with an active subscription (``entitlements.service."
+            "site_code_entitled``). The workspace plan grants nothing; a "
+            "platform override (``WorkspaceOverrides.site_source_visible``) can "
+            "grant or revoke it workspace-wide. OFF by default so turning the "
+            "gate on is a separate, "
             "revertible operational step rather than something that ships with "
             "the code. "
             "It is ANDed with a per-pocket cohort stamp (``Pocket."

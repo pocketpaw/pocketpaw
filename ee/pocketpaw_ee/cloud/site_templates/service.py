@@ -18,7 +18,7 @@
 #     PATCH are owner-only by query (``_owned``).
 #   * Making a template public runs ``_check_publishable``: no reference to a
 #     workspace's private files (``assets.find_private_asset_refs``) and no
-#     source the owner's workspace may not read under SF-2.
+#     source the source site may not show under SF-2 (its own per-site tier).
 #   * Reports: one per user (enforced by the conditional ``$push``), at most
 #     ``MAX_REPORTS`` stored; ``HIDE_THRESHOLD`` of them set ``hidden``.
 #   * Caps: a snapshot over ``MAX_SNAPSHOT_BYTES`` of JSON is refused
@@ -188,9 +188,9 @@ def _check_size(snapshot: dict) -> None:
         )
 
 
-async def _check_publishable(workspace_id: str, snapshot: dict) -> None:
+async def _check_publishable(workspace_id: str, snapshot: dict, source_pocket_id: str) -> None:
     """Refuse to make ``snapshot`` public if it points at the workspace's own files
-    or carries source the workspace may not read (SF-2)."""
+    or carries source its source site may not show (SF-2)."""
     refs = find_private_asset_refs(snapshot)
     if refs:
         raise ValidationError(
@@ -199,7 +199,7 @@ async def _check_publishable(workspace_id: str, snapshot: dict) -> None:
             "workspaces cannot load. Replace them with public images before sharing it publicly.",
         )
     if not await pockets_service.snapshot_source_visible(
-        workspace_id, bool(snapshot.get("source_gated"))
+        workspace_id, bool(snapshot.get("source_gated")), source_pocket_id
     ):
         raise Forbidden(
             "site_templates.source_not_shareable",
@@ -315,7 +315,7 @@ async def save_template(
             f"This workspace already has {MAX_TEMPLATES_PER_WORKSPACE} templates",
         )
     if body.visibility == "public":
-        await _check_publishable(workspace_id, snapshot)
+        await _check_publishable(workspace_id, snapshot, body.pocket_id)
 
     doc = SiteTemplate(
         workspace=workspace_id,
@@ -399,7 +399,7 @@ async def update_template(
 
         await sites_service.require_sites_plan(workspace_id)
         _check_size(doc.snapshot)
-        await _check_publishable(workspace_id, doc.snapshot)
+        await _check_publishable(workspace_id, doc.snapshot, doc.source_pocket_id)
 
     changes = body.model_dump(exclude_none=True)
     if changes:

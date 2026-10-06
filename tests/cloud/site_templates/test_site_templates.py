@@ -659,7 +659,7 @@ async def test_patch_changes_metadata_not_version(recording_bus) -> None:
 
 @pytest.fixture
 def source_gate(monkeypatch) -> dict[str, bool]:
-    """SF-2 on, and the workspace NOT entitled to read gated source unless
+    """SF-2 on, and the source site NOT entitled to show its source unless
     ``["entitled"]`` is set."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
@@ -667,11 +667,11 @@ def source_gate(monkeypatch) -> dict[str, bool]:
 
     state = {"entitled": False}
 
-    async def _entitled(workspace_id: str) -> bool:
-        return state["entitled"]
+    async def _entitled(workspace_id: str, pocket_ids: list[str]) -> dict[str, bool]:
+        return dict.fromkeys(pocket_ids, state["entitled"])
 
     monkeypatch.setattr(get_settings(), "sites_source_gate_enabled", True)
-    monkeypatch.setattr(pockets_service, "_workspace_source_entitled", _entitled)
+    monkeypatch.setattr(pockets_service, "_source_entitled_by_pocket", _entitled)
     return state
 
 

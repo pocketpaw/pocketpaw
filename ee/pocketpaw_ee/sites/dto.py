@@ -920,13 +920,10 @@ class SiteEntitlementsResponse(BaseModel):
     second condition ANDed in, and like every field here it exists so the Download
     button can disable itself with a reason instead of 402ing when pressed.
 
-    It is NOT the same question as whether the source is VISIBLE. That one is a
-    WORKSPACE capability (``Entitlements.site_source_visible``, which gates the
-    builder's Code tab) resolved off the workspace plan by a different resolver; this
-    is a PER-SITE capability resolved off the site's own plan. A paid site inside a
-    free workspace can legitimately download a project whose source the Code tab
-    hides. A UI that gates the download button on source visibility would hide a
-    control the customer has paid for — read this field, not that one.
+    The builder's Code tab (``sourceVisible`` on the pocket wire dict) is resolved off
+    the same per-site predicate, so the two normally agree. They can still differ
+    when a platform operator overrides source visibility for the whole workspace, so
+    the Download button reads this field, never ``sourceVisible``.
     """
 
     site_id: str
