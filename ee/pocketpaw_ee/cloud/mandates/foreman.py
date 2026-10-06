@@ -4,11 +4,11 @@
 # sighting no landed task has resolved, capped, each marked new or carried over
 # and annotated with the tasks that cite it), the last 3 shifts' outcomes (each
 # task's run result: landed, failed with its reason, rejected, or in flight; and
-# what a human said at the gate), and (when a soul is bound) the soul recall,
-# then makes EXACTLY ONE LLM call that returns a strict-JSON PlanProposal: a FEW
-# tasks (≤ the charter's budget) or an explicit empty plan with a reason. A task
-# may name a charter ``recipe`` (a deterministic command) instead of LLM develop
-# work.
+# what a human said at the gate), the bound repo's C4 components, and (when a
+# soul is bound) the soul recall, then makes EXACTLY ONE LLM call that returns a
+# strict-JSON PlanProposal: a FEW tasks (≤ the charter's budget) or an explicit
+# empty plan with a reason. A task may name a charter ``recipe`` (a
+# deterministic command) instead of LLM develop work.
 #
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
 # runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
@@ -19,8 +19,8 @@
 # ``claude_cli_argv`` / ``claude_result_text`` are the ONE place the factory
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
 # and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
-# set), and they pin every seat to no settings files, no MCP and no hooks; the
-# develop station uses them too. ``run_claude_no_tools`` is the sandboxed
+# set), and they pin every seat to no settings files, no MCP and no hooks (only
+# the develop station's owner setup opts out). ``run_claude_no_tools`` is the sandboxed
 # tool-less call the foreman and the autopilot personas share. Prompts ride
 # stdin, never argv or a shell.
 #
@@ -37,7 +37,8 @@
 # failed approach without saying what changed; tasks in one shift are independent
 # of each other (they develop from the same base and land separately; dependent
 # follow-up waits for a later shift, which validation cannot detect); an
-# in-flight task is never planned again; strict JSON only.
+# in-flight task is never planned again; a task extends the repo's existing C4
+# components (listed in the prompt) and never plans a duplicate; strict JSON only.
 
 from __future__ import annotations
 
@@ -111,6 +112,9 @@ class ForemanContext:
     history: list[dict[str, Any]] = field(default_factory=list)
     # Soul recall lines (empty when no soul bound).
     soul_context: list[str] = field(default_factory=list)
+    # The bound repo's C4 containers/components, one line each, capped
+    # (``belt.orient.c4_lines``); empty when the repo has no C4 model.
+    architecture: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -141,16 +145,19 @@ _ISOLATION_FLAGS = (
 )
 
 
-def claude_cli_argv(*args: str) -> list[str]:
+def claude_cli_argv(*args: str, isolated: bool = True) -> list[str]:
     """argv for one headless call to the SYSTEM Claude Code CLI.
 
     Every factory LLM seat (foreman, develop, fix, review) builds its command
     here: ``<bin> -p <args...> <isolation flags> --output-format json
     [--model M]``. The binary is ``POCKETPAW_FACTORY_CLAUDE_BIN``, else
     ``claude`` on PATH — never the SDK's bundled copy, which goes stale.
-    Resolved per call so env changes apply."""
+    Resolved per call so env changes apply. ``isolated=False`` drops the
+    isolation flags: only the develop station's owner setup passes it, and only
+    after restoring the worktree's agent config to the base commit."""
     binary = os.environ.get("POCKETPAW_FACTORY_CLAUDE_BIN") or shutil.which("claude") or "claude"
-    argv = [binary, "-p", *args, *_ISOLATION_FLAGS, "--output-format", "json"]
+    isolation = _ISOLATION_FLAGS if isolated else ()
+    argv = [binary, "-p", *args, *isolation, "--output-format", "json"]
     model = (os.environ.get("POCKETPAW_FACTORY_CLAUDE_MODEL") or "").strip()
     if model:
         argv += ["--model", model]
@@ -338,6 +345,7 @@ def build_prompt(context: ForemanContext) -> str:
     soul_lines = "\n".join(f"- {line}" for line in context.soul_context) or "(none)"
     recipe_names = sorted((charter.get("recipes") or {}).keys())
     recipe_lines = "\n".join(f"- {name}" for name in recipe_names) or "(none)"
+    architecture_lines = "\n".join(context.architecture) or "(no C4 model for this repo)"
 
     return f"""You are the FOREMAN of a standing engineering mandate. Once per shift you decide \
 what FEW tasks (if any) the crew should run. You are judged on judgment, not output volume.
@@ -366,6 +374,9 @@ Never repeat an approach that already failed above without explicitly stating in
 == SOUL CONTEXT (long-lived memory of this mandate) ==
 {soul_lines}
 
+== EXISTING ARCHITECTURE (the repo's C4 model — the source of truth for what exists) ==
+{architecture_lines}
+
 == RECIPES (named deterministic commands the crew can run) ==
 {recipe_lines}
 When a task is exactly what a recipe does, set its "recipe" to that name and the crew runs \
@@ -387,6 +398,9 @@ plan the first step now and leave the dependent follow-up for a later shift.
 7. A task that is IN FLIGHT (queued, developing, approved, or pending at a gate) is already \
 being worked. Never plan the same work again, even under a new title; its sighting stays \
 open until it lands, and that is expected.
+8. A task EXTENDS the existing components listed under EXISTING ARCHITECTURE wherever one \
+covers the work; name the component it extends in the task's "why". Never plan a new \
+component, module or service that duplicates one listed there.
 
 == OUTPUT (STRICT) ==
 Reply with STRICT JSON only — no prose, no markdown fences, no commentary:

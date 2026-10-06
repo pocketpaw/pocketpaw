@@ -1,50 +1,44 @@
 # ee/pocketpaw_ee/cloud/belt/develop_station.py — the factory's develop station.
 #
 # ``ClaudeCodeDevelop`` is the production ``DevelopFn`` behind the headless
-# mandate dispatcher: it turns one approved plan task into a checked, reviewed
-# unified diff that ``HeadlessDevelopRunner`` attaches to the PENDING run (the
-# per-diff Instinct gate still decides; this module never commits, pushes or
-# merges anything outside a throwaway worktree).
+# mandate dispatcher: one approved plan task in, a checked, reviewed unified
+# diff out, which ``HeadlessDevelopRunner`` attaches to the PENDING run (the
+# Instinct gate still decides; nothing here commits, pushes or merges outside a
+# throwaway worktree). Steps, in order:
+#   PREPARE  bound repo inside ``POCKETPAW_BELT_REPO_ALLOWLIST`` (empty = refuse);
+#            ``git worktree add --detach`` at ``origin/<base>`` (fetched) or ``<base>``.
+#   ORIENT   LLM work only: ``orient.orient_block`` (loom world model, else the
+#            repo's C4 list) rides the develop + review prompts; a miss is a note.
+#   WORK     a charter recipe → that command; else DEVELOP → ``claude -p``.
+#   CHECK    every charter check; FIX (``claude -p`` with the failure) while
+#            attempts last. REVIEW: read-only ``claude -p`` judges the diff,
+#            failing duplicates of existing code; strict ``{"verdict","notes"}``.
+#   DONE     ``git diff --cached --binary <base>``; refused when it touches
+#            ``.claude/``, ``.mcp.json``, ``.git``, ``.gitmodules`` or adds a secret.
+#   CLEANUP  always: remove the temp dir, then ``git worktree prune``.
+# Task text is injection-screened before PREPARE and fenced ``<untrusted>`` in
+# every prompt; failures raise ``DevelopStationError`` naming the step (tails
+# redacted), recorded as ``headless_error`` on the run.
 #
-# A small explicit state machine, written as sequential steps:
-#   PREPARE  resolve the bound repo inside ``POCKETPAW_BELT_REPO_ALLOWLIST``
-#            (empty allowlist = refuse), then ``git worktree add --detach`` at
-#            ``origin/<base>`` (after a fetch) when an origin exists, else the
-#            local ``<base>``.
-#   WORK     a charter recipe → run that command; else DEVELOP → ``claude -p``.
-#   CHECK    run every charter check; keep exit code + output tail.
-#   FIX      a red check (or a failed review) with attempts left → ``claude -p``
-#            with the failure, then CHECK again. Recipes get no LLM fix.
-#   REVIEW   checks green → an independent read-only ``claude -p`` judges the
-#            task against ``git diff``: strict ``{"verdict", "notes"}`` JSON.
-#   DONE     ``git add -A`` + ``git diff --cached --binary <base sha>``; refused
-#            when it touches ``.claude/``, ``.mcp.json``, ``.git`` or
-#            ``.gitmodules``, or adds a line matching a credential pattern.
-#   CLEANUP  always: remove the temp dir, then ``git worktree prune`` (finally).
-# Before PREPARE the task text goes through the heuristic InjectionScanner (HIGH
-# refuses the run); every prompt fences task text, check output and the diff in
-# an ``<untrusted>`` data block.
-# Any dead end raises ``DevelopStationError`` naming the step; the runner records
-# it as ``headless_error`` on the queued run's blob. Output tails that reach a
-# prompt or an error are run through ``security.redact`` first.
+# Claude setup (``POCKETPAW_FACTORY_CLAUDE_SETUP``): ``strict`` (default, hosted)
+# runs every seat with no settings files, MCP servers or hooks. ``owner`` (a
+# local factory on the owner's machine) puts the worktree under
+# ``POCKETPAW_FACTORY_WORKTREE_ROOT`` (required) so CLAUDE.md discovery walks up
+# through the owner's workspace, and drops those flags for develop/fix/review.
+# TRUST RULE, never break it: an owner-mode claude call only ever runs after
+# ``_restore_trusted`` put every ``_TRUST_NAMES`` entry back to the base commit.
 #
-# Safety: every subprocess goes through ONE injectable ``Runner`` with an argv
-# list (never a shell); charter commands are ``shlex.split`` and refused unless
-# argv[0] is on the operator allowlist (``dto.command_refusal``). The default runner
-# passes only an allow-listed env (``_ENV_KEYS``: no tokens, URIs or API keys)
-# and kills the whole process group on timeout or cancellation. Station git
-# calls run with fsmonitor and hooks disabled, and the worktree's ``.git`` file
-# is snapshotted after PREPARE and re-checked after every agent step
-# (INTEGRITY). ``claude`` gets its prompt on
-# stdin, a ``--tools`` set limited to Read/Glob/Grep (+ Edit/Write and Bash
-# prefix rules for the charter checks on the edit seats), allow rules scoped to
-# the worktree (``Read(./**)``), WebFetch/WebSearch/Task denied, and no settings
-# files, MCP servers or hooks (``foreman.claude_cli_argv``, which also resolves
-# the system CLI binary and model).
-# Wired by a cloud startup hook (``wire_from_env``) when ``POCKETPAW_MANDATE_
-# DISPATCHER=headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``; off by default,
-# and refused in a multi-tenant process unless ``POCKETPAW_FACTORY_DEDICATED_
-# HOST=1`` (dedicated single-tenant hosts only — there is no OS sandbox yet).
+# Safety: ONE injectable ``Runner``, argv lists only (never a shell), charter
+# commands refused unless argv[0] is allowed (``dto.command_refusal``), an
+# allow-listed env (``_ENV_KEYS``), process-group kill on timeout/cancel, station
+# git with fsmonitor and hooks off, and the worktree ``.git`` file re-checked
+# after every agent step (INTEGRITY). claude gets the prompt on stdin, Read/
+# Glob/Grep (+ Edit/Write and Bash check rules on edit seats) scoped to
+# ``./**``, WebFetch/WebSearch/Task denied, in both setups.
+# Wired by ``wire_from_env`` (cloud startup) when ``POCKETPAW_MANDATE_DISPATCHER
+# =headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``; refused in a multi-tenant
+# process unless ``POCKETPAW_FACTORY_DEDICATED_HOST=1``, and in owner setup
+# without a worktree root.
 
 from __future__ import annotations
 
@@ -64,6 +58,7 @@ from typing import Any, Protocol
 
 from pocketpaw.security.redact import REDACT_PATTERNS, redact_output
 from pocketpaw_ee.cloud.belt.headless import DevelopRequest, DevelopResult
+from pocketpaw_ee.cloud.belt.orient import orient_block
 from pocketpaw_ee.cloud.mandates.dto import command_refusal
 from pocketpaw_ee.cloud.mandates.foreman import claude_cli_argv, claude_result_text
 
@@ -86,6 +81,26 @@ _ENV_KEYS = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDI
 # Auth the claude CLI itself needs, passed to claude calls only (never to checks,
 # recipes or git): an API-key deploy has no keychain login to fall back on.
 _CLAUDE_AUTH_KEYS = ("ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR")
+# Owner setup: before every claude call, any entry with one of these names, at
+# any depth of the worktree, is deleted and the base commit's copies restored,
+# so the settings, hooks, MCP servers and instructions that load are committed
+# ones, never agent-planted.
+_TRUST_NAMES = frozenset({".claude", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json"})
+
+
+def owner_setup() -> bool:
+    """``POCKETPAW_FACTORY_CLAUDE_SETUP=owner``: the owner's Claude Code setup
+    (CLAUDE.md files, skills, hooks, settings) loads. Anything else is ``strict``."""
+    return (os.environ.get("POCKETPAW_FACTORY_CLAUDE_SETUP") or "").strip().lower() == "owner"
+
+
+def owner_worktree_root() -> Path | None:
+    """``POCKETPAW_FACTORY_WORKTREE_ROOT`` resolved, when it is an existing dir."""
+    raw = (os.environ.get("POCKETPAW_FACTORY_WORKTREE_ROOT") or "").strip()
+    if not raw:
+        return None
+    root = Path(raw).expanduser().resolve()
+    return root if root.is_dir() else None
 
 
 def _env_seconds(name: str, default: float) -> float:
@@ -216,7 +231,19 @@ class ClaudeCodeDevelop:
         repo = self._resolve_repo(request.repo or str(found.get("repo") or ""))
         base_branch, start_ref = await self._resolve_base(repo, request.base_branch)
 
-        tmp = Path(tempfile.mkdtemp(prefix="belt-develop-"))
+        root: Path | None = None
+        if owner_setup():
+            root = owner_worktree_root()
+            if root is None:
+                raise DevelopStationError(
+                    "PREPARE: POCKETPAW_FACTORY_CLAUDE_SETUP=owner needs "
+                    "POCKETPAW_FACTORY_WORKTREE_ROOT set to an existing directory"
+                )
+            if root == repo or repo in root.parents:
+                raise DevelopStationError(
+                    "PREPARE: POCKETPAW_FACTORY_WORKTREE_ROOT is inside the bound repo"
+                )
+        tmp = Path(tempfile.mkdtemp(prefix="belt-develop-", dir=root))
         worktree = tmp / "wt"
         try:
             # PREPARE
@@ -226,6 +253,20 @@ class ClaudeCodeDevelop:
             # an agent that rewrites it could aim station git at a config of
             # its own. Snapshot it now, re-check after every agent step.
             git_snapshot = (worktree / ".git").read_bytes()
+            trust: _Trust | None = None
+            if root is not None:
+                listed = await self._git(worktree, "ls-tree", "-r", "--name-only", "-z", base_sha)
+                tracked = [
+                    p for p in listed.split("\0") if p and _TRUST_NAMES.intersection(p.split("/"))
+                ]
+                trust = _Trust(base_sha=base_sha, tracked=tracked)
+
+            # ORIENT (LLM work only): the repo's architecture, as the source of truth.
+            orient, orient_note = "", "skipped (recipe)"
+            if not request.recipe:
+                orient, orient_note = await orient_block(
+                    self.run, repo, f"{request.task}\n{request.summary}", cwd=worktree
+                )
 
             # WORK
             if request.recipe:
@@ -246,7 +287,11 @@ class ClaudeCodeDevelop:
                     )
             else:
                 await self._claude(
-                    _develop_prompt(request, charter), cwd=worktree, step="DEVELOP", checks=checks
+                    _develop_prompt(request, charter, orient),
+                    cwd=worktree,
+                    step="DEVELOP",
+                    checks=checks,
+                    trust=trust,
                 )
                 _assert_intact(worktree, git_snapshot)
 
@@ -269,6 +314,7 @@ class ClaudeCodeDevelop:
                         cwd=worktree,
                         step="FIX",
                         checks=checks,
+                        trust=trust,
                     )
                     _assert_intact(worktree, git_snapshot)
                     continue
@@ -278,7 +324,9 @@ class ClaudeCodeDevelop:
                 _assert_intact(worktree, git_snapshot)
                 await self._git(worktree, "add", "-A")
                 diff = await self._git(worktree, "diff", "--cached", base_sha)
-                passed, review_notes = await self._review(request, diff, worktree)
+                passed, review_notes = await self._review(
+                    request, diff, worktree, orient=orient, trust=trust
+                )
                 if passed:
                     verdict = "pass"
                     break
@@ -293,6 +341,7 @@ class ClaudeCodeDevelop:
                     cwd=worktree,
                     step="FIX",
                     checks=checks,
+                    trust=trust,
                 )
                 _assert_intact(worktree, git_snapshot)
 
@@ -319,6 +368,8 @@ class ClaudeCodeDevelop:
             lines = [request.summary or request.task.splitlines()[0][:120]]
             if request.recipe:
                 lines.append(f"recipe: {request.recipe}")
+            lines.append(f"setup: {'owner' if trust else 'strict'}")
+            lines.append(f"orient: {orient_note}")
             lines += [f"check `{r.command}`: {'pass' if r.ok else 'fail'}" for r in results]
             lines.append(f"review: {verdict}")
             lines += [f"  - {n}" for n in review_notes]
@@ -394,9 +445,17 @@ class ClaudeCodeDevelop:
         step: str,
         checks: list[str] | tuple[str, ...] = (),
         edits: bool = True,
+        trust: _Trust | None = None,
     ) -> str:
+        """One claude seat. ``trust`` set = owner setup: the worktree's agent
+        config is restored to the base commit first, and only then does the
+        call drop the isolation flags (the two never come apart)."""
+        if trust is not None:
+            await self._restore_trusted(cwd, trust)
         mode = ["--permission-mode", "acceptEdits"] if edits else []
-        argv = claude_cli_argv(*mode, *_tool_flags(edits=edits, checks=checks))
+        argv = claude_cli_argv(
+            *mode, *_tool_flags(edits=edits, checks=checks), isolated=trust is None
+        )
         code, out, err = await self.run(
             argv,
             cwd=cwd,
@@ -413,11 +472,29 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"{step}: claude reported an error: {_tail(out)}")
         return claude_result_text(out)
 
+    async def _restore_trusted(self, worktree: Path, trust: _Trust) -> None:
+        """Delete every ``_TRUST_NAMES`` entry on disk (tracked, untracked or
+        ignored, at any depth; a symlink is unlinked, never followed), then
+        check the base commit's copies back out."""
+        for path in _trust_entries(worktree):
+            if path.is_symlink() or not path.is_dir():
+                path.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(path)
+        if trust.tracked:
+            await self._git(worktree, "checkout", trust.base_sha, "--", *trust.tracked)
+
     async def _review(
-        self, request: DevelopRequest, diff: str, cwd: Path
+        self,
+        request: DevelopRequest,
+        diff: str,
+        cwd: Path,
+        *,
+        orient: str = "",
+        trust: _Trust | None = None,
     ) -> tuple[bool, list[str]]:
         text = await self._claude(
-            _review_prompt(request, diff), cwd=cwd, step="REVIEW", edits=False
+            _review_prompt(request, diff, orient), cwd=cwd, step="REVIEW", edits=False, trust=trust
         )
         start, end = text.find("{"), text.rfind("}")
         try:
@@ -428,6 +505,25 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"REVIEW: unparseable verdict: {text[:300]!r}")
         notes = [str(n) for n in verdict.get("notes") or []]
         return verdict["verdict"] == "pass", notes
+
+
+@dataclass(frozen=True)
+class _Trust:
+    """Owner setup's restore point: the base commit and the ``_TRUST_NAMES``
+    paths it tracks."""
+
+    base_sha: str
+    tracked: list[str]
+
+
+def _trust_entries(worktree: Path) -> list[Path]:
+    """Every entry under the worktree named in ``_TRUST_NAMES`` (``.git`` and
+    the matched dirs themselves are not descended into)."""
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(worktree):
+        found += [Path(dirpath, n) for n in (*dirnames, *filenames) if n in _TRUST_NAMES]
+        dirnames[:] = [d for d in dirnames if d not in _TRUST_NAMES and d != ".git"]
+    return found
 
 
 def _screen_task(request: DevelopRequest) -> None:
@@ -534,14 +630,19 @@ def _task_block(request: DevelopRequest) -> str:
     return _untrusted(f"TASK:\n{request.task}\n\nEXPECTED OUTCOME:\n{request.summary}")
 
 
-def _develop_prompt(request: DevelopRequest, charter: dict[str, Any]) -> str:
+def _architecture(orient: str) -> str:
+    return f"{orient}\n\n" if orient else ""
+
+
+def _develop_prompt(request: DevelopRequest, charter: dict[str, Any], orient: str = "") -> str:
     return (
         "You are the develop station of an engineering mandate, working in a "
         "throwaway git worktree (the current directory).\n\n"
         f"{_UNTRUSTED_RULE}\n\n{_task_block(request)}\n\n"
-        f"{_charter_block(charter)}\n\n"
-        "Make the change. Add or update tests that cover it. Run the checks if you "
-        "can. Do NOT commit, push or create branches. Stay inside the boundaries."
+        f"{_charter_block(charter)}\n\n{_architecture(orient)}"
+        "Make the change. Extend what already exists rather than adding a parallel "
+        "copy. Add or update tests that cover it. Run the checks if you can. Do NOT "
+        "commit, push or create branches. Stay inside the boundaries."
     )
 
 
@@ -561,7 +662,7 @@ def _check_failures(failed: list[CheckResult]) -> str:
     )
 
 
-def _review_prompt(request: DevelopRequest, diff: str) -> str:
+def _review_prompt(request: DevelopRequest, diff: str, orient: str = "") -> str:
     shown = diff[:_REVIEW_DIFF_CHARS]
     if len(diff) > _REVIEW_DIFF_CHARS:
         shown += "\n[diff truncated; read the files for the rest]"
@@ -570,9 +671,12 @@ def _review_prompt(request: DevelopRequest, diff: str) -> str:
         "task, is correct, and carries tests for the change. You may read files in "
         "the current directory; you cannot edit.\n\n"
         f"{_UNTRUSTED_RULE}\n\n{_task_block(request)}\n\n"
-        f"DIFF:\n{_untrusted(shown)}\n\n"
+        f"DIFF:\n{_untrusted(shown)}\n\n{_architecture(orient)}"
         'Reply with STRICT JSON only: {"verdict": "pass" | "fail", "notes": ["..."]}. '
-        '"fail" only for real problems: the task is not done, a bug, or missing tests.'
+        '"fail" only for real problems: the task is not done, a bug, missing tests, or '
+        "a DUPLICATE: the diff adds a module, class, component or helper that repeats "
+        "one that already exists (listed above or found in the repo). For a duplicate, "
+        "a note must name what is duplicated and the path of the existing one."
     )
 
 
@@ -599,6 +703,12 @@ def wire_from_env() -> bool:
             "belt: NOT wiring the headless develop station: this process serves cloud "
             "tenants and the station runs agent-written code on the host. Set "
             "POCKETPAW_FACTORY_DEDICATED_HOST=1 only on a dedicated single-tenant host."
+        )
+        return False
+    if owner_setup() and owner_worktree_root() is None:
+        logger.error(
+            "belt: NOT wiring the headless develop station: POCKETPAW_FACTORY_CLAUDE_SETUP="
+            "owner needs POCKETPAW_FACTORY_WORKTREE_ROOT set to an existing directory."
         )
         return False
     set_production_develop_fn(ClaudeCodeDevelop())
