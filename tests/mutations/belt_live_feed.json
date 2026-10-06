@@ -153,5 +153,14 @@
     "tests": [
       "tests/cloud/test_belt_live_feed.py::test_the_stream_route_404s_a_foreign_run"
     ]
+  },
+  {
+    "label": "live feed: the review verdict is not a row of its own",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        if feed is not None:  # the verdict as a row of its own, not only the seat's prose\n",
+    "replace": "        if False:  # the verdict as a row of its own, not only the seat's prose\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
   }
 ]

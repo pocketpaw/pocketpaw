@@ -825,7 +825,12 @@ class ClaudeCodeDevelop:
         if not isinstance(verdict, dict) or verdict.get("verdict") not in ("pass", "fail"):
             raise DevelopStationError(f"REVIEW: unparseable verdict: {text[:300]!r}")
         notes = [str(n) for n in verdict.get("notes") or []]
-        return verdict["verdict"] == "pass", notes
+        passed = verdict["verdict"] == "pass"
+        if feed is not None:  # the verdict as a row of its own, not only the seat's prose
+            call = await feed.begin("Review", {}, f"Review: {'pass' if passed else 'fail'}")
+            await feed.finish(call, "Review", "\n".join(notes) or "no notes")
+            await feed.save()
+        return passed, notes
 
 
 # A root counts only where a path STARTS: not mid-path (``src/app/x`` with a

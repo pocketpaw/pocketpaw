@@ -827,7 +827,9 @@ itself. Path, per line:
 - Station rows: ORIENT is one `Orient` tool row whose output is the note and
   the architecture block; each check is a `Bash` row narrated `Run <command>`
   that shows running, then the check's tail and `(exit N)`; a recipe is the
-  same row under `develop`. A recipe run has no `orient`, `fix` or `review`.
+  same row under `develop`; each review ends with a `Review` row narrated
+  `Review: pass` or `Review: fail`, its output the notes one per line (`no
+  notes` when there are none). A recipe run has no `orient`, `fix` or `review`.
 - Caps, per station call: 2,000 frames and 2 MB published
   (`FEED_MAX_STEPS`, `FEED_MAX_BYTES`; the control frames `start`, `stage` and
   `stream_end` are never dropped, and `stream_end.omitted` counts what was);
@@ -856,8 +858,10 @@ itself. Path, per line:
 | `error` `{code: "run.stream_timeout", message}` | the subscription hit the chat run stream's lifetime cap; reopen with `after=<last id>` |
 
 Replay: `after=0` (the default) serves the newest attempt from its `start`,
-so a reload shows what a viewer saw live; a cursor resumes right after it (and
-past an older attempt's `stream_end` into the next one). A run being developed
+so a reload shows what a viewer saw live; a cursor resumes right after it. A
+cursor at an attempt's `stream_end` resumes into the next attempt; one inside
+an earlier attempt ends at that attempt's `stream_end`, and the client reopens
+with `after=0` on the next `belt_run_updated`. A run being developed
 (`headless_state` set by the background dispatcher) whose stream does not
 exist yet is waited on. The stream lives 6 hours from `start` and 1 hour after
 `stream_end`. Each stage start also emits `belt_run_updated` on the workspace

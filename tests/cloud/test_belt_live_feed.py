@@ -215,7 +215,10 @@ async def test_every_stage_arrives_live_in_order_and_is_stored(
     assert len(rows["check"].steps) == 2
     assert all(s["narration"].startswith("Run ") for s in rows["check"].steps)
     assert [s["tool"] for s in rows["fix"].steps] == [s["tool"] for s in rows["develop"].steps]
-    assert rows["review"] is not None and rows["review"].steps == []
+    # The verdict is a row of its own (the fake reviewer's seat prints no events).
+    verdict = [(s["tool"], s["narration"], s["output"]) for s in rows["review"].steps]
+    assert verdict == [("Review", "Review: pass", "no notes")]
+    assert ("review", "tool_start", "Review: pass") in seen
     stored = json.dumps([r.steps for r in rows.values()], default=str)
     assert _SECRET not in stored and str(linked_tmp) not in stored
 

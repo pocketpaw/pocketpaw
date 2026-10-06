@@ -1,4 +1,6 @@
-"""Run streaming + control endpoints.
+"""Run streaming + control endpoints. The stream's tail, heartbeat and
+lifetime cap live in ``transport.sse_tail`` (shared with the Belt run feed);
+this route authorizes, picks the cursor and serves the history fallback.
 
 Changes:
 - 2026-09-27 (fix/run-stream-session-readers) — the stream admits a reader of
