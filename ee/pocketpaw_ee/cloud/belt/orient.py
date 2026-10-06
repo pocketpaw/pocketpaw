@@ -16,6 +16,15 @@
 #       container/component (name + first sentence), capped. The foreman gets
 #       these in its prompt; ORIENT uses them as its fallback.
 #
+# The file join (``load_model`` -> ``path_index`` -> ``component_for``): a C4
+# component may carry ``paths``, repo-relative globs (``*``/``?`` inside one
+# segment, ``**`` across any number, a trailing ``/`` = everything under it).
+# A file maps to the most specific matching glob: most literal chars, then
+# fewest wildcards, then the first declared; only the model's own system owns
+# files. c4-gen computes membership but never writes it, and loom reads Python
+# and Go only, so the model carries it. ``repo_path`` normalises a path first
+# and refuses an absolute or escaping one.
+#
 # One pure mapper: ``block_component`` turns a Pulley block manifest into c4-gen's
 # ``Component`` (id, name, description, technology) plus its ``deps`` as sync
 # relationships. It writes nothing and has no caller yet: it is for blueprint
@@ -30,6 +39,8 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -63,24 +74,40 @@ def _capped(lines: list[str], limit: int) -> list[str]:
     return kept
 
 
+def load_model(text: str) -> dict[str, Any] | None:
+    """A ``docs/c4/model.json`` text as a dict, or ``None`` when it is not JSON
+    or has no ``model.systems`` list (the one shape every reader here needs)."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    body = data.get("model") if isinstance(data, dict) else None
+    systems = body.get("systems") if isinstance(body, dict) else None
+    return data if isinstance(systems, list) else None
+
+
+def _owned_system(data: dict[str, Any]) -> dict[str, Any] | None:
+    """The system named by the model's ``scope`` (else the first with
+    containers): the others are external systems the repo talks to."""
+    systems = [s for s in data["model"]["systems"] if isinstance(s, dict) and s.get("containers")]
+    owned = [s for s in systems if s.get("id") == data.get("scope")]
+    return (owned or systems or [None])[0]
+
+
 def c4_lines(repo: str | Path) -> list[str]:
     """The repo's own C4 system as ``- <container> / <component>: <what it is>``
-    lines (``[]`` when there is no readable model). Only the system named by the
-    model's ``scope`` (else the first with containers): the others are external
-    systems the repo talks to, not things it owns."""
+    lines (``[]`` when there is no readable model)."""
     try:
-        data = json.loads((Path(repo) / "docs" / "c4" / "model.json").read_text())
-        systems = data["model"]["systems"]
-    except (OSError, ValueError, KeyError, TypeError):
+        data = load_model((Path(repo) / "docs" / "c4" / "model.json").read_text())
+    except (OSError, ValueError):  # none, or not text
         return []
-    owned = [s for s in systems if s.get("id") == data.get("scope") and s.get("containers")]
-    owned = owned or [s for s in systems if s.get("containers")]
-    if not owned:
+    system = _owned_system(data) if data else None
+    if system is None:
         return []
     lines: list[str] = []
-    for container in owned[0]["containers"]:
+    for container in _dicts(system["containers"]):
         name = container.get("name") or "?"
-        components = container.get("components") or []
+        components = _dicts(container.get("components"))
         if not components:
             lines.append(f"- {name}: {_first_sentence(container.get('description'))}")
         for comp in components:
@@ -88,6 +115,57 @@ def c4_lines(repo: str | Path) -> list[str]:
                 f"- {name} / {comp.get('name') or '?'}: {_first_sentence(comp.get('description'))}"
             )
     return _capped(lines, _C4_CHARS)
+
+
+# Glob tokens -> regex. ``fnmatch`` lets ``*`` cross ``/`` and 3.12 has no
+# ``**``-aware matcher (``glob.translate`` / ``PurePath.full_match`` are 3.13).
+_GLOB = {"**/": "(?:.*/)?", "**": ".*", "*": "[^/]*", "?": "[^/]"}
+_GLOB_SPLIT = re.compile(r"(\*\*/|\*\*|\*|\?)")
+
+PathIndex = list[tuple[int, int, int, re.Pattern[str], str]]
+
+
+def repo_path(raw: str) -> str | None:
+    """A repo-relative POSIX path (``./a//b`` -> ``a/b``), or ``None`` for an
+    empty, absolute or escaping (``..``) one."""
+    path = posixpath.normpath(raw.strip()) if raw.strip() else "."
+    if path == "." or path.startswith(("/", "../")) or path == "..":
+        return None
+    return path
+
+
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    """The dict entries of a list (a hand-authored model may hold anything)."""
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+def path_index(data: dict[str, Any] | None) -> PathIndex:
+    """Every ``paths`` glob on the owned system's components, most specific
+    first: most literal (non-wildcard) chars, then fewest wildcards, then the
+    first declared. A trailing ``/`` means everything under it."""
+    system = _owned_system(data) if data else None
+    rules: PathIndex = []
+    for container in _dicts((system or {}).get("containers")):
+        for comp in _dicts(container.get("components")):
+            globs = comp.get("paths") if comp.get("id") else None
+            for glob in globs if isinstance(globs, list) else []:
+                if not isinstance(glob, str) or not glob.strip():
+                    continue
+                glob = glob.strip().removeprefix("./")
+                glob += "**" if glob.endswith("/") else ""
+                parts = _GLOB_SPLIT.split(glob)
+                regex = "".join(_GLOB.get(p) or re.escape(p) for p in parts)
+                wild = sum(glob.count(c) for c in "*?")
+                rules.append(
+                    (-(len(glob) - wild), wild, len(rules), re.compile(regex), str(comp["id"]))
+                )
+    rules.sort(key=lambda r: r[:3])
+    return rules
+
+
+def component_for(path: str, index: PathIndex) -> str | None:
+    """The component owning a repo-relative ``path`` (``None``: no glob matches)."""
+    return next((cid for *_, regex, cid in index if regex.fullmatch(path)), None)
 
 
 def block_component(manifest: dict[str, Any]) -> tuple[dict[str, str], list[dict[str, str]]]:
@@ -230,9 +308,14 @@ async def orient_block(run: Any, repo: Path, task: str, *, cwd: Path) -> tuple[s
 
 __all__ = [
     "ORIENT_TIMEOUT",
+    "PathIndex",
     "block_component",
     "c4_lines",
+    "component_for",
+    "load_model",
     "loom_binary",
     "orient_block",
+    "path_index",
+    "repo_path",
     "world_model_for",
 ]

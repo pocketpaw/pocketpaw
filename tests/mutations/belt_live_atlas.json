@@ -1,0 +1,210 @@
+[
+  {
+    "label": "atlas join: the least specific glob wins",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "    rules.sort(key=lambda r: r[:3])\n",
+    "replace": "    rules.sort(key=lambda r: r[:3], reverse=True)\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_the_most_specific_glob_wins"
+    ]
+  },
+  {
+    "label": "atlas join: a literal-char tie ignores the wildcard count",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "(-(len(glob) - wild), wild, len(rules),",
+    "replace": "(-(len(glob) - wild), 0, len(rules),",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_the_most_specific_glob_wins"
+    ]
+  },
+  {
+    "label": "atlas join: * crosses a directory",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "\"*\": \"[^/]*\"",
+    "replace": "\"*\": \".*\"",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_glob_wildcards_respect_segments"
+    ]
+  },
+  {
+    "label": "atlas join: a trailing / matches only itself",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "                glob += \"**\" if glob.endswith(\"/\") else \"\"\n",
+    "replace": "                glob += \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_glob_wildcards_respect_segments"
+    ]
+  },
+  {
+    "label": "atlas join: an external system's components own repo files",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "    owned = [s for s in systems if s.get(\"id\") == data.get(\"scope\")]\n",
+    "replace": "    owned = []\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_the_most_specific_glob_wins"
+    ]
+  },
+  {
+    "label": "atlas join: an absolute or escaping path counts as a repo file",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "    if path == \".\" or path.startswith((\"/\", \"../\")) or path == \"..\":\n",
+    "replace": "    if path == \".\":\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_repo_paths_are_normalised_and_escapes_refused",
+      "tests/cloud/test_belt_live_atlas.py::test_file_touched_is_scrubbed_and_only_names_repo_files"
+    ]
+  },
+  {
+    "label": "live atlas: edits publish no file_touched",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "        if event == \"tool_start\" and data.get(\"tool\") in EDIT_TOOLS:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_every_edit_publishes_file_touched_with_its_component"
+    ]
+  },
+  {
+    "label": "live atlas: file_touched carries no component",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "            \"component\": component_for(path, self.paths),\n",
+    "replace": "            \"component\": None,\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_every_edit_publishes_file_touched_with_its_component"
+    ]
+  },
+  {
+    "label": "live atlas: file_touched paths are sent unredacted",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "            \"path\": redact_output(path),\n",
+    "replace": "            \"path\": path,\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_file_touched_is_scrubbed_and_only_names_repo_files"
+    ]
+  },
+  {
+    "label": "live atlas: the station never loads the base blueprint",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "                feed.paths = path_index(model)\n",
+    "replace": "                feed.paths = []\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_every_edit_publishes_file_touched_with_its_component"
+    ]
+  },
+  {
+    "label": "blueprint route: reads the owner's working tree, not the base",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        argv = [*_READ_GIT, \"cat-file\", \"blob\", f\"{sha.strip()}:{_MODEL_PATH}\"]\n        code, text, _ = await _run(argv, cwd=repo)\n",
+    "replace": "        code, text = 0, (repo / _MODEL_PATH).read_text()\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_the_blueprint_is_read_at_the_base_not_the_working_tree"
+    ]
+  },
+  {
+    "label": "blueprint route: no tenancy check",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    _action, blob = await _owned_run(workspace_id, action_id)\n    ref, model = await _base_model(blob)\n",
+    "replace": "    from pocketpaw.stores import get_instinct_store\n\n    blob = _code_change_blob(await get_instinct_store().get_action(action_id))\n    ref, model = await _base_model(blob)\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_the_blueprint_is_read_at_the_base_not_the_working_tree"
+    ]
+  },
+  {
+    "label": "blueprint route: a repo outside the allowlist is read",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    repo, _err = _re_resolve_repo(str(blob.get(\"repo\") or \"\"))\n",
+    "replace": "    repo, _err = Path(str(blob.get(\"repo\") or \"\")), None\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_repo_outside_the_allowlist_serves_no_model"
+    ]
+  },
+  {
+    "label": "blueprint route: an option-shaped base reaches git",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    if repo is None or not _REF_RE.fullmatch(base) or \"..\" in base:\n",
+    "replace": "    if repo is None:\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_hostile_base_branch_is_never_passed_to_git"
+    ]
+  },
+  {
+    "label": "blueprint route: the seats' stored edits are not files",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    for stage in (\"develop\", \"fix\"):\n        doc = await BeltRunFeed.find_one(\n",
+    "replace": "    for stage in ():\n        doc = await BeltRunFeed.find_one(\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_the_blueprint_is_read_at_the_base_not_the_working_tree"
+    ]
+  },
+  {
+    "label": "blueprint route: a read counts as a touched file",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            if step.get(\"tool\") in EDIT_TOOLS and isinstance(tool_input, dict):\n",
+    "replace": "            if isinstance(tool_input, dict):\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_the_blueprint_is_read_at_the_base_not_the_working_tree"
+    ]
+  },
+  {
+    "label": "blueprint route: a binary patch's file is missed",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "_DIFF_FILE_RE = re.compile(r\"^(?:\\+\\+\\+ b/|diff --git a/.* b/)(.+)$\", re.MULTILINE)\n",
+    "replace": "_DIFF_FILE_RE = re.compile(r\"^(?:\\+\\+\\+ b/)(.+)$\", re.MULTILINE)\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_the_blueprint_is_read_at_the_base_not_the_working_tree"
+    ]
+  },
+  {
+    "label": "atlas join: a model of the wrong shape raises",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []\n",
+    "replace": "    return list(value or [])\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_model_without_paths_or_unreadable_maps_nothing"
+    ]
+  },
+  {
+    "label": "live atlas: a model that is not text fails the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            with contextlib.suppress(OSError, ValueError):  # none, or not text\n",
+    "replace": "            with contextlib.suppress(OSError):\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_an_edit_with_no_blueprint_still_reports_the_file"
+    ]
+  },
+  {
+    "label": "orient: a C4 model that is not text fails ORIENT",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "    except (OSError, ValueError):  # none, or not text\n        return []\n",
+    "replace": "    except OSError:\n        return []\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_an_edit_with_no_blueprint_still_reports_the_file"
+    ]
+  },
+  {
+    "label": "live atlas: a mandate run is queued with no base",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "            \"base_branch\": await belt_service.default_base(repo) if repo else \"\",\n",
+    "replace": "            \"base_branch\": \"\",\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_queued_mandate_run_has_its_base_and_blueprint_before_it_develops"
+    ]
+  },
+  {
+    "label": "live atlas: a detached checkout queues the run on HEAD",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    return \"\" if branch == \"HEAD\" else branch\n",
+    "replace": "    return branch\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_queued_mandate_run_has_its_base_and_blueprint_before_it_develops"
+    ]
+  },
+  {
+    "label": "live atlas: a mandate run's blueprint ignores its line",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    refs = [(line, f\"refs/heads/{line}\")] if line else []\n",
+    "replace": "    refs = []\n",
+    "tests": [
+      "tests/cloud/test_belt_live_atlas.py::test_a_mandate_run_reads_the_blueprint_on_its_line"
+    ]
+  }
+]

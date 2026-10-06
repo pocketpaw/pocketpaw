@@ -1,0 +1,80 @@
+{
+  "version": "1",
+  "scope": "chai-ledger",
+  "generated_at": "2026-10-06T00:00:00Z",
+  "source_path": ".",
+  "authored": true,
+  "model": {
+    "people": [
+      {
+        "id": "stall-owner",
+        "name": "Stall owner",
+        "description": "Runs the chai stall and keeps the credit book.",
+        "tags": ["person"]
+      }
+    ],
+    "systems": [
+      {
+        "id": "chai-ledger",
+        "name": "chai-ledger",
+        "description": "A command-line credit ledger for a chai stall.",
+        "tags": ["internal"],
+        "containers": [
+          {
+            "id": "chai-ledger-cli",
+            "name": "chai-ledger CLI",
+            "description": "python -m chai_ledger: add customers, record cups and payments, list tabs, export CSV.",
+            "technology": "Python 3.12, argparse, standard library only",
+            "tags": ["internal"],
+            "components": [
+              {
+                "id": "ledger",
+                "name": "Ledger",
+                "description": "The commands and the JSON-file store: customers, cups on credit, payments, tabs, CSV export.",
+                "technology": "Python",
+                "paths": ["chai_ledger/**"]
+              },
+              {
+                "id": "ledger-tests",
+                "name": "Tests",
+                "description": "pytest suite driving the CLI end to end against a temp ledger file.",
+                "technology": "pytest",
+                "paths": ["tests/**"]
+              },
+              {
+                "id": "project",
+                "name": "Project files",
+                "description": "Packaging, lockfile and the README.",
+                "technology": "uv",
+                "paths": ["pyproject.toml", "uv.lock", "README.md"]
+              }
+            ]
+          },
+          {
+            "id": "ledger-file",
+            "name": "Ledger file",
+            "description": "One JSON file (./chai-ledger.json, or --ledger / $CHAI_LEDGER_FILE).",
+            "technology": "JSON",
+            "tags": ["database"],
+            "components": []
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "source": "stall-owner",
+        "target": "chai-ledger-cli",
+        "description": "records cups and payments",
+        "style": "sync"
+      },
+      {
+        "source": "chai-ledger-cli",
+        "target": "ledger-file",
+        "description": "reads and writes the ledger",
+        "technology": "JSON file",
+        "style": "sync"
+      }
+    ]
+  }
+}

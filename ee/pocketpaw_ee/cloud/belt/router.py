@@ -12,6 +12,8 @@
 #                                 chat-shaped ``steps``
 #   * GET  /belt/runs/{action_id}/stream?after= — the run's feed live, as SSE
 #                                 (``service.open_run_stream`` has the replay rules)
+#   * GET  /belt/runs/{action_id}/blueprint — the bound repo's C4 model where the
+#                                 run starts, with the run's files joined to it
 #
 # Routes are THIN: they read identity (workspace + user) from the cloud deps,
 # delegate to ``ee.cloud.belt.service``, and return what the service built. RBAC
@@ -231,6 +233,22 @@ async def get_run_feed(
     key when the stage recorded none; a foreign or non-belt run is a 404."""
     try:
         return await belt_service.get_run_feed(workspace_id, action_id, stage)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/runs/{action_id}/blueprint")
+async def get_run_blueprint(
+    action_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The run on its line's blueprint: ``{action_id, ref, model, files}``,
+    ``model`` the bound repo's C4 model (``paths`` globs included) at the
+    run's base or ``null``, ``files`` the run's touched files as ``{path,
+    component}``. A foreign or non-belt run is a 404."""
+    try:
+        return await belt_service.get_run_blueprint(workspace_id, action_id)
     except belt_service.BeltConsoleError as exc:
         raise _to_cloud_error(exc) from exc
 

@@ -70,8 +70,9 @@ class DevelopRequest:
 
     Built from the queued ``code_change`` blob. ``task`` is the human-readable
     task text (title + why) the station agent would have picked up; ``repo`` is
-    the mandate's bound repo path; ``base_branch`` is the blob's base (often
-    empty for a queued run — the develop loop / the result decides it)."""
+    the mandate's bound repo path; ``base_branch`` is the blob's base (the
+    repo's checked-out branch when the run was queued; empty when that could
+    not be read, and the develop loop / the result decides it)."""
 
     task: str
     summary: str

@@ -10,7 +10,7 @@
 #            base ahead → base merged in, in a throwaway worktree; conflict →
 #            the run stands down and a sighting is filed; refs move by
 #            compare-and-swap only), else ``origin/<base>`` (fetched) or ``<base>``;
-#            ``git worktree add --detach`` there.
+#            ``git worktree add --detach`` there; its C4 ``paths`` join edits to components.
 #   ORIENT   LLM work only: ``orient.orient_block`` (loom, else C4) rides the
 #            develop + review prompts; a miss is a note.
 #   WORK     a charter recipe → that command; else DEVELOP → ``claude -p``.
@@ -79,7 +79,7 @@ from pocketpaw_ee.cloud.belt.executor import (
 )
 from pocketpaw_ee.cloud.belt.feed import FrameReader, RunFeed, stream_events
 from pocketpaw_ee.cloud.belt.headless import DevelopRequest, DevelopResult
-from pocketpaw_ee.cloud.belt.orient import orient_block
+from pocketpaw_ee.cloud.belt.orient import load_model, orient_block, path_index
 from pocketpaw_ee.cloud.mandates.dto import command_refusal
 from pocketpaw_ee.cloud.mandates.foreman import (
     claude_cli_argv,
@@ -385,6 +385,12 @@ class ClaudeCodeDevelop:
             # an agent that rewrites it could aim station git at a config of
             # its own. Snapshot it now, re-check after every agent step.
             git_snapshot = (worktree / ".git").read_bytes()
+            # The blueprint where the run starts (its line, else its base), read
+            # before any agent step can edit it:
+            # every edit's ``file_touched`` names the component that owns it.
+            with contextlib.suppress(OSError, ValueError):  # none, or not text
+                model = load_model((worktree / "docs" / "c4" / "model.json").read_text())
+                feed.paths = path_index(model)
             trust: _Trust | None = None
             if root is not None:
                 # Agent config comes from the base, never the line: a line holds
