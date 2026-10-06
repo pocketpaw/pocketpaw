@@ -17,6 +17,7 @@ from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
     GenerateIdeasRequest,
+    ScheduleIdeasRequest,
     SocialIdeaListResponse,
     SocialIdeaResponse,
     SocialProfileListResponse,
@@ -154,3 +155,29 @@ async def update_idea(
     """Approve / skip / reset an idea and/or edit its copy. A malformed or
     foreign id is a 404."""
     return await social_service.update_idea(ctx, idea_id, body)
+
+
+@router.post(
+    "/ideas/schedule",
+    response_model=SocialIdeaListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def schedule_ideas(
+    body: ScheduleIdeasRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialIdeaListResponse:
+    """Date approved ideas and add each to /calendar. 409 if any is not approved."""
+    return await social_service.schedule_ideas(ctx, body)
+
+
+@router.post(
+    "/ideas/{idea_id}/unschedule",
+    response_model=SocialIdeaResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def unschedule_idea(
+    idea_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialIdeaResponse:
+    """Clear an idea's date and remove its /calendar event."""
+    return await social_service.unschedule_idea(ctx, idea_id)

@@ -632,3 +632,43 @@ async def test_a_workspace_keeps_several_profiles_each_with_its_own_ideas(w1, w2
     assert len(made) == 2
     assert len((await w1.get(IDEAS, params=sid)).json()["items"]) == 2
     assert (await w1.get(IDEAS, params={"profile_id": first["id"]})).json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_scheduling_puts_approved_ideas_on_the_calendar_and_unschedule_removes_them(w1):
+    from pocketpaw_ee.calendar.models import _EventDoc as CalendarEventDoc
+
+    set_production_ideas_fn(_FakeIdeas())
+    await _complete(w1)
+    first, second = (await w1.post(f"{IDEAS}/generate", json={"count": 2})).json()["items"]
+    await w1.patch(f"{IDEAS}/{first['id']}", json={"status": "approved"})
+
+    blocked = await w1.post(
+        f"{IDEAS}/schedule",
+        json={"items": [{"idea_id": second["id"], "scheduled_at": "2026-10-10T10:00:00Z"}]},
+    )
+    assert blocked.status_code == 409
+
+    resp = await w1.post(
+        f"{IDEAS}/schedule",
+        json={
+            "items": [{"idea_id": first["id"], "scheduled_at": "2026-10-10T10:00:00Z"}],
+            "timezone": "Asia/Kolkata",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    scheduled = resp.json()["items"][0]
+    assert scheduled["scheduled_at"].startswith("2026-10-10T10:00:00")
+    event = await CalendarEventDoc.get(scheduled["calendar_event_id"])
+    assert event is not None and event.workspace == "w1"
+    assert event.calendar_id == "growth-social"
+
+    moved = await w1.post(
+        f"{IDEAS}/schedule",
+        json={"items": [{"idea_id": first["id"], "scheduled_at": "2026-10-12T09:00:00Z"}]},
+    )
+    assert moved.json()["items"][0]["calendar_event_id"] == scheduled["calendar_event_id"]
+
+    cleared = (await w1.post(f"{IDEAS}/{first['id']}/unschedule")).json()
+    assert cleared["scheduled_at"] is None and cleared["calendar_event_id"] == ""
+    assert await CalendarEventDoc.get(scheduled["calendar_event_id"]) is None

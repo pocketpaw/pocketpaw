@@ -57,6 +57,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     AnalysisPatch,
     DescriptionResponse,
     GenerateIdeasRequest,
+    ScheduleIdeasRequest,
     SocialAnalysisResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
@@ -183,6 +184,8 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         platform=doc.platform,
         subreddit=doc.subreddit,
         status=doc.status,
+        scheduled_at=doc.scheduled_at,
+        calendar_event_id=doc.calendar_event_id,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -202,6 +205,8 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         platform=i.platform,
         subreddit=i.subreddit,
         status=i.status,
+        scheduled_at=iso_utc(i.scheduled_at),
+        calendar_event_id=i.calendar_event_id,
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -511,11 +516,110 @@ async def update_idea(
     return _idea_to_response(_idea_to_domain(doc))
 
 
+SOCIAL_CALENDAR_ID = "growth-social"
+_PLATFORM_NAMES = {"x": "X", "reddit": "Reddit"}
+
+
+def _calendar_ctx(ctx: RequestContext, workspace_id: str) -> Any:
+    from pocketpaw_ee.calendar._context import RequestContext as CalendarContext
+
+    return CalendarContext(workspace_id=workspace_id, user_id=ctx.user_id or "")
+
+
+def _event_title(doc: _IdeaDoc) -> str:
+    where = _PLATFORM_NAMES.get(doc.platform, "Social")
+    if doc.platform == "reddit" and doc.subreddit:
+        where = f"Reddit r/{doc.subreddit}"
+    return f"{where} post: {doc.hook}"[:500]
+
+
+def _event_description(doc: _IdeaDoc) -> str:
+    parts = [doc.caption, *doc.script]
+    if doc.hashtags:
+        parts.append(" ".join(doc.hashtags))
+    return "\n\n".join(p for p in parts if p)[:5000]
+
+
+async def schedule_ideas(ctx: RequestContext, body: ScheduleIdeasRequest) -> SocialIdeaListResponse:
+    """Give approved ideas a date and mark each with a /calendar event (created,
+    or moved when the idea was already scheduled). Nothing is posted."""
+    from datetime import timedelta
+
+    from pocketpaw_ee.calendar import service as calendar_service
+    from pocketpaw_ee.calendar.dto import CreateEventRequest, UpdateEventRequest
+
+    body = ScheduleIdeasRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    docs = [await _fetch_idea_in_workspace(workspace_id, item.idea_id) for item in body.items]
+    not_approved = [d for d in docs if d.status != "approved"]
+    if not_approved:
+        raise ConflictError("social.idea_not_approved", "Only approved ideas can be scheduled")
+
+    cal_ctx = _calendar_ctx(ctx, workspace_id)
+    length = timedelta(minutes=body.duration_minutes)
+    for doc, item in zip(docs, body.items, strict=True):
+        starts = (
+            item.scheduled_at if item.scheduled_at.tzinfo else item.scheduled_at.replace(tzinfo=UTC)
+        )
+        moved = False
+        if doc.calendar_event_id:
+            try:
+                await calendar_service.update_event(
+                    cal_ctx,
+                    doc.calendar_event_id,
+                    UpdateEventRequest(
+                        starts_at=starts, ends_at=starts + length, timezone=body.timezone
+                    ),
+                )
+                moved = True
+            except NotFound:
+                moved = False
+        if not moved:
+            event = await calendar_service.create_event(
+                cal_ctx,
+                CreateEventRequest(
+                    calendar_id=SOCIAL_CALENDAR_ID,
+                    title=_event_title(doc),
+                    description=_event_description(doc),
+                    starts_at=starts,
+                    ends_at=starts + length,
+                    timezone=body.timezone,
+                ),
+            )
+            doc.calendar_event_id = event.id
+        doc.scheduled_at = starts
+        await doc.save()
+    # no-event: Growth › Social has no realtime subscriber; /calendar got its own event.
+    return SocialIdeaListResponse(items=[_idea_to_response(_idea_to_domain(d)) for d in docs])
+
+
+async def unschedule_idea(ctx: RequestContext, idea_id: str) -> SocialIdeaResponse:
+    """Clear an idea's date and delete its /calendar event."""
+    from pocketpaw_ee.calendar import service as calendar_service
+
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_idea_in_workspace(workspace_id, idea_id)
+    if doc.calendar_event_id:
+        try:
+            await calendar_service.delete_event(
+                _calendar_ctx(ctx, workspace_id), doc.calendar_event_id
+            )
+        except NotFound:
+            pass
+    doc.scheduled_at = None
+    doc.calendar_event_id = ""
+    await doc.save()
+    # no-event: Growth › Social has no realtime subscriber; /calendar dropped its event.
+    return _idea_to_response(_idea_to_domain(doc))
+
+
 __all__ = [
     "analyze_profile",
     "complete_onboarding",
     "create_profile",
     "list_profiles",
+    "schedule_ideas",
+    "unschedule_idea",
     "generate_ideas",
     "get_profile",
     "list_ideas",

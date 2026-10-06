@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -237,6 +238,8 @@ class SocialIdeaResponse(BaseModel):
     platform: Literal["", "x", "reddit"]
     subreddit: str
     status: IdeaStatus
+    scheduled_at: str | None
+    calendar_event_id: str
     created_at: str | None
     updated_at: str | None
 
@@ -247,3 +250,17 @@ class SocialIdeaListResponse(BaseModel):
 
 class SocialProfileListResponse(BaseModel):
     items: list[SocialProfileResponse]
+
+
+class ScheduleItem(BaseModel):
+    idea_id: str = Field(min_length=1, max_length=64)
+    scheduled_at: datetime
+
+
+class ScheduleIdeasRequest(BaseModel):
+    """Put approved ideas on the calendar. ``timezone`` is the IANA zone the
+    calendar events are shown in; each event lasts ``duration_minutes``."""
+
+    items: list[ScheduleItem] = Field(min_length=1, max_length=100)
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
+    duration_minutes: int = Field(default=30, ge=5, le=240)

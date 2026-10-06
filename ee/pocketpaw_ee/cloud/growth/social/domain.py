@@ -146,6 +146,8 @@ class SocialIdea:
     platform: str = ""
     subreddit: str = ""
     status: str = "new"
+    scheduled_at: datetime | None = None
+    calendar_event_id: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
