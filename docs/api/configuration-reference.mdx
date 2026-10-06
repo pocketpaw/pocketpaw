@@ -173,6 +173,7 @@ Independent of the flag, the `<current-pocket>` widget summary is bounded to 2,0
 | `whatsapp_access_token` | `POCKETPAW_WHATSAPP_ACCESS_TOKEN` | string | — | Business API token |
 | `whatsapp_phone_number_id` | `POCKETPAW_WHATSAPP_PHONE_NUMBER_ID` | string | — | Phone number ID |
 | `whatsapp_verify_token` | `POCKETPAW_WHATSAPP_VERIFY_TOKEN` | string | — | Webhook verify token |
+| `whatsapp_app_secret` | `POCKETPAW_WHATSAPP_APP_SECRET` | string | — | Meta app secret. Business mode rejects inbound webhooks (403) without a matching `X-Hub-Signature-256`, and rejects all of them while unset |
 | `whatsapp_allowed_phone_numbers` | `POCKETPAW_WHATSAPP_ALLOWED_PHONE_NUMBERS` | string[] | `[]` | Allowed numbers (comma-separated) |
 | `whatsapp_neonize_db` | `POCKETPAW_WHATSAPP_NEONIZE_DB` | string | `~/.pocketpaw/neonize.db` | Neonize DB path |
 

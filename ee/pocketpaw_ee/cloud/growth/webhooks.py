@@ -12,12 +12,12 @@
 #
 # Signature scheme: HMAC-SHA256 over the RAW request body, keyed by
 # ``GROWTH_MSG91_WEBHOOK_SECRET``, hex-encoded, in ``X-Msg91-Signature``. An
-# optional ``sha256=`` prefix is tolerated because several providers emit it.
-# MSG91 does not publish a fixed signing scheme for WhatsApp inbound events
-# (you configure the callback URL and any custom headers on the account), so
-# this is the repo-standard shared-secret HMAC — the same primitive the Svix
-# verification in ``meetings/providers/recall/webhooks.py`` uses, minus the
-# Svix-specific id/timestamp envelope.
+# optional ``sha256=`` or ``v1=`` prefix is tolerated because several providers
+# emit one. MSG91 does not publish a fixed signing scheme for WhatsApp inbound
+# events (you configure the callback URL and any custom headers on the account),
+# so this uses the same HMAC check as Meta's X-Hub-Signature-256: the digest
+# comparison is core's ``whatsapp_adapter.verify_signature``, and this module
+# only resolves the secret and the header and maps failures to ``Forbidden``.
 #
 # WHAT AN INBOUND REPLY MEANS: under Meta's rules a user-initiated message both
 # opens a 24-hour service window and is the opt-in signal for that number. So
@@ -29,13 +29,9 @@
 # processed, ignored, or unknown number. A caller with a valid signature still
 # must not be able to use this endpoint as a membership oracle over phone
 # numbers.
-#
-# Created 2026-07-27 (feat/growth-g6): new module.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
 import os
@@ -44,6 +40,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from starlette.datastructures import Headers
 
+from pocketpaw.bus.adapters.whatsapp_adapter import verify_signature
 from pocketpaw_ee.cloud._core.errors import Forbidden
 
 logger = logging.getLogger(__name__)
@@ -142,14 +139,13 @@ def _verify_signature(headers: Headers, body: bytes) -> None:
         raise Forbidden(
             "growth.webhook_unsigned", "The MSG91 webhook is missing its signature header."
         )
-    # Tolerate the common ``sha256=<hex>`` prefix form.
+    # Strip a ``sha256=`` or ``v1=`` prefix (the core check only knows ``sha256=``).
     if "=" in provided:
         prefix, _, rest = provided.partition("=")
         if prefix.strip().lower() in ("sha256", "v1"):
             provided = rest.strip()
 
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(provided.lower(), expected):
+    if not verify_signature(secret, body, provided):
         raise Forbidden(
             "growth.webhook_signature_invalid", "The MSG91 webhook signature did not verify."
         )

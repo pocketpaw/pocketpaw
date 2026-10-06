@@ -47,6 +47,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "slack_app_token",
         "whatsapp_access_token",
         "whatsapp_verify_token",
+        "whatsapp_app_secret",
         "tavily_api_key",
         "brave_search_api_key",
         "parallel_api_key",
