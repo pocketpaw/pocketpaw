@@ -12,7 +12,9 @@
 #   WORK     a charter recipe → that command; else DEVELOP → ``claude -p`` in
 #            ``stream-json``: its events fold into the run's step feed
 #            (``belt/feed.py``, scrubbed + capped), stored via the belt service
-#            before any error is raised; a failed save never fails the run.
+#            before any error is raised (the stage is emptied when a develop
+#            starts); a failed save never fails the run. Seat output and every
+#            error tail have the worktree and repo paths made relative.
 #   CHECK    every charter check; FIX (``claude -p`` with the failure) while
 #            attempts last. REVIEW: read-only ``claude -p`` judges the diff,
 #            failing duplicates of existing code; strict ``{"verdict","notes"}``.
@@ -50,6 +52,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -195,10 +198,11 @@ class CheckResult:
         return self.code == 0
 
 
-def _tail(text: str) -> str:
-    """The last lines of some output, secrets redacted — every tail ends up in
-    a prompt or on the stored blob."""
-    lines = text.strip().splitlines()[-_TAIL_LINES:]
+def _tail(text: str, *roots: Path) -> str:
+    """The last lines of some output, secrets redacted and paths under
+    ``roots`` made relative — every tail ends up in a prompt or on the stored
+    blob."""
+    lines = _relative_paths(text, *roots).strip().splitlines()[-_TAIL_LINES:]
     return redact_output("\n".join(lines))[-_TAIL_CHARS:]
 
 
@@ -238,6 +242,10 @@ class ClaudeCodeDevelop:
     max_fix_attempts: int = 2
 
     async def __call__(self, request: DevelopRequest) -> DevelopResult:
+        # A re-develop starts from an empty feed, so a run that fails before
+        # its develop seat (screen, charter, base fetch, recipe) never shows
+        # the previous attempt's steps as this one's.
+        await self._store_feed(request, "DEVELOP", "")
         _screen_task(request)
         found = await self.charter_for(request.workspace_id, request.mandate_id)
         if found is None:
@@ -303,7 +311,7 @@ class ClaudeCodeDevelop:
                 if code != 0:
                     raise DevelopStationError(
                         f"WORK: recipe {request.recipe!r} ({command}) exited {code}:\n"
-                        f"{_tail(out + err)}"
+                        f"{_tail(out + err, worktree)}"
                     )
             else:
                 await self._claude(
@@ -313,6 +321,7 @@ class ClaudeCodeDevelop:
                     checks=checks,
                     trust=trust,
                     feed_for=request,
+                    repo=repo,
                 )
                 _assert_intact(worktree, git_snapshot)
 
@@ -336,6 +345,7 @@ class ClaudeCodeDevelop:
                         step="FIX",
                         checks=checks,
                         trust=trust,
+                        repo=repo,
                     )
                     _assert_intact(worktree, git_snapshot)
                     continue
@@ -346,7 +356,7 @@ class ClaudeCodeDevelop:
                 await self._git(worktree, "add", "-A")
                 diff = await self._git(worktree, "diff", "--cached", base_sha)
                 passed, review_notes = await self._review(
-                    request, diff, worktree, orient=orient, trust=trust
+                    request, diff, worktree, orient=orient, trust=trust, repo=repo
                 )
                 if passed:
                     verdict = "pass"
@@ -363,6 +373,7 @@ class ClaudeCodeDevelop:
                     step="FIX",
                     checks=checks,
                     trust=trust,
+                    repo=repo,
                 )
                 _assert_intact(worktree, git_snapshot)
 
@@ -447,7 +458,9 @@ class ClaudeCodeDevelop:
     async def _git(self, cwd: Path, *args: str) -> str:
         code, out, err = await self.run([*_GIT, *args], cwd=cwd, timeout=_GIT_TIMEOUT)
         if code != 0:
-            raise DevelopStationError(f"git {args[0]} failed (exit {code}): {_tail(err or out)}")
+            raise DevelopStationError(
+                f"git {args[0]} failed (exit {code}): {_tail(err or out, cwd)}"
+            )
         return out
 
     async def _check(self, cwd: Path, command: str) -> CheckResult:
@@ -456,7 +469,7 @@ class ClaudeCodeDevelop:
             cwd=cwd,
             timeout=_env_seconds("POCKETPAW_FACTORY_CHECK_TIMEOUT", 600),
         )
-        return CheckResult(command=command, code=code, tail=_tail(out + "\n" + err))
+        return CheckResult(command=command, code=code, tail=_tail(out + "\n" + err, cwd))
 
     async def _claude(
         self,
@@ -468,12 +481,15 @@ class ClaudeCodeDevelop:
         edits: bool = True,
         trust: _Trust | None = None,
         feed_for: DevelopRequest | None = None,
+        repo: Path | None = None,
     ) -> str:
         """One claude seat. ``trust`` set = owner setup: the worktree's agent
         config is restored to the base commit first, and only then does the
         call drop the isolation flags (the two never come apart). ``feed_for``
         set = the seat streams and its steps are stored as that run's feed for
-        this step, before any failure below is raised."""
+        this step, before any failure below is raised. ``repo`` (the bound
+        repo, which the worktree's ``.git`` file names) is stripped from the
+        output like the worktree."""
         if trust is not None:
             await self._restore_trusted(cwd, trust)
         mode = ["--permission-mode", "acceptEdits"] if edits else []
@@ -491,7 +507,8 @@ class ClaudeCodeDevelop:
         )
         # Worktree paths read relative everywhere downstream: the feed, the
         # error tails that land on the run blob, the returned text.
-        out, err = _relative_paths(out, cwd), _relative_paths(err, cwd)
+        roots = (cwd, repo) if repo is not None else (cwd,)
+        out, err = _relative_paths(out, *roots), _relative_paths(err, *roots)
         if feed_for is not None:
             await self._store_feed(feed_for, step, out)
         if code != 0:
@@ -550,9 +567,15 @@ class ClaudeCodeDevelop:
         *,
         orient: str = "",
         trust: _Trust | None = None,
+        repo: Path | None = None,
     ) -> tuple[bool, list[str]]:
         text = await self._claude(
-            _review_prompt(request, diff, orient), cwd=cwd, step="REVIEW", edits=False, trust=trust
+            _review_prompt(request, diff, orient),
+            cwd=cwd,
+            step="REVIEW",
+            edits=False,
+            trust=trust,
+            repo=repo,
         )
         start, end = text.find("{"), text.rfind("}")
         try:
@@ -565,13 +588,18 @@ class ClaudeCodeDevelop:
         return verdict["verdict"] == "pass", notes
 
 
-def _relative_paths(text: str, cwd: Path) -> str:
-    """``text`` with the worktree prefix stripped from every path in it. The CLI
-    reports the PHYSICAL path (macOS: ``/private/var/...`` for a ``/var/...``
-    temp dir), so both spellings go, the longer first: replacing the shorter one
-    first would cut it out of the middle of the longer (``/privateREADME.md``)."""
-    for prefix in sorted({f"{cwd}/", f"{os.path.realpath(cwd)}/"}, key=len, reverse=True):
-        text = text.replace(prefix, "")
+def _relative_paths(text: str, *roots: Path) -> str:
+    """``text`` with every path under ``roots`` made relative: ``<root>/x`` ->
+    ``x`` and a bare ``<root>`` (``cd <root> &&``, a ``pwd`` result) -> ``.``;
+    a bare root followed by a path character (a sibling ``<root>-old``) stays.
+    The CLI reports the PHYSICAL path (macOS: ``/private/var/...`` for a
+    ``/var/...`` temp dir), so both spellings go, the longer first: replacing
+    the shorter one first would cut it out of the middle of the longer
+    (``/privateREADME.md``)."""
+    spellings = {str(r) for r in roots} | {os.path.realpath(r) for r in roots}
+    for root in sorted(spellings, key=len, reverse=True):
+        text = text.replace(f"{root}/", "")
+        text = re.sub(re.escape(root) + r"(?![\w.\-])", ".", text)
     return text
 
 

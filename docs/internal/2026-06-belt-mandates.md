@@ -545,10 +545,13 @@ once it exits the station folds its stdout into steps and stores them. Path:
   with `security.redact` patterns. The developer's prose between tool calls
   has no chat-step kind and is stored as a `thinking` step; back-to-back
   prose and thinking blocks share one step, a blank line apart.
-- Worktree paths read relative: the station strips the worktree prefix from a
-  seat's stdout and stderr as soon as the call returns, so the feed, the error
-  tails on the run blob and the returned text never carry an absolute path.
-  Both the station's spelling and the physical one the CLI reports (macOS
+- Worktree paths read relative: the station strips the worktree and the bound
+  repo (which the worktree's `.git` file names) from a seat's stdout and stderr
+  as soon as the call returns, and from every check, recipe and git error tail,
+  so the feed, the errors on the run blob and the returned text never carry an
+  absolute path. `<root>/x` becomes `x` and a bare `<root>` (`cd <wt> &&`, a
+  `pwd` result) becomes `.`; a sibling such as `<wt>-old` keeps its path. Both
+  the station's spelling and the physical one the CLI reports (macOS
   `/private/var/...` for a `/var/...` temp dir) go, the longer first, so
   neither cuts into the other.
 - Caps: 2,000 steps and 2 MB per stored feed (`FEED_MAX_STEPS`,
@@ -556,8 +559,9 @@ once it exits the station folds its stdout into steps and stores them. Path:
   develop stage is captured today, so that is also the per-run budget.
 - Storage: `BeltRunFeed` (`belt_run_feeds`), one row per (workspace, run,
   stage), unique on that key and written with one atomic upsert; a
-  re-develop replaces the stage's row, even with an empty feed when the new
-  attempt printed nothing, so the page never shows an earlier attempt. Only
+  re-develop replaces the stage's row: the station empties it when a develop
+  starts, so an attempt that fails before its seat (task screen, charter, base
+  fetch) or prints nothing (a timeout) never shows an earlier attempt. Only
   `belt/service.py` touches it (`save_run_feed` / `get_run_feed`). It lives
   outside the Instinct `code_change` blob because `GET /belt/runs` reads every
   blob. Measured against JSON files beside the worktree, 2,000 steps (2.6 MB

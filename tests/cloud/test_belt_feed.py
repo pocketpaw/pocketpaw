@@ -3,20 +3,24 @@
 # A queued run goes through the REAL headless runner and develop station (tmp
 # git repo, real check command); only the ``claude`` binary is faked, and its
 # develop seat prints the stream-json a real ``claude -p --output-format
-# stream-json --verbose`` run prints (the shapes were captured from a live CLI
-# run: thinking with an empty body, text, tool_use, tool_result carrying only
-# the tool_use_id, the result envelope, then one more system line). Pins: the
-# develop seat streams and the station still reads the result envelope; the
-# steps are stored per run + stage in order (mongomock) and served by
-# ``GET /belt/runs/{id}/feed`` in the chat wire shape, back-to-back prose
-# blocks a blank line apart; worktree paths show relative even when the temp
-# dir is reached through a symlink and the CLI reports the physical path (the
-# macOS ``/var`` -> ``/private/var`` case); a secret planted in a tool result
-# or a tool input reaches neither storage nor the response; a failed develop
-# still stores its feed and records what claude said (no stream-json, no
-# worktree path); a timed-out re-develop replaces the earlier feed; parallel
-# same-name calls pair with their results by id; a failing save never fails
-# the run; the step and byte caps; and the route's tenancy 404.
+# stream-json --verbose`` run prints (shapes captured from live CLI runs:
+# thinking with an empty body, text, tool_use, tool_result carrying only the
+# tool_use_id, the result envelope, then one more system line). Pins:
+#   * the seat streams and the station still reads the result envelope;
+#   * steps stored per run + stage in order (mongomock), served by
+#     ``GET /belt/runs/{id}/feed`` in the chat wire shape, prose blocks a blank
+#     line apart;
+#   * no worktree path anywhere: the temp dir is reached through a symlink and
+#     the CLI reports the physical path (macOS ``/var`` -> ``/private/var``);
+#     bare paths (``cd <wt>``, a ``pwd`` result) read ``.``; the bound repo the
+#     ``.git`` file names goes too; same for headless_error (claude's words or
+#     stderr, never stream-json) and a failing check's tail;
+#   * secrets in a tool result or input reach neither storage nor the response;
+#   * the stage row is the latest attempt: a failed, timed-out, or pre-seat
+#     failing re-develop replaces it; the upsert keeps one row per
+#     workspace/run/stage and its createdAt;
+#   * parallel same-name calls pair with their results by id; a failing save
+#     never fails the run; the step and byte caps; the route's tenancy 404.
 
 from __future__ import annotations
 
@@ -58,8 +62,10 @@ def _t(second: int) -> str:
     return f"2026-10-06T08:00:{second:02d}.000Z"
 
 
-def _stream(cwd: Path, *, is_error: bool = False, cut: bool = False) -> str:
-    """What the develop seat prints. ``cut`` = the CLI died mid-tool."""
+def _stream(cwd: Path, *, is_error: bool = False, cut: bool = False, git_text: str = "") -> str:
+    """What the develop seat prints. ``cut`` = the CLI died mid-tool.
+    ``git_text`` is what reading the worktree's ``.git`` file returns (it names
+    the bound repo); the Bash calls carry the worktree path bare."""
     lines: list[dict] = [
         {"type": "system", "subtype": "init", "cwd": str(cwd), "session_id": "s1"},
         {
@@ -166,6 +172,78 @@ def _stream(cwd: Path, *, is_error: bool = False, cut: bool = False) -> str:
         {
             "type": "assistant",
             "timestamp": _t(8),
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_4",
+                        "name": "Read",
+                        "input": {"file_path": f"{cwd}/.git"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": _t(8),
+            "message": {
+                "content": [{"tool_use_id": "toolu_4", "type": "tool_result", "content": git_text}]
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": _t(8),
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_5",
+                        "name": "Bash",
+                        "input": {"command": f"cd {cwd} && uv run pytest -q"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": _t(8),
+            "message": {
+                "content": [
+                    {
+                        "tool_use_id": "toolu_5",
+                        "type": "tool_result",
+                        "content": (
+                            f"Permission to use Bash with command cd {cwd} && "
+                            "uv run pytest -q has been denied."
+                        ),
+                    }
+                ]
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": _t(8),
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_6",
+                        "name": "Bash",
+                        "input": {"command": "pwd"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": _t(8),
+            "message": {
+                "content": [{"tool_use_id": "toolu_6", "type": "tool_result", "content": str(cwd)}]
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": _t(8),
             "message": {"content": [{"type": "text", "text": "Done: feature.txt says ok."}]},
         },
         {
@@ -212,7 +290,10 @@ class StreamingClaude(FakeClaude):
         # The CLI reports the physical path, as ``getcwd`` does.
         cwd = Path(os.path.realpath(cwd))
         stderr = self.stderr.format(cwd=cwd)
-        return self.code, _stream(cwd, is_error=self.is_error, cut=self.cut), stderr
+        git_file = cwd / ".git"
+        git_text = git_file.read_text() if git_file.is_file() else ""
+        stream = _stream(cwd, is_error=self.is_error, cut=self.cut, git_text=git_text)
+        return self.code, stream, stderr
 
 
 def _linked_dir(tmp_path: Path) -> Path:
@@ -279,10 +360,20 @@ async def test_develop_feed_is_stored_in_order_and_served(
         ("tool", "Read"),
         ("tool", "Write"),
         ("tool", "Edit"),
+        ("tool", "Read"),
+        ("tool", "Bash"),
+        ("tool", "Bash"),
         ("thinking", "Done: feature.txt says ok."),
     ]
-    read, write, edit = doc.steps[1:4]
+    read, write, edit, git_read, cd, pwd = doc.steps[1:7]
     assert read["input"] == {"file_path": "README.md"}  # the worktree prefix is gone
+    # Bare worktree paths read "." and the bound repo the .git file names goes too.
+    assert git_read["output"].startswith("gitdir: .git/worktrees/")
+    assert cd["input"] == {"command": "cd . && uv run pytest -q"} and "cd . &&" in cd["output"]
+    assert pwd["output"] == "."
+    stored_text = json.dumps(doc.steps, default=str)
+    assert "belt-develop-" not in stored_text and str(linked_tmp) not in stored_text
+    assert str(repo) not in stored_text
     assert write["output"] == "File created at feature.txt"
     assert edit["input"]["old_string"] == "draft" and edit["status"] == "complete"
     assert str(read["started_at"]).startswith("2026-10-06 08:00:02")
@@ -292,7 +383,16 @@ async def test_develop_feed_is_stored_in_order_and_served(
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["action_id"] == action_id and body["stage"] == "develop"
-    assert [s["tool"] for s in body["steps"]] == ["", "Read", "Write", "Edit", ""]
+    assert [s["tool"] for s in body["steps"]] == [
+        "",
+        "Read",
+        "Write",
+        "Edit",
+        "Read",
+        "Bash",
+        "Bash",
+        "",
+    ]
     assert body["steps"][1]["startedAt"].startswith("2026-10-06T08:00:02")
     assert "stepsOmitted" not in body
 
@@ -322,7 +422,13 @@ async def test_stream_result_envelope_is_the_seat_result(repo):  # noqa: F811
 
 @pytest.mark.parametrize(
     ("stderr", "said"),
-    [("", "I'll add feature.txt."), ("fatal: {cwd}/feature.txt: denied", "fatal: feature.txt")],
+    [
+        ("", "I'll add feature.txt."),
+        (
+            "fatal: {cwd}/feature.txt: denied\nEACCES: scandir '{cwd}'",
+            "fatal: feature.txt: denied\nEACCES: scandir '.'",
+        ),
+    ],
 )
 async def test_failed_develop_still_stores_its_feed(
     repo,  # noqa: F811
@@ -357,7 +463,7 @@ async def test_a_timed_out_redevelop_replaces_the_earlier_feed(repo, mongo_db): 
 
     req = replace(_request(repo), action_id="run-x")
     await _station(StreamingClaude(develop=[_write("ok")]), repo)(req)
-    assert len((await _feed_doc("run-x")).steps) == 5
+    assert len((await _feed_doc("run-x")).steps) == 8
 
     with pytest.raises(ds.DevelopStationError, match="DEVELOP: claude exited -1: timed out"):
         await _station(StreamingClaude(timed_out=True), repo)(req)
@@ -383,6 +489,67 @@ def test_parallel_same_name_calls_pair_by_id():
     assert got == [("a.txt", "A"), ("b.txt", "B")]
 
 
+async def test_a_redevelop_that_fails_before_its_seat_clears_the_feed(repo, mongo_db):  # noqa: F811
+    """A re-develop that dies in PREPARE (here the charter is gone) still
+    clears the stage: the page never shows the earlier attempt as this one."""
+    from dataclasses import replace
+
+    req = replace(_request(repo), action_id="run-y")
+    await _station(StreamingClaude(develop=[_write("ok")]), repo)(req)
+    assert (await _feed_doc("run-y")).steps
+
+    station = _station(StreamingClaude(), repo)
+
+    async def no_charter(_w, _m):
+        return None
+
+    station.charter_for = no_charter
+    with pytest.raises(ds.DevelopStationError, match="PREPARE: mandate"):
+        await station(req)
+    assert (await _feed_doc("run-y")).steps == []
+
+
+async def test_a_check_tail_carries_no_worktree_path(repo, store, monkeypatch, linked_tmp):  # noqa: F811
+    """A failing check that prints its cwd: the CHECK error on the run reads
+    ``.``, not the temp dir."""
+    import sys
+
+    pwd_check = f'{sys.executable} -c "import os,sys; print(os.getcwd()); sys.exit(1)"'
+    action_id = await _queue_run(monkeypatch, repo, recipe="")
+    station = _station(StreamingClaude(develop=[_write("ok")]), repo, checks=(pwd_check,))
+    await HeadlessDevelopRunner(develop_fn=station).run(action_id)
+
+    error = (await store.get_action(action_id)).parameters["_code_change"]["headless_error"]
+    assert "CHECK:" in error and "still failing" in error
+    assert error.rstrip().endswith(".")
+    assert "belt-develop-" not in error and str(linked_tmp) not in error
+
+
+async def test_save_run_feed_upserts_per_workspace_and_keeps_created_at(mongo_db):
+    """One row per (workspace, run, stage): an update keeps ``createdAt`` and
+    replaces the steps; another workspace's same run/stage is its own row."""
+    import asyncio
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.models.belt_run_feed import BeltRunFeed
+
+    await belt_service.save_run_feed("w1", "a1", "develop", [{"kind": "tool", "tool": "Read"}], 0)
+    first = await _feed_doc("a1")
+    await asyncio.sleep(0.01)
+    await belt_service.save_run_feed("w1", "a1", "develop", [{"kind": "tool", "tool": "Edit"}], 2)
+    again = await _feed_doc("a1")
+    assert again.id == first.id and again.createdAt == first.createdAt
+    assert again.updatedAt > first.updatedAt
+    assert [s["tool"] for s in again.steps] == ["Edit"] and again.steps_omitted == 2
+
+    await belt_service.save_run_feed("w2", "a1", "develop", [{"kind": "tool", "tool": "Bash"}], 0)
+    rows = await BeltRunFeed.find(BeltRunFeed.action_id == "a1").to_list()
+    assert sorted((r.workspace, r.steps[0]["tool"]) for r in rows) == [
+        ("w1", "Edit"),
+        ("w2", "Bash"),
+    ]
+
+
 async def test_a_failing_save_never_fails_the_run(repo, store, monkeypatch, caplog):  # noqa: F811
     action_id = await _queue_run(monkeypatch, repo, recipe="")
     station = _station(StreamingClaude(develop=[_write("ok")]), repo)
@@ -406,8 +573,22 @@ def test_worktree_paths_are_relative_whatever_the_prefix_order(tmp_path):
         cwd = link / f"belt-develop-{i:02d}x" / "wt"
         cwd.mkdir(parents=True)
         physical = os.path.realpath(cwd)
-        text = json.dumps({"a": f"{physical}/README.md", "b": f"{cwd}/src/x.py"})
-        assert json.loads(ds._relative_paths(text, cwd)) == {"a": "README.md", "b": "src/x.py"}
+        text = json.dumps(
+            {
+                "a": f"{physical}/README.md",
+                "b": f"{cwd}/src/x.py",
+                "c": f"cd {physical} && pwd",
+                "d": str(cwd),
+                "e": f"{cwd}-old/y",
+            }
+        )
+        assert json.loads(ds._relative_paths(text, cwd)) == {
+            "a": "README.md",
+            "b": "src/x.py",
+            "c": "cd . && pwd",
+            "d": ".",
+            "e": f"{cwd}-old/y",  # a sibling keeps its path
+        }
 
 
 # ---------------------------------------------------------------------------

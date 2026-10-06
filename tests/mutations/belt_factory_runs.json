@@ -308,8 +308,8 @@
   {
     "label": "feed: worktree prefixes are stripped in set order, so a /private/var path loses its middle",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "    for prefix in sorted({f\"{cwd}/\", f\"{os.path.realpath(cwd)}/\"}, key=len, reverse=True):\n",
-    "replace": "    for prefix in {f\"{cwd}/\", f\"{os.path.realpath(cwd)}/\"}:\n",
+    "find": "    for root in sorted(spellings, key=len, reverse=True):\n",
+    "replace": "    for root in spellings:\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_worktree_paths_are_relative_whatever_the_prefix_order"
     ]
@@ -317,7 +317,7 @@
   {
     "label": "feed: the worktree prefix is left on seat output",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        out, err = _relative_paths(out, cwd), _relative_paths(err, cwd)\n",
+    "find": "        out, err = _relative_paths(out, *roots), _relative_paths(err, *roots)\n",
     "replace": "",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served",
@@ -354,8 +354,8 @@
   {
     "label": "feed: stderr reaches headless_error with absolute worktree paths",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        out, err = _relative_paths(out, cwd), _relative_paths(err, cwd)\n",
-    "replace": "        out = _relative_paths(out, cwd)\n",
+    "find": "        out, err = _relative_paths(out, *roots), _relative_paths(err, *roots)\n",
+    "replace": "        out = _relative_paths(out, *roots)\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
     ]
@@ -403,6 +403,70 @@
     "replace": "    if isinstance(envelope, dict):\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_stream_result_envelope_is_the_seat_result"
+    ]
+  },
+  {
+    "label": "feed: a bare worktree path (cd <wt>, a pwd result) is stored absolute",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        text = re.sub(re.escape(root) + r\"(?![\\w.\\-])\", \".\", text)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served",
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: a sibling <wt>-old path is cut as if it were the worktree",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        text = re.sub(re.escape(root) + r\"(?![\\w.\\-])\", \".\", text)\n",
+    "replace": "        text = re.sub(re.escape(root), \".\", text)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_worktree_paths_are_relative_whatever_the_prefix_order"
+    ]
+  },
+  {
+    "label": "feed: the bound repo root the .git file names stays in the feed",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        roots = (cwd, repo) if repo is not None else (cwd,)\n",
+    "replace": "        roots = (cwd,)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: a re-develop failing before its seat keeps the previous attempt's feed",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        await self._store_feed(request, \"DEVELOP\", \"\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_redevelop_that_fails_before_its_seat_clears_the_feed"
+    ]
+  },
+  {
+    "label": "feed: a failing check's tail lands on the run with the worktree path",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        return CheckResult(command=command, code=code, tail=_tail(out + \"\\n\" + err, cwd))\n",
+    "replace": "        return CheckResult(command=command, code=code, tail=_tail(out + \"\\n\" + err))\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_check_tail_carries_no_worktree_path"
+    ]
+  },
+  {
+    "label": "feed: the upsert filter drops the workspace, so tenants share a row",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        {\"workspace\": workspace_id, \"action_id\": action_id, \"stage\": stage},\n",
+    "replace": "        {\"action_id\": action_id, \"stage\": stage},\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_save_run_feed_upserts_per_workspace_and_keeps_created_at"
+    ]
+  },
+  {
+    "label": "feed: every save rewrites createdAt",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            \"$set\": {\"steps\": steps, \"steps_omitted\": steps_omitted, \"updatedAt\": now},\n            \"$setOnInsert\": {\"createdAt\": now},\n",
+    "replace": "            \"$set\": {\n                \"steps\": steps,\n                \"steps_omitted\": steps_omitted,\n                \"updatedAt\": now,\n                \"createdAt\": now,\n            },\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_save_run_feed_upserts_per_workspace_and_keeps_created_at"
     ]
   }
 ]
