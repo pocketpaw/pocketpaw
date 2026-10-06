@@ -4,8 +4,11 @@
 # v2 stays one streamed pydantic_ai call with no tools, whatever backend the agent
 # runs on: only the agent's provider + model is followed, never its runtime. The
 # agent is the widget's bound one, else the site's dedicated ``concierge-<site_id>``.
-# No usable model on it falls back to ``pawbar_concierge_model``, then the backend
-# default. The resolved spec drives the model build AND the proxy attribution, and
+# A blank model on a non-pydantic_ai backend (a Claude Agent SDK agent left on
+# "auto") is that backend's own default, the model the agent itself runs. No usable
+# model on it falls back to ``pawbar_concierge_model``, then the backend
+# default. ``answer_model`` names the same pick for the owner's dashboard. The
+# resolved spec drives the model build AND the proxy attribution, and
 # a changed agent model is picked up once the per-agent memo expires.
 #
 # The model seam is ``concierge_runtime._build_model(settings, spec)``; the
@@ -163,6 +166,60 @@ async def test_an_agent_with_no_model_falls_back_to_the_deployment_setting(
     assert rec.specs == [_DEPLOYMENT_SPEC]
 
 
+def _pin_settings(monkeypatch, **update: Any) -> None:
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    from pocketpaw.config import get_settings
+
+    pinned = get_settings().model_copy(
+        update={"pawbar_concierge_model": _DEPLOYMENT_SPEC, **update}
+    )
+    monkeypatch.setattr(concierge_runtime, "_settings", lambda: pinned)
+
+
+@pytest.mark.asyncio
+async def test_a_claude_sdk_agent_with_no_model_answers_with_its_backends_model(
+    concierge_client,  # noqa: F811
+    rec,
+    monkeypatch,
+):
+    """A blank model on a Claude Agent SDK agent means "the backend's default",
+    so the turn uses the model that agent itself would run (``resolve_model``),
+    never the deployment's concierge model."""
+    _pin_settings(monkeypatch, claude_sdk_provider="litellm", claude_sdk_model="claude-opus-4-6")
+    client, store = concierge_client
+    await _site()
+    agent_id = await _agent("claude-blank", backend="claude_agent_sdk", model="")
+    widget = await store.create_widget(_widget(agent_id=agent_id))
+
+    res = await _chat(client, widget.id)
+
+    assert res.status_code == 200, res.text
+    assert rec.specs == ["litellm:claude-opus-4-6"]
+
+
+@pytest.mark.asyncio
+async def test_a_claude_sdk_agent_with_nothing_set_gets_the_providers_default_claude(
+    concierge_client,  # noqa: F811
+    rec,
+    monkeypatch,
+):
+    from pocketpaw.llm.providers.base import PROVIDER_DEFAULT_MODELS
+
+    _pin_settings(
+        monkeypatch, claude_sdk_provider="anthropic", claude_sdk_model="", anthropic_model=""
+    )
+    client, store = concierge_client
+    await _site()
+    agent_id = await _agent("claude-bare", backend="claude_agent_sdk", model="")
+    widget = await store.create_widget(_widget(agent_id=agent_id))
+
+    res = await _chat(client, widget.id)
+
+    assert res.status_code == 200, res.text
+    assert rec.specs == [f"anthropic:{PROVIDER_DEFAULT_MODELS['anthropic']}"]
+
+
 @pytest.mark.asyncio
 async def test_the_dedicated_agent_answers_an_unbound_widget(concierge_client, rec):  # noqa: F811
     client, store = concierge_client
@@ -278,3 +335,25 @@ def test_usage_prices_the_resolved_model_when_the_response_names_none(monkeypatc
 
     assert seen == ["owner-pick"]
     assert usage["model"] == "owner-pick"
+
+
+@pytest.mark.asyncio
+async def test_answer_model_names_what_a_turn_would_use(
+    concierge_client,  # noqa: F811
+    rec,
+    monkeypatch,
+):
+    """The dashboard's label and the turn agree: both go through the same resolution."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    _pin_settings(monkeypatch, claude_sdk_provider="anthropic", claude_sdk_model="claude-opus-4-6")
+    client, store = concierge_client
+    site = await _site()
+    agent_id = await _agent("claude-label", backend="claude_agent_sdk", model="")
+    widget = await store.create_widget(_widget(agent_id=agent_id))
+
+    label = await concierge_runtime.answer_model(widget, site, "ws-1")
+    await _chat(client, widget.id)
+
+    assert label == "anthropic:claude-opus-4-6"
+    assert rec.specs == [label]

@@ -18,7 +18,8 @@
 #
 # Model (``_turn_model_spec``, memoized ``_AGENT_MODEL_TTL_S`` per agent): the
 # provider + model the owner picked on the concierge agent (the widget's bound one,
-# else ``concierge-<site_id>``), mapped by ``_agent_spec``; else
+# else ``concierge-<site_id>``), mapped by ``_agent_spec`` (a blank model on a
+# non-pydantic_ai backend is that backend's own default); else
 # ``pawbar_concierge_model``; else the backend default. Never the agent's runtime:
 # the call stays tool-free. That one spec drives the build, proxy fields and usage.
 #
@@ -1112,7 +1113,12 @@ def _agent_spec(settings: Any, backend: str, model: str) -> str | None:
     """The pydantic_ai ``provider:model`` spec for an agent's backend + model, or
     None when it has no model or names one pydantic_ai cannot serve.
 
-    A pydantic_ai agent's model already is a spec. Any other backend's model is
+    A pydantic_ai agent's model already is a spec; a blank one is None. On any
+    other backend a blank model means that backend's default, so it resolves the
+    way the agent itself would run: the backend's settings field, then
+    ``resolve_model``'s provider chain (a Claude Agent SDK agent on anthropic
+    gets the anthropic default, never the deployment's concierge model). Any
+    other backend's model is
     read the way the pool routes it (``route_model``'s ``_BACKEND_MODEL_ATTR``
     table, legacy names resolved first) and paired with that backend's own
     ``<backend>_provider`` setting; a backend without one (``deep_agents``)
@@ -1121,19 +1127,26 @@ def _agent_spec(settings: Any, backend: str, model: str) -> str | None:
     back instead of reaching a provider that cannot serve it."""
     from pocketpaw.agents.pydantic_ai import _KNOWN_PROVIDERS
     from pocketpaw.agents.registry import _LEGACY_BACKENDS
-    from pocketpaw.llm.providers.base import _BACKEND_MODEL_ATTR, _BACKEND_MODEL_ATTR_ALIASES
+    from pocketpaw.llm.providers.base import (
+        _BACKEND_MODEL_ATTR,
+        _BACKEND_MODEL_ATTR_ALIASES,
+        resolve_model,
+    )
 
     model = (model or "").strip()
-    if not model:
-        return None
     backend = _LEGACY_BACKENDS.get(backend, backend)
     if backend == "pydantic_ai":
-        return model
+        return model or None
     attr = _BACKEND_MODEL_ATTR.get(backend) or _BACKEND_MODEL_ATTR_ALIASES.get(backend)
     if not attr:
         return None
     provider_field = attr.removesuffix("_model") + "_provider"
     provider = str(getattr(settings, provider_field, "") or "").strip()
+    if not model:
+        model = str(getattr(settings, attr, "") or "").strip()
+        model = model or str(resolve_model(settings, backend, provider) or "").strip()
+    if not model:
+        return None
     spec = f"{provider}:{model}" if provider else model
     head, sep, _rest = spec.partition(":")
     return spec if sep and head in _KNOWN_PROVIDERS else None
@@ -1195,6 +1208,19 @@ async def _turn_model_spec(settings: Any, widget: Any, site: Any, workspace_id: 
         f"{fallback} from pawbar_concierge_model" if fallback else "the backend default",
     )
     return fallback
+
+
+async def answer_model(widget: Any, site: Any, workspace_id: str) -> str:
+    """The ``provider:model`` a v2 turn on ``widget`` answers with now, for the
+    owner's dashboard: the same resolution a turn makes. '' when it can't be told."""
+    settings = _settings()
+    try:
+        spec = await _turn_model_spec(settings, widget, site, workspace_id)
+        provider, model = _builder(settings)._parse_provider_model(spec)
+    except Exception:  # noqa: BLE001 — a label never fails the overview
+        logger.debug("concierge v2: answer model lookup failed", exc_info=True)
+        return ""
+    return f"{provider}:{model}" if provider and model else (model or "")
 
 
 def _build_model(settings: Any, spec: str | None) -> Any:
