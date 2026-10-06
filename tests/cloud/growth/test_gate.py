@@ -1009,6 +1009,8 @@ class TestGrowthRouteRbac:
             # Growth › Social. Nothing here leaves the workspace (no posting,
             # no account connections), so reads are growth.read and every
             # write — analysis and idea generation included — growth.write.
+            ("GET", "/growth/social/profiles"): "growth.read",
+            ("POST", "/growth/social/profiles"): "growth.write",
             ("GET", "/growth/social/profile"): "growth.read",
             ("PUT", "/growth/social/profile"): "growth.write",
             ("POST", "/growth/social/profile/analyze"): "growth.write",

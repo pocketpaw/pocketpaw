@@ -239,3 +239,7 @@ class SocialIdeaResponse(BaseModel):
 
 class SocialIdeaListResponse(BaseModel):
     items: list[SocialIdeaResponse]
+
+
+class SocialProfileListResponse(BaseModel):
+    items: list[SocialProfileResponse]

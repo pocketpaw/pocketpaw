@@ -607,3 +607,23 @@ async def test_a_member_can_use_every_route(mongo_db):
         assert (await member.post(f"{PROFILE}/complete")).status_code == 200
         assert (await member.post(f"{IDEAS}/generate", json={"count": 1})).status_code == 200
         assert (await member.get(IDEAS)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_keeps_several_profiles_each_with_its_own_ideas(w1, w2):
+    set_production_ideas_fn(_FakeIdeas())
+    first = await _complete(w1)
+    second = (await w1.post(f"{BASE}/profiles")).json()
+    sid = {"profile_id": second["id"]}
+    assert (await w1.put(PROFILE, params=sid, json=_COMPLETE)).status_code == 200
+    assert (await w1.post(f"{PROFILE}/complete", params=sid)).status_code == 200
+
+    listed = (await w1.get(f"{BASE}/profiles")).json()["items"]
+    assert [p["id"] for p in listed] == [first["id"], second["id"]]
+    assert (await w2.get(f"{BASE}/profiles")).json()["items"] == []
+    assert (await w2.get(PROFILE, params=sid)).status_code == 404
+
+    made = (await w1.post(f"{IDEAS}/generate", params=sid, json={"count": 2})).json()["items"]
+    assert len(made) == 2
+    assert len((await w1.get(IDEAS, params=sid)).json()["items"]) == 2
+    assert (await w1.get(IDEAS, params={"profile_id": first["id"]})).json()["items"] == []

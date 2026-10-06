@@ -1,5 +1,6 @@
 # ee/pocketpaw_ee/cloud/models/social_profile.py — the Growth › Social company
-# profile: one per workspace (UNIQUE ``workspace`` index), holding what the
+# profile. A workspace may hold several (one per brand it posts for), each
+# holding what the
 # setup wizard typed (owner, company, website, the six description fields, the
 # business-shape enums) and the latest website analysis.
 #
@@ -11,7 +12,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from beanie import Indexed
 from pydantic import Field
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
@@ -20,7 +20,7 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 class SocialProfile(TimestampedDocument):
     """A workspace's social-content company profile."""
 
-    workspace: Indexed(str, unique=True)  # type: ignore[valid-type]
+    workspace: str
     owner_name: str = ""
     company_name: str = ""
     website: str | None = None
@@ -37,4 +37,5 @@ class SocialProfile(TimestampedDocument):
     onboarding_completed_at: datetime | None = None
 
     class Settings:
-        name = "growth_social_profiles"
+        name = "growth_social_brands"
+        indexes = [[("workspace", 1), ("updatedAt", -1)]]

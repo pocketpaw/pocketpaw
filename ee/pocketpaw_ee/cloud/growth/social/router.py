@@ -19,6 +19,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     GenerateIdeasRequest,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialProfileListResponse,
     SocialProfileResponse,
     UpdateIdeaRequest,
     UpsertProfileRequest,
@@ -30,14 +31,41 @@ router = APIRouter(
 )
 
 
+_PROFILE_ID = Query(default=None, description="Which profile; omitted = the most recently updated")
+
+
+@router.get(
+    "/profiles",
+    response_model=SocialProfileListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_profiles(
+    ctx: RequestContext = Depends(request_context),
+) -> SocialProfileListResponse:
+    """Every social profile in the workspace, oldest first."""
+    return await social_service.list_profiles(ctx)
+
+
+@router.post(
+    "/profiles",
+    response_model=SocialProfileResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def create_profile(ctx: RequestContext = Depends(request_context)) -> SocialProfileResponse:
+    """Start a new, empty profile for another brand."""
+    return await social_service.create_profile(ctx)
+
+
 @router.get(
     "/profile",
     response_model=SocialProfileResponse,
     dependencies=[Depends(require_action_any_workspace("growth.read"))],
 )
-async def get_profile(ctx: RequestContext = Depends(request_context)) -> SocialProfileResponse:
-    """The workspace's social profile. 404 until the first PUT creates it."""
-    return await social_service.get_profile(ctx)
+async def get_profile(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SocialProfileResponse:
+    """One social profile. 404 until the first PUT creates it."""
+    return await social_service.get_profile(ctx, profile_id)
 
 
 @router.put(
@@ -47,11 +75,12 @@ async def get_profile(ctx: RequestContext = Depends(request_context)) -> SocialP
 )
 async def upsert_profile(
     body: UpsertProfileRequest,
+    profile_id: str | None = _PROFILE_ID,
     ctx: RequestContext = Depends(request_context),
 ) -> SocialProfileResponse:
     """Partial upsert of the typed fields: omitted fields are left alone, an
     explicit ``null`` clears, ``description`` merges key by key."""
-    return await social_service.upsert_profile(ctx, body)
+    return await social_service.upsert_profile(ctx, body, profile_id)
 
 
 @router.post(
@@ -59,11 +88,13 @@ async def upsert_profile(
     response_model=SocialProfileResponse,
     dependencies=[Depends(require_action_any_workspace("growth.write"))],
 )
-async def analyze_profile(ctx: RequestContext = Depends(request_context)) -> SocialProfileResponse:
+async def analyze_profile(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SocialProfileResponse:
     """Read the website and run the analyst in-request (20–60 s). 200 even when
     ``analysis_status`` comes back ``failed``; 503 with no analyser installed,
     404 with no profile, 422 with neither website nor description."""
-    return await social_service.analyze_profile(ctx)
+    return await social_service.analyze_profile(ctx, profile_id)
 
 
 @router.post(
@@ -71,9 +102,11 @@ async def analyze_profile(ctx: RequestContext = Depends(request_context)) -> Soc
     response_model=SocialProfileResponse,
     dependencies=[Depends(require_action_any_workspace("growth.write"))],
 )
-async def complete_profile(ctx: RequestContext = Depends(request_context)) -> SocialProfileResponse:
+async def complete_profile(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SocialProfileResponse:
     """Finish onboarding. 422 ``social.profile_incomplete`` names what is missing."""
-    return await social_service.complete_onboarding(ctx)
+    return await social_service.complete_onboarding(ctx, profile_id)
 
 
 @router.post(
@@ -83,11 +116,12 @@ async def complete_profile(ctx: RequestContext = Depends(request_context)) -> So
 )
 async def generate_ideas(
     body: GenerateIdeasRequest | None = None,
+    profile_id: str | None = _PROFILE_ID,
     ctx: RequestContext = Depends(request_context),
 ) -> SocialIdeaListResponse:
     """Generate ``count`` (1–12, default 6) new post ideas. 409 before onboarding
     is complete, 503 with no ideas writer, 502 when the run fails."""
-    return await social_service.generate_ideas(ctx, body or GenerateIdeasRequest())
+    return await social_service.generate_ideas(ctx, body or GenerateIdeasRequest(), profile_id)
 
 
 @router.get(
@@ -97,10 +131,11 @@ async def generate_ideas(
 )
 async def list_ideas(
     status: IdeaStatus | None = Query(default=None),
+    profile_id: str | None = _PROFILE_ID,
     ctx: RequestContext = Depends(request_context),
 ) -> SocialIdeaListResponse:
-    """The workspace's ideas, newest first, optionally one status."""
-    return await social_service.list_ideas(ctx, status=status)
+    """One profile's ideas, newest first, optionally one status."""
+    return await social_service.list_ideas(ctx, status=status, profile_id=profile_id)
 
 
 @router.patch(

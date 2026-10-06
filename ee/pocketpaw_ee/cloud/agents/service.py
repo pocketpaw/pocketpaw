@@ -1177,8 +1177,8 @@ async def seed_pinned_agent(
     """Create a declaratively defined agent for a workspace if its slug is missing.
 
     ``definition`` is the ``{"name", "slug", "config"}`` shape the growth agents
-    declare. Like the growth writer seeder, an existing row is NARROWED back to
-    the definition's tools with ``tool_mode="exclusive"`` — these agents are
+    declare. Like the growth writer seeder, an existing row is re-synced to the
+    definition's system prompt and tools with ``tool_mode="exclusive"`` — these agents are
     pinned on purpose, and a widened surface is the hazard. Returns
     ``(agent, created)``.
     """
@@ -1186,6 +1186,10 @@ async def seed_pinned_agent(
     pinned_tools = list(definition["config"].get("tools") or [])
     existing = await _AgentDoc.find_one(_AgentDoc.workspace == workspace_id, _AgentDoc.slug == slug)
     if existing is not None:
+        prompt = definition["config"].get("system_prompt")
+        if prompt and existing.config.system_prompt != prompt:
+            existing.config.system_prompt = prompt
+            await existing.save()
         widened = list(existing.config.tools or []) != pinned_tools
         if widened or existing.config.tool_mode != "exclusive":
             logger.info(

@@ -32,8 +32,7 @@
 #   * REDIRECTS ARE MANUAL, max MAX_REDIRECTS, and EVERY hop re-runs the whole URL
 #     + DNS + IP check. `allowed_host` additionally pins the chain to one host.
 #   * Per-fetch timeout; the size cap is enforced ON THE STREAM, so an oversized
-#     body is aborted mid-read and never fully buffered (a GET with
-#     ``truncate=True`` keeps the first cap bytes instead). No cookies (jar cleared
+#     body is aborted mid-read and never fully buffered. No cookies (jar cleared
 #     after every response), no auth, no env proxies (trust_env=False — an
 #     HTTP_PROXY would route around the pin), and an honest User-Agent that each
 #     caller supplies for ITSELF (``user_agent=``, defaulting to the importer's).
@@ -318,9 +317,7 @@ class SafeFetcher:
                 )
         return ips[0]
 
-    async def fetch(
-        self, url: str, *, allowed_host: str | None = None, truncate: bool = False
-    ) -> FetchResult:
+    async def fetch(self, url: str, *, allowed_host: str | None = None) -> FetchResult:
         """GET ``url`` with the full SSRF pipeline, following redirects manually.
 
         Every hop is SSRF-revalidated regardless. ``allowed_host`` adds an
@@ -328,18 +325,12 @@ class SafeFetcher:
         raises ``sites.import_crawl_offsite_redirect`` so a same-site asset/page
         can't 30x us into fetching (and deploying) foreign content. The seed
         fetch passes ``None`` — the caller re-seeds the crawl host from the
-        final URL instead (so an apex->www redirect imports the whole site).
-
-        ``truncate`` keeps the first ``per_fetch_cap`` bytes of an oversized
-        body instead of raising — for a reader that only wants a page's head
-        and opening text. The total byte budget still applies."""
+        final URL instead (so an apex->www redirect imports the whole site)."""
         current = url
         for _hop in range(MAX_REDIRECTS + 1):
             parsed = validate_fetch_url(current)
             ip = await self._checked_ip(parsed.hostname)
-            status, content_type, location, body, headers = await self._pinned_get(
-                parsed, ip, truncate=truncate
-            )
+            status, content_type, location, body, headers = await self._pinned_get(parsed, ip)
             if status in _REDIRECT_STATUSES:
                 if not location:
                     raise FetchError("redirect response carried no Location header")
@@ -379,9 +370,9 @@ class SafeFetcher:
         )
 
     async def _pinned_get(
-        self, parsed: Any, ip: str, *, truncate: bool = False
+        self, parsed: Any, ip: str
     ) -> tuple[int, str, str, bytes, dict[str, str]]:
-        return await self._pinned_request("GET", parsed, ip, truncate=truncate)
+        return await self._pinned_request("GET", parsed, ip)
 
     async def _pinned_request(
         self,

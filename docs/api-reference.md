@@ -7009,14 +7009,19 @@ The stored preview only ever describes the criteria it ran against:
 ## Growth — Social
 
 The setup wizard, website analysis and post ideas behind `/growth` › Social.
-One profile per workspace, created by the first `PUT`. Nothing here leaves
+A workspace can hold several profiles, one per brand it posts for. Every
+`/profile…` and `/ideas` route takes an optional `?profile_id=`; without it
+the route acts on the most recently updated profile, and the first `PUT`
+creates one. Ideas belong to one profile. Nothing here leaves
 the workspace: there is no posting, scheduling or account connection. Every
 route is license-gated and workspace-scoped; reads need `growth.read`, every
 other route `growth.write` (both MEMBER).
 
 | Route | What it does |
 |---|---|
-| `GET /api/v1/growth/social/profile` | The workspace's profile. `404 social_profile.not_found` until the first `PUT`. |
+| `GET /api/v1/growth/social/profiles` | Every profile in the workspace, oldest first: `{items: SocialProfile[]}`. |
+| `POST /api/v1/growth/social/profiles` | Start a new, empty profile for another brand. |
+| `GET /api/v1/growth/social/profile` | One profile (`?profile_id=`). `404 social_profile.not_found` until the first `PUT`. |
 | `PUT /api/v1/growth/social/profile` | Partial upsert of the typed fields and, optionally, a hand-edited `analysis` (below). |
 | `POST /api/v1/growth/social/profile/analyze` | Read the website and run the analyst, in the request (below). |
 | `POST /api/v1/growth/social/profile/complete` | Finish onboarding: stamps `onboarding_completed_at`. |
@@ -7103,29 +7108,20 @@ characters (blank items are dropped). A hand edit does not touch
 No body. Runs in the request and takes 20–60 seconds, so give the call a long
 client timeout.
 
-With a `website`, the server fetches the homepage and up to four more pages on
-the same origin whose path or link text looks like about, pricing, product,
-features or customers. Every fetch goes through the SSRF-hardened
-`sites.safe_fetch` (public addresses only, redirects re-checked, later pages
-pinned to the homepage's final host) and honours `robots.txt` for the
-`PawGrowthSocial/1.0` user agent. Each page is cut at 200 KB, the whole read
-at 1.2 MB, each fetch times out after 8 seconds, and the whole read is
-budgeted at about 25 seconds (no new page starts once less than one fetch
-timeout is left). Each page is reduced to its title, meta description,
-Open Graph tags, h1–h3 headings, the first 4000 characters of visible text,
-and a logo or favicon URL.
-
-That, plus the six description fields, goes to a no-tools analyst agent
-(`growth-social-analyst`, seeded in the workspace on first use). What the
+The website address and the six description fields go to the analyst agent
+(`growth-social-analyst`, seeded in the workspace on first use and re-synced
+to its definition on every run). It is pinned to exactly `WebSearch` and
+`WebFetch`, the growth researcher's surface: it reads the homepage and up to
+four telling pages (about, pricing, product or features, customers) itself,
+and can do nothing else. What the
 owner typed wins: the analysis may sharpen a typed field but not contradict
 it, an empty analysis field is filled from the typed one, and the typed
 things-to-avoid are always kept. With no website the analysis uses the
-description alone. `pages_read` and `logo_url` come from the fetch, never from
-the model.
+description alone. `pages_read` lists the http(s) URLs the agent reports it
+fetched; `logo_url` is not set.
 
 If the fetch or the model fails, the call still returns 200 with
-`analysis_status: "failed"` and a short `analysis_error` such as
-`"We couldn't reach acme.com."`; the previous `analysis` and `analyzed_at`
+`analysis_status: "failed"` and a short `analysis_error`; the previous `analysis` and `analyzed_at`
 are kept. Only the analysis fields are written, so a `PUT` made while the
 analysis runs is not overwritten.
 

@@ -4,9 +4,11 @@
 # domain and both agents off the doc classes).
 #
 # Tenancy: every read filters on ``workspace``; malformed, missing and
-# cross-tenant idea ids raise the same NotFound so existence never leaks. One
-# profile per workspace (unique index); ``upsert_profile`` creates it on the
-# first PUT.
+# cross-tenant profile and idea ids raise the same NotFound so existence never
+# leaks. A workspace may hold several profiles (one per brand). Every profile
+# route takes an optional ``profile_id``; without one it acts on the most
+# recently updated profile, and ``upsert_profile`` creates the first. Ideas
+# belong to one profile.
 #
 # A PUT may carry a hand-edited ``analysis``: only the editable fields sent are
 # replaced (``pages_read`` / ``logo_url`` stay server-owned), ``analyzed_at`` is
@@ -33,7 +35,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
-from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import (
@@ -59,6 +60,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialAnalysisResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialProfileListResponse,
     SocialProfileResponse,
     UpdateIdeaRequest,
     UpsertProfileRequest,
@@ -70,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 RECENT_HOOKS_LIMIT = 40
 IDEA_LIST_LIMIT = 500
+PROFILE_LIST_LIMIT = 100
 _NULLABLE_FIELDS = ("website", "team_size", "monthly_revenue", "role", "business_model", "category")
 _ANALYSIS_TEXTS = ("summary", "product", "audience", "problem", "tone")
 _ANALYSIS_LISTS = (
@@ -205,19 +208,51 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
 # ---------------------------------------------------------------------------
 
 
-async def _profile_doc(workspace_id: str) -> _ProfileDoc | None:
-    return await _ProfileDoc.find_one({"workspace": workspace_id})
+async def _profile_doc(workspace_id: str, profile_id: str | None = None) -> _ProfileDoc | None:
+    if profile_id is None:
+        docs = (
+            await _ProfileDoc.find({"workspace": workspace_id})
+            .sort([("updatedAt", -1), ("_id", -1)])
+            .limit(1)
+            .to_list()
+        )
+        return docs[0] if docs else None
+    try:
+        oid = PydanticObjectId(profile_id)
+    except Exception:  # noqa: BLE001
+        return None
+    return await _ProfileDoc.find_one({"_id": oid, "workspace": workspace_id})
 
 
-async def _require_profile_doc(workspace_id: str) -> _ProfileDoc:
-    doc = await _profile_doc(workspace_id)
+async def _require_profile_doc(workspace_id: str, profile_id: str | None = None) -> _ProfileDoc:
+    doc = await _profile_doc(workspace_id, profile_id)
     if doc is None:
         raise NotFound("social_profile")
     return doc
 
 
-async def get_profile(ctx: RequestContext) -> SocialProfileResponse:
-    doc = await _require_profile_doc(_require_workspace(ctx))
+async def list_profiles(ctx: RequestContext) -> SocialProfileListResponse:
+    docs = (
+        await _ProfileDoc.find({"workspace": _require_workspace(ctx)})
+        .sort([("createdAt", 1), ("_id", 1)])
+        .limit(PROFILE_LIST_LIMIT)
+        .to_list()
+    )
+    return SocialProfileListResponse(
+        items=[_profile_to_response(_profile_to_domain(d)) for d in docs]
+    )
+
+
+async def create_profile(ctx: RequestContext) -> SocialProfileResponse:
+    """Start a new, empty profile; the setup wizard fills it in."""
+    doc = _ProfileDoc(workspace=_require_workspace(ctx))
+    await doc.insert()
+    # no-event: Growth › Social has no realtime subscriber; the wizard re-fetches.
+    return _profile_to_response(_profile_to_domain(doc))
+
+
+async def get_profile(ctx: RequestContext, profile_id: str | None = None) -> SocialProfileResponse:
+    doc = await _require_profile_doc(_require_workspace(ctx), profile_id)
     return _profile_to_response(_profile_to_domain(doc))
 
 
@@ -251,20 +286,21 @@ def _apply_analysis_edit(doc: _ProfileDoc, patch: AnalysisPatch) -> None:
         doc.analysis_error = None
 
 
-async def upsert_profile(ctx: RequestContext, body: UpsertProfileRequest) -> SocialProfileResponse:
-    """Create the workspace's profile on first call, else apply the sent fields."""
+async def upsert_profile(
+    ctx: RequestContext, body: UpsertProfileRequest, profile_id: str | None = None
+) -> SocialProfileResponse:
+    """Apply the sent fields. With no ``profile_id`` and no profile yet, create
+    the workspace's first one."""
     body = UpsertProfileRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
-    doc = await _profile_doc(workspace_id)
+    if profile_id is not None:
+        doc = await _require_profile_doc(workspace_id, profile_id)
+    else:
+        doc = await _profile_doc(workspace_id)
     if doc is None:
         doc = _ProfileDoc(workspace=workspace_id)
         _apply_upsert(doc, body)
-        try:
-            await doc.insert()
-        except DuplicateKeyError:
-            doc = await _require_profile_doc(workspace_id)
-            _apply_upsert(doc, body)
-            await doc.save()
+        await doc.insert()
     else:
         _apply_upsert(doc, body)
         await doc.save()
@@ -272,7 +308,9 @@ async def upsert_profile(ctx: RequestContext, body: UpsertProfileRequest) -> Soc
     return _profile_to_response(_profile_to_domain(doc))
 
 
-async def analyze_profile(ctx: RequestContext) -> SocialProfileResponse:
+async def analyze_profile(
+    ctx: RequestContext, profile_id: str | None = None
+) -> SocialProfileResponse:
     """Read the website (if any) and run the analyst, in-request."""
     from pocketpaw_ee.cloud.growth.social import analyst as social_analyst
 
@@ -284,7 +322,8 @@ async def analyze_profile(ctx: RequestContext) -> SocialProfileResponse:
             "social.analyzer_unavailable",
             "Website analysis is not configured on this deployment",
         )
-    profile = _profile_to_domain(await _require_profile_doc(workspace_id))
+    doc = await _require_profile_doc(workspace_id, profile_id)
+    profile = _profile_to_domain(doc)
     if not profile.website and not profile.has_description():
         raise ValidationError(
             "social.nothing_to_analyze",
@@ -317,15 +356,19 @@ async def analyze_profile(ctx: RequestContext) -> SocialProfileResponse:
             "analysis_error": (outcome.error or "The analysis failed.")[:300],
         }
     update["updatedAt"] = now
-    await _ProfileDoc.find_one({"workspace": workspace_id}).update({"$set": update})
+    await _ProfileDoc.find_one({"_id": doc.id, "workspace": workspace_id}).update({"$set": update})
     # no-event: Growth › Social has no realtime subscriber; the wizard re-fetches.
-    return _profile_to_response(_profile_to_domain(await _require_profile_doc(workspace_id)))
+    return _profile_to_response(
+        _profile_to_domain(await _require_profile_doc(workspace_id, str(doc.id)))
+    )
 
 
-async def complete_onboarding(ctx: RequestContext) -> SocialProfileResponse:
+async def complete_onboarding(
+    ctx: RequestContext, profile_id: str | None = None
+) -> SocialProfileResponse:
     """Stamp ``onboarding_completed_at`` once every required field is set."""
     workspace_id = _require_workspace(ctx)
-    doc = await _require_profile_doc(workspace_id)
+    doc = await _require_profile_doc(workspace_id, profile_id)
     missing = _profile_to_domain(doc).missing_for_completion()
     if missing:
         raise ValidationError(
@@ -354,9 +397,9 @@ async def _fetch_idea_in_workspace(workspace_id: str, idea_id: str) -> _IdeaDoc:
     return doc
 
 
-async def _recent_hooks(workspace_id: str) -> list[str]:
+async def _recent_hooks(workspace_id: str, profile: str) -> list[str]:
     docs = (
-        await _IdeaDoc.find({"workspace": workspace_id})
+        await _IdeaDoc.find({"workspace": workspace_id, "profile": profile})
         .sort([("createdAt", -1), ("_id", -1)])
         .limit(RECENT_HOOKS_LIMIT)
         .to_list()
@@ -364,7 +407,9 @@ async def _recent_hooks(workspace_id: str) -> list[str]:
     return [d.hook for d in docs if d.hook]
 
 
-async def generate_ideas(ctx: RequestContext, body: GenerateIdeasRequest) -> SocialIdeaListResponse:
+async def generate_ideas(
+    ctx: RequestContext, body: GenerateIdeasRequest, profile_id: str | None = None
+) -> SocialIdeaListResponse:
     """Ask the ideas agent for ``count`` new ideas and store them as ``new``."""
     from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
     from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
@@ -376,15 +421,18 @@ async def generate_ideas(ctx: RequestContext, body: GenerateIdeasRequest) -> Soc
         raise CloudError(
             503, "social.ideas_unavailable", "Idea generation is not configured on this deployment"
         )
-    doc = await _profile_doc(workspace_id)
+    doc = await _profile_doc(workspace_id, profile_id)
     if doc is None or doc.onboarding_completed_at is None:
         raise ConflictError(
             "social.onboarding_incomplete", "Finish the Social setup before generating ideas"
         )
 
     profile = _profile_to_domain(doc)
+    profile_key = str(doc.id)
     try:
-        generated = await ideas_fn(profile, body.count, await _recent_hooks(workspace_id))
+        generated = await ideas_fn(
+            profile, body.count, await _recent_hooks(workspace_id, profile_key)
+        )
     except ResearchUnavailable as exc:
         raise CloudError(502, "social.ideas_failed", f"Idea generation failed: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
@@ -395,6 +443,7 @@ async def generate_ideas(ctx: RequestContext, body: GenerateIdeasRequest) -> Soc
     for item in list(generated)[: body.count]:
         idea = _IdeaDoc(
             workspace=workspace_id,
+            profile=profile_key,
             format=item.format,
             hook=item.hook,
             on_screen_text=item.on_screen_text,
@@ -412,9 +461,14 @@ async def generate_ideas(ctx: RequestContext, body: GenerateIdeasRequest) -> Soc
     return SocialIdeaListResponse(items=[_idea_to_response(_idea_to_domain(d)) for d in docs])
 
 
-async def list_ideas(ctx: RequestContext, *, status: str | None = None) -> SocialIdeaListResponse:
+async def list_ideas(
+    ctx: RequestContext, *, status: str | None = None, profile_id: str | None = None
+) -> SocialIdeaListResponse:
     workspace_id = _require_workspace(ctx)
-    query: dict[str, Any] = {"workspace": workspace_id}
+    doc = await _profile_doc(workspace_id, profile_id)
+    if doc is None:
+        return SocialIdeaListResponse(items=[])
+    query: dict[str, Any] = {"workspace": workspace_id, "profile": str(doc.id)}
     if status is not None:
         query["status"] = status
     docs = (
@@ -445,6 +499,8 @@ async def update_idea(
 __all__ = [
     "analyze_profile",
     "complete_onboarding",
+    "create_profile",
+    "list_profiles",
     "generate_ideas",
     "get_profile",
     "list_ideas",
