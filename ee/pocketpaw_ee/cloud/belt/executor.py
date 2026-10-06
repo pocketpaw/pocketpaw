@@ -29,8 +29,9 @@
 # deleted when the run did not land (a retry starts clean); a line is never
 # deleted, and once its ref moved the run IS landed: a push or PR failure after
 # that is noted on the outcome, never a failed run (the Foreman would re-plan
-# work the line already holds). ``line_merged`` answers the Foreman's "is it in
-# the base yet".
+# work the line already holds). ``line_merged`` answers "is this run's commit in
+# the base yet"; ``line_status`` reads a whole line from git (ahead, merged,
+# subjects, its open PR) for the mandate page and the Foreman's THE LINE.
 #
 # RE-DEVELOP (``_moved``): a headless run whose diff no longer fits where it
 # lands (``git apply --check`` and ``--3way`` both fail on the moved base or
@@ -113,26 +114,9 @@ class GhCliPrOpener:
     ) -> str:
         # A branch that already has an open PR into the base (a mandate line
         # after its first landing) keeps it: the push above updated it.
-        code, out, _err = await _run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--head",
-                branch,
-                "--base",
-                base_branch,
-                "--state",
-                "open",
-                "--json",
-                "url",
-                "--jq",
-                ".[0].url // empty",
-            ],
-            cwd=repo_path,
-        )
-        if code == 0 and out.strip().startswith("http"):
-            return out.strip()
+        existing = await _open_pr_url(repo_path, branch, base_branch)
+        if existing:
+            return existing
         code, out, err = await _run(
             [
                 "gh",
@@ -158,6 +142,34 @@ class GhCliPrOpener:
             if line.startswith("http"):
                 return line
         return out.strip() or "<pr-created>"
+
+
+async def _open_pr_url(repo_path: Path, branch: str, base_branch: str) -> str | None:
+    """The open PR of ``branch`` into ``base_branch`` (``gh pr list``), or None:
+    no PR, no ``gh``, or any gh failure."""
+    try:
+        code, out, _err = await _run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--base",
+                base_branch,
+                "--state",
+                "open",
+                "--json",
+                "url",
+                "--jq",
+                ".[0].url // empty",
+            ],
+            cwd=repo_path,
+        )
+    except Exception:  # noqa: BLE001 — gh missing or timed out reads as no PR
+        return None
+    url = out.strip()
+    return url if code == 0 and url.startswith("http") else None
 
 
 async def _run(
@@ -275,6 +287,68 @@ async def line_merged(repo: str, base_branch: str, commit_sha: str) -> bool:
         if await commit_of(git, ref) and await is_ancestor(git, commit_sha, ref):
             return True
     return False
+
+
+_LINE_SUBJECTS = 30  # cap on the commit subjects ``line_status`` returns
+
+
+async def line_status(repo: str, mandate_id: str) -> dict[str, Any]:
+    """A mandate's line as git has it now (no fetch), for the mandate page and
+    the Foreman: ``branch``; ``base``, the repo's checked-out branch (the
+    develop station's default base); ``exists``; ``ahead``, commits on the line
+    that neither ``origin/<base>`` (as last fetched) nor the local base holds,
+    the line's own base-sync merges included; ``merged`` (``ahead`` is 0: the
+    tip is in the base); ``subjects``, those commits' subjects without the
+    merges, newest first, capped; ``pr_url``, the line's open PR, looked up with
+    an origin while unmerged. Any git failure or timeout reads ``exists=False``."""
+    branch = line_branch(mandate_id)
+    out: dict[str, Any] = {
+        "branch": branch,
+        "base": None,
+        "exists": False,
+        "ahead": 0,
+        "merged": False,
+        "pr_url": None,
+        "subjects": [],
+    }
+    try:
+        repo_path, _err = _re_resolve_repo(repo) if branch else (None, None)
+        if repo_path is None or branch is None:
+            return out
+        git = _git_in(repo_path)
+        tip = await commit_of(git, f"refs/heads/{branch}")
+        code, head, _err = await git("rev-parse", "--abbrev-ref", "HEAD")
+        base = head.strip()
+        if not tip or code != 0 or base in ("", "HEAD", branch):
+            return out
+        bases = [
+            ref
+            for ref in (f"refs/remotes/origin/{base}", f"refs/heads/{base}")
+            if await commit_of(git, ref)
+        ]
+        if not bases:
+            return out
+        span = [tip, "--not", *bases, "--"]
+        code, count, _err = await git("rev-list", "--count", *span)
+        if code != 0:
+            return out
+        code, log, _err = await git(
+            "log", "--no-merges", f"--max-count={_LINE_SUBJECTS}", "--format=%s", *span
+        )
+        if code != 0:
+            return out
+        ahead = int(count.strip())
+        subjects = [s[:200] for s in log.splitlines() if s.strip()]
+        has_origin = await _has_origin(repo_path)
+    except Exception:  # noqa: BLE001 — a timeout or an unreadable repo reads as no line
+        logger.debug("belt: line status read failed", exc_info=True)
+        return out
+    out.update(exists=True, base=base, ahead=ahead, merged=ahead == 0, subjects=subjects)
+    if ahead and has_origin:
+        # ponytail: one gh call per read, bounded by _SUBPROCESS_TIMEOUT; cache
+        # it on the line tip if mandate detail reads get hot.
+        out["pr_url"] = await _open_pr_url(repo_path, branch, base)
+    return out
 
 
 def _re_resolve_repo(repo: str) -> tuple[Path | None, str | None]:

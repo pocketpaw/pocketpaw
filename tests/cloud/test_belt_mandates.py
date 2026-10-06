@@ -27,8 +27,9 @@
 # digest route (sightings, shifts, runs and waiting gates per mandate); the
 # foreman's backlog (open sightings carry over across shifts, a landed task
 # resolves its sightings, in-flight work is marked, the list is capped); the
-# mandate's line (work landed on it is built, awaiting merge or merged) and the
-# develop station's deduped line-conflict sighting.
+# mandate's line (work landed on it is built, awaiting merge or merged; THE LINE
+# and the detail's ``line`` block read git) and the develop station's deduped
+# line-conflict sighting.
 
 from __future__ import annotations
 
@@ -1429,8 +1430,9 @@ async def test_foreman_counts_line_work_as_built_and_sees_the_merge(
     tmp_path, mongo_db, store, journal, graph, monkeypatch, foreman_calls
 ):
     """A task landed on the mandate's line resolves its sighting and reads as on
-    the line, awaiting merge into the base; once the captain merges the line,
-    the next shift reads it as merged."""
+    the line, awaiting merge into the base; THE LINE and the mandate detail's
+    ``line`` block come from git (a commit no run recorded shows too); once the
+    captain merges the line, both read merged."""
     from pocketpaw.config import get_settings
 
     real = get_settings()
@@ -1468,6 +1470,9 @@ async def test_foreman_counts_line_work_as_built_and_sees_the_merge(
     _toy_git(repo, "add", "auth.txt")
     _toy_git(repo, "commit", "-q", "-m", "feat: add auth")
     sha = _toy_git(repo, "rev-parse", "HEAD").strip()
+    (repo / "fixup.txt").write_text("by hand\n")
+    _toy_git(repo, "add", "fixup.txt")
+    _toy_git(repo, "commit", "-q", "-m", "fix: by hand")
     _toy_git(repo, "checkout", "-q", "main")
     await store.approve(run["action_id"])
     await store.mark_executed(run["action_id"], f"Landed on '{line}'")
@@ -1476,18 +1481,48 @@ async def test_foreman_counts_line_work_as_built_and_sees_the_merge(
     waiting = f"on the line {line}, awaiting merge into main"
     client.post(f"/belt/mandates/{mandate_id}/shift")
     call = foreman_calls[-1]
-    title = "Address: no login"
-    assert call.context.line == [{"shift_no": 1, "title": title, "state": waiting}]
-    assert f'- shift 1 "{title}": {waiting}' in call.prompt
+    assert call.context.line == {
+        "branch": line,
+        "base": "main",
+        "exists": True,
+        "ahead": 2,
+        "merged": False,
+        "pr_url": None,
+        "subjects": ["fix: by hand", "feat: add auth"],
+    }
+    assert f"{line}: 2 commit(s) not in main yet" in call.prompt
+    assert "- fix: by hand\n- feat: add auth\n" in call.prompt
     assert f"(cites {sid}): landed ({waiting})" in call.prompt
     assert f"id={sid}" not in call.prompt, "line work is built: its sighting is resolved"
     assert "never plan that work again" in call.prompt.lower()
+    assert client.get(f"/belt/mandates/{mandate_id}").json()["line"] == call.context.line
 
     _toy_git(repo, "merge", "-q", "--no-ff", "-m", "merge the line", line)
     client.post(f"/belt/mandates/{mandate_id}/shift")
     call = foreman_calls[-1]
-    assert [t["state"] for t in call.context.line] == ["merged into main"]
-    assert f'- shift 1 "{title}": merged into main' in call.prompt
+    assert (call.context.line["ahead"], call.context.line["merged"]) == (0, True)
+    assert f"everything on {line} is merged into main" in call.prompt
+    assert "(cites" in call.prompt and "landed (merged into main)" in call.prompt
+    assert client.get(f"/belt/mandates/{mandate_id}").json()["line"]["merged"] is True
+
+
+async def test_mandate_detail_line_block_reads_no_line_without_one(tmp_path, mongo_db, monkeypatch):
+    """A repo with no line (here: not even a git repo) reads exists=false; the
+    branch is still named, so the page can say where runs will land."""
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "toy"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+    line = client.get(f"/belt/mandates/{mandate_id}").json()["line"]
+    assert line == {
+        "branch": f"belt/line/{mandate_id}",
+        "base": None,
+        "exists": False,
+        "ahead": 0,
+        "merged": False,
+        "pr_url": None,
+        "subjects": [],
+    }
 
 
 async def test_station_sighting_files_once_per_signal(tmp_path, mongo_db, store, monkeypatch):

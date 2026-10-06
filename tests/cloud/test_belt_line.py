@@ -6,7 +6,8 @@
 # sighting and leaves the line alone), and the executor applies the approved
 # diff on the line tip and moves the ref by compare-and-swap, pushing it and
 # reusing one PR when the repo has an origin. A run without a mandate keeps its
-# own ``feat/belt-<id>`` branch.
+# own ``feat/belt-<id>`` branch. ``line_status`` reads the line from git (ahead,
+# merged, subjects, the open PR) for the mandate page and the Foreman.
 #
 # Real git in tmp repos (a bare repo stands in for origin; no network). The
 # develop work is a charter recipe (a deterministic command), so no LLM seat
@@ -420,3 +421,81 @@ async def test_gh_opener_reuses_the_open_pr_for_a_branch(monkeypatch, tmp_path):
     listed["out"] = ""
     assert await opener.open_pr(**kw) == "https://github.com/acme/toy/pull/10"
     assert calls[-1][:3] == ["gh", "pr", "create"]
+
+
+# ---------------------------------------------------------------------------
+# the line as git has it: what the mandate page and the Foreman read
+# ---------------------------------------------------------------------------
+
+
+def _no_line(branch: str | None = LINE) -> dict:
+    return {
+        "branch": branch,
+        "base": None,
+        "exists": False,
+        "ahead": 0,
+        "merged": False,
+        "pr_url": None,
+        "subjects": [],
+    }
+
+
+async def test_line_status_reads_ahead_and_merged_from_git(store, repo, station, monkeypatch):
+    assert await belt_executor.line_status(str(repo), MID) == _no_line()
+
+    await _land(store, await _develop(store, station, repo, "add-auth", monkeypatch))
+    await _land(store, await _develop(store, station, repo, "add-audit", monkeypatch))
+    (repo / "notes.txt").write_text("from main\n")
+    _git(repo, "add", "notes.txt")
+    _git(repo, "commit", "-q", "-m", "a commit on main the line lacks")
+    status = await belt_executor.line_status(str(repo), MID)
+    assert status == {
+        "branch": LINE,
+        "base": "main",
+        "exists": True,
+        "ahead": 2,
+        "merged": False,
+        "pr_url": None,  # local-only: no PR to look up
+        "subjects": ["feat: add-audit", "feat: add-auth"],
+    }
+
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge the line", LINE)
+    status = await belt_executor.line_status(str(repo), MID)
+    assert (status["exists"], status["ahead"], status["merged"]) == (True, 0, True)
+    assert status["subjects"] == []
+
+
+async def test_line_status_looks_up_the_open_pr_only_while_unmerged(
+    store, repo, origin, station, monkeypatch
+):
+    await _land(store, await _develop(store, station, repo, "add-auth", monkeypatch), FakeOpener())
+    asked: list[tuple[str, str]] = []
+
+    async def open_pr_url(repo_path: Path, branch: str, base_branch: str) -> str:
+        asked.append((branch, base_branch))
+        return "https://github.com/acme/toy/pull/7"
+
+    monkeypatch.setattr(belt_executor, "_open_pr_url", open_pr_url)
+    status = await belt_executor.line_status(str(repo), MID)
+    assert (status["ahead"], status["pr_url"]) == (1, "https://github.com/acme/toy/pull/7")
+    assert asked == [(LINE, "main")]
+
+    # Merged into the local base (origin/main is still the last fetch): merged,
+    # and no PR lookup.
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge the line", LINE)
+    status = await belt_executor.line_status(str(repo), MID)
+    assert status["merged"] is True and status["pr_url"] is None
+    assert len(asked) == 1
+
+
+async def test_line_status_reads_no_line_on_any_git_failure(repo, tmp_path, monkeypatch):
+    assert await belt_executor.line_status(str(tmp_path / "missing"), MID) == _no_line()
+    assert await belt_executor.line_status("/etc", MID) == _no_line()  # outside the allowlist
+    assert await belt_executor.line_status(str(repo), "m1") == _no_line(None)
+    _git(repo, "branch", LINE)
+
+    async def timed_out(argv, *, cwd=None, stdin=None):
+        raise RuntimeError("command timed out after 120.0s: git rev-list")
+
+    monkeypatch.setattr(belt_executor, "_run", timed_out)
+    assert await belt_executor.line_status(str(repo), MID) == _no_line()

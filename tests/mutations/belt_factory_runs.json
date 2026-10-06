@@ -779,8 +779,8 @@
   {
     "label": "line: the gh opener opens a second PR for a branch that has one",
     "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
-    "find": "if code == 0 and out.strip().startswith(\"http\"):",
-    "replace": "if False:",
+    "find": "        if existing:\n            return existing\n",
+    "replace": "        if False:\n            return existing\n",
     "tests": [
       "tests/cloud/test_belt_line.py::test_gh_opener_reuses_the_open_pr_for_a_branch"
     ]
@@ -866,6 +866,71 @@
     "replace": "            stage=\"done\",\n            pr_url=pr_url,\n        )\n        # The ONLY terminal",
     "tests": [
       "tests/cloud/test_belt_console.py::test_executor_emits_landed_and_persists_pr_result"
+    ]
+  },
+  {
+    "label": "line: the line status reads merged while commits await merge",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "merged=ahead == 0, subjects=subjects)",
+    "replace": "merged=True, subjects=subjects)",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_line_status_reads_ahead_and_merged_from_git",
+      "tests/cloud/test_belt_mandates.py::test_foreman_counts_line_work_as_built_and_sees_the_merge"
+    ]
+  },
+  {
+    "label": "line: ahead counts commits the base already holds",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "span = [tip, \"--not\", *bases, \"--\"]",
+    "replace": "span = [tip, \"--\"]",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_line_status_reads_ahead_and_merged_from_git"
+    ]
+  },
+  {
+    "label": "line: the line's open PR is never looked up",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "out[\"pr_url\"] = await _open_pr_url(repo_path, branch, base)",
+    "replace": "out[\"pr_url\"] = None",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_line_status_looks_up_the_open_pr_only_while_unmerged"
+    ]
+  },
+  {
+    "label": "line: a merged line still asks gh for a PR",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "    if ahead and has_origin:\n",
+    "replace": "    if has_origin:\n",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_line_status_looks_up_the_open_pr_only_while_unmerged"
+    ]
+  },
+  {
+    "label": "line: a git failure or timeout raises out of the line status",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "except Exception:  # noqa: BLE001 — a timeout or an unreadable repo reads as no line",
+    "replace": "except ValueError:  # noqa: BLE001 — a timeout or an unreadable repo reads as no line",
+    "tests": [
+      "tests/cloud/test_belt_line.py::test_line_status_reads_no_line_on_any_git_failure"
+    ]
+  },
+  {
+    "label": "line: the mandate detail carries no line block",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        \"line\": await line_status(doc.surface.repo_id, mandate_id),\n",
+    "replace": "        \"line\": None,\n",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_foreman_counts_line_work_as_built_and_sees_the_merge",
+      "tests/cloud/test_belt_mandates.py::test_mandate_detail_line_block_reads_no_line_without_one"
+    ]
+  },
+  {
+    "label": "line: THE LINE drops the commits awaiting merge",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "                *(f\"- {s}\" for s in line.get(\"subjects\") or []),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_foreman_counts_line_work_as_built_and_sees_the_merge"
     ]
   }
 ]

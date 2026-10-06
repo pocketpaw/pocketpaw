@@ -4,9 +4,9 @@
 # sighting no landed task has resolved, capped, each marked new or carried over
 # and annotated with the tasks that cite it), the last 3 shifts' outcomes (each
 # task's run result: landed, failed with its reason, rejected, or in flight; and
-# what a human said at the gate), the mandate's LINE (tasks landed on its line
-# branch: built, and either merged into the base or awaiting the captain's
-# merge), the bound repo's C4 components, and (when a soul is bound) the soul
+# what a human said at the gate), the mandate's LINE as git has it (the
+# subjects of its commits not in the base yet, awaiting the captain's merge;
+# built either way), the bound repo's C4 components, and (when a soul is bound) the soul
 # recall, then makes EXACTLY ONE LLM call that returns a
 # strict-JSON PlanProposal: a FEW tasks (≤ the charter's budget) or an explicit
 # empty plan with a reason. A task may name a charter ``recipe`` (a
@@ -116,10 +116,10 @@ class ForemanContext:
     # their run results ({title, evidence_refs, status, in_flight, error});
     # gate is what a human said when rejecting or editing its plan.
     history: list[dict[str, Any]] = field(default_factory=list)
-    # Tasks landed on the mandate's line branch, oldest shift first:
-    # {shift_no, title, state}; state is "merged into <base>" or "on the line
-    # <branch>, awaiting merge into <base>". Built either way.
-    line: list[dict[str, Any]] = field(default_factory=list)
+    # The mandate's line as git has it (``belt.executor.line_status``):
+    # {branch, base, exists, ahead, merged, pr_url, subjects}; ``subjects`` are
+    # the commits not in the base yet, newest first. Built either way.
+    line: dict[str, Any] = field(default_factory=dict)
     # Soul recall lines (empty when no soul bound).
     soul_context: list[str] = field(default_factory=list)
     # The bound repo's C4 containers/components, one line each, capped
@@ -410,10 +410,19 @@ def build_prompt(context: ForemanContext) -> str:
             "highest severity first, then oldest)"
         )
     history_lines = "\n".join(_history_lines(h) for h in context.history) or "(no prior shifts)"
-    line_lines = (
-        "\n".join(f'- shift {t["shift_no"]} "{t["title"]}": {t["state"]}' for t in context.line)
-        or "(nothing has landed on the line yet)"
-    )
+    line = context.line
+    if not line.get("exists"):
+        line_lines = "(nothing has landed on the line yet)"
+    elif line.get("merged"):
+        line_lines = f"(everything on {line['branch']} is merged into {line['base']})"
+    else:
+        line_lines = "\n".join(
+            [
+                f"{line['branch']}: {line['ahead']} commit(s) not in {line['base']} yet, "
+                "awaiting the captain's merge:",
+                *(f"- {s}" for s in line.get("subjects") or []),
+            ]
+        )
     soul_lines = "\n".join(f"- {line}" for line in context.soul_context) or "(none)"
     recipe_names = sorted((charter.get("recipes") or {}).keys())
     recipe_lines = "\n".join(f"- {name}" for name in recipe_names) or "(none)"
@@ -443,7 +452,7 @@ rejected did not resolve its sighting.
 Never repeat an approach that already failed above without explicitly stating in the task's \
 "why" what is different this time.
 
-== THE LINE (this mandate's branch; every task here is BUILT) ==
+== THE LINE (this mandate's branch; every commit here is BUILT) ==
 {line_lines}
 Each run starts from the line, so later tasks build on what landed there. Never plan that \
 work again, merged or not; merging the line into the base is the captain's call.

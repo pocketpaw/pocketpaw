@@ -29,7 +29,8 @@
 # the shift trigger persists what it finds resolved on the sighting
 # (``resolved_by_run``), because the runs list only reaches the newest actions.
 # A task landed on the mandate's line is built either way; its ``line`` says
-# whether the base holds it yet (``belt.executor.line_merged``).
+# whether the base holds it yet (``belt.executor.line_merged``). The detail's
+# ``line`` block and the Foreman's THE LINE read git (``line_status``).
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
 # charter_for_mandate (the develop station's checks/recipes/goal read),
@@ -311,8 +312,10 @@ async def get_mandate(workspace_id: str, user_id: str, mandate_id: str) -> dict[
 
 
 async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
-    """Build the detail wire dict for a mandate doc — recent shifts + sightings
-    grouped by patrol."""
+    """Build the detail wire dict for a mandate doc — recent shifts, sightings
+    grouped by patrol, and its ``line`` block as git has it (never raises)."""
+    from pocketpaw_ee.cloud.belt.executor import line_status
+
     mandate_id = str(doc.id)
     workspace_id = doc.workspace
     recent_shifts = (
@@ -351,6 +354,7 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
         ],
         "sightings_by_patrol": by_patrol,
         "created_at": doc.createdAt,
+        "line": await line_status(doc.surface.repo_id, mandate_id),
     }
 
 
@@ -1100,6 +1104,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     #    foreman reads the open backlog (every sighting no landed task has
     #    resolved), not just what arrived since the last shift.
     from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.belt.executor import line_status
     from pocketpaw_ee.cloud.belt.orient import c4_lines
 
     charter_wire = _charter_to_wire(doc.charter)
@@ -1147,11 +1152,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         sightings=backlog["open"][:_BACKLOG_CAP],
         open_total=len(backlog["open"]),
         history=history,
-        line=[
-            {"shift_no": t["shift_no"], "title": t["title"], "state": t["line"]}
-            for t in backlog["tasks"]
-            if t.get("line")
-        ],
+        line=await line_status(doc.surface.repo_id, mandate_id),
         soul_context=soul_context,
         architecture=c4_lines(doc.surface.repo_id),
     )
