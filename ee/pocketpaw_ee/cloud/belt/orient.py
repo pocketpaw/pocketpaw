@@ -16,6 +16,13 @@
 #       container/component (name + first sentence), capped. The foreman gets
 #       these in its prompt; ORIENT uses them as its fallback.
 #
+# One pure mapper: ``block_component`` turns a Pulley block manifest into c4-gen's
+# ``Component`` (id, name, description, technology) plus its ``deps`` as sync
+# relationships. It writes nothing and has no caller yet: it is for blueprint
+# drafting (BF-14) and the line app's docs/c4/model.json writer (BF-15). C4 has no
+# slot for routes, tables or events, so they ride the description after the
+# block's own first sentence (the part ``c4_lines`` shows).
+#
 # Both blocks are owner-authored repo data (C4, symbols, shared-soul rules), so
 # they ride the prompt unfenced, after the task and charter.
 
@@ -81,6 +88,42 @@ def c4_lines(repo: str | Path) -> list[str]:
                 f"- {name} / {comp.get('name') or '?'}: {_first_sentence(comp.get('description'))}"
             )
     return _capped(lines, _C4_CHARS)
+
+
+def block_component(manifest: dict[str, Any]) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """A Pulley block manifest as ``(component, relationships)``: the c4-gen
+    ``Component`` fields, and one sync ``block -> dependency`` relationship per
+    entry in ``deps``. Pure: the caller decides where they go (blueprint
+    drafting, a line app's model.json). ``name``, ``version``, ``description``
+    and ``kind`` are required by Pulley's manifest schema, so they are indexed
+    directly. Pulley declares a table PREFIX, not tables, so tables render as
+    ``<prefix>*``."""
+    name = str(manifest["name"])
+    events = manifest.get("events") or {}
+    prefix = manifest.get("tablePrefix")
+    facts = [
+        ("Provides", manifest.get("provides") or []),
+        ("Routes", [r["path"] for r in manifest.get("routes") or []]),
+        ("Endpoints", [e["path"] for e in manifest.get("endpoints") or []]),
+        ("Tables", [f"{prefix}*"] if prefix else []),
+        ("Emits", events.get("emits") or []),
+        ("Consumes", events.get("consumes") or []),
+    ]
+    first = str(manifest["description"]).strip()
+    if not first.endswith((".", "!", "?")):
+        first += "."
+    rest = [f"{label}: {', '.join(values)}." for label, values in facts if values]
+    component = {
+        "id": name,
+        "name": name,
+        "description": " ".join([first, *rest]),
+        "technology": f"Pulley {manifest['kind']} block {manifest['version']}",
+    }
+    relationships = [
+        {"source": name, "target": dep, "description": f"depends on {dep} {rng}", "style": "sync"}
+        for dep, rng in sorted((manifest.get("deps") or {}).items())
+    ]
+    return component, relationships
 
 
 def _loom_dir(repo: Path) -> Path | None:
@@ -185,4 +228,11 @@ async def orient_block(run: Any, repo: Path, task: str, *, cwd: Path) -> tuple[s
     return "", note + "no world model"
 
 
-__all__ = ["ORIENT_TIMEOUT", "c4_lines", "loom_binary", "orient_block", "world_model_for"]
+__all__ = [
+    "ORIENT_TIMEOUT",
+    "block_component",
+    "c4_lines",
+    "loom_binary",
+    "orient_block",
+    "world_model_for",
+]
