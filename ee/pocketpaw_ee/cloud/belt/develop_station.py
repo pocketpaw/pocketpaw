@@ -3,21 +3,25 @@
 # ``ClaudeCodeDevelop`` is the production ``DevelopFn`` behind the headless
 # mandate dispatcher: one approved plan task in, a checked, reviewed unified
 # diff out, which ``HeadlessDevelopRunner`` attaches to the PENDING run (the
-# Instinct gate still decides; nothing here commits, pushes or merges outside a
-# throwaway worktree). Steps, in order:
+# Instinct gate still decides; nothing here pushes or merges into a base).
 #   PREPARE  bound repo inside ``POCKETPAW_BELT_REPO_ALLOWLIST`` (empty = refuse);
-#            ``git worktree add --detach`` at ``origin/<base>`` (fetched) or ``<base>``.
-#   ORIENT   LLM work only: ``orient.orient_block`` (loom world model, else the
-#            repo's C4 list) rides the develop + review prompts; a miss is a note.
+#            the start: the mandate's LINE (``belt/line/<id>``, ``executor.line_tip``)
+#            synced with the base first (merged into it → the line moves to it;
+#            base ahead → base merged in, in a throwaway worktree; conflict →
+#            the run stands down and a sighting is filed; refs move by
+#            compare-and-swap only), else ``origin/<base>`` (fetched) or ``<base>``;
+#            ``git worktree add --detach`` there.
+#   ORIENT   LLM work only: ``orient.orient_block`` (loom, else C4) rides the
+#            develop + review prompts; a miss is a note.
 #   WORK     a charter recipe → that command; else DEVELOP → ``claude -p`` in
 #            ``stream-json``, folded into the run's step feed (``belt/feed.py``,
 #            scrubbed + capped, stored before any error is raised, emptied when a
 #            develop starts; a failed save never fails the run). Seat output and
-#            error tails get worktree/repo paths relative, the OS user as ``user`` in ls -l/home.
+#            error tails get worktree/repo paths relative, the OS user as ``user``.
 #   CHECK    every charter check. LLM work only (a recipe skips both): FIX
 #            (``claude -p`` + the failure) while attempts last; REVIEW, read-only
 #            ``claude -p``, fails duplicates; strict ``{"verdict","notes"}``.
-#   DONE     ``git diff --cached --binary <base>``; refused when it touches
+#   DONE     ``git diff --cached --binary <start>``; refused when it touches
 #            ``.claude/``, ``.mcp.json``, ``.git``, ``.gitmodules`` or adds a secret.
 #   CLEANUP  always: remove the temp dir, then ``git worktree prune``.
 # Task text is injection-screened before PREPARE and fenced ``<untrusted>`` in
@@ -26,28 +30,24 @@
 #
 # Claude setup (the crew worker's, else ``POCKETPAW_FACTORY_CLAUDE_SETUP``):
 # ``strict`` (default, hosted) runs every seat with no settings files, MCP
-# servers or hooks. ``owner`` (a local factory on the owner's machine) puts the
-# worktree under ``POCKETPAW_FACTORY_WORKTREE_ROOT`` (required, so an owner seat
-# only works where the operator set one) so CLAUDE.md discovery walks up through
-# the owner's workspace, and drops those flags for develop/fix/review.
+# servers or hooks. ``owner`` (a local factory) puts the worktree under
+# ``POCKETPAW_FACTORY_WORKTREE_ROOT`` (required) so CLAUDE.md discovery walks up
+# through the owner's workspace, and drops those flags for develop/fix/review.
 # TRUST RULE, never break it: an owner-mode claude call only ever runs after
 # ``_restore_trusted`` put every ``_TRUST_NAMES`` entry back to the base commit.
-# A crew worker (``DevelopRequest.model`` / ``instructions``, from its Agent)
-# sets the develop and fix seats' ``--model`` and adds its instructions, fenced
-# ``<untrusted>`` (an agent owner edits them without ``belt.manage``), to their
-# prompts; the review seat keeps the factory default, independent of the worker.
+# A crew worker (``DevelopRequest.model`` / ``instructions``) sets the develop
+# and fix seats' ``--model`` and adds its instructions, fenced ``<untrusted>``,
+# to their prompts; the review seat keeps the factory default.
 #
 # Safety: ONE injectable ``Runner``, argv lists only (never a shell), charter
 # commands refused unless argv[0] is allowed (``dto.command_refusal``), an
 # allow-listed env (``_ENV_KEYS``), process-group kill on timeout/cancel, station
-# git with fsmonitor and hooks off, and the worktree ``.git`` file re-checked
-# after every agent step (INTEGRITY). claude gets the prompt on stdin, Read/
-# Glob/Grep (+ Edit/Write and Bash check rules on edit seats) scoped to
-# ``./**``, WebFetch/WebSearch/Task denied, in both setups.
-# Wired by ``wire_from_env`` (cloud startup) when ``POCKETPAW_MANDATE_DISPATCHER
-# =headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``; refused in a multi-tenant
-# process unless ``POCKETPAW_FACTORY_DEDICATED_HOST=1``, and in owner setup
-# without a worktree root.
+# git with fsmonitor and hooks off, the worktree ``.git`` file re-checked after
+# every agent step (INTEGRITY), claude tools path-scoped to ``./**`` with
+# WebFetch/WebSearch/Task denied. Wired by ``wire_from_env`` when
+# ``POCKETPAW_MANDATE_DISPATCHER=headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``;
+# refused in a multi-tenant process unless ``POCKETPAW_FACTORY_DEDICATED_HOST=1``,
+# and in owner setup without a worktree root.
 
 from __future__ import annotations
 
@@ -68,6 +68,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pocketpaw.security.redact import REDACT_PATTERNS, redact_output
+from pocketpaw_ee.cloud.belt.executor import (
+    GitFn,
+    LineError,
+    commit_of,
+    is_ancestor,
+    line_branch,
+    line_tip,
+    move_ref,
+)
 from pocketpaw_ee.cloud.belt.feed import fold_feed, stream_events
 from pocketpaw_ee.cloud.belt.headless import DevelopRequest, DevelopResult
 from pocketpaw_ee.cloud.belt.orient import orient_block
@@ -226,6 +235,12 @@ async def _default_charter_for(workspace_id: str, mandate_id: str) -> dict[str, 
     return await mandate_service.charter_for_mandate(workspace_id, mandate_id)
 
 
+async def _default_file_sighting(workspace_id: str, mandate_id: str, draft: dict[str, Any]) -> None:
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    await mandate_service.file_station_sighting(workspace_id, mandate_id, draft)
+
+
 async def _default_save_feed(
     workspace_id: str, action_id: str, stage: str, steps: list[dict[str, Any]], omitted: int
 ) -> None:
@@ -237,14 +252,15 @@ async def _default_save_feed(
 @dataclass
 class ClaudeCodeDevelop:
     """Production ``DevelopFn``: worktree → develop/recipe → checks → fix loop →
-    review → diff. ``run``, ``charter_for`` and ``save_feed`` are injectable for
-    tests."""
+    review → diff. ``run``, ``charter_for``, ``save_feed`` and ``file_sighting``
+    (a line's base conflict, as a backlog sighting) are injectable for tests."""
 
     run: Runner = run_subprocess
     charter_for: Callable[[str, str], Awaitable[dict[str, Any] | None]] = _default_charter_for
     save_feed: Callable[[str, str, str, list[dict[str, Any]], int], Awaitable[None]] = (
         _default_save_feed
     )
+    file_sighting: Callable[[str, str, dict[str, Any]], Awaitable[Any]] = _default_file_sighting
     max_fix_attempts: int = 2
 
     async def __call__(self, request: DevelopRequest) -> DevelopResult:
@@ -263,7 +279,7 @@ class ClaudeCodeDevelop:
             _charter_argv(command, "CHECK")
 
         repo = self._resolve_repo(request.repo or str(found.get("repo") or ""))
-        base_branch, start_ref = await self._resolve_base(repo, request.base_branch)
+        base_branch, start_ref, line_note = await self._resolve_base(repo, request)
 
         owner = request.setup == "owner" if request.setup else owner_setup()
         root: Path | None = None
@@ -416,6 +432,8 @@ class ClaudeCodeDevelop:
             if request.recipe:
                 lines.append(f"recipe: {request.recipe}")
             lines.append(f"setup: {'owner' if trust else 'strict'}")
+            if line_note:
+                lines.append(f"line: {line_note}")
             if request.worker:
                 lines.append(f"worker: {request.worker} ({_worker_note(request)})")
             lines.append(f"orient: {orient_note}")
@@ -455,11 +473,15 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"PREPARE: {err}")
         return path
 
-    async def _resolve_base(self, repo: Path, base_branch: str) -> tuple[str, str]:
-        """``(branch name, worktree start ref)``. The branch defaults to the
-        repo's checked-out branch; the start ref is ``origin/<branch>`` (after a
-        fetch) when an origin exists — the same rule as the belt executor."""
-        base = base_branch.strip()
+    async def _resolve_base(self, repo: Path, request: DevelopRequest) -> tuple[str, str, str]:
+        """``(base branch, worktree start ref, line note)``. The base defaults to
+        the repo's checked-out branch; the start is ``origin/<base>`` (after a
+        fetch) when an origin exists, else ``<base>`` — the belt executor's rule.
+        A mandate's run starts from its LINE instead, synced with the base
+        first: a line the base already holds (the captain merged it) moves to
+        the base; a base with commits the line lacks is merged into it
+        (``_merge_base_into``); history is never rewritten. The note says which."""
+        base = request.base_branch.strip()
         if not base:
             base = (await self._git(repo, "rev-parse", "--abbrev-ref", "HEAD")).strip()
             if base == "HEAD":
@@ -467,10 +489,104 @@ class ClaudeCodeDevelop:
         code, _out, _err = await self.run(
             [*_GIT, "remote", "get-url", "origin"], cwd=repo, timeout=_GIT_TIMEOUT
         )
-        if code == 0:
+        has_origin = code == 0
+        if has_origin:
             await self._git(repo, "fetch", "origin", base)
-            return base, f"origin/{base}"
-        return base, base
+        base_ref = f"origin/{base}" if has_origin else base
+        line = line_branch(request.mandate_id)
+        if line is None:
+            return base, base_ref, ""
+
+        async def git(*args: str) -> tuple[int, str, str]:
+            return await self.run([*_GIT, *args], cwd=repo, timeout=_GIT_TIMEOUT)
+
+        try:
+            tip, local = await line_tip(git, line, has_origin=has_origin)
+        except LineError as exc:
+            raise DevelopStationError(f"PREPARE: {exc}") from None
+        if not tip:
+            return base, base_ref, f"{line} (new, from {base})"
+        base_sha = await commit_of(git, base_ref)
+        if not base_sha:
+            raise DevelopStationError(f"PREPARE: base {base_ref!r} not found")
+        if await is_ancestor(git, tip, base_sha):
+            await self._move_line(git, line, base_sha, local)
+            note = f"{line} (on {base})" if tip == base_sha else f"{line} (merged; moved to {base})"
+            return base, base_sha, note
+        if await is_ancestor(git, base_sha, tip):
+            await self._move_line(git, line, tip, local)
+            return base, tip, line
+        merged = await self._merge_base_into(repo, request, line, tip, base, base_sha)
+        await self._move_line(git, line, merged, local)
+        return base, merged, f"{line} ({base} merged in)"
+
+    @staticmethod
+    async def _move_line(git: GitFn, line: str, new: str, old: str) -> None:
+        """Move the local line ref to ``new`` by compare-and-swap (no-op when it
+        is there already)."""
+        if new != old and not await move_ref(git, line, new, old):
+            raise DevelopStationError(
+                f"PREPARE: {line} moved while it was synced with the base; re-run"
+            )
+
+    async def _merge_base_into(
+        self, repo: Path, request: DevelopRequest, line: str, tip: str, base: str, base_sha: str
+    ) -> str:
+        """Merge the base into the line in a throwaway worktree and return the
+        merge commit (the caller swaps the ref). A conflict files a sighting
+        (keyed on the line tip, so a standing conflict files once) and stands
+        the run down; the line is untouched."""
+        tmp = Path(tempfile.mkdtemp(prefix="belt-line-"))
+        worktree = tmp / "wt"
+        try:
+            await self._git(repo, "worktree", "add", "--detach", str(worktree), tip)
+            code, out, err = await self.run(
+                [
+                    *_GIT,
+                    "merge",
+                    "--no-ff",
+                    "--no-edit",
+                    "-m",
+                    f"Merge {base} into {line}",
+                    base_sha,
+                ],
+                cwd=worktree,
+                timeout=_GIT_TIMEOUT,
+            )
+            if code == 0:
+                return (await self._git(worktree, "rev-parse", "HEAD")).strip()
+            listed = await self._git(worktree, "diff", "--name-only", "--diff-filter=U")
+            files = [f for f in listed.splitlines() if f.strip()]
+            if not files:
+                raise DevelopStationError(
+                    f"PREPARE: merging {base} into {line} failed: {_tail(err or out, worktree)}"
+                )
+            what = (
+                f"{base} conflicts with the line {line} in {', '.join(files[:5])}: merge "
+                f"{base} into {line} by hand, then re-run"
+            )
+            try:
+                await self.file_sighting(
+                    request.workspace_id,
+                    request.mandate_id,
+                    {
+                        "patrol": "line",
+                        "severity": 4,
+                        "summary": what[:280],
+                        "evidence": {
+                            "dedup_key": f"line-conflict:{line}:{tip}",
+                            "line": line,
+                            "base": base,
+                            "files": files[:20],
+                        },
+                    },
+                )
+            except Exception:  # noqa: BLE001 — the run still stands down with the reason
+                logger.warning("belt: could not file the line conflict sighting", exc_info=True)
+            raise DevelopStationError(f"PREPARE: {what}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            await self.run([*_GIT, "worktree", "prune"], cwd=repo, timeout=_GIT_TIMEOUT)
 
     async def _git(self, cwd: Path, *args: str) -> str:
         code, out, err = await self.run([*_GIT, *args], cwd=cwd, timeout=_GIT_TIMEOUT)
