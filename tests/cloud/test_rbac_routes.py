@@ -10,10 +10,15 @@
 #     we are testing. They run end-to-end against the fake User injected below.
 #
 # What IS mocked:
-#   - current_active_user — we inject FakeUser objects to control identity
-#     and workspace membership without a live MongoDB/JWT stack.
+#   - current_active_user AND current_optional_user — override_cloud_user
+#     injects FakeUser objects into both, to control identity and workspace
+#     membership without a live MongoDB/JWT stack. request_context reads
+#     current_optional_user; overriding only the first 401s every workspace
+#     route before its role check runs.
 #   - require_license — license validation requires env secrets; we bypass
 #     it so guard tests are not coupled to the license subsystem.
+#   - KnowledgeService.ingest_document_to_scope — the KB compile step, which
+#     would otherwise call the real agent backend.
 #   - Service layer (Beanie calls) — for happy-path 200 tests only. The
 #     service runs after the guard passes; mocking it lets us assert on the
 #     HTTP status without a real database.
@@ -34,6 +39,8 @@ from fastapi.testclient import TestClient
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.license import require_license
+
+from tests.cloud.conftest import override_cloud_user
 
 # ---------------------------------------------------------------------------
 # Fake user builders
@@ -124,7 +131,7 @@ def _make_agents_app(user: _FakeUser | None = None) -> FastAPI:
     if user is None:
         app.dependency_overrides[current_active_user] = _unauthenticated()
     else:
-        app.dependency_overrides[current_active_user] = lambda: user
+        override_cloud_user(app, user)
     return app
 
 
@@ -139,7 +146,7 @@ def _make_workspace_app(user: _FakeUser | None = None) -> FastAPI:
     if user is None:
         app.dependency_overrides[current_active_user] = _unauthenticated()
     else:
-        app.dependency_overrides[current_active_user] = lambda: user
+        override_cloud_user(app, user)
     return app
 
 
@@ -154,7 +161,7 @@ def _make_kb_app(user: _FakeUser | None = None) -> FastAPI:
     if user is None:
         app.dependency_overrides[current_active_user] = _unauthenticated()
     else:
-        app.dependency_overrides[current_active_user] = lambda: user
+        override_cloud_user(app, user)
     return app
 
 
@@ -466,7 +473,10 @@ class TestRoleBoundary:
         test that a MEMBER can pass the write guard too (no regression into
         accidentally requiring ADMIN for writes).
         """
-        with patch("pocketpaw_ee.cloud.kb.router._kb", return_value={"ingested": 1}):
+        with patch(
+            "pocketpaw_ee.cloud.kb.router.KnowledgeService.ingest_document_to_scope",
+            new=AsyncMock(return_value={"ingested": 1}),
+        ):
             app = _make_kb_app(user=_member_of("ws1"))
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(

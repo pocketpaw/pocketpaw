@@ -1,8 +1,8 @@
 # test_tasks_router.py — router-layer tests for the Tasks entity.
-# Created: 2026-05-13 — PR 2 of 3 for Mission Control's backend.
 #   Asserts status-code mapping, request body validation, and tenant
 #   isolation at the HTTP boundary. Uses the shared ``mongo_db`` fixture
-#   plus a per-test FastAPI app with auth deps overridden.
+#   plus a per-test FastAPI app with the license gate and both auth deps
+#   overridden (``override_cloud_user``).
 """Router smoke tests for the Tasks entity."""
 
 from __future__ import annotations
@@ -11,23 +11,24 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.tasks.router import router
+
+from tests.cloud.conftest import fake_workspace_user, override_cloud_user
 
 
 @pytest_asyncio.fixture
-async def app_client(mongo_db) -> AsyncClient:
-    from pocketpaw_ee.cloud.auth import current_active_user
-
-    class _U:
-        id = "creator-1"
-        active_workspace = "w1"
-        workspaces: list = []
-
+async def app(mongo_db) -> FastAPI:
     app = FastAPI()
     add_error_handler(app)
     app.include_router(router, prefix="/api/v1")
-    app.dependency_overrides[current_active_user] = lambda: _U()
+    app.dependency_overrides[require_license] = lambda: None
+    override_cloud_user(app, fake_workspace_user(role="member", user_id="creator-1"))
+    return app
 
+
+@pytest_asyncio.fixture
+async def app_client(app) -> AsyncClient:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as client:
         yield client
@@ -116,6 +117,14 @@ async def test_get_returns_404_for_missing(app_client) -> None:
 
 async def test_get_returns_404_for_malformed_id(app_client) -> None:
     resp = await app_client.get("/api/v1/tasks/not-an-objectid")
+    assert resp.status_code == 404
+
+
+async def test_get_returns_404_for_other_workspace(app, app_client) -> None:
+    """A task in w1 is invisible (uniform 404) to a caller whose workspace is w2."""
+    created = (await app_client.post("/api/v1/tasks", json=_create_body())).json()
+    override_cloud_user(app, fake_workspace_user(role="admin", workspace_id="w2", user_id="u-w2"))
+    resp = await app_client.get(f"/api/v1/tasks/{created['id']}")
     assert resp.status_code == 404
 
 
