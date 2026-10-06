@@ -119,14 +119,20 @@ def _render_brief(brief: dict[str, Any], model_name: str) -> str:
                 components.append(part)
 
     def by_path(entities: list[dict[str, Any]]) -> list[str]:
+        """Symbols grouped per file; a path-less entity (a C4 component in a
+        model with no symbol extractor) on its own line with its description."""
         grouped: dict[str, list[str]] = {}
+        loose: list[str] = []
         for e in entities or []:
             label = e.get("symbol") or e.get("name") or "?"
-            kind = (e.get("attrs") or {}).get("kind")
-            grouped.setdefault(e.get("path") or "?", []).append(
-                f"{label} ({kind})" if kind else label
-            )
-        return [f"- {path}: {', '.join(names)}" for path, names in grouped.items()]
+            attrs = e.get("attrs") or {}
+            if not e.get("path"):
+                what = _first_sentence(attrs.get("description"))
+                loose.append(f"- {e.get('kind') or 'entity'} {label}: {what}")
+                continue
+            kind = attrs.get("kind")
+            grouped.setdefault(e["path"], []).append(f"{label} ({kind})" if kind else label)
+        return [f"- {path}: {', '.join(names)}" for path, names in grouped.items()] + loose
 
     lines = [f"EXISTING ARCHITECTURE (source of truth: loom world model {model_name})"]
     if components:

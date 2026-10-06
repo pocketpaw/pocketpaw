@@ -1066,7 +1066,8 @@ BRIEF = {
             "path": "src/feature_store.py",
             "symbol": "FeatureStore",
             "attrs": {"kind": "class"},
-        }
+        },
+        {"kind": "component", "name": "Feature Engine", "attrs": {"description": "Owns. More."}},
     ],
     "position": ["FeatureStore > feature_store.py > Feature Engine > Toy App > Toy"],
     "blast_radius": [],
@@ -1126,6 +1127,7 @@ async def test_orient_brief_lands_in_the_develop_and_review_prompts(repo, monkey
     for prompt in (develop, review):
         block = prompt.split("EXISTING ARCHITECTURE", 1)[1]
         assert "src/feature_store.py: FeatureStore (class)" in block
+        assert "- component Feature Engine: Owns." in block
         assert "Components this task touches: Feature Engine; Toy App; Toy" in block
         assert "[boundary_owner] Feature Engine: Owns features." in block
         assert "do not create a second copy of anything listed" in block
