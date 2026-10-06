@@ -129,7 +129,7 @@ class _RecordingModel:
         self.fail = fail
         self.calls: list[dict[str, Any]] = []
 
-    def build(self, _settings: Any) -> Any:
+    def build(self, _settings: Any, _spec: str | None = None) -> Any:
         from pydantic_ai.models.function import FunctionModel
 
         async def _stream(messages, info):

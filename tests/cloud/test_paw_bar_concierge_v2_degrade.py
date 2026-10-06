@@ -386,7 +386,7 @@ class _FailingModel(_RecordingModel):
         super().__init__(reply=reply or [])
         self.exc = exc
 
-    def build(self, _settings: Any) -> Any:
+    def build(self, _settings: Any, _spec: str | None = None) -> Any:
         from pydantic_ai.models.function import FunctionModel
 
         async def _stream(messages, info):
@@ -407,7 +407,7 @@ class _FlakyModel(_RecordingModel):
         self.exc = exc
         self.failures = failures
 
-    def build(self, _settings: Any) -> Any:
+    def build(self, _settings: Any, _spec: str | None = None) -> Any:
         from pydantic_ai.models.function import FunctionModel
 
         async def _stream(messages, info):
@@ -637,7 +637,7 @@ async def test_tags_are_not_sent_to_a_provider_that_is_not_our_proxy(monkeypatch
 
     settings = get_settings().model_copy(update={"pawbar_concierge_model": "anthropic:x"})
     out = concierge_runtime._model_settings(
-        settings, "ws-1", tags=["pawbar_site:s", "pawbar_widget:w"]
+        settings, "anthropic:x", "ws-1", tags=["pawbar_site:s", "pawbar_widget:w"]
     )
     assert "extra_body" not in out
     assert "openai_user" not in out

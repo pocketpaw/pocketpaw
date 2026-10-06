@@ -15,6 +15,8 @@
 #   * ``_settings`` -> the settings the run was given;
 #   * the catalog store -> a throwaway ``PawBarStore`` holding the case's widget,
 #     so the per-turn catalog and card hydration read real rows;
+#   * ``_turn_model_spec`` -> the deployment's ``pawbar_concierge_model`` (no Mongo
+#     agent read), since the gate certifies that model and no owner's pick;
 #   * ``_build_model`` -> a replay ``FunctionModel`` in recorded mode, and left
 #     alone in real mode (the deployment's configured pydantic_ai model).
 #
@@ -109,6 +111,9 @@ def _seams(settings: Any, replay: str | None, seen: dict[str, Any]) -> Iterator[
     async def _no_usage(**_kw: Any) -> list[Any]:
         return []
 
+    async def _deployment_spec(*_a: Any, **_kw: Any) -> str | None:
+        return concierge_runtime._model_spec(settings)
+
     async def _create_run(spec: Any) -> Any:
         from types import SimpleNamespace
 
@@ -128,11 +133,12 @@ def _seams(settings: Any, replay: str | None, seen: dict[str, Any]) -> Iterator[
             stack.enter_context(patch(f"{runs}.{name}", _noop))
         stack.enter_context(patch(f"{runs}.find_run_usage_since", _no_usage))
         stack.enter_context(patch.object(concierge_runtime, "_settings", lambda: settings))
+        stack.enter_context(patch.object(concierge_runtime, "_turn_model_spec", _deployment_spec))
         stack.enter_context(patch.object(concierge_runtime, "build_prompt", _build_prompt))
         stack.enter_context(patch.object(concierge_runtime, "FenceFilter", _RecordingFilter))
         if replay is not None:
             stack.enter_context(
-                patch.object(concierge_runtime, "_build_model", lambda _s: _replay_model(replay))
+                patch.object(concierge_runtime, "_build_model", lambda *_a: _replay_model(replay))
             )
         yield
 
