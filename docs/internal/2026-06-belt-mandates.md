@@ -5,8 +5,9 @@
      instructions and setup), the headless develop station (strict and owner
      Claude setups, the trust restore, ORIENT) and its security posture, the
      architecture context the foreman and review get, the mandate's line
-     branch (base sync, landing, re-develop, one PR), endpoints (incl. the digest), env vars, and the remaining demo-bar
-     concessions. -->
+     branch (base sync, landing, re-develop, one PR, its state on the wire and
+     the UI surfaces), endpoints (incl. the digest), env vars, and the
+     remaining demo-bar concessions. -->
 
 # Belt Mandates — the standing JOB primitive
 
@@ -241,13 +242,18 @@ shift, so work it skipped or that failed comes back on the next shift:
   status, the cited sighting ids and, on failure, the run's `error`. Prompt
   rule 7 says an in-flight task is never planned again, and the existing rule
   says a failed approach is not repeated without stating what changed.
-- **The line.** Every task landed on the mandate's line branch is listed under
-  `THE LINE` (and suffixed on its history row) as `on the line
-  belt/line/<id>, awaiting merge into <base>`, or `merged into <base>` once
-  the base holds its commit (`belt.executor.line_merged`: an ancestor of
+- **The line.** `THE LINE` is read from git (`belt.executor.line_status`, the
+  same view as the mandate detail's `line` block): `<line>: N commit(s) not in
+  <base> yet, awaiting the captain's merge:` followed by those commits'
+  subjects (merges left out, newest first, capped at 30), or `everything on
+  <line> is merged into <base>`, or nothing landed yet. A commit no run
+  recorded (a captain's fixup) counts too, and old landings never drop out of
+  a runs window. Each landed task's history row is suffixed `on the line
+  belt/line/<id>, awaiting merge into <base>` or `merged into <base>` once the
+  base holds that run's commit (`belt.executor.line_merged`: an ancestor of
   `origin/<base>` as last fetched, or of the local base). Either way it is
   built: its sightings are resolved like any landed task's, and the prompt says
-  never to plan that work again. A squash or rebase merge leaves the commit
+  never to plan that work again. A squash or rebase merge leaves the commits
   outside the base, so such a line keeps reading "awaiting merge"; merge line
   PRs with a merge commit.
 - **Gate teaching.** A rejection or edit at the plan gate is filed as a
@@ -276,7 +282,7 @@ still at the plan gate, and the last 3 shifts'.
 | POST | `/belt/mandates` | `belt.manage` | Create (charter body + `patrols` senses toggles + optional `upstream` watch list + optional `crew`) → `{mandate}` |
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
 | GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
-| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts, sightings-by-patrol |
+| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts, sightings-by-patrol, and the `line` block (see *The line: one branch per mandate*; the `{mandate}` that create, crew and autopilot return carries it too) |
 | PUT | `/belt/mandates/{id}/crew` | `belt.manage` | Replace the crew roster: `{crew: [{agent_id, role: dev\|reviewer\|foreman, concurrency (1-8), setup?: owner\|strict}]}` → `{mandate}`; see *The crew* below |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
@@ -591,13 +597,21 @@ before every owner-mode claude call (DEVELOP, each FIX, REVIEW) the station
 deletes every entry named `.claude`, `CLAUDE.md`, `CLAUDE.local.md`,
 `AGENTS.md` or `.mcp.json`, at any depth, whether tracked, untracked or
 gitignored (a symlink is unlinked, never followed), then runs
-`git checkout <base sha> -- <those paths tracked at base>`. The settings,
-hooks, MCP servers and instructions that load are always the committed ones.
-The `.git`-file integrity check and the DONE refusal of diffs touching
-`.claude/` or `.mcp.json` stay; for LLM runs the restore before REVIEW already
-reverts any plant, so the DONE rule is defense in depth (a recipe, which has
-no claude step, still meets it). A consequence: an owner-mode run cannot land
-an edit to a CLAUDE.md or AGENTS.md file; the restore reverts it.
+`git checkout <base sha> -- <those paths tracked at base>`. The base sha is
+the BASE's commit (`origin/<base>` with a remote, else the local base), never
+the mandate's line: the line holds commits a gate approved but the captain has
+not merged. The settings, hooks, MCP servers and instructions that load are
+always the base's committed ones. The `.git`-file integrity check stays, and
+DONE refuses any diff touching one of those names (`.claude/`, `.mcp.json`,
+CLAUDE.md, CLAUDE.local.md, AGENTS.md, at any depth) in both setups, so no
+factory run puts agent instructions on a line. For LLM runs in owner setup the
+restore before REVIEW already reverts any plant, so the DONE rule is defense in
+depth there (a recipe, which has no claude step, still meets it). Two
+consequences: no mandate run can change a CLAUDE.md or AGENTS.md file (do it
+on the base by hand), and in owner setup a line whose agent config differs
+from the base (only a hand commit on the line can do that) fails every run at
+DONE, because the restore's revert is a protected path; merge the line or move
+that change to the base.
 
 The foreman and the autopilot personas stay strict in both setups: they read
 untrusted third-party text, so they get the architecture by prompt injection
@@ -695,6 +709,42 @@ the outcome (`pr_url` stays empty) and the next landing pushes again. Failing
 the run would make the Foreman re-plan work the line already holds. A per-run
 `feat/belt-<id>` branch keeps the old rule: a push or PR failure fails the run
 and deletes the local branch, so a retry can branch again.
+
+**On the wire.** The mandate detail (`GET /belt/mandates/{id}`) carries a
+`line` block read from git (`belt.executor.line_status`; no fetch, every git
+call bounded by the executor's subprocess timeout):
+
+```
+line: {branch, base, exists, ahead, merged, pr_url, subjects}
+  branch    belt/line/<mandate id> (null when the id is not an ObjectId)
+  base      the repo's checked-out branch, the develop station's default base
+  exists    the local line ref is there; false on any git error or timeout
+  ahead     commits on the line that neither origin/<base> (as last fetched)
+            nor the local base holds; the line's own base-sync merges count
+  merged    ahead == 0: the tip is in the base
+  subjects  those commits' subjects without the merges, newest first, max 30
+  pr_url    the line's open PR (gh pr list), looked up only with an origin
+            while ahead > 0; null without one or on any gh failure
+```
+
+`GET /belt/mandates` does not carry it: that would be several git calls and a
+`gh` call per mandate. `belt_run_updated` names the landing `branch` (the
+line, for a mandate run) next to `pr_url`, so the run chip updates from the
+bus without a refetch.
+
+**In the UI** (paw-enterprise) the line shows in three places: the per-diff
+approve confirm names the line (`belt/line/<id>`) and says the captain merges
+it into the base when ready; the run card and run page show the line as the
+run's branch chip once it lands; the mandate page's Line panel shows the
+branch, how many commits are ahead of the base or that it is merged, and the
+line's PR, or the `git merge --no-ff belt/line/<id>` command to run on the
+base when there is none.
+
+**Merge line PRs with a merge commit** (`--no-ff`, GitHub's "Create a merge
+commit"), not a squash or a rebase. A squash writes new commits, so the
+line's own commits never become ancestors of the base: `ahead` never drops,
+`merged` stays false, history rows keep reading "awaiting merge", and the
+next run's base sync merges the squashed copy back into the line.
 
 **Re-develop.** Two runs of one shift develop from the same line tip. Once the
 first lands, the second's patch may no longer apply on the moved line (or,
@@ -828,7 +878,8 @@ What the station scrubs or blocks:
   (`--strict-mcp-config`) and no hooks (`disableAllHooks`), so a `.claude/` or
   `.mcp.json` planted in the worktree never loads. In the owner setup the
   develop, fix and review calls load the owner's config, and the trust restore
-  puts the worktree's agent config back to the base commit before each call;
+  puts the worktree's agent config back to the base commit (never the line)
+  before each call;
   the foreman and autopilot stay strict. Auth is the CLI's
   keychain/OAuth login; never `--bare`, which forces API-key auth. Tools are
   limited with `--tools` and the allow rules are scoped to the worktree
@@ -838,9 +889,10 @@ What the station scrubs or blocks:
 - **Git.** Station git calls run with `core.fsmonitor=false` and
   `core.hooksPath=/dev/null`; the worktree `.git` file is snapshotted and
   re-checked after every agent step.
-- **The diff.** Refused if it touches `.claude/`, `.mcp.json`, `.git` or
-  `.gitmodules`, or if an added line matches a `security.redact` credential
-  pattern (the error never echoes the value).
+- **The diff.** Refused if it touches agent config (`.claude/`, `.mcp.json`,
+  CLAUDE.md, CLAUDE.local.md, AGENTS.md), `.git` or `.gitmodules` at any
+  depth, or if an added line matches a `security.redact` credential pattern
+  (the error never echoes the value).
 - **Text.** Output tails, prompts' failure text and `headless_error` go through
   `security.redact`. Task text, check output and the diff sit in `<untrusted>`
   blocks the prompts tell the model to treat as data, and task text the
@@ -859,8 +911,9 @@ Residual risks:
   tells it to. There is no OS sandbox yet; the next step is a container or
   `sandbox-exec` runner for checks and recipes.
 - Strict setup: the worktree's `CLAUDE.md` files can still load, so text
-  written in DEVELOP can steer FIX and REVIEW. That is not host exec, and the
-  human gate sees the hunk. The owner setup's trust restore closes this.
+  written in DEVELOP can steer FIX and REVIEW within that run. That is not host
+  exec, and DONE refuses the hunk, so it never reaches the line. The owner
+  setup's trust restore closes it inside the run too.
 - Owner setup: the owner's hooks, MCP servers and permission settings apply to
   every develop, fix and review call. User-level Stop hooks may fire on each
   call (session-log noise, rebuild triggers); whether workspace-level hooks
@@ -996,7 +1049,10 @@ logged background crashes. It also pins the owner setup (no isolation flags,
 the tool rules kept, the worktree under the root, strict unchanged, the
 worktree-root refusal) and the trust restore (planted `.claude/settings.json`,
 `CLAUDE.md`, nested and gitignored plants, a symlinked `.claude` and an
-untracked `.mcp.json` are all back to base before FIX and REVIEW), ORIENT (the
+untracked `.mcp.json` are all back to base before FIX and REVIEW; on a
+mandate's line the seats get the base's CLAUDE.md, never the line's, and a line
+whose agent config differs fails at DONE), DONE refusing CLAUDE.md, AGENTS.md
+and CLAUDE.local.md diffs like `.claude/` and `.mcp.json`, ORIENT (the
 loom argv, the block in the develop and review prompts, the review's duplicate
 rule, the C4 fallback, the "no world model" note, recipes skipping it), the
 foreman's C4 list (`test_belt_mandates.py` checks the shift wires it in) and the
@@ -1035,12 +1091,18 @@ pushed and one PR is reused; a line pushed ahead on origin is where the next
 run starts; a PR failure after the swap keeps the landing; a run with no
 mandate keeps its own branch (a PR failure fails it and deletes the branch);
 the ref move is a compare-and-swap; the line name only comes from a real
-mandate id. `test_belt_mandates.py` checks the Foreman reads line work as
-built, awaiting merge then merged, and that a station sighting files once.
-`tests/mutations/belt_factory_runs.json` breaks each of these on purpose
-(the `feed:` entries for the feed, the `line:` ones for the line). CI runs these in the "Belt mandates and the
-craft factory develop station" step (`tests/cloud` is outside the default
-addopts).
+mandate id; `line_status` reads ahead, merged and subjects from git (a base
+commit the line lacks never counts), looks up the open PR only with an origin
+while unmerged, and reads exists=false on a missing repo, a non-mandate id or a
+timed-out git. `test_belt_mandates.py` checks the Foreman reads line work as
+built, awaiting merge then merged, with THE LINE and the detail's `line` block
+from git (a commit no run recorded shows too), a repo with no line reading
+exists=false, and that a station sighting files once. `test_belt_console.py`
+checks a landing's `belt_run_updated` names its branch.
+`tests/mutations/belt_factory_runs.json` breaks each of these on purpose (the
+`feed:` entries for the feed, the `line:` ones for the line). CI runs these in
+the "Belt mandates and the craft factory develop station" step (`tests/cloud`
+is outside the default addopts).
 
 `tests/cloud/test_belt_crew.py` pins the crew: the roster through create, the
 crew route, GET and a reload; the 422s (another workspace's agent, public or
