@@ -860,6 +860,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     #    foreman reads the open backlog (every sighting no landed task has
     #    resolved), not just what arrived since the last shift.
     from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.belt.orient import c4_lines
 
     charter_wire = _charter_to_wire(doc.charter)
     since = last.createdAt if last else None
@@ -907,6 +908,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         open_total=len(backlog["open"]),
         history=history,
         soul_context=soul_context,
+        architecture=c4_lines(doc.surface.repo_id),
     )
     try:
         plan = await foreman_mod.plan_shift(context)

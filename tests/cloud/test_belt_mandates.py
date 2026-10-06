@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -391,6 +392,50 @@ async def test_no_action_stands_down(tmp_path, mongo_db, store, journal, graph, 
     # The pawprints feed reads the stand-down.
     prints = client.get(f"/belt/mandates/{mandate_id}/pawprints").json()["pawprints"]
     assert [p["kind"] for p in prints] == ["stood_down"]
+
+
+async def test_shift_gives_the_foreman_the_repo_c4_components(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch
+):
+    """The shift trigger reads the bound repo's C4 model into the foreman's
+    prompt, so the foreman plans against what already exists."""
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "c4-repo"
+    (repo / "docs/c4").mkdir(parents=True)
+    (repo / "docs/c4/model.json").write_text(
+        json.dumps(
+            {
+                "scope": "toy",
+                "model": {
+                    "systems": [
+                        {
+                            "id": "toy",
+                            "containers": [
+                                {
+                                    "name": "Toy App",
+                                    "components": [
+                                        {"name": "Dep Bumper", "description": "Bumps pins."}
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    prompts: list[str] = []
+    real_plan = foreman.MockLlm.plan
+
+    async def capture(self, *, prompt, context):
+        prompts.append(prompt)
+        return await real_plan(self, prompt=prompt, context=context)
+
+    monkeypatch.setattr(foreman.MockLlm, "plan", capture)
+    mandate_id = _create_mandate(client, repo)
+    assert client.post(f"/belt/mandates/{mandate_id}/shift").status_code == 200
+    assert len(prompts) == 1
+    assert "- Toy App / Dep Bumper: Bumps pins." in prompts[0]
 
 
 # ---------------------------------------------------------------------------
