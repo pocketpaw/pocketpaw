@@ -4980,7 +4980,7 @@ refused only when:
 |--------|------|
 | `invalid_name` / `invalid_range` | Not a valid npm name, or not a version, range or dist-tag. |
 | `non_registry_spec` | git, url, file, tarball, `npm:` alias or GitHub shorthand. |
-| `toolchain_reserved` | svelte, `@sveltejs/*`, vite, react, react-dom, `@vitejs/*`, tailwindcss, `@tailwindcss/*`, `@ripple-ui/*`, valibot, `@noble/hashes`, `@cloudflare/*`. The generator provides these. |
+| `toolchain_reserved` | The name is reserved for the build toolchain by the vendored paw-sites allowlist. None are today: svelte, vite, react and the rest may be declared, and the declared version wins over the generator's pin. |
 | `not_found` / `no_eligible_version` | Not on the registry, or no version matches the range / the dist-tag does not exist. The reason names `latest` (or the known tags). |
 | `registry_unavailable` | The registry could not be read and the request was a range or tag, which needs it. Retryable. An exact version is accepted as given instead, with an `unverified` warning. |
 

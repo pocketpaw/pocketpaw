@@ -151,7 +151,9 @@ def test_author_packages_drops_ranges_and_bad_names():
     assert dm.author_packages({"paw.dependencies.json": text}) == {"three": "0.170.0"}
 
 
-def test_the_toolchain_list_matches_the_contract():
+def test_no_toolchain_name_is_reserved():
+    """paw-sites retired TOOLCHAIN_RESERVED; the vendored allowlist carries none."""
+    assert dm.TOOLCHAIN_RESERVED == ()
     for name in (
         "svelte",
         "@sveltejs/kit",
@@ -165,9 +167,8 @@ def test_the_toolchain_list_matches_the_contract():
         "valibot",
         "@noble/hashes",
         "@cloudflare/workers-types",
+        "three",
     ):
-        assert dm.is_toolchain_reserved(name), name
-    for name in ("three", "gsap", "motion", "svelte-motion", "reactive", "@noble/curves"):
         assert not dm.is_toolchain_reserved(name), name
 
 

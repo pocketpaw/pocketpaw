@@ -54,15 +54,6 @@
     ]
   },
   {
-    "label": "PP-1 resolver: toolchain names are accepted as author packages, so an author can pin svelte/react/vite to a version the generator's toolchain was never vetted against",
-    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "    if is_toolchain_reserved(req.name):",
-    "replace": "    if False:",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
-    ]
-  },
-  {
     "label": "PP-1 resolver: git / url / file / alias specs pass as ranges",
     "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
     "find": "    if _NON_REGISTRY_RE.search(req.name) or _NON_REGISTRY_RE.search(req.range):",

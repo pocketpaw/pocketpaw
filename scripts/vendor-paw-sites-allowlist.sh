@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 # scripts/vendor-paw-sites-allowlist.sh -- re-vendor paw-sites' dependency allowlist.
 #
-# Created 2026-10-02 (fix/canon-cross-repo-pins, CN-8). paw-sites owns the author
-# dependency rules (src/allowlist.ts: VETTED_DEPENDENCIES, TOOLCHAIN_RESERVED,
-# MAX_AUTHOR_PACKAGES) and prints them with `paw-sites-gen allowlist`. pocketpaw
+# paw-sites owns the author dependency rules (src/allowlist.ts: VETTED_DEPENDENCIES,
+# AUTHOR_DECLARABLE, the retired-and-empty TOOLCHAIN_RESERVED) and prints them with
+# `paw-sites-gen allowlist`; maxAuthorPackages is printed as null (no cap). pocketpaw
 # commits that output as ee/pocketpaw_ee/sites/paw-sites-allowlist.json, which
 # vetted_pins and dependency_manifest read. This script rewrites the JSON plus
 # paw-sites-allowlist.pin.json (commit + sha256);
 # tests/ee/sites/test_paw_sites_allowlist_vendored.py fails when the two disagree.
 #
-# Updated 2026-10-02 (CN-8 review): no worktree and no `bun install` any more.
-# `git archive <commit> src` goes into a temp dir and bun imports allowlist.ts on its
-# own (its import closure is node:module + errors.ts, no packages), so no ripple
+# No worktree and no `bun install`: `git archive <commit> src` goes into a temp dir
+# and bun imports allowlist.ts on its own (its import closure is node:module + errors.ts, no packages), so no ripple
 # checkout is needed. The print below mirrors runAllowlist() in paw-sites
 # src/cli.ts key for key; if that function's output changes, change this too (the
-# reviewer confirmed identical bytes against `paw-sites-gen allowlist` at 057194b).
+# output matched `paw-sites-gen allowlist` byte for byte at 170a273).
 #
 # This is the COMMITTED copy. scripts/vendor-paw-sites.sh still writes the deploy
 # copy (deploy/paw-sites/allowlist.json) that the image ships beside the generator.
@@ -41,7 +40,6 @@ cat > "$TMP/print.ts" <<'TS'
 import {
   AUTHOR_DECLARABLE,
   ENGINE_TOOLCHAIN_RESERVED,
-  MAX_AUTHOR_PACKAGES,
   TOOLCHAIN_RESERVED,
   VETTED_DEPENDENCIES
 } from './src/allowlist.ts';
@@ -54,7 +52,7 @@ console.log(
     pinned,
     toolchainReserved: TOOLCHAIN_RESERVED,
     engineToolchainReserved: ENGINE_TOOLCHAIN_RESERVED,
-    maxAuthorPackages: MAX_AUTHOR_PACKAGES,
+    maxAuthorPackages: null,
     vetted: VETTED_DEPENDENCIES
   })
 );
@@ -68,6 +66,6 @@ import hashlib, json, sys
 dest, pin, commit = sys.argv[1:]
 data = json.load(open(pin, encoding="utf-8"))
 data.update(source_commit=commit, sha256=hashlib.sha256(open(dest, "rb").read()).hexdigest())
-open(pin, "w", encoding="utf-8").write(json.dumps(data, indent=2) + "\n")
+open(pin, "w", encoding="utf-8", newline="\n").write(json.dumps(data, indent=2) + "\n")
 print(f"[vendor-paw-sites-allowlist] {commit[:7]} sha256 {data['sha256']}")
 PY
