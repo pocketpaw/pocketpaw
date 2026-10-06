@@ -518,12 +518,49 @@
     ]
   },
   {
+    "label": "the host's OS account reads user wherever it is a word, so the images' pocketpaw package and paths read user",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "text = re.sub(home, r\"\\1user\", text)",
+    "replace": "text = re.sub(r\"(?<!\\w)\" + re.escape(me) + r\"(?!\\w)\", \"user\", text)",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account",
+      "tests/cloud/test_belt_feed.py::test_a_check_tail_carries_no_host_user_name"
+    ]
+  },
+  {
+    "label": "a home dir (/home/<u>, /Users/<u>) keeps the host's OS account name",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        text = re.sub(home, r\"\\1user\", text)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account"
+    ]
+  },
+  {
+    "label": "an ls -l group column keeps the host's OS account name (the images' pocketpaw:pocketpaw)",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "m[3] + acct(m[4])",
+    "replace": "m[3] + m[4]",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account"
+    ]
+  },
+  {
+    "label": "an ls -l line with @ (xattrs) or + (ACL) after the mode keeps its owner",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "[-rwxsStT]{9}[@+.]?",
+    "replace": "[-rwxsStT]{9}",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account"
+    ]
+  },
+  {
     "label": "the feed and headless_error carry the host's OS account name",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "    if me:\n        text = re.sub(",
-    "replace": "    if me and False:\n        text = re.sub(",
+    "find": "    if me:\n",
+    "replace": "    if me and False:\n",
     "tests": [
-      "tests/cloud/test_belt_feed.py::test_the_host_user_name_reads_user_after_the_paths_go",
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account",
       "tests/cloud/test_belt_feed.py::test_a_check_tail_carries_no_host_user_name"
     ]
   }

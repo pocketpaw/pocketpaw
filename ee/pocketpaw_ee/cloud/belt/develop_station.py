@@ -15,7 +15,8 @@
 #            before any error is raised (the stage is emptied when a develop
 #            starts); a failed save never fails the run. Seat output and every
 #            error tail have the worktree and repo paths made relative and the
-#            host's OS account name replaced by ``user``.
+#            host's OS account name, where it names the account (``ls -l``
+#            owner/group, a home dir), replaced by ``user``.
 #   CHECK    every charter check; FIX (``claude -p`` with the failure) while
 #            attempts last. REVIEW: read-only ``claude -p`` judges the diff,
 #            failing duplicates of existing code; strict ``{"verdict","notes"}``.
@@ -598,8 +599,11 @@ _PATH_START = r"(?:(?<=\\[nrt])|(?<![\w.\-/~]))"
 # A bare root ends where its name does: a sentence's full stop (``in <wt>.``)
 # still ends it, a sibling's name (``<wt>.bak``, ``<wt>_v2``, ``<wt>-old``) doesn't.
 _BARE_END = r"(?![\w\-]|\.[\w\-])"
-# A word starts after a non-word char, or after a ``\n`` / ``\t`` escape.
-_WORD_START = r"(?:(?<=\\[nrt])|(?<!\w))"
+# An ``ls -l`` line's mode, link count, owner and group, at a line start (or a
+# ``\n`` escape): type + 9 bits, maybe ``@`` (xattrs) / ``+`` (ACL) / ``.``.
+_LS_LONG = re.compile(
+    r"(?:(?<=\\[nrt])|(?<![\w\-]))([-bcdlps][-rwxsStT]{9}[@+.]?[ \t]+\d+[ \t]+)(\S+)([ \t]+)(\S+)"
+)
 
 
 def _relative_paths(text: str, *roots: Path) -> str:
@@ -607,9 +611,11 @@ def _relative_paths(text: str, *roots: Path) -> str:
     ``x`` and a bare ``<root>`` (``cd <root> &&``, a ``pwd`` result) -> ``.``.
     Only whole paths match (``_PATH_START`` / ``_BARE_END``). The CLI reports the
     PHYSICAL path (macOS: ``/private/var/...`` for a ``/var/...`` temp dir), so
-    both spellings go, the longer first. Then the host's OS account name (an
-    ``ls -l`` owner column, a ``whoami``) reads ``user``: whole word,
-    case-sensitive, and only after the roots, which can hold it."""
+    both spellings go, the longer first. Then the host's OS account name reads
+    ``user``, but only where it names the account: an ``ls -l`` owner or group
+    column and a home dir (``/Users/<u>``, ``/home/<u>``). The images run as
+    ``pocketpaw``, so the bare word is also the package. After the roots, which
+    can sit under the home."""
     spellings = {str(r) for r in roots} | {os.path.realpath(r) for r in roots}
     for root in sorted(spellings, key=len, reverse=True):
         escaped = re.escape(root)
@@ -620,7 +626,13 @@ def _relative_paths(text: str, *roots: Path) -> str:
     except (OSError, KeyError):  # no login name and no passwd entry
         me = ""
     if me:
-        text = re.sub(_WORD_START + re.escape(me) + r"(?!\w)", "user", text)
+
+        def acct(name: str) -> str:
+            return "user" if name == me else name
+
+        text = _LS_LONG.sub(lambda m: m[1] + acct(m[2]) + m[3] + acct(m[4]), text)
+        home = _PATH_START + r"(/(?:Users|home)/)" + re.escape(me) + _BARE_END
+        text = re.sub(home, r"\1user", text)
     return text
 
 

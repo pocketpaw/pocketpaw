@@ -16,7 +16,8 @@
 #     bound repo the ``.git`` file names goes too, but only as a whole path
 #     (``src/app/x`` survives a ``/app`` root); same for headless_error (claude's words or
 #     stderr, never stream-json) and a failing check's tail; the host's OS
-#     account name reads ``user`` there too;
+#     account name reads ``user`` there too, but only in an ``ls -l`` owner/group
+#     column or a home dir (the images run as ``pocketpaw``, also a package);
 #   * each tool row's narration is its subject (path, command's first line,
 #     pattern), capped and redacted;
 #   * secrets in a tool result or input reach neither storage nor the response;
@@ -608,20 +609,21 @@ async def test_a_check_tail_carries_no_worktree_path(repo, store, monkeypatch, l
 
 async def test_a_check_tail_carries_no_host_user_name(repo, store, monkeypatch):  # noqa: F811
     """An ``ls -la`` line names the factory's OS account in its owner column:
-    the CHECK error on the run reads ``user`` there instead."""
-    import getpass
+    the CHECK error on the run reads ``user`` there instead. The deploy images
+    run as ``pocketpaw``, so the same word as a package or path segment stays."""
     import sys
 
-    me = getpass.getuser()
-    line = f"drwxr-xr-x  5 {me}  staff  160 Oct  6 08:00 ."
-    check = f'{sys.executable} -c "import sys; print({line!r}); sys.exit(1)"'
+    monkeypatch.setattr(ds.getpass, "getuser", lambda: "pocketpaw")
+    out = "drwxr-xr-x  5 pocketpaw  staff  160 Oct  6 08:00 .\nsrc/pocketpaw/x.py"
+    check = f'{sys.executable} -c "import sys; print({out!r}); sys.exit(1)"'
     action_id = await _queue_run(monkeypatch, repo, recipe="")
     station = _station(StreamingClaude(develop=[_write("ok")]), repo, checks=(check,))
     await HeadlessDevelopRunner(develop_fn=station).run(action_id)
 
     error = (await store.get_action(action_id)).parameters["_code_change"]["headless_error"]
-    assert "CHECK:" in error and "drwxr-xr-x  5 user  staff  160" in error
-    assert me not in error.replace(check, "")
+    tail = error.replace(check, "")  # the check's own command is echoed as written
+    assert "CHECK:" in tail and "drwxr-xr-x  5 user  staff  160" in tail
+    assert "src/pocketpaw/x.py" in tail and "5 pocketpaw" not in tail
 
 
 async def test_save_run_feed_upserts_per_workspace_and_keeps_created_at(mongo_db):
@@ -667,8 +669,6 @@ def test_worktree_paths_are_relative_whatever_the_prefix_order(tmp_path):
     """Both spellings of the worktree go, for many dir names (a set's iteration
     order differs per string; neither order may mangle ``/private/var`` into
     ``/p...README.md``), bare roots read ``.``, and a sibling keeps its path."""
-    import getpass
-
     link = _linked_dir(tmp_path)
     for i in range(24):
         cwd = link / f"belt-develop-{i:02d}x" / "wt"
@@ -688,25 +688,51 @@ def test_worktree_paths_are_relative_whatever_the_prefix_order(tmp_path):
             "b": "src/x.py",
             "c": "cd . && pwd",
             "d": ".",
-            # A sibling keeps its path (pytest's tmp dir names the OS account).
-            "e": f"{cwd}-old/y".replace(getpass.getuser(), "user"),
+            "e": f"{cwd}-old/y",  # a sibling keeps its path
         }
 
 
-def test_the_host_user_name_reads_user_after_the_paths_go(tmp_path):
-    """Whole word (a line opening after a literal ``\\n`` in stream-json counts)
-    and case-sensitive. Paths go first: pytest's tmp dir holds the user name
-    (``pytest-of-<user>``), so redacting it first would leave every worktree
-    path whole."""
-    import getpass
+def _as(monkeypatch, me: str, text: str, *roots: Path) -> str:
+    monkeypatch.setattr(ds.getpass, "getuser", lambda: me)
+    return ds._relative_paths(text, *roots)
 
-    me = getpass.getuser()
-    cwd = tmp_path / "wt"
-    cwd.mkdir()
-    text = f"drwxr-xr-x  5 {me}  staff  160 .\n{cwd}/a.py\n{me}x x{me} {me.upper()}\\n{me}"
-    assert ds._relative_paths(text, cwd) == (
-        f"drwxr-xr-x  5 user  staff  160 .\na.py\n{me}x x{me} {me.upper()}\\nuser"
+
+def test_the_host_account_reads_user_only_where_it_names_the_account(monkeypatch):
+    """The deploy images run as OS user ``pocketpaw``, which is also the
+    package and a path segment: only an ``ls -l`` line's owner/group columns
+    (mode with an optional ``@``/``+``, at a line start or after a literal
+    ``\\n`` in stream-json) and a home dir (``/Users/<u>``, ``/home/<u>``) read
+    ``user``. Case-sensitive; another account's home keeps its name."""
+    kept = (
+        "from pocketpaw.tools import x\n"
+        "src/pocketpaw/x.py\n"
+        "pocketpaw ok POCKETPAW\\npocketpaw\n"
+        "src/home/pocketpaw/x /home/pocketpaw-old/x /home/pocketpawx\n"
+        "-rw-r--r-- pocketpaw"
     )
+    assert _as(monkeypatch, "pocketpaw", kept) == kept
+
+    listing = "drwxr-xr-x  5 pocketpaw staff 160 Oct 6 10:00 src"
+    assert _as(monkeypatch, "pocketpaw", listing) == (
+        "drwxr-xr-x  5 user staff 160 Oct 6 10:00 src"
+    )
+    docker = "x\\n-rw-r--r--+ 1 pocketpaw pocketpaw 10 Oct 6 10:00 pocketpaw.py"
+    assert _as(monkeypatch, "pocketpaw", docker) == (
+        "x\\n-rw-r--r--+ 1 user user 10 Oct 6 10:00 pocketpaw.py"
+    )
+    mac = "-rw-r--r--@ 1 prakash-1 staff 42 Oct 6 10:00 a.py"
+    assert _as(monkeypatch, "prakash-1", mac) == "-rw-r--r--@ 1 user staff 42 Oct 6 10:00 a.py"
+
+    homes = "/home/pocketpaw/.cache/uv x=/Users/pocketpaw/a /home/pocketpaw."
+    want = "/home/user/.cache/uv x=/Users/user/a /home/user."
+    assert _as(monkeypatch, "pocketpaw", homes) == want
+
+
+def test_the_host_account_goes_after_the_paths(monkeypatch):
+    """A worktree under the account's home is stripped whole first; redacting
+    the home first would leave ``/Users/user/wt/a.py`` behind."""
+    root = Path("/Users/pocketpaw/wt")
+    assert _as(monkeypatch, "pocketpaw", f"{root}/a.py and {root}", root) == "a.py and ."
 
 
 # ---------------------------------------------------------------------------
