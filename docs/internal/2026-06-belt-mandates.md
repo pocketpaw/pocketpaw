@@ -1200,8 +1200,9 @@ station run publishing `file_touched` after each edit with its component (and
 `null` with no model), the scrub and skips on `file_touched`, and the route
 reading the committed model (not the working tree), joining stored edits and
 diff files in order, 404ing a foreign run, refusing a repo outside the
-allowlist and never handing git an option-shaped base
-(`tests/mutations/belt_live_atlas.json`, 17 mutations).
+allowlist and never handing git an option-shaped base; a model that is
+missing, not text or not C4 never fails the run
+(`tests/mutations/belt_live_atlas.json`, 20 mutations).
 `tests/cloud/test_belt_line.py` drives the line on real tmp repos (a bare
 repo as origin, charter recipes as the develop work, a fake PR opener): two
 runs of one mandate stack on the line with no re-added lines; a merged line

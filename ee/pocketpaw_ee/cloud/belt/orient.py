@@ -99,15 +99,15 @@ def c4_lines(repo: str | Path) -> list[str]:
     lines (``[]`` when there is no readable model)."""
     try:
         data = load_model((Path(repo) / "docs" / "c4" / "model.json").read_text())
-    except OSError:
+    except (OSError, ValueError):  # none, or not text
         return []
     system = _owned_system(data) if data else None
     if system is None:
         return []
     lines: list[str] = []
-    for container in system["containers"]:
+    for container in _dicts(system["containers"]):
         name = container.get("name") or "?"
-        components = container.get("components") or []
+        components = _dicts(container.get("components"))
         if not components:
             lines.append(f"- {name}: {_first_sentence(container.get('description'))}")
         for comp in components:
@@ -134,16 +134,21 @@ def repo_path(raw: str) -> str | None:
     return path
 
 
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    """The dict entries of a list (a hand-authored model may hold anything)."""
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
 def path_index(data: dict[str, Any] | None) -> PathIndex:
     """Every ``paths`` glob on the owned system's components, most specific
     first: most literal (non-wildcard) chars, then fewest wildcards, then the
     first declared. A trailing ``/`` means everything under it."""
     system = _owned_system(data) if data else None
     rules: PathIndex = []
-    for container in (system or {}).get("containers") or []:
-        for comp in container.get("components") or []:
-            cid = comp.get("id") if isinstance(comp, dict) else None
-            for glob in (comp.get("paths") or []) if cid else []:
+    for container in _dicts((system or {}).get("containers")):
+        for comp in _dicts(container.get("components")):
+            globs = comp.get("paths") if comp.get("id") else None
+            for glob in globs if isinstance(globs, list) else []:
                 if not isinstance(glob, str) or not glob.strip():
                     continue
                 glob = glob.strip().removeprefix("./")
@@ -151,7 +156,9 @@ def path_index(data: dict[str, Any] | None) -> PathIndex:
                 parts = _GLOB_SPLIT.split(glob)
                 regex = "".join(_GLOB.get(p) or re.escape(p) for p in parts)
                 wild = sum(glob.count(c) for c in "*?")
-                rules.append((-(len(glob) - wild), wild, len(rules), re.compile(regex), str(cid)))
+                rules.append(
+                    (-(len(glob) - wild), wild, len(rules), re.compile(regex), str(comp["id"]))
+                )
     rules.sort(key=lambda r: r[:3])
     return rules
 

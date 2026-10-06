@@ -387,7 +387,7 @@ class ClaudeCodeDevelop:
             git_snapshot = (worktree / ".git").read_bytes()
             # The base's blueprint, read before any agent step can edit it:
             # every edit's ``file_touched`` names the component that owns it.
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, ValueError):  # none, or not text
                 model = load_model((worktree / "docs" / "c4" / "model.json").read_text())
                 feed.paths = path_index(model)
             trust: _Trust | None = None

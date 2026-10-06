@@ -134,6 +134,11 @@ def test_a_model_without_paths_or_unreadable_maps_nothing():
     assert orient.load_model("not json") is None
     assert orient.load_model(json.dumps({"model": {}})) is None
     assert orient.load_model(json.dumps(_model(("a", ["x"]))))["scope"] == "app"
+    # A hand-authored model of the wrong shape maps nothing rather than raising.
+    odd = {"scope": "app", "model": {"systems": [{"id": "app", "containers": "oops"}]}}
+    assert orient.path_index(odd) == []
+    odd["model"]["systems"][0]["containers"] = [{"components": [{"id": "a", "paths": "x"}]}, 7]
+    assert orient.path_index(odd) == []
 
 
 def test_the_chai_ledger_blueprint_maps_its_files(tmp_path: Path):
@@ -174,6 +179,10 @@ def test_the_chai_ledger_blueprint_maps_its_files(tmp_path: Path):
 def _commit_model(root: Path, model: dict) -> None:
     (root / "docs" / "c4").mkdir(parents=True, exist_ok=True)
     (root / "docs" / "c4" / "model.json").write_text(json.dumps(model))
+    _commit_model_file(root)
+
+
+def _commit_model_file(root: Path) -> None:
     for args in (["add", "-A"], ["commit", "-q", "-m", "blueprint"]):
         subprocess.run(
             ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
@@ -231,13 +240,21 @@ async def test_every_edit_publishes_file_touched_with_its_component(
     assert comps[0] == {"id": "feature", "paths": ["feature.txt"]}
 
 
+@pytest.mark.parametrize("model", [None, b"\xff\xfe not utf-8", b'{"model": {"systems": 1}}'])
 async def test_an_edit_with_no_blueprint_still_reports_the_file(
     repo,  # noqa: F811
     store,  # noqa: F811
     mongo_db,
     monkeypatch,
     transport,  # noqa: F811
+    model,
 ):
+    """No model, or one that is not text or not a C4 model: the run goes on and
+    every file reads unowned."""
+    if model is not None:
+        (repo / "docs" / "c4").mkdir(parents=True)
+        (repo / "docs" / "c4" / "model.json").write_bytes(model)
+        _commit_model_file(repo)
     action_id = await _queue_run(monkeypatch, repo, recipe="")
     fake = StreamingClaude(develop=[_write("ok")])
     await HeadlessDevelopRunner(develop_fn=_station(fake, repo, checks=())).run(action_id)
