@@ -38,13 +38,16 @@ LINE = f"belt/line/{MID}"
 PY = sys.executable
 
 
-def _write(name: str, text: str) -> str:
-    return f"{PY} -c \"open('{name}', 'w').write('{text}\\n')\""
+def _write(name: str, text: str, mode: str = "w") -> str:
+    return f"{PY} -c \"open('{name}', '{mode}').write('{text}\\n')\""
 
 
+# Both feature recipes append to one shared file (the way ``belt add`` edits
+# package.json): a run developed from the base instead of the line would
+# re-add the first feature's line and no longer apply on the line.
 RECIPES = {
-    "add-auth": _write("auth.txt", "auth"),
-    "add-audit": _write("audit.txt", "audit"),
+    "add-auth": _write("features.txt", "auth", "a"),
+    "add-audit": _write("features.txt", "audit", "a"),
     "readme-line": _write("README.md", "line version"),
 }
 
@@ -201,17 +204,16 @@ async def test_second_run_starts_from_the_line_and_stacks_on_it(store, repo, sta
     assert first["commit_sha"] == _sha(repo, LINE)
 
     second_id = await _develop(store, station, repo, "add-audit", monkeypatch)
-    # The second develop started from the line: its diff adds audit.txt only.
+    # The second develop started from the line: it adds its own line only.
     diff = _blob(await store.get_action(second_id))["diff"]
-    assert "audit.txt" in diff and "auth.txt" not in diff
+    assert "+audit" in diff and "+auth" not in diff
     second = await _land(store, second_id)
 
     tip = _sha(repo, LINE)
     assert second["branch"] == LINE and second["commit_sha"] == tip
     assert _sha(repo, f"{LINE}^") == first["commit_sha"]
-    assert _git(repo, "show", "--name-status", "--format=", LINE).split() == ["A", "audit.txt"]
-    changed = _git(repo, "diff", "--name-only", "main", LINE).split()
-    assert sorted(changed) == ["audit.txt", "auth.txt"]
+    assert _git(repo, "show", f"{LINE}:features.txt") == "auth\naudit\n"
+    assert _git(repo, "diff", "--name-only", "main", LINE).split() == ["features.txt"]
     assert _sha(repo, "main") == main, "the base never moves on its own"
     assert _git(repo, "worktree", "list").count("\n") == 1
 
@@ -231,6 +233,7 @@ async def test_a_merged_line_moves_to_the_base(store, repo, station, monkeypatch
     assert "line: belt/line/" in _blob(await store.get_action(run_id))["summary"]
     landed = await _land(store, run_id)
     assert _sha(repo, f"{landed['commit_sha']}^") == merged
+    assert _git(repo, "show", f"{LINE}:features.txt") == "auth\naudit\n"
 
 
 async def test_base_commits_the_line_lacks_are_merged_into_it(store, repo, station, monkeypatch):
@@ -245,12 +248,12 @@ async def test_base_commits_the_line_lacks_are_merged_into_it(store, repo, stati
     parents = _git(repo, "rev-list", "--parents", "-n", "1", sync).split()[1:]
     assert parents == [first["commit_sha"], main], "the base was merged into the line"
     diff = _blob(await store.get_action(run_id))["diff"]
-    assert "audit.txt" in diff and "notes.txt" not in diff and "auth.txt" not in diff
+    assert "+audit" in diff and "notes.txt" not in diff and "+auth" not in diff
 
     landed = await _land(store, run_id)
     assert _sha(repo, f"{landed['commit_sha']}^") == sync
-    files = _git(repo, "ls-tree", "--name-only", LINE).split()
-    assert {"audit.txt", "auth.txt", "notes.txt"} <= set(files)
+    assert _git(repo, "show", f"{LINE}:features.txt") == "auth\naudit\n"
+    assert _git(repo, "show", f"{LINE}:notes.txt") == "from main\n"
 
 
 async def test_a_base_conflict_stands_the_run_down_with_a_sighting(
