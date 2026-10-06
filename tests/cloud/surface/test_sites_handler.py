@@ -597,10 +597,11 @@ async def test_react_create_states_the_prerender_rule() -> None:
 
 
 async def test_react_create_names_the_reserved_build_shell() -> None:
-    """The generator owns index.html / package.json / vite.config.ts /
-    paw-prerender.mjs and the src/paw/ namespace, and REJECTS a source map that
-    writes one. A preamble that doesn't say so sends the agent into a create error
-    it cannot predict — and those files are what hold the prerender contract."""
+    """The generator owns index.html / paw-prerender.mjs and the src/paw/
+    namespace, and REJECTS a source map that writes one (package.json and
+    vite.config.* are the author's since 2026-10-07, and the preamble says so). A
+    preamble that doesn't say so sends the agent into a create error it cannot
+    predict — and those files are what hold the prerender contract."""
     preamble = (
         await sites_handler.build_preamble(
             WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
@@ -608,9 +609,10 @@ async def test_react_create_names_the_reserved_build_shell() -> None:
     ).text
 
     assert "src/App.tsx" in preamble
-    for reserved in ("index.html", "package.json", "vite.config.ts", "paw-prerender.mjs"):
+    for reserved in ("index.html", "paw-prerender.mjs"):
         assert reserved in preamble, f"the preamble does not name the reserved {reserved}"
     assert "src/paw/" in preamble
+    assert "package.json and vite.config.* are yours" in preamble
 
 
 async def test_react_create_does_not_promise_a_submit_route() -> None:

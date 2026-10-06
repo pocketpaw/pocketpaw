@@ -44,7 +44,9 @@ DEPENDENCY_MANIFEST_PATH = "paw.dependencies.json"
 #: The manifest schema version this module writes and reads.
 MANIFEST_SCHEMA = 1
 
-#: Most packages one site may declare (contract §2). paw-sites ``MAX_AUTHOR_PACKAGES``.
+#: paw-sites ``MAX_AUTHOR_PACKAGES``, read from the vendored allowlist. The resolver no
+#: longer enforces it (2026-10-07, "open everything"); it stays only until the vendored
+#: allowlist is re-vendored from the paw-sites release that drops the cap.
 MAX_DECLARED_PACKAGES: int = int(VENDORED_ALLOWLIST["maxAuthorPackages"])
 
 #: npm's own ceiling on a package name.
@@ -96,15 +98,25 @@ VITE_CONFIG_FILES: tuple[str, ...] = tuple(
     f"vite.config.{ext}" for ext in ("ts", "js", "mjs", "mts", "cjs", "cts")
 )
 
-#: Install configuration and lockfiles an authored map may never ship: each one
-#: changes how ``bun install`` resolves (registry, release-age floor, pinned tree),
-#: which is the build lane's decision, not the author's (paw-sites PS-1).
-INSTALL_CONFIG_FILES: tuple[str, ...] = (
-    "bunfig.toml",
-    ".npmrc",
-    "bun.lock",
-    "bun.lockb",
-    "package-lock.json",
+#: Install configuration an author MAY ship at the project root (2026-10-07). It
+#: only takes effect in the Daytona sandbox; a host install displaces bunfig.toml
+#: with the host floor (``bun_supply_chain.write_host_bunfig``).
+AUTHOR_INSTALL_CONFIG_FILES: tuple[str, ...] = ("bunfig.toml", ".npmrc")
+
+#: Lockfiles stay generator-owned: the generator merges the author's package.json
+#: with its toolchain, so an authored lockfile would pin a tree that no longer matches.
+LOCKFILES: tuple[str, ...] = ("bun.lock", "bun.lockb", "package-lock.json")
+
+#: Every install-config file (the legacy build-shell classifier still recognises all
+#: of them in old source maps).
+INSTALL_CONFIG_FILES: tuple[str, ...] = (*AUTHOR_INSTALL_CONFIG_FILES, *LOCKFILES)
+
+#: Build-shell files an author may write at the project root on svelte and react
+#: (2026-10-07). The paw-sites generator merges them with its toolchain.
+AUTHOR_SHELL_FILES: tuple[str, ...] = (
+    "package.json",
+    *VITE_CONFIG_FILES,
+    *AUTHOR_INSTALL_CONFIG_FILES,
 )
 
 #: Engines whose authored code can import a declared package. ripple has no
@@ -247,7 +259,10 @@ def author_packages(source: Mapping[str, Any] | None) -> dict[str, str]:
 
 
 __all__ = [
+    "AUTHOR_INSTALL_CONFIG_FILES",
+    "AUTHOR_SHELL_FILES",
     "DEPENDENCY_ENGINES",
+    "LOCKFILES",
     "DEPENDENCY_MANIFEST_PATH",
     "EXACT_VERSION_RE",
     "INSTALL_CONFIG_FILES",

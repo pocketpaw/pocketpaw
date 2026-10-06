@@ -314,6 +314,7 @@ async def test_add_writes_a_canonical_manifest_and_a_draft_version(beanie_test_d
         "pocket_id": pocket_id,
         "packages": {"three": {"version": "0.170.0"}},
         "rejected": [],
+        "warnings": [],
         "changed": True,
     }
     assert resolve.calls == [(["three"], "svelte", [])]

@@ -283,12 +283,10 @@ class TestFailsBeforeSpendingMoney:
         assert c.calls == []
 
 
-class TestTheSupplyChainFloorReachesTheSandbox:
-    """SL-3. The workspace's install protections live in the DEVELOPER'S HOME DIR
-    (``~/.npmrc``, ``~/.bunfig.toml``) and are in no repo, so a fresh container inherits
-    none of them. Once Daytona is the only build host, that makes the build box weaker
-    than the runtime image beside it — these tests are what stop the floor being dropped
-    by a refactor nobody connects to supply chain.
+class TestTheSandboxBunfig:
+    """The sandbox installs author packages with an OPEN bunfig (2026-10-07: no
+    release-age floor, install scripts allowed; the sandbox is the isolation). The
+    host floor lives in ``test_generator_client_supply_chain``.
     """
 
     async def test_a_bunfig_is_uploaded_into_the_project_dir(self) -> None:
@@ -297,55 +295,31 @@ class TestTheSupplyChainFloorReachesTheSandbox:
         dests = [dest for _, dest in c.uploaded]
         assert f"{dr.SANDBOX_PROJECT_DIR}/{dr.SANDBOX_BUNFIG_REL}" in dests
 
-    async def test_the_floor_carries_the_seven_day_release_age_and_no_scripts(self) -> None:
-        """The two controls, asserted on the BYTES that actually get uploaded rather
-        than on the constant, so a broken encode or a wrong destination still fails."""
+    async def test_the_sandbox_bunfig_sets_no_floor_and_allows_scripts(self) -> None:
+        """Asserted on the BYTES that actually get uploaded, not on the constant."""
         c = FakeClient(sentinel=_ok_sentinel())
         await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=c)
         dst = f"{dr.SANDBOX_PROJECT_DIR}/{dr.SANDBOX_BUNFIG_REL}"
         body = next(src for src, dest in c.uploaded if dest == dst)
         text = body.decode() if isinstance(body, bytes) else body
-        # 604800 = 7 days in seconds, bun's unit. The number is asserted literally: a
-        # plausible-looking wrong value (a day, or minutes) is the failure mode here.
-        assert "minimumReleaseAge = 604800" in text
-        assert "ignoreScripts = true" in text
         assert "[install]" in text
+        assert "minimumReleaseAge" not in text
+        assert "ignoreScripts" not in text
 
-    async def test_a_project_supplied_bunfig_is_dropped_so_the_floor_wins(self) -> None:
-        """A floor a built project can override is not a floor.
-
-        Resolved in our own code, NOT by upload ordering: bulk_upload hands the whole
-        list to the SDK in one batch, so which write survives a duplicate destination is
-        not ours to guarantee. Asserting exactly ONE bunfig destination is what proves
-        the resolution happened here.
+    async def test_an_author_bunfig_wins_and_is_uploaded_once(self) -> None:
+        """The author may ship a bunfig.toml; in the sandbox it is respected. Exactly
+        ONE upload to that destination, because bulk_upload does not order duplicates.
         """
-        hostile = dict(REACT_FILES)
-        hostile["bunfig.toml"] = "[install]\nminimumReleaseAge = 0\nignoreScripts = false\n"
+        authored = dict(REACT_FILES)
+        authored["bunfig.toml"] = "[install]\nexact = true\n"
         c = FakeClient(sentinel=_ok_sentinel())
-        await dr.run_build(hostile, engine="react", timeout_seconds=600, client=c)
+        await dr.run_build(authored, engine="react", timeout_seconds=600, client=c)
 
         dst = f"{dr.SANDBOX_PROJECT_DIR}/{dr.SANDBOX_BUNFIG_REL}"
         matching = [src for src, dest in c.uploaded if dest == dst]
-        assert len(matching) == 1, "the project's bunfig must be dropped, not merely lost a race"
+        assert len(matching) == 1
         text = matching[0].decode() if isinstance(matching[0], bytes) else matching[0]
-        assert "minimumReleaseAge = 604800" in text
-        assert "minimumReleaseAge = 0" not in text
-        assert "ignoreScripts = false" not in text
-
-    async def test_dropping_a_project_bunfig_is_logged_not_silent(self, caplog) -> None:
-        """The trade this makes is discarding a possibly-legitimate project setting, so
-        it must be visible. A silent override is the version of this that wastes an
-        afternoon when someone's bun config appears not to apply."""
-        import logging
-
-        hostile = dict(REACT_FILES)
-        hostile["bunfig.toml"] = "[install]\nminimumReleaseAge = 0\n"
-        c = FakeClient(sentinel=_ok_sentinel())
-        with caplog.at_level(logging.WARNING):
-            await dr.run_build(hostile, engine="react", timeout_seconds=600, client=c)
-        # getMessage(), not .message: the latter only exists once a formatter has run,
-        # so reading it here raises rather than failing the assertion it looks like.
-        assert any("bunfig.toml" in r.getMessage() for r in caplog.records)
+        assert text == authored["bunfig.toml"]
 
     async def test_the_floor_does_not_displace_the_project_or_the_wrapper(self) -> None:
         """Adding an upload must not cost an existing one."""

@@ -6,6 +6,12 @@ for scripts/migrate_legacy_build_shell.py. Run it before deploying paw-sites #55
 
 # Legacy build-shell migration (run BEFORE deploying paw-sites #55)
 
+> **2026-10-07:** `package.json`, `vite.config.*`, `svelte.config.js`, `bunfig.toml`
+> and `.npmrc` are author-writable again ("open everything"; the generator merges
+> them with its toolchain). The migration no longer touches or reports them. What
+> it still handles: svelte `src/routes/+layout.{ts,js}`, lockfiles, misspelled
+> `paw.dependencies.json`, and the generator namespaces.
+
 **Created:** 2026-09-24 · **Dry run by default.** `--apply` writes draft versions only.
 It never publishes.
 

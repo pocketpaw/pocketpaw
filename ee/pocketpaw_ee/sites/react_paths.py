@@ -1,81 +1,41 @@
 # react_paths.py — the ONE place the react-track source-map path policy lives.
 #
-# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — mirrors paw-sites PS-1:
-# every ``vite.config.*`` spelling and the install config (``bunfig.toml``, ``.npmrc``,
-# ``bun.lock``, ``bun.lockb``, ``package-lock.json``) are reserved, and matching is
-# CASE-INSENSITIVE for every reserved file and the ``src/paw/`` namespace.
-# ``paw.dependencies.json`` (the author dependency manifest) is reserved in any
-# spelling, case included. Only the resolver behind ``set_site_dependencies`` writes
-# it; it sits at the map root, which was already outside ``src/``/``public/``, but it
-# is now classified RESERVED so the edit lane names the right tool instead of calling
-# it a stray root file.
+# Both writers of a react source map (``create_react_site`` and the
+# ``edit_react_component`` edit lane) call this module; ``sites_create`` re-exports
+# the constants under their old names. It mirrors paw-sites' ``react-scaffold.ts``
+# ``RESERVED_FILES`` / ``RESERVED_NAMESPACE``, matched case-insensitively on the
+# normalized path.
 #
-# Updated: 2026-09-01 (fix/sites-react-orphan-create) — added
-# ``react_path_is_referenced``, which answers "does anything in this source map
-# reach that path". The module was pure POLICY (may this path be written); this is
-# the first question about REACHABILITY, and it lives here because the answer
-# depends on the same two-prefix layout the policy above encodes: ``src/`` is a
-# module tree reached by import specifiers, ``public/`` is copied to the web root
-# and reached by URL. Written for the edit lane's ``create``, which could land a
-# component nothing imports and report a clean success — see the section comment
-# above the function for the incident that produced it.
+# Since 2026-10-07 ("open everything") the root build files — ``package.json``,
+# ``vite.config.*``, ``bunfig.toml``, ``.npmrc`` — belong to the author; the generator
+# merges them with its toolchain. What stays generator-owned: ``index.html``,
+# ``paw-prerender.mjs`` and ``src/paw/`` (the prerender contract), lockfiles, and
+# ``paw.dependencies.json`` (only the resolver behind ``set_site_dependencies``
+# writes it).
 #
-# Created: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — extracted from
-# ``agent/mcp_servers/sites_create.py``, which owned ``REACT_RESERVED_FILES`` /
-# ``REACT_RESERVED_PREFIX`` / ``_reserved_react_keys`` because create was the only
-# writer of a react ``source`` map. ``edit_react_component`` is the second writer,
-# and a second writer with its own copy of the guard is how the guard rots: an edit
-# that could write ``package.json`` would defeat the generator's dependency
-# allowlist. (It would NOT defeat the supply-chain release-age floor, which this
-# comment used to claim: that floor lives in the build lane's ``bunfig.toml``
-# (``sites/bun_supply_chain.py``), written into the project dir by both build
-# runners and outside any author's reach. Corrected 2026-09-12 — the wrong reason
-# for a right guard is still load-bearing, because it is the reason someone reads
-# before deciding whether the guard may be relaxed.)
-# So the normalization + the reserved set moved HERE and both writers call
-# it. ``sites_create`` re-exports the two constants and ``_reserved_react_keys``
-# under their old names, so nothing that imported them from there had to change.
-#
-# What is NEW here (create never needed it) is :func:`react_path_rejection` — the
-# single-path verdict an edit needs. Create validates a whole map and only had to
-# answer "which keys collide"; an edit names ONE path and has to answer "may this
-# path be written at all", which is the reserved question PLUS a positive one:
-# the resolved path must land under ``src/`` or ``public/``. Create got that second
-# half for free (its required ``src/App.tsx`` key and the generator's own scaffold
-# meant a stray root file was merely inert), but an edit with ``create=True`` can
-# mint an arbitrary path, so "not reserved" is not the same as "allowed".
+# :func:`react_path_is_referenced` answers a different question — does anything in
+# the map reach a path — for the edit lane's ``create``, which could otherwise land a
+# component nothing imports and report a clean success.
 """React-track source-map path policy for Paw Sites.
 
 A react-engine pocket's ``source`` is a ``{relative_path: file_contents}`` map that
 the paw-sites generator materializes ON TOP of a build shell it owns. Two rules
 govern which paths an author (create OR edit) may write:
 
-1. **Reserved paths are the generator's.** ``index.html``, ``package.json``,
-   ``vite.config.ts``, ``paw-prerender.mjs`` and everything under ``src/paw/``
-   carry the prerender contract. paw-sites' ``react-scaffold.ts`` throws on a
-   collision; checking here turns a build-time throw far from the authoring turn
-   into an actionable error. It is not tidiness: an author who could overwrite
-   ``paw-prerender.mjs`` could remove the pass that fills the prerender outlet,
-   turning the site back into a shell that is blank with JavaScript disabled — and
-   an author who could overwrite ``package.json`` would be writing the dependency
-   manifest, which is what the generator's vetted allowlist checks.
+1. **Reserved paths are the generator's.** ``index.html``, ``paw-prerender.mjs`` and
+   everything under ``src/paw/`` carry the prerender contract: an author who could
+   overwrite ``paw-prerender.mjs`` could remove the pass that fills the prerender
+   outlet, turning the site back into a shell that is blank with JavaScript
+   disabled. Lockfiles and ``paw.dependencies.json`` are reserved too.
 
-   The release-age floor is NOT enforced here, though this docstring said so until
-   2026-09-12. It lives in the build lane's ``bunfig.toml``
-   (``sites/bun_supply_chain.py``), written into the project dir immediately before
-   ``bun install`` on both the Daytona and the local runner. That distinction
-   matters the moment someone proposes letting an author declare a dependency:
-   the allowlist is the thing this reservation protects, and the floor holds
-   regardless.
-
-2. **Authored files live under ``src/`` or ``public/``.** Everything else at the
-   project root belongs to the shell, so a path outside those two prefixes is
-   rejected rather than silently written somewhere the build ignores.
+2. **Authored files live under ``src/`` or ``public/``**, plus the root build files
+   in :data:`REACT_AUTHOR_ROOT_FILES`. Anything else at the project root is rejected
+   rather than silently written somewhere the build ignores.
 
 Both rules are applied to the NORMALIZED path: backslashes become forward slashes
 and ``.``/``..`` segments collapse (``posixpath``, not ``os.path`` — source-map keys
 are POSIX-style project-relative paths regardless of the host OS). A guard a
-trivial path spelling defeats is not a guard, and ``./package.json`` /
+trivial path spelling defeats is not a guard, and ``./index.html`` /
 ``src\\paw\\entry.tsx`` / ``src/paw/../paw/entry.tsx`` are trivial spellings.
 """
 
@@ -87,9 +47,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from pocketpaw_ee.sites.dependency_manifest import (
+    AUTHOR_SHELL_FILES,
     DEPENDENCY_MANIFEST_PATH,
-    INSTALL_CONFIG_FILES,
-    VITE_CONFIG_FILES,
+    LOCKFILES,
     is_dependency_manifest_path,
 )
 
@@ -98,11 +58,9 @@ from pocketpaw_ee.sites.dependency_manifest import (
 # collision.
 REACT_RESERVED_FILES: tuple[str, ...] = (
     "index.html",
-    "package.json",
-    *VITE_CONFIG_FILES,
     "paw-prerender.mjs",
     DEPENDENCY_MANIFEST_PATH,
-    *INSTALL_CONFIG_FILES,
+    *LOCKFILES,
 )
 REACT_RESERVED_PREFIX = "src/paw/"
 # Case-folded once: the generator matches case-insensitively, so this must.
@@ -111,6 +69,12 @@ _RESERVED_FOLDED = frozenset(f.casefold() for f in REACT_RESERVED_FILES)
 # The two directories an author may write into. Anything else — a root-level file,
 # a path that escapes the project with ``..``, an absolute path — is not authorable.
 REACT_AUTHORABLE_PREFIXES: tuple[str, ...] = ("src/", "public/")
+
+# Root build-shell files the author MAY write (2026-10-07, "open everything"):
+# package.json, vite.config.*, bunfig.toml, .npmrc. The paw-sites generator merges
+# them with its own toolchain config.
+REACT_AUTHOR_ROOT_FILES: tuple[str, ...] = AUTHOR_SHELL_FILES
+_AUTHOR_ROOT_FOLDED = frozenset(f.casefold() for f in REACT_AUTHOR_ROOT_FILES)
 
 
 def normalize_react_path(path: str) -> str:
@@ -136,13 +100,15 @@ def is_reserved_react_path(path: str) -> bool:
 
 
 def is_authorable_react_path(path: str) -> bool:
-    """True when ``path`` resolves inside ``src/`` or ``public/``.
+    """True when ``path`` is under ``src/`` / ``public/`` or is an author root file.
 
-    Note this is about the RESOLVED path: ``src/../package.json`` normalizes to
-    ``package.json`` and is not authorable, which is the point.
+    Note this is about the RESOLVED path: ``src/../README.md`` normalizes to
+    ``README.md`` and is not authorable.
     """
     norm = normalize_react_path(path)
-    return any(norm.startswith(prefix) for prefix in REACT_AUTHORABLE_PREFIXES)
+    return norm.casefold() in _AUTHOR_ROOT_FOLDED or any(
+        norm.startswith(prefix) for prefix in REACT_AUTHORABLE_PREFIXES
+    )
 
 
 def reserved_react_keys(source: dict[str, Any]) -> list[str]:
@@ -179,19 +145,18 @@ def react_path_rejection(path: str) -> str | None:
         )
     if is_reserved_react_path(norm):
         return (
-            f"`{path}` resolves to `{norm}`, which the generator owns. The build "
-            "shell (index.html, package.json, vite.config.ts, paw-prerender.mjs) "
-            "and the `src/paw/` namespace carry the prerender contract that keeps "
-            "the page from shipping blank without JavaScript, and package.json is "
-            "where the dependency allowlist lives. Edit under `src/` (outside "
-            "`src/paw/`) or `public/`."
+            f"`{path}` resolves to `{norm}`, which the generator owns. index.html, "
+            "paw-prerender.mjs and the `src/paw/` namespace carry the prerender "
+            "contract that keeps the page from shipping blank without JavaScript, "
+            "and lockfiles are produced by the build. Edit under `src/` (outside "
+            "`src/paw/`) or `public/`, or the root build files (package.json, "
+            "vite.config.*, bunfig.toml, .npmrc)."
         )
-    if not any(norm.startswith(prefix) for prefix in REACT_AUTHORABLE_PREFIXES):
+    if not is_authorable_react_path(norm):
         return (
             f"`{path}` resolves to `{norm}`, which is outside the authored source "
-            "tree. A react site's own files live under `src/` or `public/`; "
-            "everything else at the project root belongs to the generated build "
-            "shell."
+            "tree. A react site's own files live under `src/` or `public/`, plus "
+            "the root build files (package.json, vite.config.*, bunfig.toml, .npmrc)."
         )
     return None
 

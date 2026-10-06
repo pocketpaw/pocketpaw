@@ -85,22 +85,21 @@
     ]
   },
   {
-    "label": "the reserved shell stops winning a path collision — an authored package.json puts an unvetted dependency set in a project we hand out",
+    "label": "the reserved shell stops winning a path collision — an authored +layout.ts that turns prerender off ships in the download",
     "file": "ee/pocketpaw_ee/sites/project_zip.py",
     "find": "        if path in planned:\n            logger.info(\"project zip: the vetted %s replaces the authored copy\", path)\n        planned[path] = contents",
     "replace": "        planned.setdefault(path, contents)",
     "tests": [
-      "tests/ee/sites/test_project_zip.py::test_an_authored_manifest_cannot_displace_the_vetted_shell"
+      "tests/ee/sites/test_project_zip.py::test_the_shell_layout_ts_beats_an_authored_one_now_that_it_is_reserved"
     ]
   },
   {
-    "label": "nothing counts as reserved — the vetted manifest becomes a mere default an authored one displaces",
+    "label": "nothing counts as reserved — the shell's prerender layout becomes a mere default an authored one displaces",
     "file": "ee/pocketpaw_ee/sites/project_zip.py",
     "find": "    if engine == \"svelte\":\n        return svelte_paths.is_reserved_svelte_path(path)",
     "replace": "    if engine == \"svelte\":\n        return False",
     "tests": [
-      "tests/ee/sites/test_project_zip.py::test_an_authored_manifest_cannot_displace_the_vetted_shell",
-      "tests/ee/sites/test_project_zip.py::test_every_overriding_shell_path_is_one_the_generator_reserves"
+      "tests/ee/sites/test_project_zip.py::test_the_shell_layout_ts_beats_an_authored_one_now_that_it_is_reserved"
     ]
   },
   {
@@ -146,6 +145,15 @@
     "replace": "    data = _write_zip(planned)",
     "tests": [
       "tests/ee/sites/test_project_zip.py::test_the_deflate_runs_off_the_event_loop"
+    ]
+  },
+  {
+    "label": "an authored package.json replaces the shell's wholesale — the download loses its toolchain and does not build",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "        planned[\"package.json\"] = _merge_package_json(shell_pkg, planned[\"package.json\"])",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_an_authored_package_json_is_merged_with_the_vetted_shell"
     ]
   }
 ]

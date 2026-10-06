@@ -10308,7 +10308,8 @@ async def set_site_dependencies(
     ``dependencies`` param, which runs the same resolver. ``add`` is a list of
     ``{name, range?}`` requests; ``remove`` is a list of names. Removes apply first,
     then every add goes through :func:`dependency_resolver.resolve_dependencies`
-    (registry metadata only — nothing installs). A rejected add is reported in
+    (registry metadata only — nothing installs). Any public npm package resolves; a
+    rejected add (bad spec, unknown name, unresolvable range) is reported in
     ``rejected`` with an actionable reason and changes nothing; the rest still land.
 
     The manifest is rewritten whole, in canonical form, through the pockets
@@ -10324,7 +10325,8 @@ async def set_site_dependencies(
     ``_pockets`` / ``_resolve`` are injectable seams for tests.
 
     Returns ``{pocket_id, packages: {name: {version}}, rejected: [{name, code,
-    reason}], changed}``.
+    reason}], warnings: [{name, code, message}], changed}``. ``warnings`` (advisories,
+    deprecation) are about packages that WERE declared.
     """
     from pocketpaw_ee.sites import dependency_resolver
 
@@ -10379,9 +10381,11 @@ async def set_site_dependencies(
             for req in requests
         ]
         requests = []
+    warnings: list[dict[str, str]] = []
     if requests:
         result = await resolve(requests, engine, already_declared=packages.keys())
         rejected += [r.as_dict() for r in result.rejected]
+        warnings += list(getattr(result, "warnings", None) or [])
         for name, resolved in result.packages.items():
             packages[name] = resolved.manifest_entry()
 
@@ -10401,6 +10405,7 @@ async def set_site_dependencies(
             name: {"version": entry["version"]} for name, entry in sorted(packages.items())
         },
         "rejected": rejected,
+        "warnings": warnings,
         "changed": changed,
     }
 

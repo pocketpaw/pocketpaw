@@ -34,8 +34,8 @@ Three facts decide whether a source is usable here, and together they rule out
 most of the web's design catalogue:
 
 1.  **Packages are declared, not installed by you.** svelte, react and html
-    sites take npm packages through `set_site_dependencies` (policy-checked,
-    pinned, imported client-side), so a runtime like `gsap`, `lenis` or `three`
+    sites take npm packages through `set_site_dependencies` (any npm package
+    or version, pinned to an exact version), so a runtime like `gsap`, `lenis` or `three`
     is there when it earns its weight. `npm i` is still not a step you have, and
     anything that installs FILES into the project (shadcn registry entries,
     copy-in component kits) is out, however good it is.

@@ -1,12 +1,56 @@
 [
   {
-    "label": "PP-1 resolver: the 7-day release-age floor is ignored, so a version published yesterday (a possible compromised fresh publish) is pinned and handed to the sandbox, which then refuses it at install",
+    "label": "resolver: dist-tags are ignored, so `latest` becomes the highest version and `next` / `beta` cannot resolve at all",
     "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "    aged = [p for p in satisfying if p[2] <= cutoff]",
-    "replace": "    aged = list(satisfying)",
+    "find": "        tagged = tags.get(req.range)",
+    "replace": "        tagged = None",
     "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_resolves_the_newest_version_old_enough_to_install",
-      "tests/ee/sites/test_dependency_resolver.py::test_only_too_new_versions_is_refused_with_the_floor_named"
+      "tests/ee/sites/test_dependency_resolver.py::test_latest_follows_the_tag_not_the_highest_version"
+    ]
+  },
+  {
+    "label": "resolver: a deprecated version is no longer passed over for a maintained one in the same range",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "        return [p for p in items if not versions[p[1]].get(\"deprecated\")] or items",
+    "replace": "        return items",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_a_deprecated_version_is_skipped_for_an_older_good_one"
+    ]
+  },
+  {
+    "label": "resolver: advisories are read but never reach the agent as a warning",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "            if str(adv.get(\"severity\", \"\")).lower() not in WARNING_SEVERITIES:",
+    "replace": "            if True:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_an_affecting_advisory_is_a_warning"
+    ]
+  },
+  {
+    "label": "resolver: an advisory-endpoint outage fails closed again, so a flaky npm endpoint blocks every package",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "        logger.info(\"sites.deps: advisory lookup skipped (%s)\", exc)\n        return []",
+    "replace": "        raise",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_an_advice_lookup_failure_still_accepts"
+    ]
+  },
+  {
+    "label": "resolver: an unreachable registry refuses even an exact pin that needs no metadata",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    exact = _exact_version(req.range)\n    if exact is not None:",
+    "replace": "    exact = None\n    if exact is not None:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_an_unreachable_registry_accepts_an_exact_pin_with_a_warning"
+    ]
+  },
+  {
+    "label": "resolver: a jsDelivr outage rejects an html package again (integrity was meant to be optional)",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    except httpx.HTTPError as exc:\n        logger.info(\"sites.deps: jsDelivr hash skipped for %s (%s)\", pkg.name, exc)",
+    "replace": "    except httpx.HTTPError:\n        raise",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_an_unreachable_cdn_keeps_the_html_package_without_integrity"
     ]
   },
   {
@@ -25,79 +69,6 @@
     "replace": "    if False:",
     "tests": [
       "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
-    ]
-  },
-  {
-    "label": "PP-1 resolver: deprecated versions are no longer skipped or refused",
-    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "    chosen = next((p for p in aged if not versions[p[1]].get(\"deprecated\")), None)",
-    "replace": "    chosen = aged[0]",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason",
-      "tests/ee/sites/test_dependency_resolver.py::test_a_deprecated_version_is_skipped_for_an_older_good_one"
-    ]
-  },
-  {
-    "label": "PP-1 resolver: a package with lifecycle install scripts is accepted",
-    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "    if lifecycle:",
-    "replace": "    if False:",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
-    ]
-  },
-  {
-    "label": "PP-1 resolver: a native addon (gypfile / binary) is accepted",
-    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "    if manifest.get(\"gypfile\") or manifest.get(\"binary\"):",
-    "replace": "    if False:",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
-    ]
-  },
-  {
-    "label": "PP-1 resolver: the unpacked-size cap stops applying",
-    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "    if isinstance(size, int) and size > MAX_UNPACKED_BYTES:",
-    "replace": "    if isinstance(size, int) and size > MAX_UNPACKED_BYTES * 100:",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
-    ]
-  },
-  {
-    "label": "PP-1 resolver: the popularity floor (the typosquat guard) is gone",
-    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "    if count < MIN_WEEKLY_DOWNLOADS:",
-    "replace": "    if False:",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
-    ]
-  },
-  {
-    "label": "PP-1 resolver: advisories are read but never block",
-    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "            if str(adv.get(\"severity\", \"\")).lower() not in BLOCKING_SEVERITIES:",
-    "replace": "            if True:",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
-    ]
-  },
-  {
-    "label": "PP-1 resolver: an unreachable advisory database is a silent ACCEPT instead of a registry_unavailable refusal",
-    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
-    "find": "        return {p.name: _unavailable(p.name, \"the npm advisory database\", detail) for p in packages}",
-    "replace": "        return {}",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_an_unreachable_registry_refuses_rather_than_accepts"
-    ]
-  },
-  {
-    "label": "PP-1 resolver: the 20-package cap is effectively removed",
-    "file": "ee/pocketpaw_ee/sites/dependency_manifest.py",
-    "find": "MAX_DECLARED_PACKAGES: int = int(VENDORED_ALLOWLIST[\"maxAuthorPackages\"])",
-    "replace": "MAX_DECLARED_PACKAGES: int = 2000",
-    "tests": [
-      "tests/ee/sites/test_dependency_resolver.py::test_more_than_twenty_is_refused_past_the_cap"
     ]
   },
   {
@@ -149,21 +120,21 @@
     ]
   },
   {
-    "label": "PP-1 paths: svelte authors can ship a bunfig.toml / .npmrc / lockfile that changes how the sandbox resolves",
-    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
-    "find": "    DEPENDENCY_MANIFEST_PATH,\n    *INSTALL_CONFIG_FILES,\n)",
-    "replace": "    DEPENDENCY_MANIFEST_PATH,\n)",
-    "tests": [
-      "tests/ee/sites/test_dependency_manifest.py::test_svelte_and_react_reserve_install_config_and_every_vite_spelling"
-    ]
-  },
-  {
     "label": "PP-1 project zip: author packages never reach the downloaded package.json, so the download does not build",
     "file": "ee/pocketpaw_ee/sites/project_zip.py",
     "find": "    runtime: dict[str, str] = dict(sorted((author_deps or {}).items()))",
     "replace": "    runtime: dict[str, str] = {}",
     "tests": [
       "tests/ee/sites/test_project_zip.py::test_author_packages_land_in_package_json_at_exact_versions"
+    ]
+  },
+  {
+    "label": "paths: lockfiles drop out of the svelte reserved set, so an authored lockfile pins a tree the merged package.json no longer matches",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "    DEPENDENCY_MANIFEST_PATH,\n    *LOCKFILES,\n)",
+    "replace": "    DEPENDENCY_MANIFEST_PATH,\n)",
+    "tests": [
+      "tests/ee/sites/test_dependency_manifest.py::test_svelte_and_react_reserve_lockfiles"
     ]
   }
 ]

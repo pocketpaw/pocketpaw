@@ -334,7 +334,7 @@ from typing import Any, Protocol
 from urllib.parse import unquote
 
 from pocketpaw_ee.sites import vetted_pins
-from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG_REL, write_build_bunfig
+from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG_REL, write_host_bunfig
 from pocketpaw_ee.sites.dependency_manifest import has_author_dependencies
 from pocketpaw_ee.sites.engines import (
     candidate_static_output_rels,
@@ -1513,15 +1513,15 @@ class _SubprocessRunner:
         # before the install decision so the dep-hash reflects the final inputs).
         # This just runs `bun install` on the prepared dir.
         #
-        # ...behind the same supply-chain floor the Daytona sandbox installs behind.
-        # This used to be the asymmetry: daytona_runner uploaded a bunfig into every
-        # sandbox and this path wrote none, so the LOCAL runner — which is what
-        # dev_server, draft_markup, service and the deployed Coolify image all use —
-        # resolved from the open registry with lifecycle scripts enabled. Written
-        # here rather than in build() because this is the method that spawns the
-        # install: a floor applied anywhere else is one a future caller can route
-        # around by calling install() directly.
-        write_build_bunfig(project_dir)  # the floor, laid at the spawn
+        # ...behind the HOST supply-chain floor (7-day release age, no lifecycle
+        # scripts). This runner is the API host — dev_server, draft_markup, service
+        # and the deployed Coolify image all use it — and it only installs our own
+        # toolchain (author packages are refused before this, HostInstallRefused);
+        # the open sandbox bunfig is the Daytona lane's alone. Written here rather
+        # than in build() because this is the method that spawns the install: a
+        # floor applied anywhere else is one a future caller can route around by
+        # calling install() directly.
+        write_host_bunfig(project_dir)  # the floor, laid at the spawn
         timeout_s = _build_timeout_sec()
         # start_new_session=True: own process group so a wedged install is killable
         # as a group on timeout.
@@ -2072,7 +2072,7 @@ class GeneratorClient:
             # manifest has no install to put a floor under, and the fake-runner tests
             # hand this a projectDir that was never created on disk (the same reason
             # _rewrite_ripple_dep is guarded).
-            write_build_bunfig(project_dir)
+            write_host_bunfig(project_dir)
         # PERF-3 install cache: run `bun install` ONLY when the dependency set
         # changed. Fingerprint the install inputs and compare to the sentinel from
         # the last successful install in this dir. Match → skip (reuse the cached
