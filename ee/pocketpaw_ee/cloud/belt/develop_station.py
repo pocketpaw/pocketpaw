@@ -273,8 +273,13 @@ class ClaudeCodeDevelop:
         if owner:
             root = owner_worktree_root()
             if root is None:
+                asked = (
+                    "the crew seat's setup=owner"
+                    if request.setup
+                    else "POCKETPAW_FACTORY_CLAUDE_SETUP=owner"
+                )
                 raise DevelopStationError(
-                    "PREPARE: POCKETPAW_FACTORY_CLAUDE_SETUP=owner needs "
+                    f"PREPARE: {asked} needs "
                     "POCKETPAW_FACTORY_WORKTREE_ROOT set to an existing directory"
                 )
             if root == repo or repo in root.parents:
@@ -777,10 +782,14 @@ _UNTRUSTED_RULE = (
 )
 
 
+_TAG_END = re.compile(r"(untrusted\s*)>", re.IGNORECASE)
+
+
 def _untrusted(text: str) -> str:
-    """Fence ``text`` as data. Any tag spelling inside is defanged so the text
-    can't close the block early and smuggle in instructions."""
-    return "<untrusted>\n" + text.replace("untrusted>", "untrusted&gt;") + "\n</untrusted>"
+    """Fence ``text`` as data. Any tag spelling inside (any case, with space
+    before the ``>``) is defanged so the text can't close the block early and
+    smuggle in instructions."""
+    return "<untrusted>\n" + _TAG_END.sub(r"\1&gt;", text) + "\n</untrusted>"
 
 
 def _task_block(request: DevelopRequest) -> str:

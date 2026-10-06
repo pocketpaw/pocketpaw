@@ -134,9 +134,9 @@ class CrewMember(BaseModel):
     worker may run at once (recorded; the factory still runs one at a time).
     ``setup`` picks the develop station's Claude setup for this worker's runs;
     ``None`` keeps the factory's ``POCKETPAW_FACTORY_CLAUDE_SETUP``.
-    ``seated_by`` is the admin who last set the roster (server-set): seating and
-    every develop re-read the agent AS that user, so an agent they can no longer
-    read is a gone seat."""
+    ``seated_by`` is the admin who seated this agent (server-set; a later roster
+    save by anyone keeps it): every develop re-reads the agent AS that user, so
+    an agent they can no longer read is a gone seat."""
 
     agent_id: str
     role: CrewRole = "dev"

@@ -633,7 +633,7 @@
   {
     "label": "a non-Claude worker model (gpt-4o) reaches --model and fails the develop",
     "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
-    "find": "r\"^(?:(?:[a-z0-9-]+\\.)*claude-[a-z0-9.:-]+|default|sonnet|opus|haiku|opusplan|fable)\"",
+    "find": "r\"^(?:(?:[a-z0-9][a-z0-9-]*\\.)*claude-[a-z0-9.:-]+|default|sonnet|opus|haiku|opusplan|fable)\"",
     "replace": "r\"^(?:[a-z0-9][a-z0-9._:-]*)\"",
     "tests": [
       "tests/cloud/test_belt_crew.py::test_a_non_claude_worker_model_falls_back_and_the_report_says_why"

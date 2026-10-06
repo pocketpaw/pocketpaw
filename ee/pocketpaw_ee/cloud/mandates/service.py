@@ -9,9 +9,9 @@
 # that accept ``workspace_id`` / ``user_id`` / ``upstream`` get them via
 # signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
 # (sense → foreman → plan gate); prepare_plan_resolution; get_pawprints;
-# set_autopilot; set_crew (the roster; every agent must be one the caller can
-# read in this workspace); digest (the morning report, composed only from the
-# read functions above plus the belt runs list).
+# set_autopilot; set_crew (the roster; each NEW agent must be one the caller can
+# read in this workspace, enabled); digest (the morning report, composed only
+# from the read functions above plus the belt runs list).
 #
 # The CREW: a roster of cloud Agents on the mandate (``MandateDoc.crew``). The
 # dispatcher seats each plan task on a dev (``crew_seat_for_task``: live dev
@@ -19,8 +19,9 @@
 # runner then reads that agent's CURRENT model + instructions
 # (``crew_worker``) so an edit in the agent editor reaches the next develop.
 # Every read is ``agents.service.get_for_viewer`` as the seat's ``seated_by``
-# (the admin who set the roster), so an agent that admin can no longer read is
-# a gone seat. Agents are read through ``agents.service`` (never its Beanie doc).
+# (the admin who seated that agent; a later roster save keeps it), so an agent
+# that admin can no longer read is a gone seat. Agents are read through
+# ``agents.service`` (never its Beanie doc).
 #
 # The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands.
 # The foreman and the digest both read it by joining the mandate's belt run rows
@@ -622,15 +623,26 @@ async def set_autopilot(
 
 
 async def _crew_from_request(
-    workspace_id: str, user_id: str, members: list[CrewMemberRequest]
+    workspace_id: str,
+    user_id: str,
+    members: list[CrewMemberRequest],
+    seated: list[CrewMember] | None = None,
 ) -> list[CrewMember]:
-    """The roster to store. Each agent must be one the caller can read AND live
-    in this workspace (a public agent from another workspace is refused), so a
-    leaked id never seats a foreign agent. 422 on a miss. The caller is stamped
-    as every seat's ``seated_by``: they vouched for the whole roster."""
+    """The roster to store, vouched per seat. A seat whose agent is already on
+    the stored roster (``seated``) keeps its ``seated_by``: that admin vouched
+    for it and develops still read the agent as them, so another admin's edit
+    neither re-reads it as themselves nor trips on an agent they can't see (or
+    one deleted since). A NEW agent must be one the caller can read, live in
+    this workspace (a public agent from another workspace is refused, so a
+    leaked id never seats a foreign agent) and be enabled; 422 on a miss. The
+    caller is stamped as each new seat's ``seated_by``. Role, concurrency and
+    setup always come from the request."""
     from pocketpaw_ee.cloud.agents import service as agents_service
 
+    vouched = {m.agent_id: m.seated_by for m in seated or []}
     for m in members:
+        if m.agent_id in vouched:
+            continue
         try:
             agent = await agents_service.get_for_viewer(m.agent_id, workspace_id, user_id)
         except NotFound:
@@ -640,14 +652,23 @@ async def _crew_from_request(
                 "mandate.crew_agent_not_found",
                 f"crew: agent {m.agent_id!r} is not an agent in this workspace",
             )
-    return [CrewMember(**m.model_dump(), seated_by=user_id) for m in members]
+        if agent.disabled:
+            raise ValidationError(
+                "mandate.crew_agent_disabled",
+                f"crew: agent {m.agent_id!r} is disabled; enable it before seating it",
+            )
+    return [
+        CrewMember(**m.model_dump(), seated_by=vouched.get(m.agent_id, user_id)) for m in members
+    ]
 
 
 async def set_crew(workspace_id: str, user_id: str, mandate_id: str, body: Any) -> dict[str, Any]:
     """Replace a mandate's crew roster. Body: ``{crew: [{agent_id, role,
     concurrency, setup?}]}``. Returns ``{"mandate": <detail>}`` (the autopilot
-    envelope). A bad body or an unreadable agent is a 422; a cross-tenant
-    mandate a 404."""
+    envelope). Seats already on the roster carry over as whoever seated them;
+    a bad body or a new agent the caller can't read, outside this workspace, or
+    disabled is a 422; a cross-tenant mandate a 404. Removing a seat always
+    works."""
     from pydantic import ValidationError as PydanticValidationError
 
     from pocketpaw_ee.cloud.mandates.dto import SetCrewRequest
@@ -658,7 +679,7 @@ async def set_crew(workspace_id: str, user_id: str, mandate_id: str, body: Any) 
         raise ValidationError("mandate.crew_invalid", _first_pydantic_msg(exc)) from exc
 
     doc = await _fetch_mandate(workspace_id, mandate_id)
-    doc.crew = await _crew_from_request(workspace_id, user_id, req.crew)
+    doc.crew = await _crew_from_request(workspace_id, user_id, req.crew, doc.crew)
     await doc.save()
     await emit(
         mandate_events.MandateCrewChanged(

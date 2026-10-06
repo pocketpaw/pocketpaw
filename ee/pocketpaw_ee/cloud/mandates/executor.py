@@ -261,7 +261,7 @@ async def _crew_seat(workspace_id: str, mandate_id: str, index: int) -> dict[str
 
         return await mandate_service.crew_seat_for_task(workspace_id, mandate_id, index)
     except Exception:  # noqa: BLE001 — a crew read must never break dispatch
-        logger.debug("mandate: crew seat lookup failed (non-fatal)", exc_info=True)
+        logger.warning("mandate: crew seat lookup failed (non-fatal)", exc_info=True)
         return None
 
 

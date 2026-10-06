@@ -421,17 +421,24 @@ mandate stores only a roster, `MandateDoc.crew`, one seat per agent:
 ```
 
 `PUT /belt/mandates/{id}/crew` replaces it (create takes the same `crew`
-list). Every agent must be one the caller can read AND that lives in this
-workspace (another workspace's public agent is refused), one seat per agent,
-at most 20 seats; anything else is a 422. The caller is stamped as every
-seat's `seated_by` (server-set; they vouched for the whole roster). The write
-emits `mandate.crew_changed`.
+list). Vouching is per seat. A seat whose agent is already on the roster
+carries over with its `seated_by` (the admin who seated it), so another admin
+can change its role, concurrency or setup, or edit the rest of the roster,
+without being able to read that agent; one deleted since doesn't block edits
+either. A NEW agent must be one the caller can read, live in this workspace
+(another workspace's public agent is refused) and be enabled
+(`mandate.crew_agent_disabled` otherwise); the caller is stamped as its
+`seated_by` (server-set). One seat per agent, at most 20 seats; anything else
+is a 422. Removing a seat always works. The write emits
+`mandate.crew_changed`.
 
 **Seat rule.** When a plan task is dispatched, `StationTaskDispatcher` seats it
 on a dev: the roster's `dev` seats in roster order, minus any whose agent is
 gone, disabled or no longer in the workspace; task N (1-based, the plan's
 order) goes to dev `(N - 1) % devs` (`mandates.service.pick_dev`). Two devs
-split a two-task shift. The seat rides the run blob as
+split a two-task shift. N is the task's index in its own plan, so the
+round-robin restarts at the first dev every shift: on one-task shifts only
+the first live dev ever works. The seat rides the run blob as
 `worker: {agent_id, name, setup, seated_by}`; a mandate with no live dev gets
 `worker: {}` and the factory env decides everything, exactly as before crews.
 A re-develop (moved base) keeps the run's seat.
@@ -471,8 +478,9 @@ The report gains `worker: <name> (model <id or default>)`.
 
 Not wired yet: `reviewer` and `foreman` seats are stored and shown but the
 review and foreman calls still use the factory defaults; `concurrency` is
-recorded for the parallel-worker queue (develops still run one at a time); a
-plan task can't name its worker (the seat rule is round-robin only).
+stored and shown but not enforced (develops still run one at a time; it is
+for the parallel-worker queue); a plan task can't name its worker (the seat
+rule is round-robin only).
 
 ### Claude setup: strict and owner
 
@@ -891,13 +899,17 @@ addopts).
 `tests/cloud/test_belt_crew.py` pins the crew: the roster through create, the
 crew route, GET and a reload; the 422s (another workspace's agent, public or
 not, someone's private agent, duplicates, bad role / concurrency / setup) and
-the cross-tenant 404; the seat rule (two devs, two tasks, two workers;
+the cross-tenant 404; per-seat vouching (another admin edits a roster holding a
+private agent of the first admin's and a deleted one; a new unreadable or
+disabled agent is still refused); the seat rule (two devs, two tasks, two workers;
 reviewers and disabled agents skipped); the station running a worker's model
 on develop and fix but not review, its instructions in those prompts, catalog
-model ids mapped and non-claude ones falling back to the env, a seat's setup
-over the env's; and end to end, roster → dispatch → runner → station argv,
-with the agent edited between dispatch and develop, no crew and a disabled
-agent falling back to the env, the instructions fenced as untrusted data, and
+model ids mapped and non-claude or flag-shaped ones falling back to the env, a
+seat's setup over the env's (and an owner seat with no worktree root failing
+PREPARE with an error that names the seat); and end to end, roster → dispatch
+→ runner → station argv, with the agent edited between dispatch and develop,
+no crew and a disabled agent falling back to the env, the instructions fenced
+as untrusted data (any case or spacing of the closing tag defanged), and
 an agent the seating admin can no longer read becoming a gone seat.
 
 `tests/cloud/test_belt_autopilot.py` (feat/belt-autopilot) pins both new pieces:

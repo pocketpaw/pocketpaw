@@ -181,9 +181,10 @@ def claude_cli_argv(
 
 # A Claude model the CLI runs: a ``claude-*`` id (optionally region/provider
 # dotted, e.g. ``us.anthropic.claude-…``) or a CLI alias, with an optional
-# ``[1m]`` context suffix. Lowercase only; nothing that could read as a flag.
+# ``[1m]`` context suffix. Lowercase only, and every dotted part starts with a
+# letter or digit, so nothing that could read as a flag.
 _CLI_MODEL = re.compile(
-    r"^(?:(?:[a-z0-9-]+\.)*claude-[a-z0-9.:-]+|default|sonnet|opus|haiku|opusplan|fable)"
+    r"^(?:(?:[a-z0-9][a-z0-9-]*\.)*claude-[a-z0-9.:-]+|default|sonnet|opus|haiku|opusplan|fable)"
     r"(?:\[1m\])?$"
 )
 
