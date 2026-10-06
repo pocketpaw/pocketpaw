@@ -52,7 +52,7 @@ def _no_scheduler():
 
 
 @pytest.fixture(autouse=True)
-def _fresh_limiters():
+def _fresh_limiters(monkeypatch):
     limiters = (
         rate_limit._meeting_knock_ip_limiter,
         rate_limit._meeting_knock_code_limiter,
@@ -60,6 +60,10 @@ def _fresh_limiters():
     )
     for lim in limiters:
         lim._buckets.clear()
+        # Buckets refill on time.monotonic, so a loop to capacity that runs slow
+        # under suite load gets a token back and the "blocked" call passes.
+        # Zero refill for the test; the product limiters keep their real rates.
+        monkeypatch.setattr(lim, "rate", 0.0)
     yield
     for lim in limiters:
         lim._buckets.clear()

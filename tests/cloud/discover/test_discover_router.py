@@ -53,9 +53,14 @@ PUBLIC_KEYS = {
 
 
 @pytest.fixture(autouse=True)
-def _fresh_limiter():
+def _fresh_limiter(monkeypatch):
     rate_limit._discover_public_limiter._buckets.clear()
     rate_limit._discover_report_limiter._buckets.clear()
+    # Buckets refill on time.monotonic, so a loop to capacity that runs slow
+    # under suite load gets a token back and the "blocked" call passes.
+    # Zero refill for the test; the product limiters keep their real rates.
+    monkeypatch.setattr(rate_limit._discover_public_limiter, "rate", 0.0)
+    monkeypatch.setattr(rate_limit._discover_report_limiter, "rate", 0.0)
     yield
     rate_limit._discover_public_limiter._buckets.clear()
     rate_limit._discover_report_limiter._buckets.clear()
