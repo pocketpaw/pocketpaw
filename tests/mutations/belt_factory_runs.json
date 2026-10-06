@@ -620,5 +620,14 @@
       "tests/cloud/test_belt_crew.py::test_worker_instructions_are_fenced_as_untrusted_data",
       "tests/cloud/test_belt_crew.py::test_worker_model_and_instructions_reach_develop_and_fix_not_review"
     ]
+  },
+  {
+    "label": "a seat's agent is re-read without the seating admin's visibility check",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "agent = await agents_service.get_for_viewer(agent_id, workspace_id, seated_by or None)",
+    "replace": "agent = await agents_service.get(agent_id)",
+    "tests": [
+      "tests/cloud/test_belt_crew.py::test_an_agent_the_seating_admin_can_no_longer_read_is_a_gone_seat"
+    ]
   }
 ]

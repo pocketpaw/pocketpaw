@@ -13,7 +13,7 @@
 #          ``code_change`` Action (``station_pending=True``, no diff) carrying
 #          the task text, its ``title`` (the commit subject when it lands) and
 #          ``expected_outcome``, its ``recipe`` (if any), the crew ``worker``
-#          seat (``{agent_id, name, setup}``; task N goes to live dev seat
+#          seat (``{agent_id, name, setup, seated_by}``; task N goes to live dev seat
 #          ``(N-1) % devs``, see ``mandates.service.pick_dev``) and the mandate
 #          provenance, and fires ``belt_run_updated``. A human drives ``/belt``
 #          to a diff.
@@ -188,9 +188,10 @@ class StationTaskDispatcher:
             # A charter recipe name (foreman-validated) — the develop station
             # runs that command instead of an LLM develop. "" = develop work.
             "recipe": str(task.get("recipe") or ""),
-            # The crew seat this task runs on ({agent_id, name, setup}); the
-            # headless runner reads the agent's model + instructions at develop
-            # time. {} = no crew: the factory env decides.
+            # The crew seat this task runs on ({agent_id, name, setup,
+            # seated_by}); the headless runner reads the agent's model +
+            # instructions at develop time, as seated_by. {} = no crew: the
+            # factory env decides.
             "worker": worker or {},
         }
 

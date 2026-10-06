@@ -415,8 +415,8 @@ class ClaudeCodeDevelop:
                 lines.append(f"recipe: {request.recipe}")
             lines.append(f"setup: {'owner' if trust else 'strict'}")
             if request.worker:
-                model = cli_model(request.model) or "default"
-                lines.append(f"worker: {request.worker} (model {model})")
+                note = request.worker_note or f"model {cli_model(request.model) or 'default'}"
+                lines.append(f"worker: {request.worker} ({note})")
             lines.append(f"orient: {orient_note}")
             lines += [f"check `{r.command}`: {'pass' if r.ok else 'fail'}" for r in results]
             lines.append(f"review: {verdict}")

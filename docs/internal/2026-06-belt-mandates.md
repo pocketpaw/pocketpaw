@@ -416,30 +416,36 @@ prompt) and soul live on the Agent and are edited in the agent editor. The
 mandate stores only a roster, `MandateDoc.crew`, one seat per agent:
 
 ```
-{agent_id, role: dev | reviewer | foreman, concurrency: 1-8, setup: owner | strict | null}
+{agent_id, role: dev | reviewer | foreman, concurrency: 1-8, setup: owner | strict | null,
+ seated_by}
 ```
 
 `PUT /belt/mandates/{id}/crew` replaces it (create takes the same `crew`
 list). Every agent must be one the caller can read AND that lives in this
 workspace (another workspace's public agent is refused), one seat per agent,
-at most 20 seats; anything else is a 422. The write emits
-`mandate.crew_changed`.
+at most 20 seats; anything else is a 422. The caller is stamped as every
+seat's `seated_by` (server-set; they vouched for the whole roster). The write
+emits `mandate.crew_changed`.
 
 **Seat rule.** When a plan task is dispatched, `StationTaskDispatcher` seats it
 on a dev: the roster's `dev` seats in roster order, minus any whose agent is
 gone, disabled or no longer in the workspace; task N (1-based, the plan's
 order) goes to dev `(N - 1) % devs` (`mandates.service.pick_dev`). Two devs
 split a two-task shift. The seat rides the run blob as
-`worker: {agent_id, name, setup}`; a mandate with no live dev gets
+`worker: {agent_id, name, setup, seated_by}`; a mandate with no live dev gets
 `worker: {}` and the factory env decides everything, exactly as before crews.
 A re-develop (moved base) keeps the run's seat.
 
 **Per-worker settings.** The headless runner reads the seated agent when the
 develop runs, not at dispatch (`mandates.service.crew_worker`), so an edit in
 the agent editor reaches a queued run, and the agent's instructions never sit
-on a run blob other members can read. A gone or disabled agent falls back to
-the factory env. `DevelopRequest` carries `worker`, `model`, `instructions`
-and `setup`:
+on a run blob other members can read. Seating and this read both use the
+roster route's visibility-checked read (`agents.service.get_for_viewer`) AS
+`seated_by`, so an agent that is gone, disabled, or no longer readable by the
+admin who seated it (its owner made it private) is a gone seat: the run uses
+the factory env for everything, setup included, and the report says
+`worker: <name> (seat unavailable: ...)`. `DevelopRequest` carries `worker`,
+`model`, `instructions`, `setup` and `worker_note`:
 
 - `model` sets `--model` on the DEVELOP and FIX calls, over
   `POCKETPAW_FACTORY_CLAUDE_MODEL`. Agent models are catalog ids, so
@@ -448,8 +454,10 @@ and `setup`:
   the env (`foreman.cli_model`). REVIEW keeps the factory model: the reviewer
   stays independent of the worker.
 - `instructions` (capped at 4,000 chars) ride the develop and fix prompts as
-  the worker's working instructions, after the charter; the boundaries win.
-  They are workspace-authored, so they are not fenced as untrusted.
+  style notes, after the charter, INSIDE the `<untrusted>` fence: an agent's
+  owner edits them without `belt.manage` and they are re-read at every
+  develop, so they can shape style but never the rules, tools or files. The
+  agent's name stays out of the prompt for the same reason.
 - `setup` (`owner` / `strict`) picks the Claude setup for the whole run, over
   `POCKETPAW_FACTORY_CLAUDE_SETUP`; unset follows the env. An `owner` seat
   still needs the operator's `POCKETPAW_FACTORY_WORKTREE_ROOT`, or the run
@@ -886,7 +894,8 @@ on develop and fix but not review, its instructions in those prompts, catalog
 model ids mapped and non-claude ones falling back to the env, a seat's setup
 over the env's; and end to end, roster → dispatch → runner → station argv,
 with the agent edited between dispatch and develop, no crew and a disabled
-agent falling back to the env.
+agent falling back to the env, the instructions fenced as untrusted data, and
+an agent the seating admin can no longer read becoming a gone seat.
 
 `tests/cloud/test_belt_autopilot.py` (feat/belt-autopilot) pins both new pieces:
 autopilot start persists state + runs an immediate cycle whose sightings carry

@@ -14,9 +14,10 @@
 #   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued blob (task,
 #     expected outcome, repo, base, mandate provenance, ``recipe``, and the crew
 #     ``worker`` seat the dispatcher assigned), resolves that worker's CURRENT
-#     model + instructions (``worker_for``, the mandates service read; a gone or
-#     disabled agent falls back to the factory env), calls the DevelopFn with
-#     the run's ``action_id`` (the develop feed's key),
+#     model + instructions (``worker_for``, the mandates service read as the
+#     admin who seated it; a gone, disabled or no-longer-readable agent is a gone
+#     seat: factory env, and the report says so), calls the DevelopFn with the
+#     run's ``action_id`` (the develop feed's key),
 #     then back-writes diff + base_branch + ``files_changed`` (the DevelopFn's
 #     count, else the diff's ``+++`` headers) onto the SAME action, clears
 #     ``station_pending`` and mints a Decision-Graph ``correlation_id``. Never
@@ -85,10 +86,12 @@ class DevelopRequest:
     # The crew worker (an Agent) this run is seated on: its name, model and
     # instructions, and the seat's Claude setup ("owner" / "strict"). Empty =
     # the factory env (POCKETPAW_FACTORY_CLAUDE_MODEL / _SETUP) decides.
+    # ``worker_note`` says why a seated worker's settings were not used.
     worker: str = ""
     model: str = ""
     instructions: str = ""
     setup: str = ""
+    worker_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -121,9 +124,9 @@ class HeadlessDevelopRunner:
     per-diff human gate is preserved (the runner never approves or executes)."""
 
     develop_fn: DevelopFn
-    # ``(workspace_id, agent_id) -> {name, model, instructions} | None``; the
-    # default reads the agent through the mandates service.
-    worker_for: Callable[[str, str], Awaitable[dict[str, str] | None]] | None = None
+    # ``(workspace_id, agent_id, seated_by) -> {name, model, instructions} |
+    # None``; the default reads the agent through the mandates service.
+    worker_for: Callable[[str, str, str], Awaitable[dict[str, str] | None]] | None = None
 
     async def run(self, action_id: str, *, workspace_id: str | None = None) -> str:
         """Produce a diff for a queued ``code_change`` action and attach it.
@@ -241,28 +244,36 @@ class HeadlessDevelopRunner:
         return action_id
 
     async def _worker(self, blob: dict[str, Any]) -> dict[str, str]:
-        """The seated worker's DevelopRequest fields, read now so an agent
-        edit since dispatch applies. ``{}`` (factory env) when the run has no
-        seat; the seat's setup alone when the agent is gone, disabled or the
-        read fails (never blocks the develop)."""
+        """The seated worker's DevelopRequest fields, read now (as the admin
+        who seated it) so an agent edit since dispatch applies. ``{}`` (factory
+        env) when the run has no seat. A gone seat (the agent is gone, disabled,
+        no longer readable by that admin, or the read fails) also runs on the
+        factory env, with a ``worker_note`` for the report; never blocks."""
         seat = blob.get("worker")
         if not isinstance(seat, dict) or not seat.get("agent_id"):
             return {}
-        fields = {"worker": str(seat.get("name") or ""), "setup": str(seat.get("setup") or "")}
+        name = str(seat.get("name") or "")
         try:
             found = await (self.worker_for or _default_worker_for)(
-                str(blob.get("workspace_id") or ""), str(seat["agent_id"])
+                str(blob.get("workspace_id") or ""),
+                str(seat["agent_id"]),
+                str(seat.get("seated_by") or ""),
             )
         except Exception:  # noqa: BLE001 — a worker read must not crash the develop
             logger.warning("headless: worker read failed; using the factory env", exc_info=True)
             found = None
-        if found:
-            fields.update(
-                worker=str(found.get("name") or fields["worker"]),
-                model=str(found.get("model") or ""),
-                instructions=str(found.get("instructions") or ""),
-            )
-        return fields
+        if not found:
+            return {
+                "worker": name,
+                "worker_note": "seat unavailable: the agent is gone, disabled or no longer "
+                "readable by the admin who seated it; ran on the factory defaults",
+            }
+        return {
+            "worker": str(found.get("name") or name),
+            "model": str(found.get("model") or ""),
+            "instructions": str(found.get("instructions") or ""),
+            "setup": str(seat.get("setup") or ""),
+        }
 
     async def _attach_diff(
         self,
@@ -409,10 +420,12 @@ class HeadlessDevelopRunner:
             logger.debug("headless: failed to record headless_error note", exc_info=True)
 
 
-async def _default_worker_for(workspace_id: str, agent_id: str) -> dict[str, str] | None:
+async def _default_worker_for(
+    workspace_id: str, agent_id: str, seated_by: str
+) -> dict[str, str] | None:
     from pocketpaw_ee.cloud.mandates import service as mandate_service
 
-    return await mandate_service.crew_worker(workspace_id, agent_id)
+    return await mandate_service.crew_worker(workspace_id, agent_id, seated_by)
 
 
 def _diff_file_count(diff: str) -> int:

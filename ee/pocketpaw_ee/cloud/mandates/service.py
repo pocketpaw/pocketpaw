@@ -18,7 +18,9 @@
 # seats in roster order, ``pick_dev`` round-robin by task index); the headless
 # runner then reads that agent's CURRENT model + instructions
 # (``crew_worker``) so an edit in the agent editor reaches the next develop.
-# Agents are read through ``agents.service`` (never its Beanie doc).
+# Every read is ``agents.service.get_for_viewer`` as the seat's ``seated_by``
+# (the admin who set the roster), so an agent that admin can no longer read is
+# a gone seat. Agents are read through ``agents.service`` (never its Beanie doc).
 #
 # The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands.
 # The foreman and the digest both read it by joining the mandate's belt run rows
@@ -624,7 +626,8 @@ async def _crew_from_request(
 ) -> list[CrewMember]:
     """The roster to store. Each agent must be one the caller can read AND live
     in this workspace (a public agent from another workspace is refused), so a
-    leaked id never seats a foreign agent. 422 on a miss."""
+    leaked id never seats a foreign agent. 422 on a miss. The caller is stamped
+    as every seat's ``seated_by``: they vouched for the whole roster."""
     from pocketpaw_ee.cloud.agents import service as agents_service
 
     for m in members:
@@ -637,7 +640,7 @@ async def _crew_from_request(
                 "mandate.crew_agent_not_found",
                 f"crew: agent {m.agent_id!r} is not an agent in this workspace",
             )
-    return [CrewMember(**m.model_dump()) for m in members]
+    return [CrewMember(**m.model_dump(), seated_by=user_id) for m in members]
 
 
 async def set_crew(workspace_id: str, user_id: str, mandate_id: str, body: Any) -> dict[str, Any]:
@@ -682,14 +685,14 @@ def pick_dev(devs: list[_T], index: int) -> _T | None:
     return devs[(index - 1) % len(devs)] if devs else None
 
 
-async def _live_agent(workspace_id: str, agent_id: str) -> Any | None:
-    """The agent behind a seat, or ``None`` when it is gone, disabled or no
-    longer in this workspace (internal read: the roster route already checked
-    the admin could read it)."""
+async def _live_agent(workspace_id: str, agent_id: str, seated_by: str) -> Any | None:
+    """The agent behind a seat, or ``None`` when it is gone, disabled, no
+    longer in this workspace, or no longer readable by ``seated_by`` (the same
+    visibility-checked read the roster route used to seat it)."""
     from pocketpaw_ee.cloud.agents import service as agents_service
 
     try:
-        agent = await agents_service.get(agent_id)
+        agent = await agents_service.get_for_viewer(agent_id, workspace_id, seated_by or None)
     except NotFound:
         return None
     if agent.workspace_id != workspace_id or agent.disabled:
@@ -700,7 +703,8 @@ async def _live_agent(workspace_id: str, agent_id: str) -> Any | None:
 async def crew_seat_for_task(
     workspace_id: str, mandate_id: str, index: int
 ) -> dict[str, Any] | None:
-    """The dev seat plan task ``index`` runs on: ``{agent_id, name, setup}``,
+    """The dev seat plan task ``index`` runs on: ``{agent_id, name, setup,
+    seated_by}``,
     or ``None`` (no crew, or no live dev) so the factory's env defaults apply.
     Dead seats (deleted / disabled agents) are skipped before ``pick_dev``."""
     # no-event: read-only path; emit only on writes.
@@ -716,24 +720,30 @@ async def crew_seat_for_task(
     for seat in doc.crew:
         if seat.role != "dev":
             continue
-        agent = await _live_agent(workspace_id, seat.agent_id)
+        agent = await _live_agent(workspace_id, seat.agent_id, seat.seated_by)
         if agent is not None:
             live.append((seat, agent))
     picked = pick_dev(live, index)
     if picked is None:
         return None
     seat, agent = picked
-    return {"agent_id": seat.agent_id, "name": agent.name, "setup": seat.setup or ""}
+    return {
+        "agent_id": seat.agent_id,
+        "name": agent.name,
+        "setup": seat.setup or "",
+        "seated_by": seat.seated_by,
+    }
 
 
-async def crew_worker(workspace_id: str, agent_id: str) -> dict[str, str] | None:
+async def crew_worker(workspace_id: str, agent_id: str, seated_by: str) -> dict[str, str] | None:
     """A seated worker's CURRENT settings for a develop: ``{name, model,
     instructions}`` (the agent's ``config.model`` and ``config.system_prompt``),
-    or ``None`` when the agent is gone or disabled. Read at develop time, not
+    or ``None`` when the agent is gone, disabled or no longer readable by the
+    admin who seated it (``seated_by``). Read at develop time, not
     stored on the run, so a private agent's instructions never land on a run
     blob and an editor change applies to the next develop."""
     # no-event: read-only path; emit only on writes.
-    agent = await _live_agent(workspace_id, agent_id)
+    agent = await _live_agent(workspace_id, agent_id, seated_by)
     if agent is None:
         return None
     return {

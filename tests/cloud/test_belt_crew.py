@@ -136,19 +136,26 @@ async def test_crew_round_trips_through_create_update_and_get(tmp_path, mongo_db
 
     created = _create(client, tmp_path, crew=[{"agent_id": builder}])
     assert created["crew"] == [
-        {"agent_id": builder, "role": "dev", "concurrency": 1, "setup": None}
+        {"agent_id": builder, "role": "dev", "concurrency": 1, "setup": None, "seated_by": USER}
     ]
     mid = created["id"]
 
     roster = [
-        {"agent_id": builder, "role": "dev", "concurrency": 2},
+        # ``seated_by`` is server-set: a client value is ignored.
+        {"agent_id": builder, "role": "dev", "concurrency": 2, "seated_by": "u-forged"},
         {"agent_id": checker, "role": "reviewer", "concurrency": 1, "setup": "owner"},
     ]
     res = client.put(f"/belt/mandates/{mid}/crew", json={"crew": roster})
     assert res.status_code == 200, res.text
     want = [
-        {"agent_id": builder, "role": "dev", "concurrency": 2, "setup": None},
-        {"agent_id": checker, "role": "reviewer", "concurrency": 1, "setup": "owner"},
+        {"agent_id": builder, "role": "dev", "concurrency": 2, "setup": None, "seated_by": USER},
+        {
+            "agent_id": checker,
+            "role": "reviewer",
+            "concurrency": 1,
+            "setup": "owner",
+            "seated_by": USER,
+        },
     ]
     assert res.json()["mandate"]["crew"] == want
     assert client.get(f"/belt/mandates/{mid}").json()["crew"] == want
@@ -225,7 +232,7 @@ async def test_seat_picker_gives_two_tasks_two_different_devs(tmp_path, mongo_db
 
     seats = [await mandate_service.crew_seat_for_task(WS, mid, i) for i in (1, 2, 3)]
     assert [s["agent_id"] for s in seats] == [a, b, a]  # reviewer + disabled dev skipped
-    assert seats[0] == {"agent_id": a, "name": "Ada", "setup": ""}
+    assert seats[0] == {"agent_id": a, "name": "Ada", "setup": "", "seated_by": USER}
     assert seats[1]["setup"] == "strict"
     assert await mandate_service.crew_seat_for_task("w2", mid, 1) is None
     assert mandate_service.pick_dev([], 1) is None
@@ -349,7 +356,7 @@ async def test_roster_dev_develops_with_its_agent_model(repo, tmp_path, mongo_db
 
     action_id = await _dispatch(store, mid)
     blob = (await store.get_action(action_id)).parameters["_code_change"]
-    assert blob["worker"] == {"agent_id": ada, "name": "Ada", "setup": ""}
+    assert blob["worker"] == {"agent_id": ada, "name": "Ada", "setup": "", "seated_by": USER}
     assert "CREW-RULE" not in json.dumps(blob)
 
     from pocketpaw_ee.cloud.models.agent import Agent
@@ -400,3 +407,35 @@ async def test_no_crew_and_a_gone_agent_keep_the_env_defaults(
     await HeadlessDevelopRunner(develop_fn=_station(fake, repo)).run(action_id, workspace_id=WS)
     assert _model(_claude_argvs(fake)[0]) == "opus"
     assert "CREW-RULE" not in fake.claude_calls[0][1]
+
+
+async def test_an_agent_the_seating_admin_can_no_longer_read_is_a_gone_seat(
+    repo, tmp_path, mongo_db, monkeypatch
+):
+    """The admin (u1) seats a member's (u2) workspace agent. When the member
+    flips it to private after dispatch, the develop re-reads it AS u1, finds it
+    unreadable, runs on the factory defaults without its instructions, and says
+    so in the report. Seating a new task skips it the same way."""
+    store = InstinctStore(tmp_path / "instinct.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLAUDE_MODEL", "opus")
+    theirs = await _agent("Theirs", model="sonnet", prompt="CREW-RULE", owner="u2")
+    mid = _create(_client(monkeypatch), repo, crew=[{"agent_id": theirs, "setup": "owner"}])["id"]
+    action_id = await _dispatch(store, mid)
+
+    from pocketpaw_ee.cloud.models.agent import Agent
+
+    doc = await Agent.get(mandate_service._as_object_id(theirs))
+    doc.visibility = "private"
+    await doc.save()
+
+    fake = FakeClaude(develop=[_write("ok")])
+    await HeadlessDevelopRunner(develop_fn=_station(fake, repo)).run(action_id, workspace_id=WS)
+    summary = (await store.get_action(action_id)).parameters["_code_change"]["summary"]
+    assert _model(_claude_argvs(fake)[0]) == "opus"
+    assert "CREW-RULE" not in fake.claude_calls[0][1]
+    assert "setup: strict" in summary  # the seat's owner setup went with it
+    assert "worker: Theirs (seat unavailable:" in summary and "factory defaults" in summary
+    assert await mandate_service.crew_seat_for_task(WS, mid, 1) is None
+    # Its owner still reads it; the seat is about the admin who vouched for it.
+    assert await mandate_service.crew_worker(WS, theirs, "u2") is not None
