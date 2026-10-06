@@ -106,7 +106,12 @@ permanently, with nothing in the product ever mentioning it again.
 `sites.service.reconcile_plan_carried_sites` is what closes it, and it is called
 from `workspace.service.set_workspace_plan` — the chokepoint, not from each
 caller, so a plan written by a webhook, an admin action, or a test converges the
-same way. **Oldest first keeps its slot**, ordered on `createdAt`: the oldest site
+same way. `platform_set_workspace_overrides` calls it too, since an
+`included_sites` override moves the allowance just like a plan. Allowances that
+shrink with no write at all (an override reaching its `expires_at`) or through a
+writer that skips both (a direct DB edit) are caught by the renewal sweep, which
+runs `reconcile_all_plan_carried_sites` over every workspace with a site on the
+plan rail each tick. **Oldest first keeps its slot**, ordered on `createdAt`: the oldest site
 is the one most likely to be linked to and indexed, and losing its custom domain
 is the most expensive release available.
 
