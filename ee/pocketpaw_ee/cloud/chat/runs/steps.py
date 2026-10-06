@@ -10,8 +10,9 @@ surface records a call the same way.
 
 Why a recorder and not the raw frames: the frames are a live-UI protocol, not a
 record. A claude_sdk call is announced twice (a provisional ``input_pending``
-frame, then the real one), thinking arrives as many small deltas, and results
-carry no call id. Storing them verbatim would show phantom calls and hundreds of
+frame, then the real one), thinking arrives as many small deltas, and chat
+results carry no call id (a result pairs with its call by ``call_id`` when the
+source has one, else by tool name). Storing them verbatim would show phantom calls and hundreds of
 one-word thinking rows. Everything stored is bounded (per-field caps, plus a
 per-recorder step and byte budget: the chat defaults below, larger for a develop
 feed) and passed through the same scrub/redact the audit log uses, string values
@@ -116,11 +117,14 @@ class StepRecorder:
         self._max_total_bytes = max_total_bytes
         self._steps: list[dict[str, Any]] = []
         self._omitted = 0
-        # Open tool calls, oldest first: (step, provisional). No call id reaches
-        # this layer, so a result pairs with the OLDEST open call of its tool.
-        self._open: list[tuple[dict[str, Any], bool]] = []
-        # Calls dropped by the step cap that are still "open", per tool, so
-        # their results and resolving frames don't count as a second drop.
+        # Open tool calls, oldest first: (step, provisional, call_id). A result
+        # pairs with the open call carrying its ``call_id`` when the source
+        # sends one (the belt feed does; the chat backends don't); otherwise
+        # with the OLDEST open call of its tool.
+        self._open: list[tuple[dict[str, Any], bool, str]] = []
+        # Calls dropped by the step cap that are still "open" (by id, else per
+        # tool), so their results and resolving frames don't count twice.
+        self._dropped_ids: set[str] = set()
         self._dropped_open: dict[str, int] = {}
         self._dropped_provisional: dict[str, int] = {}
         self._thinking: dict[str, Any] | None = None
@@ -195,17 +199,20 @@ class StepRecorder:
         narration = data.get("narration")
         narration = narration if isinstance(narration, str) else ""
         pending = data.get("input_pending") is True
+        call_id = str(data.get("call_id") or "")
         if not pending:
             # The resolved frame for a call announced provisionally: upgrade
             # that step instead of recording a phantom second call.
-            for index, (step, provisional) in enumerate(self._open):
-                if provisional and step["tool"] == tool:
+            for index, (step, provisional, cid) in enumerate(self._open):
+                if provisional and _same_call(step, cid, tool, call_id):
                     step["input"] = _cap_input(data.get("input"))
                     if narration:
                         step["narration"] = narration
-                    self._open[index] = (step, False)
+                    self._open[index] = (step, False, cid or call_id)
                     return
-            if self._dropped_provisional.get(tool):
+            if call_id in self._dropped_ids:
+                return
+            if not call_id and self._dropped_provisional.get(tool):
                 self._dropped_provisional[tool] -= 1
                 return
         step = self._new_step(
@@ -216,7 +223,9 @@ class StepRecorder:
             input=None if pending else _cap_input(data.get("input")),
         )
         if self._append(step):
-            self._open.append((step, pending))
+            self._open.append((step, pending, call_id))
+        elif call_id:
+            self._dropped_ids.add(call_id)
         else:
             self._dropped_open[tool] = self._dropped_open.get(tool, 0) + 1
             if pending:
@@ -224,13 +233,29 @@ class StepRecorder:
 
     def _on_tool_result(self, data: dict[str, Any], at: datetime) -> None:
         tool = str(data.get("tool") or "")
+        call_id = str(data.get("call_id") or "")
         output, truncated = _cap_output(data.get("output"))
-        for index, (step, _provisional) in enumerate(self._open):
-            if step["tool"] == tool:
-                del self._open[index]
-                break
+        match = next(
+            (i for i, (_s, _p, cid) in enumerate(self._open) if call_id and cid == call_id),
+            None,
+        )
+        if match is None and call_id in self._dropped_ids:
+            # Its call was dropped by the cap and already counted.
+            self._dropped_ids.discard(call_id)
+            return
+        if match is None:
+            match = next(
+                (
+                    i
+                    for i, (s, _p, cid) in enumerate(self._open)
+                    if _same_call(s, cid, tool, call_id)
+                ),
+                None,
+            )
+        if match is not None:
+            step = self._open.pop(match)[0]
         else:
-            if self._dropped_open.get(tool):
+            if not call_id and self._dropped_open.get(tool):
                 # Its call was dropped by the cap and already counted.
                 self._dropped_open[tool] -= 1
                 return
@@ -256,7 +281,7 @@ class StepRecorder:
             return
         at = now or _now()
         self._close_thinking(at)
-        for step, _provisional in self._open:
+        for step, _provisional, _call_id in self._open:
             step["status"] = "missing_result"
             step["ended_at"] = at
         self._open = []
@@ -291,6 +316,14 @@ class StepRecorder:
         return {"steps": list(self._steps), "steps_omitted": self._omitted}
 
 
+def _same_call(step: dict[str, Any], step_call_id: str, tool: str, call_id: str) -> bool:
+    """Whether a frame belongs to an open call: by id when both carry one,
+    else by tool name."""
+    if call_id and step_call_id:
+        return call_id == step_call_id
+    return step["tool"] == tool
+
+
 def record_agent_event(
     recorder: StepRecorder,
     event: Any,
@@ -322,6 +355,8 @@ def record_agent_event(
             frame["narration"] = narration
         if meta.get("input_pending") is True:
             frame["input_pending"] = True
+        if meta.get("call_id"):
+            frame["call_id"] = meta["call_id"]
         recorder.observe("tool_start", frame, now)
     elif etype == "tool_result":
         name = meta.get("name") or meta.get("tool") or ""
@@ -329,7 +364,10 @@ def record_agent_event(
         if isinstance(content, dict):
             name = name or content.get("tool") or content.get("name") or ""
             output = content.get("result", content)
-        recorder.observe("tool_result", {"tool": name, "output": output}, now)
+        frame = {"tool": name, "output": output}
+        if meta.get("call_id"):
+            frame["call_id"] = meta["call_id"]
+        recorder.observe("tool_result", frame, now)
 
 
 def steps_wire_fields(steps: Any, steps_omitted: int = 0) -> dict[str, Any]:

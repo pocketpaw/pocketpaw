@@ -7,10 +7,11 @@
 #
 #   * ``stream_events`` — stdout lines -> ``AgentEvent`` (the one event schema,
 #     ``agents/protocol.py``): assistant ``text`` -> message, non-empty
-#     ``thinking`` -> thinking, ``tool_use`` -> tool_use (name + input), and a
-#     user ``tool_result`` -> tool_result named from its ``tool_use_id`` (the
-#     CLI puts only the id on a result; the recorder pairs by name). Each event
-#     carries the line's ISO ``timestamp`` in ``metadata``. Other lines (system,
+#     ``thinking`` -> thinking, ``tool_use`` -> tool_use (name, input, and the
+#     block id as ``call_id``), and a user ``tool_result`` -> tool_result with
+#     its ``tool_use_id`` as ``call_id`` and the name looked up from it, so the
+#     recorder pairs parallel same-name calls by id. Each event carries the
+#     line's ISO ``timestamp`` in ``metadata``. Other lines (system,
 #     rate limits, the final result envelope) and unparseable ones are skipped.
 #   * ``fold_feed`` — events -> ``StepRecorder`` through
 #     ``steps.record_agent_event``, so a feed is the chat steps shape: same
@@ -86,17 +87,22 @@ def stream_events(stdout: str) -> Iterator[AgentEvent]:
             elif kind == "assistant" and btype == "thinking" and block.get("thinking"):
                 yield AgentEvent("thinking", str(block["thinking"]), dict(meta))
             elif kind == "assistant" and btype == "tool_use":
+                call_id = str(block.get("id") or "")
                 name = str(block.get("name") or "")
-                names[str(block.get("id") or "")] = name
+                names[call_id] = name
                 raw_input = block.get("input")
                 tool_input = raw_input if isinstance(raw_input, dict) else {}
-                yield AgentEvent("tool_use", name, {**meta, "name": name, "input": tool_input})
+                yield AgentEvent(
+                    "tool_use",
+                    name,
+                    {**meta, "name": name, "input": tool_input, "call_id": call_id},
+                )
             elif kind == "user" and btype == "tool_result":
-                name = names.get(str(block.get("tool_use_id") or ""), "")
+                call_id = str(block.get("tool_use_id") or "")
                 yield AgentEvent(
                     "tool_result",
                     _result_text(block.get("content")),
-                    {**meta, "name": name},
+                    {**meta, "name": names.get(call_id, ""), "call_id": call_id},
                 )
 
 

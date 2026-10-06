@@ -527,8 +527,12 @@ once it exits the station folds its stdout into steps and stores them. Path:
 
 - `belt/feed.py` `stream_events` turns the CLI lines into `AgentEvent`s
   (`agents/protocol.py`, the one event schema): assistant `text` → message,
-  non-empty `thinking` → thinking, `tool_use` → tool_use (name + input),
-  `tool_result` → tool_result named from its `tool_use_id`. Each line's ISO
+  non-empty `thinking` → thinking, `tool_use` → tool_use (name, input, and the
+  block id as `call_id`), `tool_result` → tool_result with its `tool_use_id` as
+  `call_id`. The recorder pairs a result with its call by `call_id` (parallel
+  calls of one tool can finish in any order; a live capture showed each
+  result right after its own call, but nothing guarantees it), and by tool
+  name only when a source has no ids (the chat backends). Each line's ISO
   `timestamp` becomes the step time. System lines, rate-limit events and the
   result envelope are skipped; the station reads the envelope separately
   (`foreman.claude_result_envelope`: the whole stdout for `json`, else the last
@@ -540,15 +544,20 @@ once it exits the station folds its stdout into steps and stores them. Path:
   keys masked, and every string in a tool input and every result redacted
   with `security.redact` patterns. The developer's prose between tool calls
   has no chat-step kind and is stored as a `thinking` step; back-to-back
-  prose and thinking blocks share one step, a blank line apart. Worktree paths
-  are shown relative: both the station's spelling and the physical one the CLI
-  reports (macOS `/private/var/...` for a `/var/...` temp dir) are stripped,
-  the longer first, so neither cuts into the other.
+  prose and thinking blocks share one step, a blank line apart.
+- Worktree paths read relative: the station strips the worktree prefix from a
+  seat's stdout and stderr as soon as the call returns, so the feed, the error
+  tails on the run blob and the returned text never carry an absolute path.
+  Both the station's spelling and the physical one the CLI reports (macOS
+  `/private/var/...` for a `/var/...` temp dir) go, the longer first, so
+  neither cuts into the other.
 - Caps: 2,000 steps and 2 MB per stored feed (`FEED_MAX_STEPS`,
   `FEED_MAX_BYTES`); what is dropped is counted in `steps_omitted`. Only the
   develop stage is captured today, so that is also the per-run budget.
 - Storage: `BeltRunFeed` (`belt_run_feeds`), one row per (workspace, run,
-  stage), unique on that key; a re-develop replaces the stage's row. Only
+  stage), unique on that key and written with one atomic upsert; a
+  re-develop replaces the stage's row, even with an empty feed when the new
+  attempt printed nothing, so the page never shows an earlier attempt. Only
   `belt/service.py` touches it (`save_run_feed` / `get_run_feed`). It lives
   outside the Instinct `code_change` blob because `GET /belt/runs` reads every
   blob. Measured against JSON files beside the worktree, 2,000 steps (2.6 MB
@@ -560,10 +569,10 @@ once it exits the station folds its stdout into steps and stores them. Path:
   save is best-effort: a fold or Mongo failure is logged and never fails the
   run. A failed seat's `headless_error` carries what claude said (the result
   envelope's text, else its last prose, redacted), never the raw stream-json.
-- Known gap: a seat killed by the timeout or a cancel stores no feed, because
-  `run_subprocess` collects stdout only when the process exits and discards it
-  on a kill. Reading the stream line by line as it arrives (BF-4's per-line
-  callback) closes it, along with live tailing.
+- Known gap: a seat killed by the timeout stores an empty feed (and a cancel
+  none), because `run_subprocess` collects stdout only when the process exits
+  and discards it on a kill. Reading the stream line by line as it arrives
+  (BF-4's per-line callback) closes it, along with live tailing.
 - `GET /api/v1/belt/runs/{id}/feed?stage=develop` (`belt.read`) returns
   `{action_id, stage, steps?, stepsOmitted?}`, the steps in the chat history
   wire shape (`steps_wire_fields`), so the UI maps them with
@@ -792,8 +801,11 @@ a blank line apart, relative paths (the run's temp dir reached through a
 symlink whose physical path ends with it, and 24 such dirs for the prefix
 order), secrets planted in a tool result and a tool input absent from storage
 and the response, the result envelope read past the trailing system line, a
-failed develop still storing its feed and recording claude's words rather than
-stream-json, a failing save not failing the run, the step and byte caps, and
+failed develop still storing its feed and recording claude's words (stderr or
+its last prose) with no stream-json and no worktree path, a timed-out
+re-develop replacing the earlier feed, parallel same-name calls answered out
+of order pairing by id, a stream cut after `system/init` not read as a result,
+a failing save not failing the run, the step and byte caps (by id too), and
 the route's tenancy 404.
 `tests/mutations/belt_factory_runs.json` breaks each of these on purpose
 (the `feed:` entries for the feed). CI runs these in the "Belt mandates and the

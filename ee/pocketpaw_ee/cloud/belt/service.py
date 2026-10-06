@@ -783,27 +783,23 @@ async def save_run_feed(
     """Store one run stage's steps (already scrubbed and capped by
     ``belt/feed.py``), replacing that stage's previous feed: a re-develop shows
     its latest attempt. Raises on a Mongo failure; the station treats the save
-    as best-effort. Only this module reads/writes ``BeltRunFeed``."""
+    as best-effort. Only this module reads/writes ``BeltRunFeed``. One atomic
+    upsert on the unique (workspace, run, stage) key, so two writers never race
+    into a duplicate-key error (the raw update skips Beanie's timestamp hooks,
+    hence the explicit ``updatedAt`` / ``createdAt``)."""
+    from datetime import UTC, datetime
+
     from pocketpaw_ee.cloud.models.belt_run_feed import BeltRunFeed
 
-    doc = await BeltRunFeed.find_one(
-        BeltRunFeed.workspace == workspace_id,
-        BeltRunFeed.action_id == action_id,
-        BeltRunFeed.stage == stage,
+    now = datetime.now(UTC)
+    await BeltRunFeed.get_pymongo_collection().update_one(
+        {"workspace": workspace_id, "action_id": action_id, "stage": stage},
+        {
+            "$set": {"steps": steps, "steps_omitted": steps_omitted, "updatedAt": now},
+            "$setOnInsert": {"createdAt": now},
+        },
+        upsert=True,
     )
-    if doc is None:
-        doc = BeltRunFeed(
-            workspace=workspace_id,
-            action_id=action_id,
-            stage=stage,
-            steps=steps,
-            steps_omitted=steps_omitted,
-        )
-        await doc.insert()
-    else:
-        doc.steps = steps
-        doc.steps_omitted = steps_omitted
-        await doc.save()
     # no-event: the run page reads the feed on open; live tailing is a later slice.
 
 

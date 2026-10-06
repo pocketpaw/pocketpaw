@@ -489,8 +489,11 @@ class ClaudeCodeDevelop:
             timeout=_env_seconds("POCKETPAW_FACTORY_DEVELOP_TIMEOUT", 900),
             stdin=prompt,
         )
+        # Worktree paths read relative everywhere downstream: the feed, the
+        # error tails that land on the run blob, the returned text.
+        out, err = _relative_paths(out, cwd), _relative_paths(err, cwd)
         if feed_for is not None:
-            await self._store_feed(feed_for, step, out, cwd)
+            await self._store_feed(feed_for, step, out)
         if code != 0:
             said = err or _claude_said(out)
             raise DevelopStationError(f"{step}: claude exited {code}: {_tail(said)}")
@@ -501,13 +504,14 @@ class ClaudeCodeDevelop:
             )
         return claude_result_text(out)
 
-    async def _store_feed(self, request: DevelopRequest, step: str, stdout: str, cwd: Path) -> None:
-        """Fold a seat's stream-json into steps and store them under the run.
-        Worktree paths are shown relative. Best-effort: a run without an
-        ``action_id`` stores nothing, and a fold or save failure is logged."""
-        if not request.action_id or not stdout:
+    async def _store_feed(self, request: DevelopRequest, step: str, stdout: str) -> None:
+        """Fold a seat's stream-json into steps and store them under the run,
+        replacing the stage's last feed even when this attempt printed nothing
+        (a timeout), so the page never shows a previous attempt as this one.
+        Best-effort: a run without an ``action_id`` stores nothing, and a fold
+        or save failure is logged."""
+        if not request.action_id:
             return
-        stdout = _relative_paths(stdout, cwd)
         try:
             # Parsing and redacting a few MB is CPU work; keep it off the loop.
             recorder = await asyncio.to_thread(lambda: fold_feed(stream_events(stdout)))

@@ -263,8 +263,8 @@
   {
     "label": "feed: a failed develop raises before its feed is stored",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        if feed_for is not None:\n            await self._store_feed(feed_for, step, out, cwd)\n        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n",
-    "replace": "        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n        if feed_for is not None:\n            await self._store_feed(feed_for, step, out, cwd)\n",
+    "find": "        if feed_for is not None:\n            await self._store_feed(feed_for, step, out)\n        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n",
+    "replace": "        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n        if feed_for is not None:\n            await self._store_feed(feed_for, step, out)\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
     ]
@@ -297,15 +297,6 @@
     ]
   },
   {
-    "label": "feed: a result is not named from its tool_use_id, so calls never pair",
-    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
-    "find": "                name = names.get(str(block.get(\"tool_use_id\") or \"\"), \"\")\n",
-    "replace": "                name = \"\"\n",
-    "tests": [
-      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
-    ]
-  },
-  {
     "label": "feed: the route serves another workspace's run",
     "file": "ee/pocketpaw_ee/cloud/belt/service.py",
     "find": "    await _owned_run(workspace_id, action_id)\n    doc = await BeltRunFeed.find_one(\n",
@@ -324,12 +315,13 @@
     ]
   },
   {
-    "label": "feed: the worktree prefix is left on stored paths",
+    "label": "feed: the worktree prefix is left on seat output",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        stdout = _relative_paths(stdout, cwd)\n",
+    "find": "        out, err = _relative_paths(out, cwd), _relative_paths(err, cwd)\n",
     "replace": "",
     "tests": [
-      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served",
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
     ]
   },
   {
@@ -357,6 +349,60 @@
     "replace": "                sep = \"\"\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: stderr reaches headless_error with absolute worktree paths",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        out, err = _relative_paths(out, cwd), _relative_paths(err, cwd)\n",
+    "replace": "        out = _relative_paths(out, cwd)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: a timed-out attempt leaves the earlier attempt's feed in place",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        if not request.action_id:\n            return\n        try:\n",
+    "replace": "        if not request.action_id or not stdout:\n            return\n        try:\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_timed_out_redevelop_replaces_the_earlier_feed"
+    ]
+  },
+  {
+    "label": "feed: a tool result loses its call id, so parallel same-name calls pair by name",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "                    {**meta, \"name\": names.get(call_id, \"\"), \"call_id\": call_id},\n",
+    "replace": "                    {**meta, \"name\": names.get(call_id, \"\")},\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_parallel_same_name_calls_pair_by_id"
+    ]
+  },
+  {
+    "label": "feed: the step adapter drops a result's call id",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/steps.py",
+    "find": "        frame = {\"tool\": name, \"output\": output}\n        if meta.get(\"call_id\"):\n            frame[\"call_id\"] = meta[\"call_id\"]\n",
+    "replace": "        frame = {\"tool\": name, \"output\": output}\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_parallel_same_name_calls_pair_by_id"
+    ]
+  },
+  {
+    "label": "feed: a dropped call's result (by id) is counted as a second omission",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/steps.py",
+    "find": "        elif call_id:\n            self._dropped_ids.add(call_id)\n",
+    "replace": "        elif False:\n            self._dropped_ids.add(call_id)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_feed_caps_steps_and_counts_the_rest"
+    ]
+  },
+  {
+    "label": "feed: a stream cut after system/init reads as the result envelope",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "    if isinstance(envelope, dict) and envelope.get(\"type\", \"result\") == \"result\":\n",
+    "replace": "    if isinstance(envelope, dict):\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_stream_result_envelope_is_the_seat_result"
     ]
   }
 ]

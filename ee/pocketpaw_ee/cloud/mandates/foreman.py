@@ -187,7 +187,11 @@ def claude_result_envelope(stdout: str) -> dict[str, Any] | None:
                 continue
             if isinstance(event, dict) and event.get("type") == "result":
                 return event
-    return envelope if isinstance(envelope, dict) else None
+    # A one-line stream cut after ``system/init`` parses whole too; only a result
+    # envelope (or an untyped legacy one) counts.
+    if isinstance(envelope, dict) and envelope.get("type", "result") == "result":
+        return envelope
+    return None
 
 
 def claude_result_text(stdout: str) -> str:

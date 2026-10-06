@@ -13,9 +13,10 @@
 # dir is reached through a symlink and the CLI reports the physical path (the
 # macOS ``/var`` -> ``/private/var`` case); a secret planted in a tool result
 # or a tool input reaches neither storage nor the response; a failed develop
-# still stores its feed and records what claude said, not raw stream-json; a
-# failing save never fails the run; the step and byte caps; and the route's
-# tenancy 404.
+# still stores its feed and records what claude said (no stream-json, no
+# worktree path); a timed-out re-develop replaces the earlier feed; parallel
+# same-name calls pair with their results by id; a failing save never fails
+# the run; the step and byte caps; and the route's tenancy 404.
 
 from __future__ import annotations
 
@@ -32,8 +33,9 @@ pytestmark = pytest.mark.usefixtures("any_repo_root")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from pocketpaw_ee.cloud.belt import develop_station as ds  # noqa: E402
-from pocketpaw_ee.cloud.belt.feed import FEED_MAX_STEPS, fold_feed  # noqa: E402
+from pocketpaw_ee.cloud.belt.feed import FEED_MAX_STEPS, fold_feed, stream_events  # noqa: E402
 from pocketpaw_ee.cloud.belt.headless import HeadlessDevelopRunner  # noqa: E402
+from pocketpaw_ee.cloud.mandates import foreman  # noqa: E402
 
 from pocketpaw.agents.protocol import AgentEvent  # noqa: E402
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
@@ -73,7 +75,7 @@ def _stream(cwd: Path, *, is_error: bool = False, cut: bool = False) -> str:
         {
             "type": "assistant",
             "timestamp": _t(1),
-            "message": {"content": [{"type": "text", "text": "I'll add feature.txt."}]},
+            "message": {"content": [{"type": "text", "text": f"I'll add {cwd}/feature.txt."}]},
         },
         {
             "type": "assistant",
@@ -182,9 +184,19 @@ class StreamingClaude(FakeClaude):
     """``FakeClaude`` whose develop seat streams. The seat still writes
     feature.txt for real; the stream is what the CLI would have printed."""
 
-    def __init__(self, *, code: int = 0, is_error: bool = False, cut: bool = False, **kw):
+    def __init__(
+        self,
+        *,
+        code: int = 0,
+        is_error: bool = False,
+        cut: bool = False,
+        stderr: str = "",
+        timed_out: bool = False,
+        **kw,
+    ):
         super().__init__(**kw)
         self.code, self.is_error, self.cut = code, is_error, cut
+        self.stderr, self.timed_out = stderr, timed_out
         self.formats: list[list[str]] = []
 
     async def __call__(self, argv, *, cwd, timeout, stdin=None):
@@ -195,9 +207,12 @@ class StreamingClaude(FakeClaude):
         await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin)
         if fmt[:2] != ["stream-json", "--verbose"]:
             return 0, json.dumps({"type": "result", "result": "done"}), ""
+        if self.timed_out:  # what run_subprocess returns after the kill
+            return -1, "", f"timed out after {timeout:.0f}s"
         # The CLI reports the physical path, as ``getcwd`` does.
         cwd = Path(os.path.realpath(cwd))
-        return self.code, _stream(cwd, is_error=self.is_error, cut=self.cut), ""
+        stderr = self.stderr.format(cwd=cwd)
+        return self.code, _stream(cwd, is_error=self.is_error, cut=self.cut), stderr
 
 
 def _linked_dir(tmp_path: Path) -> Path:
@@ -299,22 +314,73 @@ async def test_stream_result_envelope_is_the_seat_result(repo):  # noqa: F811
         await _station(StreamingClaude(is_error=True), repo)._claude(
             "p", cwd=repo, step="DEVELOP", feed_for=req
         )
+    # A run killed right after ``system/init`` is one JSON line, not a result.
+    init = json.dumps({"type": "system", "subtype": "init", "cwd": "/x"})
+    assert foreman.claude_result_envelope(init) is None
+    assert ds._claude_said(init) == "no message"
 
 
-async def test_failed_develop_still_stores_its_feed(repo, store, mongo_db, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize(
+    ("stderr", "said"),
+    [("", "I'll add feature.txt."), ("fatal: {cwd}/feature.txt: denied", "fatal: feature.txt")],
+)
+async def test_failed_develop_still_stores_its_feed(
+    repo,  # noqa: F811
+    store,
+    mongo_db,
+    monkeypatch,
+    linked_tmp,
+    stderr,
+    said,
+):
     action_id = await _queue_run(monkeypatch, repo, recipe="")
-    fake = StreamingClaude(code=1, cut=True, develop=[_write("ok")])
+    fake = StreamingClaude(code=1, cut=True, stderr=stderr, develop=[_write("ok")])
     await HeadlessDevelopRunner(develop_fn=_station(fake, repo)).run(action_id)
 
-    blob = (await store.get_action(action_id)).parameters["_code_change"]
-    assert "DEVELOP: claude exited 1" in blob["headless_error"]
-    # What claude last said, not the raw stream-json it printed.
-    assert "I'll add feature.txt." in blob["headless_error"]
-    assert '"type"' not in blob["headless_error"]
+    error = (await store.get_action(action_id)).parameters["_code_change"]["headless_error"]
+    assert "DEVELOP: claude exited 1" in error
+    # What claude said (stderr, else its last prose), never raw stream-json,
+    # and no worktree path in either spelling.
+    assert said in error
+    assert '"type"' not in error
+    assert "belt-develop-" not in error and str(linked_tmp) not in error
     doc = await _feed_doc(action_id)
     assert [s["tool"] for s in doc.steps] == ["", "Read", "Write"]
     # The call the CLI died in says so instead of spinning.
     assert doc.steps[-1]["status"] == "missing_result"
+
+
+async def test_a_timed_out_redevelop_replaces_the_earlier_feed(repo, mongo_db):  # noqa: F811
+    """The stage row is the latest attempt: a re-develop that times out (no
+    stdout) leaves an empty feed, never the first attempt's steps."""
+    from dataclasses import replace
+
+    req = replace(_request(repo), action_id="run-x")
+    await _station(StreamingClaude(develop=[_write("ok")]), repo)(req)
+    assert len((await _feed_doc("run-x")).steps) == 5
+
+    with pytest.raises(ds.DevelopStationError, match="DEVELOP: claude exited -1: timed out"):
+        await _station(StreamingClaude(timed_out=True), repo)(req)
+    doc = await _feed_doc("run-x")
+    assert doc.steps == [] and doc.steps_omitted == 0
+
+
+def test_parallel_same_name_calls_pair_by_id():
+    """Two parallel Reads whose results arrive in the other order: each output
+    lands on its own call (pairing by name would swap them)."""
+
+    def use(i: str, path: str) -> dict:
+        block = {"type": "tool_use", "id": i, "name": "Read", "input": {"file_path": path}}
+        return {"type": "assistant", "timestamp": _t(1), "message": {"content": [block]}}
+
+    def result(i: str, text: str) -> dict:
+        block = {"type": "tool_result", "tool_use_id": i, "content": text}
+        return {"type": "user", "timestamp": _t(2), "message": {"content": [block]}}
+
+    lines = [use("t1", "a.txt"), use("t2", "b.txt"), result("t2", "B"), result("t1", "A")]
+    recorder = fold_feed(stream_events("\n".join(json.dumps(x) for x in lines)))
+    got = [(s["input"]["file_path"], s["output"]) for s in recorder.steps]
+    assert got == [("a.txt", "A"), ("b.txt", "B")]
 
 
 async def test_a_failing_save_never_fails_the_run(repo, store, monkeypatch, caplog):  # noqa: F811
@@ -357,6 +423,19 @@ def _calls(n: int, output: str = "x") -> list[AgentEvent]:
     return events
 
 
+def _batched_calls(n: int) -> list[AgentEvent]:
+    """``n`` parallel calls with ids, every result after every call, reversed."""
+    uses = [
+        AgentEvent("tool_use", "Read", {"name": "Read", "input": {"i": i}, "call_id": f"c{i}"})
+        for i in range(n)
+    ]
+    results = [
+        AgentEvent("tool_result", f"r{i}", {"name": "Read", "call_id": f"c{i}"})
+        for i in reversed(range(n))
+    ]
+    return uses + results
+
+
 def test_feed_caps_steps_and_counts_the_rest():
     recorder = fold_feed(_calls(FEED_MAX_STEPS + 25))
     assert len(recorder.steps) == FEED_MAX_STEPS
@@ -364,6 +443,11 @@ def test_feed_caps_steps_and_counts_the_rest():
     # Every kept call still has its own result (dropped calls' results don't
     # land on a kept one).
     assert all(s["status"] == "complete" and s["output"] == "x" for s in recorder.steps)
+
+    # By id: the dropped calls' results are neither paired nor counted again.
+    recorder = fold_feed(_batched_calls(FEED_MAX_STEPS + 25))
+    assert len(recorder.steps) == FEED_MAX_STEPS and recorder.steps_omitted == 25
+    assert all(s["output"] == f"r{s['input']['i']}" for s in recorder.steps)
 
 
 def test_feed_caps_bytes():

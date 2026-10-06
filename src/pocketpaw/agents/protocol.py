@@ -35,6 +35,13 @@ class AgentEvent:
         - ``input`` (dict): the arguments it was called with.
         - ``input_pending`` (bool, optional): whether ``input`` is still
           provisional. See the contract below.
+        - ``call_id`` (str, optional): the call's id, when the source has one.
+
+    ``tool_result`` metadata:
+        - ``name`` (str): the tool that ran.
+        - ``call_id`` (str, optional): the id of the ``tool_use`` it answers.
+          Consumers pair on it when both sides carry it (parallel calls of one
+          tool can finish in any order), else on ``name``.
 
     The ``input_pending`` contract — ONE tool call may produce MORE THAN ONE
     ``tool_use`` event:
