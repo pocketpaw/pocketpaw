@@ -9,7 +9,8 @@
 #   * the chai-ledger toy's blueprint (``fixtures/chai_ledger_c4.json``) maps its
 #     real files.
 #   * every Edit/Write/MultiEdit a seat makes publishes ``file_touched`` on the
-#     run's stream with the component it maps to (none for a Read).
+#     run's stream with the component it maps to (none for a Read, a path
+#     outside the repo or a cut input), its path scrubbed.
 #   * ``GET /belt/runs/{id}/blueprint`` serves the bound repo's model as
 #     committed on the run's base (never the working tree) with the run's
 #     touched files mapped, and 404s a foreign run.
@@ -25,6 +26,7 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 from fastapi.testclient import TestClient  # noqa: E402
+from pocketpaw_ee.cloud.belt import feed as belt_feed  # noqa: E402
 from pocketpaw_ee.cloud.belt import orient  # noqa: E402
 from pocketpaw_ee.cloud.belt import service as belt_service  # noqa: E402
 from pocketpaw_ee.cloud.belt.headless import HeadlessDevelopRunner  # noqa: E402
@@ -37,6 +39,7 @@ from tests.cloud.test_belt_develop_station import (  # noqa: E402
     repo,  # noqa: F401 — the tmp git repo fixture
 )
 from tests.cloud.test_belt_feed import (  # noqa: E402
+    _SECRET,
     StreamingClaude,
     linked_tmp,  # noqa: F401 — station temp dirs behind a symlink
     store,  # noqa: F401 — the instinct store fixture
@@ -88,14 +91,14 @@ def _owner(model: dict, path: str) -> str | None:
 def test_the_most_specific_glob_wins():
     model = _model(
         ("src", ["src/**"]),
-        ("api", ["src/api/**"]),
         ("py", ["src/**/*.py"]),
+        ("api", ["src/api/**"]),
         ("routes", ["src/api/routes.py"]),
         ("api-again", ["src/api/**"]),
     )
     assert _owner(model, "src/api/routes.py") == "routes"  # exact beats any glob
-    # src/api/** and src/**/*.py have as many literal chars; fewer wildcards wins,
-    # and of the two src/api/** the first declared does.
+    # src/**/*.py (declared first) and src/api/** have as many literal chars;
+    # fewer wildcards wins, and of the two src/api/** the first declared does.
     assert _owner(model, "src/api/v1/users.py") == "api"
     assert _owner(model, "src/core/x.py") == "py"
     assert _owner(model, "src/core/x.ts") == "src"
@@ -245,6 +248,36 @@ async def test_an_edit_with_no_blueprint_still_reports_the_file(
     assert blueprint["files"] == [{"path": "feature.txt", "component": None}]
 
 
+async def test_file_touched_is_scrubbed_and_only_names_repo_files(monkeypatch):
+    sent: list[tuple[str, dict]] = []
+
+    async def publish(_aid, event, data):
+        sent.append((event, data))
+
+    async def nothing(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(belt_feed, "_publish", publish)
+    monkeypatch.setattr(belt_feed, "_notify", nothing)
+    feed = belt_feed.RunFeed("w1", "run-x", nothing)
+    feed.paths = orient.path_index(_model(("keys", ["keys/"])))
+    await feed.stage("fix")
+    for tool, tool_input in (
+        ("Write", {"file_path": f"keys/{_SECRET}.txt"}),
+        ("Read", {"file_path": "keys/a.txt"}),
+        ("Edit", {"file_path": "/Users/user/elsewhere.py"}),
+        ("Edit", '{"file_path": "cut…'),
+        ("MultiEdit", {"file_path": "keys/b.txt", "edits": []}),
+    ):
+        await feed.add("tool_start", {"tool": tool, "input": tool_input, "call_id": tool})
+    touched = [d for e, d in sent if e == "file_touched"]
+    assert [(d["path"], d["component"], d["stage"]) for d in touched] == [
+        ("keys/[REDACTED].txt", "keys", "fix"),
+        ("keys/b.txt", "keys", "fix"),
+    ]
+    assert _SECRET not in json.dumps(sent)
+
+
 # ---------------------------------------------------------------------------
 # GET /belt/runs/{id}/blueprint
 # ---------------------------------------------------------------------------
@@ -265,9 +298,23 @@ async def test_the_blueprint_is_read_at_the_base_not_the_working_tree(
         "diff --git a/notes.md b/notes.md\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1 @@\n+n\n"
     )
     run = await _propose_run(store, repo=str(repo), diff=diff)
+    # The seats' stored edits come first (develop, then fix), then the diff's
+    # files; a read, a path outside the repo and a cut input name nothing.
+    fix = [
+        {"id": "s1", "kind": "tool", "tool": "Read", "input": {"file_path": "secret.md"}},
+        {"id": "s2", "kind": "tool", "tool": "Edit", "input": {"file_path": "lib/util.py"}},
+        {"id": "s3", "kind": "tool", "tool": "Write", "input": {"file_path": "/Users/user/x.py"}},
+        {"id": "s4", "kind": "tool", "tool": "Edit", "input": '{"file_path": "cut…'},
+    ]
+    await belt_service.save_run_feed("w1", run.id, "fix", fix)
+    develop = [
+        {"id": "s0", "kind": "tool", "tool": "MultiEdit", "input": {"file_path": "./app.py"}}
+    ]
+    await belt_service.save_run_feed("w1", run.id, "develop", develop)
     blueprint = await belt_service.get_run_blueprint("w1", run.id)
     assert blueprint["files"] == [
         {"path": "app.py", "component": "app"},
+        {"path": "lib/util.py", "component": "lib"},
         {"path": "lib/logo.png", "component": "lib"},
         {"path": "notes.md", "component": None},
     ]
@@ -307,8 +354,24 @@ async def test_a_hostile_base_branch_is_never_passed_to_git(
     repo,  # noqa: F811
     store,  # noqa: F811
     mongo_db,
+    monkeypatch,
 ):
+    from pocketpaw_ee.cloud.belt import executor
+
     _commit_model(repo, _model(("app", ["app.py"])))
-    run = await _propose_run(store, repo=str(repo), base_branch="--output=/tmp/x")
-    blueprint = await belt_service.get_run_blueprint("w1", run.id)
-    assert blueprint["model"] is None and blueprint["ref"] is None
+    calls: list[list[str]] = []
+    real_run = executor._run
+
+    async def spy(argv, **kw):
+        calls.append(list(argv))
+        return await real_run(argv, **kw)
+
+    monkeypatch.setattr(executor, "_run", spy)
+    for base in ("--output=/tmp/x", "main..evil", "-c"):
+        run = await _propose_run(store, repo=str(repo), base_branch=base)
+        blueprint = await belt_service.get_run_blueprint("w1", run.id)
+        assert blueprint["model"] is None and blueprint["ref"] is None
+    assert calls == []
+    run = await _propose_run(store, repo=str(repo))
+    assert (await belt_service.get_run_blueprint("w1", run.id))["ref"] == "main"
+    assert calls  # the spy sees a real read

@@ -243,12 +243,12 @@ jobs:
       - name: Belt mandates and the craft factory develop station
         # The mandate shift loop, the headless develop runner, the cadence
         # scheduler, the develop station (real tmp git repo, real check
-        # commands, a faked claude binary), its develop step feed, the crew
-        # roster (agents as workers), the mandate line branch (real tmp repos and
-        # a bare origin), the console's run events (belt_run_updated), the
-        # upstream patrol (a faked gh) and the Pulley block
-        # manifest -> C4 mapper. tests/cloud is excluded by the
-        # pyproject addopts; mongomock stands in for Mongo.
+        # commands, a faked claude binary), its step feed stored and live, the
+        # blueprint file join and file_touched, the crew roster (agents as
+        # workers), the mandate line branch (real tmp repos and a bare origin),
+        # the console's run events (belt_run_updated), the upstream patrol (a
+        # faked gh) and the Pulley block manifest -> C4 mapper. tests/cloud is
+        # excluded by the pyproject addopts; mongomock stands in for Mongo.
         run: >-
           uv run pytest tests/cloud/test_belt_develop_station.py
           tests/cloud/test_belt_crew.py
@@ -259,7 +259,9 @@ jobs:
           tests/cloud/test_belt_pulley_c4.py
           tests/cloud/test_belt_scheduler.py
           tests/cloud/test_belt_upstream_patrol.py
-          tests/cloud/test_belt_feed.py -o addopts="" -q --tb=short
+          tests/cloud/test_belt_feed.py
+          tests/cloud/test_belt_live_feed.py
+          tests/cloud/test_belt_live_atlas.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

@@ -7,7 +7,8 @@
      architecture context the foreman and review get, the mandate's line
      branch (base sync, landing, re-develop, one PR, its state on the wire and
      the UI surfaces), the run feed (live over SSE and stored per stage, with
-     its wire contract), endpoints (incl. the digest), env vars, and the
+     its wire contract), the run on its blueprint (C4 `paths`, the file join,
+     `file_touched`), endpoints (incl. the digest), env vars, and the
      remaining demo-bar concessions. -->
 
 # Belt Mandates — the standing JOB primitive
@@ -857,6 +858,7 @@ itself. Path, per line:
 | `thinking` `{stage, content}` | a whole block of reasoning or prose (not a delta) |
 | `tool_start` `{stage, tool, input, narration, call_id}` | a call begins; `input` scrubbed and capped |
 | `tool_result` `{stage, tool, output, output_truncated, call_id}` | that call's result |
+| `file_touched` `{stage, path, component, tool, call_id}` | right after an `Edit`/`Write`/`MultiEdit` `tool_start`: the repo-relative file and the blueprint component that owns it (`null` when no glob does); see "The run on its blueprint" |
 | `stream_end` `{ok, omitted}` | the attempt ended (`ok` false on a failed run); terminal |
 | `stream_end` `{from_history: true}` | no live stream and the run is not being developed: read `GET /belt/runs/{id}/feed?stage=` for each stage |
 | `error` `{code: "run.stream_timeout", message}` | the subscription hit the chat run stream's lifetime cap; reopen with `after=<last id>` |
@@ -881,6 +883,65 @@ stage, steps?, stepsOmitted?}`, the steps in the chat history wire shape
 (`steps_wire_fields`), so the UI maps them with `persistedStepsToEntries` and
 renders them with `ThinkingSteps`. No `steps` key when the stage recorded none;
 the same tenancy 404 as `GET /belt/runs/{id}`.
+
+### The run on its blueprint
+
+A line's blueprint is its C4 model, `docs/c4/model.json` in the bound repo. The
+Atlas draws a run on it, so every file the run touches has to land on a
+component. c4-gen computes file membership but never writes it, and loom reads
+Python and Go only, so the model carries it: a component may list `paths`,
+repo-relative globs.
+
+```json
+{"id": "ledger", "name": "Ledger", "technology": "Python",
+ "paths": ["chai_ledger/**"]}
+```
+
+- Globs: `*` and `?` stay inside one path segment, `**` spans any number of
+  segments (`**/test_*.py` matches `test_a.py` too), a trailing `/` means
+  everything under it, and the pattern must match the whole path. No `[...]`
+  classes.
+- Join (`belt/orient.py` `path_index` + `component_for`): the most specific
+  matching glob wins: the most literal (non-wildcard) characters, then the
+  fewest wildcards, then the component declared first. Only the model's own
+  system (its `scope`, else the first with containers) owns files. A file no
+  glob matches has `component: null`; BF-6 turns that into drift.
+- Paths are normalised first (`./a//b` is `a/b`); an absolute path or one that
+  climbs out with `..` is not a repo file and is never joined.
+- c4-gen's `Component` has no `paths` field yet, so regenerating a model with
+  c4-gen drops them; keep `paths` on hand-authored (`authored: true`) models.
+  The chai-ledger toy's blueprint lives as a test fixture,
+  `tests/cloud/fixtures/chai_ledger_c4.json`.
+
+Live: at PREPARE, before any agent step, the station reads the worktree's
+`docs/c4/model.json` (the base commit's) into the run's feed. Each `Edit`,
+`Write` or `MultiEdit` call a seat makes (develop or fix; review is read-only)
+then publishes `file_touched {stage, path, component, tool, call_id}` on the
+run stream right after its `tool_start`. The path is the one the station
+already made relative, redacted again; a path outside the worktree sends
+nothing. `file_touched` counts against the live frame cap like any frame and
+is not stored: the stored rows keep the edit call itself, which is what the
+blueprint read below joins on a reload.
+
+`GET /api/v1/belt/runs/{id}/blueprint` (`belt.read`, the same tenancy 404 as
+`GET /belt/runs/{id}`) returns:
+
+| Field | Shape |
+|---|---|
+| `action_id` | the run |
+| `ref` | the base the model was read at: `origin/<base>` when that ref exists in the bound repo, else `<base>` (the station's rule, without its fetch); `null` when the repo is outside the allowlist or the base is not a safe ref name |
+| `model` | `{scope, model: {people, systems, relationships}}`, the c4-gen model as committed at `ref`, `paths` included; `null` when there is none, it is not a C4 model, or it is over 1 MB |
+| `files` | `[{path, component}]`, first touch first: the `Edit`/`Write`/`MultiEdit` calls the develop then fix rows stored, then every file the run's diff writes (`+++ b/` and `diff --git` headers, so a binary patch and a recipe's files count) |
+
+The model is read with `git cat-file blob <sha>:docs/c4/model.json` (fsmonitor
+and hooks off; no textconv or filters), never from the owner's working tree,
+and nothing from the repo runs. The repo is re-resolved inside
+`POCKETPAW_BELT_REPO_ALLOWLIST` on every read (the executor's
+`_re_resolve_repo`), and a base that is not a plain ref name (`-` first, `..`,
+anything outside `[A-Za-z0-9._/-]`) never reaches git. The read follows the
+base branch's tip, so a model changed on the base after the run maps the
+run's files by the new model; recording the run's base sha on the blob would
+pin it.
 
 ### Runs read model
 
@@ -1133,6 +1194,14 @@ account, a row per stage, and the same frames replayed by the route; a recipe
 run's two stages; a failed run's `stream_end {ok: false}`; a broken transport
 not failing the run; the live frame cap; and the route's newest-attempt
 replay, cursor resume, `from_history`, wait-while-developing and tenancy 404.
+`tests/cloud/test_belt_live_atlas.py` pins the blueprint: glob specificity and
+segment rules, path normalisation, the chai-ledger fixture's files, a real
+station run publishing `file_touched` after each edit with its component (and
+`null` with no model), the scrub and skips on `file_touched`, and the route
+reading the committed model (not the working tree), joining stored edits and
+diff files in order, 404ing a foreign run, refusing a repo outside the
+allowlist and never handing git an option-shaped base
+(`tests/mutations/belt_live_atlas.json`, 17 mutations).
 `tests/cloud/test_belt_line.py` drives the line on real tmp repos (a bare
 repo as origin, charter recipes as the develop work, a fake PR opener): two
 runs of one mandate stack on the line with no re-added lines; a merged line
