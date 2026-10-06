@@ -5,8 +5,9 @@
 # so draft versioning, revert, the preview content hash, the project zip and
 # ``read_site_source`` all see it without a second storage field. Cross-repo
 # contract: docs/design/drafts/2026-09-24-sites-deps-verify-contract.md §1/§2.
-# ``TOOLCHAIN_RESERVED`` / ``MAX_DECLARED_PACKAGES`` come from the vendored paw-sites
-# allowlist (package data, so still network-free).
+# ``TOOLCHAIN_RESERVED`` comes from the vendored paw-sites allowlist (package data, so
+# still network-free). It is empty: authors may declare toolchain names too, and there
+# is no package-count cap (the vendored ``maxAuthorPackages`` is null).
 #
 # It also owns ``requires_sandbox``, the one host-vs-sandbox predicate: a source that
 # declares packages OR carries any authored build-shell file (package.json,
@@ -43,11 +44,6 @@ DEPENDENCY_MANIFEST_PATH = "paw.dependencies.json"
 #: The manifest schema version this module writes and reads.
 MANIFEST_SCHEMA = 1
 
-#: paw-sites ``MAX_AUTHOR_PACKAGES``, read from the vendored allowlist. The resolver no
-#: longer enforces it (2026-10-07, "open everything"); it stays only until the vendored
-#: allowlist is re-vendored from the paw-sites release that drops the cap.
-MAX_DECLARED_PACKAGES: int = int(VENDORED_ALLOWLIST["maxAuthorPackages"])
-
 #: npm's own ceiling on a package name.
 MAX_NAME_LENGTH = 214
 
@@ -81,11 +77,14 @@ _BLOCKED_NAMES = frozenset(
     }
 )
 
-#: Toolchain-owned packages an author may not declare (contract §2), from paw-sites
-#: ``TOOLCHAIN_RESERVED``. A string ending in ``/`` reserves the whole scope (paw-sites
-#: writes ``@scope/*``). paw-sites' ``engineToolchainReserved`` (motion, ripple only)
-#: needs no twin here: ripple is not in ``DEPENDENCY_ENGINES``.
-_RESERVED_RAW: list[str] = VENDORED_ALLOWLIST["toolchainReserved"]
+#: Toolchain-owned packages an author may not declare, from paw-sites
+#: ``TOOLCHAIN_RESERVED``. Empty since paw-sites retired it: an author may declare a
+#: toolchain name and their version wins over the generator's pin. Still read, so a
+#: re-vendor that reserves names again takes effect. A string ending in ``/``
+#: reserves the whole scope (paw-sites writes ``@scope/*``). paw-sites'
+#: ``engineToolchainReserved`` needs no twin here: ripple is not in
+#: ``DEPENDENCY_ENGINES``.
+_RESERVED_RAW: list[str] = list(VENDORED_ALLOWLIST.get("toolchainReserved") or [])
 # A '*' anywhere but a trailing '/*' would be a pattern this module cannot honour.
 # A raise, not an assert, so it still fires under python -O.
 if any("*" in e and not (e.endswith("/*") and e.count("*") == 1) for e in _RESERVED_RAW):
@@ -314,7 +313,6 @@ __all__ = [
     "INSTALL_CONFIG_FILES",
     "VITE_CONFIG_FILES",
     "MANIFEST_SCHEMA",
-    "MAX_DECLARED_PACKAGES",
     "TOOLCHAIN_RESERVED",
     "author_build_shell_files",
     "author_packages",

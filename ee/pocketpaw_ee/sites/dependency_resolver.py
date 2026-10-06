@@ -9,8 +9,10 @@
 #
 # What this module still refuses: specs that are not plain registry packages (git,
 # url, file, tarball, ``npm:`` alias, GitHub shorthand), names npm would not accept,
-# toolchain-owned names, unreadable ranges, names the registry does not know, and a
-# range/tag that matches no published version.
+# unreadable ranges, names the registry does not know, and a range/tag that matches
+# no published version. Toolchain names (svelte, vite, react...) are accepted: the
+# vendored paw-sites allowlist reserves none, so ``is_toolchain_reserved`` is a no-op
+# unless a re-vendor brings reservations back.
 #
 # It FAILS OPEN on the metadata it only uses for advice: advisories become
 # ``warnings``, and an advisory or jsDelivr outage is ignored. If the registry itself
@@ -23,7 +25,7 @@ Entry point: :func:`resolve_dependencies`. A request is ``{"name": ..., "range":
 (range optional, default "latest"). For each one the resolver:
 
 1. validates the name and refuses non-registry specs (git, url, file, tarball, alias);
-2. refuses toolchain-owned names (contract §2);
+2. refuses names the vendored allowlist reserves for the toolchain (none today);
 3. picks a version: ``latest`` or any other dist-tag resolves through the packument's
    ``dist-tags``; a semver range picks the highest matching version, preferring one
    that is not deprecated (prereleases match only when the range names them, as in

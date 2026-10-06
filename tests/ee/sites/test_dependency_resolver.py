@@ -4,9 +4,10 @@
 # serving packuments, download counts, advisories and jsdelivr bytes) with a fixed
 # clock, so every remaining rejection reason, every warning and every fail-open path
 # is exercised without the network. Policy is "open everything" (2026-10-07): only
-# non-registry specs, bad names, toolchain names, unreadable ranges, unknown packages
-# and unmatched ranges/tags are refused. ``tests/mutations/sites_author_dependencies.json``
-# applies the mutations the gate tests name.
+# non-registry specs, bad names, unreadable ranges, unknown packages and unmatched
+# ranges/tags are refused; toolchain names resolve like any other package.
+# ``tests/mutations/sites_author_dependencies.json`` applies the mutations the gate
+# tests name.
 
 from __future__ import annotations
 
@@ -63,6 +64,8 @@ class FakeRegistry:
                 tags={"latest": "0.171.0"},
             ),
             "gsap": _packument("gsap", {"3.12.5": {}, "3.13.0": {}}, {"3.12.5": 300, "3.13.0": 90}),
+            "svelte": _packument("svelte", {"5.1.0": {}}, {"5.1.0": 100}),
+            "@sveltejs/kit": _packument("@sveltejs/kit", {"2.5.0": {}}, {"2.5.0": 100}),
             "@scope/pkg": _packument("@scope/pkg", {"1.0.0": {}}, {"1.0.0": 100}),
             "old-thing": _packument(
                 "old-thing", {"1.0.0": {"deprecated": "use new-thing"}}, {"1.0.0": 900}
@@ -304,13 +307,6 @@ async def test_an_unknown_dist_tag_names_the_known_ones(registry):
         ({"name": "three", "range": "mrdoob/three.js"}, dr.NON_REGISTRY_SPEC),
         ({"name": "three", "range": "not a range"}, dr.INVALID_RANGE),
         ({"name": "three", "range": "^^1"}, dr.INVALID_RANGE),
-        ({"name": "svelte"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "@sveltejs/kit"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "react-dom"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "@tailwindcss/vite"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "@ripple-ui/svelte"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "@cloudflare/workers-types"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "valibot"}, dr.TOOLCHAIN_RESERVED),
         ({"name": "does-not-exist"}, dr.NOT_FOUND),
     ],
 )
@@ -367,9 +363,12 @@ async def test_a_low_severity_or_unaffected_advisory_is_not_even_a_warning(regis
 
 
 @pytest.mark.asyncio
-async def test_toolchain_names_never_reach_the_network(registry):
-    await _resolve(registry, {"name": "svelte"})
-    assert registry.calls == []
+async def test_toolchain_names_resolve_like_any_package(registry):
+    """The vendored allowlist reserves nothing, so svelte is an ordinary package."""
+    result = await _resolve(registry, {"name": "svelte"}, {"name": "@sveltejs/kit"})
+    assert result.rejected == []
+    assert result.packages["svelte"].version == "5.1.0"
+    assert result.packages["@sveltejs/kit"].version == "2.5.0"
 
 
 @pytest.mark.asyncio
