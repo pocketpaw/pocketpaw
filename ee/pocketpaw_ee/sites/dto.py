@@ -258,6 +258,11 @@ class SiteResponse(BaseModel):
     # is a secret: the origins are public by construction.
     foreign_origin: bool = False
     allowed_origins: list[str] = Field(default_factory=list)
+    # A connected site's own page title (<title>, else og:title), read from its
+    # verified origin, whitespace-collapsed and capped at 200 chars. "" for hosted
+    # sites, before the first read, and for rows that predate the field. The owner's
+    # ``name`` is never overwritten with it; the card shows name || this || host.
+    origin_title: str = ""
 
 
 class SiteExportResponse(BaseModel):

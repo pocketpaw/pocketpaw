@@ -3644,6 +3644,39 @@ tier stays bought, the renewal date stays where it was. An `agent_id` in another
 tenant is a 404 from inside the funnel, deliberately indistinguishable from an
 agent that does not exist.
 
+### The connected site's gallery card
+
+A connected site never deploys, so the card lanes a publish runs (screenshot,
+favicon) never fire for it. Instead one card refresh fetches the verified origin's
+homepage **once**, through the SSRF-hardened fetch (DNS pinned to a public
+address, every redirect hop re-checked, private targets refused), and records the
+page title and icon from that markup before taking the screenshot. Only the host
+the grounding crawl would use is ever fetched: verified, and proved within 30
+days.
+
+It runs in the background after a first bind, after a rebind, after
+`POST /sites/origins/verify` succeeds for a host a connected site serves on, and
+as a second chance from the knowledge sync (which reuses the crawl's homepage
+HTML and only fills fields that are still empty). None of these can fail the
+request that triggered them.
+
+| `SiteResponse` field | Meaning for a connected site |
+|----------------------|------------------------------|
+| `name` | The owner's own label. Never overwritten by the card refresh. |
+| `origin_title` | The homepage's `<title>`, falling back to `og:title`. Control characters dropped, whitespace collapsed, capped at 200 characters. `""` before the first read, when the page has no title, for hosted sites, and for rows that predate the field. |
+| `favicon_url` | The homepage's icon as a `data:` URI, fetched through the same safe path. `null` when there is none. |
+| `preview_image_url` | The screenshot of the verified origin. |
+
+Clients should show `name || origin_title || host`.
+
+`POST /sites/{site_id}/preview-refresh` on a connected site also refreshes
+`origin_title` and `favicon_url` from the same single homepage fetch, before the
+screenshot. Its error contract is unchanged: `422 sites.origin_unverified`,
+`sites.origin_verification_stale` or `sites.preview_unavailable` when there is no
+fresh verified origin, `422 sites.preview_not_serving` when the page is not
+answering. A failed title/icon read keeps the stored values and does not turn into
+an error.
+
 ## Sites — Download the project
 
 The built site handed back to its owner as an archive, rather than only served from our

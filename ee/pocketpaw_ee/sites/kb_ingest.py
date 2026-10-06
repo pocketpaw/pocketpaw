@@ -710,6 +710,7 @@ async def _sync_foreign_site_knowledge(
         await _record_sync(site, report, previous=previous)
         return report
 
+    _schedule_foreign_card_meta(site, harvest)
     _schedule_first_foreign_screenshot(site)
     _schedule_catalog_sync(site)
 
@@ -758,6 +759,33 @@ async def _sync_foreign_site_knowledge(
     for warning in harvest.warnings:
         logger.info("sites.kb: %s crawl note — %s", harvest.host, warning)
     return report
+
+
+def _schedule_foreign_card_meta(site: Any, harvest: Any) -> None:
+    """Fill a connected site's missing card title / icon from the crawl. Never
+    blocks, never raises.
+
+    The second chance behind the bind-time card refresh (``sites.connected_card``):
+    only when ``origin_title`` or ``favicon_url`` is still empty, and only from the
+    homepage HTML this crawl already holds, so it costs no extra page request.
+    """
+    if (getattr(site, "origin_title", "") or "") and (getattr(site, "favicon_url", "") or ""):
+        return
+    markup = (getattr(harvest, "source", None) or {}).get("index.html")
+    if not markup:
+        return
+    try:
+        from pocketpaw_ee.sites import connected_card
+
+        connected_card.schedule_connected_card(
+            site, markup=markup, base_url=f"https://{harvest.host}/", screenshot=False
+        )
+    except Exception:  # noqa: BLE001 — a card is never a gate on a sync
+        logger.warning(
+            "sites.kb: could not schedule a card refresh for foreign site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
 
 
 def _schedule_first_foreign_screenshot(site: Any) -> None:

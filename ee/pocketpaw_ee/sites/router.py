@@ -1500,6 +1500,9 @@ async def verify_site_origin(
     unreachable domain — is an error response and writes nothing at all.
     """
     claim = await ownership.verify_origin(workspace_id=ctx.workspace_id, host=body.host)
+    # A fresh proof is what lets a connected site's card read the customer's page,
+    # so every connected site on this host refreshes its title, icon and picture.
+    await sites_service.schedule_connected_cards_for_origin(ctx.workspace_id, claim.host)
     return OriginVerificationResponse(
         host=claim.host,
         status=claim.status,
