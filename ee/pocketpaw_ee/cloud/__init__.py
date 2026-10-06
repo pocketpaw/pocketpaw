@@ -983,11 +983,14 @@ def mount_cloud(app: FastAPI) -> None:
     )
     from pocketpaw_ee.cloud.growth.social.ideas import (
         agent_generate_ideas,
+        agent_make_media,
         set_production_ideas_fn,
+        set_production_media_fn,
     )
 
     set_production_analyze_fn(agent_analyze)
     set_production_ideas_fn(agent_generate_ideas)
+    set_production_media_fn(agent_make_media)
 
     # NOTE: Composio is wired per-backend via ``pocketpaw_ee.cloud.composio.providers``
     # — each agent backend (claude_sdk, openai_agents, google_adk,

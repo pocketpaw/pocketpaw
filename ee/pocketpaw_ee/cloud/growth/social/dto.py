@@ -240,6 +240,8 @@ class SocialIdeaResponse(BaseModel):
     status: IdeaStatus
     scheduled_at: str | None
     calendar_event_id: str
+    poster_svg: str
+    reel_html: str
     created_at: str | None
     updated_at: str | None
 
@@ -264,3 +266,7 @@ class ScheduleIdeasRequest(BaseModel):
     items: list[ScheduleItem] = Field(min_length=1, max_length=100)
     timezone: str = Field(default="UTC", min_length=1, max_length=64)
     duration_minutes: int = Field(default=30, ge=5, le=240)
+
+
+class MakeMediaRequest(BaseModel):
+    kind: Literal["poster", "reel"]

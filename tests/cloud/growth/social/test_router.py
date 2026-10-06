@@ -35,7 +35,11 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     SocialAnalysis,
     SocialProfile,
 )
-from pocketpaw_ee.cloud.growth.social.ideas import set_production_ideas_fn
+from pocketpaw_ee.cloud.growth.social.ideas import (
+    clean_svg,
+    set_production_ideas_fn,
+    set_production_media_fn,
+)
 from pocketpaw_ee.cloud.growth.social.router import router as social_router
 from pocketpaw_ee.cloud.license import require_license
 
@@ -103,6 +107,7 @@ def _reset_seams():
     finally:
         set_production_analyze_fn(None)
         set_production_ideas_fn(None)
+        set_production_media_fn(None)
 
 
 class _FakeAnalyzer:
@@ -672,3 +677,30 @@ async def test_scheduling_puts_approved_ideas_on_the_calendar_and_unschedule_rem
     cleared = (await w1.post(f"{IDEAS}/{first['id']}/unschedule")).json()
     assert cleared["scheduled_at"] is None and cleared["calendar_event_id"] == ""
     assert await CalendarEventDoc.get(scheduled["calendar_event_id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_make_media_stores_a_clean_poster_and_502s_on_junk(w1, w2):
+    set_production_ideas_fn(_FakeIdeas())
+    await _complete(w1)
+    idea = (await w1.post(f"{IDEAS}/generate", json={"count": 1})).json()["items"][0]
+    url = f"{IDEAS}/{idea['id']}/media"
+
+    assert (await w1.post(url, json={"kind": "poster"})).status_code == 503
+
+    async def draw(profile, idea, kind):
+        return clean_svg('<svg onload="x()"><script>x</script><text>Hi</text></svg>')
+
+    set_production_media_fn(draw)
+    made = await w1.post(url, json={"kind": "poster"})
+    assert made.status_code == 200, made.text
+    assert made.json()["poster_svg"] == "<svg><text>Hi</text></svg>"
+    assert (await w1.get(f"{IDEAS}/{idea['id']}")).json()["poster_svg"] == made.json()["poster_svg"]
+    assert (await w2.post(url, json={"kind": "poster"})).status_code == 404
+    assert (await w1.post(url, json={"kind": "gif"})).status_code == 422
+
+    async def junk(profile, idea, kind):
+        return ""
+
+    set_production_media_fn(junk)
+    assert (await w1.post(url, json={"kind": "reel"})).status_code == 502

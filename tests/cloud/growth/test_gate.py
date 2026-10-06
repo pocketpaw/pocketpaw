@@ -1019,6 +1019,8 @@ class TestGrowthRouteRbac:
             ("GET", "/growth/social/ideas"): "growth.read",
             ("PATCH", "/growth/social/ideas/{idea_id}"): "growth.write",
             ("POST", "/growth/social/ideas/schedule"): "growth.write",
+            ("GET", "/growth/social/ideas/{idea_id}"): "growth.read",
+            ("POST", "/growth/social/ideas/{idea_id}/media"): "growth.write",
             ("POST", "/growth/social/ideas/{idea_id}/unschedule"): "growth.write",
         }
 

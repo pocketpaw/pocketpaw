@@ -35,6 +35,8 @@ class SocialIdea(TimestampedDocument):
     status: str = "new"
     scheduled_at: datetime | None = None
     calendar_event_id: str = ""
+    poster_svg: str = ""
+    reel_html: str = ""
 
     class Settings:
         name = "growth_social_ideas"

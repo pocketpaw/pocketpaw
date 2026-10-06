@@ -17,6 +17,7 @@ from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
     GenerateIdeasRequest,
+    MakeMediaRequest,
     ScheduleIdeasRequest,
     SocialIdeaListResponse,
     SocialIdeaResponse,
@@ -181,3 +182,28 @@ async def unschedule_idea(
 ) -> SocialIdeaResponse:
     """Clear an idea's date and remove its /calendar event."""
     return await social_service.unschedule_idea(ctx, idea_id)
+
+
+@router.get(
+    "/ideas/{idea_id}",
+    response_model=SocialIdeaResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def get_idea(
+    idea_id: str, ctx: RequestContext = Depends(request_context)
+) -> SocialIdeaResponse:
+    return await social_service.get_idea(ctx, idea_id)
+
+
+@router.post(
+    "/ideas/{idea_id}/media",
+    response_model=SocialIdeaResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def make_media(
+    idea_id: str,
+    body: MakeMediaRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialIdeaResponse:
+    """Draw a poster (SVG) or a ~10 s reel (HyperFrames HTML) for one idea, editable in /studio."""
+    return await social_service.make_media(ctx, idea_id, body)

@@ -57,6 +57,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     AnalysisPatch,
     DescriptionResponse,
     GenerateIdeasRequest,
+    MakeMediaRequest,
     ScheduleIdeasRequest,
     SocialAnalysisResponse,
     SocialIdeaListResponse,
@@ -186,6 +187,8 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         status=doc.status,
         scheduled_at=doc.scheduled_at,
         calendar_event_id=doc.calendar_event_id,
+        poster_svg=doc.poster_svg,
+        reel_html=doc.reel_html,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -207,6 +210,8 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         status=i.status,
         scheduled_at=iso_utc(i.scheduled_at),
         calendar_event_id=i.calendar_event_id,
+        poster_svg=i.poster_svg,
+        reel_html=i.reel_html,
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -516,6 +521,44 @@ async def update_idea(
     return _idea_to_response(_idea_to_domain(doc))
 
 
+async def get_idea(ctx: RequestContext, idea_id: str) -> SocialIdeaResponse:
+    doc = await _fetch_idea_in_workspace(_require_workspace(ctx), idea_id)
+    return _idea_to_response(_idea_to_domain(doc))
+
+
+async def make_media(
+    ctx: RequestContext, idea_id: str, body: MakeMediaRequest
+) -> SocialIdeaResponse:
+    """Have the ideas agent draw a poster (SVG) or a reel (HyperFrames HTML) for one idea."""
+    from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
+    from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
+
+    body = MakeMediaRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    media_fn = social_ideas.resolve_media_fn()
+    if media_fn is None:
+        raise CloudError(
+            503, "social.media_unavailable", "Poster and reel drafts are not configured here"
+        )
+    doc = await _fetch_idea_in_workspace(workspace_id, idea_id)
+    profile_doc = await _profile_doc(workspace_id, doc.profile or None)
+    if profile_doc is None:
+        raise NotFound("social_profile")
+    try:
+        made = await media_fn(_profile_to_domain(profile_doc), _idea_to_domain(doc), body.kind)
+    except ResearchUnavailable as exc:
+        raise CloudError(502, "social.media_failed", f"Drawing the {body.kind} failed") from exc
+    if not made:
+        raise CloudError(502, "social.media_failed", f"The {body.kind} came back unusable")
+    if body.kind == "poster":
+        doc.poster_svg = made
+    else:
+        doc.reel_html = made
+    await doc.save()
+    # no-event: Growth › Social has no realtime subscriber; the card re-renders from the response.
+    return _idea_to_response(_idea_to_domain(doc))
+
+
 SOCIAL_CALENDAR_ID = "growth-social"
 _PLATFORM_NAMES = {"x": "X", "reddit": "Reddit"}
 
@@ -617,7 +660,9 @@ __all__ = [
     "analyze_profile",
     "complete_onboarding",
     "create_profile",
+    "get_idea",
     "list_profiles",
+    "make_media",
     "schedule_ideas",
     "unschedule_idea",
     "generate_ideas",

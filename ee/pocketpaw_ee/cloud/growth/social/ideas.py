@@ -32,6 +32,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     PLATFORM_FORMATS,
     VIDEO_FORMATS,
     GeneratedIdea,
+    SocialIdea,
     SocialProfile,
 )
 
@@ -258,7 +259,107 @@ def resolve_ideas_fn() -> IdeasFn | None:
     return _PRODUCTION_IDEAS_FN
 
 
+_MEDIA_BRIEFS = {
+    "poster": (
+        "Draw a poster for this post as ONE self-contained SVG. Size: {size}. Use the "
+        "brand's tone; bold readable headline from the hook as <text> elements (no text "
+        "converted to paths); simple shapes and gradients; no <script>, no <foreignObject>, "
+        "no external images or fonts (use generic font families). Answer with only the SVG."
+    ),
+    "reel": (
+        "Make a 10-second vertical reel for this post as ONE HyperFrames HTML document: a "
+        'root element with data-composition-id="main" data-start="0" data-duration="10" '
+        'data-width="1080" data-height="1920"; GSAP from https://cdn.jsdelivr.net/npm/gsap@3 '
+        "building a paused timeline registered as "
+        'window.__timelines = window.__timelines || {{}}; window.__timelines["main"] = tl; '
+        "three or four animated text beats from the hook and post, brand-toned colours, no "
+        "<audio>, every asset inline or absolute https. Answer with only the HTML."
+    ),
+}
+_POSTER_SIZES = {"x": "1080x1080", "reddit": "1200x628"}
+_SVG_RE = re.compile(r"<svg\b.*?</svg>", re.IGNORECASE | re.DOTALL)
+_HTML_RE = re.compile(r"(<!doctype html.*?</html>|<html\b.*?</html>)", re.IGNORECASE | re.DOTALL)
+_UNSAFE_SVG = (
+    re.compile(r"<(script|foreignObject)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<(script|foreignObject)\b[^>]*/>", re.IGNORECASE),
+    re.compile(r"\son\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE),
+    re.compile(
+        r"\s(?:xlink:)?href\s*=\s*([\"'])(?!#|data:image/(?:png|jpeg|gif|webp);)[^\"']*\1",
+        re.IGNORECASE,
+    ),
+)
+MAX_POSTER_CHARS = 150_000
+
+
+def build_media_prompt(profile: SocialProfile, idea: SocialIdea, kind: str) -> str:
+    size = _POSTER_SIZES.get(idea.platform, "1080x1080")
+    lines = [_MEDIA_BRIEFS[kind].format(size=size), "", "<post>"]
+    lines.append(f"Company: {fence(profile.company_name) or '(not given)'}")
+    if profile.analysis is not None and profile.analysis.tone:
+        lines.append(f"Tone: {fence(profile.analysis.tone)}")
+    lines.append(f"Hook: {fence(idea.hook)}")
+    if idea.caption:
+        lines.append(f"Post: {fence(idea.caption)}")
+    lines += ["</post>"]
+    return "\n".join(lines)
+
+
+def clean_svg(text: str) -> str:
+    match = _SVG_RE.search(text or "")
+    if match is None:
+        return ""
+    svg = match.group(0)
+    for pattern in _UNSAFE_SVG:
+        svg = pattern.sub("", svg)
+    return svg if len(svg) <= MAX_POSTER_CHARS else ""
+
+
+def clean_reel(text: str) -> str:
+    from pocketpaw_ee.agent.mcp_servers.timeline import validate_motion_graphic
+
+    match = _HTML_RE.search(text or "")
+    html = match.group(0) if match else (text or "").strip()
+    shape, error = validate_motion_graphic(html, 30)
+    if error:
+        logger.warning("growth social reel rejected: %s", error[:200])
+        return ""
+    return html
+
+
+class MediaFn(Protocol):
+    async def __call__(self, profile: SocialProfile, idea: SocialIdea, kind: str) -> str: ...
+
+
+async def agent_make_media(profile: SocialProfile, idea: SocialIdea, kind: str) -> str:
+    """The production ``MediaFn``: "" when the agent's answer is unusable."""
+    text = await run_pinned_agent(
+        profile.workspace_id,
+        GROWTH_SOCIAL_IDEAS_AGENT,
+        build_media_prompt(profile, idea, kind),
+        f"{GROWTH_SOCIAL_IDEAS_SLUG}-{kind}",
+    )
+    return clean_svg(text) if kind == "poster" else clean_reel(text)
+
+
+_PRODUCTION_MEDIA_FN: MediaFn | None = None
+
+
+def set_production_media_fn(fn: MediaFn | None) -> None:
+    global _PRODUCTION_MEDIA_FN
+    _PRODUCTION_MEDIA_FN = fn
+
+
+def resolve_media_fn() -> MediaFn | None:
+    return _PRODUCTION_MEDIA_FN
+
+
 __all__ = [
+    "MediaFn",
+    "agent_make_media",
+    "clean_reel",
+    "clean_svg",
+    "resolve_media_fn",
+    "set_production_media_fn",
     "GROWTH_SOCIAL_IDEAS_AGENT",
     "GROWTH_SOCIAL_IDEAS_PROMPT",
     "GROWTH_SOCIAL_IDEAS_SLUG",

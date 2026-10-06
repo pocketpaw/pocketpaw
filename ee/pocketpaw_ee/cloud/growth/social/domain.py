@@ -148,6 +148,8 @@ class SocialIdea:
     status: str = "new"
     scheduled_at: datetime | None = None
     calendar_event_id: str = ""
+    poster_svg: str = ""
+    reel_html: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
