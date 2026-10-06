@@ -268,13 +268,19 @@ def mount_cloud(app: FastAPI) -> None:
     app.add_middleware(CSRFMiddleware)
 
     # Draft preview origin — requests for ``<token>.<PAW_SITES_PREVIEW_BASE_URL host>``
-    # go straight to the sites preview app, OUTSIDE CSRF / auth / request-log, so the
-    # untrusted-content origin never touches a session, cookie or audit row. Only CORS
-    # (installed after this) wraps it, and the preview host is not a CORS-allowed
-    # origin, so CORS passes those requests through untouched.
-    from pocketpaw_ee.sites.preview_origin import PreviewHostDispatch
+    # go straight to the sites preview app. It must be the OUTERMOST layer: the core
+    # app factories add AuthMiddleware, BodySizeLimit and CORS after this function
+    # runs, and anything they wrap gets the API's 401s and rate limits. So it is not
+    # added here; ``install_cors`` (called last by both factories) adds what
+    # ``app.state.outermost_middleware`` lists after CORS. The preview host then never
+    # touches a session, cookie, CSRF check or audit row.
+    from pocketpaw_ee.sites.preview_origin import PreviewHostDispatch, check_preview_base
 
-    app.add_middleware(PreviewHostDispatch)
+    check_preview_base()  # a refused base logs an ERROR and turns previews off
+    outermost = list(getattr(app.state, "outermost_middleware", ()))
+    if PreviewHostDispatch not in outermost:
+        outermost.append(PreviewHostDispatch)
+    app.state.outermost_middleware = outermost
 
     # Global error handler — extracted to ee.cloud._core.http
     add_error_handler(app)

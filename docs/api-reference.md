@@ -3012,7 +3012,10 @@ that per engine.
 image and public file beside it, served with `Access-Control-Allow-Origin: *` and no
 cookies. `<token>` is a 32-hex-char capability minted per content hash, so an edit
 gets a new URL. `null` while a build is pending or failed; show the build state
-then. Append `?paw_edit=1` (and the usual `paw_nonce`) to arm the edit bridge,
+then. Also `null` beside a served render (`build_status: "none"`) when the artifact
+store refused or failed to keep the draft's files, or the preview base URL is
+misconfigured: the server retries that at most once per draft every 10 minutes
+rather than rebuilding on every view. Append `?paw_edit=1` (and the usual `paw_nonce`) to arm the edit bridge,
 which talks to the builder over `postMessage` exactly like the live lane. Setup:
 `docs/deployment/sites-draft-preview-origin.md`.
 

@@ -60,7 +60,7 @@ _REACT_INDEX = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <script type="module" crossorigin src="/assets/index-9f8e7d.js"></script>
+  <script type="module" crossorigin src="/assets/index-9f8e7d1c.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/vendor-1a2b.js">
   <link rel="stylesheet" crossorigin href="/assets/index-4c5d.css">
   <link rel="icon" href="/favicon.svg">
@@ -72,7 +72,7 @@ _REACT_INDEX = """<!DOCTYPE html>
 """
 _REACT_DIST = {
     "index.html": _REACT_INDEX,
-    "assets/index-9f8e7d.js": _REACT_CHUNK,
+    "assets/index-9f8e7d1c.js": _REACT_CHUNK,
     "assets/vendor-1a2b.js": "export const a=1;\n",
     "assets/index-4c5d.css": "h1{color:red}\n",
     "assets/hero-77aa.png": b"\x89PNG\r\n\x1a\n" + b"\0" * 32,
@@ -284,7 +284,7 @@ async def test_preview_index_keeps_its_head_and_module_script(beanie_test_db):
 
     _assert_public_asset(resp, "text/html")
     assert "<head>" in resp.text
-    assert '<script type="module" crossorigin src="/assets/index-9f8e7d.js">' in resp.text
+    assert '<script type="module" crossorigin src="/assets/index-9f8e7d1c.js">' in resp.text
     assert 'data-uid="App:h1:0"' in resp.text
 
 
@@ -292,7 +292,7 @@ async def test_preview_index_keeps_its_head_and_module_script(beanie_test_db):
 async def test_preview_serves_the_js_chunk_with_acao_and_js_content_type(beanie_test_db):
     _pid, url = await _react_draft()
 
-    resp = await _fetch(urljoin(url, "assets/index-9f8e7d.js"))
+    resp = await _fetch(urljoin(url, "assets/index-9f8e7d1c.js"))
 
     _assert_public_asset(resp, "application/javascript")
     assert resp.text == _REACT_CHUNK
@@ -304,7 +304,7 @@ async def test_root_absolute_asset_refs_resolve_on_the_preview_host(beanie_test_
     URL's ORIGIN root, so draft == published only if that lands on this draft."""
     _pid, url = await _react_draft()
 
-    resp = await _fetch(urljoin(url, "/assets/index-9f8e7d.js"))
+    resp = await _fetch(urljoin(url, "/assets/index-9f8e7d1c.js"))
 
     _assert_public_asset(resp, "application/javascript")
     assert resp.text == _REACT_CHUNK
@@ -586,7 +586,7 @@ async def test_the_edit_variant_is_not_addressable_by_path(beanie_test_db):
 async def test_hashed_assets_are_immutable_and_unknown_files_404(beanie_test_db):
     _pid, url = await _react_draft()
 
-    asset = await _fetch(urljoin(url, "/assets/index-9f8e7d.js"))
+    asset = await _fetch(urljoin(url, "/assets/index-9f8e7d1c.js"))
     missing = await _fetch(urljoin(url, "/assets/nope.js"))
 
     assert "immutable" in asset.headers.get("cache-control", "")

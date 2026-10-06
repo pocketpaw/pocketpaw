@@ -11,7 +11,8 @@
 # once published. One host per draft is what makes that true.
 #
 # What this module owns:
-#   * the base-URL setting and the token <-> host mapping;
+#   * the base-URL setting (validated: a malformed base, or one that equals or
+#     contains the app's own host, turns previews off) and the token <-> host map;
 #   * packing a draft's files into the tgz the artifact store keeps per content hash;
 #   * html drafts (they never build): the declared-package import map and the
 #     vendored runtime-error reporter (``runtime_reporter.js``) in every page, plus an
@@ -20,11 +21,16 @@
 #     Both scripts are pinned to a paw-sites commit (paw-sites-edit-bridge.pin.json).
 #   * ``preview_app`` — the ASGI app that serves a draft — and
 #     ``PreviewHostDispatch``, the middleware that routes preview-host requests to it
-#     inside the main API process.
+#     inside the main API process. It must be the OUTERMOST layer (``install_cors``
+#     adds it last via ``app.state.outermost_middleware``), or auth and rate limits
+#     answer preview requests.
 #
 # Invariants: ``preview_app`` never reads cookies or auth, never sets a cookie, and
 # answers an unknown token with a bare 404. It serves bytes only from the artifact
-# store; nothing in a request can name a path outside a draft's own file set.
+# store; nothing in a request can name a path outside a draft's own file set. A
+# preview URL is handed out only when the draft's files AND token are both stored.
+# Per-process caches (token lookups, unpacked drafts, single-flight loads) keep an
+# asset request off the store; every servable draft fits the draft cache.
 
 from __future__ import annotations
 
@@ -38,6 +44,7 @@ import re
 import secrets
 import tarfile
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
@@ -59,17 +66,29 @@ EDIT_VARIANT_DIR = ".paw-edit"
 ENTRY = "index.html"
 NOT_FOUND_PAGE = "404.html"
 
-#: Ceilings on one unpacked draft (same scale as the artifact preview lane).
+#: Ceilings on one unpacked draft. ``MAX_TOTAL_BYTES`` stays at or under
+#: ``_CACHE_BYTES`` so every servable draft fits the cache: a draft too big to cache
+#: would be re-read and re-unpacked on every asset request.
 MAX_FILES = 20_000
-MAX_TOTAL_BYTES = 128 * 1024 * 1024
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
 
 #: Drafts kept unpacked in memory per process (LRU, bounded by count AND bytes).
 _CACHE_ENTRIES = 8
-_CACHE_BYTES = 64 * 1024 * 1024
+_CACHE_BYTES = 128 * 1024 * 1024
+
+#: token -> (pocket, hash) resolutions kept per process, so an asset request does not
+#: hit the store to resolve its token. A miss is remembered briefly too: random tokens
+#: would otherwise cost a store read each. A hit expires so an evicted draft stops
+#: serving within ``_TOKEN_HIT_TTL``.
+_TOKEN_CACHE_ENTRIES = 4096
+_TOKEN_HIT_TTL = 300.0
+_TOKEN_MISS_TTL = 30.0
 
 _JS = "application/javascript; charset=utf-8"
 
-_HASHED_NAME_RE = re.compile(r"[-.][A-Za-z0-9_]{6,}\.[a-z0-9]+$")
+#: A bundler content hash in a filename: ``index-BvK3x9_a.js``, ``chunk.3f9a1c2e.css``.
+#: 8+ chars with a digit or capital, so a plain word (``hero-banner.png``) is not one.
+_HASHED_NAME_RE = re.compile(r"[-.](?=[A-Za-z0-9_-]*[0-9A-Z])[A-Za-z0-9_-]{8,}\.[a-z0-9]+$")
 
 #: Headers on every preview response. No framing restriction: the builder frames
 #: this origin. No cookies, no credentials: ``*`` is the only ACAO a cookieless
@@ -106,19 +125,71 @@ def preview_base_url() -> str:
     return configured or _default_base_url()
 
 
-def _base_parts() -> tuple[str, str, int | None]:
-    parts = urlsplit(preview_base_url())
-    host = (parts.hostname or "").lower()
-    return parts.scheme or "http", host, parts.port
+#: Env vars naming the hosts the API and dashboard answer on. The preview base must
+#: never equal or contain one of them: ``PreviewHostDispatch`` would route that host's
+#: whole API to ``preview_app``.
+_APP_URL_ENVS = (
+    "POCKETPAW_PUBLIC_BASE_URL",
+    "POCKETPAW_FRONTEND_BASE_URL",
+    "PAW_SITES_BUILDER_ORIGIN",
+)
+
+
+def _parse_base(raw: str) -> tuple[tuple[str, str, int | None] | None, str | None]:
+    """(scheme, host, port) of a base URL, or ``(None, why it is refused)``."""
+    parts = urlsplit(raw)
+    if parts.scheme not in ("http", "https"):
+        return None, f"{PREVIEW_BASE_ENV}={raw!r} needs an http:// or https:// scheme"
+    try:
+        port = parts.port
+    except ValueError:
+        return None, f"{PREVIEW_BASE_ENV}={raw!r} has an invalid port"
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not host or "." not in host or host.startswith("["):
+        return None, f"{PREVIEW_BASE_ENV}={raw!r} needs a dotted host name"
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return None, f"{PREVIEW_BASE_ENV}={raw!r} must be scheme://host[:port] only"
+    for env in _APP_URL_ENVS:
+        app_host = (urlsplit(os.environ.get(env, "").strip()).hostname or "").lower()
+        if app_host and (app_host == host or app_host.endswith("." + host)):
+            return None, (
+                f"{PREVIEW_BASE_ENV} host {host!r} equals or contains the app host "
+                f"{app_host!r} ({env}); every request to it would be served as a draft"
+            )
+    return (parts.scheme, host, port), None
+
+
+def preview_base_problem() -> str | None:
+    """Why the configured preview base is refused, or ``None`` when it is usable. A
+    refused base turns the preview origin OFF (no URL is minted, no host is routed
+    to the preview app) rather than taking the API down with it."""
+    return _parse_base(preview_base_url())[1]
+
+
+def check_preview_base() -> bool:
+    """Startup check: log loudly (ERROR) when the base is refused. True when usable."""
+    problem = preview_base_problem()
+    if problem is not None:
+        logger.error("sites.preview_origin: draft previews are DISABLED: %s", problem)
+    return problem is None
+
+
+def _base_parts() -> tuple[str, str, int | None] | None:
+    return _parse_base(preview_base_url())[0]
 
 
 def preview_base_host() -> str:
-    return _base_parts()[1]
+    parts = _base_parts()
+    return parts[1] if parts else ""
 
 
-def preview_url_for(token: str) -> str:
-    """The absolute URL of a draft's index.html on the preview origin."""
-    scheme, host, port = _base_parts()
+def preview_url_for(token: str) -> str | None:
+    """The absolute URL of a draft's index.html on the preview origin, or ``None``
+    when the configured base is refused (see :func:`preview_base_problem`)."""
+    parts = _base_parts()
+    if parts is None:
+        return None
+    scheme, host, port = parts
     netloc = f"{token}.{host}" + (f":{port}" if port else "")
     return f"{scheme}://{netloc}/{ENTRY}"
 
@@ -173,21 +244,44 @@ def existing_preview_url(store: Any, pocket_id: str, content_hash: str) -> str |
     """The preview URL already minted for this draft, or ``None``."""
     if not store_supports_preview(store):
         return None
+    if preview_base_problem() is not None:
+        return None
     token = store.read_preview_token(pocket_id, content_hash)
     return preview_url_for(token) if token and TOKEN_RE.fullmatch(token) else None
 
 
-def publish_draft(store: Any, pocket_id: str, content_hash: str, files_tgz: bytes) -> str | None:
-    """Store a draft's files and mint (or reuse) its token. Returns the preview URL,
-    or ``None`` when the store cannot hold drafts."""
-    if not store_supports_preview(store):
-        return None
-    store.write_dist(pocket_id, content_hash, files_tgz)
+def _mint_token(store: Any, pocket_id: str, content_hash: str) -> str | None:
+    """The draft's token, minting and storing one when it has none. ``None`` when the
+    store could not record a new token (a URL for it would 404)."""
     token = store.read_preview_token(pocket_id, content_hash)
-    if not token or not TOKEN_RE.fullmatch(token):
-        token = new_token()
-        store.write_preview_token(pocket_id, content_hash, token)
-    return preview_url_for(token)
+    if token and TOKEN_RE.fullmatch(token):
+        return token
+    token = new_token()
+    return token if store.write_preview_token(pocket_id, content_hash, token) else None
+
+
+def publish_draft(store: Any, pocket_id: str, content_hash: str, files_tgz: bytes) -> str | None:
+    """Store a draft's files and mint (or reuse) its token. Returns the preview URL
+    only when BOTH the files and the token are stored; ``None`` when the store cannot
+    hold drafts, refused or failed either write, or the preview base is refused. A
+    URL is never handed out for a draft the origin cannot serve."""
+    if not store_supports_preview(store) or preview_base_problem() is not None:
+        return None
+    if not store.write_dist(pocket_id, content_hash, files_tgz):
+        return None
+    token = _mint_token(store, pocket_id, content_hash)
+    return preview_url_for(token) if token else None
+
+
+def repair_preview_url(store: Any, pocket_id: str, content_hash: str) -> str | None:
+    """A URL for a draft whose files are stored but whose token write failed: mint the
+    token now, no rebuild. ``None`` when the files are not there either."""
+    if not store_supports_preview(store) or preview_base_problem() is not None:
+        return None
+    if store.read_dist(pocket_id, content_hash) is None:
+        return None
+    token = _mint_token(store, pocket_id, content_hash)
+    return preview_url_for(token) if token else None
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +552,12 @@ async def materialize_html_draft(
 # ---------------------------------------------------------------------------
 
 _draft_cache: OrderedDict[tuple[str, str], dict[str, bytes]] = OrderedDict()
+#: token -> (expires at, (pocket, hash) or None for a remembered miss)
+_token_cache: OrderedDict[str, tuple[float, tuple[str, str] | None]] = OrderedDict()
 _draft_cache_lock = threading.Lock()  # _load_draft runs in worker threads
+#: token -> [lock, waiters]: one store read + unpack per token at a time; concurrent
+#: requests for the same draft's assets wait for it and then hit the cache.
+_inflight: dict[str, list[Any]] = {}
 
 
 def _content_type(name: str) -> str:
@@ -471,23 +570,75 @@ def _content_type(name: str) -> str:
 
 
 def _cache_control(rel: str, status: int) -> str:
+    """Immutable only for content-addressed files (SvelteKit's ``_app/immutable/`` or a
+    hashed filename); a plain ``assets/logo.png`` can change under the same URL when
+    the draft is re-published. ``private``: a capability URL is not for shared caches."""
     if status != 200:
         return "no-store"
-    if rel.startswith(("assets/", "_app/immutable/")) or _HASHED_NAME_RE.search(rel):
+    if rel.startswith("_app/immutable/") or _HASHED_NAME_RE.search(rel.rsplit("/", 1)[-1]):
         return "public, max-age=31536000, immutable"
-    return "no-cache"
+    return "private, no-cache"
+
+
+def _clear_caches() -> None:
+    """Drop every per-process preview cache (tests; an operator after a store swap)."""
+    with _draft_cache_lock:
+        _draft_cache.clear()
+        _token_cache.clear()
+
+
+def _resolve_token(store: Any, token: str) -> tuple[str, str] | None:
+    now = time.monotonic()
+    with _draft_cache_lock:
+        hit = _token_cache.get(token)
+        if hit is not None and hit[0] > now:
+            _token_cache.move_to_end(token)
+            return hit[1]
+    ref = store.resolve_preview_token(token)
+    ref = (ref[0], ref[1]) if ref is not None else None
+    ttl = _TOKEN_HIT_TTL if ref is not None else _TOKEN_MISS_TTL
+    with _draft_cache_lock:
+        _token_cache[token] = (now + ttl, ref)
+        _token_cache.move_to_end(token)
+        while len(_token_cache) > _TOKEN_CACHE_ENTRIES:
+            _token_cache.popitem(last=False)
+    return ref
+
+
+def _single_flight(token: str) -> threading.Lock:
+    with _draft_cache_lock:
+        slot = _inflight.setdefault(token, [threading.Lock(), 0])
+        slot[1] += 1
+        return slot[0]
+
+
+def _release_flight(token: str) -> None:
+    with _draft_cache_lock:
+        slot = _inflight.get(token)
+        if slot is not None:
+            slot[1] -= 1
+            if slot[1] <= 0:
+                del _inflight[token]
 
 
 def _load_draft(token: str) -> dict[str, bytes] | None:
+    lock = _single_flight(token)
+    try:
+        with lock:
+            return _load_draft_locked(token)
+    finally:
+        _release_flight(token)
+
+
+def _load_draft_locked(token: str) -> dict[str, bytes] | None:
     from pocketpaw_ee.sites import service as sites_service
 
     store = sites_service._default_artifact_store()
     if not store_supports_preview(store):
         return None
-    ref = store.resolve_preview_token(token)
-    if ref is None:
+    key = _resolve_token(store, token)
+    if key is None:
         return None
-    key = (ref[0], ref[1])
     with _draft_cache_lock:
         cached = _draft_cache.get(key)
         if cached is not None:
@@ -501,13 +652,13 @@ def _load_draft(token: str) -> dict[str, bytes] | None:
     except (tarfile.TarError, OSError, EOFError, ValueError):
         logger.warning("sites.preview_origin: unreadable draft for token %s…", token[:6])
         return None
-    size = sum(len(b) for b in files.values())
-    if size > _CACHE_BYTES:
-        return files  # served, not cached: one huge draft must not evict the rest
+    # unpack_files caps a draft at MAX_TOTAL_BYTES <= _CACHE_BYTES, so it always fits.
     with _draft_cache_lock:
         _draft_cache[key] = files
         total = sum(sum(len(b) for b in f.values()) for f in _draft_cache.values())
-        while len(_draft_cache) > _CACHE_ENTRIES or total > _CACHE_BYTES:
+        while len(_draft_cache) > 1 and (
+            len(_draft_cache) > _CACHE_ENTRIES or total > _CACHE_BYTES
+        ):
             _old_key, old = _draft_cache.popitem(last=False)
             total -= sum(len(b) for b in old.values())
     return files

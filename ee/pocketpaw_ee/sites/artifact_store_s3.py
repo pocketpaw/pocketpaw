@@ -291,28 +291,32 @@ class S3ArtifactStore:
             logger.debug("sites.artifact_store_s3: read miss for %s", key, exc_info=True)
             return None
 
-    def write_dist(self, pocket_id: str, content_hash: str, data: bytes) -> None:
+    def write_dist(self, pocket_id: str, content_hash: str, data: bytes) -> bool:
+        """Store a draft's packed files. False when refused (a capture key, or a pack
+        past the preview ceilings) or the put failed; no URL is minted then."""
         if _dist_carries_capture_key(data):
             logger.warning(
                 "sites.artifact_store_s3: refusing to store draft files for pocket %s — "
-                "they carry a per-site capture key.",
+                "they carry a per-site capture key (or are unreadable / too large).",
                 pocket_id,
             )
-            return
-        self._put(dist_key(pocket_id, content_hash), data, "application/gzip")
+            return False
+        return self._put(dist_key(pocket_id, content_hash), data, "application/gzip")
 
     def read_dist(self, pocket_id: str, content_hash: str) -> bytes | None:
         return self._get(dist_key(pocket_id, content_hash))
 
-    def write_preview_token(self, pocket_id: str, content_hash: str, token: str) -> None:
+    def write_preview_token(self, pocket_id: str, content_hash: str, token: str) -> bool:
+        """Reverse pointer, then forward key. True when both landed (the token resolves)."""
         pointer = json.dumps({"pocket_id": pocket_id, "content_hash": content_hash})
         # Pointer first: a token the forward key names must always resolve.
-        if self._put(token_pointer_key(token), pointer.encode("utf-8"), "application/json"):
-            self._put(
-                f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.token",
-                token.encode("utf-8"),
-                "text/plain",
-            )
+        if not self._put(token_pointer_key(token), pointer.encode("utf-8"), "application/json"):
+            return False
+        return self._put(
+            f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.token",
+            token.encode("utf-8"),
+            "text/plain",
+        )
 
     def read_preview_token(self, pocket_id: str, content_hash: str) -> str | None:
         raw = self._get(f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.token")
@@ -334,6 +338,11 @@ class S3ArtifactStore:
         except (ValueError, KeyError, TypeError):
             return None
         if not isinstance(pocket_id, str) or not isinstance(content_hash, str):
+            return None
+        # The forward key must still name this token, same as the filesystem store: a
+        # stale or orphaned reverse pointer (a token re-minted after a failed write, or
+        # a bucket lifecycle rule that expired the draft first) must not serve.
+        if self.read_preview_token(pocket_id, content_hash) != token:
             return None
         return pocket_id, content_hash
 

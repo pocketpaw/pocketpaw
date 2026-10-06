@@ -386,3 +386,39 @@ class TestDraftPreviewFiles:
 
         assert adapter.puts == []
         assert store.read_dist("pocketA", "hash1") is None
+
+    def test_writes_report_whether_they_landed(self, store_and_adapter):
+        """publish_draft mints a URL only on True; a refused or failed write must say so."""
+        from pocketpaw_ee.sites.preview_origin import pack_files
+
+        store, adapter = store_and_adapter
+        key = f"site_key_{secrets.token_urlsafe(24)}"
+        packed = pack_files({"index.html": b"<h1>hi</h1>"})
+
+        assert store.write_dist("pocketA", "hash1", packed) is True
+        assert store.write_preview_token("pocketA", "hash1", "a" * 32) is True
+        assert store.write_dist("pocketA", "hash2", pack_files({"x.js": key.encode()})) is False
+        adapter.put_error = RuntimeError("s3 down")
+        assert store.write_dist("pocketA", "hash3", packed) is False
+        assert store.write_preview_token("pocketA", "hash3", "c" * 32) is False
+
+    def test_a_failed_put_yields_no_preview_url(self, store_and_adapter):
+        from pocketpaw_ee.sites.preview_origin import pack_files, publish_draft
+
+        store, adapter = store_and_adapter
+        adapter.put_error = RuntimeError("s3 down")
+
+        assert publish_draft(store, "pocketA", "hash1", pack_files({"index.html": b"x"})) is None
+
+    def test_a_stale_reverse_pointer_does_not_resolve(self, store_and_adapter):
+        """Same rule as the filesystem store: the forward key must still name the token.
+        A pointer whose draft was re-minted or expired by a lifecycle rule 404s."""
+        store, adapter = store_and_adapter
+        old, new = "a" * 32, "b" * 32
+        store.write_preview_token("pocketA", "hash1", old)
+        store.write_preview_token("pocketA", "hash1", new)
+
+        assert store.resolve_preview_token(new) == ("pocketA", "hash1")
+        assert store.resolve_preview_token(old) is None
+        del adapter.objects["site-artifacts/pocketA/hash1.token"]
+        assert store.resolve_preview_token(new) is None

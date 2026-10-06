@@ -33,6 +33,7 @@ import logging
 import re
 import secrets
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -545,7 +546,8 @@ class _FilesystemArtifactStore:
                 pass
             raise
 
-    def write_dist(self, pocket_id: str, content_hash: str, data: bytes) -> None:
+    def write_dist(self, pocket_id: str, content_hash: str, data: bytes) -> bool:
+        """Store a draft's packed files. True when they are on disk."""
         from pocketpaw_ee.sites.generator_client import artifact_home
 
         pocket_dir = artifact_home() / pocket_id
@@ -555,8 +557,9 @@ class _FilesystemArtifactStore:
             logger.warning(
                 "sites.artifact_store: dist write failed for pocket %s", pocket_id, exc_info=True
             )
-            return
+            return False
         self._evict(pocket_dir)
+        return True
 
     def read_dist(self, pocket_id: str, content_hash: str) -> bytes | None:
         from pocketpaw_ee.sites.generator_client import artifact_home
@@ -566,7 +569,9 @@ class _FilesystemArtifactStore:
         except OSError:
             return None
 
-    def write_preview_token(self, pocket_id: str, content_hash: str, token: str) -> None:
+    def write_preview_token(self, pocket_id: str, content_hash: str, token: str) -> bool:
+        """Record a draft's token (reverse pointer, then forward). True when both are
+        written, i.e. the token now resolves."""
         from pocketpaw_ee.sites.generator_client import artifact_home
 
         home = artifact_home()
@@ -579,6 +584,8 @@ class _FilesystemArtifactStore:
             logger.warning(
                 "sites.artifact_store: token write failed for pocket %s", pocket_id, exc_info=True
             )
+            return False
+        return True
 
     def read_preview_token(self, pocket_id: str, content_hash: str) -> str | None:
         from pocketpaw_ee.sites.generator_client import artifact_home
@@ -9690,11 +9697,21 @@ async def get_native_artifact(
     # what keeps an editing session from billing a sandbox per keystroke.
     cached = store.read(pocket_id, content_hash)
     preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
-    if cached is not None and preview_url is None and preview_origin.store_supports_preview(store):
-        # A render cached before the preview origin existed has no draft files to
-        # serve. Rebuild once (same content hash, so the job is idempotent) rather
-        # than hand the builder a preview it can never load.
-        cached = None
+    if (
+        cached is not None
+        and preview_url is None
+        and preview_origin.store_supports_preview(store)
+        and preview_origin.preview_base_problem() is None
+        and _claim_preview_retry(pocket_id, content_hash)
+    ):
+        # A cached render with no preview URL: either its files landed but the token
+        # write failed (mint it now, no build), or it has no files (cached before the
+        # preview origin existed, or the store refused them). Rebuild that at most
+        # once per retry window; past it, serve the render with a null preview_url
+        # instead of billing a sandbox on every view for files the store won't keep.
+        preview_url = preview_origin.repair_preview_url(store, pocket_id, content_hash)
+        if preview_url is None:
+            cached = None
     if cached is not None:
         body_html, css = cached
         return {
@@ -9751,6 +9768,27 @@ async def get_native_artifact(
     }
 
 
+#: (pocket, content hash) -> monotonic time of the last attempt to give a draft a
+#: preview URL it lacked (a rebuild, or an html re-materialize). Per process, bounded.
+_preview_retry_at: OrderedDict[tuple[str, str], float] = OrderedDict()
+_PREVIEW_RETRY_WINDOW = 600.0
+_PREVIEW_RETRY_ENTRIES = 4096
+
+
+def _claim_preview_retry(pocket_id: str, content_hash: str) -> bool:
+    """True (and the window starts) when this draft may try again to get a preview
+    URL; False while a previous attempt is inside ``_PREVIEW_RETRY_WINDOW``."""
+    key, now = (pocket_id, content_hash), time.monotonic()
+    last = _preview_retry_at.get(key)
+    if last is not None and now - last < _PREVIEW_RETRY_WINDOW:
+        return False
+    _preview_retry_at[key] = now
+    _preview_retry_at.move_to_end(key)
+    while len(_preview_retry_at) > _PREVIEW_RETRY_ENTRIES:
+        _preview_retry_at.popitem(last=False)
+    return True
+
+
 #: Bump when the html draft materialization changes (import map, bridge, layout), so
 #: drafts re-materialize under a new content hash and a new preview URL.
 _HTML_PREVIEW_VERSION = "html-preview-2"
@@ -9774,7 +9812,14 @@ async def _html_draft_artifact(
         engine="html",
     )
     preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
-    if preview_url is None and preview_origin.store_supports_preview(store):
+    if (
+        preview_url is None
+        and preview_origin.store_supports_preview(store)
+        and preview_origin.preview_base_problem() is None
+        and _claim_preview_retry(pocket_id, content_hash)
+    ):
+        # Bounded like the built lane: a store that refuses or fails the write is not
+        # re-materialized (an arm-html run) on every view.
         files = await preview_origin.materialize_html_draft(source, builder_origin, arm=arm)
         preview_url = preview_origin.publish_draft(
             store, pocket_id, content_hash, preview_origin.pack_files(files)
