@@ -35,6 +35,8 @@ Public API:
 - ``seed_default_agent`` / ``seed_code_agent`` (+ their all-workspace back-fills)
   — the default agent and the ``code`` agent, whose tools are capped to the four
   file tools (``tool_mode="exclusive"``)
+- ``seed_pinned_agent`` — seed any declaratively defined, tool-pinned agent by
+  slug (the Growth › Social analyst and ideas agents)
 - ``legacy_ctx(user_id, workspace_id)`` — helper for the router
 """
 
@@ -1169,6 +1171,61 @@ async def seed_growth_writer_agent(
     return agent, True
 
 
+async def seed_pinned_agent(
+    workspace_id: str, owner_id: str, definition: dict[str, Any]
+) -> tuple[_AgentDoc, bool]:
+    """Create a declaratively defined agent for a workspace if its slug is missing.
+
+    ``definition`` is the ``{"name", "slug", "config"}`` shape the growth agents
+    declare. Like the growth writer seeder, an existing row is NARROWED back to
+    the definition's tools with ``tool_mode="exclusive"`` — these agents are
+    pinned on purpose, and a widened surface is the hazard. Returns
+    ``(agent, created)``.
+    """
+    slug = definition["slug"]
+    pinned_tools = list(definition["config"].get("tools") or [])
+    existing = await _AgentDoc.find_one(_AgentDoc.workspace == workspace_id, _AgentDoc.slug == slug)
+    if existing is not None:
+        widened = list(existing.config.tools or []) != pinned_tools
+        if widened or existing.config.tool_mode != "exclusive":
+            logger.info(
+                "Narrowed '%s' agent in workspace %s from tool_mode=%s tools=%s",
+                slug,
+                workspace_id,
+                existing.config.tool_mode,
+                existing.config.tools,
+            )
+            existing.config.tool_mode = "exclusive"
+            existing.config.tools = pinned_tools
+            await existing.save()
+        return existing, False
+
+    agent = _AgentDoc(
+        workspace=workspace_id,
+        name=definition["name"],
+        slug=slug,
+        avatar="",
+        owner=owner_id,
+        visibility="workspace",
+        config=_AgentConfigDoc(**definition["config"]),
+    )
+    await agent.insert()
+    logger.info("'%s' agent seeded in workspace %s (id: %s)", slug, workspace_id, agent.id)
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": str(agent.id),
+                "workspace_id": workspace_id,
+                "owner_id": owner_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
+    )
+    return agent, True
+
+
 async def ensure_growth_writer_agent_all_workspaces() -> int:
     """Back-fill the ``growth-writer`` agent for every existing workspace.
 
@@ -1214,6 +1271,7 @@ __all__ = [
     "seed_default_agent",
     "seed_growth_researcher_agent",
     "seed_growth_writer_agent",
+    "seed_pinned_agent",
     "set_scopes",
     "suggest_for_mentions",
     "update",

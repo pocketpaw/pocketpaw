@@ -1,0 +1,79 @@
+[
+  {
+    "label": "tenancy: an idea patch reads across workspaces",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    doc = await _IdeaDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})",
+    "replace": "    doc = await _IdeaDoc.find_one({\"_id\": oid})",
+    "tests": ["tests/cloud/growth/social/test_router.py"]
+  },
+  {
+    "label": "tenancy: the profile read drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    return await _ProfileDoc.find_one({\"workspace\": workspace_id})",
+    "replace": "    return await _ProfileDoc.find_one({})",
+    "tests": ["tests/cloud/growth/social/test_router.py"]
+  },
+  {
+    "label": "tenancy: the ideas list drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    query: dict[str, Any] = {\"workspace\": workspace_id}",
+    "replace": "    query: dict[str, Any] = {}",
+    "tests": ["tests/cloud/growth/social/test_router.py"]
+  },
+  {
+    "label": "server-owned: a hand edit may overwrite pages_read",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/dto.py",
+    "find": "    hooks: _AnalysisList | None = None\n",
+    "replace": "    hooks: _AnalysisList | None = None\n    pages_read: list[str] | None = None\n",
+    "tests": ["tests/cloud/growth/social/test_router.py"]
+  },
+  {
+    "label": "picker: off-origin links are followed",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "        if absolute is None or _origin(absolute) != home_origin:",
+    "replace": "        if absolute is None:",
+    "tests": ["tests/cloud/growth/social/test_analyst.py"]
+  },
+  {
+    "label": "robots: subpages ignore robots.txt",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "        if not allowed_by_robots(robots, link, SOCIAL_USER_AGENT):\n            continue",
+    "replace": "        if False:\n            continue",
+    "tests": ["tests/cloud/growth/social/test_analyst.py"]
+  },
+  {
+    "label": "fetch: subpages are not pinned to the final host",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "            result = await fetcher.fetch(link, allowed_host=final_host, truncate=True)",
+    "replace": "            result = await fetcher.fetch(link, truncate=True)",
+    "tests": ["tests/cloud/growth/social/test_analyst.py"]
+  },
+  {
+    "label": "fetch: an oversized page fails instead of being cut",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "        home = await fetcher.fetch(url, truncate=True)",
+    "replace": "        home = await fetcher.fetch(url)",
+    "tests": ["tests/cloud/growth/social/test_analyst.py"]
+  },
+  {
+    "label": "typed fields: the owner's avoid list is dropped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "    if typed_avoid:\n",
+    "replace": "    if False:\n",
+    "tests": ["tests/cloud/growth/social/test_analyst.py"]
+  },
+  {
+    "label": "analyze: a failed run wipes the last good analysis",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            \"analysis_status\": \"failed\",\n",
+    "replace": "            \"analysis_status\": \"failed\",\n            \"analysis\": None,\n",
+    "tests": ["tests/cloud/growth/social/test_router.py"]
+  },
+  {
+    "label": "gate: a social route loses its RBAC guard",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/router.py",
+    "find": "@router.get(\n    \"/ideas\",\n    response_model=SocialIdeaListResponse,\n    dependencies=[Depends(require_action_any_workspace(\"growth.read\"))],\n)",
+    "replace": "@router.get(\n    \"/ideas\",\n    response_model=SocialIdeaListResponse,\n)",
+    "tests": ["tests/cloud/growth/test_gate.py"]
+  }
+]

@@ -7006,6 +7006,190 @@ The stored preview only ever describes the criteria it ran against:
 | 503 | `icp.research_unavailable` | No research backend is wired on this deployment. Nothing is recorded. |
 | 404 | `icp.not_found` | Unknown id, or another workspace's hunt. |
 
+## Growth — Social
+
+The setup wizard, website analysis and post ideas behind `/growth` › Social.
+One profile per workspace, created by the first `PUT`. Nothing here leaves
+the workspace: there is no posting, scheduling or account connection. Every
+route is license-gated and workspace-scoped; reads need `growth.read`, every
+other route `growth.write` (both MEMBER).
+
+| Route | What it does |
+|---|---|
+| `GET /api/v1/growth/social/profile` | The workspace's profile. `404 social_profile.not_found` until the first `PUT`. |
+| `PUT /api/v1/growth/social/profile` | Partial upsert of the typed fields and, optionally, a hand-edited `analysis` (below). |
+| `POST /api/v1/growth/social/profile/analyze` | Read the website and run the analyst, in the request (below). |
+| `POST /api/v1/growth/social/profile/complete` | Finish onboarding: stamps `onboarding_completed_at`. |
+| `POST /api/v1/growth/social/ideas/generate` | Generate new post ideas (below). |
+| `GET /api/v1/growth/social/ideas` | `{items}`, newest first. Optional `status=new\|approved\|skipped`; omitted returns every idea. Any other value is a 422. |
+| `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). |
+
+**Response (`SocialProfile`)** — every profile route returns this shape:
+
+```json
+{
+  "id": "6702…",
+  "workspace_id": "w1",
+  "owner_name": "Sam",
+  "company_name": "Acme Dental",
+  "website": "https://acme-dental.com",
+  "description": {
+    "product": "Family dentistry",
+    "audience": "Parents of young kids",
+    "problem": "",
+    "benefits": "",
+    "tone": "Warm, plain",
+    "avoid": "Fear tactics"
+  },
+  "team_size": "2_10",
+  "monthly_revenue": "10k_50k",
+  "role": "founder",
+  "business_model": "local_business",
+  "category": "Health",
+  "analysis_status": "ready",
+  "analysis_error": null,
+  "analysis": {
+    "summary": "A family dental practice in Austin.",
+    "product": "Checkups and cleanings",
+    "audience": "Parents of young kids",
+    "problem": "Kids who are scared of the dentist",
+    "tone": "Warm, plain",
+    "benefits": ["Same-week appointments"],
+    "differentiators": ["Kid-only hours"],
+    "competitors": [],
+    "avoid": ["Fear tactics"],
+    "content_pillars": ["First visits", "At-home habits"],
+    "hooks": ["What a first dental visit actually looks like"],
+    "pages_read": ["https://acme-dental.com/", "https://acme-dental.com/about"],
+    "logo_url": "https://acme-dental.com/logo.svg"
+  },
+  "analyzed_at": "2026-10-06T10:00:00+00:00",
+  "onboarding_completed_at": null,
+  "created_at": "2026-10-06T09:58:00+00:00",
+  "updated_at": "2026-10-06T10:00:00+00:00"
+}
+```
+
+Enums: `team_size` is `solo | 2_10 | 11_50 | 51_200 | 200_plus`;
+`monthly_revenue` is `pre_revenue | under_1k | 1k_10k | 10k_50k | 50k_250k |
+250k_plus`; `role` is `founder | marketer | social_media_manager | agency |
+creator | other`; `business_model` is `b2b_saas | b2c_app | ecommerce |
+services | local_business | creator | marketplace | other`. Each may be
+`null`. `analysis_status` is `none | ready | failed`, and `analysis` is `null`
+until the first successful analysis or hand edit.
+
+### `PUT /api/v1/growth/social/profile`
+
+Every field is optional. An omitted field is left as it is; an explicit
+`null` clears it (`owner_name` and `company_name` clear to `""`).
+`description` merges key by key, so one wizard step can send
+`{"description": {"audience": "…"}}` without wiping the others. Each
+description field is at most 2000 characters, the names 120, `category` 60.
+`website` is trimmed and gets `https://` when typed bare (`acme.com` →
+`https://acme.com`); anything that is still not an `http(s)` address with a
+dotted host is a 422. An enum value outside the lists above is a 422.
+
+`analysis` is a hand edit from the Brand page, in the same shape as the
+response's `analysis`. Only the editable fields you send are replaced
+(`summary`, `product`, `audience`, `problem`, `tone`, and the six lists).
+`pages_read` and `logo_url` belong to the server and are ignored if sent.
+Strings are at most 2000 characters; each list at most 20 items of 300
+characters (blank items are dropped). A hand edit does not touch
+`analyzed_at`. If `analysis_status` was `none` or `failed`, it becomes
+`ready` and `analysis_error` is cleared.
+
+### `POST /api/v1/growth/social/profile/analyze`
+
+No body. Runs in the request and takes 20–60 seconds, so give the call a long
+client timeout.
+
+With a `website`, the server fetches the homepage and up to four more pages on
+the same origin whose path or link text looks like about, pricing, product,
+features or customers. Every fetch goes through the SSRF-hardened
+`sites.safe_fetch` (public addresses only, redirects re-checked, later pages
+pinned to the homepage's final host) and honours `robots.txt` for the
+`PawGrowthSocial/1.0` user agent. Each page is cut at 200 KB, the whole read
+at 1.2 MB, each fetch times out after 8 seconds, and the whole read is
+budgeted at about 25 seconds (no new page starts once less than one fetch
+timeout is left). Each page is reduced to its title, meta description,
+Open Graph tags, h1–h3 headings, the first 4000 characters of visible text,
+and a logo or favicon URL.
+
+That, plus the six description fields, goes to a no-tools analyst agent
+(`growth-social-analyst`, seeded in the workspace on first use). What the
+owner typed wins: the analysis may sharpen a typed field but not contradict
+it, an empty analysis field is filled from the typed one, and the typed
+things-to-avoid are always kept. With no website the analysis uses the
+description alone. `pages_read` and `logo_url` come from the fetch, never from
+the model.
+
+If the fetch or the model fails, the call still returns 200 with
+`analysis_status: "failed"` and a short `analysis_error` such as
+`"We couldn't reach acme.com."`; the previous `analysis` and `analyzed_at`
+are kept. Only the analysis fields are written, so a `PUT` made while the
+analysis runs is not overwritten.
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `social.analyzer_unavailable` | No analyser is wired on this deployment. |
+| 404 | `social_profile.not_found` | The workspace has no profile yet. |
+| 422 | `social.nothing_to_analyze` | Neither a website nor any description field is set. |
+
+### `POST /api/v1/growth/social/profile/complete`
+
+No body. Needs `owner_name`, `company_name`, `team_size`, `monthly_revenue`,
+`role`, `business_model` and `category`; otherwise
+`422 social.profile_incomplete`, whose message names the missing fields.
+Stamps `onboarding_completed_at` on the first success and keeps that stamp on
+later calls. `404 social_profile.not_found` without a profile.
+
+### `POST /api/v1/growth/social/ideas/generate`
+
+Body (optional): `{"count": 6}`, 1–12, default 6. A no-tools ideas agent
+(`growth-social-ideas`) writes that many short-form post ideas from the
+completed profile and is shown the workspace's 40 most recent hooks so it does
+not repeat them. It is told never to claim results or metrics. New ideas are
+stored with `status: "new"` and returned as `{items}`:
+
+```json
+{
+  "items": [
+    {
+      "id": "6703…",
+      "workspace_id": "w1",
+      "format": "hook_demo",
+      "hook": "What a first dental visit actually looks like",
+      "on_screen_text": "No drills. No needles. Just counting teeth.",
+      "caption": "Booking a first visit? Here is the whole thing in 30 seconds.",
+      "why": "Parents worry about the unknown; showing it removes the fear.",
+      "script": ["Open on the waiting room", "Chair goes back", "Counting teeth", "Sticker"],
+      "hashtags": ["#kidsdentist", "#firstvisit"],
+      "status": "new",
+      "created_at": "2026-10-06T10:05:00+00:00",
+      "updated_at": "2026-10-06T10:05:00+00:00"
+    }
+  ]
+}
+```
+
+`format` is `hook_demo | slideshow | wall_of_text | meme | talking_head`.
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `social.ideas_unavailable` | No ideas writer is wired on this deployment. |
+| 409 | `social.onboarding_incomplete` | No profile, or onboarding not completed. |
+| 502 | `social.ideas_failed` | The run failed or returned no usable idea. Nothing is stored. |
+| 422 | — | `count` outside 1–12. |
+
+### `PATCH /api/v1/growth/social/ideas/{idea_id}`
+
+Any of `status` (`new | approved | skipped`), `hook` (non-blank, ≤ 300),
+`on_screen_text` (≤ 500), `caption` (≤ 2200), `script` and `hashtags` (blank
+items dropped, then the first 12 beats and 15 tags kept). At least one is required. `format` and `why` are the
+generator's and cannot be edited. Returns the idea. A malformed id, an
+unknown id and another workspace's id all return
+`404 social_idea.not_found`.
+
 ## Growth — the agent surface (`pocketpaw_growth` MCP)
 
 The chat agent on the `/growth` rail reaches the same service layer through

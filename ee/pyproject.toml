@@ -1130,6 +1130,8 @@ allow_indirect_imports = "true"
 # ``agent.mcp_servers.growth`` reaches prospects and drafts ONLY through
 # ``growth.service``, never a doc class. It is also the module where a stray
 # Beanie import would be least visible, so the contract is the check.
+# feat/growth-social-setup — Growth › Social joins on the same terms: its
+# SocialProfile / SocialIdea docs are written only by ``growth.social.service``.
 source_modules = [
     "pocketpaw_ee.agent.mcp_servers.growth",
     "pocketpaw_ee.cloud.growth.router",
@@ -1146,12 +1148,19 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.whatsapp",
     "pocketpaw_ee.cloud.growth.msg91",
     "pocketpaw_ee.cloud.growth.webhooks",
+    "pocketpaw_ee.cloud.growth.social.router",
+    "pocketpaw_ee.cloud.growth.social.dto",
+    "pocketpaw_ee.cloud.growth.social.domain",
+    "pocketpaw_ee.cloud.growth.social.analyst",
+    "pocketpaw_ee.cloud.growth.social.ideas",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
     "pocketpaw_ee.cloud.models.draft",
     "pocketpaw_ee.cloud.models.message_log",
     "pocketpaw_ee.cloud.models.icp",
+    "pocketpaw_ee.cloud.models.social_profile",
+    "pocketpaw_ee.cloud.models.social_idea",
 ]
 
 [[tool.importlinter.contracts]]
