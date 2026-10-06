@@ -254,7 +254,7 @@
   {
     "label": "feed: the develop seat keeps json output, so nothing streams",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "            stream=feed_for is not None,\n",
+    "find": "            stream=feed is not None,\n",
     "replace": "            stream=False,\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
@@ -263,8 +263,8 @@
   {
     "label": "feed: a failed develop raises before its feed is stored",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        if feed_for is not None:\n            await self._store_feed(feed_for, step, out)\n        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n",
-    "replace": "        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n        if feed_for is not None:\n            await self._store_feed(feed_for, step, out)\n",
+    "find": "            await feed.save()\n        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n",
+    "replace": "        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n        if live and feed is not None:\n            await feed.save()\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
     ]
@@ -281,8 +281,8 @@
   {
     "label": "feed: the step cap is lifted",
     "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
-    "find": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=FEED_MAX_BYTES)\n",
-    "replace": "    recorder = StepRecorder(max_steps=10**9, max_total_bytes=FEED_MAX_BYTES)\n",
+    "find": "    frames: Iterable[Frame], max_steps: int = FEED_MAX_STEPS, max_bytes: int = FEED_MAX_BYTES\n",
+    "replace": "    frames: Iterable[Frame], max_steps: int = 10**9, max_bytes: int = FEED_MAX_BYTES\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_feed_caps_steps_and_counts_the_rest"
     ]
@@ -290,8 +290,8 @@
   {
     "label": "feed: the byte cap is lifted",
     "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
-    "find": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=FEED_MAX_BYTES)\n",
-    "replace": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=10**12)\n",
+    "find": "    frames: Iterable[Frame], max_steps: int = FEED_MAX_STEPS, max_bytes: int = FEED_MAX_BYTES\n",
+    "replace": "    frames: Iterable[Frame], max_steps: int = FEED_MAX_STEPS, max_bytes: int = 10**12\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_feed_caps_bytes"
     ]
@@ -317,7 +317,7 @@
   },
   {
     "label": "feed: a failing save fails the run",
-    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
     "find": "        except Exception:  # noqa: BLE001 — the feed is a view; it never fails a run\n",
     "replace": "        except ValueError:  # noqa: BLE001 — the feed is a view; it never fails a run\n",
     "tests": [
@@ -336,8 +336,8 @@
   {
     "label": "feed: back-to-back prose blocks run together",
     "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
-    "find": "                sep = \"\\n\\n\" if prose_open else \"\"\n",
-    "replace": "                sep = \"\"\n",
+    "find": "            sep = \"\\n\\n\" if self._prose_open else \"\"\n",
+    "replace": "            sep = \"\"\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
     ]
@@ -352,19 +352,10 @@
     ]
   },
   {
-    "label": "feed: a timed-out attempt leaves the earlier attempt's feed in place",
-    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        if not request.action_id:\n            return\n        try:\n",
-    "replace": "        if not request.action_id or not stdout:\n            return\n        try:\n",
-    "tests": [
-      "tests/cloud/test_belt_feed.py::test_a_timed_out_redevelop_replaces_the_earlier_feed"
-    ]
-  },
-  {
     "label": "feed: a tool result loses its call id, so parallel same-name calls pair by name",
     "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
-    "find": "                    {**meta, \"name\": names.get(call_id, \"\"), \"call_id\": call_id},\n",
-    "replace": "                    {**meta, \"name\": names.get(call_id, \"\")},\n",
+    "find": "            meta_result = {**meta, \"name\": names.get(call_id, \"\"), \"call_id\": call_id}\n",
+    "replace": "            meta_result = {**meta, \"name\": names.get(call_id, \"\")}\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_parallel_same_name_calls_pair_by_id"
     ]
@@ -426,9 +417,9 @@
   },
   {
     "label": "feed: a re-develop failing before its seat keeps the previous attempt's feed",
-    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        await self._store_feed(request, \"DEVELOP\", \"\")\n",
-    "replace": "",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "        for stage in STAGES:\n            await self._save(stage, [], 0)\n",
+    "replace": "        for stage in ():\n            await self._save(stage, [], 0)\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_a_redevelop_that_fails_before_its_seat_clears_the_feed"
     ]
@@ -501,8 +492,8 @@
   {
     "label": "feed tool rows carry no label, so collapsed rows all read the tool's kind",
     "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
-    "find": "recorder, event, name, tool_input, narration=_label(name, tool_input), now=at",
-    "replace": "recorder, event, name, tool_input, now=at",
+    "find": "            narration = label(name, tool_input)\n",
+    "replace": "            narration = None\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_tool_rows_are_labelled_by_their_subject",
       "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"

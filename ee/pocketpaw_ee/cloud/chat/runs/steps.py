@@ -19,8 +19,11 @@ feed) and passed through the same scrub/redact the audit log uses, string values
 of tool inputs included, because tool I/O is where secrets leak.
 
 ``steps_wire_fields`` is the one step -> wire conversion, shared by every UI
-history mapper and the belt feed route. Steps are display data only: the LLM
-history reader never reads them.
+history mapper and the belt feed route. ``agent_event_frame`` is the one
+``AgentEvent`` -> frame mapping and ``scrub_frame`` applies the recorder's caps
+and redaction to a frame before it is streamed live (the belt run stream), so a
+live viewer and a reload see the same scrubbed values. Steps are display data
+only: the LLM history reader never reads them.
 """
 
 from __future__ import annotations
@@ -324,32 +327,27 @@ def _same_call(step: dict[str, Any], step_call_id: str, tool: str, call_id: str)
     return step["tool"] == tool
 
 
-def record_agent_event(
-    recorder: StepRecorder,
+def agent_event_frame(
     event: Any,
     tool_name: str = "",
     tool_input: Any = None,
     narration: str | None = None,
-    now: datetime | None = None,
-) -> None:
-    """Adapt one ``AgentEvent`` to the run_core frame the recorder takes.
+) -> tuple[str, dict[str, Any]] | None:
+    """The run_core ``(event_name, event_data)`` frame one ``AgentEvent`` maps
+    to, or ``None`` for an event the recorder has no use for.
 
     ``tool_use`` arrives with its name, input and narration already resolved by
     the caller (the bridge resolves them for its WS chip too). ``tool_result``
-    resolves its own name from ``metadata`` or a dict ``content``. ``now`` is the
-    event's own time when the source carries one (the belt feed parses it off
-    each CLI line); otherwise the recorder stamps the moment it observes.
-    """
+    resolves its own name from ``metadata`` or a dict ``content``."""
     etype = getattr(event, "type", "")
     content = getattr(event, "content", None)
     meta = getattr(event, "metadata", None)
     meta = meta if isinstance(meta, dict) else {}
     if etype == "thinking":
-        text = content if isinstance(content, str) else ""
-        recorder.observe("thinking", {"content": text}, now)
-    elif etype in {"message", "text"}:
-        recorder.observe("chunk", {}, now)
-    elif etype == "tool_use":
+        return "thinking", {"content": content if isinstance(content, str) else ""}
+    if etype in {"message", "text"}:
+        return "chunk", {}
+    if etype == "tool_use":
         frame: dict[str, Any] = {"tool": tool_name, "input": tool_input}
         if narration:
             frame["narration"] = narration
@@ -357,8 +355,8 @@ def record_agent_event(
             frame["input_pending"] = True
         if meta.get("call_id"):
             frame["call_id"] = meta["call_id"]
-        recorder.observe("tool_start", frame, now)
-    elif etype == "tool_result":
+        return "tool_start", frame
+    if etype == "tool_result":
         name = meta.get("name") or meta.get("tool") or ""
         output: Any = content
         if isinstance(content, dict):
@@ -367,7 +365,40 @@ def record_agent_event(
         frame = {"tool": name, "output": output}
         if meta.get("call_id"):
             frame["call_id"] = meta["call_id"]
-        recorder.observe("tool_result", frame, now)
+        return "tool_result", frame
+    return None
+
+
+def record_agent_event(
+    recorder: StepRecorder,
+    event: Any,
+    tool_name: str = "",
+    tool_input: Any = None,
+    narration: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Observe one ``AgentEvent`` as its ``agent_event_frame``. ``now`` is the
+    event's own time when the source carries one (the belt feed parses it off
+    each CLI line); otherwise the recorder stamps the moment it observes."""
+    frame = agent_event_frame(event, tool_name, tool_input, narration)
+    if frame is not None:
+        recorder.observe(*frame, now)
+
+
+def scrub_frame(event_name: str, event_data: dict[str, Any]) -> dict[str, Any]:
+    """A frame with the caps and redaction ``StepRecorder`` applies to what it
+    stores: tool inputs scrubbed and redacted, outputs redacted and capped (with
+    ``output_truncated``), thinking redacted and capped. Other keys pass as
+    they are; a narration is the caller's to redact, as on the recorder."""
+    data = dict(event_data)
+    if event_name == "thinking":
+        text = _stringify(data.get("content"))[: MAX_THINKING_CHARS * 2]
+        data["content"] = redact_output(text)[:MAX_THINKING_CHARS]
+    elif event_name == "tool_start":
+        data["input"] = None if data.get("input_pending") is True else _cap_input(data.get("input"))
+    elif event_name == "tool_result":
+        data["output"], data["output_truncated"] = _cap_output(data.get("output"))
+    return data
 
 
 def steps_wire_fields(steps: Any, steps_omitted: int = 0) -> dict[str, Any]:
@@ -406,4 +437,10 @@ def _step_to_wire(step: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["StepRecorder", "record_agent_event", "steps_wire_fields"]
+__all__ = [
+    "StepRecorder",
+    "agent_event_frame",
+    "record_agent_event",
+    "scrub_frame",
+    "steps_wire_fields",
+]
