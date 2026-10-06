@@ -848,5 +848,24 @@
       "tests/cloud/test_belt_develop_station.py::test_diff_touching_agent_config_is_refused",
       "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_from_the_base_never_the_line"
     ]
+  },
+  {
+    "label": "line: belt_run_updated drops the landing branch (the run chip needs a refetch)",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        data[\"branch\"] = branch\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_belt_console.py::test_executor_emits_landed_and_persists_pr_result",
+      "tests/cloud/test_belt_console.py::test_executor_local_only_emits_landed_without_pr_url"
+    ]
+  },
+  {
+    "label": "line: the remote landing event names no branch",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "            stage=\"done\",\n            pr_url=pr_url,\n            branch=target,\n        )\n        # The ONLY terminal",
+    "replace": "            stage=\"done\",\n            pr_url=pr_url,\n        )\n        # The ONLY terminal",
+    "tests": [
+      "tests/cloud/test_belt_console.py::test_executor_emits_landed_and_persists_pr_result"
+    ]
   }
 ]

@@ -22,8 +22,8 @@
 #      reuses the open PR of a branch, so a line keeps one PR); local-only: no
 #      push, no PR;
 #   7. back-writes ``branch`` / ``commit_sha`` / ``pr_url`` / ``files_changed``
-#      onto the blob, fires ``belt_run_updated`` and closes the Decision-Graph
-#      chain once.
+#      onto the blob, fires ``belt_run_updated`` (naming the branch) and closes
+#      the Decision-Graph chain once.
 # Every failure goes through ``_fail`` (mark_failed + one chain close + a
 # ``failed`` run event). The worktree is always removed. A per-run branch is
 # deleted when the run did not land (a retry starts clean); a line is never
@@ -409,8 +409,10 @@ async def _emit_run_updated(
     status: str,
     stage: str,
     pr_url: str | None = None,
+    branch: str | None = None,
 ) -> None:
-    """Publish ``belt_run_updated`` for an executor lifecycle terminal.
+    """Publish ``belt_run_updated`` for an executor lifecycle terminal (a
+    landing names its ``branch``: the line, for a mandate run).
 
     Thin wrapper over ``belt_service.emit_belt_run_updated`` (the WORKSPACE
     REALTIME BUS path + an in-turn SSE) so the executor has one call site per
@@ -427,6 +429,7 @@ async def _emit_run_updated(
             status=status,
             stage=stage,
             pr_url=pr_url,
+            branch=branch,
         )
     except Exception:  # noqa: BLE001 — emit must never break the apply path
         logger.debug("belt: belt_run_updated emit failed (non-fatal)", exc_info=True)
@@ -450,11 +453,10 @@ async def _persist_run_result(
     write failure leaves the run without the structured fields (the read model
     falls back to None) but never breaks the approve response.
 
-    Two landing shapes share this writer:
-      * WITH-REMOTE — ``pr_url`` + ``branch`` are set; ``commit_sha`` is omitted.
-      * LOCAL-ONLY (no ``origin``) — ``branch`` + ``commit_sha`` are set; ``pr_url``
-        stays absent so the read model emits ``pr_url=None`` and the page renders
-        a branch chip instead of a PR link.
+    Every landing sets ``branch`` + ``commit_sha``. WITH-REMOTE also sets
+    ``pr_url`` (absent when the PR open failed after the line moved); LOCAL-ONLY
+    (no ``origin``) never does, so the read model emits ``pr_url=None`` and the
+    page renders a branch chip instead of a PR link.
     """
 
     try:
@@ -863,6 +865,7 @@ async def execute_approved_change(
             status="landed",
             stage="done",
             pr_url=pr_url,
+            branch=target,
         )
         # The ONLY terminal on the happy path (every failure above closed via
         # ``_fail`` and returned), so exactly one ``decision.completed`` per run.
@@ -996,13 +999,14 @@ async def _land_local_only(
         files_changed=n_files,
         commit_sha=commit_sha,
     )
-    # Publish belt_run_updated (status=landed, stage=done) — NO pr_url for a
-    # local-only landing. Best-effort.
+    # Publish belt_run_updated (status=landed, stage=done, the branch) — NO
+    # pr_url for a local-only landing. Best-effort.
     await _emit_run_updated(
         workspace_id=workspace_id,
         action_id=str(action.id),
         status="landed",
         stage="done",
+        branch=branch,
     )
     # Close the Decision-Graph chain once on the success path — branch + sha
     # ride the payload (no pr_url) for the explain narrator.

@@ -31,7 +31,8 @@
 #
 # Realtime: ``emit_belt_run_updated`` publishes on the workspace bus (the
 # required path — approve/executed/failed fire after the chat turn's SSE drain
-# is gone) plus a best-effort per-stream ``push_sse_event``.
+# is gone) plus a best-effort per-stream ``push_sse_event``; a landing names
+# its ``branch`` (a mandate run's line).
 
 from __future__ import annotations
 
@@ -72,8 +73,11 @@ async def emit_belt_run_updated(
     status: str,
     stage: str,
     pr_url: str | None = None,
+    branch: str | None = None,
 ) -> None:
-    """Publish ``belt_run_updated`` for a station run lifecycle change.
+    """Publish ``belt_run_updated`` for a station run lifecycle change. A
+    landing carries ``branch`` (a mandate run's line, ``belt/line/<id>``) and,
+    with a remote, ``pr_url``, so the page patches its chip without a refetch.
 
     PRIMARY path — the WORKSPACE REALTIME BUS (``_core.realtime.emit``), the same
     path Tray / Mission Control / pocket events ride. This is REQUIRED because a
@@ -100,6 +104,8 @@ async def emit_belt_run_updated(
     }
     if pr_url:
         data["pr_url"] = pr_url
+    if branch:
+        data["branch"] = branch
 
     # PRIMARY — workspace realtime bus (async fan-out to every workspace member).
     try:

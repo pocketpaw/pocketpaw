@@ -758,6 +758,8 @@ async def test_executor_emits_landed_and_persists_pr_result(
     assert blob["pr_url"] == "https://github.com/acme/repo/pull/7"
     assert blob["branch"].startswith("feat/belt-")
     assert blob["files_changed"] == 1
+    # The event names the landing branch, so the run chip updates without a refetch.
+    assert landed[0]["branch"] == blob["branch"]
 
 
 async def test_executor_local_only_emits_landed_without_pr_url(
@@ -831,6 +833,7 @@ async def test_executor_local_only_emits_landed_without_pr_url(
     assert blob["commit_sha"]
     assert "pr_url" not in blob or blob["pr_url"] is None
     assert blob["files_changed"] == 1
+    assert landed[0]["branch"] == blob["branch"]
 
 
 async def test_executor_emits_failed_on_apply_conflict(monkeypatch, recording_bus, sse, tmp_path):
