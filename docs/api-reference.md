@@ -1342,10 +1342,9 @@ Making a template public (on save or with `PATCH`) runs these checks first:
   `site_templates.private_assets`, and the message says how many. External
   images (`https://images.unsplash.com/...`) and the public Sites asset rail are
   allowed.
-- **No locked source.** If the source gate would withhold this source (the
-  source site is not on `site` / `staff` with an active subscription, or an
-  operator revoked source for the workspace), the request is `403`
-  `site_templates.source_not_shareable`.
+- **Any site's plan.** The source site's own tier does not matter: a free or
+  draft site can be shared publicly. A pocket created from the template later
+  follows its own site's tier for source visibility.
 - The Sites plan gate and the 2 MB size cap, as on save.
 
 Every response and event carries the template's metadata only, never its
