@@ -522,20 +522,6 @@ async def _source_visible_for_doc(doc: _PocketDoc, *, entitled: bool | None = No
     return answers[pocket_id]
 
 
-async def snapshot_source_visible(workspace_id: str, source_gated: bool, pocket_id: str) -> bool:
-    """May ``workspace_id`` read a site snapshot copied from ``pocket_id``? (SF-2)
-
-    The same answer ``_source_visible_for_doc`` gives that pocket with that stamp,
-    for callers holding a copied snapshot rather than a pocket (sharing a site
-    template publicly). The source pocket's own Site tier decides, exactly as it
-    does for the pocket. Not a second rule: it asks the same one.
-    """
-    from types import SimpleNamespace
-
-    probe = SimpleNamespace(workspace=workspace_id, source_gated=bool(source_gated), id=pocket_id)
-    return await _source_visible_for_doc(probe)  # type: ignore[arg-type]
-
-
 async def _resolved_wire_dict(
     doc: _PocketDoc,
     viewer_user_id: str,
@@ -6528,7 +6514,6 @@ async def list_workspace_pocket_connector_permissions(
 
 
 __all__ = [
-    "snapshot_source_visible",
     "access_via_share_link",
     "add_agent",
     "add_collaborator",
