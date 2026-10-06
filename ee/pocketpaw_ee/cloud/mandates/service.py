@@ -861,8 +861,11 @@ _PLAN_STATUS = {
 def _task_status(run: dict[str, Any]) -> str:
     """A run row's status in the foreman's words. A queued run whose headless
     develop failed waits for a human, so it is ``develop failed``, not in
-    flight."""
+    flight; one a develop is working (``running`` at a stage) is
+    ``developing``."""
     status = str(run.get("status") or "")
+    if status == "running":
+        return "developing"
     if status == "queued":
         if run.get("headless_error"):
             return "develop failed"
@@ -1944,12 +1947,14 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
         new_runs = [_run_digest_row(r) for r in mine if _since(r.get("created_at"), since)]
         diff_gates = [_run_digest_row(r) for r in mine if r.get("status") == "proposed"]
         # A headless develop that failed (or never finished: a restart drops
-        # the in-memory queue) leaves its run queued for a human, so it is
-        # reported whatever its age, like a gate.
+        # the in-memory queue, leaving the run queued or running at its last
+        # stage) waits for a human, so it is reported whatever its age, like a
+        # gate.
         stuck = [
             _run_digest_row(r)
             for r in mine
-            if r.get("status") == "queued" and (r.get("headless_error") or r.get("headless_state"))
+            if r.get("status") in ("queued", "running")
+            and (r.get("headless_error") or r.get("headless_state"))
         ]
 
         totals["new_sightings"] += len(fresh)

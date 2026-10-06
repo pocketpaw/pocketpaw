@@ -444,7 +444,10 @@ sweeper, so pytest runs never spawn background loops that outlive the test.
   if it is ever approved (`error_class="StationPending"`).
 - **`headless`** — `HeadlessTaskDispatcher` files the same queued run, then
   produces the diff with no human in the loop and attaches it; the run becomes
-  a pending `code_change` at the per-diff gate. In production the develop runs
+  a pending `code_change` at the per-diff gate. While the station works it the
+  console shows `running / <stage>` (orient, develop, check, fix, review); the
+  attached diff reads `proposed / gate`, a failed develop `queued / station`
+  again, each with a `belt_run_updated`. In production the develop runs
   in a background task, one at a time, so plan approval returns at once. With
   no develop loop wired it degrades to `station`.
 - **`bus`** — announce-only (`belt_run_updated(status="dispatched")` under a
@@ -489,9 +492,10 @@ the failing step's name; the runner leaves the run queued and records the
 reason (secrets redacted) as `headless_error` on the blob, where the console
 and the digest show it. The station never commits to a branch, pushes or
 merges. Background develops are process-local: the dispatcher marks each run
-`headless_state: "queued"` until it attaches or fails, so a run a restart
-dropped stays visible as stuck in the digest (nothing re-drives it yet), and a
-background task that crashes is logged at ERROR. The develop request aims at
+`headless_state: "queued"`, each station stage then overwrites it with the
+stage's name, until it attaches or fails, so a run a restart dropped stays
+visible as stuck in the digest (nothing re-drives it yet), and a background
+task that crashes is logged at ERROR. The develop request aims at
 the blob's `expected_outcome`; the attached run's `summary` becomes the
 station's report (checks, setup, orient source, review verdict and notes, fix
 attempts), and its `files_changed` is the station's count (else the diff's
@@ -864,11 +868,12 @@ an earlier attempt ends at that attempt's `stream_end`, and the client reopens
 with `after=0` on the next `belt_run_updated`. A run being developed
 (`headless_state` set by the background dispatcher) whose stream does not
 exist yet is waited on. The stream lives 6 hours from `start` and 1 hour after
-`stream_end`. Each stage start also emits `belt_run_updated` on the workspace
-bus with `status: "queued"` and `stage` set to the step, so a page can (re)open
-the stream when a station picks a run up; `GET /belt/runs` still reports
-`station` for a running run, and the stream is the source of truth for the
-step. Heartbeats are `: ping` comments between 15 s reads (the chat stream's
+`stream_end`. Each stage start also records the step as the run's
+`headless_state` and emits `belt_run_updated` on the workspace bus with
+`status: "running"` and `stage` set to the step, so a page can (re)open the
+stream when a station picks a run up; `GET /belt/runs` reads the same
+`running` / step. The attached diff emits `proposed` / `gate`, a failed
+develop `queued` / `station`. Heartbeats are `: ping` comments between 15 s reads (the chat stream's
 `transport.sse_tail`, which both routes use).
 
 `GET /api/v1/belt/runs/{id}/feed?stage=<stage>` (`belt.read`) returns `{action_id,

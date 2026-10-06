@@ -1160,8 +1160,10 @@ class TemporalSweepCompleted(Event):
 # Payload (carried under ``Event.data``):
 #   workspace_id  — tenancy (drives the workspace fan-out).
 #   action_id     — the Instinct code-change Action id (the run id).
-#   status        — proposed | approved | rejected | landed | failed.
-#   stage         — gate | done.
+#   status        — queued | running | proposed | approved | rejected | landed
+#                   | failed.
+#   stage         — station (queued) | orient | develop | check | fix | review
+#                   (running) | gate | done.
 #   pr_url        — the opened PR url (only on the landed terminal); omitted
 #                   otherwise so the wire stays minimal.
 @dataclass

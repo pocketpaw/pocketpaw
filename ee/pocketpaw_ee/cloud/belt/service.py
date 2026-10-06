@@ -14,7 +14,8 @@
 #     failure keeps the local repo and returns ``remote_error``).
 #   * ``list_runs`` / ``get_run`` — the runs read model over ``code_change``
 #     Instinct Actions, newest-first. Status/stage derive from the Action
-#     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``);
+#     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``,
+#     or ``running``/<stage> once ``mark_run_stage`` names a develop's stage);
 #     ``title``, ``files_changed``, landing fields (``pr_url`` / ``branch`` /
 #     ``commit_sha``) and mandate provenance (``mandate_id`` / ``shift_no`` /
 #     ``headless_error`` / ``headless_state`` / ``redevelop``) are read
@@ -126,6 +127,27 @@ async def emit_belt_run_updated(
         push_sse_event("belt_run_updated", dict(data))
     except Exception:  # noqa: BLE001 — SSE push must never break a lifecycle path
         logger.debug("belt: belt_run_updated SSE push failed (non-fatal)", exc_info=True)
+
+
+async def mark_run_stage(workspace_id: str, action_id: str, stage: str) -> None:
+    """A headless develop started ``stage`` on the run: its blob's
+    ``headless_state`` names the stage (so the runs list reads it ``running``
+    there) and ``belt_run_updated`` says so. Best-effort; never raises."""
+    from pocketpaw.stores import get_instinct_store
+
+    try:
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        action = await store.get_action(action_id)
+        params = dict(getattr(action, "parameters", None) or {})
+        blob = params.get(_CODE_CHANGE_PARAM_KEY)
+        if isinstance(blob, dict):
+            params[_CODE_CHANGE_PARAM_KEY] = {**blob, "headless_state": stage}
+            await store.update_parameters(action_id, params)
+    except Exception:  # noqa: BLE001 — the live stage is a view; never fail the run
+        logger.debug("belt: could not mark run %s at %s", action_id, stage, exc_info=True)
+    await emit_belt_run_updated(
+        workspace_id=workspace_id, action_id=action_id, status="running", stage=stage
+    )
 
 
 class BeltConsoleError(Exception):
@@ -641,7 +663,9 @@ def _derive_status_stage(action: Any, blob: dict[str, Any] | None = None) -> tup
     A QUEUED STATION RUN — a pending ``code_change`` Action whose blob carries
     ``station_pending=True`` (filed by the mandate ``StationTaskDispatcher`` with
     no diff yet) — reads as ``("queued", "station")`` so the console shows it as
-    waiting for a human to open the develop station, not sitting at the gate."""
+    waiting for a station, not sitting at the gate. Once a headless develop
+    starts a stage (``headless_state`` names it; "queued" = handed over, not
+    started) it reads as ``("running", <that stage>)``."""
     if blob is not None and blob.get("station_pending"):
         raw = getattr(getattr(action, "status", None), "value", None) or str(
             getattr(action, "status", "")
@@ -649,7 +673,8 @@ def _derive_status_stage(action: Any, blob: dict[str, Any] | None = None) -> tup
         # Only a still-pending queued run reads as "queued"; once the human drives
         # the station and a diff is proposed, a fresh non-pending row supersedes it.
         if raw == "pending":
-            return ("queued", "station")
+            live = str(blob.get("headless_state") or "")
+            return ("running", live) if live and live != "queued" else ("queued", "station")
     raw = getattr(getattr(action, "status", None), "value", None) or str(
         getattr(action, "status", "")
     )
@@ -704,7 +729,8 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "plan_action_id": str(blob.get("plan_action_id") or "") or None,
         "task_index": blob.get("task_index"),
         "headless_error": str(blob.get("headless_error") or "") or None,
-        # "queued" while a background develop owns the run; left behind = orphan.
+        # "queued" once handed to a background develop, then the live stage;
+        # left behind = orphan.
         "headless_state": str(blob.get("headless_state") or "") or None,
         # How many times the executor sent it back to re-develop on a moved base.
         "redevelop": int(blob.get("redevelop") or 0),

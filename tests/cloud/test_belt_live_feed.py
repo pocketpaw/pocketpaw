@@ -151,15 +151,21 @@ async def test_every_stage_arrives_live_in_order_and_is_stored(
 ):
     """A run whose first develop fails its check: orient, develop, check, fix,
     check again, review, each frame published as the seat prints it, tagged
-    with its stage, and each stage's steps stored in its own row."""
+    with its stage, and each stage's steps stored in its own row. Each stage
+    start says ``running`` at that stage on the bus and in the runs list, and
+    the attached diff says ``proposed`` at the gate."""
     nudges: list[tuple[str, str]] = []
+    rows_seen: list[tuple[str, str]] = []
 
     async def nudge(**kw):
         nudges.append((kw["status"], kw["stage"]))
+        row = await belt_service.get_run(kw["workspace_id"], kw["action_id"])
+        rows_seen.append((row["status"], row["stage"]))
 
     monkeypatch.setattr(belt_service, "emit_belt_run_updated", nudge)
     action_id = await _queue_run(monkeypatch, repo, recipe="")
     nudges.clear()  # filing the run nudged once already (queued / station)
+    rows_seen.clear()
     fake = StreamingClaude(develop=[_write("nope"), _write("ok")])
     await HeadlessDevelopRunner(develop_fn=_station(fake, repo, checks=(CHECK,))).run(action_id)
     blob = (await store.get_action(action_id)).parameters["_code_change"]
@@ -177,9 +183,11 @@ async def test_every_stage_arrives_live_in_order_and_is_stored(
         ("stage", "review", 1),
     ]
     assert frames[-1][1:] == ("stream_end", {"ok": True, "omitted": 0})
-    assert nudges == [
-        ("queued", s) for s in ("orient", "develop", "check", "fix", "check", "review")
-    ]
+    live = [("running", s) for s in ("orient", "develop", "check", "fix", "check", "review")]
+    assert nudges == [*live, ("proposed", "gate")]
+    # The runs list agrees with each nudge as it is sent.
+    assert rows_seen == nudges
+    assert (await belt_service.get_run("w1", action_id))["headless_state"] is None
     # Every content frame says which stage it belongs to, in stage order.
     stage, seen = "", []
     for _, event, data in frames[1:-1]:
@@ -256,7 +264,14 @@ async def test_a_recipe_run_has_no_orient_fix_or_review(
 
 async def test_a_failed_run_still_ends_its_stream(repo, store, mongo_db, monkeypatch, transport):  # noqa: F811
     """A run that dies in a seat ends with ``stream_end {ok: false}``, so a
-    viewer never waits on it."""
+    viewer never waits on it, and goes back to ``queued`` at the station (its
+    ``headless_error`` says why) on the bus and in the runs list."""
+    nudges: list[tuple[str, str]] = []
+
+    async def nudge(**kw):
+        nudges.append((kw["status"], kw["stage"]))
+
+    monkeypatch.setattr(belt_service, "emit_belt_run_updated", nudge)
     action_id = await _queue_run(monkeypatch, repo, recipe="")
     fake = StreamingClaude(code=1, cut=True)
     await HeadlessDevelopRunner(develop_fn=_station(fake, repo)).run(action_id)
@@ -264,6 +279,9 @@ async def test_a_failed_run_still_ends_its_stream(repo, store, mongo_db, monkeyp
     assert frames[-1][1:] == ("stream_end", {"ok": False, "omitted": 0})
     blob = (await store.get_action(action_id)).parameters["_code_change"]
     assert "DEVELOP: claude exited 1" in blob["headless_error"]
+    assert nudges[-1] == ("queued", "station")
+    row = await belt_service.get_run("w1", action_id)
+    assert (row["status"], row["stage"], row["headless_state"]) == ("queued", "station", None)
 
 
 async def test_a_broken_transport_never_fails_the_run(repo, store, mongo_db, monkeypatch):  # noqa: F811

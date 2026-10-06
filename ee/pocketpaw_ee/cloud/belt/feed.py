@@ -20,7 +20,8 @@
 #   * ``RunFeed`` — one station call. ``start`` empties every ``STAGES`` row and
 #     opens the attempt on the run's stream (``stream_id``: the chat-runs
 #     ``RunStreamTransport``, so Redis in production); ``stage`` opens a step
-#     (``belt_run_updated`` too); ``add`` keeps a frame for its stage and
+#     (and marks the run ``running`` there: ``service.mark_run_stage``, which
+#     emits ``belt_run_updated``); ``add`` keeps a frame for its stage and
 #     publishes it scrubbed (``steps.scrub_frame``) and stage-tagged; ``save``
 #     folds the stage's frames of this call into its stored row; ``end`` closes
 #     the attempt with ``stream_end``. Frames reach it already path-relative
@@ -224,11 +225,9 @@ async def _publish(action_id: str, event: str, data: dict[str, Any]) -> None:
 
 
 async def _notify(workspace_id: str, action_id: str, stage: str) -> None:
-    from pocketpaw_ee.cloud.belt.service import emit_belt_run_updated
+    from pocketpaw_ee.cloud.belt.service import mark_run_stage
 
-    await emit_belt_run_updated(
-        workspace_id=workspace_id, action_id=action_id, status="queued", stage=stage
-    )
+    await mark_run_stage(workspace_id, action_id, stage)
 
 
 def _size(data: Any) -> int:

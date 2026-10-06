@@ -162,5 +162,69 @@
     "tests": [
       "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
     ]
+  },
+  {
+    "label": "live status: a running headless run reads queued at the station",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            return (\"running\", live) if live and live != \"queued\" else (\"queued\", \"station\")\n",
+    "replace": "            return (\"queued\", \"station\")\n",
+    "tests": [
+      "tests/cloud/test_belt_console.py::test_a_headless_run_reads_running_at_its_live_stage",
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: a stage start never records the stage on the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            params[_CODE_CHANGE_PARAM_KEY] = {**blob, \"headless_state\": stage}\n",
+    "replace": "            params[_CODE_CHANGE_PARAM_KEY] = dict(blob)\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: a stage start still says queued on the bus",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        workspace_id=workspace_id, action_id=action_id, status=\"running\", stage=stage\n",
+    "replace": "        workspace_id=workspace_id, action_id=action_id, status=\"queued\", stage=stage\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: an attached diff sends no proposed belt_run_updated",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "        await _emit(workspace_id, action_id, \"proposed\", \"gate\")\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_every_stage_arrives_live_in_order_and_is_stored"
+    ]
+  },
+  {
+    "label": "live status: a failed develop sends no queued belt_run_updated",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "        await _emit(str(blob.get(\"workspace_id\") or \"\"), action_id, \"queued\", \"station\")\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_belt_live_feed.py::test_a_failed_run_still_ends_its_stream"
+    ]
+  },
+  {
+    "label": "live status: the foreman reads a running run as not in flight",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    if status == \"running\":\n        return \"developing\"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_a_running_run_is_a_task_in_flight"
+    ]
+  },
+  {
+    "label": "live status: the digest misses a run dropped mid-stage",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            if r.get(\"status\") in (\"queued\", \"running\")\n",
+    "replace": "            if r.get(\"status\") == \"queued\"\n",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_digest_reports_orphaned_background_develops_as_stuck"
+    ]
   }
 ]
