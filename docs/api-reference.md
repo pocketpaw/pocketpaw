@@ -6902,11 +6902,20 @@ accept-while-you-wire-it-up mode — a forged inbound reply would flip
 `opted_in` and thereby unlock business-initiated sends to a number that never
 consented.
 
-On a verified inbound reply the handler sets `prospect.opted_in = true`, moves
-the prospect to `replied`, and walks any `sent` WhatsApp draft for that prospect
-to `replied` (through the gate seam). Under Meta's rules a user-initiated
-message both opens the 24-hour service window and *is* the opt-in signal for
-that number.
+On a verified inbound reply the handler moves the prospect to `replied` and
+walks any `sent` WhatsApp draft for that prospect to `replied` (through the gate
+seam). What the reply does to consent depends on its text, matched as a whole
+message after trimming whitespace and a trailing `.` or `!`, case-insensitively:
+
+| Reply | Effect |
+|-------|--------|
+| `stop`, `unsubscribe`, `cancel`, `end`, `quit`, `opt out`, `opt-out`, `optout` | `opted_in = false` and `whatsapp_opt_out_at` stamped, so the dispatch guard refuses later sends |
+| `start`, `subscribe`, `resume` | `opted_in = true` and `whatsapp_opt_out_at` cleared |
+| anything else | `opted_in = true`, unless `whatsapp_opt_out_at` is set (only START undoes an opt-out) |
+
+A user-initiated message opens the 24-hour service window. Reading a plain reply
+as consent to later business-initiated sends is current behaviour, not settled
+policy. A STOP word inside a longer sentence is a plain reply.
 
 Delivery-status callbacks (`status` / `delivered` / `read` / …) are accepted and
 ignored — a receipt is not consent. A number no workspace holds is a 200 no-op.

@@ -19,11 +19,13 @@
 # verification in ``meetings/providers/recall/webhooks.py`` uses, minus the
 # Svix-specific id/timestamp envelope.
 #
-# WHAT AN INBOUND REPLY MEANS: under Meta's rules a user-initiated message both
-# opens a 24-hour service window and is the opt-in signal for that number. So
-# the handler sets ``prospect.opted_in = True``, moves the prospect to
-# ``replied``, and walks any ``sent`` WhatsApp draft for that prospect to
-# ``replied`` through the service's gate seam.
+# WHAT AN INBOUND REPLY MEANS: a user-initiated message opens a 24-hour service
+# window and, unless it is an opt-out, is read as the opt-in signal for that
+# number. A whole-message STOP word (``growth.domain.whatsapp_reply_intent``)
+# clears ``prospect.opted_in`` and stamps ``whatsapp_opt_out_at``; START undoes
+# that; any other reply sets ``opted_in`` unless the prospect opted out. Every
+# reply moves the prospect to ``replied`` and walks any ``sent`` WhatsApp draft
+# for that prospect to ``replied`` through the service's gate seam.
 #
 # The response body is a CONSTANT ``{"ok": true}`` for every accepted request —
 # processed, ignored, or unknown number. A caller with a valid signature still
@@ -74,8 +76,9 @@ _NUMBER_KEYS = (
 async def msg91_webhook(request: Request) -> dict:
     """Ingest an MSG91 WhatsApp inbound event.
 
-    A verified inbound reply opts the prospect in, marks them ``replied``, and
-    walks their sent WhatsApp drafts to ``replied``. Delivery-status callbacks
+    A verified inbound reply marks the prospect ``replied`` and walks their sent
+    WhatsApp drafts to ``replied``. A STOP reply opts them out; START or any
+    other reply opts them in, unless they opted out. Delivery-status callbacks
     and numbers we don't hold are accepted and ignored. A bad or missing
     signature is a 403 — nothing is read from an unverified body.
     """
@@ -100,7 +103,7 @@ async def msg91_webhook(request: Request) -> dict:
 
     from pocketpaw_ee.cloud.growth import service as growth_service
 
-    matched = await growth_service.record_whatsapp_inbound_reply(number)
+    matched = await growth_service.record_whatsapp_inbound_reply(number, _extract_text(event))
     # Logged (operators need it), never returned — the response shape is
     # identical for a known and an unknown number.
     logger.info("growth/msg91 webhook: inbound reply applied to %d prospect row(s)", matched)
@@ -208,6 +211,35 @@ def _extract_number(event: dict[str, Any]) -> str:
                 sender = first.get("from") or first.get("customer_number")
                 if isinstance(sender, str) and sender.strip():
                     return sender.strip()
+    return ""
+
+
+def _text_of(value: Any) -> str:
+    """A text field that is either a string or nested as ``{"text"|"body": ...}``."""
+    if isinstance(value, dict):
+        return _text_of(value.get("text") or value.get("body"))
+    return value if isinstance(value, str) else ""
+
+
+def _extract_text(event: dict[str, Any]) -> str:
+    """The message text of an inbound payload, or "" (media, unknown shapes).
+
+    Covers the same envelopes as ``_extract_number``: flat (``content.text``,
+    ``text``), ``data``/``payload``-wrapped, and Meta's ``messages[0].text.body``.
+    """
+    candidates: list[dict[str, Any]] = []
+    for container in (event, event.get("data"), event.get("payload")):
+        if not isinstance(container, dict):
+            continue
+        candidates.append(container)
+        messages = container.get("messages")
+        if isinstance(messages, list) and messages and isinstance(messages[0], dict):
+            candidates.append(messages[0])
+    for candidate in candidates:
+        for key in ("text", "content", "body", "message"):
+            text = _text_of(candidate.get(key))
+            if text.strip():
+                return text
     return ""
 
 
