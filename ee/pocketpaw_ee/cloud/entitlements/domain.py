@@ -7,7 +7,8 @@
 #   * ``Entitlements`` — what a WORKSPACE may do, derived from ``Workspace.plan``
 #     plus the billing plan catalog, then overlaid with any platform-operator
 #     override. Credit allotment, the monthly credit ceiling, the SMB resource
-#     ceilings, the included-sites allowance, and the site-source capability.
+#     ceilings, the included-sites allowance, and the operator's site-source
+#     override.
 #   * ``SiteEntitlements`` — what ONE site may do, derived from that site's own
 #     ``plan_tier`` + ``subscription_status``. Sites are the only thing billed
 #     per-object, so the workspace plan cannot answer it.
@@ -23,10 +24,10 @@
 #     Free values, never ``None``/uncapped; ``None`` means uncapped and is only
 #     ever reached from a tier that genuinely is.
 #   * A capability must never be granted by forgetting it. The two fields carrying
-#     a default (``Entitlements.site_source_visible`` and
-#     ``SiteEntitlements.project_download``) both default to WITHHELD; everything
-#     else has no default, so an omission fails loudly. A new default is only
-#     allowed in that direction.
+#     a default never grant by omission: ``SiteEntitlements.project_download``
+#     defaults to WITHHELD, and ``Entitlements.site_source_visible`` defaults to
+#     ``None`` (no workspace-wide answer; each site's own tier decides, failing
+#     closed). Everything else has no default, so an omission fails loudly.
 #   * A field that would answer the same thing forever does not belong here — it
 #     reads as implemented. See ``SiteEntitlements``'s note on the three it omits.
 
@@ -75,24 +76,19 @@ class Entitlements:
     sites are three private blocks of 200, not one shared pool, so there is no
     workspace-level number to resolve.
 
-    ``site_source_visible`` is "may this account read the SOURCE CODE of the sites
-    it owns" — the generated markup, styles and scripts behind a published Paw
-    Site. It is the only boolean on this class, and the only field here with a
-    default, so both facts are worth stating:
+    ``site_source_visible`` is the platform operator's WORKSPACE-WIDE answer to "may
+    this account read the source code of its sites", and it is three-state on
+    purpose. ``False`` revokes source on every site in the workspace (an abuse
+    response); ``True`` grants it on every site; ``None``, the plan catalog's
+    answer for every workspace plan, has no opinion and leaves each site to its own
+    per-site tier (``entitlements.service.site_code_entitled``). The workspace PLAN
+    never grants source: a paid site in a Free workspace shows its code, and a
+    free site in a Pro Max workspace does not.
 
-    It is a WORKSPACE capability rather than a per-site one, and that is not a
-    convenience. Source is a field on the POCKET, and pockets are workspace-scoped
-    — a site does not own the thing being read. Worse, ``create_draft_site`` sets
-    neither ``plan_tier`` nor ``subscription_status``, so every pocket's Site row
-    sits on the free floor from pocket-create until its first publish; a per-site
-    gate would therefore withhold source on every DRAFT, from paying customers,
-    for exactly as long as they were authoring it.
-
-    It defaults to ``False`` because ``features`` above it already carries a
-    default, so dataclass ordering leaves no choice — and ``False`` is the only
-    safe default to have been forced into. A construction that forgets this field
-    WITHHOLDS source; it cannot leak code by omission. Do not "fix" the default to
-    ``True`` to spare a caller an argument.
+    It defaults to ``None`` because ``features`` above it already carries a
+    default, so dataclass ordering leaves no choice. ``None`` cannot leak code: it
+    defers to the per-site rule, which withholds on every unknown. Do not "fix" the
+    default to ``True``.
     """
 
     workspace_id: str
@@ -106,8 +102,8 @@ class Entitlements:
     max_storage_bytes: int | None
     included_sites: int | None
     features: frozenset[str] = field(default_factory=frozenset)
-    # Fail closed: an omitted field withholds source rather than granting it.
-    site_source_visible: bool = False
+    # No workspace-wide answer: each site's own tier decides (and fails closed).
+    site_source_visible: bool | None = None
 
 
 @dataclass(frozen=True)

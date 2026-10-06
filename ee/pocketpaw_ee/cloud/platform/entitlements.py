@@ -18,12 +18,14 @@ from Decision 7's original list — is added in their place. See
 ``cloud.models.workspace.WorkspaceOverrides`` for the full accounting.
 
 **One of the overridable fields is not a ceiling.** ``site_source_visible``
-is a capability flag — may this tenant read the source code of the sites it
-owns — so its override is ``bool | None``, not the ``int | "uncapped" | None``
-every ceiling here uses. ``None`` defers to the plan, ``True`` grants, and
-``False`` REVOKES a grant the plan makes, which is the case that earns the
+is a capability flag — may this tenant read the source code of its sites — so
+its override is ``bool | None``, not the ``int | "uncapped" | None`` every
+ceiling here uses. No workspace plan answers it: ``None`` leaves each site to
+its own per-site tier, ``True`` grants source on every site in the workspace,
+and ``False`` REVOKES it on every site, which is the case that earns the
 tri-state: taking source away from a paying tenant is an abuse response and
-must not require moving them off their plan.
+must not require touching their sites' plans. The catalog column therefore
+reads ``None`` for every plan.
 
 **Read-back, not just merge.** The read route returns the plan CATALOG's
 values, the OVERRIDE-RESOLVED values, and the raw override document side by
@@ -81,7 +83,8 @@ class EntitlementCeilingsOut(BaseModel):
     max_call_seconds_per_day: int | None
     max_storage_bytes: int | None
     included_sites: int | None
-    site_source_visible: bool
+    # Three-state: None means no workspace-wide answer (each site's tier decides).
+    site_source_visible: bool | None
 
 
 class OverridesOut(BaseModel):

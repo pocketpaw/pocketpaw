@@ -4,12 +4,14 @@
 #
 # The gate is three conditions ANDed in ``pockets.service._source_visible_for_doc``:
 # the pocket was born after the flip (``Pocket.source_gated``, stamped at create
-# from ``sites_source_gate_enabled``), the setting is still on, and the WORKSPACE
-# is not entitled (``Entitlements.site_source_visible``).
+# from ``sites_source_gate_enabled``), the setting is still on, and the pocket's
+# SITE is not entitled (its own tier is not ``site`` / ``staff`` with an active
+# subscription). Which sites are entitled is pinned in the sibling
+# ``test_source_visibility_per_site.py``; this file pins the gate's mechanics.
 #
 # WHAT A REVIEWER SHOULD CHECK, in order:
 #   (a) the cohort — a pocket born before the flip keeps source forever, one born
-#       after it on a free workspace does not, and a paid workspace is untouched;
+#       after it with no paid site does not, and a paid site is untouched;
 #   (b) the reach — the chokepoint is ``pocket_to_wire_dict``, so gating one
 #       expression must also cover the gallery list, the PATCH and spec-merge
 #       WRITE responses and the WebSocket broadcast. Those three are what a
@@ -34,10 +36,9 @@
 #
 # Every test drives the real resolver with ``get_workspace_plan`` /
 # ``get_workspace_overrides`` monkeypatched, which is the pattern the whole tree
-# uses on it, over the shared mongomock ``mongo_db`` fixture. Nothing here reads
-# or writes a Site document, on purpose: the gate is deliberately keyed off the
-# WORKSPACE plan, so a pocket with no Site row must resolve like any other rather
-# than raise — which is asserted, not assumed.
+# uses on it, over the shared mongomock ``mongo_db`` fixture. A "paid" pocket is
+# one with a Site row on ``staff`` / ``active``; every other pocket has no Site row
+# at all, which must resolve withheld rather than raise — asserted, not assumed.
 from __future__ import annotations
 
 import inspect
@@ -70,9 +71,10 @@ RIPPLE_SPEC: dict[str, Any] = {"ui": {"type": "flex", "children": []}, "state": 
 
 @pytest.fixture
 def plan(monkeypatch: pytest.MonkeyPatch):
-    """Pin what plan a workspace resolves to. ``free`` withholds source; every
-    paid rung grants it. Patched at ``workspace.service`` because that is the one
-    seam ``resolve_entitlements`` reads and the whole tree already mocks."""
+    """Pin what plan a workspace resolves to. The plan no longer decides source
+    (each site's own tier does); it is pinned so the resolver runs without a real
+    workspace. Patched at ``workspace.service`` because that is the one seam
+    ``resolve_entitlements`` reads and the whole tree already mocks."""
 
     def _plan(mapping: dict[str, str | None]) -> None:
         import pocketpaw_ee.cloud.workspace.service as ws_svc
@@ -120,10 +122,11 @@ def retro(monkeypatch: pytest.MonkeyPatch):
     return _set
 
 
-async def _make_site_pocket(workspace_id: str, *, name: str = "Site") -> dict:
+async def _make_site_pocket(workspace_id: str, *, name: str = "Site", paid: bool = False) -> dict:
     """A svelte-track site pocket, created through the REST create path so the
-    cohort stamp is applied exactly as production applies it."""
-    return await pockets_service.create(
+    cohort stamp is applied exactly as production applies it. ``paid`` adds its
+    Site row on ``staff`` with an active subscription, which entitles it to source."""
+    created = await pockets_service.create(
         workspace_id,
         USER,
         CreatePocketRequest(
@@ -135,6 +138,19 @@ async def _make_site_pocket(workspace_id: str, *, name: str = "Site") -> dict:
             ripple_spec=dict(RIPPLE_SPEC),
         ),
     )
+    if paid:
+        from pocketpaw_ee.cloud.models.site import Site
+
+        await Site(
+            workspace=workspace_id,
+            pocket_id=created["_id"],
+            owner=USER,
+            name=name,
+            plan_tier="staff",
+            subscription_status="active",
+        ).insert()
+        created = await pockets_service.get_for_wire(created["_id"], USER)
+    return created
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +159,8 @@ async def _make_site_pocket(workspace_id: str, *, name: str = "Site") -> dict:
 
 
 async def test_a_new_free_pocket_is_redacted(gate, plan) -> None:
-    """Acceptance 1, first half: a pocket created while the gate is on, in a free
-    workspace, serves no source."""
+    """Acceptance 1, first half: a pocket created while the gate is on, with no
+    paid site behind it, serves no source."""
     gate(True)
     created = await _make_site_pocket(FREE_WS)
 
@@ -166,11 +182,11 @@ async def test_a_existing_free_pocket_keeps_its_source(gate, plan) -> None:
     assert fetched["source"] == SOURCE_MAP
 
 
-async def test_a_paid_workspace_is_unaffected(gate, plan) -> None:
-    """Acceptance 2. Same flip, same create path, a plan that grants the
-    capability — nothing is withheld."""
+async def test_a_paid_site_is_unaffected(gate, plan) -> None:
+    """Acceptance 2. Same flip, same create path, a site whose own plan grants
+    the capability — nothing is withheld."""
     gate(True)
-    created = await _make_site_pocket(PAID_WS)
+    created = await _make_site_pocket(PAID_WS, paid=True)
 
     assert created["source"] == SOURCE_MAP
     fetched = await pockets_service.get_for_wire(created["_id"], USER)
@@ -213,10 +229,9 @@ async def test_a_gate_ships_disabled(plan) -> None:
 
 
 async def test_a_pocket_with_no_site_row_resolves_denied_not_raising(gate, plan) -> None:
-    """Acceptance 4. Nothing in this gate reads the Site collection — it is keyed
-    off the WORKSPACE plan precisely because ``create_draft_site`` leaves a draft's
-    Site row on the free floor. A pocket with no Site document at all must
-    therefore resolve to withheld, calmly, rather than raise."""
+    """Acceptance 4. The gate reads the pocket's Site row for its tier. A pocket
+    with no Site document at all has bought nothing, so it must resolve to
+    withheld, calmly, rather than raise."""
     from pocketpaw_ee.cloud.models.site import Site
 
     gate(True)
@@ -310,9 +325,12 @@ async def test_b_websocket_broadcast_payload_is_redacted(gate, plan, recording_b
 
 
 async def test_b_websocket_broadcast_is_unredacted_when_paid(gate, plan, recording_bus) -> None:
-    """The broadcast's counterpart — it is gated, not blanket-stripped."""
+    """The broadcast's counterpart — it is gated, not blanket-stripped. The site
+    is paid for after create, so the broadcast checked is the one an edit sends."""
     gate(True)
-    created = await _make_site_pocket(PAID_WS)
+    created = await _make_site_pocket(PAID_WS, paid=True)
+    recording_bus.events.clear()
+    await pockets_service.update(created["_id"], USER, UpdatePocketRequest(name="Renamed"))
 
     payload = next(
         e.data["pocket"]
@@ -460,11 +478,12 @@ async def test_d_draft_version_snapshot_survives_a_gated_edit(gate, plan) -> Non
 # ---------------------------------------------------------------------------
 # (e) ``sourceVisible`` — the effective answer, published.
 #
-# The client cannot re-derive the gate: it is the workspace capability AND the
-# pocket's ``source_gated`` cohort stamp, and only the capability is on any wire.
-# Gating a Code tab on the capability alone would hide it on GRANDFATHERED
-# pockets whose source we still send. So the resolved answer travels with the
-# payload, off the same argument, and the tests below pin that they agree.
+# The client cannot re-derive the gate: it is the pocket's site tier, the
+# operator override AND the pocket's ``source_gated`` cohort stamp, and most of
+# that is on no wire the client reads. Gating a Code tab on anything else would
+# hide it on GRANDFATHERED pockets whose source we still send. So the resolved
+# answer travels with the payload, off the same argument, and the tests below
+# pin that they agree.
 # ---------------------------------------------------------------------------
 
 
@@ -473,7 +492,7 @@ async def test_e_flag_tracks_the_payload_in_both_directions(gate, plan) -> None:
     ungated means ``true`` AND source present."""
     gate(True)
     gated = await _make_site_pocket(FREE_WS, name="Gated")
-    allowed = await _make_site_pocket(PAID_WS, name="Allowed")
+    allowed = await _make_site_pocket(PAID_WS, name="Allowed", paid=True)
 
     gated_wire = await pockets_service.get_for_wire(gated["_id"], USER)
     assert gated_wire["sourceVisible"] is False
@@ -485,10 +504,10 @@ async def test_e_flag_tracks_the_payload_in_both_directions(gate, plan) -> None:
 
 
 async def test_e_flag_is_true_for_a_grandfathered_pocket(gate, plan) -> None:
-    """The case the flag exists for. A free workspace resolves the CAPABILITY
-    False, but this pocket predates the flip and its source is still served — so
-    a client gating on ``GET /entitlements`` alone would hide a Code tab over
-    content that is right there. The flag says ``true`` and the payload agrees."""
+    """The case the flag exists for. This pocket has no paid site, but it
+    predates the flip and its source is still served — so a client gating on the
+    site's plan alone would hide a Code tab over content that is right there. The
+    flag says ``true`` and the payload agrees."""
     gate(False)
     created = await _make_site_pocket(FREE_WS, name="Grandfathered")
     gate(True)
@@ -516,8 +535,8 @@ async def test_e_flag_is_honest_in_the_gallery_list(gate, plan) -> None:
 
 async def test_e_list_resolves_the_entitlement_once_for_the_page(gate, plan, monkeypatch) -> None:
     """Every row of a gallery belongs to one workspace, so the entitlement is
-    resolved once and handed down. Counting the calls is the point: a per-row
-    resolve puts two workspace lookups behind every card."""
+    resolved in one batch and handed down. Counting the calls is the point: a
+    per-row resolve puts a workspace lookup and a Site read behind every card."""
     import pocketpaw_ee.cloud.entitlements.service as ent_svc
 
     gate(True)
@@ -861,12 +880,12 @@ async def test_h_retroactive_gates_a_pre_flip_free_pocket(gate, retro, plan) -> 
     assert fetched["sourceVisible"] is False
 
 
-async def test_h_retroactive_leaves_a_paid_workspace_alone(gate, retro, plan) -> None:
+async def test_h_retroactive_leaves_a_paid_site_alone(gate, retro, plan) -> None:
     """The regression that matters most. Reaching further back must not reach
-    past the entitlement — a paying customer's source is untouched no matter
-    which cohort their pocket was born into."""
+    past the entitlement — a paid site's source is untouched no matter which
+    cohort its pocket was born into."""
     gate(False)
-    created = await _make_site_pocket(PAID_WS, name="Pre-flip paid site")
+    created = await _make_site_pocket(PAID_WS, name="Pre-flip paid site", paid=True)
 
     gate(True)
     retro(True)

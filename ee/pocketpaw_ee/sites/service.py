@@ -5498,13 +5498,12 @@ async def _assert_entitled_to_project_download(site: Any) -> None:
     own", meaning tenancy only. So deleting the call to this function does not
     degrade the download, it gives it away.
 
-    Deliberately does NOT also check ``Entitlements.site_source_visible``. That is a
-    workspace capability governing whether the builder shows a Code tab, resolved off
-    the workspace plan; this is a per-site capability resolved off the site's plan.
-    Two questions, two resolvers, and a paid site in a free workspace may download a
-    project whose source the Code tab hides. Adding the second check would also make
-    it impossible to write a test that proves this one fires (see the mutation plan:
-    two guards on one seam let a mutation escape).
+    Deliberately does NOT also check the workspace's source override
+    (``WorkspaceOverrides.site_source_visible``). The Code tab and this download read
+    the same per-site predicate (``site_code_entitled``); the override is a visibility
+    lever on the Code tab only. Adding it here as a second guard would also make it
+    impossible to write a test that proves this one fires (see the mutation plan: two
+    guards on one seam let a mutation escape).
 
     Synchronous and handed the loaded doc, because the resolver is pure and
     ``entitlements`` may not import ``models.site`` (EE cloud rule 2).
@@ -11254,6 +11253,65 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
         {"_id": 0, "pocket_id": 1},
     )
     return {row["pocket_id"] async for row in cursor if row.get("pocket_id")}
+
+
+async def site_billing_for_pockets(
+    workspace_id: str, pocket_ids: list[str]
+) -> dict[str, tuple[str | None, str]]:
+    """``{pocket_id: (plan_tier, subscription_status)}`` of each pocket's canonical Site.
+
+    The per-site billing fields the pockets service needs to answer "may this
+    pocket's source go out" (``entitlements.service.site_code_entitled``), read here
+    because this service is the sole owner of Site reads. ONE query for a whole
+    gallery page, so the pockets list pays no per-row lookup. A pocket with no Site
+    row is absent from the result.
+
+    Picks the row ``_canonical_site_doc`` would when legacy dupes exist: the
+    stable-id row (a transferred row keeps its minted id), else the newest row with
+    a url, else the newest. Projected to the fields that choice and the answer need.
+    Tenant-scoped on ``workspace``.
+    """
+    if not workspace_id or not pocket_ids:
+        return {}
+    cursor = _SiteDoc.get_pymongo_collection().find(
+        {"workspace": workspace_id, "pocket_id": {"$in": list(pocket_ids)}},
+        {
+            "pocket_id": 1,
+            "plan_tier": 1,
+            "subscription_status": 1,
+            "archived": 1,
+            "identity_workspace": 1,
+            "url": 1,
+            "createdAt": 1,
+        },
+    )
+    by_pocket: dict[str, list[dict[str, Any]]] = {}
+    async for row in cursor:
+        if row.get("pocket_id"):
+            by_pocket.setdefault(row["pocket_id"], []).append(row)
+
+    def _created(row: dict[str, Any]) -> datetime:
+        stamp = row.get("createdAt")
+        return stamp.replace(tzinfo=None) if isinstance(stamp, datetime) else datetime.min
+
+    out: dict[str, tuple[str | None, str]] = {}
+    for pocket_id, rows in by_pocket.items():
+        moved = next(
+            (
+                r
+                for r in rows
+                if r.get("archived") is False
+                and r.get("identity_workspace") not in ("", None, workspace_id)
+            ),
+            None,
+        )
+        stable_id = moved["_id"] if moved is not None else _live_object_id(workspace_id, pocket_id)
+        chosen = next((r for r in rows if r["_id"] == stable_id), None)
+        if chosen is None:
+            newest = sorted(rows, key=_created, reverse=True)
+            chosen = next((r for r in newest if r.get("url")), newest[0])
+        out[pocket_id] = (chosen.get("plan_tier"), chosen.get("subscription_status") or "none")
+    return out
 
 
 async def live_site_for_pocket(*, workspace_id: str, pocket_id: str) -> tuple[str, str] | None:

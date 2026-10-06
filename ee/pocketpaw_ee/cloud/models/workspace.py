@@ -120,12 +120,12 @@ class WorkspaceOverrides(BaseModel):
     ``max_seats=0`` to uncapped needs to say that, not merely "no opinion".
 
     ``site_source_visible`` is the one field here that is NOT a ceiling, so its
-    tri-state is its own: ``None`` means "use the plan's answer", ``True`` grants
-    a workspace the right to read its sites' source code, and ``False`` REVOKES
-    it from a plan that would otherwise grant it. That third case is the reason
-    the field is ``bool | None`` and not merely a flag to set — revoking source
-    from a paying tenant is an abuse response, and it has to be expressible
-    without moving them off their plan. It is excluded from the non-negative
+    tri-state is its own: ``None`` means "no opinion — each site's own per-site
+    tier decides", ``True`` grants source on every site in the workspace, and
+    ``False`` REVOKES it on every site, paid ones included. That third case is
+    the reason the field is ``bool | None`` and not merely a flag to set —
+    revoking source from a paying tenant is an abuse response, and it has to be
+    expressible without touching their sites' plans. It is excluded from the non-negative
     validator below, which exists for the integer ceilings.
 
     Every field here is read by ``resolve_entitlements``, which is the single

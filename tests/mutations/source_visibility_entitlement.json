@@ -1,39 +1,12 @@
 [
   {
-    "label": "the grant is deleted outright — every paid workspace loses source access",
+    "label": "the workspace plan grants source again, so a free site in a paid workspace shows its code",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "        site_source_visible=tier.key in _SOURCE_VISIBLE_PLANS,",
-    "replace": "        site_source_visible=False,",
+    "find": "        included_sites=tier.included_sites,\n        features=tier.features,\n    )",
+    "replace": "        included_sites=tier.included_sites,\n        features=tier.features,\n        site_source_visible=tier.key != \"free\",\n    )",
     "tests": [
-      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_paid_workspace_may_read_its_site_source"
-    ]
-  },
-  {
-    "label": "the grant reads the RAW stored plan key, so a retired studio/agency key is paid",
-    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "        site_source_visible=tier.key in _SOURCE_VISIBLE_PLANS,",
-    "replace": "        site_source_visible=(plan_key or \"free\") != \"free\",",
-    "tests": [
-      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_retired_or_unknown_plan_key_is_withheld"
-    ]
-  },
-  {
-    "label": "the free floor joins the granting set — every signup can read site source",
-    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "_SOURCE_VISIBLE_PLANS = frozenset({\"go\", \"pro\", \"pro_max\", \"enterprise\"})",
-    "replace": "_SOURCE_VISIBLE_PLANS = frozenset({\"free\", \"go\", \"pro\", \"pro_max\", \"enterprise\"})",
-    "tests": [
-      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_free_workspace_may_not_read_its_site_source",
-      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_the_free_floor_is_not_in_the_granting_set"
-    ]
-  },
-  {
-    "label": "the catalog's base-floor fallback grants source when the catalog loses its base tier",
-    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "                site_source_visible=False,",
-    "replace": "                site_source_visible=True,",
-    "tests": [
-      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_catalog_with_no_base_tier_is_withheld"
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_no_workspace_plan_answers_source",
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_a_free_site_in_a_pro_max_workspace_is_hidden"
     ]
   },
   {
@@ -52,7 +25,7 @@
     "find": "    if override is None:\n        return catalog_value\n    return override",
     "replace": "    return catalog_value or override",
     "tests": [
-      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_override_revokes_source_from_a_paid_workspace"
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_the_flag_overlay_lets_a_revocation_beat_a_grant"
     ]
   },
   {
@@ -67,10 +40,10 @@
   {
     "label": "the domain default grants source, so any construction that omits the field leaks code",
     "file": "ee/pocketpaw_ee/cloud/entitlements/domain.py",
-    "find": "    site_source_visible: bool = False",
-    "replace": "    site_source_visible: bool = True",
+    "find": "    site_source_visible: bool | None = None",
+    "replace": "    site_source_visible: bool | None = True",
     "tests": [
-      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_entitlements_object_built_without_the_field_withholds_source"
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_b_an_entitlements_object_built_without_the_field_defers"
     ]
   },
   {
@@ -88,7 +61,7 @@
     "find": "        site_source_visible=ent.site_source_visible,\n",
     "replace": "",
     "tests": [
-      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_the_capability_reaches_the_entitlements_wire"
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_the_override_reaches_the_entitlements_wire"
     ]
   },
   {

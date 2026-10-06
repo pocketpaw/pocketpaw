@@ -2,6 +2,11 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-06 (fix/site-source-per-site-tier) — a site's source is
+  visible (`sourceVisible` on the pocket) only when the SITE is on `site` or
+  `staff` with an active subscription. The workspace plan no longer grants it;
+  `site_source_visible` on `GET /entitlements` is now the operator override only
+  (`null` = each site decides). Download and template-sharing notes updated.
 Updated: 2026-10-03 (fix/paw-key-scopes) — "Workspace API key scopes": which
   route families each `paw_` key scope unlocks; everything else is a 403.
 Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
@@ -1337,8 +1342,10 @@ Making a template public (on save or with `PATCH`) runs these checks first:
   `site_templates.private_assets`, and the message says how many. External
   images (`https://images.unsplash.com/...`) and the public Sites asset rail are
   allowed.
-- **No locked source.** If the source gate would withhold this source from the
-  owner's workspace, the request is `403` `site_templates.source_not_shareable`.
+- **No locked source.** If the source gate would withhold this source (the
+  source site is not on `site` / `staff` with an active subscription, or an
+  operator revoked source for the workspace), the request is `403`
+  `site_templates.source_not_shareable`.
 - The Sites plan gate and the 2 MB size cap, as on save.
 
 Every response and event carries the template's metadata only, never its
@@ -3721,11 +3728,13 @@ show it.
 "the pre-check") before offering the button.** That is what the field is for — discovering the refusal by
 provoking it is the failure the per-site entitlements read exists to end.
 
-**Do not gate the button on source visibility instead.** `site_source_visible` is a
-**workspace** capability that governs whether the builder shows a Code tab;
-`project_download` is a **per-site** capability resolved off the site's own plan. A paid
-site inside a free workspace may legitimately download a project whose Code tab is
-hidden, so gating on the workspace field would hide a control the customer has paid for.
+**Do not gate the button on source visibility instead.** The pocket's `sourceVisible`
+(which governs the builder's Code tab) is resolved off the same per-site rule as
+`project_download` (`site` or `staff`, active subscription), so the two normally agree.
+They differ when a platform operator overrides source visibility for the whole
+workspace (`site_source_visible` on `GET /entitlements`, `null` when unset): that
+override reaches the Code tab only, never the download. Read `project_download` for
+the button.
 
 Self-hosted and OSS deployments have no billing, so the gate is skipped entirely there
 (`sites_enforced()`) and the download always works.

@@ -205,7 +205,7 @@
   {
     "label": "publish: save public without the checks",
     "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "    if body.visibility == \"public\":\n        await _check_publishable(workspace_id, snapshot)\n",
+    "find": "    if body.visibility == \"public\":\n        await _check_publishable(workspace_id, snapshot, body.pocket_id)\n",
     "replace": "",
     "tests": [
       "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_a_private_asset",
@@ -215,7 +215,7 @@
   {
     "label": "patch: make public without the checks",
     "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "        _check_size(doc.snapshot)\n        await _check_publishable(workspace_id, doc.snapshot)\n",
+    "find": "        _check_size(doc.snapshot)\n        await _check_publishable(workspace_id, doc.snapshot, doc.source_pocket_id)\n",
     "replace": "        _check_size(doc.snapshot)\n",
     "tests": [
       "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_private_assets",
