@@ -29,7 +29,8 @@ from pocketpaw_ee.cloud.auth.core import (
 from pocketpaw_ee.cloud.auth.router import router as auth_router
 
 _TEST_EMAIL = "cookie-chain@example.com"
-_TEST_PASSWORD = "test-password-123"
+# Meets the password policy (upper, lower, digit, symbol, no email local part).
+_TEST_PASSWORD = "Test-Password-123!"
 
 
 async def _seed_user() -> None:
@@ -62,7 +63,9 @@ def _build_app() -> FastAPI:
 
 
 @pytest_asyncio.fixture
-async def app_client(mongo_db) -> AsyncClient:
+async def app_client(mongo_db, monkeypatch) -> AsyncClient:
+    # The policy's HIBP breach check is a live network call; keep it off here.
+    monkeypatch.setenv("POCKETPAW_HIBP_ENABLED", "false")
     await _seed_user()
     app = _build_app()
     transport = ASGITransport(app=app)
