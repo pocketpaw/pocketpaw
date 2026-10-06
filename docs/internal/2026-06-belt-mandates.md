@@ -1,8 +1,10 @@
 <!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
      craft factory built on it: anatomy, charter (cadence, checks, recipes),
-     patrols (incl. upstream), the headless develop station and its security
-     posture, landing and re-develop, endpoints (incl. the digest), env vars,
-     and the remaining demo-bar concessions. -->
+     patrols (incl. upstream), the headless develop station (strict and owner
+     Claude setups, the trust restore, ORIENT) and its security posture, the
+     architecture context the foreman and review get, landing and re-develop,
+     endpoints (incl. the digest), env vars, and the remaining demo-bar
+     concessions. -->
 
 # Belt Mandates — the standing JOB primitive
 
@@ -125,7 +127,19 @@ a failed approach without stating what changed; tasks in one shift are
 independent of each other (they develop from the same base and land
 separately, so dependent follow-up work waits for a later shift; plan
 validation cannot detect a dependency, so only the prompt says it); a task in
-flight is never planned again; strict JSON only.
+flight is never planned again; a task extends an existing component and never
+plans a duplicate of one (rule 8, below); strict JSON only.
+
+The foreman also gets the bound repo's architecture: the shift trigger reads
+`<repo>/docs/c4/model.json` (`belt/orient.c4_lines`) and the prompt lists the
+repo's own containers and components, one line each with the first sentence of
+its description, capped at about 3k characters (external systems the model
+also names are left out). Rule 8 says a task extends a listed component
+wherever one covers the work, names it in the task's `why`, and never plans a
+new component, module or service that duplicates one listed. With no C4 model
+the block says so. The foreman stays in the strict setup in both modes (it
+reads third-party sighting text), so this injection is how it learns the
+architecture.
 
 #### What the foreman reads: the backlog and the run outcomes
 
@@ -345,21 +359,26 @@ sweeper, so pytest runs never spawn background loops that outlive the test.
 The develop loop for `headless` is `belt/develop_station.ClaudeCodeDevelop`,
 wired by a cloud startup hook when `POCKETPAW_MANDATE_DISPATCHER=headless`
 **and** `POCKETPAW_FACTORY_DEVELOP=claude` (and, in a process serving cloud
-tenants, `POCKETPAW_FACTORY_DEDICATED_HOST=1`; see Security posture). One run
-walks a fixed sequence:
+tenants, `POCKETPAW_FACTORY_DEDICATED_HOST=1`; see Security posture; in the
+owner setup, an existing `POCKETPAW_FACTORY_WORKTREE_ROOT`). One run walks a
+fixed sequence:
 
 ```
 PREPARE  screen the task text (InjectionScanner, HIGH refuses); refuse any
          charter check whose program is not allowed; resolve the bound repo
          inside POCKETPAW_BELT_REPO_ALLOWLIST (empty = refuse); git worktree
          add --detach at origin/<base> (after a fetch) when an origin exists,
-         else the local <base>; snapshot the worktree's .git file
+         else the local <base>, in a temp dir (owner setup: under
+         POCKETPAW_FACTORY_WORKTREE_ROOT); snapshot the worktree's .git file
+ORIENT   LLM work only (recipes skip it): the repo's architecture brief from
+         loom (else its C4 list) for the develop and review prompts
 WORK     a recipe task runs the charter's recipe command; otherwise
          `claude -p` develops (--permission-mode acceptEdits)
 CHECK    run every charter check
 FIX ≤2   a red check, or a failed review, sends the failure back to
          `claude -p`, then CHECK again; at most 2 attempts (recipes get none)
-REVIEW   an independent read-only `claude -p` judges the diff against the task:
+REVIEW   an independent read-only `claude -p` judges the diff against the task
+         and fails a duplicate of existing code:
          strict {"verdict": "pass"|"fail", "notes": [...]}
 DONE     git add -A; git diff --cached --binary against the base sha; refused
          if it touches .claude/, .mcp.json, .git or .gitmodules, or adds a
@@ -377,8 +396,88 @@ merges. Background develops are process-local: the dispatcher marks each run
 dropped stays visible as stuck in the digest (nothing re-drives it yet), and a
 background task that crashes is logged at ERROR. The develop request aims at
 the blob's `expected_outcome`; the attached run's `summary` becomes the
-station's report (checks, review verdict and notes, fix attempts), and its
-`files_changed` is the station's count (else the diff's `+++` headers).
+station's report (checks, setup, orient source, review verdict and notes, fix
+attempts), and its `files_changed` is the station's count (else the diff's
+`+++` headers).
+
+### Claude setup: strict and owner
+
+`POCKETPAW_FACTORY_CLAUDE_SETUP` picks how the develop, fix and review calls
+run the Claude Code CLI.
+
+- **`strict`** (default; hosted deploys). Every call passes
+  `--setting-sources ""`, `--strict-mcp-config` and
+  `--settings '{"disableAllHooks":true}'`: no settings files, no MCP servers,
+  no hooks. The worktree sits in a system temp dir. The agent codes with no
+  CLAUDE.md beyond the repo's own and no skills.
+- **`owner`** (a local factory on the owner's own machine). The factory codes
+  with the owner's real Claude Code setup: workspace and repo CLAUDE.md files,
+  skills, hooks, settings and MCP config. The worktree is created under
+  `POCKETPAW_FACTORY_WORKTREE_ROOT`, which must be an existing directory
+  outside the bound repo; the station refuses to wire without it, and a run
+  refuses at PREPARE if it goes missing. Point it at a directory inside the
+  owner's workspace, e.g. `<workspace>/paw-worktrees/factory-runs`, so CLAUDE.md
+  discovery walks up from the worktree through the workspace. The three
+  isolation flags are dropped; the tool surface is unchanged (`--tools`, the
+  `./**`-scoped allow rules, WebFetch/WebSearch/Task denied). Never `--bare`.
+
+**Trust restore** (owner setup only). Owner mode loads whatever agent config
+sits in the worktree, and the agent can write to the worktree. So immediately
+before every owner-mode claude call (DEVELOP, each FIX, REVIEW) the station
+deletes every entry named `.claude`, `CLAUDE.md`, `CLAUDE.local.md`,
+`AGENTS.md` or `.mcp.json`, at any depth, whether tracked, untracked or
+gitignored (a symlink is unlinked, never followed), then runs
+`git checkout <base sha> -- <those paths tracked at base>`. The settings,
+hooks, MCP servers and instructions that load are always the committed ones.
+The `.git`-file integrity check and the DONE refusal of diffs touching
+`.claude/` or `.mcp.json` stay; for LLM runs the restore before REVIEW already
+reverts any plant, so the DONE rule is defense in depth (a recipe, which has
+no claude step, still meets it). A consequence: an owner-mode run cannot land
+an edit to a CLAUDE.md or AGENTS.md file; the restore reverts it.
+
+The foreman and the autopilot personas stay strict in both setups: they read
+untrusted third-party text, so they get the architecture by prompt injection
+instead (see The foreman). The scrubbed env applies in both setups.
+
+### ORIENT: the architecture as the source of truth
+
+Between PREPARE and WORK (LLM work only) the station orients the agent in the
+repo's existing architecture so it extends what exists instead of building a
+second copy (`belt/orient.py`):
+
+1. Resolve a loom world model: `<loom dir>/worldmodel-<repo dir name,
+   lowercased>.json`, where the loom dir is `POCKETPAW_FACTORY_LOOM_DIR`, else
+   the nearest ancestor of the bound repo that holds a `.loom/` directory (the
+   workspace's, for repos checked out in it).
+2. Run `loom orient -model <model> -json -- <task>` through the station's one
+   runner (argv list, scrubbed env, 60s timeout; the `--` keeps a task that
+   starts with `-` from being read as a flag). The binary is
+   `POCKETPAW_FACTORY_LOOM_BIN`, else `loom` on PATH, else `~/go/bin/loom`.
+3. Render the brief as an `EXISTING ARCHITECTURE` block, capped at about 4k
+   characters: the components the task touches, the code that already exists
+   for it (symbols grouped per file, or C4 components with their description
+   when the model has no symbols), the blast radius, entrypoints, and the
+   rules, ending with "reuse before you add; do not create a second copy of
+   anything listed".
+4. No world model, or loom failing: fall back to the repo's
+   `docs/c4/model.json` list. Neither: no block. ORIENT never fails a run; the
+   summary's `orient:` line names the source (`loom worldmodel-<x>.json`,
+   `no world model; C4 docs/c4/model.json`, `no world model`, with
+   `loom orient failed (exit N)` in front when loom was tried).
+
+The block goes into the develop prompt (after the task and charter, outside the
+`<untrusted>` fence: it is owner-authored repo data) and into the review
+prompt. REVIEW must fail a diff that adds a module, class, component or helper
+duplicating one that already exists, listed or found in the repo, and its notes
+must name what is duplicated and the path of the existing one; the fix loop
+then gets those notes like any other review failure.
+
+World models are generated files under the workspace's `.loom/` (gitignored):
+the `loom-sync.sh` Stop hook refreshes pocketpaw and soul-protocol. loom has
+symbol extractors for Python and Go only, so `worldmodel-paw-enterprise.json`
+and `worldmodel-ripple.json` are built from C4, kb and the shared soul alone
+(`loom build <repo> --scope <scope> --out <model>` from the workspace root);
+their briefs name components, not files, and nothing refreshes them yet.
 
 ### Landing and re-develop
 
@@ -448,10 +547,13 @@ What the station scrubs or blocks:
 - **Programs.** Check and recipe argv[0] must be on
   `POCKETPAW_FACTORY_ALLOWED_COMMANDS`, enforced at create (422) and again
   before exec. No shells, `env`, `sudo`, downloaders, `git`, or relative paths.
-- **Claude seats.** Every call (foreman, develop, fix, review) loads no
-  settings files (`--setting-sources ""`), no MCP servers
+- **Claude seats.** In the strict setup every call (foreman, develop, fix,
+  review) loads no settings files (`--setting-sources ""`), no MCP servers
   (`--strict-mcp-config`) and no hooks (`disableAllHooks`), so a `.claude/` or
-  `.mcp.json` planted in the worktree never loads. Auth is the CLI's
+  `.mcp.json` planted in the worktree never loads. In the owner setup the
+  develop, fix and review calls load the owner's config, and the trust restore
+  puts the worktree's agent config back to the base commit before each call;
+  the foreman and autopilot stay strict. Auth is the CLI's
   keychain/OAuth login; never `--bare`, which forces API-key auth. Tools are
   limited with `--tools` and the allow rules are scoped to the worktree
   (`Read(./**)`, `Edit(./**)`, `Write(./**)`, plus `Bash(<check>:*)` on the
@@ -480,9 +582,15 @@ Residual risks:
   An allowed program like `python`, `npm` or `make` runs whatever the worktree
   tells it to. There is no OS sandbox yet; the next step is a container or
   `sandbox-exec` runner for checks and recipes.
-- The worktree's `CLAUDE.md` files still load (memory files are not a setting
-  source), so text written in DEVELOP can steer FIX and REVIEW. That is not
-  host exec, and the human gate sees the hunk.
+- Strict setup: the worktree's `CLAUDE.md` files can still load, so text
+  written in DEVELOP can steer FIX and REVIEW. That is not host exec, and the
+  human gate sees the hunk. The owner setup's trust restore closes this.
+- Owner setup: the owner's hooks, MCP servers and permission settings apply to
+  every develop, fix and review call. User-level Stop hooks may fire on each
+  call (session-log noise, rebuild triggers); whether workspace-level hooks
+  load for a nested worktree has not been checked. The tool surface stays
+  `--tools`-limited, but MCP tools the owner's settings allow are reachable.
+  Use it only on the owner's own machine.
 - The secret scan is pattern-based: it misses unknown formats and can refuse a
   diff with fixture values such as `password="..."` or a URL with basic auth.
 - The allowlist roots are global settings plus per-workspace console roots; a
@@ -542,7 +650,11 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
 | `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
 | `POCKETPAW_FACTORY_CLAUDE_BIN` | `claude` on PATH | The Claude Code CLI every factory LLM seat shells (foreman, develop, fix, review) |
-| `POCKETPAW_FACTORY_CLAUDE_MODEL` | the CLI's built-in default | Passed as `--model` when set (user settings don't load, so a model set there is ignored) |
+| `POCKETPAW_FACTORY_CLAUDE_MODEL` | the CLI's built-in default | Passed as `--model` when set (in the strict setup user settings don't load, so a model set there is ignored) |
+| `POCKETPAW_FACTORY_CLAUDE_SETUP` | `strict` | `owner` runs develop/fix/review with the owner's Claude Code setup (CLAUDE.md, skills, hooks, settings, MCP) plus the trust restore; anything else is `strict` |
+| `POCKETPAW_FACTORY_WORKTREE_ROOT` | unset | Owner setup only, and required there: existing dir outside the bound repo that station worktrees are created under, e.g. `<workspace>/paw-worktrees/factory-runs` |
+| `POCKETPAW_FACTORY_LOOM_DIR` | nearest ancestor `.loom/` of the bound repo | Where ORIENT looks for `worldmodel-<repo dir name>.json` |
+| `POCKETPAW_FACTORY_LOOM_BIN` | `loom` on PATH, else `~/go/bin/loom` | The loom CLI ORIENT runs |
 | `POCKETPAW_FACTORY_DEVELOP_TIMEOUT` | `900` | Seconds per `claude -p` call (develop, fix, review) |
 | `POCKETPAW_FACTORY_CHECK_TIMEOUT` | `600` | Seconds per check or recipe command |
 | `POCKETPAW_MANDATE_LLM` | `claude` | Foreman / autopilot transport: `claude` or `mock` |
@@ -559,6 +671,11 @@ env, so the station's own `git fetch` has no `SSH_AUTH_SOCK`, `GH_TOKEN`,
 `GIT_SSH_COMMAND` or `GIT_ASKPASS`: SSH keys must work without an agent (key
 files under `~/.ssh`, or the macOS keychain via `UseKeychain`), and `gh`/HTTPS
 auth must live in its config files, not in env vars.
+
+On the owner's own machine, add `POCKETPAW_FACTORY_CLAUDE_SETUP=owner` and
+`POCKETPAW_FACTORY_WORKTREE_ROOT=<workspace>/paw-worktrees/factory-runs` (create
+the directory first) so the factory codes with the workspace CLAUDE.md, the repo
+CLAUDE.md and the workspace skills. Keep the default `strict` on hosted deploys.
 
 ## Demo-bar concessions (each marked in code)
 
@@ -599,7 +716,14 @@ real tmp git repo with real check commands and a faked `claude`, including the
 hardening: claude argv flags, the scrubbed env, refused programs, the
 multi-tenant wiring refusal, `.git` tampering, protected paths, secret diffs,
 redaction, untrusted fencing, the injection screen, process-group kills and
-logged background crashes;
+logged background crashes. It also pins the owner setup (no isolation flags,
+the tool rules kept, the worktree under the root, strict unchanged, the
+worktree-root refusal) and the trust restore (planted `.claude/settings.json`,
+`CLAUDE.md`, nested and gitignored plants, a symlinked `.claude` and an
+untracked `.mcp.json` are all back to base before FIX and REVIEW), ORIENT (the
+loom argv, the block in the develop and review prompts, the review's duplicate
+rule, the C4 fallback, the "no world model" note, recipes skipping it) and the
+foreman's C4 list (`test_belt_mandates.py` checks the shift wires it in);
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
 cadence scheduler; the headless file also lands a run (commit subject from the
 title) and drives the re-develop against a real tmp repo: two diffs from one
