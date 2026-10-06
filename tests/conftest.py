@@ -268,7 +268,9 @@ def _setup_asyncio_child_watcher():
 # Process-global reset, before every test (see the module docstring)
 # ---------------------------------------------------------------------------
 
-# Zero-arg reset hooks, as (module, function). Import-time registries
+# Zero-arg reset hooks, as (module, function). A dotted function name is resolved
+# attribute by attribute, so ``"_CACHE.clear"`` empties a module-level dict in
+# place when the module has no reset hook of its own. Import-time registries
 # (meetings ``providers.base._REGISTRY``, ``ripple_resolver._REGISTRY``) are left
 # out on purpose: they are filled when their modules import, and modules never
 # re-import, so clearing them would drop providers for every later test.
@@ -324,6 +326,9 @@ _RESETS: tuple[tuple[str, str], ...] = (
     ("pocketpaw_ee.foresight.api.run_store", "reset_run_store"),
     ("pocketpaw_ee.foresight.insights_llm", "reset_cache"),
     ("pocketpaw_ee.foresight.persona", "reset_paw_social_agent_counter"),
+    # 60 s per-member override cache: a grant cached by one test lets a later
+    # test's member through its 403 check.
+    ("pocketpaw_ee.guards.deps", "_ACTION_OVERRIDE_CACHE.clear"),
     ("pocketpaw_ee.sites.artifact_store_s3", "reset_shared_adapter"),
 )
 
@@ -421,7 +426,7 @@ def _reset_process_globals(monkeypatch):
         if mod is None:
             continue
         try:
-            getattr(mod, func_name)()
+            functools.reduce(getattr, func_name.split("."), mod)()
         except Exception as exc:  # noqa: BLE001 — one broken hook must not fail every test
             _reset_failures.setdefault(f"{mod_name}.{func_name}", repr(exc))
     for mod_name, attr, default in _GLOBALS:
