@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Depends, FastAPI, Request
@@ -849,8 +850,10 @@ def _billing_client(monkeypatch, *, role: str):
     # are not what these tests measure. Pinned False so a denial is decided by the
     # role alone. (In practice the live lookup already resolves to [] — it drives an
     # async Mongo read through run_until_complete from a thread with no running loop
-    # — but pinning it makes that explicit rather than incidental.)
-    monkeypatch.setattr(guards_deps, "_has_action_override", lambda *a, **k: False)
+    # — but pinning it makes that explicit rather than incidental.) It is awaited by
+    # check_workspace_action, so the stub must be async: a sync lambda turns every
+    # deny path into a 500 on ``await False`` instead of the 403 asserted below.
+    monkeypatch.setattr(guards_deps, "_has_action_override", AsyncMock(return_value=False))
 
     async def _create_topup(**kwargs):
         spy["topup"] = kwargs
