@@ -1224,14 +1224,15 @@ class Settings(BaseSettings):
     )
 
     # Paw Bar concierge v2 runner (``pocketpaw_ee.paw_bar.concierge_runtime``).
-    # Fixed per deployment on purpose: a public, anonymous visitor must not be
-    # able to steer model choice or reply length.
+    # A public, anonymous visitor can never steer model choice or reply length;
+    # the model follows the site owner's pick on the concierge agent.
     pawbar_concierge_model: str = Field(
         default="",
         description=(
-            "Model the v2 Paw Bar concierge answers with, as a pydantic_ai spec "
-            "(``litellm:<model>`` or a bare name on the configured provider). "
-            "Empty uses the pydantic_ai backend's own model resolution."
+            "Model the v2 Paw Bar concierge answers with when its agent names none "
+            "pydantic_ai can serve, as a pydantic_ai spec (``litellm:<model>`` or a "
+            "bare name on the configured provider). Empty uses the pydantic_ai "
+            "backend's own model resolution."
         ),
     )
     pawbar_concierge_max_tokens: int = Field(

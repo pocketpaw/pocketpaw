@@ -361,10 +361,25 @@ a call with no tools cannot reach them. A v2 turn is stored as the same concierg
 record, so transcripts, memory, stats and retention behave as they do for legacy, and the
 widget receives the same stream events.
 
-The model and the reply cap are fixed per deployment:
-`POCKETPAW_PAWBAR_CONCIERGE_MODEL` (a pydantic_ai model spec such as `litellm:<model>`;
-empty uses the deployment's pydantic_ai default) and
-`POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS` (default 600).
+The model follows the owner's pick on the concierge's agent: the agent bound to the
+widget, else the site's dedicated `concierge-<site_id>` agent. Only its provider and model
+are used. The turn is still the one tool-free call above, whatever backend the agent runs
+on, so a Claude Agent SDK or Codex agent's tools, MCP servers and skills never reach a
+visitor. A pydantic_ai agent's model is used as is; another backend's model is paired with
+that backend's provider setting (`claude_sdk_provider` and the like) and used when
+pydantic_ai can serve that provider. When the agent has no model, or one pydantic_ai can't
+reach (Codex, opencode, Copilot, Google ADK), the deployment's
+`POCKETPAW_PAWBAR_CONCIERGE_MODEL` (a pydantic_ai model spec such as `litellm:<model>`)
+applies, and when that is empty the deployment's pydantic_ai default. The choice is cached
+for 30 seconds per agent, so a changed model shows up within that window. Spend
+attribution on the proxy and usage pricing use the same model.
+
+The eval gate certifies the deployment's model and governs only the automatic move from
+legacy to v2. An owner's explicit model on their own agent is honoured at runtime without
+a gate report.
+
+The reply cap is fixed per deployment: `POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS`
+(default 2000).
 
 ### What a v2 reply can contain
 

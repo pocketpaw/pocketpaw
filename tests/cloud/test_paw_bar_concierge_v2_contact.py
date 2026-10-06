@@ -79,7 +79,7 @@ class _CappedModel(_RecordingModel):
         super().__init__(reply=reply or [])
         self.thinking = thinking
 
-    def build(self, _settings: Any) -> Any:
+    def build(self, _settings: Any, _spec: str | None = None) -> Any:
         from pydantic_ai.models.function import DeltaThinkingPart, FunctionModel
 
         rec = self
@@ -105,7 +105,7 @@ class _CappedModel(_RecordingModel):
 class _BrokenModel(_RecordingModel):
     """Raises a non-transient provider error before any text, every call."""
 
-    def build(self, _settings: Any) -> Any:
+    def build(self, _settings: Any, _spec: str | None = None) -> Any:
         from pydantic_ai.models.function import FunctionModel
 
         async def _stream(messages, info):
@@ -445,7 +445,12 @@ def test_reasoning_effort_is_sent_only_when_configured():
     from pocketpaw.config import get_settings
 
     base = get_settings().model_copy(update={"pawbar_concierge_model": "litellm:fake"})
-    assert "openai_reasoning_effort" not in concierge_runtime._model_settings(base, "ws-1")
+    assert "openai_reasoning_effort" not in concierge_runtime._model_settings(
+        base, "litellm:fake", "ws-1"
+    )
 
     low = base.model_copy(update={"pawbar_concierge_reasoning_effort": "low"})
-    assert concierge_runtime._model_settings(low, "ws-1")["openai_reasoning_effort"] == "low"
+    assert (
+        concierge_runtime._model_settings(low, "litellm:fake", "ws-1")["openai_reasoning_effort"]
+        == "low"
+    )
