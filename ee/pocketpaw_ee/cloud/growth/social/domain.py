@@ -29,10 +29,32 @@ BusinessModel = Literal[
     "other",
 ]
 AnalysisStatus = Literal["none", "ready", "failed"]
-IdeaFormat = Literal["hook_demo", "slideshow", "wall_of_text", "meme", "talking_head"]
+IdeaFormat = Literal[
+    "hook_demo",
+    "slideshow",
+    "wall_of_text",
+    "meme",
+    "talking_head",
+    "x_post",
+    "x_thread",
+    "reddit_post",
+]
+Platform = Literal["x", "reddit"]
 IdeaStatus = Literal["new", "approved", "skipped"]
 
 IDEA_FORMATS: tuple[str, ...] = get_args(IdeaFormat)
+PLATFORMS: tuple[str, ...] = get_args(Platform)
+VIDEO_FORMATS: tuple[str, ...] = (
+    "hook_demo",
+    "slideshow",
+    "wall_of_text",
+    "meme",
+    "talking_head",
+)
+PLATFORM_FORMATS: dict[str, tuple[str, ...]] = {
+    "x": ("x_post", "x_thread"),
+    "reddit": ("reddit_post",),
+}
 
 DESCRIPTION_FIELDS: tuple[str, ...] = (
     "product",
@@ -121,6 +143,8 @@ class SocialIdea:
     why: str = ""
     script: tuple[str, ...] = ()
     hashtags: tuple[str, ...] = ()
+    platform: str = ""
+    subreddit: str = ""
     status: str = "new"
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -137,6 +161,8 @@ class GeneratedIdea:
     why: str = ""
     script: tuple[str, ...] = ()
     hashtags: tuple[str, ...] = ()
+    platform: str = ""
+    subreddit: str = ""
 
 
 @dataclass(frozen=True)

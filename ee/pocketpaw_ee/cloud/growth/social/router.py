@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.growth.social import service as social_service
-from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus
+from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
     GenerateIdeasRequest,
     SocialIdeaListResponse,
@@ -131,11 +131,14 @@ async def generate_ideas(
 )
 async def list_ideas(
     status: IdeaStatus | None = Query(default=None),
+    platform: Platform | None = Query(default=None),
     profile_id: str | None = _PROFILE_ID,
     ctx: RequestContext = Depends(request_context),
 ) -> SocialIdeaListResponse:
     """One profile's ideas, newest first, optionally one status."""
-    return await social_service.list_ideas(ctx, status=status, profile_id=profile_id)
+    return await social_service.list_ideas(
+        ctx, status=status, profile_id=profile_id, platform=platform
+    )
 
 
 @router.patch(

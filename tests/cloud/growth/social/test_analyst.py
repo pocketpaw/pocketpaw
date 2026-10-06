@@ -141,6 +141,26 @@ class TestIdeasParser:
         assert result[0].hashtags == ("#dentist", "#Kids")
         assert result[0].script == ("a", "b")
 
+    def test_platform_keeps_only_its_formats_and_cleans_subreddits(self):
+        text = (
+            '{"ideas": ['
+            '{"format": "reddit_post", "hook": "How we price", "subreddit": "r/smallbusiness",'
+            ' "hashtags": ["#x"]},'
+            '{"format": "reddit_post", "hook": "Bad sub", "subreddit": "not a sub!"},'
+            '{"format": "x_post", "hook": "Wrong platform"},'
+            '{"format": "meme", "hook": "Video idea"}'
+            "]}"
+        )
+        reddit = parse_ideas_response(text, 12, "reddit")
+        assert [(i.hook, i.subreddit, i.platform) for i in reddit] == [
+            ("How we price", "smallbusiness", "reddit"),
+            ("Bad sub", "", "reddit"),
+        ]
+        assert reddit[0].hashtags == ()
+        x = parse_ideas_response(text, 12, "x")
+        assert [(i.format, i.platform) for i in x] == [("x_post", "x")]
+        assert [i.format for i in parse_ideas_response(text, 12)] == ["meme"]
+
     def test_caps_at_the_limit_and_tolerates_junk(self):
         many = ",".join(f'{{"format": "meme", "hook": "h{i}"}}' for i in range(20))
         assert len(parse_ideas_response(f'{{"ideas": [{many}]}}', 3)) == 3

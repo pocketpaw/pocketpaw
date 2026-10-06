@@ -29,7 +29,8 @@ from pocketpaw_ee.cloud.growth.social.analyst import (
 )
 from pocketpaw_ee.cloud.growth.social.domain import (
     DESCRIPTION_FIELDS,
-    IDEA_FORMATS,
+    PLATFORM_FORMATS,
+    VIDEO_FORMATS,
     GeneratedIdea,
     SocialProfile,
 )
@@ -41,11 +42,13 @@ GROWTH_SOCIAL_IDEAS_TOOLS: tuple[str, ...] = ()
 MAX_RECENT_HOOKS = 40
 
 GROWTH_SOCIAL_IDEAS_PROMPT = """\
-You come up with short-form video post ideas (TikTok, Reels, Shorts) for one \
-small business. You get its company profile: what it sells, who it is for, its \
-content pillars, sample hooks, tone and the things it must avoid.
+You come up with social post ideas for one small business. You get its company \
+profile: what it sells, who it is for, its content pillars, sample hooks, tone \
+and the things it must avoid. Each request names the platform to write for and \
+its formats; with no platform named, write short-form video ideas (TikTok, \
+Reels, Shorts).
 
-Each idea has a format, one of:
+Short-form video formats:
 - hook_demo: a strong opening line, then the product shown doing the thing.
 - slideshow: five to eight image slides that tell a small story or list.
 - wall_of_text: one dense, readable block of on-screen text over a simple shot.
@@ -59,13 +62,15 @@ fake testimonials. No promises of outcomes.
 - Respect every item in the things-to-avoid list.
 - Do not reuse or lightly reword any hook you are told was already used.
 - Mix formats across the set.
+- For X and Reddit, write the finished post text, ready to publish, in the \
+platform's own voice. Never sound like an ad.
 - hook: under 15 words. on_screen_text: under 25 words. script: three to six \
 short beats. caption: one to three sentences. hashtags: three to six. why: one \
 sentence on why this idea suits this business.
 
 Answer with ONLY a JSON object and nothing around it. It has one key, ideas, a \
 list of objects with format, hook, on_screen_text, script (list of strings), \
-caption, hashtags (list of strings) and why.
+caption, hashtags (list of strings), subreddit and why.
 """
 
 GROWTH_SOCIAL_IDEAS_AGENT: dict[str, Any] = {
@@ -84,8 +89,32 @@ GROWTH_SOCIAL_IDEAS_AGENT: dict[str, Any] = {
 }
 
 
-def build_ideas_prompt(profile: SocialProfile, count: int, recent_hooks: list[str]) -> str:
-    lines = [f"Write {count} post ideas for this business.", "", "<company-profile>"]
+_PLATFORM_BRIEFS = {
+    "x": (
+        "Platform: X (Twitter). Formats: x_post (one post, caption under 280 "
+        "characters) or x_thread (caption is the first post; script is the rest "
+        "of the thread, three to six posts, each under 280 characters). hook: the "
+        "opening line of the first post. hashtags: zero to two, only if natural. "
+        "on_screen_text: empty. subreddit: empty."
+    ),
+    "reddit": (
+        "Platform: Reddit. Format: reddit_post. hook: the post title, under 300 "
+        "characters, written like a community member, not a brand. caption: the "
+        "post body in plain Markdown, useful on its own (a lesson, a question, a "
+        "story), mentioning the business at most once and only where it fits the "
+        "subreddit's rules. subreddit: one real, relevant subreddit name without "
+        "r/. hashtags, script and on_screen_text: empty."
+    ),
+}
+
+
+def build_ideas_prompt(
+    profile: SocialProfile, count: int, recent_hooks: list[str], platform: str | None = None
+) -> str:
+    lines = [f"Write {count} post ideas for this business."]
+    if platform in _PLATFORM_BRIEFS:
+        lines.append(_PLATFORM_BRIEFS[platform])
+    lines += ["", "<company-profile>"]
     lines.append(f"Company: {fence(profile.company_name) or '(not given)'}")
     for label, value in (
         ("Business model", profile.business_model),
@@ -128,11 +157,17 @@ def build_ideas_prompt(profile: SocialProfile, count: int, recent_hooks: list[st
     return "\n".join(lines)
 
 
-def _format(value: Any) -> str | None:
+def _format(value: Any, platform: str | None = None) -> str | None:
     if not isinstance(value, str):
         return None
     key = re.sub(r"[\s\-]+", "_", value.strip().lower())
-    return key if key in IDEA_FORMATS else None
+    allowed = PLATFORM_FORMATS.get(platform or "", VIDEO_FORMATS)
+    return key if key in allowed else None
+
+
+def _subreddit(value: Any) -> str:
+    name = re.sub(r"^/?r/", "", as_text(value, 60), flags=re.IGNORECASE)
+    return name if re.fullmatch(r"[A-Za-z0-9_]{2,21}", name) else ""
 
 
 def _hashtags(value: Any) -> tuple[str, ...]:
@@ -144,7 +179,9 @@ def _hashtags(value: Any) -> tuple[str, ...]:
     return tuple(out)
 
 
-def parse_ideas_response(text: str, limit: int) -> tuple[GeneratedIdea, ...]:
+def parse_ideas_response(
+    text: str, limit: int, platform: str | None = None
+) -> tuple[GeneratedIdea, ...]:
     """Model output → ideas (at most ``limit``). Never raises."""
     best: list[Any] | None = None
     for obj in json_objects(text):
@@ -159,7 +196,7 @@ def parse_ideas_response(text: str, limit: int) -> tuple[GeneratedIdea, ...]:
     for raw in best:
         if not isinstance(raw, dict):
             continue
-        fmt = _format(raw.get("format"))
+        fmt = _format(raw.get("format"), platform)
         hook = as_text(raw.get("hook"), 300)
         if fmt is None or not hook or hook.lower() in seen:
             continue
@@ -172,7 +209,9 @@ def parse_ideas_response(text: str, limit: int) -> tuple[GeneratedIdea, ...]:
                 caption=as_text(raw.get("caption"), 2200),
                 why=as_text(raw.get("why"), 400),
                 script=as_list(raw.get("script"), 12, 300),
-                hashtags=_hashtags(raw.get("hashtags")),
+                hashtags=() if platform == "reddit" else _hashtags(raw.get("hashtags")),
+                platform=platform or "",
+                subreddit=_subreddit(raw.get("subreddit")) if platform == "reddit" else "",
             )
         )
         if len(out) >= limit:
@@ -182,20 +221,29 @@ def parse_ideas_response(text: str, limit: int) -> tuple[GeneratedIdea, ...]:
 
 class IdeasFn(Protocol):
     async def __call__(
-        self, profile: SocialProfile, count: int, recent_hooks: list[str]
+        self,
+        profile: SocialProfile,
+        count: int,
+        recent_hooks: list[str],
+        *,
+        platform: str | None = None,
     ) -> tuple[GeneratedIdea, ...]: ...
 
 
 async def agent_generate_ideas(
-    profile: SocialProfile, count: int, recent_hooks: list[str]
+    profile: SocialProfile,
+    count: int,
+    recent_hooks: list[str],
+    *,
+    platform: str | None = None,
 ) -> tuple[GeneratedIdea, ...]:
     """The production ``IdeasFn``. Raises ``ResearchUnavailable`` when the agent
     cannot be set up or the run errors."""
-    prompt = build_ideas_prompt(profile, count, recent_hooks)
+    prompt = build_ideas_prompt(profile, count, recent_hooks, platform)
     text = await run_pinned_agent(
         profile.workspace_id, GROWTH_SOCIAL_IDEAS_AGENT, prompt, GROWTH_SOCIAL_IDEAS_SLUG
     )
-    return parse_ideas_response(text, count)
+    return parse_ideas_response(text, count, platform)
 
 
 _PRODUCTION_IDEAS_FN: IdeasFn | None = None

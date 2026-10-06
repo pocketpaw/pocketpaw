@@ -180,6 +180,8 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         why=doc.why,
         script=tuple(doc.script or ()),
         hashtags=tuple(doc.hashtags or ()),
+        platform=doc.platform,
+        subreddit=doc.subreddit,
         status=doc.status,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
@@ -197,6 +199,8 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         why=i.why,
         script=list(i.script),
         hashtags=list(i.hashtags),
+        platform=i.platform,
+        subreddit=i.subreddit,
         status=i.status,
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
@@ -431,7 +435,10 @@ async def generate_ideas(
     profile_key = str(doc.id)
     try:
         generated = await ideas_fn(
-            profile, body.count, await _recent_hooks(workspace_id, profile_key)
+            profile,
+            body.count,
+            await _recent_hooks(workspace_id, profile_key),
+            platform=body.platform,
         )
     except ResearchUnavailable as exc:
         raise CloudError(502, "social.ideas_failed", f"Idea generation failed: {exc}") from exc
@@ -451,6 +458,8 @@ async def generate_ideas(
             why=item.why,
             script=list(item.script),
             hashtags=list(item.hashtags),
+            platform=item.platform,
+            subreddit=item.subreddit,
             status="new",
         )
         await idea.insert()
@@ -462,7 +471,11 @@ async def generate_ideas(
 
 
 async def list_ideas(
-    ctx: RequestContext, *, status: str | None = None, profile_id: str | None = None
+    ctx: RequestContext,
+    *,
+    status: str | None = None,
+    profile_id: str | None = None,
+    platform: str | None = None,
 ) -> SocialIdeaListResponse:
     workspace_id = _require_workspace(ctx)
     doc = await _profile_doc(workspace_id, profile_id)
@@ -471,6 +484,8 @@ async def list_ideas(
     query: dict[str, Any] = {"workspace": workspace_id, "profile": str(doc.id)}
     if status is not None:
         query["status"] = status
+    if platform is not None:
+        query["platform"] = platform
     docs = (
         await _IdeaDoc.find(query)
         .sort([("createdAt", -1), ("_id", -1)])

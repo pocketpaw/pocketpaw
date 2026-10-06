@@ -27,6 +27,8 @@ class SocialIdea(TimestampedDocument):
     why: str = ""
     script: list[str] = Field(default_factory=list)
     hashtags: list[str] = Field(default_factory=list)
+    platform: str = ""
+    subreddit: str = ""
     status: str = "new"
 
     class Settings:

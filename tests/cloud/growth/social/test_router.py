@@ -123,7 +123,12 @@ class _FakeIdeas:
         self.calls: list[tuple[SocialProfile, int, list[str]]] = []
 
     async def __call__(
-        self, profile: SocialProfile, count: int, recent_hooks: list[str]
+        self,
+        profile: SocialProfile,
+        count: int,
+        recent_hooks: list[str],
+        *,
+        platform: str | None = None,
     ) -> tuple[GeneratedIdea, ...]:
         self.calls.append((profile, count, recent_hooks))
         if isinstance(self.result, Exception):

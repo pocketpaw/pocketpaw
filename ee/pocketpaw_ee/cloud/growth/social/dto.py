@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
@@ -29,6 +29,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     IdeaFormat,
     IdeaStatus,
     MonthlyRevenue,
+    Platform,
     SocialRole,
     TeamSize,
 )
@@ -180,6 +181,7 @@ class SocialProfileResponse(BaseModel):
 
 class GenerateIdeasRequest(BaseModel):
     count: int = Field(default=DEFAULT_IDEA_COUNT, ge=1, le=MAX_IDEA_COUNT)
+    platform: Platform | None = None
 
 
 class UpdateIdeaRequest(BaseModel):
@@ -232,6 +234,8 @@ class SocialIdeaResponse(BaseModel):
     why: str
     script: list[str]
     hashtags: list[str]
+    platform: Literal["", "x", "reddit"]
+    subreddit: str
     status: IdeaStatus
     created_at: str | None
     updated_at: str | None
