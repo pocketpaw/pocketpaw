@@ -7028,6 +7028,8 @@ other route `growth.write` (both MEMBER).
 | `POST /api/v1/growth/social/ideas/generate` | Generate new post ideas (below). |
 | `GET /api/v1/growth/social/ideas` | `{items}`, newest first. Optional `status=new\|approved\|skipped`; omitted returns every idea. Any other value is a 422. |
 | `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). |
+| `POST /api/v1/growth/social/ideas/schedule` | `{items: [{idea_id, scheduled_at}], timezone?, duration_minutes?}`: date approved ideas and give each a `/calendar` event (calendar `growth-social`); rescheduling moves the same event. `409 social.idea_not_approved` if any is not approved. Nothing is posted. |
+| `POST /api/v1/growth/social/ideas/{idea_id}/unschedule` | Clear the date and delete the idea's calendar event. |
 
 **Response (`SocialProfile`)** — every profile route returns this shape:
 
