@@ -829,5 +829,24 @@
     "tests": [
       "tests/cloud/test_belt_mandates.py::test_station_sighting_files_once_per_signal"
     ]
+  },
+  {
+    "label": "line: owner seats load agent config from the line, not the base",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "trust = _Trust(base_sha=trust_sha, tracked=tracked)",
+    "replace": "trust = _Trust(base_sha=base_sha, tracked=tracked)",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_from_the_base_never_the_line"
+    ]
+  },
+  {
+    "label": "line: a diff writing CLAUDE.md / AGENTS.md / CLAUDE.local.md is attached",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_PROTECTED_NAMES = _TRUST_NAMES | {\".git\", \".gitmodules\"}",
+    "replace": "_PROTECTED_NAMES = {\".claude\", \".mcp.json\", \".git\", \".gitmodules\"}",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_diff_touching_agent_config_is_refused",
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_from_the_base_never_the_line"
+    ]
   }
 ]

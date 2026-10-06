@@ -21,8 +21,8 @@
 #   CHECK    every charter check. LLM work only (a recipe skips both): FIX
 #            (``claude -p`` + the failure) while attempts last; REVIEW, read-only
 #            ``claude -p``, fails duplicates; strict ``{"verdict","notes"}``.
-#   DONE     ``git diff --cached --binary <start>``; refused when it touches
-#            ``.claude/``, ``.mcp.json``, ``.git``, ``.gitmodules`` or adds a secret.
+#   DONE     ``git diff --cached --binary <start>``; refused when it touches agent
+#            config (any ``_TRUST_NAMES`` entry), ``.git``, ``.gitmodules`` or a secret.
 #   CLEANUP  always: remove the temp dir, then ``git worktree prune``.
 # Task text is injection-screened before PREPARE and fenced ``<untrusted>`` in
 # every prompt; failures raise ``DevelopStationError`` naming the step (tails
@@ -34,7 +34,7 @@
 # ``POCKETPAW_FACTORY_WORKTREE_ROOT`` (required) so CLAUDE.md discovery walks up
 # through the owner's workspace, and drops those flags for develop/fix/review.
 # TRUST RULE, never break it: an owner-mode claude call only ever runs after
-# ``_restore_trusted`` put every ``_TRUST_NAMES`` entry back to the base commit.
+# ``_restore_trusted`` put every ``_TRUST_NAMES`` entry back to the BASE (never the line).
 # A crew worker (``DevelopRequest.model`` / ``instructions``) sets the develop
 # and fix seats' ``--model`` and adds its instructions, fenced ``<untrusted>``,
 # to their prompts; the review seat keeps the factory default.
@@ -279,7 +279,7 @@ class ClaudeCodeDevelop:
             _charter_argv(command, "CHECK")
 
         repo = self._resolve_repo(request.repo or str(found.get("repo") or ""))
-        base_branch, start_ref, line_note = await self._resolve_base(repo, request)
+        base_branch, start_ref, line_note, trust_sha = await self._resolve_base(repo, request)
 
         owner = request.setup == "owner" if request.setup else owner_setup()
         root: Path | None = None
@@ -311,11 +311,13 @@ class ClaudeCodeDevelop:
             git_snapshot = (worktree / ".git").read_bytes()
             trust: _Trust | None = None
             if root is not None:
-                listed = await self._git(worktree, "ls-tree", "-r", "--name-only", "-z", base_sha)
+                # Agent config comes from the base, never the line: a line holds
+                # commits a gate approved but the captain has not merged.
+                listed = await self._git(worktree, "ls-tree", "-r", "--name-only", "-z", trust_sha)
                 tracked = [
                     p for p in listed.split("\0") if p and _TRUST_NAMES.intersection(p.split("/"))
                 ]
-                trust = _Trust(base_sha=base_sha, tracked=tracked)
+                trust = _Trust(base_sha=trust_sha, tracked=tracked)
 
             # ORIENT (LLM work only): the repo's architecture, as the source of truth.
             orient, orient_note = "", "skipped (recipe)"
@@ -473,14 +475,15 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"PREPARE: {err}")
         return path
 
-    async def _resolve_base(self, repo: Path, request: DevelopRequest) -> tuple[str, str, str]:
-        """``(base branch, worktree start ref, line note)``. The base defaults to
-        the repo's checked-out branch; the start is ``origin/<base>`` (after a
-        fetch) when an origin exists, else ``<base>`` — the belt executor's rule.
-        A mandate's run starts from its LINE instead, synced with the base
-        first: a line the base already holds (the captain merged it) moves to
-        the base; a base with commits the line lacks is merged into it
-        (``_merge_base_into``); history is never rewritten. The note says which."""
+    async def _resolve_base(self, repo: Path, request: DevelopRequest) -> tuple[str, str, str, str]:
+        """``(base branch, worktree start ref, line note, base commit)``. The base
+        defaults to the repo's checked-out branch; the start is ``origin/<base>``
+        (after a fetch) when an origin exists, else ``<base>`` — the belt
+        executor's rule. A mandate's run starts from its LINE instead, synced
+        with the base first: a line the base already holds (the captain merged
+        it) moves to the base; a base with commits the line lacks is merged into
+        it (``_merge_base_into``); history is never rewritten. The note says
+        which. The base commit is where owner setup restores agent config from."""
         base = request.base_branch.strip()
         if not base:
             base = (await self._git(repo, "rev-parse", "--abbrev-ref", "HEAD")).strip()
@@ -493,32 +496,32 @@ class ClaudeCodeDevelop:
         if has_origin:
             await self._git(repo, "fetch", "origin", base)
         base_ref = f"origin/{base}" if has_origin else base
-        line = line_branch(request.mandate_id)
-        if line is None:
-            return base, base_ref, ""
 
         async def git(*args: str) -> tuple[int, str, str]:
             return await self.run([*_GIT, *args], cwd=repo, timeout=_GIT_TIMEOUT)
 
+        base_sha = await commit_of(git, base_ref)
+        if not base_sha:
+            raise DevelopStationError(f"PREPARE: base {base_ref!r} not found")
+        line = line_branch(request.mandate_id)
+        if line is None:
+            return base, base_ref, "", base_sha
         try:
             tip, local = await line_tip(git, line, has_origin=has_origin)
         except LineError as exc:
             raise DevelopStationError(f"PREPARE: {exc}") from None
         if not tip:
-            return base, base_ref, f"{line} (new, from {base})"
-        base_sha = await commit_of(git, base_ref)
-        if not base_sha:
-            raise DevelopStationError(f"PREPARE: base {base_ref!r} not found")
+            return base, base_ref, f"{line} (new, from {base})", base_sha
         if await is_ancestor(git, tip, base_sha):
             await self._move_line(git, line, base_sha, local)
             note = f"{line} (on {base})" if tip == base_sha else f"{line} (merged; moved to {base})"
-            return base, base_sha, note
+            return base, base_sha, note, base_sha
         if await is_ancestor(git, base_sha, tip):
             await self._move_line(git, line, tip, local)
-            return base, tip, line
+            return base, tip, line, base_sha
         merged = await self._merge_base_into(repo, request, line, tip, base, base_sha)
         await self._move_line(git, line, merged, local)
-        return base, merged, f"{line} ({base} merged in)"
+        return base, merged, f"{line} ({base} merged in)", base_sha
 
     @staticmethod
     async def _move_line(git: GitFn, line: str, new: str, old: str) -> None:
@@ -830,16 +833,16 @@ def _charter_argv(command: str, step: str) -> list[str]:
     return argv
 
 
-_PROTECTED_DIRS = {".claude", ".git"}
-_PROTECTED_FILES = {".mcp.json", ".gitmodules"}
+_PROTECTED_NAMES = _TRUST_NAMES | {".git", ".gitmodules"}
 
 
 def _is_protected(path: str) -> bool:
-    """A path a produced diff may never carry: agent config the next CLI run
-    would load (``.claude/``, ``.mcp.json``) or git plumbing (``.git``,
-    ``.gitmodules``), at any depth."""
-    parts = path.strip().strip('"').split("/")
-    return bool(_PROTECTED_DIRS.intersection(parts)) or parts[-1] in _PROTECTED_FILES
+    """A path a produced diff may never carry, at any depth: agent config a
+    later CLI run would load (every ``_TRUST_NAMES`` entry: ``.claude/``,
+    ``.mcp.json``, CLAUDE.md, CLAUDE.local.md, AGENTS.md) or git plumbing
+    (``.git``, ``.gitmodules``). It keeps factory-written instructions off a
+    mandate's line, where later owner-mode seats would build on them."""
+    return bool(_PROTECTED_NAMES.intersection(path.strip().strip('"').split("/")))
 
 
 def _assert_intact(worktree: Path, snapshot: bytes) -> None:
