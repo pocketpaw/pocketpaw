@@ -67,6 +67,10 @@ WARNING_SEVERITIES = frozenset({"moderate", "high", "critical"})
 
 _HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
+#: Most outbound registry / CDN lookups one resolve keeps in flight. A request list
+#: is author-supplied, so the fan-out is bounded rather than one task per package.
+MAX_CONCURRENT_LOOKUPS = 12
+
 # Rejection codes. Stable strings the agent (and tests) can key on.
 INVALID_NAME = "invalid_name"
 NON_REGISTRY_SPEC = "non_registry_spec"
@@ -646,14 +650,25 @@ async def resolve_dependencies(
     owns_client = client is None
     http = client or httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True)
     try:
+        gate = asyncio.Semaphore(MAX_CONCURRENT_LOOKUPS)
+
+        async def _bounded(coro):
+            async with gate:
+                return await coro
+
         resolved = await asyncio.gather(
-            *(_resolve_one(http, r, registry=registry, warnings=result.warnings) for r in pending)
+            *(
+                _bounded(_resolve_one(http, r, registry=registry, warnings=result.warnings))
+                for r in pending
+            )
         )
         survivors = [v for v in resolved if isinstance(v, ResolvedPackage)]
         result.rejected.extend(v for v in resolved if isinstance(v, Rejection))
         result.warnings.extend(await _advisory_warnings(http, survivors, registry=registry))
         if engine == "html":
-            survivors = list(await asyncio.gather(*(_with_esm(http, p) for p in survivors)))
+            survivors = list(
+                await asyncio.gather(*(_bounded(_with_esm(http, p)) for p in survivors))
+            )
         for pkg in survivors:
             result.packages[pkg.name] = pkg
     finally:
