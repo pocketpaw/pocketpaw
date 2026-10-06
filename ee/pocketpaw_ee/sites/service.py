@@ -8401,6 +8401,45 @@ async def reconcile_plan_carried_sites(workspace_id: str) -> dict[str, int]:
     return {"carried": allowance, "released": released}
 
 
+async def reconcile_all_plan_carried_sites() -> dict[str, int]:
+    """Run ``reconcile_plan_carried_sites`` for every workspace carrying a site.
+
+    The periodic half of the plan rail. ``set_workspace_plan`` and the override
+    write reconcile at write time, but an allowance can also shrink with no write
+    at all — an ``included_sites`` override that reaches its ``expires_at`` — or
+    through a writer that bypasses both (a direct DB edit, a migration). Only a
+    pass on the clock converges those, so the renewal sweep calls this each tick.
+
+    Scoped to workspaces with at least one site on the plan rail; nobody else has
+    anything to release. Each workspace runs in its own try so one failure cannot
+    stop the rest. Returns ``{"workspaces": n, "released": n, "failed": n}``.
+    """
+    query = {"billing_rail": _PLAN_RAIL}
+    try:
+        workspace_ids = await _SiteDoc.get_pymongo_collection().distinct("workspace", query)
+    except Exception:
+        # mongomock-motor returns a cursor rather than an awaitable for
+        # ``distinct``; fall back to a scan (same shape as cycles.service).
+        workspace_ids = list({doc.workspace async for doc in _SiteDoc.find(query)})
+
+    counts = {"workspaces": 0, "released": 0, "failed": 0}
+    for workspace_id in workspace_ids:
+        if not workspace_id:
+            continue
+        counts["workspaces"] += 1
+        try:
+            result = await reconcile_plan_carried_sites(str(workspace_id))
+            counts["released"] += result.get("released", 0)
+        except Exception:
+            counts["failed"] += 1
+            logger.exception(
+                "sites.reconcile: could not reconcile plan-carried sites for workspace=%s; "
+                "the next sweep retries it",
+                workspace_id,
+            )
+    return counts
+
+
 async def _plan_can_carry(workspace_id: str, *, site_id: str | None) -> bool:
     """Is there a free slot on the workspace plan for this site?
 

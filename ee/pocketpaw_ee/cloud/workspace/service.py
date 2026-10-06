@@ -2030,8 +2030,9 @@ async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
     #
     # BEST-EFFORT, always. The plan move is the thing the customer paid for and it
     # has already landed; a failure to tidy sites must not undo it or 500 a webhook
-    # that will never be redelivered. The periodic sites sweep re-runs this, so a
-    # failure here costs a delay rather than the outcome.
+    # that will never be redelivered. The renewal sweep re-runs this for every
+    # workspace carrying a site (``reconcile_all_plan_carried_sites``) on each
+    # tick, so a failure here costs a delay rather than the outcome.
     try:
         from pocketpaw_ee.sites import service as sites_service
 
@@ -2554,6 +2555,29 @@ async def platform_set_workspace_overrides(
         raise NotFound("workspace", workspace_id)
     doc.overrides = overrides
     await doc.save()
+
+    # An ``included_sites`` override moves the site allowance exactly like a plan
+    # does, so clearing or lowering one must release the overflow the same way
+    # ``set_workspace_plan`` does. Best-effort: the override write stands, and the
+    # renewal sweep converges whatever this misses.
+    try:
+        from pocketpaw_ee.sites import service as sites_service
+
+        reconciled = await sites_service.reconcile_plan_carried_sites(workspace_id)
+        if reconciled.get("released"):
+            logger.info(
+                "workspace.platform_set_workspace_overrides: workspace=%s released %d "
+                "site(s) the new allowance does not carry",
+                workspace_id,
+                reconciled["released"],
+            )
+    except Exception:
+        logger.exception(
+            "workspace.platform_set_workspace_overrides: could not reconcile plan-carried "
+            "sites for workspace=%s — the override write STANDS; the sites sweep will "
+            "converge it",
+            workspace_id,
+        )
     return doc
 
 
