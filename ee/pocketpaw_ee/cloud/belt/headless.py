@@ -13,7 +13,7 @@
 #     ``POCKETPAW_FACTORY_DEVELOP=claude``); tests inject a canned-diff fake.
 #   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued blob (task,
 #     expected outcome, repo, base, mandate provenance, ``recipe``), calls the
-#     DevelopFn,
+#     DevelopFn with the run's ``action_id`` (the develop feed's key),
 #     then back-writes diff + base_branch + ``files_changed`` (the DevelopFn's
 #     count, else the diff's ``+++`` headers) onto the SAME action, clears
 #     ``station_pending`` and mints a Decision-Graph ``correlation_id``. Never
@@ -75,6 +75,9 @@ class DevelopRequest:
     # A charter recipe name: run that deterministic command instead of an LLM
     # develop. "" = ordinary develop work.
     recipe: str = ""
+    # The run (``code_change`` Action id) this develop works: the key the
+    # station's step feed is stored under. "" = no run (a direct call).
+    action_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,7 @@ class HeadlessDevelopRunner:
             mandate_id=str(blob.get("mandate_id") or ""),
             shift_no=int(blob.get("shift_no") or 0),
             recipe=str(blob.get("recipe") or ""),
+            action_id=action_id,
         )
 
         try:

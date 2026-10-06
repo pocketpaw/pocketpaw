@@ -232,5 +232,86 @@
     "tests": [
       "tests/cloud/test_belt_mandates.py::test_shift_gives_the_foreman_the_repo_c4_components"
     ]
+  },
+  {
+    "label": "feed: a tool result is stored unredacted (the scrub is gone)",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/steps.py",
+    "find": "    text = redact_output(text[:_REDACT_SCAN_CHARS])\n",
+    "replace": "    text = text[:_REDACT_SCAN_CHARS]\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: a tool input's values are stored unredacted",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/steps.py",
+    "find": "    scrubbed = _redact_leaves(scrub_params(value))\n",
+    "replace": "    scrubbed = scrub_params(value)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: the develop seat keeps json output, so nothing streams",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            stream=feed_for is not None,\n",
+    "replace": "            stream=False,\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: a failed develop raises before its feed is stored",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        if feed_for is not None:\n            await self._store_feed(feed_for, step, out, cwd)\n        if code != 0:\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(err or out)}\")\n",
+    "replace": "        if code != 0:\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(err or out)}\")\n        if feed_for is not None:\n            await self._store_feed(feed_for, step, out, cwd)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: a stream's trailing system line hides the result envelope",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "        for line in reversed(stdout.splitlines()):\n",
+    "replace": "        for line in stdout.splitlines()[-1:]:\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_stream_result_envelope_is_the_seat_result"
+    ]
+  },
+  {
+    "label": "feed: the step cap is lifted",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=FEED_MAX_BYTES)\n",
+    "replace": "    recorder = StepRecorder(max_steps=10**9, max_total_bytes=FEED_MAX_BYTES)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_feed_caps_steps_and_counts_the_rest"
+    ]
+  },
+  {
+    "label": "feed: the byte cap is lifted",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=FEED_MAX_BYTES)\n",
+    "replace": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=10**12)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_feed_caps_bytes"
+    ]
+  },
+  {
+    "label": "feed: a result is not named from its tool_use_id, so calls never pair",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "                name = names.get(str(block.get(\"tool_use_id\") or \"\"), \"\")\n",
+    "replace": "                name = \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: the route serves another workspace's run",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    await _owned_run(workspace_id, action_id)\n    doc = await BeltRunFeed.find_one(\n",
+    "replace": "    doc = await BeltRunFeed.find_one(\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_feed_route_tenancy_and_empty"
+    ]
   }
 ]

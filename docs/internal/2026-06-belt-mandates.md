@@ -269,7 +269,9 @@ either). Tighten both surfaces together before GA.
 the same beyond-four shape the belt console uses). Beanie docs (`MandateDoc`,
 `ShiftDoc`, `SightingDoc`; all workspace-keyed) live in `mandates/domain.py`,
 imported ONLY by `mandates/service.py`, and register into `init_beanie` via a
-lazy import in `cloud/models/__init__.py` (the calendar-doc pattern).
+lazy import in `cloud/models/__init__.py` (the calendar-doc pattern). A run's
+develop feed is a `BeltRunFeed` row owned by `belt/service.py` (see "The develop
+feed").
 
 ## Soul wiring (demo bar)
 
@@ -373,7 +375,9 @@ PREPARE  screen the task text (InjectionScanner, HIGH refuses); refuse any
 ORIENT   LLM work only (recipes skip it): the repo's architecture brief from
          loom (else its C4 list) for the develop and review prompts
 WORK     a recipe task runs the charter's recipe command; otherwise
-         `claude -p` develops (--permission-mode acceptEdits)
+         `claude -p` develops (--permission-mode acceptEdits,
+         --output-format stream-json --verbose); its events become the run's
+         develop feed (see "The develop feed")
 CHECK    run every charter check
 FIX ≤2   a red check, or a failed review, sends the failure back to
          `claude -p`, then CHECK again; at most 2 attempts (recipes get none)
@@ -514,6 +518,51 @@ fails. The status flip uses the store's `_update_status` with
 `require_status=approved`, so a concurrent decision makes the flip a no-op
 (the run then fails with that reason). The reopened row keeps its first
 `approved_by` / `approved_at` until the next approval overwrites them.
+
+### The develop feed
+
+The run page shows what the developer agent did: the DEVELOP seat runs with
+`--output-format stream-json --verbose` (every other seat keeps `json`), and
+once it exits the station folds its stdout into steps and stores them. Path:
+
+- `belt/feed.py` `stream_events` turns the CLI lines into `AgentEvent`s
+  (`agents/protocol.py`, the one event schema): assistant `text` → message,
+  non-empty `thinking` → thinking, `tool_use` → tool_use (name + input),
+  `tool_result` → tool_result named from its `tool_use_id`. Each line's ISO
+  `timestamp` becomes the step time. System lines, rate-limit events and the
+  result envelope are skipped; the station reads the envelope separately
+  (`foreman.claude_result_envelope`: the whole stdout for `json`, else the last
+  `type: "result"` line, since the CLI prints more after it), so the seat's
+  result text and its `is_error` check work in both formats.
+- `fold_feed` feeds them through `steps.record_agent_event` (the adapter the
+  group/DM chat bridge uses) into a `StepRecorder`, so a feed is the chat steps
+  shape with the same per-field caps and the same scrub: secret-named input
+  keys masked, and every string in a tool input and every result redacted
+  with `security.redact` patterns. The developer's prose between tool calls
+  has no chat-step kind and is stored as a `thinking` step. Worktree paths are
+  shown relative.
+- Caps: 2,000 steps and 2 MB per stored feed (`FEED_MAX_STEPS`,
+  `FEED_MAX_BYTES`); what is dropped is counted in `steps_omitted`. Only the
+  develop stage is captured today, so that is also the per-run budget.
+- Storage: `BeltRunFeed` (`belt_run_feeds`), one row per (workspace, run,
+  stage), unique on that key; a re-develop replaces the stage's row. Only
+  `belt/service.py` touches it (`save_run_feed` / `get_run_feed`). It lives
+  outside the Instinct `code_change` blob because `GET /belt/runs` reads every
+  blob. Measured against JSON files beside the worktree, 2,000 steps (2.6 MB
+  of JSON): Mongo upsert 17 ms / read 5.6 ms, file write 12 ms / read 5 ms. Same
+  order; Mongo is readable from every web process, a file is host-local, and
+  the strict setup's worktree is a temp dir deleted at CLEANUP.
+- The feed is stored before a failed seat raises, so a develop that died
+  mid-tool still shows its steps (the open call reads `missing_result`). The
+  save is best-effort: a fold or Mongo failure is logged and never fails the
+  run. A seat killed by the timeout prints nothing the station keeps, so it
+  stores no feed.
+- `GET /api/v1/belt/runs/{id}/feed?stage=develop` (`belt.read`) returns
+  `{action_id, stage, steps?, stepsOmitted?}`, the steps in the chat history
+  wire shape (`steps_wire_fields`), so the UI maps them with
+  `persistedStepsToEntries` and renders them with `ThinkingSteps`. No `steps`
+  key when the stage recorded none; a foreign or non-belt run is a 404, the
+  same tenancy as `GET /belt/runs/{id}`.
 
 ### Runs read model
 
@@ -729,8 +778,14 @@ cadence scheduler; the headless file also lands a run (commit subject from the
 title) and drives the re-develop against a real tmp repo: two diffs from one
 base, the first landed and merged, the second re-developed once and back at the
 gate, a second conflict failing with "base moved twice", and no develop loop
-failing with its reason. `tests/mutations/belt_factory_runs.json` breaks each
-of these on purpose. CI runs these in the "Belt mandates and the craft factory
+failing with its reason. `tests/cloud/test_belt_feed.py` drives a queued run
+through the real runner and station with a `claude` that prints captured-shape
+stream-json: steps stored in order and served by the feed route, relative
+paths, secrets planted in a tool result and a tool input absent from storage
+and the response, the result envelope read past the trailing system line, a
+failed develop still storing its feed, a failing save not failing the run, the
+step and byte caps, and the route's tenancy 404.
+`tests/mutations/belt_factory_runs.json` breaks each of these on purpose. CI runs these in the "Belt mandates and the craft factory
 develop station" step (`tests/cloud` is outside the default addopts).
 
 `tests/cloud/test_belt_autopilot.py` (feat/belt-autopilot) pins both new pieces:

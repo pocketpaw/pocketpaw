@@ -16,7 +16,8 @@
 # prompt carries third-party sighting text) and reads the envelope's
 # ``result``; ``mock`` is deterministic (one task per open sighting not already
 # in flight, highest severity first; ``set_mock_plan()`` overrides it in tests).
-# ``claude_cli_argv`` / ``claude_result_text`` are the ONE place the factory
+# ``claude_cli_argv`` / ``claude_result_text`` (``claude_result_envelope``
+# underneath, ``json`` and ``stream-json`` alike) are the ONE place the factory
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
 # and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
 # set), and they pin every seat to no settings files, no MCP and no hooks (only
@@ -145,7 +146,7 @@ _ISOLATION_FLAGS = (
 )
 
 
-def claude_cli_argv(*args: str, isolated: bool = True) -> list[str]:
+def claude_cli_argv(*args: str, isolated: bool = True, stream: bool = False) -> list[str]:
     """argv for one headless call to the SYSTEM Claude Code CLI.
 
     Every factory LLM seat (foreman, develop, fix, review) builds its command
@@ -154,24 +155,47 @@ def claude_cli_argv(*args: str, isolated: bool = True) -> list[str]:
     ``claude`` on PATH — never the SDK's bundled copy, which goes stale.
     Resolved per call so env changes apply. ``isolated=False`` drops the
     isolation flags: only the develop station's owner setup passes it, and only
-    after restoring the worktree's agent config to the base commit."""
+    after restoring the worktree's agent config to the base commit.
+    ``stream=True`` asks for ``stream-json`` (one JSON event per line; ``-p``
+    needs ``--verbose`` for it) so the develop seat's tool calls can be read
+    back as a feed; ``claude_result_text`` reads both formats."""
     binary = os.environ.get("POCKETPAW_FACTORY_CLAUDE_BIN") or shutil.which("claude") or "claude"
     isolation = _ISOLATION_FLAGS if isolated else ()
-    argv = [binary, "-p", *args, *isolation, "--output-format", "json"]
+    output = ("stream-json", "--verbose") if stream else ("json",)
+    argv = [binary, "-p", *args, *isolation, "--output-format", *output]
     model = (os.environ.get("POCKETPAW_FACTORY_CLAUDE_MODEL") or "").strip()
     if model:
         argv += ["--model", model]
     return argv
 
 
-def claude_result_text(stdout: str) -> str:
-    """The model text from a ``--output-format json`` envelope (its ``result``
-    field); a bare-text stdout (older CLI) is returned as-is."""
+def claude_result_envelope(stdout: str) -> dict[str, Any] | None:
+    """The CLI's final ``{"type": "result", ...}`` envelope: the whole stdout
+    for ``--output-format json``, else the LAST ``type == "result"`` line of a
+    ``stream-json`` run (the CLI may print more events after it). ``None`` when
+    there is none (bare text, a killed run)."""
     try:
         envelope = json.loads(stdout)
     except json.JSONDecodeError:
-        return stdout
-    if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
+        envelope = None
+        for line in reversed(stdout.splitlines()):
+            if '"result"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result":
+                return event
+    return envelope if isinstance(envelope, dict) else None
+
+
+def claude_result_text(stdout: str) -> str:
+    """The model text from the result envelope (its ``result`` field), for
+    either output format; a stdout with no envelope (older CLI, bare text) is
+    returned as-is."""
+    envelope = claude_result_envelope(stdout)
+    if envelope is not None and isinstance(envelope.get("result"), str):
         return envelope["result"]
     return stdout
 

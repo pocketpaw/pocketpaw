@@ -1,89 +1,38 @@
-# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
-# cloud.realtime re-export shim is deleted.
 """Bridge between cloud chat events and the PocketPaw agent pool.
 
 Pure cross-domain orchestrator: subscribes to the legacy ``message.sent``
-``event_bus`` event and delegates every Beanie touch to the owning
-entity service (``chat.group_service`` for group lookup,
-``agents.service`` for persona, ``chat.message_service`` for history
-rehydration + reply persistence, ``pockets.service`` for ripple-spec
-auto-pocket creation).
+``event_bus`` event and delegates every Beanie touch to the owning entity
+service (``chat.group_service`` for group lookup, ``agents.service`` for persona,
+``chat.message_service`` for history rehydration + reply persistence,
+``pockets.service`` for ripple-spec auto-pocket creation).
 
-Responsibilities:
-1. Checks each agent's respond_mode (silent, auto, mention_only, smart)
-2. Triggers agents that should respond and streams responses via WebSocket
-3. Parses ripple specs from agent responses
-4. Delegates pocket creation to ``pockets_service.create_from_ripple_spec``
-5. Persists agent messages via ``message_service.create_agent_message``
+``_dispatch_agent_responses`` runs the shared run-start billing gate
+(``credits.guards.over_billing_limit``) BEFORE respond-mode evaluation, so an
+over-budget tenant triggers no model call (not even ``_smart_relevance_check``'s
+pre-classifier); a rejection emits one ``agent.error``. It then checks each
+agent's respond_mode (silent, auto, mention_only, smart).
 
-Updated 2026-09-28 (feat/persist-tool-steps): ``_run_agent_response`` feeds
-the run's thinking, ``tool_use`` and ``tool_result`` events to the same
-``StepRecorder`` the SSE chat path uses (``chat/runs/steps.py``) and persists the
-result on the agent Message (``create_agent_message(steps=..., steps_omitted=...)``),
-so a group/DM reply keeps the work behind it after a refresh, like a chat reply
-does. The events are AgentEvents, not run_core frames, so ``_record_step`` adapts
-them to the frame shapes the recorder takes. Nothing emitted on the WS changes.
-The kwargs ride only when steps were recorded, so a plain reply's write is as before.
-
-User-message attachments ride the ``message.sent`` payload so channel
-agents see the same filename/mime/size context DM agents already get —
-appended to the user prompt as an ``Attached files:`` block before
-``pool.run`` (matching ``src/pocketpaw/agents/loop.py``'s DM shape).
-
-Updated 2026-06-12: ``_run_agent_response`` now binds the agent's
-workspace/user identity (``attach_agent_identity``) around ``pool.run`` so
-in-process MCP tools that resolve scope from ContextVars (fabric, instinct,
-decisions, connectors) work on the group/DM bridge path. The SSE chat path
-already did this in ``run_core``; the bridge path skipped it, so every
-scoped tool returned "requires workspace context".
-
-Updated 2026-06-28 (feat/aiam-agent-revoke, AW-4): ``_run_agent_response``
-catches ``AgentDisabled`` from ``pool.get`` explicitly and SKIPS the agent
-(returns None, no error to the channel) — a soft-disabled agent simply stops
-responding in groups/DMs until re-enabled.
-
-Updated 2026-07-08 (feat/billing-enforce-gate): ``_dispatch_agent_responses``
-now runs the shared run-start billing gate (``credits.guards.over_billing_limit``)
-ABOVE the respond-mode evaluation — before ``_smart_relevance_check``'s Haiku
-pre-classifier call and before ``pool.run`` — so an over-budget tenant triggers
-NO model call on the group/DM auto-response path. On rejection it emits one
-``agent.error`` to the group and returns.
-Updated 2026-07-11 (ART-1): ``_run_agent_response`` binds a per-run
-delivered-artifact collector around ``pool.run`` and drains it into a
-``{type:"artifact", meta}`` attachment per successful ``deliver_artifact`` call,
-so a group/DM agent that delivers a file persists the structured signal too.
-This path has no run-transport SSE stream, so it emits no ``artifact`` event —
-that applies only to the streaming ``run_core`` path.
-
-Updated 2026-08-15 (HTN-11): the phrasing function moved to
-``shared/tool_narration.py`` as ``narrate_tool_use`` and this module imports it.
-It was private here while exactly one surface narrated; the streaming
-``run_core`` path now calls the same function, and a second copy is how the two
-surfaces would drift apart. Same arrangement as ``plan_normalizer``.
-
-Updated 2026-08-15 (HTN-2): ``narrate_tool_use`` takes the running agent and
-resolves that agent's OWN ``ToolRegistry`` (``tool_bridge.narration_registry_for``),
-so a tool's declared phrase is read off the live instance the registry holds
-rather than from a hardcoded name->class map that constructed the tool. Tools
-that declare nothing now derive a phrase from their name, so an unannotated
-tool reaches the wire as "Publishing the site" instead of no narration at all.
-
-Updated 2026-08-15 (HTN-1): the ``tool_use`` branch reads ``event.metadata``
-(name + input) with ``event.content`` as fallback — the precedence ``run_core``
-already uses — and adds an additive ``narration`` field to ``agent.tool_use``
-carrying the tool's plain-language phrase ("Searching the web for quarterly
-filings"). ``tool`` still carries the tool name, so clients keyed on it are
-unaffected; a tool with no ``Narration`` emits no ``narration`` field.
-
-Updated 2026-08-15 (HTN-5): the ``tool_use`` branch routes a recognized plan tool
-(``write_plan`` today) through ``shared/plan_normalizer.py`` and emits
-``agent.plan_updated`` INSTEAD of ``agent.tool_use`` — the panel is the narration,
-so "Using write_plan..." alongside it is bookkeeping noise. The substitution is
-fail-open: a plan call whose arguments cannot be read falls back to the ordinary
-``agent.tool_use``, so the surface degrades to today's behaviour rather than
-going silent. A per-run ``PlanTracker`` supplies the monotonic ``seq`` and
-suppresses re-emits of an unchanged plan (``write_plan`` fires at both the start
-and the end of every step and resends the whole list each time).
+``_run_agent_response`` streams one agent's reply over the WS:
+  * binds the agent's workspace/user identity (``attach_agent_identity``), a
+    per-run delivered-artifact collector and the turn slot around ``pool.run``,
+    so ContextVar-scoped MCP tools work and a ``deliver_artifact`` call lands as
+    an ``{type:"artifact", meta}`` attachment (no ``artifact`` SSE event: this
+    path has no run stream);
+  * skips an agent ``pool.get`` reports disabled (``AgentDisabled``), silently;
+  * appends user-message attachments as an ``Attached files:`` block;
+  * reads ``tool_use`` name + input from ``metadata`` first (``content`` is
+    prose), adds the tool's plain-language ``narration``
+    (``shared/tool_narration.narrate_tool_use``, resolved from the running
+    agent's own ``ToolRegistry``) when there is one, and emits a recognized plan
+    tool as ``agent.plan_updated`` instead of a tool chip (fail-open: an
+    unreadable plan call falls back to the chip; a per-run ``PlanTracker``
+    supplies ``seq`` and drops unchanged re-emits);
+  * feeds thinking, ``tool_use`` and ``tool_result`` events to a
+    ``StepRecorder`` through ``steps.record_agent_event`` (the adapter the belt
+    develop feed shares) and persists the steps on the agent Message, only when
+    some were recorded;
+  * parses ripple specs into pockets and persists the reply via
+    ``message_service.create_agent_message``.
 """
 
 from __future__ import annotations
@@ -104,7 +53,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     AgentStreamStart,
     AgentToolUse,
 )
-from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
+from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder, record_agent_event
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
 from pocketpaw_ee.cloud.shared.tool_narration import narrate_tool_use
@@ -637,7 +586,7 @@ async def _run_agent_response(
             agent_id, user_message, session_key, history, knowledge_context=knowledge_context
         ):
             if event.type in {"message", "text"}:
-                _record_step(recorder, event)
+                record_agent_event(recorder, event)
                 full_text += event.content
                 now = asyncio.get_event_loop().time()
                 if now - last_emit_ts >= STREAM_CHUNK_THROTTLE_S:
@@ -712,12 +661,12 @@ async def _run_agent_response(
                 narration = narrate_tool_use(tool_name, tool_input, instance)
                 if narration:
                     payload["narration"] = narration
-                _record_step(recorder, event, tool_name, tool_input, narration)
+                record_agent_event(recorder, event, tool_name, tool_input, narration)
                 await emit(AgentToolUse(data=payload))
             elif event.type == "tool_result":
-                _record_step(recorder, event)
+                record_agent_event(recorder, event)
             elif event.type == "thinking":
-                _record_step(recorder, event)
+                record_agent_event(recorder, event)
                 await emit(
                     AgentToolUse(
                         data={
@@ -878,45 +827,6 @@ async def _group_history_for_agent(
             name = m.sender_name or names.get(m.sender or "") or "A member"
         history.append({"role": "user", "content": f"{name}: {m.content}"})
     return history
-
-
-def _record_step(
-    recorder: StepRecorder,
-    event: Any,
-    tool_name: str = "",
-    tool_input: Any = None,
-    narration: str | None = None,
-) -> None:
-    """Adapt one AgentEvent to the run_core frame the recorder takes.
-
-    ``tool_use`` arrives with its name, input and narration already resolved by
-    the caller (the same values the WS chip gets). ``tool_result`` resolves its own:
-    the bridge emits nothing for it, so there is no caller-side parsing to reuse.
-    The resolution mirrors run_core's ``_drive_agent_loop`` so both surfaces
-    record the same call the same way.
-    """
-    etype = getattr(event, "type", "")
-    content = getattr(event, "content", None)
-    meta = getattr(event, "metadata", None)
-    meta = meta if isinstance(meta, dict) else {}
-    if etype == "thinking":
-        recorder.observe("thinking", {"content": content if isinstance(content, str) else ""})
-    elif etype in {"message", "text"}:
-        recorder.observe("chunk", {})
-    elif etype == "tool_use":
-        frame: dict[str, Any] = {"tool": tool_name, "input": tool_input}
-        if narration:
-            frame["narration"] = narration
-        if meta.get("input_pending") is True:
-            frame["input_pending"] = True
-        recorder.observe("tool_start", frame)
-    elif etype == "tool_result":
-        name = meta.get("name") or meta.get("tool") or ""
-        output: Any = content
-        if isinstance(content, dict):
-            name = name or content.get("tool") or content.get("name") or ""
-            output = content.get("result", content)
-        recorder.observe("tool_result", {"tool": name, "output": output})
 
 
 def register_agent_bridge() -> None:

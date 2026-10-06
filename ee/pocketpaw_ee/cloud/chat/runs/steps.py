@@ -1,25 +1,25 @@
-"""Record the tool calls and thinking an agent run streams, for the Message.
+"""Record the tool calls and thinking an agent run streams, as ordered steps.
 
-Created: 2026-09-28 (feat/persist-tool-steps) — tool calls, tool results and
-thinking a chat run streams used to reach only the Redis run stream (1h TTL), so
-a refresh showed the reply and none of the work behind it. ``StepRecorder`` is
-fed the same ``(event_name, event_data)`` frames the run loop writes to that
-stream and folds them into the ordered ``steps`` list stored on the assistant
-``Message``. The group/DM bridge feeds it the same frame shapes, so both surfaces
-persist steps one way.
+Tool calls, tool results and thinking a chat run streams reach the Redis run
+stream (1h TTL) live; ``StepRecorder`` folds the same ``(event_name, event_data)``
+frames into the ordered ``steps`` list stored on the assistant ``Message``, so a
+refresh still shows the work behind a reply. ``record_agent_event`` adapts one
+``AgentEvent`` to those frames: the group/DM bridge and the Belt develop
+station's feed (``belt/feed.py``) both feed the recorder through it, so every
+surface records a call the same way.
 
 Why a recorder and not the raw frames: the frames are a live-UI protocol, not a
 record. A claude_sdk call is announced twice (a provisional ``input_pending``
 frame, then the real one), thinking arrives as many small deltas, and results
 carry no call id. Storing them verbatim would show phantom calls and hundreds of
-one-word thinking rows. Everything stored is bounded (per-field and per-message
-caps) and passed through the same scrub/redact the audit log uses, because a
-Message is durable and readable by everyone in the thread, and tool I/O is where
-secrets leak.
+one-word thinking rows. Everything stored is bounded (per-field caps, plus a
+per-recorder step and byte budget: the chat defaults below, larger for a develop
+feed) and passed through the same scrub/redact the audit log uses, string values
+of tool inputs included, because tool I/O is where secrets leak.
 
 ``steps_wire_fields`` is the one step -> wire conversion, shared by every UI
-history mapper. Steps are display data only: the LLM history reader never reads
-them.
+history mapper and the belt feed route. Steps are display data only: the LLM
+history reader never reads them.
 """
 
 from __future__ import annotations
@@ -58,14 +58,29 @@ def _stringify(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _redact_leaves(value: Any) -> Any:
+    """Redact every string inside ``value``. An Edit's ``new_string`` or a Bash
+    command carries a key under a harmless name, which ``scrub_params`` (names
+    only) never sees. Leaves, not the encoded JSON: there a key at the start of
+    a line follows a literal ``\\n`` and the patterns' word boundary misses it."""
+    if isinstance(value, str):
+        return redact_output(value[:_REDACT_SCAN_CHARS])
+    if isinstance(value, dict):
+        return {k: _redact_leaves(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_leaves(v) for v in value]
+    return value
+
+
 def _cap_input(value: Any) -> Any:
-    """Scrub secret-named args, then keep the dict if it is small.
+    """Scrub secret-named args and redact secret-shaped values, then keep the
+    dict if it is small.
 
     Round-tripped through JSON so what lands in Mongo is plain JSON types. An
     over-size input is stored as a truncated JSON string: the step still shows
     what was asked, without one huge argument blowing the message budget.
     """
-    scrubbed = scrub_params(value)
+    scrubbed = _redact_leaves(scrub_params(value))
     try:
         encoded = json.dumps(scrubbed, default=str)
     except (TypeError, ValueError):
@@ -94,7 +109,11 @@ class StepRecorder:
     ignored.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, max_steps: int = MAX_STEPS, max_total_bytes: int = MAX_TOTAL_BYTES
+    ) -> None:
+        self._max_steps = max_steps
+        self._max_total_bytes = max_total_bytes
         self._steps: list[dict[str, Any]] = []
         self._omitted = 0
         # Open tool calls, oldest first: (step, provisional). No call id reaches
@@ -129,7 +148,7 @@ class StepRecorder:
             self._close_thinking(at)
 
     def _append(self, step: dict[str, Any]) -> bool:
-        if len(self._steps) >= MAX_STEPS:
+        if len(self._steps) >= self._max_steps:
             self._omitted += 1
             return False
         self._steps.append(step)
@@ -241,12 +260,12 @@ class StepRecorder:
             step["status"] = "missing_result"
             step["ended_at"] = at
         self._open = []
-        # The per-message byte budget. Checked here, not per event, because a
+        # The byte budget. Checked here, not per event, because a
         # step's size is only known once its result has landed.
         total = 0
         for index, step in enumerate(self._steps):
             total += len(json.dumps(step, default=str))
-            if total > MAX_TOTAL_BYTES:
+            if total > self._max_total_bytes:
                 self._omitted += len(self._steps) - index
                 del self._steps[index:]
                 break
@@ -270,6 +289,47 @@ class StepRecorder:
         if not self._steps and not self._omitted:
             return {}
         return {"steps": list(self._steps), "steps_omitted": self._omitted}
+
+
+def record_agent_event(
+    recorder: StepRecorder,
+    event: Any,
+    tool_name: str = "",
+    tool_input: Any = None,
+    narration: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Adapt one ``AgentEvent`` to the run_core frame the recorder takes.
+
+    ``tool_use`` arrives with its name, input and narration already resolved by
+    the caller (the bridge resolves them for its WS chip too). ``tool_result``
+    resolves its own name from ``metadata`` or a dict ``content``. ``now`` is the
+    event's own time when the source carries one (the belt feed parses it off
+    each CLI line); otherwise the recorder stamps the moment it observes.
+    """
+    etype = getattr(event, "type", "")
+    content = getattr(event, "content", None)
+    meta = getattr(event, "metadata", None)
+    meta = meta if isinstance(meta, dict) else {}
+    if etype == "thinking":
+        text = content if isinstance(content, str) else ""
+        recorder.observe("thinking", {"content": text}, now)
+    elif etype in {"message", "text"}:
+        recorder.observe("chunk", {}, now)
+    elif etype == "tool_use":
+        frame: dict[str, Any] = {"tool": tool_name, "input": tool_input}
+        if narration:
+            frame["narration"] = narration
+        if meta.get("input_pending") is True:
+            frame["input_pending"] = True
+        recorder.observe("tool_start", frame, now)
+    elif etype == "tool_result":
+        name = meta.get("name") or meta.get("tool") or ""
+        output: Any = content
+        if isinstance(content, dict):
+            name = name or content.get("tool") or content.get("name") or ""
+            output = content.get("result", content)
+        recorder.observe("tool_result", {"tool": name, "output": output}, now)
 
 
 def steps_wire_fields(steps: Any, steps_omitted: int = 0) -> dict[str, Any]:
@@ -308,4 +368,4 @@ def _step_to_wire(step: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["StepRecorder", "steps_wire_fields"]
+__all__ = ["StepRecorder", "record_agent_event", "steps_wire_fields"]

@@ -9,7 +9,10 @@
 #            ``git worktree add --detach`` at ``origin/<base>`` (fetched) or ``<base>``.
 #   ORIENT   LLM work only: ``orient.orient_block`` (loom world model, else the
 #            repo's C4 list) rides the develop + review prompts; a miss is a note.
-#   WORK     a charter recipe → that command; else DEVELOP → ``claude -p``.
+#   WORK     a charter recipe → that command; else DEVELOP → ``claude -p`` in
+#            ``stream-json``: its events fold into the run's step feed
+#            (``belt/feed.py``, scrubbed + capped), stored via the belt service
+#            before any error is raised; a failed save never fails the run.
 #   CHECK    every charter check; FIX (``claude -p`` with the failure) while
 #            attempts last. REVIEW: read-only ``claude -p`` judges the diff,
 #            failing duplicates of existing code; strict ``{"verdict","notes"}``.
@@ -57,10 +60,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pocketpaw.security.redact import REDACT_PATTERNS, redact_output
+from pocketpaw_ee.cloud.belt.feed import fold_feed, stream_events
 from pocketpaw_ee.cloud.belt.headless import DevelopRequest, DevelopResult
 from pocketpaw_ee.cloud.belt.orient import orient_block
 from pocketpaw_ee.cloud.mandates.dto import command_refusal
-from pocketpaw_ee.cloud.mandates.foreman import claude_cli_argv, claude_result_text
+from pocketpaw_ee.cloud.mandates.foreman import (
+    claude_cli_argv,
+    claude_result_envelope,
+    claude_result_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,13 +216,25 @@ async def _default_charter_for(workspace_id: str, mandate_id: str) -> dict[str, 
     return await mandate_service.charter_for_mandate(workspace_id, mandate_id)
 
 
+async def _default_save_feed(
+    workspace_id: str, action_id: str, stage: str, steps: list[dict[str, Any]], omitted: int
+) -> None:
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    await belt_service.save_run_feed(workspace_id, action_id, stage, steps, omitted)
+
+
 @dataclass
 class ClaudeCodeDevelop:
     """Production ``DevelopFn``: worktree → develop/recipe → checks → fix loop →
-    review → diff. ``run`` and ``charter_for`` are injectable for tests."""
+    review → diff. ``run``, ``charter_for`` and ``save_feed`` are injectable for
+    tests."""
 
     run: Runner = run_subprocess
     charter_for: Callable[[str, str], Awaitable[dict[str, Any] | None]] = _default_charter_for
+    save_feed: Callable[[str, str, str, list[dict[str, Any]], int], Awaitable[None]] = (
+        _default_save_feed
+    )
     max_fix_attempts: int = 2
 
     async def __call__(self, request: DevelopRequest) -> DevelopResult:
@@ -292,6 +312,7 @@ class ClaudeCodeDevelop:
                     step="DEVELOP",
                     checks=checks,
                     trust=trust,
+                    feed_for=request,
                 )
                 _assert_intact(worktree, git_snapshot)
 
@@ -446,15 +467,21 @@ class ClaudeCodeDevelop:
         checks: list[str] | tuple[str, ...] = (),
         edits: bool = True,
         trust: _Trust | None = None,
+        feed_for: DevelopRequest | None = None,
     ) -> str:
         """One claude seat. ``trust`` set = owner setup: the worktree's agent
         config is restored to the base commit first, and only then does the
-        call drop the isolation flags (the two never come apart)."""
+        call drop the isolation flags (the two never come apart). ``feed_for``
+        set = the seat streams and its steps are stored as that run's feed for
+        this step, before any failure below is raised."""
         if trust is not None:
             await self._restore_trusted(cwd, trust)
         mode = ["--permission-mode", "acceptEdits"] if edits else []
         argv = claude_cli_argv(
-            *mode, *_tool_flags(edits=edits, checks=checks), isolated=trust is None
+            *mode,
+            *_tool_flags(edits=edits, checks=checks),
+            isolated=trust is None,
+            stream=feed_for is not None,
         )
         code, out, err = await self.run(
             argv,
@@ -462,15 +489,42 @@ class ClaudeCodeDevelop:
             timeout=_env_seconds("POCKETPAW_FACTORY_DEVELOP_TIMEOUT", 900),
             stdin=prompt,
         )
+        if feed_for is not None:
+            await self._store_feed(feed_for, step, out, cwd)
         if code != 0:
             raise DevelopStationError(f"{step}: claude exited {code}: {_tail(err or out)}")
-        try:
-            envelope = json.loads(out)
-        except json.JSONDecodeError:
-            envelope = None
-        if isinstance(envelope, dict) and envelope.get("is_error"):
-            raise DevelopStationError(f"{step}: claude reported an error: {_tail(out)}")
+        envelope = claude_result_envelope(out)
+        if envelope is not None and envelope.get("is_error"):
+            raise DevelopStationError(
+                f"{step}: claude reported an error: {_tail(str(envelope.get('result') or out))}"
+            )
         return claude_result_text(out)
+
+    async def _store_feed(self, request: DevelopRequest, step: str, stdout: str, cwd: Path) -> None:
+        """Fold a seat's stream-json into steps and store them under the run.
+        Worktree paths are shown relative. Best-effort: a run without an
+        ``action_id`` stores nothing, and a fold or save failure is logged."""
+        if not request.action_id or not stdout:
+            return
+        for prefix in {f"{cwd}/", f"{os.path.realpath(cwd)}/"}:
+            stdout = stdout.replace(prefix, "")
+        try:
+            # Parsing and redacting a few MB is CPU work; keep it off the loop.
+            recorder = await asyncio.to_thread(lambda: fold_feed(stream_events(stdout)))
+            await self.save_feed(
+                request.workspace_id,
+                request.action_id,
+                step.lower(),
+                recorder.steps,
+                recorder.steps_omitted,
+            )
+        except Exception:  # noqa: BLE001 — the feed is a view; it never fails a run
+            logger.warning(
+                "belt: could not store the %s feed for run %s",
+                step.lower(),
+                request.action_id,
+                exc_info=True,
+            )
 
     async def _restore_trusted(self, worktree: Path, trust: _Trust) -> None:
         """Delete every ``_TRUST_NAMES`` entry on disk (tracked, untracked or

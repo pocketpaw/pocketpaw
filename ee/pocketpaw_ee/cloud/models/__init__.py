@@ -230,6 +230,7 @@ from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
+from pocketpaw_ee.cloud.models.belt_run_feed import BeltRunFeed
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.builtin_widget import BuiltInWidget, BuiltInWidgetPosition
 from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
@@ -421,6 +422,7 @@ __all__ = [
     "PlatformAuditEvent",
     "AuditWebhook",
     "AuthSession",
+    "BeltRunFeed",
     "BeltWorkspaceConfig",
     "BuiltInWidget",
     "BuiltInWidgetPosition",
@@ -698,6 +700,8 @@ def get_all_documents():
         AuthSession,
         APIKey,
         BeltWorkspaceConfig,
+        # A Belt run stage's step feed. Only ``ee.cloud.belt.service`` writes it.
+        BeltRunFeed,
         TaskEvent,
         # Workspace jobs — durable status record for ARQ-backed pocket jobs
         # (pp#1459). Only ``ee.cloud.jobs.service`` writes it.
