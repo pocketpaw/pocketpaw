@@ -11,6 +11,8 @@
 # import order. A domain that owns its own vocabulary declares it in its own
 # module (``meetings/events.py``, ``mandates/events.py``) and NOT here too;
 # ``tests/cloud/realtime/test_event_registry.py`` fails on any duplicate.
+# Such a module must also be listed in ``_DOMAIN_EVENT_MODULES`` so a process
+# that never imported it can still rebuild its events.
 #
 # Where a group has a payload contract, the comment above it documents it.
 from __future__ import annotations
@@ -20,6 +22,27 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 EVENT_REGISTRY: dict[str, type[Event]] = {}
+
+# Domain modules that declare their own Event subclasses. A process that never
+# imported one (an arq worker) loads them on the first registry miss, so
+# ``rebuild_event`` still finds the owning class. Imported lazily: each of
+# these imports this module.
+_DOMAIN_EVENT_MODULES = (
+    "pocketpaw_ee.cloud.meetings.events",
+    "pocketpaw_ee.cloud.mandates.events",
+)
+_domain_events_loaded = False
+
+
+def _load_domain_events() -> None:
+    global _domain_events_loaded
+    if _domain_events_loaded:
+        return
+    _domain_events_loaded = True
+    import importlib
+
+    for name in _DOMAIN_EVENT_MODULES:
+        importlib.import_module(name)
 
 
 @dataclass
@@ -60,6 +83,8 @@ def rebuild_event(payload: dict) -> Event:
         ts = datetime.now(UTC)
     else:
         ts = datetime.fromisoformat(str(ts_raw))
+    if evt_type not in EVENT_REGISTRY:
+        _load_domain_events()
     cls = EVENT_REGISTRY.get(evt_type, Event)
     inst = cls(data=data, ts=ts)
     # Subclasses overwrite `type` in __post_init__; the base Event needs the
