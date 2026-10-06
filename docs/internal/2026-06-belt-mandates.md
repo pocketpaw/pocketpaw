@@ -550,10 +550,12 @@ once it exits the station folds its stdout into steps and stores them. Path:
   as soon as the call returns, and from every check, recipe and git error tail,
   so the feed, the errors on the run blob and the returned text never carry an
   absolute path. `<root>/x` becomes `x` and a bare `<root>` (`cd <wt> &&`, a
-  `pwd` result) becomes `.`; a sibling such as `<wt>-old` keeps its path. Both
+  `pwd` result, `working in <wt>.`) becomes `.`. Only whole paths match: a root
+  must start a path (so a `/app` repo root leaves `src/app/page.tsx` alone,
+  while a path opening a line in raw stream-json, after a literal `\n`, still
+  counts), and a sibling such as `<wt>-old` or `<wt>.bak` keeps its path. Both
   the station's spelling and the physical one the CLI reports (macOS
-  `/private/var/...` for a `/var/...` temp dir) go, the longer first, so
-  neither cuts into the other.
+  `/private/var/...` for a `/var/...` temp dir) go.
 - Caps: 2,000 steps and 2 MB per stored feed (`FEED_MAX_STEPS`,
   `FEED_MAX_BYTES`); what is dropped is counted in `steps_omitted`. Only the
   develop stage is captured today, so that is also the per-run budget.

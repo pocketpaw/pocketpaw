@@ -306,15 +306,6 @@
     ]
   },
   {
-    "label": "feed: worktree prefixes are stripped in set order, so a /private/var path loses its middle",
-    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "    for root in sorted(spellings, key=len, reverse=True):\n",
-    "replace": "    for root in spellings:\n",
-    "tests": [
-      "tests/cloud/test_belt_feed.py::test_worktree_paths_are_relative_whatever_the_prefix_order"
-    ]
-  },
-  {
     "label": "feed: the worktree prefix is left on seat output",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
     "find": "        out, err = _relative_paths(out, *roots), _relative_paths(err, *roots)\n",
@@ -408,7 +399,7 @@
   {
     "label": "feed: a bare worktree path (cd <wt>, a pwd result) is stored absolute",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        text = re.sub(re.escape(root) + r\"(?![\\w.\\-])\", \".\", text)\n",
+    "find": "        text = re.sub(_PATH_START + escaped + _BARE_END, \".\", text)\n",
     "replace": "",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served",
@@ -418,8 +409,8 @@
   {
     "label": "feed: a sibling <wt>-old path is cut as if it were the worktree",
     "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
-    "find": "        text = re.sub(re.escape(root) + r\"(?![\\w.\\-])\", \".\", text)\n",
-    "replace": "        text = re.sub(re.escape(root), \".\", text)\n",
+    "find": "        text = re.sub(_PATH_START + escaped + _BARE_END, \".\", text)\n",
+    "replace": "        text = re.sub(_PATH_START + escaped, \".\", text)\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_worktree_paths_are_relative_whatever_the_prefix_order"
     ]
@@ -467,6 +458,34 @@
     "replace": "            \"$set\": {\n                \"steps\": steps,\n                \"steps_omitted\": steps_omitted,\n                \"updatedAt\": now,\n                \"createdAt\": now,\n            },\n",
     "tests": [
       "tests/cloud/test_belt_feed.py::test_save_run_feed_upserts_per_workspace_and_keeps_created_at"
+    ]
+  },
+  {
+    "label": "feed: a root matches mid-path, so /app cuts src/app/page.tsx (and /private/var holds /var)",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_PATH_START = r\"(?:(?<=\\\\[nrt])|(?<![\\w.\\-/~]))\"\n",
+    "replace": "_PATH_START = \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_short_repo_root_only_strips_whole_paths"
+    ]
+  },
+  {
+    "label": "feed: a path opening a line in stream-json (after a literal \\n) is left absolute",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_PATH_START = r\"(?:(?<=\\\\[nrt])|(?<![\\w.\\-/~]))\"\n",
+    "replace": "_PATH_START = r\"(?<![\\w.\\-/~])\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_short_repo_root_only_strips_whole_paths"
+    ]
+  },
+  {
+    "label": "feed: a bare path ending a sentence (in <wt>.) is left absolute",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_BARE_END = r\"(?![\\w\\-]|\\.[\\w\\-])\"\n",
+    "replace": "_BARE_END = r\"(?![\\w.\\-])\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served",
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
     ]
   }
 ]

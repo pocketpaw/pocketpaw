@@ -12,8 +12,9 @@
 #     line apart;
 #   * no worktree path anywhere: the temp dir is reached through a symlink and
 #     the CLI reports the physical path (macOS ``/var`` -> ``/private/var``);
-#     bare paths (``cd <wt>``, a ``pwd`` result) read ``.``; the bound repo the
-#     ``.git`` file names goes too; same for headless_error (claude's words or
+#     bare paths (``cd <wt>``, a ``pwd`` result, ``in <wt>.``) read ``.``; the
+#     bound repo the ``.git`` file names goes too, but only as a whole path
+#     (``src/app/x`` survives a ``/app`` root); same for headless_error (claude's words or
 #     stderr, never stream-json) and a failing check's tail;
 #   * secrets in a tool result or input reach neither storage nor the response;
 #   * the stage row is the latest attempt: a failed, timed-out, or pre-seat
@@ -82,6 +83,11 @@ def _stream(cwd: Path, *, is_error: bool = False, cut: bool = False, git_text: s
             "type": "assistant",
             "timestamp": _t(1),
             "message": {"content": [{"type": "text", "text": f"I'll add {cwd}/feature.txt."}]},
+        },
+        {
+            "type": "assistant",
+            "timestamp": _t(1),
+            "message": {"content": [{"type": "text", "text": f"Working in {cwd}."}]},
         },
         {
             "type": "assistant",
@@ -244,6 +250,30 @@ def _stream(cwd: Path, *, is_error: bool = False, cut: bool = False, git_text: s
         {
             "type": "assistant",
             "timestamp": _t(8),
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "toolu_7", "name": "Grep", "input": {"pattern": "x"}}
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": _t(8),
+            "message": {
+                "content": [
+                    {
+                        "tool_use_id": "toolu_7",
+                        "type": "tool_result",
+                        # A path mid-path and one at a line start: only the
+                        # second is under a ``/app`` repo root.
+                        "content": "src/app/page.tsx\n/app/src/x.py",
+                    }
+                ]
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": _t(8),
             "message": {"content": [{"type": "text", "text": "Done: feature.txt says ok."}]},
         },
         {
@@ -356,16 +386,19 @@ async def test_develop_feed_is_stored_in_order_and_served(
     assert doc is not None and doc.stage == "develop" and doc.steps_omitted == 0
     shape = [(s["kind"], s["tool"] or s["text"]) for s in doc.steps]
     assert shape == [
-        ("thinking", "The task wants a file.\n\nI'll add feature.txt."),
+        ("thinking", "The task wants a file.\n\nI'll add feature.txt.\n\nWorking in .."),
         ("tool", "Read"),
         ("tool", "Write"),
         ("tool", "Edit"),
         ("tool", "Read"),
         ("tool", "Bash"),
         ("tool", "Bash"),
+        ("tool", "Grep"),
         ("thinking", "Done: feature.txt says ok."),
     ]
-    read, write, edit, git_read, cd, pwd = doc.steps[1:7]
+    read, write, edit, git_read, cd, pwd, grep = doc.steps[1:8]
+    # Bound repo is the tmp repo here, so ``/app`` paths are not its paths.
+    assert grep["output"] == "src/app/page.tsx\n/app/src/x.py"
     assert read["input"] == {"file_path": "README.md"}  # the worktree prefix is gone
     # Bare worktree paths read "." and the bound repo the .git file names goes too.
     assert git_read["output"].startswith("gitdir: .git/worktrees/")
@@ -391,6 +424,7 @@ async def test_develop_feed_is_stored_in_order_and_served(
         "Read",
         "Bash",
         "Bash",
+        "Grep",
         "",
     ]
     assert body["steps"][1]["startedAt"].startswith("2026-10-06T08:00:02")
@@ -423,7 +457,7 @@ async def test_stream_result_envelope_is_the_seat_result(repo):  # noqa: F811
 @pytest.mark.parametrize(
     ("stderr", "said"),
     [
-        ("", "I'll add feature.txt."),
+        ("", "Working in .."),
         (
             "fatal: {cwd}/feature.txt: denied\nEACCES: scandir '{cwd}'",
             "fatal: feature.txt: denied\nEACCES: scandir '.'",
@@ -463,7 +497,7 @@ async def test_a_timed_out_redevelop_replaces_the_earlier_feed(repo, mongo_db): 
 
     req = replace(_request(repo), action_id="run-x")
     await _station(StreamingClaude(develop=[_write("ok")]), repo)(req)
-    assert len((await _feed_doc("run-x")).steps) == 8
+    assert len((await _feed_doc("run-x")).steps) == 9
 
     with pytest.raises(ds.DevelopStationError, match="DEVELOP: claude exited -1: timed out"):
         await _station(StreamingClaude(timed_out=True), repo)(req)
@@ -487,6 +521,20 @@ def test_parallel_same_name_calls_pair_by_id():
     recorder = fold_feed(stream_events("\n".join(json.dumps(x) for x in lines)))
     got = [(s["input"]["file_path"], s["output"]) for s in recorder.steps]
     assert got == [("a.txt", "A"), ("b.txt", "B")]
+
+
+async def test_a_short_repo_root_only_strips_whole_paths(repo, mongo_db, tmp_path):  # noqa: F811
+    """A ``/app`` repo root (a container mount): ``/app/src/x.py`` -> ``src/x.py``
+    even at the start of a line inside stream-json, while ``src/app/page.tsx``
+    keeps its middle."""
+    from dataclasses import replace
+
+    req = replace(_request(repo), action_id="run-app")
+    await _station(StreamingClaude(), repo)._claude(
+        "p", cwd=tmp_path, step="DEVELOP", feed_for=req, repo=Path("/app")
+    )
+    grep = (await _feed_doc("run-app")).steps[7]
+    assert grep["tool"] == "Grep" and grep["output"] == "src/app/page.tsx\nsrc/x.py"
 
 
 async def test_a_redevelop_that_fails_before_its_seat_clears_the_feed(repo, mongo_db):  # noqa: F811
@@ -565,9 +613,9 @@ async def test_a_failing_save_never_fails_the_run(repo, store, monkeypatch, capl
 
 
 def test_worktree_paths_are_relative_whatever_the_prefix_order(tmp_path):
-    """Both spellings of the worktree go, longest first, for many dir names: a
-    set's iteration order differs per string, so a station that relied on it
-    would mangle some of these (``/p...README.md``) in any process."""
+    """Both spellings of the worktree go, for many dir names (a set's iteration
+    order differs per string; neither order may mangle ``/private/var`` into
+    ``/p...README.md``), bare roots read ``.``, and a sibling keeps its path."""
     link = _linked_dir(tmp_path)
     for i in range(24):
         cwd = link / f"belt-develop-{i:02d}x" / "wt"

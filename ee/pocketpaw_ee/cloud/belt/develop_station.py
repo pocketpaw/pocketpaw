@@ -588,18 +588,27 @@ class ClaudeCodeDevelop:
         return verdict["verdict"] == "pass", notes
 
 
+# A root counts only where a path STARTS: not mid-path (``src/app/x`` with a
+# ``/app`` root, ``/private/var`` holding ``/var``). In raw stream-json a path
+# that opens a line follows a literal ``\n`` / ``\t`` escape, so those count as
+# a start too.
+_PATH_START = r"(?:(?<=\\[nrt])|(?<![\w.\-/~]))"
+# A bare root ends where its name does: a sentence's full stop (``in <wt>.``)
+# still ends it, a sibling's name (``<wt>.bak``, ``<wt>_v2``, ``<wt>-old``) doesn't.
+_BARE_END = r"(?![\w\-]|\.[\w\-])"
+
+
 def _relative_paths(text: str, *roots: Path) -> str:
     """``text`` with every path under ``roots`` made relative: ``<root>/x`` ->
-    ``x`` and a bare ``<root>`` (``cd <root> &&``, a ``pwd`` result) -> ``.``;
-    a bare root followed by a path character (a sibling ``<root>-old``) stays.
-    The CLI reports the PHYSICAL path (macOS: ``/private/var/...`` for a
-    ``/var/...`` temp dir), so both spellings go, the longer first: replacing
-    the shorter one first would cut it out of the middle of the longer
-    (``/privateREADME.md``)."""
+    ``x`` and a bare ``<root>`` (``cd <root> &&``, a ``pwd`` result) -> ``.``.
+    Only whole paths match (``_PATH_START`` / ``_BARE_END``). The CLI reports the
+    PHYSICAL path (macOS: ``/private/var/...`` for a ``/var/...`` temp dir), so
+    both spellings go, the longer first."""
     spellings = {str(r) for r in roots} | {os.path.realpath(r) for r in roots}
     for root in sorted(spellings, key=len, reverse=True):
-        text = text.replace(f"{root}/", "")
-        text = re.sub(re.escape(root) + r"(?![\w.\-])", ".", text)
+        escaped = re.escape(root)
+        text = re.sub(_PATH_START + escaped + "/", "", text)
+        text = re.sub(_PATH_START + escaped + _BARE_END, ".", text)
     return text
 
 
