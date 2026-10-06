@@ -6,7 +6,8 @@
      Claude setups, the trust restore, ORIENT) and its security posture, the
      architecture context the foreman and review get, the mandate's line
      branch (base sync, landing, re-develop, one PR, its state on the wire and
-     the UI surfaces), endpoints (incl. the digest), env vars, and the
+     the UI surfaces), the run feed (live over SSE and stored per stage, with
+     its wire contract), endpoints (incl. the digest), env vars, and the
      remaining demo-bar concessions. -->
 
 # Belt Mandates — the standing JOB primitive
@@ -361,7 +362,7 @@ the same beyond-four shape the belt console uses). Beanie docs (`MandateDoc`,
 `ShiftDoc`, `SightingDoc`; all workspace-keyed) live in `mandates/domain.py`,
 imported ONLY by `mandates/service.py`, and register into `init_beanie` via a
 lazy import in `cloud/models/__init__.py` (the calendar-doc pattern). A run's
-develop feed is a `BeltRunFeed` row owned by `belt/service.py` (see "The develop
+feed is a `BeltRunFeed` row per stage owned by `belt/service.py` (see "The run
 feed").
 
 ## Soul wiring (demo bar)
@@ -467,8 +468,7 @@ ORIENT   LLM work only (recipes skip it): the repo's architecture brief from
          loom (else its C4 list) for the develop and review prompts
 WORK     a recipe task runs the charter's recipe command; otherwise
          `claude -p` develops (--permission-mode acceptEdits,
-         --output-format stream-json --verbose); its events become the run's
-         develop feed (see "The develop feed")
+         --output-format stream-json --verbose)
 CHECK    run every charter check
 FIX ≤2   a red check, or a failed review, sends the failure back to
          `claude -p`, then CHECK again; at most 2 attempts (recipes skip it:
@@ -774,72 +774,104 @@ fails. The status flip uses the store's `_update_status` with
 (the run then fails with that reason). The reopened row keeps its first
 `approved_by` / `approved_at` until the next approval overwrites them.
 
-### The develop feed
+### The run feed
 
-The run page shows what the developer agent did: the DEVELOP seat runs with
-`--output-format stream-json --verbose` (every other seat keeps `json`), and
-once it exits the station folds its stdout into steps and stores them. Path:
+The run page shows what each station step did, as it happens and after a
+reload. Every step is a stage of the run's feed: `orient`, `develop`, `check`,
+`fix`, `review` (`feed.STAGES`). All three claude seats (develop, fix, review)
+run with `--output-format stream-json --verbose`; the station's runner hands
+each stdout line over as it arrives (the `Runner`'s optional `on_line`, read in
+chunks so a line past 64 KiB is still one line), and the line becomes chat
+frames at once. Checks, a recipe command and ORIENT are rows the station writes
+itself. Path, per line:
 
-- `belt/feed.py` `stream_events` turns the CLI lines into `AgentEvent`s
-  (`agents/protocol.py`, the one event schema): assistant `text` → message,
-  non-empty `thinking` → thinking, `tool_use` → tool_use (name, input, and the
-  block id as `call_id`), `tool_result` → tool_result with its `tool_use_id` as
-  `call_id`. The recorder pairs a result with its call by `call_id` (parallel
-  calls of one tool can finish in any order; a live capture showed each
-  result right after its own call, but nothing guarantees it), and by tool
-  name only when a source has no ids (the chat backends). Each line's ISO
-  `timestamp` becomes the step time. System lines, rate-limit events and the
-  result envelope are skipped; the station reads the envelope separately
-  (`foreman.claude_result_envelope`: the whole stdout for `json`, else the last
-  `type: "result"` line, since the CLI prints more after it), so the seat's
-  result text and its `is_error` check work in both formats.
-- `fold_feed` feeds them through `steps.record_agent_event` (the adapter the
-  group/DM chat bridge uses) into a `StepRecorder`, so a feed is the chat steps
-  shape with the same per-field caps and the same scrub: secret-named input
-  keys masked, and every string in a tool input and every result redacted
-  with `security.redact` patterns. The developer's prose between tool calls
-  has no chat-step kind and is stored as a `thinking` step; back-to-back
-  prose and thinking blocks share one step, a blank line apart.
-- Worktree paths read relative: the station strips the worktree and the bound
-  repo (which the worktree's `.git` file names) from a seat's stdout and stderr
-  as soon as the call returns, and from every check, recipe and git error tail,
-  so the feed, the errors on the run blob and the returned text never carry an
-  absolute path. `<root>/x` becomes `x` and a bare `<root>` (`cd <wt> &&`, a
-  `pwd` result, `working in <wt>.`) becomes `.`. Only whole paths match: a root
-  must start a path (so a `/app` repo root leaves `src/app/page.tsx` alone,
-  while a path opening a line in raw stream-json, after a literal `\n`, still
-  counts), and a sibling such as `<wt>-old` or `<wt>.bak` keeps its path. Both
-  the station's spelling and the physical one the CLI reports (macOS
-  `/private/var/...` for a `/var/...` temp dir) go.
-- Caps: 2,000 steps and 2 MB per stored feed (`FEED_MAX_STEPS`,
-  `FEED_MAX_BYTES`); what is dropped is counted in `steps_omitted`. Only the
-  develop stage is captured today, so that is also the per-run budget.
+- Scrub first: the station strips the worktree and the bound repo (which the
+  worktree's `.git` file names) and writes the host account as `user` in an
+  `ls -l` owner/group column or a home dir, on each live line, on the final
+  stdout/stderr, and on every check, recipe and git error tail, so nothing
+  downstream carries an absolute path. `<root>/x` becomes `x` and a bare
+  `<root>` (`cd <wt> &&`, a `pwd` result, `working in <wt>.`) becomes `.`; only
+  whole paths match (a `/app` root leaves `src/app/page.tsx` alone, a path
+  opening a line in raw stream-json after a literal `\n` still counts, a
+  sibling `<wt>-old` keeps its path), in both the station's spelling and the
+  physical one the CLI reports (macOS `/private/var/...`). A charter command
+  shown on a check or recipe row is scrubbed the same way.
+- Parse: `belt/feed.py` `FrameReader` turns each line into `AgentEvent`s
+  (`agents/protocol.py`) and those into chat frames through
+  `steps.agent_event_frame`, the adapter the group/DM bridge uses: `thinking`
+  `{content}`, `tool_start` `{tool, input, narration, call_id}`, `tool_result`
+  `{tool, output, call_id}`. The developer's prose has no chat-step kind and is
+  a `thinking` frame; back-to-back prose blocks are a blank line apart. A
+  result pairs with its call by `call_id` (parallel calls of one tool can
+  finish in any order). A row's narration keeps its verb: `Read <path>`, `Edit
+  <path>`, `Write <path>`, `Run <first line of the command>`, `Grep <pattern>`,
+  `Find <pattern>` (Glob), redacted and cut to 80 chars of subject. System
+  lines, rate-limit events and the result envelope are skipped; the station
+  reads the envelope separately (`foreman.claude_result_envelope`), so a
+  seat's result text and its `is_error` check work in both formats.
+- Live: `RunFeed.add` publishes the frame through `steps.scrub_frame` (the
+  recorder's own caps and redaction: secret-named input keys masked, every
+  input string and every output redacted with `security.redact`, outputs and
+  thinking capped) with its `stage` added, on the run's chat-runs
+  `RunStreamTransport` stream (Redis in production, key `run:belt:<id>:events`;
+  the in-memory buffer without `POCKETPAW_REDIS_URL`). A publish failure is
+  logged once and ends publishing for that call; the run goes on.
+- Stored: after each round of a stage the station folds every frame that stage
+  had in this call into a `StepRecorder` (the chat steps shape) and upserts its
+  `BeltRunFeed` row, so `check` and `fix` rows hold both rounds. A row is
+  stored before a failed seat raises (the open call reads `missing_result`),
+  and a call empties all five rows when it starts, so an attempt that fails
+  early never shows an earlier one. A fold or save failure is logged and never
+  fails the run. A failed seat's `headless_error` carries what claude said,
+  never raw stream-json.
+- Station rows: ORIENT is one `Orient` tool row whose output is the note and
+  the architecture block; each check is a `Bash` row narrated `Run <command>`
+  that shows running, then the check's tail and `(exit N)`; a recipe is the
+  same row under `develop`. A recipe run has no `orient`, `fix` or `review`.
+- Caps, per station call: 2,000 frames and 2 MB published
+  (`FEED_MAX_STEPS`, `FEED_MAX_BYTES`; the control frames `start`, `stage` and
+  `stream_end` are never dropped, and `stream_end.omitted` counts what was);
+  stored rows share 2,000 steps and 2 MB across the five stages (each row's
+  overflow in `steps_omitted`).
 - Storage: `BeltRunFeed` (`belt_run_feeds`), one row per (workspace, run,
-  stage), unique on that key and written with one atomic upsert; a
-  re-develop replaces the stage's row: the station empties it when a develop
-  starts, so an attempt that fails before its seat (task screen, charter, base
-  fetch) or prints nothing (a timeout) never shows an earlier attempt. Only
+  stage), unique on that key and written with one atomic upsert. Only
   `belt/service.py` touches it (`save_run_feed` / `get_run_feed`). It lives
   outside the Instinct `code_change` blob because `GET /belt/runs` reads every
-  blob. Measured against JSON files beside the worktree, 2,000 steps (2.6 MB
-  of JSON): Mongo upsert 17 ms / read 5.6 ms, file write 12 ms / read 5 ms. Same
-  order; Mongo is readable from every web process, a file is host-local, and
-  the strict setup's worktree is a temp dir deleted at CLEANUP.
-- The feed is stored before a failed seat raises, so a develop that died
-  mid-tool still shows its steps (the open call reads `missing_result`). The
-  save is best-effort: a fold or Mongo failure is logged and never fails the
-  run. A failed seat's `headless_error` carries what claude said (the result
-  envelope's text, else its last prose, redacted), never the raw stream-json.
-- Known gap: a seat killed by the timeout stores an empty feed (and a cancel
-  none), because `run_subprocess` collects stdout only when the process exits
-  and discards it on a kill. Reading the stream line by line as it arrives
-  (BF-4's per-line callback) closes it, along with live tailing.
-- `GET /api/v1/belt/runs/{id}/feed?stage=develop` (`belt.read`) returns
-  `{action_id, stage, steps?, stepsOmitted?}`, the steps in the chat history
-  wire shape (`steps_wire_fields`), so the UI maps them with
-  `persistedStepsToEntries` and renders them with `ThinkingSteps`. No `steps`
-  key when the stage recorded none; a foreign or non-belt run is a 404, the
-  same tenancy as `GET /belt/runs/{id}`.
+  blob. Measured against JSON files beside the worktree, 2,000 steps (2.6 MB of
+  JSON): Mongo upsert 17 ms / read 5.6 ms, file write 12 ms / read 5 ms. Same
+  order; Mongo is readable from every web process, a file is host-local.
+
+#### Wire contract
+
+| What | Shape |
+|---|---|
+| `GET /api/v1/belt/runs/{id}/stream?after=<cursor>` (`belt.read`) | `text/event-stream`; each frame `id: <cursor>`, `event: <name>`, `data: <json>`; a foreign or non-belt run is a 404 (`belt.run_not_found`) before the stream opens |
+| `start` `{}` | a station call (one attempt) begins; a client clears its feed |
+| `stage` `{stage, round}` | a step begins; `stage` in `orient\|develop\|check\|fix\|review`, `round` counts repeats of that stage in the call (a second check is round 2) |
+| `thinking` `{stage, content}` | a whole block of reasoning or prose (not a delta) |
+| `tool_start` `{stage, tool, input, narration, call_id}` | a call begins; `input` scrubbed and capped |
+| `tool_result` `{stage, tool, output, output_truncated, call_id}` | that call's result |
+| `stream_end` `{ok, omitted}` | the attempt ended (`ok` false on a failed run); terminal |
+| `stream_end` `{from_history: true}` | no live stream and the run is not being developed: read `GET /belt/runs/{id}/feed?stage=` for each stage |
+| `error` `{code: "run.stream_timeout", message}` | the subscription hit the chat run stream's lifetime cap; reopen with `after=<last id>` |
+
+Replay: `after=0` (the default) serves the newest attempt from its `start`,
+so a reload shows what a viewer saw live; a cursor resumes right after it (and
+past an older attempt's `stream_end` into the next one). A run being developed
+(`headless_state` set by the background dispatcher) whose stream does not
+exist yet is waited on. The stream lives 6 hours from `start` and 1 hour after
+`stream_end`. Each stage start also emits `belt_run_updated` on the workspace
+bus with `status: "queued"` and `stage` set to the step, so a page can (re)open
+the stream when a station picks a run up; `GET /belt/runs` still reports
+`station` for a running run, and the stream is the source of truth for the
+step. Heartbeats are `: ping` comments between 15 s reads (the chat stream's
+`transport.sse_tail`, which both routes use).
+
+`GET /api/v1/belt/runs/{id}/feed?stage=<stage>` (`belt.read`) returns `{action_id,
+stage, steps?, stepsOmitted?}`, the steps in the chat history wire shape
+(`steps_wire_fields`), so the UI maps them with `persistedStepsToEntries` and
+renders them with `ThinkingSteps`. No `steps` key when the stage recorded none;
+the same tenancy 404 as `GET /belt/runs/{id}`.
 
 ### Runs read model
 
@@ -1081,8 +1113,17 @@ failed develop still storing its feed and recording claude's words (stderr or
 its last prose) with no stream-json and no worktree path, a timed-out
 re-develop replacing the earlier feed, parallel same-name calls answered out
 of order pairing by id, a stream cut after `system/init` not read as a result,
-a failing save not failing the run, the step and byte caps (by id too), and
-the route's tenancy 404.
+a failing save not failing the run, the step and byte caps (by id too), row
+labels with their verbs, and the route's tenancy 404.
+`tests/cloud/test_belt_live_feed.py` pins the live half: the runner handing
+lines over before the process exits (a 200 KB line and a 300 KB stdin
+included) and a timeout returning no stdout; a run whose first develop fails
+its check publishing orient, develop, check, fix, check and review in order
+with every frame stage-tagged, scrubbed of secrets, paths and the host
+account, a row per stage, and the same frames replayed by the route; a recipe
+run's two stages; a failed run's `stream_end {ok: false}`; a broken transport
+not failing the run; the live frame cap; and the route's newest-attempt
+replay, cursor resume, `from_history`, wait-while-developing and tenancy 404.
 `tests/cloud/test_belt_line.py` drives the line on real tmp repos (a bare
 repo as origin, charter recipes as the develop work, a fake PR opener): two
 runs of one mandate stack on the line with no re-added lines; a merged line
