@@ -21,6 +21,11 @@
 # ``{on, users}``; its background task is process-local (``autopilot`` module).
 # ``MandateDoc.upstream`` is the ``upstream`` patrol's config: pinned GitHub
 # dependencies (``{repo, pin_file}``) whose new commits the patrol reports.
+# ``MandateDoc.crew`` is the roster: cloud Agents on the mandate, each with a
+# role (``dev`` / ``reviewer`` / ``foreman``), a concurrency and an optional
+# Claude setup (``owner`` / ``strict``; unset = the factory env). A crew member
+# IS an Agent; the roster holds only the link plus the seat, never a copy of the
+# agent's model or instructions.
 
 from __future__ import annotations
 
@@ -39,6 +44,8 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 KpiDirection = Literal["up", "down"]
 Cadence = Literal["daily", "weekly", "manual"]
+CrewRole = Literal["dev", "reviewer", "foreman"]
+CrewSetup = Literal["owner", "strict"]
 MandateStatus = Literal["active", "paused"]
 ShiftState = Literal["planning", "in_gate", "executing", "done", "stood_down"]
 
@@ -118,6 +125,26 @@ class UpstreamPin(BaseModel):
     pin_file: str
 
 
+class CrewMember(BaseModel):
+    """One seat on a mandate's crew: a cloud Agent and how it works here.
+
+    ``agent_id`` is the Agent (its model, instructions and soul live there).
+    ``role`` is the seat; only ``dev`` seats take plan tasks today (round-robin,
+    see ``mandates.service.pick_dev``). ``concurrency`` is how many develops the
+    worker may run at once (recorded; the factory still runs one at a time).
+    ``setup`` picks the develop station's Claude setup for this worker's runs;
+    ``None`` keeps the factory's ``POCKETPAW_FACTORY_CLAUDE_SETUP``.
+    ``seated_by`` is the admin who seated this agent (server-set; a later roster
+    save by anyone keeps it): every develop re-reads the agent AS that user, so
+    an agent they can no longer read is a gone seat."""
+
+    agent_id: str
+    role: CrewRole = "dev"
+    concurrency: int = 1
+    setup: CrewSetup | None = None
+    seated_by: str = ""
+
+
 class Autopilot(BaseModel):
     """Autopilot state on a mandate — Foresight-seeded simulated users.
 
@@ -161,6 +188,8 @@ class MandateDoc(TimestampedDocument):
     autopilot: Autopilot = Field(default_factory=Autopilot)
     # The ``upstream`` patrol's watch list; empty on mandates that predate it.
     upstream: list[UpstreamPin] = Field(default_factory=list)
+    # The crew roster; empty = the factory's env defaults run every task.
+    crew: list[CrewMember] = Field(default_factory=list)
 
     class Settings:
         name = "mandates"
@@ -268,6 +297,9 @@ __all__ = [
     "Budget",
     "Cadence",
     "Charter",
+    "CrewMember",
+    "CrewRole",
+    "CrewSetup",
     "Kpi",
     "KpiDirection",
     "MandateDoc",

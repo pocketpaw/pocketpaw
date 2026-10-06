@@ -1,7 +1,9 @@
 <!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
      craft factory built on it: anatomy, charter (cadence, checks, recipes),
-     patrols (incl. upstream), the headless develop station (strict and owner
-     Claude setups, the trust restore, ORIENT) and its security posture, the
+     patrols (incl. upstream), the crew (cloud Agents as workers: roster, seat
+     rule, per-worker model, instructions and setup), the headless develop
+     station (strict and owner Claude setups, the trust restore, ORIENT) and its
+     security posture, the
      architecture context the foreman and review get, landing and re-develop,
      endpoints (incl. the digest), env vars, and the remaining demo-bar
      concessions. -->
@@ -25,7 +27,8 @@ diff passes a human gate, and nothing merges.
 
 ```
 MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
-          recipes; surface: repo; upstream: pinned GitHub deps)
+          recipes; surface: repo; upstream: pinned GitHub deps;
+          crew: cloud Agents seated as dev / reviewer / foreman)
    │
    ├── PATROLS sense the surface (scoped by the
    │   mandate's `patrols` toggles) ───────────► SIGHTINGS (deduped)
@@ -57,8 +60,9 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
                       task as a Belt run; on REJECT the router closes the
                       chain and the shift records the reason
          6. develop — with the headless dispatcher, the develop station
-                      produces each run's diff (see below); the diff waits
-                      at the per-diff Instinct gate
+                      produces each run's diff (see below), with the model and
+                      instructions of the crew dev seated on the task; the
+                      diff waits at the per-diff Instinct gate
 ```
 
 ### The charter: cadence, checks, recipes
@@ -189,10 +193,11 @@ still at the plan gate, and the last 3 shifts'.
 
 | Method | Path | Gate | What |
 |--------|------|------|------|
-| POST | `/belt/mandates` | `belt.manage` | Create (charter body + `patrols` senses toggles + optional `upstream` watch list) → `{mandate}` |
+| POST | `/belt/mandates` | `belt.manage` | Create (charter body + `patrols` senses toggles + optional `upstream` watch list + optional `crew`) → `{mandate}` |
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
 | GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
-| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, recent shifts, sightings-by-patrol |
+| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts, sightings-by-patrol |
+| PUT | `/belt/mandates/{id}/crew` | `belt.manage` | Replace the crew roster: `{crew: [{agent_id, role: dev\|reviewer\|foreman, concurrency (1-8), setup?: owner\|strict}]}` → `{mandate}`; see *The crew* below |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
 | POST | `/belt/mandates/{id}/shift` | `belt.manage` | Run a shift now → `{shift: {shift_id, no, state, plan_action_id, task_count, no_action_reason}}` |
@@ -404,10 +409,83 @@ station's report (checks, setup, orient source, review verdict and notes, fix
 attempts), and its `files_changed` is the station's count (else the diff's
 `+++` headers).
 
+### The crew: cloud Agents as workers
+
+A crew member IS a cloud Agent (`/agents`): its model, instructions (system
+prompt) and soul live on the Agent and are edited in the agent editor. The
+mandate stores only a roster, `MandateDoc.crew`, one seat per agent:
+
+```
+{agent_id, role: dev | reviewer | foreman, concurrency: 1-8, setup: owner | strict | null,
+ seated_by}
+```
+
+`PUT /belt/mandates/{id}/crew` replaces it (create takes the same `crew`
+list). Vouching is per seat. A seat whose agent is already on the roster
+carries over with its `seated_by` (the admin who seated it), so another admin
+can change its role, concurrency or setup, or edit the rest of the roster,
+without being able to read that agent; one deleted since doesn't block edits
+either. A NEW agent must be one the caller can read, live in this workspace
+(another workspace's public agent is refused) and be enabled
+(`mandate.crew_agent_disabled` otherwise); the caller is stamped as its
+`seated_by` (server-set). One seat per agent, at most 20 seats; anything else
+is a 422. Removing a seat always works. The write emits
+`mandate.crew_changed`.
+
+**Seat rule.** When a plan task is dispatched, `StationTaskDispatcher` seats it
+on a dev: the roster's `dev` seats in roster order, minus any whose agent is
+gone, disabled or no longer in the workspace; task N (1-based, the plan's
+order) goes to dev `(N - 1) % devs` (`mandates.service.pick_dev`). Two devs
+split a two-task shift. N is the task's index in its own plan, so the
+round-robin restarts at the first dev every shift: on one-task shifts only
+the first live dev ever works. The seat rides the run blob as
+`worker: {agent_id, name, setup, seated_by}`; a mandate with no live dev gets
+`worker: {}` and the factory env decides everything, exactly as before crews.
+A re-develop (moved base) keeps the run's seat.
+
+**Per-worker settings.** The headless runner reads the seated agent when the
+develop runs, not at dispatch (`mandates.service.crew_worker`), so an edit in
+the agent editor reaches a queued run, and the agent's instructions never sit
+on a run blob other members can read. Seating and this read both use the
+roster route's visibility-checked read (`agents.service.get_for_viewer`) AS
+`seated_by`, so an agent that is gone, disabled, or no longer readable by the
+admin who seated it (its owner made it private) is a gone seat: the run uses
+the factory env for everything, setup included, and the report says
+`worker: <name> (seat unavailable: ...)`. `DevelopRequest` carries `worker`,
+`model`, `instructions`, `setup` and `worker_note`:
+
+- `model` sets `--model` on the DEVELOP and FIX calls, over
+  `POCKETPAW_FACTORY_CLAUDE_MODEL`. Agent models are catalog ids, so
+  `anthropic/claude-sonnet-4-5` becomes `claude-sonnet-4-5`. Only a Claude
+  model passes (`claude-*`, optionally region-dotted, or a CLI alias: sonnet,
+  opus, haiku, opusplan, fable, default); another provider's model (`gpt-4o`,
+  `openai/gpt-4o`) or a value that reads as a flag falls back to the env
+  (`foreman.cli_model`) and the report says `model default: 'gpt-4o' is not a
+  Claude model`. REVIEW keeps the factory model: the reviewer stays
+  independent of the worker.
+- `instructions` (capped at 4,000 chars) ride the develop and fix prompts as
+  style notes, after the charter, INSIDE the `<untrusted>` fence: an agent's
+  owner edits them without `belt.manage` and they are re-read at every
+  develop, so they can shape style but never the rules, tools or files. The
+  agent's name stays out of the prompt for the same reason.
+- `setup` (`owner` / `strict`) picks the Claude setup for the whole run, over
+  `POCKETPAW_FACTORY_CLAUDE_SETUP`; unset follows the env. An `owner` seat
+  still needs the operator's `POCKETPAW_FACTORY_WORKTREE_ROOT`, or the run
+  fails at PREPARE, so a workspace admin can't turn on the owner setup where
+  the operator never configured one.
+
+The report gains `worker: <name> (model <id or default>)`.
+
+Not wired yet: `reviewer` and `foreman` seats are stored and shown but the
+review and foreman calls still use the factory defaults; `concurrency` is
+stored and shown but not enforced (develops still run one at a time; it is
+for the parallel-worker queue); a plan task can't name its worker (the seat
+rule is round-robin only).
+
 ### Claude setup: strict and owner
 
-`POCKETPAW_FACTORY_CLAUDE_SETUP` picks how the develop, fix and review calls
-run the Claude Code CLI.
+`POCKETPAW_FACTORY_CLAUDE_SETUP` (or a crew seat's `setup`) picks how the
+develop, fix and review calls run the Claude Code CLI.
 
 - **`strict`** (default; hosted deploys). Every call passes
   `--setting-sources ""`, `--strict-mcp-config` and
@@ -721,8 +799,8 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
 | `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
 | `POCKETPAW_FACTORY_CLAUDE_BIN` | `claude` on PATH | The Claude Code CLI every factory LLM seat shells (foreman, develop, fix, review) |
-| `POCKETPAW_FACTORY_CLAUDE_MODEL` | the CLI's built-in default | Passed as `--model` when set (in the strict setup user settings don't load, so a model set there is ignored) |
-| `POCKETPAW_FACTORY_CLAUDE_SETUP` | `strict` | `owner` runs develop/fix/review with the owner's Claude Code setup (CLAUDE.md, skills, hooks, settings, MCP) plus the trust restore; anything else is `strict` |
+| `POCKETPAW_FACTORY_CLAUDE_MODEL` | the CLI's built-in default | Passed as `--model` when set (in the strict setup user settings don't load, so a model set there is ignored); a seated crew dev's own model wins on develop/fix |
+| `POCKETPAW_FACTORY_CLAUDE_SETUP` | `strict` | `owner` runs develop/fix/review with the owner's Claude Code setup (CLAUDE.md, skills, hooks, settings, MCP) plus the trust restore; anything else is `strict`; a crew seat's `setup` wins |
 | `POCKETPAW_FACTORY_WORKTREE_ROOT` | unset | Owner setup only, and required there: existing dir outside the bound repo that station worktrees are created under, e.g. `<workspace>/paw-worktrees/factory-runs` |
 | `POCKETPAW_FACTORY_LOOM_DIR` | nearest ancestor `.loom/` of the bound repo | Where ORIENT looks for `worldmodel-<repo dir name>.json` |
 | `POCKETPAW_FACTORY_LOOM_BIN` | `loom` on PATH, else `~/go/bin/loom` | The loom CLI ORIENT runs |
@@ -817,6 +895,22 @@ the route's tenancy 404.
 (the `feed:` entries for the feed). CI runs these in the "Belt mandates and the
 craft factory develop station" step (`tests/cloud` is outside the default
 addopts).
+
+`tests/cloud/test_belt_crew.py` pins the crew: the roster through create, the
+crew route, GET and a reload; the 422s (another workspace's agent, public or
+not, someone's private agent, duplicates, bad role / concurrency / setup) and
+the cross-tenant 404; per-seat vouching (another admin edits a roster holding a
+private agent of the first admin's and a deleted one; a new unreadable or
+disabled agent is still refused); the seat rule (two devs, two tasks, two workers;
+reviewers and disabled agents skipped); the station running a worker's model
+on develop and fix but not review, its instructions in those prompts, catalog
+model ids mapped and non-claude or flag-shaped ones falling back to the env, a
+seat's setup over the env's (and an owner seat with no worktree root failing
+PREPARE with an error that names the seat); and end to end, roster → dispatch
+→ runner → station argv, with the agent edited between dispatch and develop,
+no crew and a disabled agent falling back to the env, the instructions fenced
+as untrusted data (any case or spacing of the closing tag defanged), and
+an agent the seating admin can no longer read becoming a gone seat.
 
 `tests/cloud/test_belt_autopilot.py` (feat/belt-autopilot) pins both new pieces:
 autopilot start persists state + runs an immediate cycle whose sightings carry

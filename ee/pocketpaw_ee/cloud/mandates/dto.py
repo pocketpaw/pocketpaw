@@ -5,8 +5,8 @@
 # ``model_validate``s at entry; Response models are the wire dicts the service
 # returns. ``command_refusal`` is the factory's argv[0] allowlist for charter
 # checks/recipes (the develop station re-checks it before exec). Covers mandate
-# create/read (charter incl. checks + recipes, and the
-# ``upstream`` patrol's pinned-dependency watch list), feedback
+# create/read (charter incl. checks + recipes, the ``upstream`` patrol's
+# pinned-dependency watch list, and the crew roster), the crew route, feedback
 # intake + sightings, the shift trigger, plan resolution, pawprints, the
 # autopilot toggle, and the digest query.
 
@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw_ee.cloud.mandates.domain import (
     Cadence,
+    CrewRole,
+    CrewSetup,
     KpiDirection,
     MandateStatus,
     ShiftState,
@@ -145,6 +147,37 @@ def command_refusal(program: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Crew roster — cloud Agents seated on a mandate
+# ---------------------------------------------------------------------------
+
+
+class CrewMemberRequest(BaseModel):
+    """One crew seat: an Agent in this workspace, its role, how many develops
+    it may run at once, and an optional Claude setup (unset = the factory env).
+    The service checks the caller can read the agent."""
+
+    agent_id: str = Field(min_length=1, max_length=64)
+    role: CrewRole = "dev"
+    concurrency: int = Field(default=1, ge=1, le=8)
+    setup: CrewSetup | None = None
+
+
+def _unique_agents(v: list[CrewMemberRequest]) -> list[CrewMemberRequest]:
+    ids = [m.agent_id for m in v]
+    if len(ids) != len(set(ids)):
+        raise ValueError("an agent can hold only one seat on a crew")
+    return v
+
+
+class SetCrewRequest(BaseModel):
+    """Body for ``PUT /belt/mandates/{id}/crew`` — the whole roster, replaced."""
+
+    crew: list[CrewMemberRequest] = Field(default_factory=list, max_length=20)
+
+    _unique = field_validator("crew")(_unique_agents)
+
+
+# ---------------------------------------------------------------------------
 # Mandate create + read
 # ---------------------------------------------------------------------------
 
@@ -161,6 +194,10 @@ class CreateMandateRequest(BaseModel):
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
     # The ``upstream`` patrol's watch list (enable it with "upstream" in patrols).
     upstream: list[UpstreamPinRequest] = Field(default_factory=list)
+    # The crew roster (empty = the factory's env defaults run every task).
+    crew: list[CrewMemberRequest] = Field(default_factory=list, max_length=20)
+
+    _unique_crew = field_validator("crew")(_unique_agents)
 
 
 class AutopilotState(BaseModel):
@@ -232,6 +269,7 @@ class MandateDetailResponse(BaseModel):
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
     autopilot: AutopilotState = Field(default_factory=AutopilotState)
     upstream: list[UpstreamPinRequest] = Field(default_factory=list)
+    crew: list[CrewMemberRequest] = Field(default_factory=list)
     recent_shifts: list[ShiftSummaryResponse] = Field(default_factory=list)
     sightings_by_patrol: dict[str, int] = Field(default_factory=dict)
     created_at: datetime
@@ -380,6 +418,7 @@ __all__ = [
     "CharterRequest",
     "command_refusal",
     "CreateMandateRequest",
+    "CrewMemberRequest",
     "DigestRequest",
     "FeedbackRequest",
     "KpiRequest",
@@ -392,6 +431,7 @@ __all__ = [
     "PawprintsListResponse",
     "ResolvePlanRequest",
     "ShiftResponse",
+    "SetCrewRequest",
     "ShiftSummaryResponse",
     "SightingResponse",
     "SightingsListResponse",

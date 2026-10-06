@@ -44,6 +44,14 @@ class MandateAutopilotChanged(Event):
     EVENT_TYPE: ClassVar[str] = "mandate.autopilot_changed"
 
 
+# Fired when a mandate's crew roster is replaced. Payload: {workspace_id,
+# mandate_id, crew} — the roster as stored ({agent_id, role, concurrency,
+# setup}).
+@dataclass
+class MandateCrewChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "mandate.crew_changed"
+
+
 # UI contract — fired when a shift's PlanProposal lands as a pending Instinct
 # ``belt_plan`` Action. Payload: {workspace_id, mandate_id, proposal} —
 # ``workspace_id`` drives the audience resolver's workspace fan-out (the same
@@ -58,6 +66,7 @@ __all__ = [
     "BeltPlanProposed",
     "MandateAutopilotChanged",
     "MandateCreated",
+    "MandateCrewChanged",
     "MandateShiftStarted",
     "MandateShiftUpdated",
     "MandateSightingAdded",

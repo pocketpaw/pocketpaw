@@ -12,7 +12,9 @@
 #        * ``station`` (default) — ``StationTaskDispatcher`` files a QUEUED
 #          ``code_change`` Action (``station_pending=True``, no diff) carrying
 #          the task text, its ``title`` (the commit subject when it lands) and
-#          ``expected_outcome``, its ``recipe`` (if any) and the mandate
+#          ``expected_outcome``, its ``recipe`` (if any), the crew ``worker``
+#          seat (``{agent_id, name, setup, seated_by}``; task N goes to live dev seat
+#          ``(N-1) % devs``, see ``mandates.service.pick_dev``) and the mandate
 #          provenance, and fires ``belt_run_updated``. A human drives ``/belt``
 #          to a diff.
 #        * ``headless`` — ``belt/headless.HeadlessTaskDispatcher`` files the same
@@ -155,6 +157,7 @@ class StationTaskDispatcher:
         why = str(task.get("why") or "")
         expected = str(task.get("expected_outcome") or "")
         repo = await _repo_for_mandate(workspace_id, mandate_id)
+        worker = await _crew_seat(workspace_id, mandate_id, index)
 
         # The QUEUED-run blob: the SAME ``_code_change`` shape the console reads,
         # but with ``station_pending=True`` and NO diff. ``task`` carries the
@@ -185,6 +188,11 @@ class StationTaskDispatcher:
             # A charter recipe name (foreman-validated) — the develop station
             # runs that command instead of an LLM develop. "" = develop work.
             "recipe": str(task.get("recipe") or ""),
+            # The crew seat this task runs on ({agent_id, name, setup,
+            # seated_by}); the headless runner reads the agent's model +
+            # instructions at develop time, as seated_by. {} = no crew: the
+            # factory env decides.
+            "worker": worker or {},
         }
 
         trigger = ActionTrigger(
@@ -241,6 +249,19 @@ async def _repo_for_mandate(workspace_id: str, mandate_id: str) -> str | None:
         return await mandate_service.repo_for_mandate(workspace_id, mandate_id)
     except Exception:  # noqa: BLE001 — a repo read must never break dispatch
         logger.debug("mandate: repo lookup for station run failed (non-fatal)", exc_info=True)
+        return None
+
+
+async def _crew_seat(workspace_id: str, mandate_id: str, index: int) -> dict[str, Any] | None:
+    """Best-effort read of the dev seat for task ``index`` (mandates service,
+    the sole Beanie importer). A read failure degrades to ``None`` (factory env
+    defaults); it never breaks the dispatch."""
+    try:
+        from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+        return await mandate_service.crew_seat_for_task(workspace_id, mandate_id, index)
+    except Exception:  # noqa: BLE001 — a crew read must never break dispatch
+        logger.warning("mandate: crew seat lookup failed (non-fatal)", exc_info=True)
         return None
 
 
