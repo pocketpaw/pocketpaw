@@ -21,6 +21,8 @@ the tests that ran before it in the same process.
   decisions DB go to ``tmp_path``; the paw-bar per-IP limiter is emptied; catalog
   syncs are recorded, not run; spawning the real livekit call-bot is refused (it
   never exits under pytest and hangs the suite).
+* Exit-hang guard. At session end any live aiosqlite worker thread (an unclosed
+  connection; non-daemon, so it blocks interpreter exit) is named on stderr.
 * mongomock's ``create_indexes`` is shimmed to keep ``partialFilterExpression``
   so partial unique indexes behave as in MongoDB.
 """
@@ -60,7 +62,9 @@ import functools  # noqa: E402
 import importlib.metadata  # noqa: E402
 import importlib.util  # noqa: E402
 import statistics  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
 import pytest  # noqa: E402
@@ -448,6 +452,24 @@ def pytest_sessionfinish(session, exitstatus):
             f"p99 {p99:.4f} ms, max {ms[-1]:.3f} ms\n"
         )
 
+    # An aiosqlite connection that is never closed keeps a NON-daemon worker
+    # thread alive, and the interpreter waits on it forever at exit: the run
+    # passes, then hangs. Name the leak so the hang is not a mystery.
+    workers = [
+        t
+        for t in threading.enumerate()
+        if t.is_alive() and not t.daemon and "_connection_worker_thread" in t.name
+    ]
+    if workers:
+        names = ", ".join(
+            f"{t.name} (target={getattr(getattr(t, '_target', None), '__qualname__', '?')})"
+            for t in workers
+        )
+        sys.stderr.write(
+            f"\nWARNING: {len(workers)} unclosed aiosqlite connection(s) leaked by this run; "
+            f"their non-daemon worker threads will block interpreter exit: {names}\n"
+        )
+
 
 @pytest.fixture(autouse=True)
 def _enable_test_full_access(request, monkeypatch):
@@ -508,16 +530,16 @@ def _clear_journal_cache() -> None:
         fn.cache_clear()
 
 
-@pytest.fixture(autouse=True)
-def _isolate_soul_data_dir(tmp_path, monkeypatch):
-    """Keep every test out of the developer's real ``~/.soul``.
+@contextmanager
+def soul_data_dir_isolated(tmp_path, monkeypatch):
+    """Keep a test out of the developer's real ``~/.soul`` (the autouse fixture below).
 
     The org journal (``pocketpaw.journal_dep``) lives under ``SOUL_DATA_DIR`` or
     ``~/.soul``, and the decisions store's ``_DB_PATH`` global defaults to
     ``~/.soul/decisions.db``; tests that ``set_db_path(tmp_path)`` never restored it.
     The next ``mount_cloud`` then replayed the whole real journal (~137k events)
-    into a fresh temp store: 1182 s in one census run. Both now point at this
-    test's tmp dir and are restored afterwards.
+    into a fresh temp store: 1182 s in one census run. Both point at this test's
+    tmp dir; ``monkeypatch`` puts them back when it is undone.
     """
     soul_dir = tmp_path / "soul"
     monkeypatch.setenv("SOUL_DATA_DIR", str(soul_dir))
@@ -528,8 +550,16 @@ def _isolate_soul_data_dir(tmp_path, monkeypatch):
         from pocketpaw_ee.cloud.decisions import store
 
         monkeypatch.setattr(store, "_DB_PATH", soul_dir / "decisions.db")
-    yield
-    _clear_journal_cache()
+    try:
+        yield
+    finally:
+        _clear_journal_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_soul_data_dir(tmp_path, monkeypatch):
+    with soul_data_dir_isolated(tmp_path, monkeypatch):
+        yield
 
 
 # ---------------------------------------------------------------------------

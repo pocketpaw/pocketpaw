@@ -13,11 +13,19 @@
 # ``is_applied`` / ``mark_applied`` serve a migration that commits per row (one
 # transaction per widget, say) and records its marker only once every row moved;
 # such a migration must be idempotent row by row, since a partial run is retried.
+#
+# ``checkpoint_wal(path)`` folds a file's WAL back into it with stdlib sqlite3.
+# Store ``aclose`` methods run it via ``asyncio.to_thread``, never through an
+# aiosqlite connection: eviction fires ``aclose`` as a task the loop may close
+# under, and an orphaned aiosqlite worker is a non-daemon thread that blocks
+# interpreter exit.
 
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from datetime import UTC, datetime
 
 import aiosqlite
@@ -76,3 +84,9 @@ async def mark_applied(db: aiosqlite.Connection, name: str) -> None:
         (name, datetime.now(UTC).isoformat()),
     )
     await db.commit()
+
+
+def checkpoint_wal(db_path: str) -> None:
+    """Truncate ``db_path``'s write-ahead log (blocking; run it off the loop)."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
