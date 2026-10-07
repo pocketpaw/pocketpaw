@@ -290,11 +290,12 @@ def load_license() -> LicensePayload | None:
     elif _cached_license is not None:
         return _cached_license  # type: ignore[return-value]
 
-    # Ensure .env is loaded
+    # Ensure .env is loaded. Only the working directory's file (the one Settings
+    # reads): a bare load_dotenv() walks up and imports any parent project's .env.
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(".env")
     except ImportError:
         pass
 

@@ -1391,9 +1391,15 @@ def _deploy_mode() -> str | None:
                       changes for an environment that does not set the var.
 
     A value other than the three known modes is treated as UNSET (logged) so a typo
-    degrades to the safe legacy behaviour rather than failing the publish."""
+    degrades to the safe legacy behaviour rather than failing the publish.
+
+    ``PAW_SITES_LOCAL=1`` beats all of it and answers ``local``: it is the explicit
+    "never deploy to Cloudflare" switch, so a ``PAW_CF_DEPLOY_MODE`` that also reached
+    the environment (a stray ``.env``) must not send a local run to workers.dev."""
     import os
 
+    if os.environ.get("PAW_SITES_LOCAL") == "1":
+        return "local"
     raw = (os.environ.get("PAW_CF_DEPLOY_MODE") or "").strip().lower()
     if not raw:
         return None
@@ -5215,7 +5221,21 @@ def provision_cf_client() -> Any:
 
     Thin public wrapper over ``_cf_client()`` so the builtin job builds the real CF
     client the SAME way ``_deploy_site_doc`` does, and tests can monkeypatch this one
-    seam to inject a fake client without importing the client class."""
+    seam to inject a fake client without importing the client class.
+
+    Refuses under ``PAW_SITES_LOCAL=1``: the job's first act with this client is
+    creating a real D1, and ``provision_deploy`` degrades ``local`` to ``workers``, so
+    a dynamic publish on a local box would otherwise reach Cloudflare. The job runs
+    this inside its try, so the refusal marks the site ``failed`` cleanly, the same
+    as an unconfigured Cloudflare on a fresh dev box."""
+    import os
+
+    if os.environ.get("PAW_SITES_LOCAL") == "1":
+        raise ValidationError(
+            "sites.local_mode",
+            "PAW_SITES_LOCAL=1 never deploys to Cloudflare, and a dynamic site needs a "
+            "Cloudflare D1. Unset PAW_SITES_LOCAL to publish dynamic sites.",
+        )
     return _cf_client()
 
 
