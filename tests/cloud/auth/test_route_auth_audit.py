@@ -147,7 +147,7 @@ ROUTER_MODULES = [
     ("workspace", "pocketpaw_ee.cloud.workspace.router"),
     # Mounted without joining this list while CI never ran the coverage
     # ratchet. Every route on each was walked by hand: all are session-guarded
-    # except the five public ones named in the allowlist below.
+    # except the public ones named in the allowlist below.
     ("partners", "pocketpaw_ee.cloud.partners.router"),
     ("studio_templates", "pocketpaw_ee.cloud.studio_templates.router"),
     ("discover", "pocketpaw_ee.cloud.discover.router"),
@@ -165,6 +165,7 @@ ROUTER_MODULES = [
 #: here is audited through ``router`` alone.
 ROUTER_ATTRS: dict[str, tuple[str, ...]] = {
     "pocketpaw_ee.cloud.ai_visibility.router": ("router", "site_router"),
+    "pocketpaw_ee.cloud.partners.router": ("router", "pros_router"),
 }
 
 #: Routes that are public BY DESIGN, each with the reason it has to be.
@@ -219,6 +220,15 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     # --- public indexes and tools, each behind its own abuse control ---
     "GET /discover": "public index of shareable items; per-IP limit (rate_limit_discover_public)",
     "GET /discover/{id_or_slug}": "one public listing by id or slug; same per-IP limit",
+    "GET /pros/directory": (
+        "Find a Pro directory of active, opted-in partners; per-IP limit "
+        "(rate_limit_partner_public), allow-listed fields only"
+    ),
+    "GET /pros/{slug}": "one public Pro profile; same per-IP limit",
+    "POST /pros/apply": (
+        "apply to become a Pro; per-IP limit (rate_limit_partner_apply), a global "
+        "daily cap and Turnstile (refused in production when the secret is unset)"
+    ),
     "POST /tools/ai-check": (
         "free AI check; per-IP limit (rate_limit_ai_check_public) and the daily USD "
         "spend cap always apply, Turnstile when POCKETPAW_TURNSTILE_SECRET is set"

@@ -1330,6 +1330,142 @@ The milestone ladder with when each reward was credited:
 
 Needs `fabric.read` and an ACTIVE profile (**403** `partner.not_active`).
 
+### `PATCH /partners/me/profile`
+
+The caller's public partner profile; only the fields sent change. Body
+(`extra` forbidden):
+
+```json
+{
+  "slug": "ravi-prints",
+  "display_name": "Ravi Prints",
+  "city": "Bengaluru",
+  "country": "IN",
+  "services": ["print", "design"],
+  "bio": "Flex and vinyl since 2009.",
+  "contact_url": "https://wa.me/919876543210",
+  "public": true
+}
+```
+
+`display_name` and `city` are stripped of surrounding whitespace before the 1-80
+length check, so a blank value is `422`. To clear `services` send `[]`; `null`
+is `422` (the other optional fields clear on `null`). `slug` is
+`^[a-z0-9-]{3,60}$`, unique across workspaces, and may not be one of
+`directory, apply, requests, find, join, request, status` (fixed segments under
+`/pros` on the API and on the public site). `services` is a subset of
+`print, design, web, marketing, photo` (up to 5). `bio` is at most 600 chars,
+`contact_url` must start with `https://`, `country` is ISO-3166 alpha-2 (upper-cased).
+`public: true` needs a `slug` and a `display_name`. Returns the same shape as
+`GET /partners/me`, which now carries these eight fields too (defaults: nulls,
+`services: []`, `public: false`). `fabric.write`. **404** when the workspace is not a
+partner (an applied partner may fill its profile in ahead of activation; it is listed
+only once active). **422** `partners.invalid_profile` (pattern, reserved slug, unknown
+service), `partners.profile_incomplete`; **409** `partners.slug_taken`. An operator
+`PUT /platform/workspaces/{id}/partner` leaves these fields as they are. Deleting
+the workspace releases its slug (and unlists it), so another partner can take it.
+An active partner with `public: true` is listed on Find a Pro (see "Find a Pro
+(public)" below).
+
+### `GET /platform/partners/applications` · `PATCH /platform/partners/applications/{id}`
+
+Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
+session cookie), the same guard as the partner switch above. The list is newest
+first: `?status=new|contacted|rejected|accepted` filters, `cursor` pages (the
+`next_cursor` of the previous page; `422 partners.bad_cursor` when invalid),
+`limit` 1-200 (default 50). Each row is `{id, name, email, city, country,
+services, message, status, note, reviewed_by, reviewed_at, created_at}`; this is
+the review queue, so the applicant's contact details are included. Every list
+read is recorded as a platform audit read.
+
+PATCH body: `status` (one of the four), optional `note` (up to 2000, kept on the
+application), `reason` (required, non-blank; goes to the platform audit row).
+Returns the updated row with `reviewed_by` (the operator's user id) and
+`reviewed_at`. Marking an application `accepted` records the decision only; the
+applicant's workspace becomes a partner through
+`PUT /platform/workspaces/{workspace_id}/partner`. An unknown id is `404` with
+no audit row. There is no operator UI for this queue yet; it is a paw-enterprise
+follow-up.
+
+## Find a Pro (public)
+
+The public face of Paw Partners, under the brand Paw Pros by PocketPaw. Strangers
+see "Pro"; the signed-in hub, operator routes and stored data keep the partner
+name. These three routes need no sign-in, live under `/pros` and return only
+allow-listed fields. Their error codes are `pros.*` (and `pro.not_found`). Nothing
+under `/partners` is public: `/partners/directory` and `/partners/{slug}` answer
+`404`.
+
+### `GET /pros/directory`
+
+No sign-in. Pros (partners with `status: active` and `public: true`), newest first
+(by `joined_at`, then slug). Query params, all optional: `city` (case-insensitive
+exact match), `service` (one of the five), `cursor` (the opaque `next_cursor` of
+the previous page; it encodes only the card's own `joined_at` and slug, never a
+workspace id), `limit` (1-50, default 24). Limited to 60 requests a minute per
+IP, shared with `GET /pros/{slug}`; past that `429` `pros.rate_limited`.
+A bad cursor is `422` `pros.bad_cursor`.
+
+**Client IP behind the public site.** Every per-IP limit keys on the rightmost
+`X-Forwarded-For` hop. Requests relayed by the paw-web Worker all arrive from
+Cloudflare's egress, so the Worker sends two headers: `X-Paw-Client-IP` (the
+visitor's address) and `X-Paw-Web-Key` (a shared secret). Only the limits on the
+routes the Worker fronts read them: these `/pros` reads, `POST /pros/apply`
+and the public Discover reads. When the backend has `POCKETPAW_PUBLIC_WEB_KEY`
+set and the key header matches it, that IP is the bucket (and the address sent
+to Turnstile); a missing or wrong key, an unset env var or an invalid address
+falls back to the normal rule. Every other limit (the auth exchange, meeting
+lookups and knocks, `POST /tools/ai-check`) ignores both headers, so a leaked
+key cannot pick their buckets. `X-Paw-Client-IP` is never read without the key.
+Rotation: set the new key on the Worker and in the backend env, redeploy both;
+there is no dual-key window, so expect a short gap where Worker traffic shares
+one bucket.
+
+Response `200` (`ProDirectoryPage`):
+`{"items": [<pro>, ...], "next_cursor": "..." | null}`. A Pro on the wire (`ProPublicOut`) is exactly these fields (never `footer_name`,
+`billing_country`, `founding` or `status`):
+
+```json
+{
+  "slug": "ravi-prints",
+  "display_name": "Ravi Prints",
+  "city": "Bengaluru",
+  "country": "IN",
+  "services": ["print", "design"],
+  "bio": "Flex and vinyl since 2009.",
+  "contact_url": "https://wa.me/919876543210",
+  "tier": "bronze",
+  "joined_at": "2026-10-01T09:00:00Z",
+  "sites": [<Discover listing>, ...]
+}
+```
+
+`sites` are the partner workspace's public Discover listings, the same card as
+`GET /discover` (see Discover below), newest first and capped at the 12 newest;
+a Pro with more shows only those 12 here (the full set is on `GET /discover`).
+
+### `GET /pros/{slug}`
+
+No sign-in; same rate limit as the directory. One Pro by slug (`ProPublicOut`),
+`404` `pro.not_found` when there is no such slug or the partner is not active or
+not public. Registered after every fixed `/pros/<segment>` route, so
+`/pros/directory` and `/pros/apply` always win over a slug.
+
+### `POST /pros/apply`
+
+No sign-in. Apply to become a Pro. Body (`ProApplyIn`, `extra` forbidden): `name`
+(1-120), `email`, `city` (1-80), `country` (ISO-2), `services` (1-5 of the five), `message` (up to 2000, optional),
+`turnstile_token`. Order of checks: the body, then a global cap of 500
+applications a day across every address (`429` `pros.apply_daily_limit`, so a
+flood from many addresses cannot fill the queue), then the Cloudflare Turnstile
+token (`400` `pros.turnstile_failed`; with `POCKETPAW_TURNSTILE_SECRET` unset
+the check is skipped with a warning in dev and refused in a production posture,
+see the AI check below). Then exactly one application is stored in the platform's
+own `partner_applications` collection (never a workspace), with the submitting
+address kept only as a sha256 hash. **204**. Limited to 5 applications an hour
+per IP (`429` `pros.apply_rate_limited`). Operators review the queue through
+`GET /platform/partners/applications` (under Paw Partners above).
+
 ## Site templates
 
 Save a site pocket as a template, then start new sites from it. A template is a
@@ -1584,7 +1720,8 @@ public site templates (`source: "site_template"`) and public studio templates
 (`source: "studio_template"`); a public template has one listing, hidden when
 the template is hidden. The two reads need no sign-in and
 are limited to 60 requests a minute per IP (shared between them); past that they
-return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
+return `429` with `discover.rate_limited`. Behind the paw-web Worker the IP comes
+from `X-Paw-Client-IP` when `X-Paw-Web-Key` matches (see `GET /pros/directory`). `use` and `report` need a signed-in
 user and act in the caller's active workspace.
 
 A listing on the wire is exactly these fields (never the owner, workspace,
@@ -1732,7 +1869,9 @@ Errors (`{"error": {"code", "message"}}`):
 | `503` | `tools.ai_check.daily_limit` | Today's anonymous checks spent `POCKETPAW_AI_CHECK_DAILY_USD` (default `5.0`) |
 | `502` | `tools.ai_check.engine_failed` | No OpenAI key configured, or every engine call failed |
 
-With `POCKETPAW_TURNSTILE_SECRET` unset (dev), Turnstile is skipped with a warning.
+With `POCKETPAW_TURNSTILE_SECRET` unset, Turnstile is skipped with a warning in dev
+and refused (`400 tools.ai_check.turnstile_failed`) in a production posture
+(`POCKETPAW_ENV=production` or `POCKETPAW_AUTH_COOKIE_SECURE=true`).
 
 ## AI visibility — Staff site card
 

@@ -1,7 +1,7 @@
 [
   {
     "label": "Turnstile rejection ignored - bots spend the platform's engine budget",
-    "file": "ee/pocketpaw_ee/cloud/ai_visibility/public_check.py",
+    "file": "ee/pocketpaw_ee/cloud/_core/turnstile.py",
     "find": "    if not ok:\n        raise BadRequest(",
     "replace": "    if False:\n        raise BadRequest(",
     "tests": [
@@ -10,9 +10,9 @@
   },
   {
     "label": "Turnstile network error fails open",
-    "file": "ee/pocketpaw_ee/cloud/ai_visibility/public_check.py",
-    "find": "        logger.warning(\"ai_check: Turnstile verify failed: %s\", type(exc).__name__)\n        ok = False",
-    "replace": "        logger.warning(\"ai_check: Turnstile verify failed: %s\", type(exc).__name__)\n        ok = True",
+    "file": "ee/pocketpaw_ee/cloud/_core/turnstile.py",
+    "find": "        logger.warning(\"turnstile: verify failed: %s\", type(exc).__name__)\n        ok = False",
+    "replace": "        logger.warning(\"turnstile: verify failed: %s\", type(exc).__name__)\n        ok = True",
     "tests": [
       "tests/cloud/ai_visibility/test_public_check.py::test_turnstile_success_and_network_error"
     ]

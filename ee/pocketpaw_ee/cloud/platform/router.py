@@ -27,7 +27,9 @@ Updated 2026-09-16 (feat/platform-entitlements, chunk 7): mounted
 Updated 2026-10-02 (feat/discover-moderation, DS-5): mounted ``discover_router``
 — staff list and feature / hide / unhide / reindex for the Discover index.
 Updated 2026-10-02 (feat/partners-foundation, PH-1): mounted ``partners_router``
-— set / clear a workspace's Paw Partners profile.
+— set / clear a workspace's Paw Partners profile — and, from the same module,
+``partner_applications_router`` — the operator's queue of public partner
+applications (list and review).
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from pocketpaw_ee.cloud.platform.credits import router as credits_router
 from pocketpaw_ee.cloud.platform.discover import router as discover_router
 from pocketpaw_ee.cloud.platform.entitlements import router as entitlements_router
 from pocketpaw_ee.cloud.platform.health import router as health_router
+from pocketpaw_ee.cloud.platform.partners import applications_router as partner_applications_router
 from pocketpaw_ee.cloud.platform.partners import router as partners_router
 from pocketpaw_ee.cloud.platform.revenue import router as revenue_router
 from pocketpaw_ee.cloud.platform.settings import router as settings_router
@@ -66,6 +69,7 @@ router.include_router(discover_router)
 router.include_router(entitlements_router)
 router.include_router(health_router)
 router.include_router(partners_router)
+router.include_router(partner_applications_router)
 router.include_router(revenue_router)
 router.include_router(settings_router)
 router.include_router(stats_router)

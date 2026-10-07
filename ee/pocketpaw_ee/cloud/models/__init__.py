@@ -290,6 +290,7 @@ from pocketpaw_ee.cloud.models.notification_outbox import (
     NotificationOutboxItem,
     NotificationRateMarker,
 )
+from pocketpaw_ee.cloud.models.partner_application import PartnerApplication
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
@@ -656,6 +657,9 @@ def get_all_documents():
         # Discover index (DS-1): one public card per source item. Only
         # ``ee.cloud.discover.service`` / ``service_admin`` write it.
         DiscoverListing,
+        # Public partner applications, reviewed by operators. Only
+        # ``ee.cloud.partners.service_admin`` reads or writes it.
+        PartnerApplication,
         # Studio generations published as templates. Only
         # ``ee.cloud.studio_templates.service`` / ``service_admin`` write it.
         StudioTemplate,

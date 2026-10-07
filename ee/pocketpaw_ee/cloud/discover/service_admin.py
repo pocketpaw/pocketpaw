@@ -38,6 +38,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -275,6 +276,34 @@ async def get_public(id_or_slug: str) -> dict:
     """One unhidden listing's public card, by id or slug, else NotFound."""
     # admin-cross-tenant: a public listing is readable by anyone.
     return _public(await public_doc_by_id_or_slug(id_or_slug))
+
+
+async def list_public_for_workspaces(
+    workspace_ids: list[str], *, per_workspace: int = 12
+) -> dict[str, list[dict]]:
+    """The newest ``per_workspace`` unhidden listings of each of ``workspace_ids``
+    as public cards, grouped by workspace (a workspace with none is absent). The
+    public partner profile shows a partner's listed sites through this; the card
+    shape is the same allow-list as the index. Capped per workspace so one
+    partner with thousands of listings cannot turn a directory page into a
+    multi-megabyte anonymous response."""
+    # admin-cross-tenant: public cards only; the workspace ids come from the
+    # public partner directory, which lists them by the partner's own choice.
+    # ponytail: one capped query per workspace (at most a directory page of
+    # them, 50); a $group/$slice aggregation if that ever shows in latency.
+    if not workspace_ids:
+        return {}
+
+    async def newest(workspace_id: str) -> list[DiscoverListing]:
+        return (
+            await DiscoverListing.find({"hidden": {"$ne": True}, "workspace": workspace_id})
+            .sort([("_id", -1)])
+            .limit(per_workspace)
+            .to_list()
+        )
+
+    pages = await asyncio.gather(*(newest(w) for w in dict.fromkeys(workspace_ids)))
+    return {rows[0].workspace: [_public(r) for r in rows] for rows in pages if rows}
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +577,7 @@ __all__ = [
     "get_staff",
     "list_all",
     "list_public",
+    "list_public_for_workspaces",
     "public_doc",
     "public_doc_by_id_or_slug",
     "push_report",
