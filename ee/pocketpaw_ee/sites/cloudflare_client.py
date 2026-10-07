@@ -24,6 +24,10 @@
 #     rename (a second POST for the same pattern is a 409).
 #   * D1: ``create_database``, ``delete_database``, and ``query_d1`` (parameterized,
 #     never interpolated SQL).
+#   * KV and R2 for ``binding_provisioner``: namespaces (find by title, create,
+#     delete) and buckets (exists, create, delete, expire-all lifecycle). The REST API
+#     has no object list/delete for R2, so a non-empty bucket delete reports False
+#     instead of raising, and the caller decides what to do with it.
 #   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html).
 #   * Analytics Engine: ``query_analytics_sql`` sends raw SQL and reads a body with
 #     no ``success`` key, so it deliberately does not use ``_unwrap`` on success.
@@ -693,6 +697,104 @@ class CloudflareClient:
             resp = await client.delete(url)
         if resp.status_code == 404:
             return
+        self._unwrap(resp)
+
+    # -- KV namespaces (binding_provisioner) ----------------------------------
+    # https://developers.cloudflare.com/api/resources/kv/subresources/namespaces/
+
+    async def find_kv_namespace(self, title: str) -> str | None:
+        """The id of the namespace titled ``title``, or None.
+
+        The provisioner's crash-recovery read: a namespace created on an attempt that
+        died before the site doc was saved is found here instead of duplicated.
+        ``per_page`` max is 1000 and an account holds at most 1,000 namespaces, so
+        one page normally covers it; the loop is bounded anyway."""
+        url = f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces"
+        async with self._client() as client:
+            for page in range(1, 51):
+                resp = await client.get(url, params={"page": page, "per_page": 1000})
+                rows = self._unwrap(resp)
+                rows = rows if isinstance(rows, list) else []
+                for row in rows:
+                    if isinstance(row, dict) and row.get("title") == title and row.get("id"):
+                        return str(row["id"])
+                if len(rows) < 1000:
+                    break
+        return None
+
+    async def create_kv_namespace(self, title: str) -> str:
+        """Create a KV namespace and return its id. Fails closed like every create."""
+        url = f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces"
+        async with self._client() as client:
+            resp = await client.post(url, json={"title": title})
+        return str(self._unwrap(resp)["id"])
+
+    async def delete_kv_namespace(self, namespace_id: str) -> None:
+        """Delete a KV namespace and its data. Idempotent on a 404."""
+        url = f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces/{namespace_id}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    # -- R2 buckets (binding_provisioner) -------------------------------------
+    # https://developers.cloudflare.com/api/resources/r2/subresources/buckets/
+
+    def _bucket_url(self, name: str) -> str:
+        return f"{_CF_API}/accounts/{self._account_id}/r2/buckets/{name}"
+
+    async def r2_bucket_exists(self, name: str) -> bool:
+        """True when the bucket is in our account (GET bucket), False on a 404."""
+        async with self._client() as client:
+            resp = await client.get(self._bucket_url(name))
+        if resp.status_code == 404:
+            return False
+        self._unwrap(resp)
+        return True
+
+    async def create_r2_bucket(self, name: str) -> str:
+        """Create an R2 bucket and return its name."""
+        url = f"{_CF_API}/accounts/{self._account_id}/r2/buckets"
+        async with self._client() as client:
+            resp = await client.post(url, json={"name": name})
+        result = self._unwrap(resp)
+        return str(result.get("name") or name) if isinstance(result, dict) else name
+
+    async def delete_r2_bucket(self, name: str) -> bool:
+        """Delete an R2 bucket. True when it is gone (a 404 included), False when
+        Cloudflare refused because it still holds objects.
+
+        Cloudflare only deletes an empty bucket, and its REST API has no object
+        list or delete (that is the S3 API, a different credential), so this cannot
+        empty one itself. A 409 is the not-empty answer; any other failure raises."""
+        async with self._client() as client:
+            resp = await client.delete(self._bucket_url(name))
+        if resp.status_code == 404:
+            return True
+        if resp.status_code == 409:
+            return False
+        self._unwrap(resp)
+        return True
+
+    async def expire_r2_bucket_objects(self, name: str, *, max_age_seconds: int = 86400) -> None:
+        """Replace the bucket's lifecycle rules with one that deletes every object
+        (and aborts every multipart upload) older than ``max_age_seconds``, so a
+        bucket that refused deletion empties itself and a later delete succeeds."""
+        age = {"type": "Age", "maxAge": max_age_seconds}
+        body = {
+            "rules": [
+                {
+                    "id": "paw-teardown-expire-all",
+                    "enabled": True,
+                    "conditions": {"prefix": ""},
+                    "deleteObjectsTransition": {"condition": age},
+                    "abortMultipartUploadsTransition": {"condition": age},
+                }
+            ]
+        }
+        async with self._client() as client:
+            resp = await client.put(f"{self._bucket_url(name)}/lifecycle", json=body)
         self._unwrap(resp)
 
     async def capture_screenshot(

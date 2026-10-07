@@ -24,8 +24,9 @@
 #                      anything irreversible, so lead ingest and the concierge stop
 #                      even if every later step fails;
 #   3. serving off   — routes, hostnames, then the Worker script itself;
-#   4. reclaim       — D1, R2, artifacts: the things that cost money once nothing
-#                      serves;
+#   4. reclaim       — D1, the bundle-deploy KV namespaces and R2 buckets, the
+#                      public-asset R2 prefix, artifacts: the things that cost money
+#                      once nothing serves;
 #   5. records       — the dependent rows;
 #   6. the Site doc  — LAST, and not by convention.
 #
@@ -59,6 +60,7 @@ STEP_ROUTES = "routes"
 STEP_HOSTNAMES = "hostnames"
 STEP_SCRIPT = "script"
 STEP_D1 = "d1"
+STEP_BINDINGS = "bindings"
 STEP_R2 = "r2"
 STEP_RECORDS = "records"
 
@@ -69,6 +71,7 @@ CASCADE_STEPS: tuple[str, ...] = (
     STEP_HOSTNAMES,
     STEP_SCRIPT,
     STEP_D1,
+    STEP_BINDINGS,
     STEP_R2,
     STEP_RECORDS,
 )
@@ -87,6 +90,11 @@ OUTCOME_SKIPPED = "nothing-to-do"
 # over a charge this code could not stop either way, and leaving it silent would
 # bill them for a site that no longer exists.
 OUTCOME_LEGACY_RAIL = "legacy-rail-needs-operator"
+# The bindings step is best effort: a KV namespace or R2 bucket it could not remove
+# (Cloudflare error, or a bucket that still holds objects) is logged with its name
+# and the cascade moves on rather than trapping the site. Recorded distinctly so an
+# operator reading the ledger knows something was left behind.
+OUTCOME_PARTIAL = "partial-needs-operator"
 
 
 class CascadeStepFailed(Exception):
@@ -179,6 +187,8 @@ async def _run_step(step: str, *, site: Any, deps: Any) -> str:
         return await _delete_script(site=site, deps=deps)
     if step == STEP_D1:
         return await _delete_d1(site=site, deps=deps)
+    if step == STEP_BINDINGS:
+        return await _delete_bindings(site=site, deps=deps)
     if step == STEP_R2:
         return await _purge_assets(site=site, deps=deps)
     if step == STEP_RECORDS:
@@ -293,6 +303,26 @@ async def _delete_d1(*, site: Any, deps: Any) -> str:
     if not db_id:
         return OUTCOME_SKIPPED
     await deps.cloudflare.delete_database(db_id)
+    return OUTCOME_DONE
+
+
+async def _delete_bindings(*, site: Any, deps: Any) -> str:
+    """The KV namespaces and R2 buckets ``binding_provisioner`` created for bundle
+    deploys. Best effort and never raises: failures are logged per resource by
+    ``teardown_bindings`` and summarised here, because the site doc (the only record
+    of these names) is about to go and a stuck cascade would not bring them back."""
+    if not (getattr(site, "kv_namespaces", None) or getattr(site, "r2_buckets", None)):
+        return OUTCOME_SKIPPED
+    from pocketpaw_ee.sites.binding_provisioner import teardown_bindings
+
+    failed = await teardown_bindings(site, cloudflare=deps.cloudflare)
+    if failed:
+        logger.warning(
+            "sites.delete: site %s left bindings behind for an operator: %s",
+            getattr(site, "id", "?"),
+            ", ".join(failed),
+        )
+        return OUTCOME_PARTIAL
     return OUTCOME_DONE
 
 

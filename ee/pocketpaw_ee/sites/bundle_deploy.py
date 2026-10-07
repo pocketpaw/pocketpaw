@@ -15,9 +15,13 @@
 #   * compat: the author's date (bumped to 2024-09-23 for nodejs_compat, clamped to
 #     today, defaulted when missing) and only allow-listed flags.
 #   * bindings: requests are mapped by TYPE and NAME onto resources WE provisioned
-#     for this site. Author-supplied ids are never read. services, dispatch
-#     namespaces, tail consumers, images and anything unknown are dropped with a
-#     warning; an unprovisioned d1/kv/r2/do/ai/queues request refuses the deploy.
+#     for this site. Author-supplied ids are never read. ``deploy_bundle`` takes an
+#     optional ``provision`` callback (``binding_provisioner.ensure_bindings``) that
+#     runs after every other check and before the first upload, creating the site's
+#     KV namespaces / R2 buckets; KV and R2 map per binding name, D1 / queues / ai
+#     are one per site. services, dispatch namespaces, tail consumers, images and
+#     anything unknown are dropped with a warning; an unprovisioned d1/kv/r2/do/ai/
+#     queues request refuses the deploy.
 #   * limits: 64 MiB of modules, our own module-count cap (Cloudflare documents
 #     none), and the static-asset caps. Over any of them refuses before upload.
 #
@@ -31,7 +35,7 @@ import json
 import logging
 import posixpath
 import re
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -94,13 +98,15 @@ _PROVISIONED_TYPES = frozenset({"d1", "kv", "r2", "do", "ai", "queues"})
 class ProvisionedResources:
     """What our provisioner stood up for THIS site. Empty means not provisioned.
 
-    Each provisioned type serves one binding request; the author picks the binding
-    NAME, we pick the resource. ``secrets`` maps names to values for ``secret``
-    requests (the values come from our encrypted store, never from the build)."""
+    D1, queues and ai serve one binding request each. KV and R2 are keyed by the
+    binding NAME the build requested (``{name: namespace_id}`` / ``{name:
+    bucket_name}``), so a site may bind several. The author picks names, we pick
+    the resources. ``secrets`` maps names to values for ``secret`` requests (the
+    values come from our encrypted store, never from the build)."""
 
     d1_database_id: str = ""
-    kv_namespace_id: str = ""
-    r2_bucket_name: str = ""
+    kv_namespaces: dict[str, str] = field(default_factory=dict)
+    r2_buckets: dict[str, str] = field(default_factory=dict)
     queue_name: str = ""
     ai: bool = False
     secrets: dict[str, str] = field(default_factory=dict)
@@ -255,7 +261,7 @@ def map_bindings(
                 continue
             binding = {"type": "secret_text", "name": name, "text": value}
         else:
-            if kind in used:
+            if kind in used and kind not in ("kv", "r2"):
                 raise _refuse(f"binding {label}: only one {kind} resource is provisioned per site")
             binding = _provisioned_binding(kind, name, provisioned)
             if binding is None:
@@ -271,10 +277,10 @@ def map_bindings(
 def _provisioned_binding(kind: str, name: str, res: ProvisionedResources) -> dict | None:
     if kind == "d1" and res.d1_database_id:
         return {"type": "d1", "name": name, "id": res.d1_database_id}
-    if kind == "kv" and res.kv_namespace_id:
-        return {"type": "kv_namespace", "name": name, "namespace_id": res.kv_namespace_id}
-    if kind == "r2" and res.r2_bucket_name:
-        return {"type": "r2_bucket", "name": name, "bucket_name": res.r2_bucket_name}
+    if kind == "kv" and res.kv_namespaces.get(name):
+        return {"type": "kv_namespace", "name": name, "namespace_id": res.kv_namespaces[name]}
+    if kind == "r2" and res.r2_buckets.get(name):
+        return {"type": "r2_bucket", "name": name, "bucket_name": res.r2_buckets[name]}
     if kind == "queues" and res.queue_name:
         return {"type": "queue", "name": name, "queue_name": res.queue_name}
     if kind == "ai" and res.ai:
@@ -452,6 +458,24 @@ def _load_assets(root: Path, manifest: dict, module_paths: set[Path]) -> tuple[d
 def load_bundle(build_dir: str | Path, provisioned: ProvisionedResources) -> PawBundle:
     """Read and vet a build's ``paw-build.json``. Raises ``ValidationError`` with a
     clear message on anything that must not deploy."""
+    bundle, manifest = _read_bundle(build_dir)
+    _map_into(bundle, manifest, provisioned)
+    return bundle
+
+
+def _map_into(bundle: PawBundle, manifest: dict, provisioned: ProvisionedResources) -> None:
+    bindings, binding_warnings = map_bindings(
+        manifest.get("bindingRequests"),
+        manifest.get("droppedBindings"),
+        provisioned,
+        has_assets=bool(bundle.assets),
+    )
+    bundle.bindings = bindings
+    bundle.warnings.extend(binding_warnings)
+
+
+def _read_bundle(build_dir: str | Path) -> tuple[PawBundle, dict]:
+    """Everything ``load_bundle`` vets except the bindings, plus the manifest."""
     root = Path(build_dir).resolve()
     try:
         manifest = json.loads((root / PAW_BUILD_FILENAME).read_text("utf-8"))
@@ -468,22 +492,17 @@ def load_bundle(build_dir: str | Path, provisioned: ProvisionedResources) -> Paw
         raise _refuse("paw-build.json has neither worker modules nor assets")
     config, warnings = _assets_config(manifest.get("assetsConfig"), assets_dir)
     date_, flags, compat_warnings = resolve_compat(manifest.get("compat"))
-    bindings, binding_warnings = map_bindings(
-        manifest.get("bindingRequests"),
-        manifest.get("droppedBindings"),
-        provisioned,
-        has_assets=bool(assets),
-    )
-    return PawBundle(
+    bundle = PawBundle(
         main_module=main_module,
         modules=modules,
         assets=assets,
         assets_config=config,
         compatibility_date=date_,
         compatibility_flags=flags,
-        bindings=bindings,
-        warnings=warnings + compat_warnings + binding_warnings,
+        bindings=[],
+        warnings=warnings + compat_warnings,
     )
+    return bundle, manifest
 
 
 async def deploy_bundle(
@@ -493,13 +512,21 @@ async def deploy_bundle(
     build_dir: str | Path,
     salt: str,
     provisioned: ProvisionedResources | None = None,
+    provision: Callable[[Any], Awaitable[ProvisionedResources]] | None = None,
 ) -> BundleDeployResult:
-    """Vet the build, upload its assets, then PUT the Worker. Live on success.
+    """Vet the build, provision its backends, upload its assets, then PUT the
+    Worker. Live on success.
 
     ``salt`` is the tenant key the asset hashes are salted with (the workspace id).
-    Every check runs before the first Cloudflare call, so a refused bundle leaves the
-    live site untouched."""
-    bundle = load_bundle(build_dir, provisioned or ProvisionedResources())
+    ``provision``, when given, receives the raw ``bindingRequests`` and returns the
+    site's resources (it replaces ``provisioned``). It runs after every module,
+    asset and compat check, so a bundle refused for those creates nothing; a
+    binding refusal still happens before the first upload, so the live site is
+    untouched either way."""
+    bundle, manifest = _read_bundle(build_dir)
+    if provision is not None:
+        provisioned = await provision(manifest.get("bindingRequests"))
+    _map_into(bundle, manifest, provisioned or ProvisionedResources())
     for warning in bundle.warnings:
         logger.warning("sites.bundle_deploy %s: %s", script_name, warning)
 
