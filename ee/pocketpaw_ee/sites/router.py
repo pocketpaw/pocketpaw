@@ -161,6 +161,7 @@ async def publish_site(
         site_plan_key=body.site_plan_key,
         purchase_authorized=await _may_buy_site_plan(user, ctx.workspace_id),
         prewarm_origin=request.headers.get("origin") or None,
+        confirm_destructive_migrations=body.confirm_destructive_migrations,
     )
     return sites_service._to_response(doc)
 

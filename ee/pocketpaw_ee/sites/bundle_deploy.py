@@ -21,7 +21,9 @@
 #     KV namespaces / R2 buckets; KV and R2 map per binding name, D1 / queues / ai
 #     are one per site. services, dispatch namespaces, tail consumers, images and
 #     anything unknown are dropped with a warning; an unprovisioned d1/kv/r2/do/ai/
-#     queues request refuses the deploy.
+#     queues request refuses the deploy. An optional ``before_upload`` hook gets the
+#     mapped bindings after every check and before the first upload (the project
+#     engine applies its D1 migrations there).
 #   * secrets: every secret the owner SET for the site (``site_secrets``) binds as
 #     ``secret_text``, requested or not. A ``secret`` request with ``required`` or a
 #     name in the manifest's ``requiredSecrets`` that is not set refuses the deploy
@@ -553,6 +555,7 @@ async def deploy_bundle(
     salt: str,
     provisioned: ProvisionedResources | None = None,
     provision: Callable[[Any], Awaitable[ProvisionedResources]] | None = None,
+    before_upload: Callable[[list[dict]], Awaitable[None]] | None = None,
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -562,13 +565,17 @@ async def deploy_bundle(
     site's resources (it replaces ``provisioned``). It runs after every module,
     asset and compat check, so a bundle refused for those creates nothing; a
     binding refusal still happens before the first upload, so the live site is
-    untouched either way."""
+    untouched either way. ``before_upload``, when given, receives the mapped bindings
+    once every check has passed and runs before the first upload (a project's D1
+    migrations); raising there also leaves the live site untouched."""
     bundle, manifest = _read_bundle(build_dir)
     if provision is not None:
         provisioned = await provision(manifest.get("bindingRequests"))
     _map_into(bundle, manifest, provisioned or ProvisionedResources())
     for warning in bundle.warnings:
         logger.warning("sites.bundle_deploy %s: %s", script_name, warning)
+    if before_upload is not None:
+        await before_upload(bundle.bindings)
 
     assets_meta = None
     if bundle.assets:

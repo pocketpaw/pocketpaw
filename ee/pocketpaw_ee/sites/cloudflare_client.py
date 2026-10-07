@@ -22,8 +22,9 @@
 #     create refuses when it is unset. No ``custom_metadata``: it is entitlement-gated.
 #   * Worker routes: ``<hostname>/*`` -> the site's Worker, updated in place on a
 #     rename (a second POST for the same pattern is a 409).
-#   * D1: ``create_database``, ``delete_database``, and ``query_d1`` (parameterized,
-#     never interpolated SQL).
+#   * D1: ``create_database``, ``find_database`` (exact name, crash recovery),
+#     ``delete_database``, ``query_d1`` and ``query_d1_batch`` (parameterized, never
+#     interpolated SQL).
 #   * KV and R2 for ``binding_provisioner``: namespaces (find by title, create,
 #     delete) and buckets (exists, create, delete, expire-all lifecycle). The REST API
 #     has no object list/delete for R2, so a non-empty bucket delete reports False
@@ -699,6 +700,26 @@ class CloudflareClient:
             return
         self._unwrap(resp)
 
+    async def find_database(self, name: str) -> str | None:
+        """The uuid of the D1 database named exactly ``name``, or None.
+
+        The provisioner's crash-recovery read, like ``find_kv_namespace``: a database
+        created on a publish that died before the Site doc was saved is found here
+        instead of created twice. ``name`` on the list endpoint is a search, so rows
+        are matched exactly; the loop is bounded."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database"
+        async with self._client() as client:
+            for page in range(1, 51):
+                resp = await client.get(url, params={"name": name, "page": page, "per_page": 100})
+                rows = self._unwrap(resp)
+                rows = rows if isinstance(rows, list) else []
+                for row in rows:
+                    if isinstance(row, dict) and row.get("name") == name and row.get("uuid"):
+                        return str(row["uuid"])
+                if len(rows) < 100:
+                    return None
+        return None
+
     # -- KV namespaces (binding_provisioner) ----------------------------------
     # https://developers.cloudflare.com/api/resources/kv/subresources/namespaces/
 
@@ -903,6 +924,38 @@ class CloudflareClient:
             raise ValidationError("sites.cloudflare_error", "D1 query statement failed")
         rows = first.get("results")
         return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+    async def query_d1_batch(
+        self, *, database_id: str, statements: Sequence[tuple[str, list]]
+    ) -> list[list[dict]]:
+        """Run several parameterized statements as ONE D1 batch and return each
+        statement's rows, in order.
+
+        Uses the query endpoint's ``batch`` body (``[{sql, params}, ...]``) so a
+        project migration and the row that records it travel together. Same SQL
+        rules as ``query_d1``: this never builds SQL, values ride ``params``.
+
+        Fail-closed: a non-2xx or ``success: false`` envelope raises through
+        ``_unwrap`` (with Cloudflare's own reason), and so does any statement that
+        reports ``success: false``, naming its position in the batch."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}/query"
+        body = {"batch": [{"sql": sql, "params": list(params or [])} for sql, params in statements]}
+        async with self._client() as client:
+            resp = await client.post(url, json=body)
+        result = self._unwrap(resp)
+        outcomes = result if isinstance(result, list) else []
+        rows: list[list[dict]] = []
+        for index, outcome in enumerate(outcomes):
+            outcome = outcome if isinstance(outcome, dict) else {}
+            if outcome.get("success") is False:
+                raise ValidationError(
+                    "sites.cloudflare_error",
+                    f"D1 batch statement {index + 1} of {len(statements)} failed",
+                )
+            found = outcome.get("results")
+            found = found if isinstance(found, list) else []
+            rows.append([r for r in found if isinstance(r, dict)])
+        return rows
 
     async def query_analytics_sql(self, sql: str) -> list[dict]:
         """Run ONE SQL query against Workers Analytics Engine and return its rows
