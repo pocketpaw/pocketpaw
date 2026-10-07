@@ -9,19 +9,28 @@
     ]
   },
   {
-    "label": "tenancy: the profile read drops its workspace filter",
+    "label": "tenancy: the latest-profile read drops its workspace filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    return await _ProfileDoc.find_one({\"workspace\": workspace_id})",
-    "replace": "    return await _ProfileDoc.find_one({})",
+    "find": "            await _ProfileDoc.find({\"workspace\": workspace_id})",
+    "replace": "            await _ProfileDoc.find({})",
     "tests": [
       "tests/cloud/growth/social/test_router.py"
     ]
   },
   {
-    "label": "tenancy: the ideas list drops its workspace filter",
+    "label": "tenancy: a profile read by id drops its workspace filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    query: dict[str, Any] = {\"workspace\": workspace_id}",
-    "replace": "    query: dict[str, Any] = {}",
+    "find": "    return await _ProfileDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})",
+    "replace": "    return await _ProfileDoc.find_one({\"_id\": oid})",
+    "tests": [
+      "tests/cloud/growth/social/test_router.py"
+    ]
+  },
+  {
+    "label": "scoping: the ideas list drops its profile filter (one social sees another's ideas)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    query: dict[str, Any] = {\"workspace\": workspace_id, \"profile\": str(doc.id)}",
+    "replace": "    query: dict[str, Any] = {\"workspace\": workspace_id}",
     "tests": [
       "tests/cloud/growth/social/test_router.py"
     ]
