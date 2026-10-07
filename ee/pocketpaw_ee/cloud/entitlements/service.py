@@ -422,14 +422,11 @@ def site_paid_backends_entitled(*, plan_tier: str | None, subscription_status: s
     backends when they ship)? Captain decision 2026-10-07: free gets D1 and KV under
     tight limits, everything else needs the ``site`` tier or above.
 
-    Same tier set and same conjunction as ``site_code_entitled``: a paid rung AND an
+    Delegates to ``site_code_entitled`` (one rule, one place): a paid rung AND an
     active subscription. A plan-carried site is ``staff`` + active, so it passes.
     Unknown, org-scoped, lapsed and never-charged all resolve ``False``.
     """
-    if not _subscription_is_active(subscription_status):
-        return False
-    tier = site_plan_catalog.site_scoped_tier(plan_tier)
-    return tier is not None and tier.key in _SITE_CODE_PLANS
+    return site_code_entitled(plan_tier=plan_tier, subscription_status=subscription_status)
 
 
 def resolve_site_entitlements(
