@@ -22,6 +22,11 @@
 #     are one per site. services, dispatch namespaces, tail consumers, images and
 #     anything unknown are dropped with a warning; an unprovisioned d1/kv/r2/do/ai/
 #     queues request refuses the deploy.
+#   * secrets: every secret the owner SET for the site (``site_secrets``) binds as
+#     ``secret_text``, requested or not. A ``secret`` request with ``required`` or a
+#     name in the manifest's ``requiredSecrets`` that is not set refuses the deploy
+#     with ``sites.secrets_missing`` naming what to set in the builder. Values only
+#     ever live in the binding: never in a warning, an error, a log or a repr.
 #   * limits: 64 MiB of modules, our own module-count cap (Cloudflare documents
 #     none), and the static-asset caps. Over any of them refuses before upload.
 #
@@ -102,14 +107,15 @@ class ProvisionedResources:
     binding NAME the build requested (``{name: namespace_id}`` / ``{name:
     bucket_name}``), so a site may bind several. The author picks names, we pick
     the resources. ``secrets`` maps names to values for ``secret`` requests (the
-    values come from our encrypted store, never from the build)."""
+    values come from our encrypted store, never from the build, and stay out of
+    ``repr`` so a logged object cannot carry them)."""
 
     d1_database_id: str = ""
     kv_namespaces: dict[str, str] = field(default_factory=dict)
     r2_buckets: dict[str, str] = field(default_factory=dict)
     queue_name: str = ""
     ai: bool = False
-    secrets: dict[str, str] = field(default_factory=dict)
+    secrets: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 @dataclass
@@ -123,7 +129,8 @@ class PawBundle:
     assets_config: dict[str, Any]
     compatibility_date: str
     compatibility_flags: list[str]
-    bindings: list[dict]
+    # Carries secret_text values: kept out of repr.
+    bindings: list[dict] = field(repr=False)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -137,6 +144,15 @@ class BundleDeployResult:
 
 def _refuse(message: str) -> ValidationError:
     return ValidationError("sites.bundle_invalid", message)
+
+
+def _secrets_missing(names: Iterable[str]) -> ValidationError:
+    listed = ", ".join(sorted(set(names)))
+    return ValidationError(
+        "sites.secrets_missing",
+        f"This site needs secrets that are not set: {listed}. Set them in the builder "
+        "(Secrets) and publish again.",
+    )
 
 
 def has_paw_build(build_dir: str | Path) -> bool:
@@ -222,15 +238,24 @@ def map_bindings(
     provisioned: ProvisionedResources,
     *,
     has_assets: bool,
+    required_secrets: Any = None,
 ) -> tuple[list[dict], list[str]]:
     """Turn binding REQUESTS into the upload's bindings, using only our resources.
 
     Only ``type``, ``name`` and ``required`` are read from a request. Any id, bucket,
-    namespace or service the author wrote is ignored by construction."""
+    namespace or service the author wrote is ignored by construction. Every secret in
+    ``provisioned.secrets`` binds as ``secret_text`` whether requested or not;
+    ``required_secrets`` (the manifest's ``requiredSecrets``) adds names that must be
+    set, on top of ``secret`` requests marked ``required``."""
     warnings = [f"binding {_request_label(d)} was dropped at build time" for d in dropped or []]
     bindings: list[dict] = []
     names: set[str] = set()
     used: set[str] = set()
+    missing = [
+        name
+        for name in (required_secrets if isinstance(required_secrets, list) else [])
+        if isinstance(name, str) and name not in provisioned.secrets
+    ]
 
     for req in requests if isinstance(requests, list) else []:
         if not isinstance(req, dict):
@@ -256,8 +281,9 @@ def map_bindings(
             value = provisioned.secrets.get(name)
             if value is None:
                 if req.get("required"):
-                    raise _refuse(f"required secret {name!r} has not been set for this site")
-                warnings.append(f"optional secret {name!r} is not set; skipped")
+                    missing.append(name)
+                else:
+                    warnings.append(f"optional secret {name!r} is not set; skipped")
                 continue
             binding = {"type": "secret_text", "name": name, "text": value}
         else:
@@ -271,6 +297,19 @@ def map_bindings(
             used.add(kind)
         names.add(name)
         bindings.append(binding)
+
+    if missing:
+        raise _secrets_missing(missing)
+    requested = {b["name"] for b in bindings if b["type"] == "secret_text"}
+    for name in sorted(provisioned.secrets):
+        if name in requested:
+            continue
+        if name in names:
+            raise _refuse(f"secret {name!r} has the same name as another binding; rename one")
+        if not _BINDING_NAME.match(name):
+            raise _refuse(f"secret name {name!r} is not a valid identifier")
+        bindings.append({"type": "secret_text", "name": name, "text": provisioned.secrets[name]})
+        names.add(name)
     return bindings, warnings
 
 
@@ -469,6 +508,7 @@ def _map_into(bundle: PawBundle, manifest: dict, provisioned: ProvisionedResourc
         manifest.get("droppedBindings"),
         provisioned,
         has_assets=bool(bundle.assets),
+        required_secrets=manifest.get("requiredSecrets", manifest.get("required_secrets")),
     )
     bundle.bindings = bindings
     bundle.warnings.extend(binding_warnings)

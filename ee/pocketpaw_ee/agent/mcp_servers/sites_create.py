@@ -373,6 +373,10 @@ VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 # Screenshot the current draft so the agent can see what it built. Same server.
 PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
 
+# Site secrets: ask the owner for one by name, list names + status. No values.
+REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
+LIST_SITE_SECRETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_secrets"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
@@ -385,6 +389,8 @@ SITES_CREATE_TOOL_IDS = (
     SET_SITE_DEPENDENCIES_TOOL_ID,
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
+    REQUEST_SITE_SECRET_TOOL_ID,
+    LIST_SITE_SECRETS_TOOL_ID,
 )
 
 
@@ -3782,6 +3788,188 @@ def make_edit_html_file_tool(tool: Any) -> Any:
     return edit_html_file
 
 
+# ── Site secrets (lane A2) ───────────────────────────────────────────────────
+# The agent ASKS for a secret by name; the owner types the value into the builder's
+# secure input card. Neither tool accepts or returns a value, and the schemas carry
+# ``additionalProperties: false`` so a ``value`` arg is refused by the SDK too.
+
+
+def _secret_tool_identity(tool_name: str, pocket_id: Any) -> tuple[str, str, dict | None]:
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return (
+            "",
+            "",
+            _error_response(
+                f"{tool_name} requires workspace and user context (call from a cloud chat session)."
+            ),
+        )
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id if isinstance(pocket_id, str) else None,
+        tool_server="pocketpaw_sites",
+        tool_name=f"_{tool_name}",
+        status="ok",
+        ok=True,
+    )
+    if not isinstance(pocket_id, str) or not pocket_id.strip():
+        return "", "", _error_response(f"{tool_name} requires a `pocket_id`.")
+    return workspace_id, user_id, None
+
+
+async def _request_site_secret_handler(args: dict) -> dict:
+    """MCP handler for ``request_site_secret``: leave a pending request, never a value."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import site_secrets
+
+    pocket_id = args.get("pocket_id")
+    workspace_id, user_id, err = _secret_tool_identity("request_site_secret", pocket_id)
+    if err is not None:
+        return err
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+    pocket_id = pocket_id.strip()
+    try:
+        view = await site_secrets.request_secret(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            name=str(args.get("name") or ""),
+            description=str(args.get("description") or ""),
+            requested_by="agent",
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+
+    if view.status == "set":
+        message = (
+            f"{view.name} is already set for this site. Read it in the Worker as "
+            f"env.{view.name}; publishing binds it. Do not ask the user to paste it."
+        )
+    else:
+        message = (
+            f"Requested {view.name}. The site owner will fill it in the builder's secure "
+            f"input; you never see the value. Read it in the Worker as env.{view.name}, "
+            "keep it out of source, .dev.vars and paw-build.json, and tell the user to set "
+            "it before publishing (publish refuses while a required secret is missing)."
+        )
+        _push_secret_request_sse(pocket_id, view)
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": pocket_id,
+            "secret": view.model_dump(mode="json"),
+            "message": message,
+        }
+    )
+
+
+def _push_secret_request_sse(pocket_id: str, view: Any) -> None:
+    """Per-run SSE so the chat that asked can render the input card inline. Best
+    effort, names only; the bus event ``site.secret_requested`` reaches the builder."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import push_sse_event
+
+        push_sse_event(
+            "site_secret_requested",
+            {"pocket_id": pocket_id, "secret": view.model_dump(mode="json")},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("request_site_secret: SSE push failed (non-fatal)", exc_info=True)
+
+
+async def _list_site_secrets_handler(args: dict) -> dict:
+    """MCP handler for ``list_site_secrets``: names and status only."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import site_secrets
+
+    pocket_id = args.get("pocket_id")
+    workspace_id, user_id, err = _secret_tool_identity("list_site_secrets", pocket_id)
+    if err is not None:
+        return err
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+    try:
+        listing = await site_secrets.list_secrets(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id.strip()
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": listing.pocket_id,
+            "secrets": [
+                {"name": s.name, "status": s.status, "description": s.description}
+                for s in listing.secrets
+            ],
+        }
+    )
+
+
+def make_request_site_secret_tool(tool: Any) -> Any:
+    """Build the ``request_site_secret`` SDK tool. Same server as the create tools."""
+
+    @tool(
+        "request_site_secret",
+        (
+            "Ask the site owner for a runtime secret (an API key, a webhook signing "
+            "secret) the site's Worker needs. Creates a pending request the owner fills "
+            "in the builder's secure input; you NEVER receive, write or ask for the "
+            "value, and must not put one in source, .dev.vars or chat. `name` is the "
+            "env var the Worker reads (UPPER_SNAKE_CASE, max 64 chars, e.g. "
+            "STRIPE_SECRET_KEY); `description` tells the owner what it is and where to "
+            "get it. Publishing binds every set secret as env.<NAME>."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Id of the site pocket."},
+                "name": {
+                    "type": "string",
+                    "description": "UPPER_SNAKE_CASE env var name, max 64 chars.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What the secret is for and where the owner finds it.",
+                },
+            },
+            "required": ["pocket_id", "name", "description"],
+            "additionalProperties": False,
+        },
+    )
+    async def request_site_secret(args):  # type: ignore[no-untyped-def]
+        return await _request_site_secret_handler(args)
+
+    return request_site_secret
+
+
+def make_list_site_secrets_tool(tool: Any) -> Any:
+    """Build the ``list_site_secrets`` SDK tool. Same server as the create tools."""
+
+    @tool(
+        "list_site_secrets",
+        (
+            "List the site's secrets by name with their status: `set` (the owner filled "
+            "it in; publishing binds it as env.<NAME>) or `pending` (requested, waiting "
+            "for the owner). Values are never returned."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Id of the site pocket."},
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def list_site_secrets(args):  # type: ignore[no-untyped-def]
+        return await _list_site_secrets_handler(args)
+
+    return list_site_secrets
+
+
 __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
@@ -3792,9 +3980,11 @@ __all__ = [
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "HTML_REQUIRED_KEYS",
+    "LIST_SITE_SECRETS_TOOL_ID",
     "REACT_REQUIRED_KEYS",
     "REACT_RESERVED_FILES",
     "REACT_RESERVED_PREFIX",
+    "REQUEST_SITE_SECRET_TOOL_ID",
     "SERVER_NAME",
     "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_CREATE_TOOL_IDS",
@@ -3808,6 +3998,8 @@ __all__ = [
     "make_edit_html_file_tool",
     "make_edit_react_component_tool",
     "make_edit_svelte_component_tool",
+    "make_list_site_secrets_tool",
     "make_read_site_source_tool",
+    "make_request_site_secret_tool",
     "make_set_site_dependencies_tool",
 ]

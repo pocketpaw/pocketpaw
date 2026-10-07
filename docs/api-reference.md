@@ -3223,6 +3223,83 @@ Errors:
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 503 | `sites.preview_build_unavailable` | The armed build could not be QUEUED (the job queue is unreachable). Retryable. A failed enqueue is deliberately an error rather than a pending response — a job id for a job nobody will run makes a client poll forever. A build that queues and then FAILS is not an error here: it comes back `200` with `build_status: "failed"` and a rung in `build_reason`. |
 
+## Sites — Secrets
+
+Runtime secrets for a site's Worker (a Stripe key, a webhook signing secret). The agent
+asks for one by name (`request_site_secret`); the pocket owner types the value into the
+builder; publishing binds every set secret as a `secret_text` binding, read in the
+Worker as `env.<NAME>`. **No endpoint, tool or event ever returns a value.** Values are
+encrypted at rest with the deployment Fernet key (`CLOUD_ENCRYPTION_KEY`); without it,
+`PUT` answers 422 `cloud.encryption_key_missing`.
+
+Secrets are keyed by pocket, so they exist before the first publish. Names are
+`UPPER_SNAKE_CASE`: a letter first, then `A-Z`, `0-9` or `_`, at most 64 characters.
+At most 50 secrets (set or pending) per site.
+
+| Method | Path | Workspace gate | Pocket gate |
+|---|---|---|---|
+| `GET` | `/sites/by-pocket/{pocket_id}/secrets` | `fabric.read` | edit access (owner, team, `shared_with`, or a workspace-visible pocket) |
+| `PUT` | `/sites/by-pocket/{pocket_id}/secrets/{name}` | `fabric.write` | pocket owner |
+| `DELETE` | `/sites/by-pocket/{pocket_id}/secrets/{name}` | `fabric.write` | pocket owner |
+
+A pocket in another workspace is a 404 for every route, owner or not.
+
+**`GET`** returns:
+
+```json
+{
+  "pocket_id": "...",
+  "can_manage": true,
+  "secrets": [
+    {"name": "STRIPE_KEY", "status": "set", "description": "", "requested_by": null,
+     "requested_at": null, "updated_at": "2026-10-07T10:00:00Z"},
+    {"name": "RESEND_KEY", "status": "pending", "description": "Resend API key for the contact form",
+     "requested_by": "agent", "requested_at": "2026-10-07T09:58:00Z", "updated_at": null}
+  ],
+  "pending": [ /* the status == "pending" subset of secrets */ ]
+}
+```
+
+`can_manage` is true only for the pocket owner; the builder shows editors the list
+read-only. `updated_at` is when the value was last set.
+
+**`PUT`** takes `{"value": "..."}` (non-empty, at most 8 KB as UTF-8) and returns one
+item in the shape above (`status: "set"`). Setting a pending secret fills the request.
+**`DELETE`** removes a secret or a pending request and answers 204.
+
+| HTTP | Code | When |
+|------|------|------|
+| 422 | `sites.secret_name_invalid` | The name is not `UPPER_SNAKE_CASE` or is over 64 characters. |
+| 422 | `sites.secret_value_empty` | `PUT` with an empty or whitespace value. |
+| 413 | `sites.secret_too_large` | `PUT` with a value over 8 KB. |
+| 422 | `sites.secret_cap` | The site already has 50 secrets or requests. |
+| 403 | `sites.secret_not_owner` | `PUT` / `DELETE` by anyone but the pocket owner. |
+| 403 | `pocket.access_denied` | `GET` without edit access to the pocket. |
+| 404 | `pocket.not_found` | Unknown pocket, or a pocket in another workspace. |
+| 404 | `site_secret.not_found` | `DELETE` of a name that has no row. |
+
+**Agent tools** (sites-manager MCP server, on `SITES_TOOL_IDS`):
+
+- `request_site_secret(pocket_id, name, description)` leaves a pending request and
+  returns `{ok, pocket_id, secret: {name, status, description, requested_by,
+  requested_at, updated_at}, message}`. It never takes a value (the schema has no
+  `value` property and forbids extra ones). Asking for a secret that is already set
+  keeps the value and answers `status: "set"`.
+- `list_site_secrets(pocket_id)` returns `{ok, pocket_id, secrets: [{name, status,
+  description}]}`.
+
+**Realtime.** `site.secret_requested` (a pending request was created or refreshed) and
+`site.secret_updated` (`status` is `"set"` or `"deleted"`) go over the workspace bus to
+the pocket owner and the acting user only. Payload: `{workspace_id, pocket_id, name,
+status, owner, user_id}` plus `description` and `requested_by` on a request. The chat
+run that asked also gets a per-run SSE `site_secret_requested` with
+`{pocket_id, secret}`, so the input card can render inline.
+
+**Publish.** A missing required secret refuses the deploy with 422
+`sites.secrets_missing`, naming each one to set; see
+[Sites bundle deploys](deployment/sites-bundle-deploys.md#secrets). The site delete
+cascade removes every secret and request for the site (best effort, logged).
+
 ## Sites — Visitor Analytics
 
 SA-4. `GET /sites/{site_id}/analytics` serves a published site's visitor numbers

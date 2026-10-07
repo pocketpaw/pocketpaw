@@ -5347,11 +5347,14 @@ def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None =
                 subscription_status=getattr(site, "subscription_status", None),
             ),
         )
-        if d1_database_id is not None:
-            from dataclasses import replace
+        from dataclasses import replace
 
+        from pocketpaw_ee.sites import site_secrets
+
+        if d1_database_id is not None:
             res = replace(res, d1_database_id=d1_database_id)
-        return res
+        # The owner's secrets ride as secret_text bindings (values never logged).
+        return replace(res, secrets=await site_secrets.secrets_for_deploy(site))
 
     return _provision
 

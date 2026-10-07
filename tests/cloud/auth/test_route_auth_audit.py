@@ -150,6 +150,9 @@ ROUTER_MODULES = [
     ("lens", "pocketpaw_ee.cloud.lens.router"),
     ("paw_bar_knowledge", "pocketpaw_ee.paw_bar.knowledge_routes"),
     ("paw_bar_catalog", "pocketpaw_ee.paw_bar.catalog_routes"),
+    # Added with the router. Every route takes request_context; the pocket gate
+    # (edit to list, owner to write) is asserted in tests/ee/sites/test_site_secrets.py.
+    ("site_secrets", "pocketpaw_ee.sites.secrets_router"),
 ]
 
 #: Modules that mount more than their ``router`` attribute. Anything not named

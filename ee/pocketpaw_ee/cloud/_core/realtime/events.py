@@ -562,6 +562,22 @@ class SiteCreated(Event):
     EVENT_TYPE: ClassVar[str] = "site.created"
 
 
+# Sites: per-site secrets (``sites.site_secrets``). NAMES ONLY, never a value.
+# ``site.secret_requested``: an agent (or user) asked the owner for a secret; the
+# builder shows the secure input card. ``site.secret_updated``: a secret was set or
+# deleted (``status`` is "set" or "deleted"). data: {workspace_id, pocket_id, name,
+# status, description, requested_by, owner, user_id}. Routed to the pocket owner and
+# the acting user only (see audience.py), not the whole workspace.
+@dataclass
+class SiteSecretRequested(Event):
+    EVENT_TYPE: ClassVar[str] = "site.secret_requested"
+
+
+@dataclass
+class SiteSecretUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "site.secret_updated"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):

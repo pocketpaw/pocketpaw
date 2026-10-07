@@ -139,7 +139,17 @@ class TestSitesMcpServerRegistration:
 
         assert PREVIEW_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__preview_site"
         assert PREVIEW_SITE_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 15
+        # Per-site secrets: ask the owner for one by name, list names + status.
+        from pocketpaw_ee.agent.mcp_servers.sites import (
+            LIST_SITE_SECRETS_TOOL_ID,
+            REQUEST_SITE_SECRET_TOOL_ID,
+        )
+
+        assert REQUEST_SITE_SECRET_TOOL_ID == "mcp__pocketpaw_sites_manager__request_site_secret"
+        assert LIST_SITE_SECRETS_TOOL_ID == "mcp__pocketpaw_sites_manager__list_site_secrets"
+        assert REQUEST_SITE_SECRET_TOOL_ID in SITES_TOOL_IDS
+        assert LIST_SITE_SECRETS_TOOL_ID in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 17
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

@@ -241,6 +241,10 @@ SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
 VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 # Screenshot the draft so the agent sees what it built. Must ride SITES_TOOL_IDS.
 PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
+# Per-site secrets: request one from the owner by name, list names + status. Must
+# ride SITES_TOOL_IDS like every other tool on this server.
+REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
+LIST_SITE_SECRETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_secrets"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -258,6 +262,8 @@ SITES_TOOL_IDS = (
     SET_SITE_DEPENDENCIES_TOOL_ID,
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
+    REQUEST_SITE_SECRET_TOOL_ID,
+    LIST_SITE_SECRETS_TOOL_ID,
 )
 
 
@@ -689,8 +695,10 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_edit_html_file_tool,
         make_edit_react_component_tool,
         make_edit_svelte_component_tool,
+        make_list_site_secrets_tool,
         make_preview_site_tool,
         make_read_site_source_tool,
+        make_request_site_secret_tool,
         make_set_site_dependencies_tool,
         make_verify_site_tool,
     )
@@ -737,6 +745,9 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     verify_site = make_verify_site_tool(tool)
     # Look at the draft (a screenshot the agent can see). Same server.
     preview_site = make_preview_site_tool(tool)
+    # Site secrets: ask the owner for one by name; list names + status. Same server.
+    request_site_secret = make_request_site_secret_tool(tool)
+    list_site_secrets = make_list_site_secrets_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -757,6 +768,8 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             set_site_dependencies,
             verify_site,
             preview_site,
+            request_site_secret,
+            list_site_secrets,
         ],
     )
     return SERVER_NAME, server
@@ -765,6 +778,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
 __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "LIST_SITE_ASSETS_TOOL_ID",
+    "LIST_SITE_SECRETS_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_REACT_SITE_TOOL_ID",
@@ -776,6 +790,7 @@ __all__ = [
     "PREVIEW_SITE_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "READ_SITE_SOURCE_TOOL_ID",
+    "REQUEST_SITE_SECRET_TOOL_ID",
     "SERVER_NAME",
     "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_TOOL_IDS",

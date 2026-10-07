@@ -27,7 +27,7 @@
 #   4. reclaim       — D1, the bundle-deploy KV namespaces and R2 buckets, the
 #                      public-asset R2 prefix, artifacts: the things that cost money
 #                      once nothing serves;
-#   5. records       — the dependent rows;
+#   5. records       — the dependent rows, then the site's secrets (best effort);
 #   6. the Site doc  — LAST, and not by convention.
 #
 # The Site document carries the ledger (``delete_ledger``), so it is the only thing
@@ -362,4 +362,25 @@ async def _purge_records(*, site: Any, deps: Any) -> str:
     ledger survives every step it records.
     """
     await deps.purge_records(workspace_id=site.workspace, site_id=str(site.id))
+    await _purge_secrets(site)
     return OUTCOME_DONE
+
+
+async def _purge_secrets(site: Any) -> None:
+    """The site's encrypted secrets and pending secret requests. Best effort: a
+    failure is logged and the cascade goes on, since the rows are useless without a
+    site to deploy them to and a stuck delete would not make them less so."""
+    try:
+        from pocketpaw_ee.sites import site_secrets
+
+        removed = await site_secrets.purge_for_pocket(
+            workspace_id=site.workspace, pocket_id=site.pocket_id
+        )
+        if removed:
+            logger.info("sites.delete: site %s removed %d secret(s)", site.id, removed)
+    except Exception:  # noqa: BLE001 - best effort, logged
+        logger.warning(
+            "sites.delete: site %s could not remove its secrets",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
