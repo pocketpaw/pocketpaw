@@ -294,6 +294,13 @@ class Site(TimestampedDocument):
     # Stable across re-publishes (publish reuses the stored value) so the D1
     # binding target — and the data behind it — never moves under a live site.
     d1_database_id: str = ""
+    # Bundle-deploy backends ``sites.binding_provisioner`` created for this site,
+    # keyed by the binding NAME the build requested: namespace id per KV binding,
+    # bucket name per R2 binding. Written only by the provisioner (never from
+    # author input), saved right after each create so a retry reuses rather than
+    # duplicates, and torn down by the delete cascade's ``bindings`` step.
+    kv_namespaces: dict[str, str] = Field(default_factory=dict)
+    r2_buckets: dict[str, str] = Field(default_factory=dict)
     # DP0-1: where a dynamic site sits in the durable D1 provision job
     # (none | provisioning | provisioned | failed). Contract: the job persists
     # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still

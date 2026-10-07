@@ -547,7 +547,9 @@ def test_unprovisioned_backends_are_refused(kind: str):
 
 
 def test_provisioned_backends_map_to_our_resources():
-    res = ProvisionedResources(kv_namespace_id="kv1", r2_bucket_name="b1", queue_name="q1", ai=True)
+    res = ProvisionedResources(
+        kv_namespaces={"CACHE": "kv1"}, r2_buckets={"FILES": "b1"}, queue_name="q1", ai=True
+    )
     bindings, _ = map_bindings(
         [
             {"type": "kv", "name": "CACHE", "id": "theirs"},

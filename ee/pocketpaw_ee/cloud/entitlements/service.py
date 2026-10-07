@@ -417,6 +417,18 @@ def site_code_entitled(*, plan_tier: str | None, subscription_status: str | None
     return tier is not None and tier.key in _SITE_CODE_PLANS
 
 
+def site_paid_backends_entitled(*, plan_tier: str | None, subscription_status: str | None) -> bool:
+    """May THIS site bind the paid-tier backends (R2 today; Durable Objects and BYO
+    backends when they ship)? Captain decision 2026-10-07: free gets D1 and KV under
+    tight limits, everything else needs the ``site`` tier or above.
+
+    Delegates to ``site_code_entitled`` (one rule, one place): a paid rung AND an
+    active subscription. A plan-carried site is ``staff`` + active, so it passes.
+    Unknown, org-scoped, lapsed and never-charged all resolve ``False``.
+    """
+    return site_code_entitled(plan_tier=plan_tier, subscription_status=subscription_status)
+
+
 def resolve_site_entitlements(
     *,
     site_id: str,

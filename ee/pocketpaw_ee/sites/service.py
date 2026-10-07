@@ -3086,12 +3086,23 @@ async def _deploy_site_doc(
             # A build that carries paw-build.json (the project engine / base app
             # templates) deploys as a multi-module bundle with static assets. No
             # existing engine emits that file, so their path below is unchanged.
+            # KV / R2 need the Site doc to record what they create; a first publish
+            # has none yet, so such a build is refused as not provisioned until the
+            # row exists.
+            _bundle_doc = await _SiteDoc.find_one(
+                {"_id": ObjectId(site_id), "workspace": workspace_id}
+            )
             await bundle_deploy.deploy_bundle(
                 cf,
                 script_name=site_id,
                 build_dir=build.project_dir,
                 salt=workspace_id,
                 provisioned=bundle_deploy.ProvisionedResources(d1_database_id=d1_database_id),
+                provision=(
+                    _bundle_provisioner(_bundle_doc, cf, d1_database_id=d1_database_id)
+                    if _bundle_doc is not None
+                    else None
+                ),
             )
         else:
             bundle = bundle_reader(build.project_dir)
@@ -5298,19 +5309,51 @@ async def deploy_bundle(
 
     The service entry point for the ``project`` engine until its publish path is
     wired. Script name is the site id (as on every WfP deploy), asset hashes are
-    salted with the workspace id, and the only provisioned resource today is the
-    site's D1 (``d1_database_id``); any other backend request is refused. Live on
-    return; the returned warnings list everything the deploy dropped."""
+    salted with the workspace id. D1 binds the site's own database
+    (``d1_database_id``); KV and R2 requests are provisioned per site by
+    ``binding_provisioner`` under the site's plan; anything else backend-shaped is
+    refused. Live on return; the returned warnings list everything the deploy
+    dropped."""
     cf = cloudflare or _cf_client()
     return await bundle_deploy.deploy_bundle(
         cf,
         script_name=str(site.id),
         build_dir=build_dir,
         salt=str(site.workspace),
-        provisioned=bundle_deploy.ProvisionedResources(
-            d1_database_id=getattr(site, "d1_database_id", "") or ""
-        ),
+        provision=_bundle_provisioner(site, cf),
     )
+
+
+def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None = None) -> Any:
+    """The ``provision`` callback ``bundle_deploy.deploy_bundle`` runs: the site's
+    plan decides what it may bind, and the resource maps are saved with ``$set`` so a
+    concurrent write to other fields of the doc is not clobbered."""
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+    from pocketpaw_ee.sites import binding_provisioner
+
+    async def _save(doc: Any) -> None:
+        await doc.set(
+            {"kv_namespaces": dict(doc.kv_namespaces), "r2_buckets": dict(doc.r2_buckets)}
+        )
+
+    async def _provision(requests: Any) -> bundle_deploy.ProvisionedResources:
+        res = await binding_provisioner.ensure_bindings(
+            site,
+            requests,
+            cloudflare=cf,
+            save=_save,
+            paid=entitlements_service.site_paid_backends_entitled(
+                plan_tier=getattr(site, "plan_tier", None),
+                subscription_status=getattr(site, "subscription_status", None),
+            ),
+        )
+        if d1_database_id is not None:
+            from dataclasses import replace
+
+            res = replace(res, d1_database_id=d1_database_id)
+        return res
+
+    return _provision
 
 
 def provision_site_url(site_id: str) -> str:
