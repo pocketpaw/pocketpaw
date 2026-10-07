@@ -1,6 +1,13 @@
 # ee/pocketpaw_ee/sites/bundle_deploy.py: deploy a ``paw-build.json`` build (the
-# ``project`` engine / base app templates) into the Workers for Platforms dispatch
-# namespace through the Cloudflare HTTP API.
+# ``project`` engine / base app templates) through the Cloudflare HTTP API, to one
+# of two TARGETS (``project_deploy_target``):
+#   * ``dispatch``: our Workers for Platforms namespace (the intended home).
+#   * ``account``: a regular account-level Worker script. INTERIM, for an account
+#     without WfP: no dispatch isolation, so a tenant's Worker shares the account's
+#     script namespace and limits. Picked by ``PAW_CF_DEPLOY_MODE=workers`` or the
+#     ``PAW_SITES_PROJECT_DEPLOY_TARGET`` override; see
+#     docs/deployment/sites-bundle-deploys.md for the risks and the switch to WfP.
+# Everything below applies to BOTH targets; only the API URLs differ.
 #
 # The build ran in a sandbox from author-owned config. This module is the trust
 # boundary on the API host: it reads ONLY ``paw-build.json`` and the files it names,
@@ -40,6 +47,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import posixpath
 import re
 from collections.abc import Awaitable, Callable, Iterable
@@ -49,11 +57,21 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
-from pocketpaw_ee.sites.cloudflare_client import WorkerModule, module_content_type
+from pocketpaw_ee.sites.cloudflare_client import (
+    ACCOUNT_TARGET,
+    DISPATCH_TARGET,
+    SCRIPT_TARGETS,
+    WorkerModule,
+    module_content_type,
+)
 
 logger = logging.getLogger(__name__)
 
 PAW_BUILD_FILENAME = "paw-build.json"
+
+# Operator override for where project bundles deploy: ``account`` or ``dispatch``.
+# Unset (or unknown) follows PAW_CF_DEPLOY_MODE (``project_deploy_target``).
+PROJECT_TARGET_ENV = "PAW_SITES_PROJECT_DEPLOY_TARGET"
 
 # Worker size: 64 MiB uncompressed on Free and Paid, no compressed cap.
 # https://developers.cloudflare.com/workers/platform/limits/
@@ -159,6 +177,21 @@ def _secrets_missing(names: Iterable[str]) -> ValidationError:
 
 def has_paw_build(build_dir: str | Path) -> bool:
     return Path(build_dir, PAW_BUILD_FILENAME).is_file()
+
+
+def project_deploy_target(deploy_mode: str | None) -> str:
+    """Where a project bundle deploys: ``account`` or ``dispatch``.
+
+    ``PAW_SITES_PROJECT_DEPLOY_TARGET`` wins when it names a target. Otherwise the
+    deploy mode decides: ``workers`` (an account without Workers for Platforms) means
+    ``account``, anything else ``dispatch``. An unknown override is logged and
+    ignored, so a typo falls back to the mode rather than failing the publish."""
+    raw = (os.environ.get(PROJECT_TARGET_ENV) or "").strip().lower()
+    if raw in SCRIPT_TARGETS:
+        return raw
+    if raw:
+        logger.warning("sites: unknown %s=%r; following the deploy mode", PROJECT_TARGET_ENV, raw)
+    return ACCOUNT_TARGET if deploy_mode == "workers" else DISPATCH_TARGET
 
 
 def _rel(value: Any, what: str) -> str:
@@ -556,6 +589,7 @@ async def deploy_bundle(
     provisioned: ProvisionedResources | None = None,
     provision: Callable[[Any], Awaitable[ProvisionedResources]] | None = None,
     before_upload: Callable[[list[dict]], Awaitable[None]] | None = None,
+    target: str = DISPATCH_TARGET,
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -567,7 +601,13 @@ async def deploy_bundle(
     binding refusal still happens before the first upload, so the live site is
     untouched either way. ``before_upload``, when given, receives the mapped bindings
     once every check has passed and runs before the first upload (a project's D1
-    migrations); raising there also leaves the live site untouched."""
+    migrations); raising there also leaves the live site untouched.
+
+    ``target`` is ``dispatch`` (the WfP namespace) or ``account`` (a regular
+    account-level script, interim until the account has WfP: the tenant's code runs
+    as one of the account's own Workers with no dispatch isolation in front)."""
+    if target not in SCRIPT_TARGETS:
+        raise _refuse(f"unknown deploy target {target!r}")
     bundle, manifest = _read_bundle(build_dir)
     if provision is not None:
         provisioned = await provision(manifest.get("bindingRequests"))
@@ -577,9 +617,17 @@ async def deploy_bundle(
     if before_upload is not None:
         await before_upload(bundle.bindings)
 
+    if target == ACCOUNT_TARGET:
+        logger.warning(
+            "sites.bundle_deploy %s: deploying as an ACCOUNT-LEVEL Worker (interim, no "
+            "dispatch isolation); move project sites to Workers for Platforms",
+            script_name,
+        )
     assets_meta = None
     if bundle.assets:
-        jwt = await cf.upload_assets(script_name=script_name, assets=bundle.assets, salt=salt)
+        jwt = await cf.upload_assets(
+            script_name=script_name, assets=bundle.assets, salt=salt, target=target
+        )
         assets_meta = {"jwt": jwt, "config": bundle.assets_config}
     await cf.put_worker(
         script_name=script_name,
@@ -589,6 +637,7 @@ async def deploy_bundle(
         compatibility_date=bundle.compatibility_date,
         compatibility_flags=bundle.compatibility_flags,
         assets=assets_meta,
+        target=target,
     )
     return BundleDeployResult(
         script_name=script_name,

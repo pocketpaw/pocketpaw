@@ -2,7 +2,11 @@
 # the Sites control plane. httpx-based, injectable transport for tests; account id
 # and token come from settings (env), never from tenant rows. Surfaces:
 #   * Workers for Platforms: ``put_worker`` uploads a user Worker into our dispatch
-#     namespace (live on 200) and ``delete_worker`` removes it. ``put_worker`` has
+#     namespace (live on 200) and ``delete_worker`` removes it. ``put_worker`` and
+#     ``upload_assets`` take a ``target``: ``dispatch`` (default, the namespace) or
+#     ``account`` (a regular account-level script at ``/workers/scripts/{name}``,
+#     the interim home of ``project`` bundles while the account has no WfP). Only
+#     the URL differs; the wire shapes are the same. ``put_worker`` has
 #     three wire shapes: the legacy single-module PUT (no bindings), the legacy
 #     one-module multipart with bindings (dynamic sites, fixed ``index.mjs`` and
 #     ``2024-09-23``), and the multi-module bundle form (``modules=``) used by
@@ -15,7 +19,10 @@
 #     hashes are salted per tenant so one tenant cannot probe another's files in
 #     the namespace-shared asset store.
 #   * Account-level Workers (the ``workers`` deploy mode): ``delete_account_script``,
-#     ``list_account_scripts``. Deploys there go through ``workers_deploy.py``.
+#     ``list_account_scripts``, ``enable_workers_dev`` (the script's workers.dev
+#     toggle, which an API upload leaves off) and ``workers_dev_subdomain`` (the
+#     account's ``<sub>.workers.dev``). Wrangler-built sites deploy through
+#     ``workers_deploy.py``, project bundles through ``put_worker(target="account")``.
 #     ``Site.deploy_target`` decides which delete applies.
 #   * Cloudflare for SaaS: custom hostnames (create, poll, delete). The CNAME target
 #     is configured (``PAW_CF_CNAME_TARGET``), never derived from the zone id, and
@@ -53,6 +60,12 @@ from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
 
 _CF_API = "https://api.cloudflare.com/client/v4"
+
+# Where ``put_worker`` / ``upload_assets`` send a script. ``dispatch`` is our WfP
+# namespace; ``account`` is a regular account-level script (no dispatch isolation).
+DISPATCH_TARGET = "dispatch"
+ACCOUNT_TARGET = "account"
+SCRIPT_TARGETS = (DISPATCH_TARGET, ACCOUNT_TARGET)
 
 # How much of an error body to carry into the raised message. Cloudflare's own
 # messages are short sentences; the cap exists so a proxy's HTML error page cannot
@@ -278,8 +291,12 @@ class CloudflareClient:
         compatibility_date: str | None = None,
         compatibility_flags: Sequence[str] | None = None,
         assets: dict | None = None,
+        target: str = DISPATCH_TARGET,
     ) -> bool:
         """Upload a user Worker into the dispatch namespace. Live on 200.
+
+        ``target="account"`` sends the same upload to a regular account-level script
+        (``PUT /accounts/{id}/workers/scripts/{name}``) instead, see ``_script_url``.
 
         ``bindings`` (DS-2) carries the Worker's runtime bindings — for a dynamic
         Paw Site, a D1 binding ``{"type": "d1", "name": "DB", "id": <database_id>}``
@@ -316,8 +333,9 @@ class CloudflareClient:
                 compatibility_date=compatibility_date,
                 compatibility_flags=compatibility_flags or [],
                 assets=assets,
+                target=target,
             )
-        url = self._script_url(script_name)
+        url = self._script_url(script_name, target)
         async with self._client() as client:
             if bindings:
                 metadata = {
@@ -347,7 +365,14 @@ class CloudflareClient:
         self._unwrap(resp)
         return True
 
-    def _script_url(self, script_name: str) -> str:
+    def _script_url(self, script_name: str, target: str = DISPATCH_TARGET) -> str:
+        """The script's API URL for ``target``. ``account`` is the regular Worker
+        upload (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/),
+        ``dispatch`` the same contract inside our WfP namespace."""
+        if target == ACCOUNT_TARGET:
+            return f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}"
+        if target != DISPATCH_TARGET:
+            raise ValidationError("sites.bundle_shape", f"unknown script target {target!r}")
         return (
             f"{_CF_API}/accounts/{self._account_id}"
             f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
@@ -364,6 +389,7 @@ class CloudflareClient:
         compatibility_date: str | None,
         compatibility_flags: Sequence[str],
         assets: dict | None,
+        target: str = DISPATCH_TARGET,
     ) -> bool:
         if bundle:
             raise ValidationError(
@@ -396,7 +422,7 @@ class CloudflareClient:
         ]
         files.extend((m.name, (m.name, m.content, m.content_type)) for m in modules)
         async with self._client() as client:
-            resp = await client.put(self._script_url(script_name), files=files)
+            resp = await client.put(self._script_url(script_name, target), files=files)
         self._unwrap(resp)
         return True
 
@@ -406,8 +432,13 @@ class CloudflareClient:
         script_name: str,
         assets: Mapping[str, bytes],
         salt: str,
+        target: str = DISPATCH_TARGET,
     ) -> str:
         """Upload a script's static assets and return the completion JWT.
+
+        ``target`` picks the session URL the same way ``put_worker`` does. The
+        account-level flow is the same three steps
+        (https://developers.cloudflare.com/workers/static-assets/direct-upload/).
 
         ``assets`` maps the served path (``/index.html``) to its bytes. The three
         steps are Cloudflare's documented WfP static-assets flow
@@ -438,7 +469,7 @@ class CloudflareClient:
         upload_url = f"{_CF_API}/accounts/{self._account_id}/workers/assets/upload?base64=true"
         async with self._client() as client:
             session_resp = await client.post(
-                f"{self._script_url(script_name)}/assets-upload-session",
+                f"{self._script_url(script_name, target)}/assets-upload-session",
                 json={"manifest": manifest},
             )
             session = self._unwrap(session_resp) or {}
@@ -522,6 +553,31 @@ class CloudflareClient:
         if resp.status_code == 404:
             return
         self._unwrap(resp)
+
+    async def enable_workers_dev(self, script_name: str) -> None:
+        """Serve an ACCOUNT-LEVEL script on ``<script>.<sub>.workers.dev``.
+
+        ``POST /accounts/{id}/workers/scripts/{name}/subdomain`` with
+        ``{"enabled": true, "previews_enabled": false}``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/subdomain/methods/create/).
+        Wrangler does this for ``workers_dev: true``; a script uploaded through the API
+        needs it said explicitly. Idempotent, so every publish sends it."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}/subdomain"
+        async with self._client() as client:
+            resp = await client.post(url, json={"enabled": True, "previews_enabled": False})
+        self._unwrap(resp)
+
+    async def workers_dev_subdomain(self) -> str:
+        """The account's workers.dev subdomain (the ``<sub>`` in
+        ``<script>.<sub>.workers.dev``), or ``""`` when the account has none.
+
+        ``GET /accounts/{id}/workers/subdomain``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/subdomains/methods/get/)."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/subdomain"
+        async with self._client() as client:
+            resp = await client.get(url)
+        result = self._unwrap(resp)
+        return str(result.get("subdomain") or "") if isinstance(result, dict) else ""
 
     async def list_account_scripts(self) -> list[str]:
         """Names of every ACCOUNT-LEVEL Worker script (the ``workers`` deploy mode).

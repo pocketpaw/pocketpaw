@@ -1,0 +1,65 @@
+[
+  {
+    "label": "project publish in workers mode runs wrangler on the API host (author config executes there)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        project_target = bundle_deploy.project_deploy_target(mode)\n        mode = \"workers\" if project_target == bundle_deploy.ACCOUNT_TARGET else \"wfp\"",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_project_account_target.py"
+    ]
+  },
+  {
+    "label": "the account target is dropped on the script PUT, so the upload goes to the dispatch namespace and 403s on an account without WfP",
+    "file": "ee/pocketpaw_ee/sites/bundle_deploy.py",
+    "find": "        assets=assets_meta,\n        target=target,\n",
+    "replace": "        assets=assets_meta,\n",
+    "tests": [
+      "tests/ee/sites/test_project_account_target.py"
+    ]
+  },
+  {
+    "label": "the account target is dropped on the assets session, so assets upload into the dispatch namespace",
+    "file": "ee/pocketpaw_ee/sites/bundle_deploy.py",
+    "find": "            script_name=script_name, assets=bundle.assets, salt=salt, target=target\n",
+    "replace": "            script_name=script_name, assets=bundle.assets, salt=salt\n",
+    "tests": [
+      "tests/ee/sites/test_project_account_target.py"
+    ]
+  },
+  {
+    "label": "the override is ignored, so an operator cannot route project bundles to WfP while other sites stay on workers",
+    "file": "ee/pocketpaw_ee/sites/bundle_deploy.py",
+    "find": "    if raw in SCRIPT_TARGETS:\n        return raw\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_project_account_target.py"
+    ]
+  },
+  {
+    "label": "workers.dev is never enabled, so the API-uploaded Worker is live but unreachable",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await cf.enable_workers_dev(name)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_project_account_target.py"
+    ]
+  },
+  {
+    "label": "the account bundle is uploaded under the site id instead of the workers-mode Worker name, so routes, renames and delete miss it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                    script_name=deploy_name,\n                    target=project_target,\n",
+    "replace": "                    script_name=site_id,\n                    target=project_target,\n",
+    "tests": [
+      "tests/ee/sites/test_project_account_target.py"
+    ]
+  },
+  {
+    "label": "a project bundle deploy claims a pageview counter it never shipped",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        counter_deployed = project_target is None and any(\n",
+    "replace": "        counter_deployed = True or any(\n",
+    "tests": [
+      "tests/ee/sites/test_project_account_target.py"
+    ]
+  }
+]
