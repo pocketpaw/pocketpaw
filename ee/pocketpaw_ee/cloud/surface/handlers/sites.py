@@ -648,7 +648,7 @@ _CONCIERGE_NOTE = (
 # describing a page that ALREADY exists, so there is no sensible default: guessing
 # hands the agent the wrong edit tool. Refine passes what the pocket stored and
 # treats anything unrecognized as unknown (see ``_refine_engine``).
-_SITE_ENGINES: tuple[str, ...] = ("html", "svelte", "ripple", "react")
+_SITE_ENGINES: tuple[str, ...] = ("html", "svelte", "ripple", "react", "project")
 
 
 def _preamble_engine(raw: str | None, *, default: str) -> str:
@@ -1456,6 +1456,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
       JavaScript unless the create declares ``interactive``.
     * ``"ripple"`` — a ripple widget landing spec via the pocket specialist →
       ``create_landing_site``. The ONE engine that does not author markup by hand.
+    * ``"project"`` — a full-stack repo from a base template →
+      ``start_site_from_template``, then recipes, file edits and ``run_build``.
 
     Phase 1 assesses the request and, when it is vague, asks ONE round of
     high-value questions via the ``ask_user`` chips (with a "just build it"
@@ -1568,6 +1570,20 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "publish, so keep offering the Preview rather than announcing a live "
             "change."
         )
+    elif engine == "project":
+        engine_note = (
+            " On this track the site is a FULL-STACK project: a base template repo "
+            "(Astro, TanStack Start, Vite + React + Hono, Next or SvelteKit on "
+            "Cloudflare Workers) you extend with backend recipes and your own code."
+        )
+        build_step = (
+            "BUILD via the `pocketpaw-create-project-site` skill — invoke it by intent "
+            "(no slash command); it routes the request to a template. If it is "
+            "unavailable: `mcp__pocketpaw_sites_manager__list_site_templates`, pick by "
+            "`when_to_use`, then `mcp__pocketpaw_sites_manager__start_site_from_template` "
+            "ONCE (it returns the pocket_id and the repo's AGENTS.md), then STOP at the "
+            "draft — publish only on explicit request.\n" + _PROJECT_LOOP
+        )
     elif engine == "ripple":
         engine_note = " The page is rendered STATICALLY (no JavaScript runs for the visitor)."
         build_step = (
@@ -1635,7 +1651,11 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "→ `mcp__pocketpaw_sites_manager__create_react_site` (and pass "
             "`interactive=true` if any component you write needs the browser); a "
             "live-data / dynamic app (dashboards, per-user data) → "
-            "`mcp__pocketpaw_sites_manager__create_dynamic_site`. A described "
+            "`mcp__pocketpaw_sites_manager__create_dynamic_site`; a full-stack app "
+            "(user accounts, its own database, server logic) or a named framework "
+            "(Next, Astro, TanStack Start, SvelteKit) → the "
+            "`pocketpaw-create-project-site` skill "
+            "(`mcp__pocketpaw_sites_manager__start_site_from_template`). A described "
             "business, a desire for a 'nice' or 'modern' site, or the design "
             "direction the user picked is NOT such a request — stay on HTML.\n"
             "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
@@ -2013,6 +2033,32 @@ def _react_write_scope() -> str:
     )
 
 
+#: The loop the project tools run, shared by the create and refine branches. The tool
+#: names are read off ``agent/mcp_servers/sites_project.py``; every one rides
+#: ``SITES_TOOL_IDS``. ``request_site_secret`` is the secrets lane's tool and may be
+#: absent, so the text tells the agent what to do without it.
+_PROJECT_LOOP = (
+    "A PROJECT site is a whole repo the user owns (package.json, framework config, "
+    "wrangler.jsonc), built in a sandbox. Its files are a `source` map you edit with "
+    "`mcp__pocketpaw_sites_manager__list_files` / `read_file` / `read_files` / "
+    "`patch_file` (exact-once {old, new} blocks, preferred) / `write_files` / "
+    "`delete_files` on the SAME pocket_id. There is no rippleSpec, no pocket specialist "
+    "and no create_*_site call here. Follow the repo's AGENTS.md (read_file it) over "
+    "your framework defaults. Backend features come from recipes: "
+    "`list_site_recipes`, then `apply_site_recipe`; do its glue tasks in order. For each "
+    "secret a recipe names, call `request_site_secret` (or, if that tool is missing, "
+    "tell the user which secrets to set in the site's settings); NEVER write a secret "
+    "value into a file. Every write saves the DRAFT and queues a build "
+    "(`verification.status: pending`). Finish with "
+    "`mcp__pocketpaw_sites_manager__run_build`; on `failed` read the log (it comes with "
+    "the result, or `get_build_log`), fix, and build again, at most 3 rounds. Call the "
+    "site ready only on `built`. When `preview_mode` is `static`, tell the user the "
+    "preview shows the static pages only and server routes (API, actions, server "
+    "pages) run after publish. Publish deploys the finished build of the current "
+    "files, so build before you publish.\n"
+)
+
+
 def _refine_publish_step(engine: str | None, pocket_id: str) -> str:
     """The publish instruction for a refine turn. Honest per engine.
 
@@ -2099,7 +2145,8 @@ def _refine_unknown_engine_step(pocket_id: str) -> str:
         "specialist CANNOT edit those — svelte uses "
         "`mcp__pocketpaw_sites_manager__edit_svelte_component`, react uses "
         "`mcp__pocketpaw_sites_manager__edit_react_component`, and html uses "
-        "`mcp__pocketpaw_sites_manager__edit_html_file`.\n"
+        "`mcp__pocketpaw_sites_manager__edit_html_file`. A `project` pocket is a whole "
+        "repo edited with `mcp__pocketpaw_sites_manager__patch_file` / `write_files`.\n"
         "If the read fails too, tell the user you could not load their site rather "
         "than attempting an edit blind.\n"
     )
@@ -2110,7 +2157,7 @@ def _refine_ask_mechanism(engine: str | None) -> str:
     ripple refine (or one whose engine is unknown) has inline ripple ON, so only there
     is the widget real. Everywhere else a ```ui-spec block would reach the user as raw
     JSON, and the ``ask_user`` tool (allowed on every /sites mode) is the mechanism."""
-    if engine in ("html", "svelte", "react"):
+    if engine in ("html", "svelte", "react", "project"):
         return (
             "with the `mcp__pocketpaw_ask__ask_user` tool (a one-line `question` and "
             "3-5 short `options`; inline ripple is OFF on this engine), then STOP and "
@@ -2341,6 +2388,18 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "the full resting state lives in the HTML, never rendered only by a "
             "script.\n"
         )
+    elif engine == "project":
+        render_truth = (
+            " It is a full-stack PROJECT site: a whole repo built in a sandbox, with "
+            "server routes that run on the published site."
+        )
+        edit_step = (
+            "Treat the user's message as a change to this repo. Read before you edit: "
+            f"`mcp__pocketpaw_sites_manager__list_files` with pocket_id `{pocket_id}`, "
+            "then `read_files` on what you will touch (AGENTS.md first). NEVER call "
+            "`start_site_from_template` again: that mints a SECOND site.\n" + _PROJECT_LOOP
+        )
+        rules = _REFINE_SHARED_RULES
     else:
         render_truth = ""
         edit_step = _refine_unknown_engine_step(pocket_id)

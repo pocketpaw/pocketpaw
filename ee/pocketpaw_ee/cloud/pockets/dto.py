@@ -766,6 +766,8 @@ def pocket_to_wire_dict(p, *, source_visible: bool) -> dict:
         # ``sites_keep_client_bundle_default`` only to the former. Coercing to a
         # bool here would erase that distinction before publish ever sees it.
         "keepsClientBundle": getattr(p, "keeps_client_bundle", None),
+        # A project site's template slug, framework and applied recipes.
+        "siteMeta": getattr(p, "site_meta", None),
         # Entity-rooms chunk ② — optional per-entity surface-profile override
         # (JSON dict mirroring the surface-domain ``SurfaceProfile``), or
         # ``None`` for legacy pockets. Two-word key → camelCase wire form, like
