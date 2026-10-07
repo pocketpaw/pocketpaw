@@ -1153,6 +1153,7 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.social.domain",
     "pocketpaw_ee.cloud.growth.social.analyst",
     "pocketpaw_ee.cloud.growth.social.ideas",
+    "pocketpaw_ee.cloud.growth.social.memes",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",

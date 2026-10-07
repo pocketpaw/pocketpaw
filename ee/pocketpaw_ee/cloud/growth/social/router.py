@@ -16,8 +16,11 @@ from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
+    CreateCharacterRequest,
     GenerateIdeasRequest,
     MakeMediaRequest,
+    MakeMemeRequest,
+    MemeFormatListResponse,
     ScheduleIdeasRequest,
     SocialIdeaListResponse,
     SocialIdeaResponse,
@@ -207,3 +210,54 @@ async def make_media(
 ) -> SocialIdeaResponse:
     """Draw a poster (SVG) or a ~10 s reel (HyperFrames HTML) for one idea, editable in /studio."""
     return await social_service.make_media(ctx, idea_id, body)
+
+
+@router.get(
+    "/meme-formats",
+    response_model=MemeFormatListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_meme_formats() -> MemeFormatListResponse:
+    """The meme format templates Create offers (our own layouts, no third-party media)."""
+    return social_service.list_meme_formats()
+
+
+@router.post(
+    "/characters",
+    response_model=SocialProfileResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def create_character(
+    body: CreateCharacterRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialProfileResponse:
+    """Draw an original vector mascot for this social. 409 past the character limit."""
+    return await social_service.create_character(ctx, body, profile_id)
+
+
+@router.delete(
+    "/characters/{character_id}",
+    response_model=SocialProfileResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def delete_character(
+    character_id: str,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialProfileResponse:
+    return await social_service.delete_character(ctx, character_id, profile_id)
+
+
+@router.post(
+    "/memes",
+    response_model=SocialIdeaResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def make_meme(
+    body: MakeMemeRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialIdeaResponse:
+    """Draw a meme with a format and character and file it as a new Blitz idea."""
+    return await social_service.make_meme(ctx, body, profile_id)

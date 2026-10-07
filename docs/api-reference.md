@@ -7030,6 +7030,10 @@ other route `growth.write` (both MEMBER).
 | `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). |
 | `POST /api/v1/growth/social/ideas/schedule` | `{items: [{idea_id, scheduled_at}], timezone?, duration_minutes?}`: date approved ideas and give each a `/calendar` event (calendar `growth-social`); rescheduling moves the same event. `409 social.idea_not_approved` if any is not approved. Nothing is posted. |
 | `POST /api/v1/growth/social/ideas/{idea_id}/unschedule` | Clear the date and delete the idea's calendar event. |
+| `GET /api/v1/growth/social/meme-formats` | The meme format templates Create offers: `{items: [{id, name, layout}]}`. Our own layouts; no third-party media. |
+| `POST /api/v1/growth/social/characters` | `{name?, description}`: the agent draws an original vector mascot (never a real person or existing franchise character), sanitised, kept on the profile (max 6, else `409 social.character_limit`). Returns the profile. |
+| `DELETE /api/v1/growth/social/characters/{character_id}` | Remove a character. Returns the profile. |
+| `POST /api/v1/growth/social/memes` | `{format?, character_id?, mention_business, prompt?, platform}`: draw a meme (character redrawn in the format's layout, as SVG) and file it as a new Blitz idea with `format: "meme"` and `poster_svg`. `409` before setup, `404` unknown character, `422` unknown format. |
 
 **Response (`SocialProfile`)** — every profile route returns this shape:
 

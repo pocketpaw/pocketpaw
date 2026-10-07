@@ -1021,6 +1021,10 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/ideas/schedule"): "growth.write",
             ("GET", "/growth/social/ideas/{idea_id}"): "growth.read",
             ("POST", "/growth/social/ideas/{idea_id}/media"): "growth.write",
+            ("GET", "/growth/social/meme-formats"): "growth.read",
+            ("POST", "/growth/social/characters"): "growth.write",
+            ("DELETE", "/growth/social/characters/{character_id}"): "growth.write",
+            ("POST", "/growth/social/memes"): "growth.write",
             ("POST", "/growth/social/ideas/{idea_id}/unschedule"): "growth.write",
         }
 

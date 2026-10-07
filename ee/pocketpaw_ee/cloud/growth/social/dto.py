@@ -159,6 +159,13 @@ class SocialAnalysisResponse(BaseModel):
     logo_url: str | None = None
 
 
+class CharacterResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    svg: str
+
+
 class SocialProfileResponse(BaseModel):
     id: str
     workspace_id: str
@@ -178,6 +185,7 @@ class SocialProfileResponse(BaseModel):
     onboarding_completed_at: str | None
     created_at: str | None
     updated_at: str | None
+    characters: list[CharacterResponse] = Field(default_factory=list)
 
 
 class GenerateIdeasRequest(BaseModel):
@@ -271,3 +279,26 @@ class ScheduleIdeasRequest(BaseModel):
 
 class MakeMediaRequest(BaseModel):
     kind: Literal["poster", "reel"]
+
+
+class CreateCharacterRequest(BaseModel):
+    name: str = Field(default="", max_length=40)
+    description: str = Field(min_length=3, max_length=400)
+
+
+class MakeMemeRequest(BaseModel):
+    format: str | None = Field(default=None, max_length=40)
+    character_id: str | None = Field(default=None, max_length=32)
+    mention_business: bool = True
+    prompt: str = Field(default="", max_length=500)
+    platform: Platform = "x"
+
+
+class MemeFormatResponse(BaseModel):
+    id: str
+    name: str
+    layout: str
+
+
+class MemeFormatListResponse(BaseModel):
+    items: list[MemeFormatResponse]

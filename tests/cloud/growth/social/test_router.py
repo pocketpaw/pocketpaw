@@ -40,6 +40,11 @@ from pocketpaw_ee.cloud.growth.social.ideas import (
     set_production_ideas_fn,
     set_production_media_fn,
 )
+from pocketpaw_ee.cloud.growth.social.memes import (
+    MadeMeme,
+    set_production_character_fn,
+    set_production_meme_fn,
+)
 from pocketpaw_ee.cloud.growth.social.router import router as social_router
 from pocketpaw_ee.cloud.license import require_license
 
@@ -108,6 +113,8 @@ def _reset_seams():
         set_production_analyze_fn(None)
         set_production_ideas_fn(None)
         set_production_media_fn(None)
+        set_production_character_fn(None)
+        set_production_meme_fn(None)
 
 
 class _FakeAnalyzer:
@@ -717,3 +724,42 @@ async def test_patch_replaces_the_poster_with_a_cleaned_edit(w1):
     assert resp.status_code == 200, resp.text
     assert resp.json()["poster_svg"] == '<svg viewBox="0 0 10 10"><rect/></svg>'
     assert (await w1.patch(url, json={"poster_svg": "not svg"})).status_code == 422
+
+
+MEME_SVG = '<svg viewBox="0 0 10 10"><text>Me:</text></svg>'
+
+
+@pytest.mark.asyncio
+async def test_characters_and_memes(w1, w2):
+    assert len((await w1.get(f"{BASE}/meme-formats")).json()["items"]) >= 10
+    await _complete(w1)
+
+    async def draw(profile, name, description):
+        return '<svg viewBox="0 0 512 512"><circle r="9" onclick="x()"/></svg>'
+
+    seen = {}
+
+    async def make(profile, character, fmt, mention, prompt, platform):
+        seen.update(character=character, fmt=fmt, mention=mention, platform=platform)
+        return MadeMeme(hook="Nobody: / Me:", caption="Post", why="Relatable", svg=MEME_SVG)
+
+    set_production_character_fn(draw)
+    set_production_meme_fn(make)
+    body = {"name": "Byte", "description": "a grumpy cat accountant"}
+    chars = (await w1.post(f"{BASE}/characters", json=body)).json()["characters"]
+    assert [c["name"] for c in chars] == ["Byte"]
+    assert chars[0]["svg"] == '<svg viewBox="0 0 512 512"><circle r="9"/></svg>'
+
+    meme = {"format": "nobody_me", "character_id": chars[0]["id"], "platform": "reddit"}
+    resp = await w1.post(f"{BASE}/memes", json=meme)
+    assert resp.status_code == 200, resp.text
+    idea = resp.json()
+    assert (idea["format"], idea["platform"], idea["poster_svg"]) == ("meme", "reddit", MEME_SVG)
+    assert seen["character"]["name"] == "Byte" and seen["fmt"] == "nobody_me"
+    assert (await w1.post(f"{BASE}/memes", json={"format": "nope"})).status_code == 422
+    missing = {"character_id": "ffffffffffff"}
+    assert (await w1.post(f"{BASE}/memes", json=missing)).status_code == 404
+    assert (await w2.post(f"{BASE}/memes", json={})).status_code == 409
+
+    gone = await w1.delete(f"{BASE}/characters/{chars[0]['id']}")
+    assert gone.json()["characters"] == []

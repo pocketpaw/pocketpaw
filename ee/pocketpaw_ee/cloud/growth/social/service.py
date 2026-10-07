@@ -55,9 +55,14 @@ from pocketpaw_ee.cloud.growth.social.domain import (
 )
 from pocketpaw_ee.cloud.growth.social.dto import (
     AnalysisPatch,
+    CharacterResponse,
+    CreateCharacterRequest,
     DescriptionResponse,
     GenerateIdeasRequest,
     MakeMediaRequest,
+    MakeMemeRequest,
+    MemeFormatListResponse,
+    MemeFormatResponse,
     ScheduleIdeasRequest,
     SocialAnalysisResponse,
     SocialIdeaListResponse,
@@ -142,6 +147,7 @@ def _profile_to_domain(doc: _ProfileDoc) -> SocialProfile:
         onboarding_completed_at=doc.onboarding_completed_at,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
+        characters=tuple(dict(c) for c in (doc.characters or [])),
     )
 
 
@@ -168,6 +174,7 @@ def _profile_to_response(p: SocialProfile) -> SocialProfileResponse:
         onboarding_completed_at=iso_utc(p.onboarding_completed_at),
         created_at=iso_utc(p.created_at),
         updated_at=iso_utc(p.updated_at),
+        characters=[CharacterResponse(**c) for c in p.characters],
     )
 
 
@@ -567,6 +574,124 @@ async def make_media(
     return _idea_to_response(_idea_to_domain(doc))
 
 
+def list_meme_formats() -> MemeFormatListResponse:
+    from pocketpaw_ee.cloud.growth.social.memes import MEME_FORMATS
+
+    return MemeFormatListResponse(
+        items=[MemeFormatResponse(id=i, name=n, layout=lay) for i, n, lay in MEME_FORMATS]
+    )
+
+
+async def create_character(
+    ctx: RequestContext, body: CreateCharacterRequest, profile_id: str | None = None
+) -> SocialProfileResponse:
+    """Have the agent draw an original vector mascot and keep it on the profile."""
+    import secrets
+
+    from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
+    from pocketpaw_ee.cloud.growth.social import memes
+    from pocketpaw_ee.cloud.growth.social.ideas import clean_svg
+
+    body = CreateCharacterRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    draw = memes.resolve_character_fn()
+    if draw is None:
+        raise CloudError(503, "social.characters_unavailable", "Characters are not configured here")
+    doc = await _require_profile_doc(workspace_id, profile_id)
+    if len(doc.characters or []) >= memes.MAX_CHARACTERS:
+        raise ConflictError(
+            "social.character_limit", f"A social can keep {memes.MAX_CHARACTERS} characters"
+        )
+    try:
+        svg = clean_svg(
+            await draw(_profile_to_domain(doc), body.name.strip(), body.description.strip())
+        )
+    except ResearchUnavailable as exc:
+        raise CloudError(502, "social.character_failed", "Drawing the character failed") from exc
+    if not svg:
+        raise CloudError(502, "social.character_failed", "The character came back unusable")
+    character = {
+        "id": secrets.token_hex(6),
+        "name": body.name.strip() or "Character",
+        "description": body.description.strip(),
+        "svg": svg,
+    }
+    await _ProfileDoc.find_one({"_id": doc.id, "workspace": workspace_id}).update(
+        {"$push": {"characters": character}, "$set": {"updatedAt": datetime.now(UTC)}}
+    )
+    # no-event: Growth › Social has no realtime subscriber; Create re-renders from the response.
+    return await get_profile(ctx, str(doc.id))
+
+
+async def delete_character(
+    ctx: RequestContext, character_id: str, profile_id: str | None = None
+) -> SocialProfileResponse:
+    workspace_id = _require_workspace(ctx)
+    doc = await _require_profile_doc(workspace_id, profile_id)
+    await _ProfileDoc.find_one({"_id": doc.id, "workspace": workspace_id}).update(
+        {"$pull": {"characters": {"id": character_id}}, "$set": {"updatedAt": datetime.now(UTC)}}
+    )
+    # no-event: Growth › Social has no realtime subscriber; Create re-renders from the response.
+    return await get_profile(ctx, str(doc.id))
+
+
+async def make_meme(
+    ctx: RequestContext, body: MakeMemeRequest, profile_id: str | None = None
+) -> SocialIdeaResponse:
+    """Draw a meme (character + format layout as SVG) and file it as a new Blitz idea."""
+    from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
+    from pocketpaw_ee.cloud.growth.social import memes
+    from pocketpaw_ee.cloud.growth.social.ideas import clean_svg
+
+    body = MakeMemeRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    make = memes.resolve_meme_fn()
+    if make is None:
+        raise CloudError(503, "social.memes_unavailable", "Memes are not configured here")
+    if body.format and body.format not in memes.MEME_FORMAT_IDS:
+        raise ValidationError("social.unknown_format", f"Unknown meme format {body.format!r}")
+    doc = await _profile_doc(workspace_id, profile_id)
+    if doc is None or doc.onboarding_completed_at is None:
+        raise ConflictError(
+            "social.onboarding_incomplete", "Finish the Social setup before making memes"
+        )
+    character = None
+    if body.character_id:
+        character = next(
+            (c for c in doc.characters or [] if c.get("id") == body.character_id), None
+        )
+        if character is None:
+            raise NotFound("social_character", body.character_id)
+    try:
+        made = await make(
+            _profile_to_domain(doc),
+            character,
+            body.format,
+            body.mention_business,
+            body.prompt,
+            body.platform,
+        )
+    except ResearchUnavailable as exc:
+        raise CloudError(502, "social.meme_failed", "Making the meme failed") from exc
+    meme_svg = clean_svg(made.svg) if made is not None else ""
+    if not meme_svg:
+        raise CloudError(502, "social.meme_failed", "The meme came back unusable")
+    idea = _IdeaDoc(
+        workspace=workspace_id,
+        profile=str(doc.id),
+        format="meme",
+        hook=made.hook,
+        caption=made.caption,
+        why=made.why,
+        platform=body.platform,
+        poster_svg=meme_svg,
+        status="new",
+    )
+    await idea.insert()
+    # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
+    return _idea_to_response(_idea_to_domain(idea))
+
+
 SOCIAL_CALENDAR_ID = "growth-social"
 _PLATFORM_NAMES = {"x": "X", "reddit": "Reddit"}
 
@@ -668,7 +793,11 @@ __all__ = [
     "analyze_profile",
     "complete_onboarding",
     "create_profile",
+    "create_character",
+    "delete_character",
     "get_idea",
+    "list_meme_formats",
+    "make_meme",
     "list_profiles",
     "make_media",
     "schedule_ideas",

@@ -992,6 +992,16 @@ def mount_cloud(app: FastAPI) -> None:
     set_production_ideas_fn(agent_generate_ideas)
     set_production_media_fn(agent_make_media)
 
+    from pocketpaw_ee.cloud.growth.social.memes import (
+        agent_draw_character,
+        agent_make_meme,
+        set_production_character_fn,
+        set_production_meme_fn,
+    )
+
+    set_production_character_fn(agent_draw_character)
+    set_production_meme_fn(agent_make_meme)
+
     # NOTE: Composio is wired per-backend via ``pocketpaw_ee.cloud.composio.providers``
     # — each agent backend (claude_sdk, openai_agents, google_adk,
     # deep_agents) calls ``build_tools_for_backend()`` in its own tool-build

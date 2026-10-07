@@ -35,6 +35,7 @@ class SocialProfile(TimestampedDocument):
     analysis: dict | None = None
     analyzed_at: datetime | None = None
     onboarding_completed_at: datetime | None = None
+    characters: list[dict] = Field(default_factory=list)
 
     class Settings:
         name = "growth_social_brands"

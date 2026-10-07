@@ -119,6 +119,7 @@ class SocialProfile:
     onboarding_completed_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    characters: tuple[dict[str, str], ...] = ()
 
     def has_description(self) -> bool:
         return any((self.description.get(key) or "").strip() for key in DESCRIPTION_FIELDS)
