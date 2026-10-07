@@ -7930,6 +7930,40 @@ when there was nothing to clear.
 
 ---
 
+## Platform Wallet Credits
+
+Cross-tenant routes under `/api/v1/platform/workspaces/{workspace_id}/credits*`
+(`ee/pocketpaw_ee/cloud/platform/credits.py`). Every amount is in micro-credits
+(1,000,000 micro is one credit). Reads need `platform.credits.read` (SUPPORT), writes
+need `platform.credits.adjust` (OPERATOR), and each call leaves a `PlatformAuditEvent`.
+
+### `GET /api/v1/platform/workspaces/{workspace_id}/credits` · `GET .../credits/history`
+
+The wallet balance with `has_wallet` and `unapplied_count`, and the ledger newest first
+(`cursor`, `limit` up to 200, exact-match `cause` filter). An id with no wallet reads as
+an empty one; these two routes do not look the workspace up.
+
+### `POST /api/v1/platform/workspaces/{workspace_id}/credits/adjust`
+
+A signed `amount_delta_micro` (non-zero) with a required `reason` and
+`idempotency_key`. Positive grants as `operator_grant`, negative claws back as
+`operator_debit` and never takes the balance below zero (`402 credits.insufficient`).
+
+```json
+{ "amount_delta_micro": 375000, "reason": "Refund for a failed run", "idempotency_key": "case-7" }
+```
+
+### `POST /api/v1/platform/workspaces/{workspace_id}/credits/reconcile`
+
+Repairs drift between the ledger and the stored balance. Needs a `reason`. Run it only
+while the wallet is quiet: a grant or debit that races it can corrupt the balance.
+
+Both writes return `404 workspace.not_found` when no workspace has that id, including a
+malformed id such as `None`. The check runs before the audit row is opened, so a refused
+call writes nothing. A soft-deleted workspace still resolves.
+
+---
+
 ## Batch reads for the chat sidebar
 
 Three endpoints that each replace a per-item GET the chat sidebar used to fan

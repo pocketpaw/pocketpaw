@@ -312,6 +312,15 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run platform credits tests
+        # Same addopts escape. The operator credit routes move real money, and
+        # the 404 for an unknown workspace is the only thing stopping ledger rows
+        # for a tenant that does not exist (an adjust on /workspaces/None/...).
+        run: uv run pytest tests/cloud/platform/test_credits.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run workspace API key tests
         # Same addopts escape. The only end-to-end proof that request_context
         # enforces a paw_ key's scopes: a key with the scope passes, a key

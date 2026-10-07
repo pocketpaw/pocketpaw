@@ -5,8 +5,9 @@ Created 2026-09-16 (feat/platform-credits) — chunk 6 of the Paw Admin PRD.
 Covers ``ee/pocketpaw_ee/cloud/platform/credits.py`` end to end: the two reads
 at SUPPORT (wallet detail, ledger history), the two writes at OPERATOR (adjust,
 reconcile), the audit trail each leaves, sub-credit precision surviving a full
-round trip without truncating to zero, replay reporting, and the 402/422
-validation paths.
+round trip without truncating to zero, replay reporting, the 402/422
+validation paths, and the 404 both writes return for a workspace that does not
+exist (``WS`` is a real Workspace doc for that reason, seeded per test).
 
 Rung enforcement itself (SUPPORT vs OPERATOR vs no role) is already covered
 generically for every ``PLATFORM_ACTIONS`` entry by
@@ -24,13 +25,22 @@ from pocketpaw_ee.cloud._core.errors import CloudError, ValidationError
 from pocketpaw_ee.cloud.credits import service as credits_service
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
 from pocketpaw_ee.cloud.models.user import User as UserDoc
+from pocketpaw_ee.cloud.models.workspace import Workspace as WorkspaceDoc
 from pocketpaw_ee.cloud.platform import credits as credits_routes
 from starlette.datastructures import Headers
 from starlette.requests import Request
 
 pytestmark = pytest.mark.asyncio
 
-WS = "ws_platform_credits"
+WS = "65f0000000000000000000a1"
+
+
+@pytest.fixture(autouse=True)
+async def _workspace(mongo_db) -> None:
+    """The writes 404 a workspace that does not exist, so ``WS`` has to be real."""
+    from beanie import PydanticObjectId
+
+    await WorkspaceDoc(id=PydanticObjectId(WS), name="Acme", slug="acme", owner="u1").insert()
 
 
 def _request() -> Request:
@@ -455,3 +465,56 @@ async def test_reconcile_rejects_an_empty_reason(mongo_db) -> None:
         )
 
     assert await PlatformAuditEvent.find_all().count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Unknown workspace: a write never lands for an id no Workspace owns
+# ---------------------------------------------------------------------------
+
+# A well-formed ObjectId with no Workspace behind it, and the literal a client sends
+# when it interpolates a null id into the path.
+_UNKNOWN_WORKSPACES = ["65f0000000000000000000ab", "None"]
+
+
+async def _nothing_written() -> None:
+    from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
+
+    assert await CreditLedgerEntry.find_all().count() == 0
+    assert await CreditBalance.find_all().count() == 0
+    assert await PlatformAuditEvent.find_all().count() == 0
+
+
+@pytest.mark.parametrize("workspace_id", _UNKNOWN_WORKSPACES)
+async def test_adjust_refuses_an_unknown_workspace(mongo_db, workspace_id: str) -> None:
+    operator = await _operator("operator")
+
+    with pytest.raises(CloudError) as err:
+        await credits_routes.adjust_credits(
+            workspace_id=workspace_id,
+            body=credits_routes.PlatformAdjustIn(
+                amount_delta_micro=1_000_000, reason="Goodwill", idempotency_key="k-unknown"
+            ),
+            request=_request(),
+            operator=operator,
+        )
+
+    assert err.value.status_code == 404
+    assert err.value.code == "workspace.not_found"
+    await _nothing_written()
+
+
+@pytest.mark.parametrize("workspace_id", _UNKNOWN_WORKSPACES)
+async def test_reconcile_refuses_an_unknown_workspace(mongo_db, workspace_id: str) -> None:
+    operator = await _operator("operator")
+
+    with pytest.raises(CloudError) as err:
+        await credits_routes.reconcile_wallet(
+            workspace_id=workspace_id,
+            body=credits_routes.PlatformReconcileIn(reason="Routine repair"),
+            request=_request(),
+            operator=operator,
+        )
+
+    assert err.value.status_code == 404
+    assert err.value.code == "workspace.not_found"
+    await _nothing_written()
