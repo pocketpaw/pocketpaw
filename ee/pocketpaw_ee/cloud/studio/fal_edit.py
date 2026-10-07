@@ -121,7 +121,7 @@ def fal_api_key() -> str | None:
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(".env")  # the cwd's file only; a bare call walks parent dirs
     except ImportError:  # pragma: no cover - uvicorn[standard] provides it
         pass
     return (os.environ.get("FAL_AI_API_KEY") or os.environ.get("FAL_KEY") or "").strip() or None

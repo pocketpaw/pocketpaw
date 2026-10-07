@@ -233,11 +233,13 @@ async def startup_event(
     bus = get_message_bus()
     await ws_adapter.start(bus)
 
-    # Load .env for enterprise config (license key, MongoDB URI, admin creds)
+    # Load .env for enterprise config (license key, MongoDB URI, admin creds). The
+    # working directory's file only, the one Settings reads: a bare load_dotenv()
+    # walks up and would import a parent project's .env.
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(".env")
     except ImportError:
         pass
 
