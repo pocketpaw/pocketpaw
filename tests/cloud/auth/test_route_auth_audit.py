@@ -209,7 +209,7 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     "GET /decisions/_ping": "liveness probe",
     # --- public indexes and tools, each behind its own abuse control ---
     "GET /discover": "public index of shareable items; per-IP limit (rate_limit_discover_public)",
-    "GET /discover/{listing_id}": "one public listing; same per-IP limit",
+    "GET /discover/{id_or_slug}": "one public listing by id or slug; same per-IP limit",
     "POST /tools/ai-check": (
         "free AI check; per-IP limit (rate_limit_ai_check_public) and the daily USD "
         "spend cap always apply, Turnstile when POCKETPAW_TURNSTILE_SECRET is set"
