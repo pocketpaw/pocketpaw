@@ -42,13 +42,13 @@ No `package.json` or Astro config needed — Lito handles everything.
 ### Preview
 
 ```bash
-npx --yes @litodocs/cli dev -i .
+npx --yes @litodocs/cli dev -i ./docs
 ```
 
 ### Build
 
 ```bash
-npx --yes @litodocs/cli build -i .
+npx --yes @litodocs/cli build -i ./docs
 ```
 
 Output goes to `./dist/`.

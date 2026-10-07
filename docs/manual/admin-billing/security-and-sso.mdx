@@ -1,0 +1,47 @@
+---
+title: "Account security and single sign-on"
+description: "Two places that control sign-in safety: your own password, two-factor codes and devices, and workspace-wide single sign-on through a company provider."
+---
+
+# Account security and single sign-on
+
+**What it is.** Two places that control sign-in safety. **Account & sessions** protects your own login — password, two-factor codes, and the list of devices you're signed in on. **Single sign-on** lets a workspace require everyone to sign in through a company provider like Okta or Google Workspace.
+
+**When you'd use it.** Lock down your own account from Account & sessions. Set up company-wide login from Single sign-on.
+
+## Reset your password
+1. Open Settings, then **Account & sessions**.
+2. Under **Password**, click **Send me a password-reset link**.
+3. Check the email shown on the page and follow the link. There's no in-app password form by design — the change happens through the email link.
+
+## Turn on two-factor authentication
+1. On **Account & sessions**, find **Two-factor authentication**.
+2. Click **Enable two-factor authentication**.
+3. Scan the QR code with an authenticator app (Google Authenticator, 1Password, or similar), or copy the manual key.
+4. Enter the 6-digit code the app shows, then click **Verify**.
+5. Save your backup codes — copy, download, or print them. Tick the box to confirm you've saved them, then click **Done**.
+
+## Manage your devices
+1. On **Account & sessions**, scroll to **Active sessions**.
+2. Each row is a browser or device you're signed in on. The current one is marked **This device**.
+3. Click **Revoke** on any other row to sign that device out.
+4. Click **Revoke all other sessions** to sign out everywhere except where you are now.
+
+## Set up single sign-on (admins and owners)
+1. Open Settings, then under Workspace pick **Single sign-on**.
+2. Choose a provider: **Okta**, **Google Workspace**, **Azure AD**, or **Generic OIDC**.
+3. Fill in the Issuer URL, Client ID, and Client Secret from your provider.
+4. Add at least one **Allowed domain** (for example, `acme.com`).
+5. Click **Save**. After the first save, click **Test connection** to confirm it works.
+6. Copy the **Sign-in URL** and share it with your team — that's the link they use to sign in.
+
+## Tips
+- Backup codes are each good once. If you lose your phone, they're how you get back in — keep them somewhere safe.
+- Turn on **Enforce SSO for these domains** to disable password login for matching email addresses.
+- To roll the client secret, just re-enter it on the Single sign-on form and save. Leaving it blank keeps the current one.
+
+## If something's off
+- If you lose both your authenticator and your backup codes, support can't recover the account. Print the codes when you set up two-factor.
+- **Test connection** stays greyed out until you've saved the configuration once.
+- Removing SSO doesn't sign current SSO users out, but new SSO logins stop working until you set it up again.
+- Only admins and owners see the Single sign-on page. Members get a notice that they can't configure it.
