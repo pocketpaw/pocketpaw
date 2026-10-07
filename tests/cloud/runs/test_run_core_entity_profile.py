@@ -291,3 +291,64 @@ async def test_execute_run_stashes_entity_resolved_profile(monkeypatch):
     assert rp is not None, "execute_run must stash ctx.resolved_profile before the loop"
     assert rp.ripple_mode == "off"  # entity override won
     assert "refund" in rp.deny_mcp_tool_ids  # entity deny present
+
+
+# ---------------------------------------------------------------------------
+# /sites refine — the source pocket's engine decides the ripple mode
+# ---------------------------------------------------------------------------
+
+_SITE_POCKET = "64b7f0c2a1b2c3d4e5f60718"
+
+
+def _sites_refine_ctx(workspace_id: str = "w1") -> ScopeContext:
+    ctx = _entity_surface_ctx(SurfaceMeta(pocket_id=_SITE_POCKET))
+    ctx.surface_context = SurfaceContext(
+        workspace_id=workspace_id,
+        user_id="u1",
+        kind=SurfaceKind.SITES,
+        meta=SurfaceMeta(pocket_id=_SITE_POCKET),
+        preamble="",
+    )
+    return ctx
+
+
+def _pocket_get(engine: str | None, workspace: str = "w1"):
+    from types import SimpleNamespace
+
+    async def _get(_oid):
+        return SimpleNamespace(workspace=workspace, engine=engine)
+
+    return _get
+
+
+@pytest.mark.parametrize(
+    ("engine", "ripple"),
+    [("svelte", "off"), ("react", "off"), ("html", "off"), ("ripple", "on"), (None, "on")],
+)
+async def test_sites_refine_ripple_follows_the_pocket_engine(monkeypatch, engine, ripple):
+    """Refine of a source-engine site drops the inline ripple prompt (~10k tokens per
+    turn it never uses); a ripple site (or a legacy one with no engine) keeps it."""
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    async def _no_override(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(run_core, "_load_entity_profile_override", _no_override)
+    monkeypatch.setattr(Pocket, "get", _pocket_get(engine))
+
+    profile = await run_core._resolve_entity_profile(_sites_refine_ctx())
+    assert profile.ripple_mode == ripple
+
+
+async def test_sites_refine_engine_is_tenant_scoped(monkeypatch):
+    """A pocket outside the run's workspace is not read: ripple stays on."""
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    async def _no_override(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(run_core, "_load_entity_profile_override", _no_override)
+    monkeypatch.setattr(Pocket, "get", _pocket_get("svelte", workspace="other"))
+
+    profile = await run_core._resolve_entity_profile(_sites_refine_ctx())
+    assert profile.ripple_mode == "on"

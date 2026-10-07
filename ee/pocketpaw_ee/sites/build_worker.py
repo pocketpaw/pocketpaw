@@ -175,6 +175,10 @@ class WorkerSettings:
     # because arq's ``worker.get_kwargs`` reads ``settings_cls.__dict__`` directly, which
     # bypasses the descriptor protocol and would hand a property object to the Worker.
     max_jobs = _sites_max_jobs()
+    # A superseded preview / html-verify job (a newer edit of the same pocket was
+    # queued) is aborted by ``build_job._supersede_previous_job``; arq only honours an
+    # abort on a worker that opts in.
+    allow_abort_jobs = True
     # Both wrapped functions carry their own per-function timeout, which is what actually
     # governs a build. This class-level value exists so the fallback is not arq's 300s
     # default, which would be under a third of a build's budget.

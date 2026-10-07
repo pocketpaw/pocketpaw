@@ -436,6 +436,36 @@ async def _load_entity_profile_override(workspace_id: str, pocket_id: str) -> di
         return override if isinstance(override, dict) else None
 
 
+async def _sites_refine_meta(ctx: ScopeContext) -> SurfaceMeta:
+    """The surface meta, with a /sites REFINE's ``engine`` set to the source pocket's.
+
+    ``meta.engine`` is a create-time hint the refine chat never stamps, so the sites
+    profile cannot tell a ripple refine from an html / svelte / react one without
+    this read — and only the latter can drop the inline ripple prompt. Tenant-scoped
+    (the pocket must be in the run's workspace). Any failure keeps the meta as is,
+    which keeps ripple ON: the safe default. Only /sites with a ``pocket_id`` reads.
+    """
+    assert ctx.surface_context is not None
+    meta = ctx.surface_context.meta
+    if ctx.surface_context.kind is not SurfaceKind.SITES or not meta.pocket_id:
+        return meta
+    try:
+        from dataclasses import replace
+
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.pocket import Pocket
+        from pocketpaw_ee.sites.engines import normalize_engine
+
+        pocket = await Pocket.get(PydanticObjectId(meta.pocket_id))
+        if pocket is None or str(getattr(pocket, "workspace", "")) != str(ctx.workspace_id):
+            return meta
+        return replace(meta, engine=normalize_engine(getattr(pocket, "engine", None)))
+    except Exception:
+        logger.debug("sites refine engine read failed for %s", meta.pocket_id, exc_info=True)
+        return meta
+
+
 async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
     """Resolve the ENTITY-AWARE ``SurfaceProfile`` for this run (once).
 
@@ -454,7 +484,8 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
         # profile (ripple on, no deny) — match it exactly.
         return resolve_profile(SurfaceKind.GENERIC, SurfaceMeta())
 
-    base = resolve_profile(ctx.surface_context.kind, ctx.surface_context.meta)
+    meta = await _sites_refine_meta(ctx)
+    base = resolve_profile(ctx.surface_context.kind, meta)
     base = await _deny_tools_that_would_only_refuse(ctx, base)
     pocket_id = ctx.surface_context.meta.pocket_id
     if not pocket_id:

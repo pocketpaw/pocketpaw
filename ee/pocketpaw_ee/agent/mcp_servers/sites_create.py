@@ -19,12 +19,16 @@
 # describes the rolled_back verdict and the staged browser-layer failure.
 # Updated: 2026-09-24 (feat/sites-verify-pipeline, PP-2) — every create_{svelte,react,
 # html}_site, edit_{svelte,react}_component, edit_html_file and set_site_dependencies
-# result carries ``verification`` (contract §5), computed by ``sites.verify`` under a
-# hard deadline (``_verification_for``: unverified/timeout, never a hang). ripple
-# creates return ``unverified``/``engine_not_verifiable`` honestly. NEW ``verify_site``
-# tool. ``edit_svelte_component`` now reports a failed compile as data (``ok: false``,
-# ``status: rolled_back``, the verdict) and has no preview_url any more (no local
-# preview deploy). A create with live-data bindings refuses npm packages
+# result carries ``verification`` (contract §5). Creates and ``verify_site`` wait for
+# the full verdict under a hard deadline (``_verification_for``); EDITS run only the
+# static check synchronously (``_edit_verification`` → ``verify.verify_edit``), enqueue
+# the build + browser layers, and get that verdict back on the NEXT edit-tool or
+# ``preview_site`` result as ``previous_verification`` (``_with_previous_verification``).
+# An unreferenced ``create=true`` half step skips verification. ripple creates return
+# ``unverified``/``engine_not_verifiable`` honestly. ``edit_svelte_component`` reports
+# a failed STATIC check as data (``ok: false``, ``status: rolled_back``, the verdict)
+# and has no preview_url (no local preview deploy). Every edit tool call logs its
+# elapsed ms (``sites.edit_tool:``). A create with live-data bindings refuses npm packages
 # (``engine_unsupported``) — dynamic svelte cannot carry them yet.
 #
 # Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — authors can declare
@@ -304,6 +308,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
@@ -571,6 +576,19 @@ VERIFY_CONTRACT = (
     "it could not be checked and give the `reason`."
 )
 
+#: Appended to every EDIT tool description. An edit answers in about a second with the
+#: static check only; the build and browser check run in the background. Verifying
+#: after every edit is what made edits slow, so the rule is once per turn, at the end.
+EDIT_VERIFY_CONTRACT = (
+    " VERIFY ONCE PER TURN, AT THE END: this result's `verification` is the static "
+    "check only (`static`); the build and browser check run in the background "
+    "(`status:'pending'`, `build:'pending'`, `job_id`). Their verdict comes back on "
+    "your NEXT sites tool result as `previous_verification`; if that is `failed`, "
+    "fix its `errors` with a follow-up edit (a build failure is reported, never "
+    "rolled back). Make every edit the change needs, then call verify_site ONCE and "
+    "tell the user the site is ready only when it returns `passed`."
+)
+
 
 def _manifest_keys(source: dict[str, Any]) -> list[str]:
     """Keys that spell the reserved dependency manifest, in any form."""
@@ -691,6 +709,135 @@ def _ripple_verification() -> dict[str, Any]:
     from pocketpaw_ee.sites import verify
 
     return verify.unverifiable("engine_not_verifiable", note=RIPPLE_NOT_VERIFIABLE_NOTE)
+
+
+#: The edit path waits only for the static check (about a second); this bounds a
+#: wedged checker or store so an edit can never hang.
+EDIT_VERIFY_DEADLINE_SEC = 30
+
+
+def _half_step_verification() -> dict[str, Any]:
+    from pocketpaw_ee.sites import verify
+
+    return verify.half_step_verdict()
+
+
+async def _edit_verification(workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """``verify.verify_edit`` for a just-edited pocket: the static check now, the sandbox
+    layers enqueued (``status: pending``). Never raises, never hangs."""
+    import asyncio
+
+    from pocketpaw_ee.sites import verify
+
+    try:
+        return await asyncio.wait_for(
+            verify.verify_edit(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id),
+            timeout=EDIT_VERIFY_DEADLINE_SEC,
+        )
+    except TimeoutError:
+        return verify.unverifiable("timeout")
+    except Exception:  # noqa: BLE001 — a verify that could not run is reported, not raised
+        logger.warning("sites: edit verification failed to run for %s", pocket_id, exc_info=True)
+        return verify.unverifiable("verify_unavailable")
+
+
+async def _settled_previous(pocket_id: Any) -> dict[str, Any] | None:
+    """The finished background verdict of this pocket's last edit, once. Never raises.
+
+    Read only for a pocket the CALLER can read, in the caller's workspace: the verify
+    store is keyed by pocket id alone, and a build verdict is still that pocket's
+    diagnostics, so an id from another tenant answers nothing.
+    """
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return None
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return None
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import verify
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except Exception:  # noqa: BLE001 — missing or foreign: nothing to report
+        return None
+    # ``get`` gates by owner / sharing / visibility, not by workspace, so the chat's
+    # workspace must match too (the same rule ``handlers/sites._refine_engine`` keeps).
+    if str(pocket.get("workspace") or "") != str(workspace_id):
+        return None
+    try:
+        return verify.settled_verdict(pocket_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("sites: could not read the previous verdict for %s", pocket_id)
+        return None
+
+
+def _attach_previous(out: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    """Put ``previous_verification`` on a tool result: into the JSON body of a success,
+    as an extra text block on an error or an image result."""
+    content = list(out.get("content") or [])
+    if not out.get("is_error") and len(content) == 1 and content[0].get("type") == "text":
+        try:
+            body = json.loads(content[0]["text"])
+        except (ValueError, TypeError):
+            body = None
+        if isinstance(body, dict):
+            body["previous_verification"] = previous
+            return {
+                **out,
+                "content": [
+                    {**content[0], "text": json.dumps(body, separators=(",", ":"), default=str)}
+                ],
+            }
+    note = (
+        "previous_verification (the background build + browser check of your last "
+        "edit): " + json.dumps(previous, separators=(",", ":"), default=str)
+    )
+    return {**out, "content": [*content, {"type": "text", "text": note}]}
+
+
+def _log_edit_tool(tool_name: str, pocket_id: Any, out: dict[str, Any], started: float) -> None:
+    status = "error" if out.get("is_error") else "ok"
+    verification = ""
+    content = out.get("content") or []
+    if status == "ok" and content and content[0].get("type") == "text":
+        try:
+            body = json.loads(content[0]["text"])
+            verification = str(((body or {}).get("verification") or {}).get("status") or "")
+        except (ValueError, TypeError, AttributeError):
+            verification = ""
+    logger.info(
+        "sites.edit_tool: tool=%s pocket=%s result=%s verification=%s elapsed_ms=%d",
+        tool_name,
+        pocket_id,
+        status,
+        verification,
+        (time.monotonic() - started) * 1000,
+    )
+
+
+def _with_previous_verification(tool_name: str, *, timed: bool = True) -> Any:
+    """Decorate a pocket-scoped sites tool handler so its result carries the settled
+    background verdict of the pocket's previous edit (read BEFORE the handler runs, so
+    the handler's own edit cannot overwrite it), and, for edit tools, log the call's
+    elapsed ms."""
+    import functools
+
+    def wrap(handler: Any) -> Any:
+        @functools.wraps(handler)
+        async def run(args: dict) -> dict:
+            started = time.monotonic()
+            pocket_id = args.get("pocket_id") if isinstance(args, dict) else None
+            previous = await _settled_previous(pocket_id)
+            out = await handler(args)
+            if previous is not None:
+                out = _attach_previous(out, previous)
+            if timed:
+                _log_edit_tool(tool_name, pocket_id, out, started)
+            return out
+
+        return run
+
+    return wrap
 
 
 # ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
@@ -2022,6 +2169,7 @@ def make_create_react_site_tool(tool: Any) -> Any:
     return create_react_site
 
 
+@_with_previous_verification("edit_svelte_component")
 async def _edit_svelte_component_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__edit_svelte_component``.
 
@@ -2130,9 +2278,9 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
             name=name,
         )
     except sites_service.EditVerificationFailed as exc:
-        # PP-2: the edit failed its static or build verification and was ROLLED BACK —
-        # the draft keeps its previous contents. Not an MCP error: the agent needs the
-        # structured verdict to fix the code, so it comes back as data with ok=false.
+        # PP-2: the edit failed its STATIC check and was ROLLED BACK — the draft keeps
+        # its previous contents. Not an MCP error: the agent needs the structured
+        # verdict to fix the code, so it comes back as data with ok=false.
         return _success_response(
             {
                 "ok": False,
@@ -2289,13 +2437,13 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
             "publish it the user clicks 'Submit for "
             "review'. Do NOT tell the user the change is published or live. ok=false "
             "means the edit was NOT staged: `status:'rolled_back'` means it failed "
-            "the static or build check and the previous version is unchanged (fix "
+            "the static check and the previous version is unchanged (fix "
             "`verification.errors` and send the edit again); an `edits` old_string "
             "that matched 0 or >1 times means make it more specific and retry; a "
-            "not-found / not-a-svelte-site error means relay the reason. A "
-            "browser-layer failure (ok:true, verification failed) keeps the edit "
-            "staged: fix it with a follow-up edit. Do NOT report a successful edit "
-            "when ok=false." + VERIFY_CONTRACT
+            "not-found / not-a-svelte-site error means relay the reason. A build or "
+            "browser failure found in the background keeps the edit staged: fix it "
+            "with a follow-up edit. Do NOT report a successful edit "
+            "when ok=false." + EDIT_VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -2382,6 +2530,7 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
     return edit_svelte_component
 
 
+@_with_previous_verification("edit_react_component")
 async def _edit_react_component_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__edit_react_component`` (RX-3).
 
@@ -2544,9 +2693,14 @@ async def _edit_react_component_handler(args: dict) -> dict:
             "created": result["created"],
             "unreferenced": unreferenced,
             "message": message,
-            # PP-2: the edit stays a draft (react builds async, so there is nothing to
-            # roll back from); the verdict says whether that draft works.
-            "verification": await _verification_for(workspace_id, user_id, pocket_id),
+            # The edit stays a draft (nothing to roll back from). Static check now, the
+            # build in the background; an unreferenced create is a half step and is
+            # verified with the edit that wires it in.
+            "verification": (
+                _half_step_verification()
+                if unreferenced
+                else await _edit_verification(workspace_id, user_id, pocket_id)
+            ),
         }
     )
 
@@ -2614,7 +2768,7 @@ def make_edit_react_component_tool(tool: Any) -> Any:
             "old_string that matched 0 or >1 times means make it more specific and "
             "retry; a reserved-path, wrong-engine, already-exists or not-found "
             "error means relay the reason. Do NOT report a successful edit when "
-            "ok=false." + VERIFY_CONTRACT
+            "ok=false." + EDIT_VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -2815,6 +2969,7 @@ async def _read_site_source_handler(args: dict) -> dict:
     return {"content": content}
 
 
+@_with_previous_verification("edit_html_file")
 async def _edit_html_file_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__edit_html_file`` (HE-10).
 
@@ -2974,13 +3129,18 @@ async def _edit_html_file_handler(args: dict) -> dict:
             "created": result["created"],
             "unreferenced": unreferenced,
             "message": message,
-            # PP-2: html has no build, so no rollback; the browser layer is what checks
-            # the page actually loads.
-            "verification": await _verification_for(workspace_id, user_id, pocket_id),
+            # html has no build, so no rollback. The edit path runs the static check
+            # only; the browser check runs when verify_site is called.
+            "verification": (
+                _half_step_verification()
+                if unreferenced
+                else await _edit_verification(workspace_id, user_id, pocket_id)
+            ),
         }
     )
 
 
+@_with_previous_verification("set_site_dependencies")
 async def _set_site_dependencies_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__set_site_dependencies`` (PP-1).
 
@@ -3043,9 +3203,10 @@ async def _set_site_dependencies_handler(args: dict) -> dict:
         return _error_response(f"set_site_dependencies failed: {exc}")
 
     body: dict[str, Any] = {"ok": True, **result}
-    # PP-2 (contract §8): the dependency change is a source change, so verify the
-    # draft it produced — a removed package still imported shows up here.
-    body["verification"] = await _verification_for(workspace_id, user_id, pocket_id)
+    # PP-2 (contract §8): the dependency change is a source change, so check the draft
+    # it produced (a removed package still imported is a static error); the build runs
+    # in the background like any edit's.
+    body["verification"] = await _edit_verification(workspace_id, user_id, pocket_id)
     if result["rejected"]:
         body["message"] = (
             "Some requests were refused (see `rejected`). Do not import a refused "
@@ -3082,7 +3243,7 @@ def make_set_site_dependencies_tool(tool: Any) -> Any:
             "(live-data) svelte site. Returns {ok, packages, rejected, warnings, "
             "changed, verification}; a package in `rejected` (misspelt, no matching "
             "version) must not be imported, and `warnings` (security advisories, "
-            "deprecation) are worth passing on to the user."
+            "deprecation) are worth passing on to the user." + EDIT_VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -3172,9 +3333,11 @@ def make_verify_site_tool(tool: Any) -> Any:
             "works: a static check of the source, a real build in the isolated build "
             "sandbox, and a headless-browser load of the built pages. Returns "
             "{ok, verification: {status: passed|failed|unverified, layers, errors, "
-            "warnings}}. Every create/edit already returns `verification`; call this to "
-            "re-check after a fix, or when a previous result was `unverified` with "
-            "reason `timeout` (the build keeps running, and this attaches to it). "
+            "warnings}}. Edits return only the static check and build in the "
+            "background, so call this ONCE at the end of a turn's edits (it waits for "
+            "the build and browser check), after a fix, or when a previous result was "
+            "`unverified` with reason `timeout` (the build keeps running, and this "
+            "attaches to it). "
             "`errors` name file, line and message — fix them and verify again. Only "
             "`passed` means the site works; `unverified` means it could not be checked."
         ),
@@ -3202,9 +3365,13 @@ _PREVIEW_VIEWPORTS = {
     "desktop": {"width": 1280, "height": 800},
     "mobile": {"width": 390, "height": 844},
 }
-# Six tiles covers a typical landing page at desktop width and keeps one look
-# at a bounded image cost.
-_PREVIEW_MAX_TILES = 6
+# Three tiles: the fold and the first sections, where layout decisions show. Every
+# tile is re-read by the model on every later call in the turn, so six tiles cost
+# twice the tokens for the lower half of the page.
+_PREVIEW_MAX_TILES = 3
+#: Browser Rendering's wait. ``load`` fires once the document and its assets are in;
+#: ``networkidle0`` also waited out analytics and font polling for nothing.
+_PREVIEW_WAIT_UNTIL = "load"
 
 
 def _native_document(body_html: str, css: str) -> str:
@@ -3254,6 +3421,7 @@ async def _draft_document(
     )
 
 
+@_with_previous_verification("preview_site", timed=False)
 async def _preview_site_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__preview_site``.
 
@@ -3311,7 +3479,7 @@ async def _preview_site_handler(args: dict) -> dict:
         image = await _cf_client().capture_screenshot(
             html=document,
             viewport=dict(_PREVIEW_VIEWPORTS[device]),
-            goto_options={"waitUntil": "networkidle0", "timeout": 20_000},
+            goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
             screenshot_options={"fullPage": True},
         )
     except CloudError as exc:
@@ -3353,7 +3521,7 @@ def make_preview_site_tool(tool: Any) -> Any:
             "LOOK at a Paw Site's current DRAFT: returns a full-page screenshot as "
             "images you can see. Args: `pocket_id` (required), optional `device`: "
             "`desktop` (default, 1280px) or `mobile` (390px). Call it after a create or "
-            "a layout-moving edit once `verification.status` is `passed`, and look "
+            "a layout-moving edit once verify_site returns `passed`, and look "
             "before you tell the user the page is ready: a page that builds cleanly can "
             "still look wrong. Fix what you see and look again; one or two rounds is "
             "normal. An error means no picture could be taken; it never means the site "
@@ -3537,7 +3705,7 @@ def make_edit_html_file_tool(tool: Any) -> Any:
             "old_string that matched 0 or >1 times means make it more specific and "
             "retry; a reserved-path, wrong-engine, already-exists or not-found "
             "error means relay the reason. Do NOT report a successful edit when "
-            "ok=false." + VERIFY_CONTRACT
+            "ok=false." + EDIT_VERIFY_CONTRACT
         ),
         {
             "type": "object",

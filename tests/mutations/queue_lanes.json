@@ -2,8 +2,8 @@
   {
     "label": "the publish enqueue drops its queue kwarg, so site builds go back onto arq's default queue and compete with chat runs for one cluster-wide ceiling of 10 - the exact starvation this change removes",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "            _queue_name=SITE_BUILD_QUEUE_NAME,\n",
-    "replace": "",
+    "find": "            _job_id=job_id,\n            _queue_name=SITE_BUILD_QUEUE_NAME,\n            # Rides as a kwarg",
+    "replace": "            _job_id=job_id,\n            # Rides as a kwarg",
     "tests": [
       "tests/ee/sites/test_build_job.py"
     ]
@@ -11,8 +11,8 @@
   {
     "label": "the preview enqueue drops its queue kwarg, so draft renders - the lane a user hits by typing rather than by publishing - go back onto the chat lane's ceiling",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "        timeout,\n        _job_id=job_id,\n        _queue_name=SITE_BUILD_QUEUE_NAME,\n    )\n",
-    "replace": "        timeout,\n        _job_id=job_id,\n    )\n",
+    "find": "            timeout,\n            _job_id=job_id,\n            _queue_name=SITE_BUILD_QUEUE_NAME,\n        )\n",
+    "replace": "            timeout,\n            _job_id=job_id,\n        )\n",
     "tests": [
       "tests/ee/sites/test_preview_build_lane.py"
     ]

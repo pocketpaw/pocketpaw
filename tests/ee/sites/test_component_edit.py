@@ -175,15 +175,14 @@ async def test_edit_component_verifies_the_new_source_and_stages_a_draft(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("layer", ["static", "build"])
-async def test_an_edit_that_does_not_compile_is_rolled_back(beanie_test_db, edit_verifier, layer):
-    """A STATIC or BUILD failure means the edit does not compile: the file is restored
-    and ``EditVerificationFailed`` (a ``SmokeGateFailed``, so the old contract holds)
-    carries the verdict for the agent."""
+async def test_an_edit_that_fails_the_static_check_is_rolled_back(beanie_test_db, edit_verifier):
+    """A STATIC failure is the one failure an edit learns of before it returns: the file
+    is restored and ``EditVerificationFailed`` (a ``SmokeGateFailed``, so the old
+    contract holds) carries the verdict for the agent."""
     from tests.ee.sites.conftest import verdict_with
 
     pocket_id = await _make_svelte_pocket("ws1", "u1")
-    edit_verifier.verdict = verdict_with(**{layer: "failed"})
+    edit_verifier.verdict = verdict_with(static="failed", build="skipped", browser="skipped")
 
     broken = "<script>import x from 'not-declared'</script>"
     with pytest.raises(SmokeGateFailed) as info:
@@ -202,6 +201,69 @@ async def test_an_edit_that_does_not_compile_is_rolled_back(beanie_test_db, edit
     # ... and the persisted source was rolled back to the last good contents.
     wire = await pockets_service.get(pocket_id, "u1")
     assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V1
+
+
+@pytest.mark.asyncio
+async def test_a_build_failure_stays_staged_and_is_reported(beanie_test_db, edit_verifier):
+    """A BUILD failure (a cached verdict for this exact source, or one reported later
+    by the background job) is never rolled back: the agent may already have moved on
+    from this edit, so it is reported and fixed with a follow-up edit."""
+    from tests.ee.sites.conftest import verdict_with
+
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+    edit_verifier.verdict = verdict_with(build="failed", browser="skipped")
+
+    result = await sites_service.edit_svelte_component(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/lib/components/Hero.svelte",
+        new_source=_HERO_V2,
+    )
+
+    assert result.verification["status"] == "failed"
+    wire = await pockets_service.get(pocket_id, "u1")
+    assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
+
+
+@pytest.mark.asyncio
+async def test_a_pending_verdict_stays_staged(beanie_test_db, edit_verifier):
+    """The usual edit result: static passed, the sandbox build queued. Staged."""
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+    edit_verifier.verdict = {
+        "status": "pending",
+        "static": "passed",
+        "build": "pending",
+        "job_id": "site-preview-x",
+        "layers": [
+            {"name": "static", "status": "passed"},
+            {"name": "build", "status": "pending"},
+            {"name": "browser", "status": "pending"},
+        ],
+        "errors": [],
+        "warnings": [],
+    }
+
+    result = await sites_service.edit_svelte_component(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/lib/components/Hero.svelte",
+        new_source=_HERO_V2,
+    )
+
+    assert result.verification["status"] == "pending"
+    assert result.verification["job_id"] == "site-preview-x"
+    wire = await pockets_service.get(pocket_id, "u1")
+    assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
+
+
+def test_only_a_static_failure_requires_rollback() -> None:
+    from tests.ee.sites.conftest import verdict_with
+
+    assert sites_service.edit_verdict_requires_rollback(verdict_with(static="failed"))
+    assert not sites_service.edit_verdict_requires_rollback(verdict_with(build="failed"))
+    assert not sites_service.edit_verdict_requires_rollback(verdict_with(browser="failed"))
 
 
 @pytest.mark.asyncio

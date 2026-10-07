@@ -793,7 +793,7 @@ async def _prewarm_native_artifact(
     ripple_spec = pocket.get("rippleSpec") or {}
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
     site_name = (pocket.get("name") or "").strip() or "Untitled site"
-    origin = (builder_origin or "").strip() or _builder_origin()
+    origin = await resolve_armed_builder_origin(workspace_id, pocket_id, builder_origin)
 
     # MT-1: the site's own declaration that its client JS is load-bearing, resolved the
     # SAME way publish resolves it. It rides BOTH the hash and the build below — the hash
@@ -1195,6 +1195,67 @@ def _capture_base() -> str:
 
 
 _LOCAL_BUILDER_ORIGIN = "http://localhost:8888"
+
+
+#: A request Origin worth remembering as the editor's view origin: scheme://host[:port].
+_VIEW_ORIGIN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://[^\s/?#]{1,200}$")
+
+
+def _recorded_view_origin(pocket_id: str) -> str:
+    from pocketpaw_ee.sites import verify_store
+
+    try:
+        record = verify_store.default_verify_store().read(pocket_id, verify_store.VIEW_ORIGIN_KEY)
+    except Exception:  # noqa: BLE001 — a lost record falls through to the next rung
+        return ""
+    origin = record.get("origin") if isinstance(record, dict) else None
+    return origin if isinstance(origin, str) and _VIEW_ORIGIN_RE.match(origin) else ""
+
+
+def _record_view_origin(pocket_id: str, origin: str) -> None:
+    """Remember the editor's request Origin for this pocket (only when it changed)."""
+    from pocketpaw_ee.sites import verify_store
+
+    if not _VIEW_ORIGIN_RE.match(origin) or _recorded_view_origin(pocket_id) == origin:
+        return
+    try:
+        verify_store.default_verify_store().write(
+            pocket_id, verify_store.VIEW_ORIGIN_KEY, {"origin": origin}
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("sites: could not record the view origin for %s", pocket_id)
+
+
+async def resolve_armed_builder_origin(
+    workspace_id: str, pocket_id: str, request_origin: str | None = None
+) -> str:
+    """THE builder origin for every armed-hash computation of a pocket's draft.
+
+    The origin is part of the native-artifact content hash, so two callers that pick
+    different origins build the same edit twice (or three times). Every caller goes
+    through here: the editor's native-artifact view, the post-edit pre-warm, the
+    verify pipeline and ``preview_site``. Precedence:
+
+      1. ``request_origin`` — the browser asking for the draft (and it is recorded);
+      2. the origin the editor last viewed this draft with (``verify_store``);
+      3. the Site row's stored ``builder_origin`` (``make_site_editable``);
+      4. the configured ``PAW_SITES_BUILDER_ORIGIN`` (``_builder_origin``).
+
+    So the agent-side callers (no request) build exactly the render the open editor
+    reads. Never raises.
+    """
+    requested = (request_origin or "").strip()
+    if requested:
+        _record_view_origin(pocket_id, requested)
+        return requested
+    if viewed := _recorded_view_origin(pocket_id):
+        return viewed
+    try:
+        doc = await _canonical_site_doc(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001 — an origin guess is never worth a failed call
+        doc = None
+    stored = (getattr(doc, "builder_origin", "") or "").strip() if doc is not None else ""
+    return stored or _builder_origin()
 
 
 def _builder_origin() -> str:
@@ -9694,11 +9755,14 @@ async def get_native_artifact(
     # site's served artifact IS its source, so it is selected through its own srcdoc
     # and has no build to render here.
     engine = normalize_engine(pocket.get("engine"))
+    # ONE origin resolver for every armed hash (the view, the pre-warm, verify,
+    # preview_site), so the agent's verify and the editor read the same render.
+    resolved_origin = await resolve_armed_builder_origin(workspace_id, pocket_id, builder_origin)
     if engine == "html" and isinstance(pocket.get("source"), dict):
         return await _html_draft_artifact(
             pocket_id=pocket_id,
             source=pocket["source"],
-            builder_origin=(builder_origin or "").strip() or _builder_origin(),
+            builder_origin=resolved_origin,
             store=_store or _default_artifact_store(),
             arm=_arm or generator_client.arm_html,
         )
@@ -9716,9 +9780,8 @@ async def get_native_artifact(
     site_name = (pocket.get("name") or "").strip() or "Untitled site"
 
     # Arm the build: a NON-EMPTY builder_origin is what makes the generator stamp
-    # data-uid + embed the manifest. Default to the configured dashboard origin when
-    # the caller passes none, exactly like make_site_editable.
-    origin = (builder_origin or "").strip() or _builder_origin()
+    # data-uid + embed the manifest (``resolve_armed_builder_origin`` never answers "").
+    origin = resolved_origin
     # MT-1: the site's own declaration that its client JS is load-bearing, resolved the
     # SAME way publish resolves it. It rides BOTH the hash and the build below — the hash
     # because the two variants are different HTML, the build because that is the bug: this
@@ -9886,7 +9949,7 @@ class SvelteEditResult:
 
 
 class EditVerificationFailed(SmokeGateFailed):
-    """A svelte edit failed its static or build verification and was rolled back (PP-2).
+    """A svelte edit failed its STATIC verification and was rolled back (PP-2).
 
     A ``SmokeGateFailed`` so every caller that treated "the edit did not pass its gate"
     as a rollback keeps doing so; ``verdict`` is the full §5 verification for the agent.
@@ -9898,9 +9961,12 @@ class EditVerificationFailed(SmokeGateFailed):
 
 
 def edit_verdict_requires_rollback(verdict: dict[str, Any]) -> bool:
-    """True when the static or build layer FAILED — the edit does not compile."""
+    """True when the STATIC layer failed — the only failure an edit learns of before it
+    returns. The sandbox build runs after the edit has answered, so a build failure is
+    reported on the agent's next tool result (``previous_verification``) and fixed
+    with a follow-up edit, never rolled back behind the agent's back."""
     for layer in verdict.get("layers") or []:
-        if layer.get("name") in ("static", "build") and layer.get("status") == "failed":
+        if layer.get("name") == "static" and layer.get("status") == "failed":
             return True
     return False
 
@@ -9910,7 +9976,7 @@ async def _default_edit_verifier(
 ) -> dict[str, Any]:
     from pocketpaw_ee.sites import verify
 
-    return await verify.verify_site(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+    return await verify.verify_edit(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
 
 
 async def edit_svelte_component(
@@ -9927,14 +9993,17 @@ async def edit_svelte_component(
 ) -> SvelteEditResult:
     """Rewrite ONE component of a svelte Paw Site pocket and VERIFY the draft.
 
-    PP-2 REWRITE — read this before the older paragraphs below. The edit no longer runs
-    a local preview build (``publish(preview=True)`` → ``bun install`` on the API host).
-    It persists the file, then runs ``verify.verify_site`` (static check on the host,
-    build + browser check in the Daytona preview lane) for EVERY svelte pocket, and:
-      * static or build ``failed`` → the file is rolled back and
-        :class:`EditVerificationFailed` (a ``SmokeGateFailed``) carries the verdict;
-      * browser ``failed`` → the edit STAYS staged and the verdict reports it;
-      * ``unverified`` → the edit stays staged and the verdict says why.
+    READ THIS before the older paragraphs below. The edit no longer runs a local
+    preview build. It persists the file, then runs ``verify.verify_edit``: the STATIC
+    check synchronously (about a second) and the build + browser layers enqueued in the
+    Daytona preview lane, not waited on. Then:
+      * static ``failed`` → the file is rolled back and :class:`EditVerificationFailed`
+        (a ``SmokeGateFailed``) carries the verdict;
+      * anything else → the edit STAYS staged and the verdict says so (``pending`` with
+        the sandbox ``job_id``, or a cached / already-built verdict). A build or browser
+        failure found later reaches the agent on its next tool result;
+      * a ``create`` nothing references yet is a half step: verification is skipped
+        (``verify.half_step_verdict``) and the wiring edit verifies the whole site.
     Returns :class:`SvelteEditResult` ``(site, unreferenced, verification)``; ``site``
     is the pocket's existing Site row (or None) — no preview deploy is minted any more,
     so there is no preview URL. ``_verify`` substitutes the verifier (tests). ``name``
@@ -10085,6 +10154,18 @@ async def edit_svelte_component(
     #    (locally, then again in the Daytona pre-warm). The verify pipeline's build IS
     #    the pre-warm — it rides the preview lane under the same content hash — so the
     #    editor's next view is a cache hit off the same sandbox.
+    # Does anything reach the file we just wrote? (See the comment at the return.)
+    # Computed BEFORE verifying: an unreferenced create is a half step, and verifying
+    # it would spend a sandbox on a render that changes again with the wiring edit.
+    unreferenced = create and not svelte_path_is_referenced(
+        {**source_map, component_path: new_source}, component_path
+    )
+    if unreferenced:
+        from pocketpaw_ee.sites.verify import half_step_verdict
+
+        site = await _latest_site_for_pocket(workspace_id, pocket_id)
+        return SvelteEditResult(site=site, unreferenced=True, verification=half_step_verdict())
+
     verifier = _verify or _default_edit_verifier
     try:
         verdict = await verifier(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
@@ -10094,14 +10175,12 @@ async def edit_svelte_component(
 
         verdict = unverifiable("verify_unavailable")
 
-    # 3. ROLL BACK when the STATIC or BUILD layer failed — the preserved contract that a
-    #    broken edit is never left staged: the author's code does not compile, so the
-    #    draft keeps its last-good contents and the caller gets the errors to fix.
-    #    A BROWSER failure (an onMount throw, a blank page, a 404 asset) stays staged
-    #    and is REPORTED: the page builds and renders server-side, the defect is often
-    #    confined to one interaction, and the fix is usually a follow-up edit to the
-    #    very file just written — rolling it back would throw away what that fix needs.
-    #    ``unverified`` stays staged too: nothing proved the edit wrong.
+    # 3. ROLL BACK when the STATIC layer failed: the author's code does not compile, so
+    #    the draft keeps its last-good contents and the caller gets the errors to fix.
+    #    Build and browser failures arrive after this call returned (the sandbox runs in
+    #    the background), so they are REPORTED on the agent's next tool result and fixed
+    #    with a follow-up edit; silently undoing an edit the agent already moved past
+    #    would leave it reasoning about source that is no longer there.
     if edit_verdict_requires_rollback(verdict):
         if create:
             # A create has no prior contents to restore. Writing ``""`` back would
@@ -10132,10 +10211,7 @@ async def edit_svelte_component(
     # Scoped to ``create`` deliberately. An ordinary edit touches a file that is
     # already part of the site, and re-litigating its wiring on every headline change
     # is noise on the common path — which is how the signal on the rare path gets
-    # skimmed. The map scanned is the POST-write one.
-    unreferenced = create and not svelte_path_is_referenced(
-        {**source_map, component_path: new_source}, component_path
-    )
+    # skimmed. The map scanned is the POST-write one (computed above, before verify).
     site = await _latest_site_for_pocket(workspace_id, pocket_id)
     return SvelteEditResult(site=site, unreferenced=unreferenced, verification=verdict)
 

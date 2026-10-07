@@ -293,9 +293,9 @@
 # The publish claim is fixed on every branch and the queued-build wording is gated
 # on ``sites/service.py::build_runs_async`` — react alone today — so svelte starts
 # telling the truth on its own if #1913 flips it. ASK-DON'T-ASSUME and the
-# ``ask-user-questions`` widget survive unchanged on every branch: refine keeps
-# ``ripple_mode="on"`` for all engines (``surface_registry._sites_profile``), so
-# that mechanism is real here even where create would have used ``ask_user`` chips.
+# ask mechanism survive on every branch; it is the ``ask-user-questions`` widget on
+# a ripple refine and the ``ask_user`` tool on html / svelte / react, matching the
+# ripple mode ``surface_registry._sites_profile`` grants each.
 
 # Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — the react track finally
 # has an EDIT tool, and two preambles were telling the agent the wrong thing about
@@ -328,9 +328,9 @@
 # fork's react branch rather than kept beside it: two react refine preambles, one
 # of them dead, is the drift the fork exists to prevent. Its content carries over
 # — the edit tool, the reserved shell, the dependency list, the prerender rule, the
-# draft framing — with three corrections. It used `mcp__pocketpaw_ask__ask_user`,
-# but refine holds `ripple_mode="on"` on every engine, so the `ask-user-questions`
-# widget is the mechanism this surface actually renders. It named
+# draft framing — with three corrections. Its ask mechanism now follows the
+# engine (`_refine_ask_mechanism`): refine of a source engine runs with ripple OFF,
+# so `mcp__pocketpaw_ask__ask_user` is the mechanism there. It named
 # `pocket_specialist__edit` inside its prohibition; the create preamble's react
 # branch forbids "the pocket specialist" by concept without the id, and this now
 # matches that. And it told the agent to relay the publish result, which on react
@@ -1819,12 +1819,17 @@ def _create_preamble(meta: SurfaceMeta) -> str:
 # descriptions; the preamble repeats it because "tell the user it is ready" is
 # written HERE, and a ready claim on a failed build is exactly the regression.
 _VERIFY_RULE = (
-    "VERIFY FIRST: every create/edit result carries `verification`. Call the site "
-    "ready ONLY when `verification.status` is `passed`. On `failed`, fix the listed "
-    "`errors` (file/line) and call `mcp__pocketpaw_sites_manager__verify_site` — at "
-    "most 3 rounds, then tell the user plainly which errors remain. On `unverified`, "
-    "say it could not be checked and why (on a ripple site `engine_not_verifiable` "
-    "only means there is no authored code to check). "
+    "VERIFY ONCE PER TURN, AT THE END: a create result carries the full "
+    "`verification`; an EDIT result carries only the static check (`static`) while "
+    "the build and browser check run in the background (`status:'pending'`). Do not "
+    "verify after each edit: make every edit the change needs, then call "
+    "`mcp__pocketpaw_sites_manager__verify_site` ONCE. Call the site ready ONLY when "
+    "it returns `passed`. If a later result carries `previous_verification` with "
+    "`failed`, fix those `errors` with a follow-up edit. On `failed`, fix the listed "
+    "`errors` (file/line) and verify again — at most 3 rounds, then tell the user "
+    "plainly which errors remain. On `unverified`, say it could not be checked and "
+    "why (on a ripple site `engine_not_verifiable` only means there is no authored "
+    "code to check). "
 )
 
 # Added 2026-09-27 (feat/sites-lean-prompt). The design phase of every create, in
@@ -1876,7 +1881,7 @@ _CRAFT_FLOOR = (
 # _VERIFY_RULE cannot answer: a page that builds cleanly can still look wrong, and
 # nothing let the agent see it. ``preview_site`` returns the draft as images.
 _LOOK_RULE = (
-    "LOOK BEFORE YOU SHOW IT: once `verification.status` is `passed`, call "
+    "LOOK BEFORE YOU SHOW IT: once verification is `passed`, call "
     "`mcp__pocketpaw_sites_manager__preview_site` (desktop, then `device: mobile`) "
     "and look at the page the way a visitor will, next to the references you "
     "opened. Fix what is off (a weak or empty fold, a placeholder that reads as a "
@@ -2100,6 +2105,20 @@ def _refine_unknown_engine_step(pocket_id: str) -> str:
     )
 
 
+def _refine_ask_mechanism(engine: str | None) -> str:
+    """How a refine asks the user, matching ``surface_registry._sites_profile``: only a
+    ripple refine (or one whose engine is unknown) has inline ripple ON, so only there
+    is the widget real. Everywhere else a ```ui-spec block would reach the user as raw
+    JSON, and the ``ask_user`` tool (allowed on every /sites mode) is the mechanism."""
+    if engine in ("html", "svelte", "react"):
+        return (
+            "with the `mcp__pocketpaw_ask__ask_user` tool (a one-line `question` and "
+            "3-5 short `options`; inline ripple is OFF on this engine), then STOP and "
+            "wait for the click"
+        )
+    return "with an `ask-user-questions` ripple widget"
+
+
 def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
     """The /sites/[siteId] refine preamble — edit an EXISTING published site.
 
@@ -2125,8 +2144,8 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
     The ripple branch is deliberately unchanged apart from the publish claim: it was
     correct there, and this is a fix for the other three engines rather than a
     rewrite of working behaviour. What is shared across all branches is the
-    ASK-DON'T-ASSUME gate, the ``ask-user-questions`` mechanism (refine keeps
-    ``ripple_mode="on"`` on every engine, so that widget is real here), the funnel /
+    ASK-DON'T-ASSUME gate (asking through :func:`_refine_ask_mechanism`, which
+    matches the ripple mode the profile grants this engine), the funnel /
     real-copy / anchor-CTA / flat-form rules, and the source ``pocket_id`` — which
     every branch still threads into the tool call it names.
     """
@@ -2201,9 +2220,10 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "Relay the tool's own `message`, and never tell the user the change is "
             "published or live. On `ok:false` nothing was staged: an old_string "
             "that matched 0 or more than 1 time needs more context, and "
-            '`status:"rolled_back"` means the edit failed the static or build '
-            "check, so fix `verification.errors` and send it again. A browser-layer "
-            "failure keeps the edit staged: fix it with a follow-up edit. To add an "
+            '`status:"rolled_back"` means the edit failed the static check, so fix '
+            "`verification.errors` and send it again. A build or browser failure "
+            "found in the background keeps the edit staged: fix it with a follow-up "
+            "edit. To add an "
             "npm package call set_site_dependencies, then import it (a browser-only "
             "library that touches window at import time goes inside onMount). "
             + _VERIFY_RULE
@@ -2355,7 +2375,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "ASK, DON'T ASSUME: if the requested edit is ambiguous, or applying it "
         "needs a real fact or content you don't have (new copy, a price, a "
         "section's content, or which of several interpretations the user means), "
-        "ASK with an `ask-user-questions` ripple widget (include a 'you decide' "
+        f"ASK {_refine_ask_mechanism(engine)} (include a 'you decide' "
         "option) instead of guessing — and NEVER fabricate real-world facts "
         "(testimonials, stats, prices, addresses, contact details).\n"
         "WHEN THE ASK IS A JUDGEMENT, NOT AN EDIT: if the user asks you to review "

@@ -192,10 +192,17 @@
 # and the client would poll a job that finished minutes ago.
 #
 # Edited 2026-09-24 (PP-2, feat/sites-verify-pipeline): THE PREVIEW JOB NOW VERIFIES.
-#   * After a clean build, ``run_site_preview_build`` runs the paw-sites browser harness
-#     in the SAME sandbox (``daytona_runner.run_build``'s ``after_build`` hook →
-#     ``browser_check.run_in_sandbox``). A browser failure never un-stores the preview:
-#     the page still compiled, and the editor still wants to show it.
+#   * After a clean build, ``run_site_preview_build`` STORES the draft artifact first
+#     (``run_build``'s ``on_artifact`` hook), then runs the paw-sites browser harness in
+#     the SAME sandbox (``after_build`` → ``browser_check.run_in_sandbox``). The draft
+#     preview is therefore up while the browser check runs, and a browser failure never
+#     un-stores it: the page still compiled, and the editor still wants to show it.
+#   * A newly accepted preview / html-verify job ABORTS the pocket's previous one
+#     (:func:`_supersede_previous_job`, a per-pocket Redis pointer; the worker sets
+#     ``allow_abort_jobs``). A render whose job was aborted is re-queued, not read as
+#     failed, when its source comes back (:func:`_clear_aborted_result`).
+#   * Each job logs its queue wait and its build / browser elapsed ms
+#     (``sites.verify: layer=…``).
 #   * Its result gains ``layers`` ({build, browser}), ``diagnostics`` ({errors, warnings})
 #     and ``checked_at``, and the same report is written to ``verify_store`` under
 #     ``sandbox-<content_hash>`` so a later ``verify_site`` of unchanged source spends no
@@ -216,16 +223,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
 import shutil
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from arq.constants import result_key_prefix
 from arq.jobs import Job, JobStatus
 
 from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
@@ -1293,9 +1303,39 @@ async def run_site_preview_build(
     artifact_rel = expected_static_output_rel(engine, generator_input)
     store = _store if _store is not None else sites_service._default_artifact_store()
     harness = _harness if _harness is not None else browser_check.run_in_sandbox
+    _log_queue_wait("preview", pocket_id, ctx)
+    # Whether ``_on_artifact`` stored the draft: None = never ran, True = stored,
+    # False = raised (settled below as RUNG_PREVIEW_UNREADABLE).
+    stored_early: list[bool] = []
+
+    async def _on_artifact(artifact: bytes) -> None:
+        # The draft preview goes into the store as soon as the build is clean, BEFORE
+        # the browser check: the editor shows the draft a browser-check sooner, and a
+        # browser failure never withheld the artifact anyway (it is stored either way).
+        try:
+            _store_preview_artifact(
+                artifact,
+                engine=engine,
+                pocket_id=pocket_id,
+                content_hash=content_hash,
+                output_rel=artifact_rel,
+                store=store,
+            )
+        except Exception:
+            stored_early.append(False)
+            raise
+        stored_early.append(True)
 
     async def _after_build(client: Any, sandbox_id: str, static_dir: str) -> Any:
-        return await harness(client, sandbox_id, static_dir=static_dir)
+        started = time.monotonic()
+        try:
+            return await harness(client, sandbox_id, static_dir=static_dir)
+        finally:
+            logger.info(
+                "sites.verify: layer=browser pocket=%s elapsed_ms=%d",
+                pocket_id,
+                (time.monotonic() - started) * 1000,
+            )
 
     work_dir = tempfile.mkdtemp(prefix=f"paw-preview-{pocket_id}-")
     try:
@@ -1330,6 +1370,7 @@ async def run_site_preview_build(
                 artifact_rel=artifact_rel,
                 image=browser_check.verify_image(),
                 after_build=_after_build,
+                on_artifact=_on_artifact,
             )
         except Exception:
             logger.exception("sites.preview: no sandbox for pocket %s", pocket_id)
@@ -1339,6 +1380,14 @@ async def run_site_preview_build(
 
     settlement = resolve_build_settlement(result)
     _log_outcome(f"preview:{pocket_id}", result, settlement)
+    timings = getattr(result, "timings", None)
+    if timings is not None:
+        logger.info(
+            "sites.verify: layer=build pocket=%s status=%s elapsed_ms=%d",
+            pocket_id,
+            settlement.status,
+            float(getattr(timings, "total_seconds", 0.0) or 0.0) * 1000,
+        )
 
     build_layer = _build_layer(result, settlement)
     errors: list[dict[str, Any]] = []
@@ -1365,14 +1414,19 @@ async def run_site_preview_build(
         return {"status": settlement.status or "failed", "reason": settlement.reason, **report}
 
     try:
-        _store_preview_artifact(
-            result.artifact or b"",
-            engine=engine,
-            pocket_id=pocket_id,
-            content_hash=content_hash,
-            output_rel=artifact_rel,
-            store=store,
-        )
+        if stored_early == [False]:
+            raise RuntimeError("the early artifact store raised")
+        if not stored_early:
+            # The runner did not call the hook (a runner without it, or a test double):
+            # store here, after the browser check, exactly as before.
+            _store_preview_artifact(
+                result.artifact or b"",
+                engine=engine,
+                pocket_id=pocket_id,
+                content_hash=content_hash,
+                output_rel=artifact_rel,
+                store=store,
+            )
     except Exception:
         logger.exception(
             "sites.preview: pocket %s built cleanly and the artifact could not be read",
@@ -1410,6 +1464,7 @@ async def run_site_html_verify(
     """
     from pocketpaw_ee.sites import browser_check
 
+    _log_queue_wait("html_verify", pocket_id, ctx)
     standalone = _harness if _harness is not None else browser_check.run_standalone
     work_dir = tempfile.mkdtemp(prefix=f"paw-verify-{pocket_id}-")
     try:
@@ -1450,6 +1505,85 @@ async def run_site_html_verify(
     return {"status": "checked", "reason": f"browser:{browser.status}", **report}
 
 
+def _log_queue_wait(lane: str, pocket_id: str, ctx: Any) -> None:
+    """Log how long the job sat in the queue (arq's ``enqueue_time`` → now)."""
+    enqueued = ctx.get("enqueue_time") if isinstance(ctx, dict) else None
+    if enqueued is None:
+        return
+    try:
+        from datetime import UTC, datetime
+
+        waited = (datetime.now(UTC) - enqueued).total_seconds()
+    except Exception:  # noqa: BLE001 — a log line is never worth a failed job
+        return
+    logger.info(
+        "sites.verify: layer=queue_wait lane=%s pocket=%s elapsed_ms=%d",
+        lane,
+        pocket_id,
+        max(0.0, waited) * 1000,
+    )
+
+
+#: The reason a waiter reads off a job aborted because a newer edit replaced it.
+SUPERSEDED_REASON = "superseded"
+
+#: Redis key holding the id of the newest preview / html-verify job per pocket.
+_CURRENT_JOB_KEY = "paw:sites:preview-current:{pocket_id}"
+#: Long enough to outlive any job on this lane; the key is only a supersede pointer.
+_CURRENT_JOB_TTL_SECONDS = 3600
+
+
+async def _supersede_previous_job(pool: Any, pocket_id: str, job_id: str) -> str | None:
+    """Make ``job_id`` the pocket's current job and ABORT the one it replaces.
+
+    Called only after a NEW job was accepted, so the replaced job is a render of
+    source the pocket no longer has: building it spends a sandbox (and a slot of
+    ``max_jobs``) on a preview nobody will view. arq aborts a queued job before it
+    starts and cancels a running one (the runner's ``finally`` still deletes its
+    sandbox). Returns the aborted job id, or ``None``. Never raises: a failed abort
+    costs one wasted build, which is the behaviour before this existed.
+    """
+    key = _CURRENT_JOB_KEY.format(pocket_id=pocket_id)
+    try:
+        previous = await pool.getset(key, job_id)
+        await pool.expire(key, _CURRENT_JOB_TTL_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.debug("sites.preview: no supersede pointer for %s", pocket_id, exc_info=True)
+        return None
+    if isinstance(previous, bytes):
+        previous = previous.decode("utf-8", "replace")
+    if not previous or previous == job_id:
+        return None
+    try:
+        await Job(previous, pool, _queue_name=SITE_BUILD_QUEUE_NAME).abort(timeout=0.01)
+    except TimeoutError:
+        pass  # the abort is requested; we do not wait for the worker to act on it
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.preview: could not abort superseded job %s", previous)
+        return None
+    logger.info(
+        "sites.preview: pocket %s superseded job %s with %s (aborted)",
+        pocket_id,
+        previous,
+        job_id,
+    )
+    return previous
+
+
+async def _clear_aborted_result(pool: Any, job_id: str) -> bool:
+    """Free a job id whose last run was ABORTED (superseded), so the same render can be
+    queued again — an undo back to that source must build, not read "failed" for the
+    hour arq keeps the result. ``True`` when a result was cleared. Never raises."""
+    try:
+        info = await Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME).result_info()
+        if info is None or info.success or not isinstance(info.result, asyncio.CancelledError):
+            return False
+        await pool.delete(result_key_prefix + job_id)
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def html_verify_job_id(pocket_id: str, content_hash: str) -> str:
     """Deterministic, like :func:`_preview_job_id`, for the same single-flight reason."""
     return f"site-verify-html-{pocket_id}-{content_hash}"
@@ -1469,16 +1603,23 @@ async def enqueue_html_verify(
     """
     job_id = html_verify_job_id(pocket_id, content_hash)
     pool = _pool_override or await _get_pool()
-    job = await pool.enqueue_job(
-        HTML_VERIFY_ARQ_FUNCTION_NAME,
-        pocket_id,
-        content_hash,
-        scrub_build_input(generator_input),
-        _job_id=job_id,
-        _queue_name=SITE_BUILD_QUEUE_NAME,
-    )
+
+    async def _enqueue() -> Any:
+        return await pool.enqueue_job(
+            HTML_VERIFY_ARQ_FUNCTION_NAME,
+            pocket_id,
+            content_hash,
+            scrub_build_input(generator_input),
+            _job_id=job_id,
+            _queue_name=SITE_BUILD_QUEUE_NAME,
+        )
+
+    job = await _enqueue()
+    if job is None and await _clear_aborted_result(pool, job_id):
+        job = await _enqueue()
     if job is None:
         return PreviewBuildEnqueue(job_id=job_id, status="building")
+    await _supersede_previous_job(pool, pocket_id, job_id)
     return PreviewBuildEnqueue(job_id=job_id, status="queued")
 
 
@@ -1494,7 +1635,21 @@ async def wait_for_preview_result(
     on the module by ``verify`` so a test can substitute it without faking arq's Redis.
     """
     job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)
-    result = await job.result(timeout=timeout, poll_delay=poll_delay)
+    try:
+        result = await job.result(timeout=timeout, poll_delay=poll_delay)
+    except asyncio.CancelledError:
+        # arq re-raises an ABORTED job's CancelledError here. That job was superseded
+        # by a newer edit of the pocket; it is not this task being cancelled, which
+        # ``cancelling()`` tells apart (a real cancellation still propagates).
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
+        superseded = {"status": "unverified", "reason": SUPERSEDED_REASON}
+        return {
+            "status": "failed",
+            "reason": SUPERSEDED_REASON,
+            "layers": {"build": superseded, "browser": superseded},
+        }
     if isinstance(result, dict):
         return result
     return {"status": "failed", "reason": "preview_result_unreadable"}
@@ -1533,16 +1688,24 @@ async def enqueue_preview_build(
     )
     job_id = _preview_job_id(pocket_id, content_hash)
     pool = _pool_override or await _get_pool()
-    job = await pool.enqueue_job(
-        PREVIEW_ARQ_FUNCTION_NAME,
-        pocket_id,
-        content_hash,
-        scrub_build_input(generator_input),
-        normalize_engine(engine),
-        timeout,
-        _job_id=job_id,
-        _queue_name=SITE_BUILD_QUEUE_NAME,
-    )
+
+    async def _enqueue() -> Any:
+        return await pool.enqueue_job(
+            PREVIEW_ARQ_FUNCTION_NAME,
+            pocket_id,
+            content_hash,
+            scrub_build_input(generator_input),
+            normalize_engine(engine),
+            timeout,
+            _job_id=job_id,
+            _queue_name=SITE_BUILD_QUEUE_NAME,
+        )
+
+    job = await _enqueue()
+    # A render whose last job was aborted as superseded is queued again, not reported
+    # as failed: the source came back to it (an undo), so it is wanted after all.
+    if job is None and await _clear_aborted_result(pool, job_id):
+        job = await _enqueue()
     if job is None:
         status, reason = await _preview_job_outcome(pool, job_id)
         logger.info(
@@ -1556,6 +1719,7 @@ async def enqueue_preview_build(
     logger.info(
         "sites.preview: queued build %s for pocket %s (%ds budget)", job_id, pocket_id, timeout
     )
+    await _supersede_previous_job(pool, pocket_id, job_id)
     return PreviewBuildEnqueue(job_id=job_id, status="queued")
 
 

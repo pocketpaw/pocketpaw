@@ -482,6 +482,33 @@ async def _communicate_bounded(
 # current fingerprint matches this; mismatch forces a reinstall (PERF-3).
 _INSTALL_HASH_FILE = ".paw-install-hash"
 
+#: Written into a pocket's persistent build dir after a successful static build: the
+#: hash of the content that build rendered (:func:`draft_source_hash`). ``draft_markup``
+#: serves an on-disk build only when this matches the pocket's CURRENT content, so an
+#: edit since the last build is never photographed as the old page.
+DRAFT_SOURCE_STAMP_FILE = ".paw-draft-source-hash"
+
+
+def draft_source_hash(
+    *, engine: str | None, source: dict[str, Any] | None, ripple_spec: dict[str, Any] | None
+) -> str:
+    """Hash of the content a build renders: the ``source`` map on a source engine, the
+    ``rippleSpec`` (which carries the theme) on ripple. Order-independent."""
+    from pocketpaw_ee.sites.engines import is_source_engine, normalize_engine
+
+    eng = normalize_engine(engine)
+    content = (source or {}) if is_source_engine(eng) else (ripple_spec or {})
+    payload = json.dumps({"engine": eng, "content": content}, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def read_draft_source_stamp(project_dir: Path) -> str:
+    try:
+        return (project_dir / DRAFT_SOURCE_STAMP_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 # Files whose contents define the dependency set. If any change, node_modules is
 # stale and must be reinstalled. The lockfile names cover bun's text + binary
 # lockfiles and the npm fallback.
@@ -1957,7 +1984,13 @@ class GeneratorClient:
                 static_build=static_build,
             )
         async with self._lock_for(pocket_id):
-            return await self._build_one(
+            # The stamp says which content the on-disk build rendered. Drop it before
+            # the dir is rewritten (a failed build leaves stale output and NO stamp),
+            # and write it only after a static build succeeded.
+            stamp = build_home() / pocket_id / DRAFT_SOURCE_STAMP_FILE
+            with contextlib.suppress(OSError):
+                stamp.unlink()
+            result = await self._build_one(
                 ripple_spec=ripple_spec,
                 theme=theme,
                 site_id=site_id,
@@ -1974,6 +2007,13 @@ class GeneratorClient:
                 smoke=smoke,
                 static_build=static_build,
             )
+            if static_build and stamp.parent.is_dir():
+                with contextlib.suppress(OSError):
+                    stamp.write_text(
+                        draft_source_hash(engine=engine, source=source, ripple_spec=ripple_spec),
+                        encoding="utf-8",
+                    )
+            return result
 
     async def _build_one(
         self,

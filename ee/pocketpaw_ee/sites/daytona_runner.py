@@ -22,6 +22,10 @@
 #   * ``image`` — forwarded to ``create_sandbox`` only when set. The preview lane passes
 #     ``PAW_SITES_VERIFY_IMAGE`` (an image carrying Playwright's chromium) so the browser
 #     layer can run in the same sandbox as the build.
+#   * ``on_artifact`` — an async hook ``(artifact_bytes)`` run the moment a clean
+#     build's artifact is downloaded and verified, BEFORE ``after_build``. The preview
+#     lane stores the draft there, so the preview appears while the browser check is
+#     still running. A raise is logged and swallowed, like ``after_build``'s.
 #   * ``after_build`` — an async hook ``(client, sandbox_id, static_dir)`` run AFTER a
 #     clean build's artifact has been downloaded and verified, and BEFORE teardown. The
 #     browser harness rides it, so the build and its browser check share one sandbox.
@@ -270,6 +274,7 @@ async def run_build(
     artifact_rel: str | None = None,
     image: str | None = None,
     after_build: Callable[[Any, str, str], Awaitable[Any]] | None = None,
+    on_artifact: Callable[[bytes], Awaitable[Any]] | None = None,
 ) -> BuildRunResult:
     """Build ``files`` in a fresh Daytona sandbox and return the verdict + artifact.
 
@@ -292,9 +297,10 @@ async def run_build(
     and retrying. It may still raise if the sandbox cannot be created at all, which is
     a distinct condition the caller must handle as retryable (nothing has run yet).
 
-    ``image`` / ``after_build`` (PP-2) — see the module header. ``after_build`` receives
-    ``(client, sandbox_id, static_dir)`` where ``static_dir`` is the absolute in-sandbox
-    path of the output dir this build wrote.
+    ``image`` / ``after_build`` / ``on_artifact`` — see the module header.
+    ``after_build`` receives ``(client, sandbox_id, static_dir)`` where ``static_dir`` is
+    the absolute in-sandbox path of the output dir this build wrote; ``on_artifact``
+    receives the verified artifact bytes before it.
     """
     if client is None:
         from pocketpaw_ee.cloud.daytona.client import get_daytona_client
@@ -445,6 +451,15 @@ async def run_build(
                     # what this check refused.
                     artifact = None
         t_extracted = time.monotonic()
+
+        # The artifact hook first (the preview lane stores the draft here), so the
+        # draft is visible before the browser check below spends its time. Same rule
+        # as after_build: only a clean, verified artifact, and a raise is swallowed.
+        if on_artifact is not None and artifact is not None and classification.deployable:
+            try:
+                await on_artifact(artifact)
+            except Exception as exc:  # noqa: BLE001 — see after_build below
+                logger.warning("daytona_runner: on_artifact hook raised (%s)", exc)
 
         # PP-2: the post-build hook (the browser harness), only on a CLEAN build and
         # still inside the sandbox's lifetime. A raise is logged and swallowed: the
