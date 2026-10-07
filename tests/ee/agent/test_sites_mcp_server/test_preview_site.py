@@ -75,6 +75,50 @@ async def test_it_returns_the_draft_as_images(ctx) -> None:
     assert call["screenshot_options"] == {"fullPage": True}
 
 
+async def test_a_long_page_comes_back_as_at_most_three_tiles_after_load(ctx) -> None:
+    """Every tile is re-read on each later call in the turn, so the look is capped at
+    the fold and the first sections, and the capture waits for ``load`` rather than
+    for the network to go idle."""
+    from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+    cf = _FakeCF(_png(1280, 12000))
+    with (
+        patch(
+            "pocketpaw_ee.sites.draft_markup.build_draft_markup",
+            new=AsyncMock(return_value="<html><body>hi</body></html>"),
+        ),
+        patch("pocketpaw_ee.sites.service._cf_client", return_value=cf),
+    ):
+        out = await mcp._preview_site_handler({"pocket_id": "p1"})
+
+    images = [part for part in out["content"] if part["type"] == "image"]
+    assert 1 <= len(images) <= 3
+    assert cf.calls[0]["goto_options"]["waitUntil"] == "load"
+
+
+async def test_it_carries_the_previous_edits_verdict(ctx) -> None:
+    """A finished background build is reported on the next sites tool result, and
+    preview_site (the call that usually follows an edit) is one."""
+    from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+    cf = _FakeCF()
+    with (
+        patch(
+            "pocketpaw_ee.sites.draft_markup.build_draft_markup",
+            new=AsyncMock(return_value="<html><body>hi</body></html>"),
+        ),
+        patch("pocketpaw_ee.sites.service._cf_client", return_value=cf),
+        patch(
+            "pocketpaw_ee.sites.verify.settled_verdict",
+            return_value={"status": "failed", "build": "failed"},
+        ),
+    ):
+        out = await mcp._preview_site_handler({"pocket_id": "p1"})
+
+    assert out["content"][-1]["type"] == "text"
+    assert "previous_verification" in out["content"][-1]["text"]
+
+
 async def test_a_svelte_draft_uses_the_cached_preview_render(ctx) -> None:
     from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 

@@ -121,8 +121,8 @@
   {
     "label": "SL-4: the tar and the unpack derive the output dir independently, so a change to one leaves the artifact extracted into a directory the deploy target does not read — a blank site replacing a working one",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "                output_rel=artifact_rel,",
-    "replace": "                output_rel=None,",
+    "find": "                deployer=_deployer,\n                output_rel=artifact_rel,",
+    "replace": "                deployer=_deployer,\n                output_rel=None,",
     "tests": [
       "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish",
       "tests/ee/sites/test_svelte_async_build.py::TestTheJobWiresThePredictionToBothEnds"

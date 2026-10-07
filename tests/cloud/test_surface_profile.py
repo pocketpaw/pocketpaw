@@ -71,7 +71,7 @@ def test_sites_profile_declares_deny_set_and_skill():
         )
         | _SITES_BUILTIN_DENY
     )
-    assert "create-svelte-site" in profile.skill_names
+    assert "pocketpaw-create-svelte-site" in profile.skill_names
 
 
 def test_generic_profile_keeps_ripple_on():
@@ -139,7 +139,7 @@ def test_resolve_profile_sites_svelte_create_disables_ripple():
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
     assert profile.ripple_mode == "off"
     assert _own_deny(profile) == _RIPPLE_CREATE_DENY | _SITES_BUILTIN_DENY
-    assert "create-svelte-site" in profile.skill_names
+    assert "pocketpaw-create-svelte-site" in profile.skill_names
 
 
 def test_resolve_profile_sites_ripple_create_keeps_ripple():
@@ -148,7 +148,8 @@ def test_resolve_profile_sites_ripple_create_keeps_ripple():
     default (``engine=None``) and the explicit ``engine="ripple"`` resolve the
     same way. The PR-1 static table wrongly returns ``ripple_mode="off"`` with
     the deny set for these."""
-    for meta in (SurfaceMeta(engine=None), SurfaceMeta(engine="ripple")):
+    # ``engine=None`` is html create since 2026-09-27 (ripple off, asks via ask_user).
+    for meta in (SurfaceMeta(engine="ripple"),):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"ripple-create meta {meta!r} must keep ripple"
         assert _own_deny(profile) == _SITES_BUILTIN_DENY, (
@@ -157,21 +158,30 @@ def test_resolve_profile_sites_ripple_create_keeps_ripple():
 
 
 def test_resolve_profile_sites_refine_keeps_ripple():
-    """RED DRIVER (fails today): the REFINE mode (pocket_id set) edits the
-    existing RIPPLE landing spec via pocket_specialist__edit, so it KEEPS ripple
-    on and denies NOTHING. Refine WINS over engine — a pocket_id present means
-    refine even when ``engine="svelte"`` is also stamped (a published site being
-    re-opened). The PR-1 static table wrongly returns ``ripple_mode="off"`` with
-    the deny set here too."""
+    """A REFINE (pocket_id set) of a ripple site, or one whose engine is unknown, edits
+    the RIPPLE landing spec via pocket_specialist__edit, so it KEEPS ripple on and
+    denies only the file/shell built-ins. On refine ``engine`` is the source pocket's
+    (``run_core._sites_refine_meta``)."""
     for meta in (
         SurfaceMeta(pocket_id="pkt_1"),
-        SurfaceMeta(pocket_id="pkt_1", engine="svelte"),  # refine wins over engine
+        SurfaceMeta(pocket_id="pkt_1", engine="ripple"),
     ):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"refine meta {meta!r} must keep ripple"
         assert _own_deny(profile) == _SITES_BUILTIN_DENY, (
             f"refine meta {meta!r} keeps the ripple/pocket tools, drops only the built-ins"
         )
+
+
+def test_resolve_profile_sites_source_refine_drops_ripple():
+    """A refine of an html / svelte / react site edits a source map, not a widget spec,
+    so it runs without the inline ripple prompt (asking via ask_user), denies the same
+    built-ins, and is NOT the create branch (no create skills, no create deny)."""
+    for engine in ("html", "svelte", "react"):
+        profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine=engine))
+        assert profile.ripple_mode == "off", engine
+        assert _own_deny(profile) == _SITES_BUILTIN_DENY, engine
+        assert not profile.skill_names, engine
 
 
 # ---------------------------------------------------------------------------
