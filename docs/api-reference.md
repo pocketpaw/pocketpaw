@@ -3087,7 +3087,11 @@ Response `200` — **build pending** (cache miss, SP-2):
   publish lane's, unchanged, and **an unrecognised value means in-progress**.
 - `build_reason` carries a rung name on a failure (`build_failed:…`,
   `scaffold_failed:…`, `sandbox_unavailable:…`, `preview_unreadable:…`) — never the
-  build's stderr, which stays in the worker log.
+  build's stderr, which stays in the worker log. `sandbox_unavailable:capacity`
+  means the Daytona org's resource limit stayed full for the whole retry window
+  (try again in a few minutes); `sandbox_unavailable:no_sandbox` means a sandbox
+  could not be created for any other reason. While a build waits for capacity it
+  reads `queued` with reason `waiting_for_capacity`.
 - `build_job_id` is the handle to poll with. **Re-fetch this endpoint** until
   `build_status` reads `"none"`, which is the render shape above.
 
@@ -5282,6 +5286,12 @@ actually works:
 ```
 
 `reason` is present only when `status` is `unverified`. `note` is optional.
+When the reason is a sandbox one (`waiting_for_capacity`,
+`sandbox_unavailable:capacity`, any other `sandbox_unavailable`), the verdict
+also carries `message`: the sentence to show the user as written. A full
+Daytona org is reported as a queue (`waiting_for_capacity`, then
+`sandbox_unavailable:capacity` once about five minutes of retries are spent),
+never as an outage. See `docs/runbooks/2026-10-07-daytona-org-capacity.md`.
 
 The three layers:
 
