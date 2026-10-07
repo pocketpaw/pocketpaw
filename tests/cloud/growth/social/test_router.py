@@ -704,3 +704,16 @@ async def test_make_media_stores_a_clean_poster_and_502s_on_junk(w1, w2):
 
     set_production_media_fn(junk)
     assert (await w1.post(url, json={"kind": "reel"})).status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_patch_replaces_the_poster_with_a_cleaned_edit(w1):
+    set_production_ideas_fn(_FakeIdeas())
+    await _complete(w1)
+    idea = (await w1.post(f"{IDEAS}/generate", json={"count": 1})).json()["items"][0]
+    url = f"{IDEAS}/{idea['id']}"
+    edited = '<svg viewBox="0 0 10 10"><script>x</script><rect onclick="y()"/></svg>'
+    resp = await w1.patch(url, json={"poster_svg": edited})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["poster_svg"] == '<svg viewBox="0 0 10 10"><rect/></svg>'
+    assert (await w1.patch(url, json={"poster_svg": "not svg"})).status_code == 422

@@ -195,6 +195,7 @@ class UpdateIdeaRequest(BaseModel):
     caption: str | None = Field(default=None, max_length=2200)
     script: list[str] | None = Field(default=None, max_length=50)
     hashtags: list[str] | None = Field(default=None, max_length=50)
+    poster_svg: str | None = Field(default=None, min_length=1, max_length=2_000_000)
 
     @field_validator("hook")
     @classmethod

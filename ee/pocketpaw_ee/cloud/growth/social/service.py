@@ -508,10 +508,18 @@ async def list_ideas(
 async def update_idea(
     ctx: RequestContext, idea_id: str, body: UpdateIdeaRequest
 ) -> SocialIdeaResponse:
-    """Move an idea's review status and/or edit its copy."""
+    """Move an idea's review status, edit its copy, and/or replace its poster with
+    an edited one (from /studio/vector), sanitised like a generated poster."""
+    from pocketpaw_ee.cloud.growth.social.ideas import MAX_EDITED_POSTER_CHARS, clean_svg
+
     body = UpdateIdeaRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     doc = await _fetch_idea_in_workspace(workspace_id, idea_id)
+    if body.poster_svg is not None:
+        poster = clean_svg(body.poster_svg, MAX_EDITED_POSTER_CHARS)
+        if not poster:
+            raise ValidationError("social.poster_invalid", "That poster is not a usable SVG")
+        doc.poster_svg = poster
     for name in ("status", "hook", "on_screen_text", "caption", "script", "hashtags"):
         value = getattr(body, name)
         if value is not None:

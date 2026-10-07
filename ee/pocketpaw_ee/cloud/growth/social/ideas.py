@@ -289,6 +289,7 @@ _UNSAFE_SVG = (
     ),
 )
 MAX_POSTER_CHARS = 150_000
+MAX_EDITED_POSTER_CHARS = 2_000_000
 
 
 def build_media_prompt(profile: SocialProfile, idea: SocialIdea, kind: str) -> str:
@@ -304,14 +305,14 @@ def build_media_prompt(profile: SocialProfile, idea: SocialIdea, kind: str) -> s
     return "\n".join(lines)
 
 
-def clean_svg(text: str) -> str:
+def clean_svg(text: str, limit: int = MAX_POSTER_CHARS) -> str:
     match = _SVG_RE.search(text or "")
     if match is None:
         return ""
     svg = match.group(0)
     for pattern in _UNSAFE_SVG:
         svg = pattern.sub("", svg)
-    return svg if len(svg) <= MAX_POSTER_CHARS else ""
+    return svg if len(svg) <= limit else ""
 
 
 def clean_reel(text: str) -> str:
