@@ -1,12 +1,14 @@
 <!-- How a paw-build.json build (project engine / base app templates) is deployed
-     into the Workers for Platforms dispatch namespace, and what gates enabling it. -->
+     through the Cloudflare HTTP API (into the WfP dispatch namespace, or as an
+     account-level Worker while the account has no WfP), and what gates enabling it. -->
 # Sites: bundle deploys (`paw-build.json`)
 
 Builds from the `project` engine and the base app templates (Next.js via OpenNext,
 TanStack Start, Astro, ...) are not single `index.mjs` workers. They are a worker made
 of one or more ES modules plus a directory of static assets. The sandbox build
-describes that output in `paw-build.json`, and the API host deploys it into the
-`paw-sites` dispatch namespace through the Cloudflare HTTP API.
+describes that output in `paw-build.json`, and the API host deploys it through the
+Cloudflare HTTP API, into the `paw-sites` dispatch namespace or, interim, as an
+account-level Worker (see "Deploy targets" below).
 
 Code: `ee/pocketpaw_ee/sites/bundle_deploy.py` (vetting and mapping),
 `ee/pocketpaw_ee/sites/binding_provisioner.py` (the per-site D1 database, KV
@@ -22,9 +24,9 @@ migrations) and `CloudflareClient.upload_assets` / `put_worker(modules=...)` in
   D1 binding for dynamic sites.
 - A `project` pocket publishes from its stored draft build (see "Project builds"
   below): the bundle is materialized and goes through this path. Under
-  `PAW_CF_DEPLOY_MODE=workers` a project is still deployed here, through the HTTP API,
-  because the workers path runs wrangler on the API host. `local` mode serves the
-  bundle's `assetsDir` statically.
+  `PAW_CF_DEPLOY_MODE=workers` a project is still deployed here, through the HTTP API
+  (the wrangler-based workers path would read author config on the API host), but to
+  the `account` target. `local` mode serves the bundle's `assetsDir` statically.
 - `sites.service.deploy_bundle(site, build_dir)` deploys a build dir directly (no
   Site-row plumbing), for callers that already hold one.
 
@@ -86,10 +88,83 @@ The shape is paw-sites' `buildPawManifest` (`src/starters.ts`, documented in
 `starters/README.md`). Unknown fields (`sizes`, `startup`, `framework`, ...) are
 ignored, so paw-sites can add fields without a pocketpaw release.
 
+## Deploy targets
+
+The bundle path has two targets. Everything in this document (manifest parsing,
+binding mapping, compat allow-list, secrets, size caps, provisioning, D1 migrations)
+applies to both. Only the API URLs and how the site is served differ.
+
+| Target | Script URL | Served at | Picked when |
+|---|---|---|---|
+| `dispatch` | `/accounts/{acct}/workers/dispatch/namespaces/{ns}/scripts/{site_id}` | `https://{site_id}.{PAW_CF_SITES_DOMAIN}` through the dispatch worker | `PAW_CF_DEPLOY_MODE=wfp` (or unset) |
+| `account` | `/accounts/{acct}/workers/scripts/{worker_name}` | `https://{worker_name}.{sub}.workers.dev`, plus custom-domain routes | `PAW_CF_DEPLOY_MODE=workers` |
+
+`PAW_SITES_PROJECT_DEPLOY_TARGET=account|dispatch` overrides the mode for project
+bundles. An unknown value is logged and ignored.
+
+### Option B: account-level Workers (interim)
+
+The production Cloudflare account has no Workers for Platforms, so every dispatch
+upload fails with `403 ... dispatch namespaces (code 10121)`. Until WfP is bought,
+project bundles in workers mode deploy as **account-level Workers** through the HTTP
+API (never wrangler), and are served exactly like the wrangler-built sites in that
+mode:
+
+- **Name.** The site's workers-mode Worker name (`workers_deploy.site_worker_name`):
+  the name-based slug claimed on first publish, else `paw-site-<site_id>`. Renames
+  (`slug_pending`), the foreign-script guard and the 3-a-day limit apply unchanged.
+- **Address.** After the PUT, `POST /accounts/{acct}/workers/scripts/{name}/subdomain`
+  with `{"enabled": true, "previews_enabled": false}` turns on workers.dev (an API
+  upload leaves it off; wrangler sends the same call for `workers_dev: true`). The URL
+  is `https://{name}.{sub}.workers.dev`, where `{sub}` is `PAW_CF_WORKERS_SUBDOMAIN`
+  or, when unset, `GET /accounts/{acct}/workers/subdomain`.
+- **Row.** `deploy_target` is stamped `workers`, so custom domains get a
+  `{hostname}/*` Worker route to this script and a site delete calls
+  `DELETE /accounts/{acct}/workers/scripts/{name}`.
+- **Badge and concierge.** Stamped into the built pages before the upload, the same
+  as every engine.
+- **Not applied.** The pageview counter (it wraps the Worker entry through wrangler;
+  a project's multi-module Worker is uploaded as built, so the site records no
+  analytics) and the AI-ready files (robots.txt, sitemap, llms.txt, IndexNow; they
+  are written into a wrangler asset dir). Both are skipped, never half-applied.
+
+Risks, and why this is interim:
+
+- **No dispatch isolation.** A tenant's Worker is one of the account's own scripts.
+  It shares the account's script count limit and its workers.dev subdomain with our
+  own Workers, and nothing sits in front of it (no dispatch worker to enforce
+  outbound rules, limits or tags). The binding mapping still only hands it the
+  site's own D1 / KV / R2 and secrets.
+- **Account limits.** Script count and per-account CPU / subrequest limits apply to
+  all sites together.
+- **Asset store.** Hashes stay salted per workspace, as on WfP.
+- Each deploy logs `deploying as an ACCOUNT-LEVEL Worker (interim, no dispatch
+  isolation)`.
+
+**Switching to WfP.** Buy Workers for Platforms on the account, create the `paw-sites`
+dispatch namespace (or set `PAW_CF_DISPATCH_NAMESPACE`), deploy the dispatch worker
+(`ee/pocketpaw_ee/sites/cloudflare/dispatch-worker`) on `PAW_CF_SITES_DOMAIN`, then
+either set `PAW_CF_DEPLOY_MODE=wfp` or keep workers mode for the other engines and
+set `PAW_SITES_PROJECT_DEPLOY_TARGET=dispatch`. A site already live as an account
+Worker keeps serving there until it is republished; after the republish delete its
+old account script and routes by hand (its row then says `wfp`).
+
+**Token scopes for the account target.** `Workers Scripts Edit` covers the script
+PUT, the assets session and the workers.dev toggle (`Workers Scripts Read` is enough
+for the subdomain lookup). Custom domains need what workers mode already needs:
+`Workers Routes Edit` on the zone (the `{hostname}/*` route) and `SSL and
+Certificates Edit` (Cloudflare for SaaS custom hostnames). D1 / KV / R2 scopes are as
+below.
+
 ## Upload sequence
 
 The same three calls wrangler makes for a WfP deploy (captured in the
-2026-10-07 next-on-wfp spike):
+2026-10-07 next-on-wfp spike). The `account` target makes the same calls with
+`/workers/scripts/{worker_name}` in place of
+`/workers/dispatch/namespaces/{ns}/scripts/{site_id}`
+([direct upload](https://developers.cloudflare.com/workers/static-assets/direct-upload/),
+[script upload](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/)),
+then enables workers.dev:
 
 1. `POST /accounts/{acct}/workers/dispatch/namespaces/{ns}/scripts/{site_id}/assets-upload-session`
    with `{"manifest": {"/path": {"hash": <32 hex>, "size": n}}}`. Cloudflare returns a

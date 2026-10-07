@@ -2,8 +2,8 @@
   {
     "label": "project publish in workers mode runs wrangler on the API host (author config executes there)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if mode == \"workers\" and normalize_engine(engine) == \"project\":\n        # A project deploys only through the HTTP API from its paw-build.json: the\n        # workers path runs wrangler on this host, which would read author config.\n        mode = \"wfp\"",
-    "replace": "    pass",
+    "find": "        project_target = bundle_deploy.project_deploy_target(mode)\n        mode = \"workers\" if project_target == bundle_deploy.ACCOUNT_TARGET else \"wfp\"",
+    "replace": "        pass",
     "tests": [
       "tests/ee/sites/test_project_engine.py::test_publish_deploys_the_stored_manifest"
     ]

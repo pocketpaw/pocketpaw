@@ -4,9 +4,10 @@
 # What lives here: publish / preview / editable lanes (``publish``,
 # ``publish_pocket``, ``_deploy_site_doc``) and the three deploy targets they
 # pick between (local, workers.dev via ``workers_deploy``, Workers-for-Platforms;
-# a WfP build carrying ``paw-build.json`` deploys through ``bundle_deploy`` and
+# a build carrying ``paw-build.json`` deploys through ``bundle_deploy`` and
 # ``deploy_bundle``; a ``project`` pocket publishes its stored sandbox build that way,
-# ``_deploy_project_site``, and its drafts / build logs are read here too); the
+# ``_deploy_project_site``, into WfP or, in workers mode, as an account-level Worker
+# named and served like a wrangler site; its drafts / build logs are read here too); the
 # dynamic-site provision seams the ``provision_site`` job calls; the build
 # stamps applied between build and deploy (concierge bar, free badge or partner
 # co-brand) and the AI-ready inputs (``_ai_ready_inputs``: training opt-in,
@@ -1385,7 +1386,9 @@ def _deploy_mode() -> str | None:
       * ``local``   → serve the static site from localhost (local_server.deploy_local).
       * ``workers`` → deploy as a regular Worker on the free workers.dev tier
                       (workers_deploy.deploy_workers — STATIC sites only; a dynamic
-                      site raises rather than deploying a broken site).
+                      site raises rather than deploying a broken site). A
+                      ``project`` bundle deploys here as an account-level Worker
+                      through the HTTP API (``bundle_deploy``), never wrangler.
       * ``wfp``     → the Workers-for-Platforms dispatch-namespace path
                       (cloudflare_client.put_worker) — today's Cloudflare default.
       * UNSET (``None``) → PRESERVE today's behaviour: ``_local_mode()`` selects the
@@ -2766,10 +2769,12 @@ async def _deploy_project_site(
 
     Nothing builds here and nothing the author wrote runs here: the bundle the sandbox
     built for the pocket's CURRENT source (``project_build``) is materialized and
-    handed to ``_deploy_site_doc`` as a prebuilt tree, whose WfP branch deploys it
-    through ``bundle_deploy`` + the binding provisioner. A source with no finished
-    draft build is a 409 (open the preview, or run a build, then publish). The site's
-    plan is checked against the manifest first (``project_build.check_plan_allows``).
+    handed to ``_deploy_site_doc`` as a prebuilt tree, which deploys it through
+    ``bundle_deploy`` + the binding provisioner: into the WfP namespace, or (workers
+    mode / ``PAW_SITES_PROJECT_DEPLOY_TARGET=account``) as an account-level Worker.
+    A source with no finished draft build is a 409 (open the preview, or run a
+    build, then publish). The site's plan is checked against the manifest first
+    (``project_build.check_plan_allows``).
 
     The Site doc is ensured (inserted undeployed on a first publish) BEFORE the deploy,
     because the provisioner records the D1 / KV / R2 it creates on it. A ``d1``
@@ -3113,10 +3118,16 @@ async def _deploy_site_doc(
         # An injected CF client (a test asserting the real CF branch) wins over an
         # env that requests local — mirrors the legacy ``cloudflare is None`` guard.
         mode = "wfp"
-    if mode == "workers" and normalize_engine(engine) == "project":
-        # A project deploys only through the HTTP API from its paw-build.json: the
-        # workers path runs wrangler on this host, which would read author config.
-        mode = "wfp"
+    # A project deploys only through the HTTP API from its paw-build.json, never via
+    # wrangler (that would read author config on this host). Its bundle target follows
+    # the mode (``workers`` -> an account-level script, ``wfp`` -> the dispatch
+    # namespace) unless PAW_SITES_PROJECT_DEPLOY_TARGET overrides it, and the mode is
+    # aligned with the target so the site is named, served, routed, stamped and
+    # deleted exactly like every other site on that target.
+    project_target: str | None = None
+    if normalize_engine(engine) == "project" and mode != "local":
+        project_target = bundle_deploy.project_deploy_target(mode)
+        mode = "workers" if project_target == bundle_deploy.ACCOUNT_TARGET else "wfp"
 
     url = ""
     # AV-1: the IndexNow key the workers deploy published, persisted below ("" = none).
@@ -3157,7 +3168,14 @@ async def _deploy_site_doc(
         # that can see the Site document the plan lives on — a Worker invocation is
         # billed where a static asset is not, so a free site must deploy the config
         # that ships no Worker at all.
-        counts_pageviews = await _site_counts_pageviews(workspace_id=workspace_id, site_id=site_id)
+        #
+        # A project bundle never counts: the counter wraps the Worker entry through
+        # wrangler, and a project's multi-module Worker is uploaded as built.
+        counts_pageviews = (
+            False
+            if project_target
+            else await _site_counts_pageviews(workspace_id=workspace_id, site_id=site_id)
+        )
         # VS-2: a site that has never deployed and has no stored Worker name claims a
         # name-based address now, BEFORE the deploy, so the Worker is created under it.
         # Returns the name the row stored BEFORE this call, which is what the guard
@@ -3187,22 +3205,46 @@ async def _deploy_site_doc(
         # AV-1: what the AI-ready files need from the row (owner's training opt-in,
         # the IndexNow key, the canonical host). A key minted here is persisted by the
         # upsert below, so the key file and the stored key never disagree.
-        ai_inputs = await _ai_ready_inputs(
-            workspace_id=workspace_id,
-            site_id=site_id,
-            site_name=site_name,
-            deploy_name=deploy_name,
-        )
-        indexnow_key = ai_inputs.indexnow_key
-        try:
-            url = await deploy_w(
-                site_id,
-                build.project_dir,
-                engine=engine,
-                analytics_entitled=counts_pageviews,
-                worker_name=deploy_name,
-                ai_ready=ai_inputs,
+        # A project bundle skips them: its assets are the author's build, uploaded as is.
+        ai_inputs = (
+            None
+            if project_target
+            else await _ai_ready_inputs(
+                workspace_id=workspace_id,
+                site_id=site_id,
+                site_name=site_name,
+                deploy_name=deploy_name,
             )
+        )
+        indexnow_key = ai_inputs.indexnow_key if ai_inputs is not None else ""
+        try:
+            if project_target:
+                # Same name, workers.dev address, routes and delete as a wrangler
+                # site; only the upload is the HTTP API bundle deploy.
+                cf = cloudflare or _cf_client()
+                await _deploy_paw_bundle(
+                    cf,
+                    script_name=deploy_name,
+                    target=project_target,
+                    workspace_id=workspace_id,
+                    site_id=site_id,
+                    project_dir=build.project_dir,
+                    engine=engine,
+                    is_dynamic=is_dynamic,
+                    d1_database_id=d1_database_id,
+                    source=source,
+                    confirm_destructive=confirm_destructive_migrations,
+                )
+                url = await _account_worker_url(cf, deploy_name)
+            else:
+                url = await deploy_w(
+                    site_id,
+                    build.project_dir,
+                    engine=engine,
+                    analytics_entitled=counts_pageviews,
+                    worker_name=deploy_name,
+                    ai_ready=ai_inputs,
+                )
         except Exception:
             if rename is not None:
                 # Whatever wrangler created under the new name before failing is ours
@@ -3241,7 +3283,7 @@ async def _deploy_site_doc(
         # failed the same check.
         from pocketpaw_ee.sites import analytics_worker
 
-        counter_deployed = any(
+        counter_deployed = project_target is None and any(
             Path(build.project_dir, name).is_file()
             for name in (analytics_worker.ENTRY_FILENAME, analytics_worker.SHIM_FILENAME)
         )
@@ -3251,38 +3293,18 @@ async def _deploy_site_doc(
             # A build that carries paw-build.json (the project engine / base app
             # templates) deploys as a multi-module bundle with static assets. No
             # existing engine emits that file, so their path below is unchanged.
-            # D1 / KV / R2 are created by the provisioner and recorded on the Site
-            # doc, which a project publish has ensured exists by now. A project's
-            # migrations are applied to its D1 after every check, before the upload.
-            _bundle_doc = await _SiteDoc.find_one(
-                {"_id": ObjectId(site_id), "workspace": workspace_id}
-            )
-            _before_upload = None
-            if normalize_engine(engine) == "project" and not is_dynamic:
-                _before_upload = _project_migrator(
-                    cf,
-                    site_id=site_id,
-                    source=source,
-                    confirm_destructive=confirm_destructive_migrations,
-                )
-            await bundle_deploy.deploy_bundle(
+            await _deploy_paw_bundle(
                 cf,
                 script_name=site_id,
-                build_dir=build.project_dir,
-                salt=workspace_id,
-                provisioned=bundle_deploy.ProvisionedResources(d1_database_id=d1_database_id),
-                provision=(
-                    _bundle_provisioner(
-                        _bundle_doc,
-                        cf,
-                        # A dynamic site's D1 was resolved above; anything else gets
-                        # its own real database from the provisioner.
-                        d1_database_id=d1_database_id if is_dynamic else None,
-                    )
-                    if _bundle_doc is not None
-                    else None
-                ),
-                before_upload=_before_upload,
+                target=bundle_deploy.DISPATCH_TARGET,
+                workspace_id=workspace_id,
+                site_id=site_id,
+                project_dir=build.project_dir,
+                engine=engine,
+                is_dynamic=is_dynamic,
+                d1_database_id=d1_database_id,
+                source=source,
+                confirm_destructive=confirm_destructive_migrations,
             )
         else:
             bundle = bundle_reader(build.project_dir)
@@ -3424,6 +3446,77 @@ async def _deploy_site_doc(
     # all still gets its cards' marks.
     _schedule_site_favicon(doc)
     return doc
+
+
+async def _deploy_paw_bundle(
+    cf: Any,
+    *,
+    script_name: str,
+    target: str,
+    workspace_id: str,
+    site_id: str,
+    project_dir: str,
+    engine: str,
+    is_dynamic: bool,
+    d1_database_id: str,
+    source: dict[str, str] | None,
+    confirm_destructive: bool,
+) -> None:
+    """Deploy a ``paw-build.json`` build through ``bundle_deploy`` to ``target``.
+
+    The one bundle path for both targets, so provisioning, binding mapping, secrets
+    and migrations cannot drift between them. D1 / KV / R2 are created by the
+    provisioner and recorded on the Site doc, which a project publish has ensured
+    exists by now. A project's migrations are applied to its D1 after every check,
+    before the upload."""
+    bundle_doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    before_upload = None
+    if normalize_engine(engine) == "project" and not is_dynamic:
+        before_upload = _project_migrator(
+            cf, site_id=site_id, source=source, confirm_destructive=confirm_destructive
+        )
+    await bundle_deploy.deploy_bundle(
+        cf,
+        script_name=script_name,
+        build_dir=project_dir,
+        salt=workspace_id,
+        provisioned=bundle_deploy.ProvisionedResources(d1_database_id=d1_database_id),
+        provision=(
+            _bundle_provisioner(
+                bundle_doc,
+                cf,
+                # A dynamic site's D1 was resolved above; anything else gets its own
+                # real database from the provisioner.
+                d1_database_id=d1_database_id if is_dynamic else None,
+            )
+            if bundle_doc is not None
+            else None
+        ),
+        before_upload=before_upload,
+        target=target,
+    )
+
+
+async def _account_worker_url(cf: Any, name: str) -> str:
+    """Turn on an API-uploaded account Worker's workers.dev address and return it.
+
+    ``https://<name>.<sub>.workers.dev``, the address ``wrangler deploy`` gives a
+    ``workers_dev: true`` site. ``<sub>`` is PAW_CF_WORKERS_SUBDOMAIN when set (the
+    same fallback the wrangler path uses), else the account's, read from the API.
+    ``""`` when the account has no workers.dev subdomain: the Worker is live but only
+    a custom domain can reach it."""
+    from pocketpaw_ee.sites.workers_deploy import _workers_dev_host
+
+    await cf.enable_workers_dev(name)
+    host = _workers_dev_host(name)
+    if not host:
+        subdomain = await cf.workers_dev_subdomain()
+        host = f"{name}.{subdomain}.workers.dev" if subdomain else ""
+    if not host:
+        logger.warning("sites: account has no workers.dev subdomain; %s has no public URL", name)
+        return ""
+    logger.info("sites.workers: deployed project bundle %s -> https://%s", name, host)
+    return f"https://{host}"
 
 
 async def _ai_ready_inputs(

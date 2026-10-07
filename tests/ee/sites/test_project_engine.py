@@ -617,12 +617,21 @@ async def test_publish_deploys_the_stored_manifest(beanie_test_db, monkeypatch, 
     calls: list[dict] = []
 
     async def _deploy_bundle(
-        cf, *, script_name, build_dir, salt, provisioned=None, provision=None, before_upload=None
+        cf,
+        *,
+        script_name,
+        build_dir,
+        salt,
+        provisioned=None,
+        provision=None,
+        before_upload=None,
+        target="dispatch",
     ):
         root = Path(build_dir)
         calls.append(
             {
                 "script_name": script_name,
+                "target": target,
                 "salt": salt,
                 "manifest": json.loads((root / "paw-build.json").read_text()),
                 "has_module": (root / ".paw/worker/index.js").is_file(),
@@ -638,6 +647,15 @@ async def test_publish_deploys_the_stored_manifest(beanie_test_db, monkeypatch, 
     async def _no_workers(*a, **k):
         raise AssertionError("a project must never deploy through wrangler")
 
+    async def _enable(name):
+        enabled.append(name)
+
+    async def _subdomain():
+        return "acct-sub"
+
+    enabled: list[str] = []
+    cf = SimpleNamespace(enable_workers_dev=_enable, workers_dev_subdomain=_subdomain)
+
     doc = await sites_service._deploy_site_doc(
         workspace_id="ws1",
         user_id="u1",
@@ -650,11 +668,20 @@ async def test_publish_deploys_the_stored_manifest(beanie_test_db, monkeypatch, 
         engine="project",
         source=dict(SOURCE),
         pattern="landing",
-        cloudflare=SimpleNamespace(),
+        cloudflare=cf,
         workers_deploy=_no_workers,
     )
     assert len(calls) == 1
-    assert calls[0]["script_name"] == site_id
+    if mode == "wfp":
+        # The WfP namespace, keyed on the bare site id, as before.
+        assert calls[0]["target"] == "dispatch" and calls[0]["script_name"] == site_id
+        assert enabled == [] and doc.deploy_target == "wfp"
+    else:
+        # Workers mode: an account-level Worker under the site's workers-mode name.
+        name = calls[0]["script_name"]
+        assert calls[0]["target"] == "account" and name == doc.worker_name
+        assert enabled == [name] and doc.deploy_target == "workers"
+        assert doc.url == f"https://{name}.acct-sub.workers.dev"
     assert calls[0]["salt"] == "ws1"
     assert calls[0]["manifest"]["workerEntry"] == ".paw/worker/index.js"
     assert calls[0]["has_module"] and calls[0]["headers_kept"]

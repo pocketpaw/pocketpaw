@@ -20,8 +20,8 @@
   {
     "label": "the publish path stops passing the resolved entitlement — the deploy writer's counting default wins and the gate is dead code",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "                analytics_entitled=counts_pageviews,\n                worker_name=deploy_name,\n",
-    "replace": "                worker_name=deploy_name,\n",
+    "find": "                    analytics_entitled=counts_pageviews,\n                    worker_name=deploy_name,\n",
+    "replace": "                    worker_name=deploy_name,\n",
     "tests": [
       "tests/ee/sites/test_sites_analytics_gate.py"
     ]
