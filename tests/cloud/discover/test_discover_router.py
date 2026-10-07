@@ -1,22 +1,15 @@
-# tests/cloud/discover/test_discover_router.py — the /discover HTTP surface (DS-1 part 2).
+# tests/cloud/discover/test_discover_router.py — the /discover HTTP surface.
 #
-# Created 2026-10-01 (feat/discover-index). Pins: anonymous GET /discover and
-# GET /discover/{id} serve exactly the public allow-list, never a hidden listing;
-# the query params filter and page (a bad cursor is a CloudError 4xx, not a 500);
-# the per-IP 60/min limit; POST /use and /report need sign-in, use counts a remix,
-# and three distinct reporters drop the listing from the anonymous index.
+# Pins: anonymous GET /discover and GET /discover/{id} serve exactly the public
+# allow-list, never a hidden listing; the query params filter and page (a bad
+# cursor is a CloudError 4xx, not a 500); the per-IP 60/min limit; POST /use and
+# /report need sign-in, use counts a remix, three distinct reporters drop the
+# listing from the anonymous index, and the 11th report in an hour is 429
+# ``discover.report_rate_limited``. Slug lookups are in test_discover_slug.py.
 #
 # Auth runs through the real ``current_user_id`` / ``current_workspace_id``; only
 # ``current_active_user`` is swapped for a toggle (the meetings router-test shape).
-#
-# Updated 2026-10-02 (feat/discover-index, hardening): POST /report is limited to
-# 10 an hour per user (the 11th is 429 ``discover.report_rate_limited``).
-#
-# Updated 2026-10-02 (feat/discover-source-contract): seeds through
-# ``sync_source("site_template", id)`` (was ``sync_site_template``).
-#
-# Updated 2026-10-02 (feat/studio-templates): the public allow-list gains
-# ``media_kind`` / ``media_url``.
+# Listings are seeded through ``sync_source("site_template", id)``.
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -37,6 +30,7 @@ WS, OTHER_WS, OWNER = "w1", "w2", "u1"
 URL = "/api/v1/discover"
 PUBLIC_KEYS = {
     "id",
+    "slug",
     "source",
     "kind",
     "title",
@@ -147,6 +141,15 @@ async def test_anonymous_list_serves_only_public_unhidden_allow_list(client) -> 
     assert set(body) == {"items", "next_cursor"}
     assert [item["id"] for item in body["items"]] == [shown]
     assert set(body["items"][0]) == PUBLIC_KEYS
+
+
+async def test_anonymous_get_one_by_slug(client) -> None:
+    listing_id = await _upsert("t1", title="Café Crème")
+    by_id = await client.get(f"{URL}/{listing_id}")
+    assert by_id.status_code == 200 and by_id.json()["slug"] == "cafe-creme"
+    by_slug = await client.get(f"{URL}/cafe-creme")
+    assert by_slug.status_code == 200 and by_slug.json() == by_id.json()
+    assert (await client.get(f"{URL}/no-such-slug")).status_code == 404
 
 
 async def test_anonymous_get_one_and_hidden_is_404(client) -> None:

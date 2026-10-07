@@ -1,19 +1,17 @@
 # Discover — request / response schemas.
 #
-# Created 2026-10-01 (feat/discover-index). ``PublicListingResponse`` is an
-# allow-list served to anonymous viewers: exactly ``id, source, kind, title,
-# description, audiences, featured, preview_image_url, live_url, remix_count,
-# created_at``. Never ``workspace``, ``owner``, ``reports``, ``hidden`` or
-# ``source_id``; ``extra="forbid"`` makes adding one by accident a construction
-# error rather than a leak.
-# Updated 2026-10-01 (feat/discover-index): ``UseListingRequest`` (optional
-# ``name``) for ``POST /discover/{id}/use``.
-# Updated 2026-10-02 (feat/discover-moderation): staff-only
+# ``PublicListingResponse`` is an allow-list served to anonymous viewers: exactly
+# ``id, slug, source, kind, title, description, audiences, featured,
+# preview_image_url, live_url, remix_count, created_at, media_kind, media_url``.
+# Never ``workspace``, ``owner``, ``reports``, ``hidden`` or ``source_id``;
+# ``extra="forbid"`` makes adding one by accident a construction error rather
+# than a leak. ``slug`` is the stable URL handle (see the listing model); the
+# public item route takes it in place of the id.
+#
+# ``UpsertListingRequest`` is what a source sync writes; ``extra="forbid"`` so a
+# source can't smuggle a Discover-owned field. The staff-only
 # ``ListStaffListingsRequest`` / ``StaffListingResponse`` / ``StaffListingPage``
-# for the platform moderation routes. Never served on a public route.
-# Updated 2026-10-02 (feat/studio-templates): ``media_kind`` (image | video |
-# audio) and ``media_url`` (absolute) join ``UpsertListingRequest`` and the
-# public allow-list; ``None`` for site templates.
+# serve the platform moderation routes and are never served on a public route.
 
 from __future__ import annotations
 
@@ -89,6 +87,9 @@ class UpsertListingRequest(BaseModel):
     live_url: str | None = None
     media_kind: Literal["image", "video", "audio"] | None = None
     media_url: str | None = None
+    #: Optional handle the source proposes; slugified like ``title`` and only
+    #: used when the listing has no slug yet (slugs never change afterwards).
+    slug: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +103,7 @@ class PublicListingResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    slug: str
     source: str
     kind: str
     title: str
@@ -134,6 +136,7 @@ class StaffListingResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    slug: str
     source: str
     source_id: str
     workspace_id: str
