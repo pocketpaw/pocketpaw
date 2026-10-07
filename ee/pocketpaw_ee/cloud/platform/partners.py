@@ -3,7 +3,7 @@ application queue.
 
 ``router`` (``/platform/workspaces/{id}/partner``) turns a workspace into a
 partner; ``applications_router`` (``/platform/partners/applications``) lists and
-reviews the public ``POST /partners/apply`` submissions through
+reviews the public ``POST /pros/apply`` submissions through
 ``partners.service_admin`` (never the Beanie doc; the PartnerApplications
 import-linter contract binds this module). Both are modelled on
 ``platform/entitlements.py``: OPERATOR rung via ``require_platform``

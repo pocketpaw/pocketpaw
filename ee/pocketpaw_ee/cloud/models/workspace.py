@@ -253,7 +253,7 @@ class PartnerProfile(BaseModel):
     joined_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # When the monthly tier sweep last reviewed (and maybe lowered) ``tier``.
     tier_reviewed_at: datetime | None = None
-    # Public profile (PW-7). Shown on /partners/directory and /partners/{slug}
+    # Public profile (PW-7). Shown on /pros/directory and /pros/{slug} (Find a Pro)
     # only while ``public`` and ``status == "active"``.
     slug: PartnerSlug | None = None
     display_name: str | None = Field(default=None, min_length=1, max_length=80)

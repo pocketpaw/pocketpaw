@@ -26,24 +26,11 @@ SOURCE_PAW_PARTNERS = "paw-partners"
 # Public profile (PW-7).
 PartnerService = Literal["print", "design", "web", "marketing", "photo"]
 PARTNER_SLUG_PATTERN = r"^[a-z0-9-]{3,60}$"
-# Fixed segments under /partners on the API and on the public site
-# (/partners/find): a slug equal to one would be shadowed by, or shadow, a route.
+# Fixed segments under /pros on the API (directory, apply, requests) and on the
+# public site (/pros/find, /pros/join, /pros/request, /pros/status): a slug equal
+# to one would be shadowed by, or shadow, a route.
 PARTNER_SLUG_RESERVED = frozenset(
-    {
-        "me",
-        "clients",
-        "offers",
-        "sell",
-        "pay-link",
-        "sites",
-        "summary",
-        "earnings",
-        "rewards",
-        "directory",
-        "apply",
-        "profile",
-        "find",
-    }
+    {"directory", "apply", "requests", "find", "join", "request", "status"}
 )
 
 

@@ -26,7 +26,7 @@ def _unset_secret(monkeypatch):
 @pytest.mark.asyncio
 async def test_dev_skips_with_a_warning(caplog) -> None:
     with caplog.at_level("WARNING"):
-        await turnstile.verify_turnstile("tok", "1.2.3.4", code="partners.turnstile_failed")
+        await turnstile.verify_turnstile("tok", "1.2.3.4", code="pros.turnstile_failed")
     assert "unset, skipping" in caplog.text
 
 
@@ -38,8 +38,8 @@ async def test_production_refuses(monkeypatch, env) -> None:
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     with pytest.raises(BadRequest) as exc:
-        await turnstile.verify_turnstile("tok", "1.2.3.4", code="partners.turnstile_failed")
-    assert exc.value.code == "partners.turnstile_failed"
+        await turnstile.verify_turnstile("tok", "1.2.3.4", code="pros.turnstile_failed")
+    assert exc.value.code == "pros.turnstile_failed"
 
 
 @pytest.mark.asyncio

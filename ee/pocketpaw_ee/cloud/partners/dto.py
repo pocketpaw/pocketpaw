@@ -2,8 +2,9 @@
 #
 # Requests and responses are separate classes (ee/cloud rule 4). The partner's
 # own views (``PartnerMeOut`` and the client / offer / sale / earnings shapes)
-# are served only on signed-in routes. ``PartnerPublicOut`` is the ONE shape an
-# anonymous caller ever sees (directory and ``/partners/{slug}``): an allow-list
+# are served only on signed-in routes. The public Find a Pro shapes are named
+# ``Pro*`` (strangers see "Pro"): ``ProPublicOut`` is the ONE shape an anonymous
+# caller ever sees (``/pros/directory`` and ``/pros/{slug}``): an allow-list
 # with ``extra="forbid"``, never ``footer_name``, ``billing_country``,
 # ``founding`` or ``status``. The operator write body lives in
 # ``cloud/platform/partners.py``. Money is ISO-4217 minor units; GSTIN is
@@ -118,8 +119,8 @@ class PartnerPublicProfileIn(BaseModel):
     public: bool | None = None
 
 
-class PartnerPublicOut(BaseModel):
-    """One partner as anyone sees it. An allow-list: never ``footer_name``,
+class ProPublicOut(BaseModel):
+    """One Pro (an active, public partner) as anyone sees it. An allow-list: never ``footer_name``,
     ``billing_country``, ``founding`` or ``status``."""
 
     model_config = ConfigDict(extra="forbid")
@@ -138,18 +139,18 @@ class PartnerPublicOut(BaseModel):
     sites: list[PublicListingResponse]
 
 
-class PartnerDirectoryPage(BaseModel):
-    """A page of public partners, newest first; ``next_cursor`` is an opaque token
+class ProDirectoryPage(BaseModel):
+    """A page of public Pros, newest first; ``next_cursor`` is an opaque token
     (never a workspace id) to pass back as ``cursor``, None on the last page."""
 
     model_config = ConfigDict(extra="forbid")
 
-    items: list[PartnerPublicOut]
+    items: list[ProPublicOut]
     next_cursor: str | None = None
 
 
-class PartnerApplyIn(BaseModel):
-    """POST /partners/apply (public). Stored as one ``PartnerApplication`` for
+class ProApplyIn(BaseModel):
+    """POST /pros/apply (public). Stored as one ``PartnerApplication`` for
     operators to review; ``turnstile_token`` is checked first (``_core.turnstile``)."""
 
     model_config = ConfigDict(extra="forbid")

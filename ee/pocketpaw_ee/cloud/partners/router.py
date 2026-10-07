@@ -1,19 +1,23 @@
 # ee/pocketpaw_ee/cloud/partners/router.py — thin HTTP layer for Paw Partners.
 #
-# Tenant routes (guarded with ``require_action_any_workspace`` exactly like
-# ``cloud/leads/router.py``): /partners/me, /partners/me/profile (PATCH),
+# Two routers. ``router`` (/partners) is the signed-in partner's own surface,
+# guarded with ``require_action_any_workspace`` exactly like
+# ``cloud/leads/router.py``: /partners/me, /partners/me/profile (PATCH),
 # /partners/clients[/{client_id}], /offers, /sites, /summary, /earnings,
 # /rewards (fabric.read / fabric.write); POST /sell and /pay-link need
 # ``sites.buy_plan`` because they spend the workspace wallet. The operator
 # switch is ``cloud/platform/partners.py``.
 #
-# Public routes, no sign-in, per-IP rate limited (``_core.rate_limit``):
-# GET /partners/directory, POST /partners/apply, GET /partners/{slug}. The slug
-# catch-all is registered LAST so every fixed segment wins; the reserved-slug
-# list in ``partners.domain`` keeps a partner from claiming one. Public responses
-# go only through ``PartnerPublicOut``. The dashboard auth middleware lets
-# /api/v1/* through and the EE auth bridge stamps a user only when a token is
-# present, so no exemption entry is needed (same as /discover).
+# ``pros_router`` (/pros) is the public Find a Pro API: strangers see "Pro",
+# code and operators see "partner". No sign-in, per-IP rate limited
+# (``_core.rate_limit``): GET /pros/directory, POST /pros/apply, GET
+# /pros/{slug}. The slug catch-all is registered LAST so every fixed segment
+# wins; the reserved-slug list in ``partners.domain`` keeps a partner from
+# claiming one. Public responses go only through ``ProPublicOut`` and public
+# error codes are ``pros.*``. The dashboard auth middleware lets /api/v1/*
+# through and the EE auth bridge stamps a user only when a token is present, so
+# no exemption entry is needed (same as /discover). Both routers are mounted
+# in ``cloud/__init__.py``.
 
 from __future__ import annotations
 
@@ -31,26 +35,27 @@ from pocketpaw_ee.cloud._core.rate_limit import (
 from pocketpaw_ee.cloud.partners import service, service_admin
 from pocketpaw_ee.cloud.partners.domain import PartnerService
 from pocketpaw_ee.cloud.partners.dto import (
-    PartnerApplyIn,
     PartnerClientCreateRequest,
     PartnerClientOut,
     PartnerClientUpdateRequest,
-    PartnerDirectoryPage,
     PartnerEarningsMonthOut,
     PartnerMeOut,
     PartnerOfferOut,
     PartnerPayLinkOut,
     PartnerPayLinkRequest,
-    PartnerPublicOut,
     PartnerPublicProfileIn,
     PartnerRewardOut,
     PartnerSaleOut,
     PartnerSellRequest,
     PartnerSiteOut,
     PartnerSummaryOut,
+    ProApplyIn,
+    ProDirectoryPage,
+    ProPublicOut,
 )
 
 router = APIRouter(prefix="/partners", tags=["partners"])
+pros_router = APIRouter(prefix="/pros", tags=["pros"])
 
 Ctx = Annotated[RequestContext, Depends(request_context)]
 _READ = [Depends(require_action_any_workspace("fabric.read"))]
@@ -138,31 +143,31 @@ async def get_rewards(ctx: Ctx) -> list[PartnerRewardOut]:
 # ---------------------------------------------------------------- public (no sign-in)
 
 
-@router.get("/directory", response_model=PartnerDirectoryPage, dependencies=_PUBLIC)
+@pros_router.get("/directory", response_model=ProDirectoryPage, dependencies=_PUBLIC)
 async def directory(
     city: Annotated[str | None, Query(max_length=80)] = None,
     service_: Annotated[PartnerService | None, Query(alias="service")] = None,
     cursor: Annotated[str | None, Query(max_length=160)] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 24,
-) -> PartnerDirectoryPage:
-    """PUBLIC. Active partners who opted in, newest first; ``cursor`` is the opaque
-    ``next_cursor`` of the previous page; 429 ``partners.rate_limited`` past 60
+) -> ProDirectoryPage:
+    """PUBLIC. Active Pros who opted in, newest first; ``cursor`` is the opaque
+    ``next_cursor`` of the previous page; 429 ``pros.rate_limited`` past 60
     reads a minute per IP."""
     return await service_admin.list_directory(
         city=city, service=service_, cursor=cursor, limit=limit
     )
 
 
-@router.post("/apply", status_code=204, dependencies=[Depends(rate_limit_partner_apply)])
-async def apply(body: PartnerApplyIn, request: Request) -> Response:
-    """PUBLIC. Apply to become a partner: one proposal for the platform. 400
-    ``partners.turnstile_failed``; 429 ``partners.apply_rate_limited`` past 5 an hour."""
+@pros_router.post("/apply", status_code=204, dependencies=[Depends(rate_limit_partner_apply)])
+async def apply(body: ProApplyIn, request: Request) -> Response:
+    """PUBLIC. Apply to become a Pro: one application for the operators. 400
+    ``pros.turnstile_failed``; 429 ``pros.apply_rate_limited`` past 5 an hour."""
     await service_admin.apply(body, remote_ip=client_ip(request, trusted_header_ok=True))
     return Response(status_code=204)
 
 
-# Registered LAST: every fixed /partners/<segment> above wins over the slug.
-@router.get("/{slug}", response_model=PartnerPublicOut, dependencies=_PUBLIC)
-async def get_public(slug: str) -> PartnerPublicOut:
-    """PUBLIC. One active, opted-in partner by slug; 404 otherwise."""
+# Registered LAST: every fixed /pros/<segment> above wins over the slug.
+@pros_router.get("/{slug}", response_model=ProPublicOut, dependencies=_PUBLIC)
+async def get_public(slug: str) -> ProPublicOut:
+    """PUBLIC. One active, opted-in Pro by slug; 404 ``pro.not_found`` otherwise."""
     return await service_admin.get_public(slug)

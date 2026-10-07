@@ -1,16 +1,18 @@
 # ee/pocketpaw_ee/cloud/partners/service_admin.py — public, cross-tenant partner reads
 # and the public application.
 #
-# Nothing here has a caller workspace: the directory and ``/partners/{slug}``
-# are read before sign-in, and ``apply`` is filed by someone who is not a tenant
+# Nothing here has a caller workspace: the Find a Pro directory and
+# ``/pros/{slug}`` are read before sign-in, and ``apply`` is filed by someone who is not a tenant
 # yet. That is why these live in ``service_admin`` and not ``service``; every
 # function carries ``# admin-cross-tenant: <reason>``.
 #
 # Invariants a reader must not break:
+#   * Public error codes are ``pros.*`` / ``pro.not_found`` (strangers see
+#     "Pro"); the operator queue keeps ``partners.*``.
 #   * Every read filters ``partner.status == "active" AND partner.public is True
 #     AND partner.slug is a string`` (``_PUBLIC``). An applied, suspended,
 #     opted-out or slug-less partner is NotFound.
-#   * The wire is ``_public`` -> ``PartnerPublicOut`` (an allow-list). The
+#   * The wire is ``_public`` -> ``ProPublicOut`` (an allow-list). The
 #     ``footer_name``, ``billing_country``, ``founding`` and ``status`` stop here.
 #   * A partner's sites are its public Discover listings, read through
 #     ``discover.service_admin.list_public_for_workspaces`` (the newest
@@ -46,9 +48,9 @@ from pocketpaw_ee.cloud.partners.domain import PARTNER_SLUG_PATTERN
 from pocketpaw_ee.cloud.partners.dto import (
     PartnerApplicationOut,
     PartnerApplicationPage,
-    PartnerApplyIn,
-    PartnerDirectoryPage,
-    PartnerPublicOut,
+    ProApplyIn,
+    ProDirectoryPage,
+    ProPublicOut,
 )
 
 # Applications accepted per UTC day, all addresses together, so a distributed
@@ -69,10 +71,10 @@ _PUBLIC: dict[str, Any] = {
 }
 
 
-def _public(ws: _WorkspaceDoc, sites: list[dict]) -> PartnerPublicOut:
+def _public(ws: _WorkspaceDoc, sites: list[dict]) -> ProPublicOut:
     p = ws.partner
     assert p is not None  # _PUBLIC matched
-    return PartnerPublicOut(
+    return ProPublicOut(
         slug=p.slug or "",
         display_name=p.display_name or "",
         city=p.city,
@@ -86,7 +88,7 @@ def _public(ws: _WorkspaceDoc, sites: list[dict]) -> PartnerPublicOut:
     )
 
 
-async def _with_sites(rows: list[_WorkspaceDoc]) -> list[PartnerPublicOut]:
+async def _with_sites(rows: list[_WorkspaceDoc]) -> list[ProPublicOut]:
     ids = [str(r.id) for r in rows]
     sites = await discover_admin.list_public_for_workspaces(ids, per_workspace=SITES_PER_PARTNER)
     return [_public(r, sites.get(str(r.id), [])) for r in rows]
@@ -114,9 +116,9 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
         micros, slug = raw.split("|", 1)
         joined = _EPOCH + timedelta(microseconds=int(micros))
     except (ValueError, UnicodeDecodeError):
-        raise ValidationError("partners.bad_cursor", "Invalid cursor") from None
+        raise ValidationError("pros.bad_cursor", "Invalid cursor") from None
     if not re.fullmatch(PARTNER_SLUG_PATTERN, slug):
-        raise ValidationError("partners.bad_cursor", "Invalid cursor")
+        raise ValidationError("pros.bad_cursor", "Invalid cursor")
     return {
         "$or": [
             {"partner.joined_at": {"$lt": joined}},
@@ -131,7 +133,7 @@ async def list_directory(
     service: str | None = None,
     cursor: str | None = None,
     limit: int = 24,
-) -> PartnerDirectoryPage:
+) -> ProDirectoryPage:
     """A page of public active partners, newest first. ``city`` is a
     case-insensitive exact match; ``service`` one of the partner's services;
     ``cursor`` an opaque ``next_cursor`` from the previous page."""
@@ -148,15 +150,15 @@ async def list_directory(
     # index when the directory outgrows a collection scan.
     rows = await _WorkspaceDoc.find(query).sort(_DIRECTORY_SORT).limit(limit + 1).to_list()
     next_cursor = _encode_cursor(rows[limit - 1]) if len(rows) > limit else None
-    return PartnerDirectoryPage(items=await _with_sites(rows[:limit]), next_cursor=next_cursor)
+    return ProDirectoryPage(items=await _with_sites(rows[:limit]), next_cursor=next_cursor)
 
 
-async def get_public(slug: str) -> PartnerPublicOut:
-    """One public active partner by slug, else NotFound."""
+async def get_public(slug: str) -> ProPublicOut:
+    """One public active partner by slug, else NotFound (``pro.not_found``)."""
     # admin-cross-tenant: a public profile is readable by anyone.
     ws = await _WorkspaceDoc.find_one({**_PUBLIC, "partner.slug": slug})
     if ws is None:
-        raise NotFound("partner", slug)
+        raise NotFound("pro", slug)
     return (await _with_sites([ws]))[0]
 
 
@@ -173,19 +175,19 @@ async def _applications_today() -> int:
 async def apply(payload: Any, *, remote_ip: str | None = None) -> str:
     """Store a partner application for operators to review; returns its id.
 
-    Order: body validation, the global daily cap (429 ``partners.apply_daily_limit``),
-    Turnstile (400 ``partners.turnstile_failed``), then one insert and
+    Order: body validation, the global daily cap (429 ``pros.apply_daily_limit``),
+    Turnstile (400 ``pros.turnstile_failed``), then one insert and
     ``PartnerApplied`` (id and country only, never the contact details).
     """
     # admin-cross-tenant: the applicant has no workspace; the row is the
     # platform's review queue, not a tenant's.
-    body = PartnerApplyIn.model_validate(payload)
+    body = ProApplyIn.model_validate(payload)
     if await _applications_today() >= APPLY_DAILY_CAP:
         raise RateLimited(
-            "partners.apply_daily_limit",
+            "pros.apply_daily_limit",
             "We're not taking more applications today - please try again tomorrow.",
         )
-    await verify_turnstile(body.turnstile_token, remote_ip, code="partners.turnstile_failed")
+    await verify_turnstile(body.turnstile_token, remote_ip, code="pros.turnstile_failed")
     doc = PartnerApplication(
         name=body.name,
         email=str(body.email),

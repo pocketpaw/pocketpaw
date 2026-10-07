@@ -1,6 +1,6 @@
 # PartnerApplication Beanie document — one public "join Paw Partners" form submission.
 #
-# Filed by POST /partners/apply (``partners.service_admin.apply``) after Turnstile
+# Filed by POST /pros/apply (``partners.service_admin.apply``) after Turnstile
 # passes; read and reviewed by operators through GET / PATCH
 # /platform/partners/applications (``cloud/platform/partners.py``, via the same
 # service_admin). It belongs to the platform, not to any workspace: the applicant

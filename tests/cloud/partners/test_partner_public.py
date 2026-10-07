@@ -2,13 +2,14 @@
 #
 # Locks the contract: a partner edits its own public profile (round-trip through
 # /me), slug rules (pattern, reserved words, uniqueness, public needs slug and
-# name), an operator PUT keeps the partner's public fields, the directory and
-# /partners/{slug} show only active + public partners and never a private field,
-# the fixed /partners segments still resolve with the slug catch-all in place,
-# apply stores exactly one PartnerApplication (none when Turnstile refuses or the
+# name), an operator PUT keeps the partner's public fields, the Find a Pro API
+# (/pros/directory, /pros/{slug}) shows only active + public partners and never a
+# private field, the old public /partners paths are gone, the fixed /partners
+# and /pros segments still resolve with the slug catch-all in place, apply
+# stores exactly one PartnerApplication (none when Turnstile refuses or the
 # global daily cap is spent), operators list and review the queue through
 # /platform/partners/applications (support cannot), the slug unique-index race
-# is a 409, and the two public buckets return 429.
+# is a 409, and the two public buckets return 429 with ``pros.*`` codes.
 
 from __future__ import annotations
 
@@ -31,13 +32,14 @@ from pocketpaw_ee.cloud.models.workspace import PartnerProfile
 from pocketpaw_ee.cloud.models.workspace import Workspace as WorkspaceDoc
 from pocketpaw_ee.cloud.partners import service, service_admin
 from pocketpaw_ee.cloud.partners.domain import PARTNER_SLUG_RESERVED
-from pocketpaw_ee.cloud.partners.dto import PartnerPublicOut
+from pocketpaw_ee.cloud.partners.dto import ProPublicOut
 from pydantic import ValidationError as PydanticValidationError
 from pymongo.errors import DuplicateKeyError
 
 pytestmark = [pytest.mark.usefixtures("mongo_db"), pytest.mark.asyncio]
 
 URL = "/api/v1/partners"
+PROS = "/api/v1/pros"
 PRIVATE = {"footer_name", "billing_country", "founding", "status"}
 PROFILE = {
     "slug": "ravi-prints",
@@ -104,12 +106,12 @@ def _fresh_buckets():
 
 @pytest_asyncio.fixture
 async def http():
-    """The real partners router: anonymous unless ``act_as`` is called."""
+    """The real partners and pros routers: anonymous unless ``act_as`` is called."""
     from pocketpaw_ee.cloud._core.context import request_context
     from pocketpaw_ee.cloud._core.deps import current_workspace_id
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud.auth import current_active_user
-    from pocketpaw_ee.cloud.partners.router import router
+    from pocketpaw_ee.cloud.partners.router import pros_router, router
 
     state = SimpleNamespace(user=None, wid=None)
 
@@ -129,6 +131,7 @@ async def http():
     app = FastAPI()
     add_error_handler(app)
     app.include_router(router, prefix="/api/v1")
+    app.include_router(pros_router, prefix="/api/v1")
     app.dependency_overrides[current_active_user] = _user
     app.dependency_overrides[current_workspace_id] = lambda: state.wid
     app.dependency_overrides[request_context] = lambda: _ctx(state.wid)
@@ -188,8 +191,16 @@ async def test_slug_pattern(http, slug) -> None:
 
 
 async def test_route_segments_stay_reserved() -> None:
-    # API fixed segments plus the public site's /partners/find page.
-    assert {"directory", "apply", "find"} <= PARTNER_SLUG_RESERVED
+    # /pros fixed segments on the API plus the public site's /pros/* pages.
+    assert PARTNER_SLUG_RESERVED == {
+        "directory",
+        "apply",
+        "requests",
+        "find",
+        "join",
+        "request",
+        "status",
+    }
 
 
 @pytest.mark.parametrize("slug", sorted(PARTNER_SLUG_RESERVED))
@@ -197,8 +208,7 @@ async def test_reserved_slugs_are_refused(slug) -> None:
     ws = await _workspace("acme", "active")
     with pytest.raises(PydanticValidationError) as exc:  # the wire DTO: 422 at the route
         await service.update_public_profile(_ctx(str(ws.id)), {"slug": slug})
-    # "me" already fails the 3-char minimum; every other reserved word is rejected by name.
-    assert slug == "me" or "reserved" in str(exc.value)
+    assert "reserved" in str(exc.value)
     # The storage model refuses them too, so no other writer can slip one in.
     with pytest.raises(PydanticValidationError):
         PartnerProfile(status="active", footer_name="x", slug=slug)
@@ -232,7 +242,7 @@ async def test_blank_names_are_422_and_names_are_stripped(http) -> None:
     assert r.json()["services"] == ["web"]
     assert (await http.patch(f"{URL}/me/profile", json={"services": []})).json()["services"] == []
     blank = {**APPLY, "name": "  "}
-    assert (await http.post(f"{URL}/apply", json=blank)).status_code == 422
+    assert (await http.post(f"{PROS}/apply", json=blank)).status_code == 422
 
 
 async def test_deleting_the_workspace_releases_its_slug(monkeypatch) -> None:
@@ -318,20 +328,21 @@ async def test_directory_shows_only_active_public_partners(http) -> None:
     await _public_partner("applied-one", status="applied")
     await _workspace("plain")
 
-    r = await http.get(f"{URL}/directory")
+    r = await http.get(f"{PROS}/directory")
     assert r.status_code == 200, r.text
     body = r.json()
     assert [p["slug"] for p in body["items"]] == ["ravi-prints"]
     assert body["next_cursor"] is None
     card = body["items"][0]
-    assert set(card) == set(PartnerPublicOut.model_fields)
+    assert set(card) == set(ProPublicOut.model_fields)
     assert not (set(card) & PRIVATE)
     assert card["display_name"] == "Ravi-Prints" and card["tier"] == "bronze"
     assert card["sites"] == []
 
     for slug in ("opted-out", "suspended-one", "applied-one", "nope"):
-        assert (await http.get(f"{URL}/{slug}")).status_code == 404, slug
-    one = await http.get(f"{URL}/ravi-prints")
+        r = await http.get(f"{PROS}/{slug}")
+        assert r.status_code == 404 and r.json()["error"]["code"] == "pro.not_found", slug
+    one = await http.get(f"{PROS}/ravi-prints")
     assert one.status_code == 200 and one.json()["slug"] == "ravi-prints"
     assert not (set(one.json()) & PRIVATE)
     assert str(shown.id) not in one.text
@@ -343,27 +354,27 @@ async def test_directory_filters_and_pages(http) -> None:
     c = await _public_partner("c-photo", city="Mumbai", services=["photo", "web"])
 
     slugs = lambda r: [p["slug"] for p in r.json()["items"]]  # noqa: E731
-    assert slugs(await http.get(f"{URL}/directory", params={"city": "PUNE"})) == [
+    assert slugs(await http.get(f"{PROS}/directory", params={"city": "PUNE"})) == [
         "b-web",
         "a-prints",
     ]
-    assert slugs(await http.get(f"{URL}/directory", params={"service": "web"})) == [
+    assert slugs(await http.get(f"{PROS}/directory", params={"service": "web"})) == [
         "c-photo",
         "b-web",
     ]
-    assert (await http.get(f"{URL}/directory", params={"service": "tattoo"})).status_code == 422
+    assert (await http.get(f"{PROS}/directory", params={"service": "tattoo"})).status_code == 422
 
-    first = await http.get(f"{URL}/directory", params={"limit": 2})
+    first = await http.get(f"{PROS}/directory", params={"limit": 2})
     cursor = first.json()["next_cursor"]
     assert slugs(first) == ["c-photo", "b-web"] and cursor
     # Opaque: no workspace id of any partner on the page is in it.
     for ws in (a, b, c):
         assert str(ws.id) not in cursor and str(ws.id) not in first.text
-    second = await http.get(f"{URL}/directory", params={"limit": 2, "cursor": cursor})
+    second = await http.get(f"{PROS}/directory", params={"limit": 2, "cursor": cursor})
     assert slugs(second) == ["a-prints"] and second.json()["next_cursor"] is None
     for junk in ("junk", str(b.id), "MTIzfA", "MXxub3Qgc2x1Zw"):  # "123|", "1|not slug"
-        r = await http.get(f"{URL}/directory", params={"cursor": junk})
-        assert r.status_code == 422 and r.json()["error"]["code"] == "partners.bad_cursor", junk
+        r = await http.get(f"{PROS}/directory", params={"cursor": junk})
+        assert r.status_code == 422 and r.json()["error"]["code"] == "pros.bad_cursor", junk
 
 
 async def test_directory_pages_through_a_joined_at_tie(http) -> None:
@@ -375,7 +386,7 @@ async def test_directory_pages_through_a_joined_at_tie(http) -> None:
     cursor = None
     while True:
         params = {"limit": 1, **({"cursor": cursor} if cursor else {})}
-        page = (await http.get(f"{URL}/directory", params=params)).json()
+        page = (await http.get(f"{PROS}/directory", params=params)).json()
         seen += [p["slug"] for p in page["items"]]
         cursor = page["next_cursor"]
         if cursor is None:
@@ -403,10 +414,10 @@ async def test_public_profile_lists_the_partners_discover_sites(http) -> None:
         {"workspace": str(other.id), "owner": "u1", "kind": "site", "title": "Theirs"},
     )
 
-    sites = (await http.get(f"{URL}/ravi-prints")).json()["sites"]
+    sites = (await http.get(f"{PROS}/ravi-prints")).json()["sites"]
     assert [s["id"] for s in sites] == [listed]
     assert sites[0]["title"] == "Bakery" and "workspace" not in sites[0]
-    page = {p["slug"]: p["sites"] for p in (await http.get(f"{URL}/directory")).json()["items"]}
+    page = {p["slug"]: p["sites"] for p in (await http.get(f"{PROS}/directory")).json()["items"]}
     assert [s["title"] for s in page["ravi-prints"]] == ["Bakery"]
     assert [s["title"] for s in page["other-one"]] == ["Theirs"]
 
@@ -421,7 +432,7 @@ async def test_public_profile_shows_only_the_newest_sites(http) -> None:
             f"t{i:02d}",
             {"workspace": str(ws.id), "owner": "u1", "kind": "site", "title": f"Site {i:02d}"},
         )
-    for path in (f"{URL}/ravi-prints", f"{URL}/directory"):
+    for path in (f"{PROS}/ravi-prints", f"{PROS}/directory"):
         body = (await http.get(path)).json()
         sites = body["sites"] if "sites" in body else body["items"][0]["sites"]
         assert len(sites) == cap == 12
@@ -430,20 +441,30 @@ async def test_public_profile_shows_only_the_newest_sites(http) -> None:
 
 async def test_fixed_segments_win_over_the_slug_catch_all(http) -> None:
     await _public_partner("ravi-prints")
-    # Anonymous: the fixed routes answer 401 (auth), not 404 from the catch-all.
+    # Anonymous: the fixed routes answer 401 (auth), not 404 from a catch-all.
     for seg in ("me", "clients", "offers", "sites", "summary", "earnings", "rewards"):
         assert (await http.get(f"{URL}/{seg}")).status_code == 401, seg
-    assert (await http.get(f"{URL}/directory")).status_code == 200
+    assert (await http.get(f"{PROS}/directory")).status_code == 200
+    assert (await http.get(f"{PROS}/ravi-prints")).status_code == 200
     ws = await _workspace("acme", "active")
     http.act_as(str(ws.id))
     assert (await http.get(f"{URL}/me")).json()["status"] == "active"
+
+
+async def test_old_public_partner_paths_are_gone(http) -> None:
+    """The public API moved to /pros: nothing anonymous answers under /partners."""
+    await _public_partner("ravi-prints")
+    assert (await http.get(f"{URL}/directory")).status_code == 404
+    assert (await http.get(f"{URL}/ravi-prints")).status_code == 404
+    assert (await http.post(f"{URL}/apply", json=APPLY)).status_code == 404
+    assert await _applications() == []
 
 
 # ---------------------------------------------------------------- apply
 
 
 async def test_apply_stores_exactly_one_application(http) -> None:
-    r = await http.post(f"{URL}/apply", json=APPLY, headers={"x-forwarded-for": "203.0.113.7"})
+    r = await http.post(f"{PROS}/apply", json=APPLY, headers={"x-forwarded-for": "203.0.113.7"})
     assert r.status_code == 204, r.text
     rows = await _applications()
     assert len(rows) == 1
@@ -463,8 +484,8 @@ async def test_apply_stores_exactly_one_application(http) -> None:
     assert await WorkspaceDoc.count() == 0
 
     bad = {**APPLY, "email": "not-an-email"}
-    assert (await http.post(f"{URL}/apply", json=bad)).status_code == 422
-    assert (await http.post(f"{URL}/apply", json={**APPLY, "services": []})).status_code == 422
+    assert (await http.post(f"{PROS}/apply", json=bad)).status_code == 422
+    assert (await http.post(f"{PROS}/apply", json={**APPLY, "services": []})).status_code == 422
     assert len(await _applications()) == 1
 
 
@@ -473,8 +494,8 @@ async def test_apply_refused_by_turnstile_stores_nothing(http, monkeypatch) -> N
         raise BadRequest(code, "nope")
 
     monkeypatch.setattr(service_admin, "verify_turnstile", refuse)
-    r = await http.post(f"{URL}/apply", json=APPLY)
-    assert r.status_code == 400 and r.json()["error"]["code"] == "partners.turnstile_failed"
+    r = await http.post(f"{PROS}/apply", json=APPLY)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "pros.turnstile_failed"
     assert await _applications() == []
 
 
@@ -483,17 +504,17 @@ async def test_apply_global_daily_cap(http, monkeypatch) -> None:
     monkeypatch.setattr(service_admin, "APPLY_DAILY_CAP", 2)
     for i in range(2):
         ip = {"x-forwarded-for": f"203.0.113.{i + 1}"}
-        assert (await http.post(f"{URL}/apply", json=APPLY, headers=ip)).status_code == 204
+        assert (await http.post(f"{PROS}/apply", json=APPLY, headers=ip)).status_code == 204
     other = {"x-forwarded-for": "203.0.113.9"}
-    blocked = await http.post(f"{URL}/apply", json=APPLY, headers=other)
+    blocked = await http.post(f"{PROS}/apply", json=APPLY, headers=other)
     assert blocked.status_code == 429
-    assert blocked.json()["error"]["code"] == "partners.apply_daily_limit"
+    assert blocked.json()["error"]["code"] == "pros.apply_daily_limit"
     assert len(await _applications()) == 2
     # Yesterday's rows do not count against today.
     for row in await _applications():
         row.createdAt = row.createdAt - timedelta(days=1)
         await row.save()
-    assert (await http.post(f"{URL}/apply", json=APPLY)).status_code == 204
+    assert (await http.post(f"{PROS}/apply", json=APPLY)).status_code == 204
 
 
 # ---------------------------------------------------------------- operator queue
@@ -504,7 +525,7 @@ PLATFORM_APPS = "/api/v1/platform/partners/applications"
 
 async def test_operator_lists_and_reviews_applications(http, platform_http) -> None:
     for name in ("One", "Two", "Three"):
-        assert (await http.post(f"{URL}/apply", json={**APPLY, "name": name})).status_code == 204
+        assert (await http.post(f"{PROS}/apply", json={**APPLY, "name": name})).status_code == 204
     r = await platform_http.get(PLATFORM_APPS)
     assert r.status_code == 200, r.text
     page = r.json()
@@ -564,7 +585,7 @@ async def test_operator_lists_and_reviews_applications(http, platform_http) -> N
 
 
 async def test_support_cannot_see_or_review_applications(http, platform_http) -> None:
-    assert (await http.post(f"{URL}/apply", json=APPLY)).status_code == 204
+    assert (await http.post(f"{PROS}/apply", json=APPLY)).status_code == 204
     app_id = str((await _applications())[0].id)
     platform_http.act_as("support")
     assert (await platform_http.get(PLATFORM_APPS)).status_code == 403
@@ -597,13 +618,13 @@ async def test_public_reads_are_rate_limited_per_ip(http) -> None:
     capacity = rate_limit._partner_public_limiter.capacity
     ip = {"x-forwarded-for": "203.0.113.7"}
     for i in range(capacity):
-        path = f"{URL}/directory" if i % 2 else f"{URL}/ravi-prints"
+        path = f"{PROS}/directory" if i % 2 else f"{PROS}/ravi-prints"
         assert (await http.get(path, headers=ip)).status_code == 200
-    blocked = await http.get(f"{URL}/directory", headers=ip)
+    blocked = await http.get(f"{PROS}/directory", headers=ip)
     assert blocked.status_code == 429
-    assert blocked.json()["error"]["code"] == "partners.rate_limited"
+    assert blocked.json()["error"]["code"] == "pros.rate_limited"
     assert (
-        await http.get(f"{URL}/directory", headers={"x-forwarded-for": "203.0.113.8"})
+        await http.get(f"{PROS}/directory", headers={"x-forwarded-for": "203.0.113.8"})
     ).status_code == 200
 
 
@@ -612,10 +633,10 @@ async def test_apply_is_rate_limited_per_ip(http) -> None:
     assert capacity == 5
     ip = {"x-forwarded-for": "203.0.113.7"}
     for _ in range(capacity):
-        assert (await http.post(f"{URL}/apply", json=APPLY, headers=ip)).status_code == 204
-    blocked = await http.post(f"{URL}/apply", json=APPLY, headers=ip)
+        assert (await http.post(f"{PROS}/apply", json=APPLY, headers=ip)).status_code == 204
+    blocked = await http.post(f"{PROS}/apply", json=APPLY, headers=ip)
     assert blocked.status_code == 429
-    assert blocked.json()["error"]["code"] == "partners.apply_rate_limited"
+    assert blocked.json()["error"]["code"] == "pros.apply_rate_limited"
     assert len(await _applications()) == capacity
 
 

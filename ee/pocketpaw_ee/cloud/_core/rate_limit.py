@@ -4,7 +4,7 @@ Layered on the OSS in-memory ``RateLimiter`` (no new dependency). The dashboard
 middleware already enforces a coarse per-IP limit on every request; the deps
 here add finer per-(actor, resource) or per-IP buckets for routes that need
 them: workspace invites, the social exchange code, slug checks, meeting lookup
-and knocks, the public Discover and partner reads, the public AI check. New
+and knocks, the public Discover and Find a Pro reads, the public AI check. New
 public routes build theirs with ``per_ip_limit`` instead of copying a function.
 
 Client address rule (``client_ip``): the RIGHTMOST ``X-Forwarded-For`` entry,
@@ -16,7 +16,7 @@ junk header never becomes a bucket key. One exception, OPT-IN PER LIMITER
 equal to it (constant-time compare) plus a valid ``X-Paw-Client-IP``, that IP
 is the address. That is how the paw-web Worker, whose every request would
 otherwise share one Cloudflare egress bucket, passes the visitor through. Only
-the limiters on routes the Worker fronts opt in (the public partner reads and
+the limiters on routes the Worker fronts opt in (the public /pros reads and
 apply, the public Discover reads); the auth exchange, meetings, the AI check
 and everything else never read the header, so a leaked key cannot pick their
 buckets. Rotation: set the new key on the Worker and here, redeploy both; there
@@ -171,14 +171,14 @@ def per_ip_limit(
 rate_limit_partner_public = per_ip_limit(
     _partner_public_limiter,
     prefix="partner-public",
-    code="partners.rate_limited",
+    code="pros.rate_limited",
     message="Too many requests - wait a moment and try again.",
     trusted_header_ok=True,
 )
 rate_limit_partner_apply = per_ip_limit(
     _partner_apply_limiter,
     prefix="partner-apply",
-    code="partners.apply_rate_limited",
+    code="pros.apply_rate_limited",
     message="Too many applications from here - try again in an hour.",
     trusted_header_ok=True,
 )

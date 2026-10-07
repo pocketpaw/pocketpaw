@@ -389,8 +389,8 @@ jobs:
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
       - name: Run Paw Partners and public rate-limit tests
-        # Same addopts escape. The partner directory, /partners/{slug} and
-        # /partners/apply answer anonymous callers; these files are the only
+        # Same addopts escape. The Find a Pro directory, /pros/{slug} and
+        # /pros/apply answer anonymous callers; these files are the only
         # proof that a private partner field never reaches the wire, that hidden
         # partners stay hidden, that applications land in the operator queue
         # (and the daily cap and both public buckets return 429), that the
