@@ -160,7 +160,7 @@ class DaytonaClient:
         cpu: int = 2,
         memory: int = 4,
         disk: int = 10,
-        auto_stop_interval: int = 3600,
+        auto_stop_interval: int = 30,
         auto_archive_interval: int | None = None,
         auto_delete_interval: int | None = None,
     ) -> SandboxInfo:
@@ -186,8 +186,10 @@ class DaytonaClient:
             memory: Memory in GB.
             disk: Disk size in GB.
             auto_stop_interval: MINUTES of inactivity before the VM auto-stops.
-                (The SDK counts these in minutes, NOT seconds — the SDK's own
-                3600 default is 60 HOURS, a latent trap. 0 disables auto-stop.)
+                (The SDK counts these in minutes, NOT seconds. This default was
+                once 3600, i.e. 60 HOURS of an idle VM holding the org's memory
+                limit. 0 disables auto-stop.) Every caller passes its own value;
+                the default only protects a new caller that forgets.
             auto_archive_interval: MINUTES after a stop before the VM is
                 auto-archived. ``None`` leaves the SDK default in place.
             auto_delete_interval: MINUTES after a stop before the VM is
@@ -273,6 +275,20 @@ class DaytonaClient:
         """Stop a sandbox."""
         sb = await self.get_sandbox_instance(sandbox_id)
         await sb.stop()
+
+    async def set_sandbox_lifecycle(
+        self,
+        sandbox_id: str,
+        *,
+        auto_stop_interval: int,
+        auto_archive_interval: int,
+        auto_delete_interval: int,
+    ) -> None:
+        """Re-apply the idle lifecycle (all MINUTES) to an existing sandbox."""
+        sb = await self.get_sandbox_instance(sandbox_id)
+        await sb.set_autostop_interval(auto_stop_interval)
+        await sb.set_auto_archive_interval(auto_archive_interval)
+        await sb.set_auto_delete_interval(auto_delete_interval)
 
     async def wait_for_sandbox(
         self,
