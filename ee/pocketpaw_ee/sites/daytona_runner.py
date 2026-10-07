@@ -275,6 +275,9 @@ async def run_build(
     image: str | None = None,
     after_build: Callable[[Any, str, str], Awaitable[Any]] | None = None,
     on_artifact: Callable[[bytes], Awaitable[Any]] | None = None,
+    extra_uploads: list[tuple[bytes, str]] | None = None,
+    ssr_markers: tuple[str, ...] | None = None,
+    log_tail_bytes: int | None = None,
 ) -> BuildRunResult:
     """Build ``files`` in a fresh Daytona sandbox and return the verdict + artifact.
 
@@ -298,6 +301,11 @@ async def run_build(
     a distinct condition the caller must handle as retryable (nothing has run yet).
 
     ``image`` / ``after_build`` / ``on_artifact`` — see the module header.
+
+    ``extra_uploads`` are ``(bytes, absolute sandbox path)`` pairs written beside the
+    project (the project lane uploads the vendored generator and its build script);
+    ``ssr_markers`` / ``log_tail_bytes`` reach :func:`build_wrapper_script`. All three
+    are inert when omitted, so existing callers render byte-identical sandboxes.
     ``after_build`` receives ``(client, sandbox_id, static_dir)`` where ``static_dir`` is
     the absolute in-sandbox path of the output dir this build wrote; ``on_artifact``
     receives the verified artifact bytes before it.
@@ -319,6 +327,8 @@ async def run_build(
         install_command=install_command,
         build_command=build_command,
         artifact_rel=artifact_rel,
+        **({"ssr_markers": ssr_markers} if ssr_markers is not None else {}),
+        **({"log_tail_bytes": log_tail_bytes} if log_tail_bytes is not None else {}),
     )
     # Rendered here rather than inside the wrapper so an engine whose output is the
     # project root fails BEFORE a sandbox is created and billed.
@@ -377,6 +387,7 @@ async def run_build(
         bunfig_dst = f"{SANDBOX_PROJECT_DIR}/{SANDBOX_BUNFIG_REL}"
         if not any(u[1] == bunfig_dst for u in uploads):
             uploads.append((SANDBOX_BUNFIG.encode(), bunfig_dst))
+        uploads.extend(extra_uploads or [])
         uploads.append((wrapper.encode(), SANDBOX_WRAPPER_PATH))
         await client.bulk_upload(sandbox_id, uploads)
         t_uploaded = time.monotonic()

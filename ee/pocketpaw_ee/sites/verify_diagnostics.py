@@ -112,6 +112,24 @@ def scrub_text(text: str) -> str:
     return out
 
 
+def scrub_log_text(text: str) -> str:
+    """Steps 1-3 of the header over a whole build LOG: the same redaction, path
+    relativizing and key scrub as :func:`scrub_text`, but line structure is kept and
+    nothing is truncated (the caller caps the log). The project lane's persisted
+    build log goes through this before it is stored."""
+    from pocketpaw.security.redact import redact_output
+
+    if not text:
+        return ""
+    log = _ANSI_RE.sub("", str(text))
+    for root in SANDBOX_ROOTS:
+        log = log.replace(root, "").replace(root.lstrip("/"), "")
+    log = _LOCAL_ORIGIN_RE.sub("/", log)
+    log = _SITE_KEY_RE.sub("site_key_[redacted]", log)
+    log = _ABS_PATH_RE.sub(lambda m: m.group(0).rstrip("/").rsplit("/", 1)[-1] or "[path]", log)
+    return redact_output(log)
+
+
 def _entry(
     layer: str, *, code: str, message: str, file: str = "", line: Any = None, col: Any = None
 ) -> dict[str, Any]:
@@ -298,5 +316,6 @@ __all__ = [
     "finalize",
     "harness_entries",
     "parse_build_stderr",
+    "scrub_log_text",
     "scrub_text",
 ]

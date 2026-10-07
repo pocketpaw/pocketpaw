@@ -293,10 +293,11 @@ SITE_BUILD_QUEUE_NAME = "arq:queue:sites"
 #: Engines this lane can build. Every one needs a per-site Node build AND emits its
 #: output into a SUBDIRECTORY — ``artifact_tar_command`` refuses an engine whose output
 #: is the project root, because an include-list cannot then exclude ``node_modules``.
-#: html satisfies neither and needs no build at all, so it never belongs here.
+#: html satisfies neither and needs no build at all, so it never belongs here. project
+#: rides only the PREVIEW job (``project_build``); its publish deploys the stored draft.
 #: ``tests/ee/sites/test_build_job.py`` fails if ``engines.py`` gains a buildable engine
 #: this tuple misses, which is the drift a hand-written list would otherwise hide.
-BUILDABLE_ENGINES: tuple[str, ...] = ("ripple", "svelte", "react")
+BUILDABLE_ENGINES: tuple[str, ...] = ("ripple", "svelte", "react", "project")
 
 #: Added to the widest in-sandbox budget (plus ``run_build``'s own exec slack) to size
 #: the arq function timeout. Covers everything OUTSIDE the sandbox's clock: the local
@@ -1285,6 +1286,20 @@ async def run_site_preview_build(
     that condition belongs, and ``_preview_job_outcome`` maps the failed job back to the
     ``sandbox_unavailable`` rung.
     """
+    if normalize_engine(engine) == "project":
+        # The project engine has no scaffold and its own bundle/record shape.
+        from pocketpaw_ee.sites import project_build
+
+        return await project_build.run_project_preview_build(
+            ctx,
+            pocket_id,
+            content_hash,
+            generator_input,
+            timeout_seconds,
+            _client=_client,
+            _store=_store,
+            _verify_store=_verify_store,
+        )
     if not is_buildable_engine(engine):
         # A routing bug — ``service.get_native_artifact`` gates on ``has_native_edit_lane``
         # and every engine that passes it also builds here. Checked anyway rather than

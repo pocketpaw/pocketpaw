@@ -19,10 +19,46 @@ buckets) and `CloudflareClient.upload_assets` / `put_worker(modules=...)` in
   bundle deploy. No existing engine (ripple, svelte, react, html) writes that file, so
   their deploys are unchanged: a single-module PUT, or the one-module multipart with a
   D1 binding for dynamic sites.
-- `sites.service.deploy_bundle(site, build_dir)` is the service entry point for the
-  `project` engine. That engine's publish path is not wired yet; this is the call it
-  will make.
-- The `workers` and `local` deploy modes don't take bundles.
+- A `project` pocket publishes from its stored draft build (see "Project builds"
+  below): the bundle is materialized and goes through this path. Under
+  `PAW_CF_DEPLOY_MODE=workers` a project is still deployed here, through the HTTP API,
+  because the workers path runs wrangler on the API host. `local` mode serves the
+  bundle's `assetsDir` statically.
+- `sites.service.deploy_bundle(site, build_dir)` deploys a build dir directly (no
+  Site-row plumbing), for callers that already hold one.
+
+## Project builds
+
+A `project` pocket's source map is the whole repo. It builds **only** in a Daytona
+sandbox (`ee/pocketpaw_ee/sites/project_build.py`):
+
+1. The source map is uploaded as the project tree, with the vendored generator
+   (`dist/` + `package.json` from `PAW_SITES_GEN_DIR`, default `/opt/paw-sites`) beside
+   it at `/tmp/paw-sites-gen`. A host without the generator fails the build as
+   `sandbox_unavailable:generator_missing`.
+2. `paw-sites-gen project-build --dir <project> --out <project>/paw-build.json --json`
+   installs, builds and (worker targets) runs the project's own wrangler dry-run. The
+   project brings its own wrangler as a devDependency.
+3. A stage step copies `paw-build.json` and the files it names into `.paw/out`, which
+   the build wrapper tars. Paths that leave the project, and an `assetsDir` at the
+   project root, are refused.
+4. The worker stores the whole bundle in the artifact store under `<hash>.bundle`
+   (publish reads it), the assets alone as the draft's preview files, and a build
+   record with the redacted, capped (64 KiB tail) log in the verify store.
+
+The build budget is `PAW_SITES_BUILD_TIMEOUT_SEC_PROJECT` (else the shared knob, else
+600s). Supersede, single-flight and the artifact caps are the preview lane's.
+
+Publishing needs a finished build of the pocket's **current** files; otherwise it is a
+`409 sites.project_build_required`. Before the deploy the plan gate runs
+(captain decision 2026-10-07): a free site may ship static output, and a worker that
+binds nothing beyond D1, KV and its own assets. Any other binding, or server code on a
+site with a custom domain, is refused with `422 sites.server_code_not_entitled` and an
+upgrade message. R2 and the rest of the binding rules then apply as below.
+
+The image ships `starters/` and `recipes/` next to the generator (`Dockerfile.enterprise`
+copies them, `scripts/vendor-paw-sites.sh` vendors them with `git archive`), for
+`template-copy` and `apply-recipe`.
 
 ## The manifest
 

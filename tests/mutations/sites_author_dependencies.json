@@ -65,8 +65,8 @@
   {
     "label": "PP-1 sandbox-only: the host generator client installs author packages on the API host",
     "file": "ee/pocketpaw_ee/sites/generator_client.py",
-    "find": "        if needs_node_build(engine) and requires_sandbox(source):",
-    "replace": "        if False:",
+    "find": "            needs_node_build(engine) and requires_sandbox(source)\n        ):",
+    "replace": "            False\n        ):",
     "tests": [
       "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_the_host_client_refuses_to_install_author_packages",
       "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_an_unreadable_manifest_is_refused_too"

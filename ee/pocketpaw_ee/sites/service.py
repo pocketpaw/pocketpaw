@@ -5,7 +5,9 @@
 # ``publish_pocket``, ``_deploy_site_doc``) and the three deploy targets they
 # pick between (local, workers.dev via ``workers_deploy``, Workers-for-Platforms;
 # a WfP build carrying ``paw-build.json`` deploys through ``bundle_deploy`` and
-# ``deploy_bundle``); the dynamic-site provision seams the ``provision_site`` job calls; the build
+# ``deploy_bundle``; a ``project`` pocket publishes its stored sandbox build that way,
+# ``_deploy_project_site``, and its drafts / build logs are read here too); the
+# dynamic-site provision seams the ``provision_site`` job calls; the build
 # stamps applied between build and deploy (concierge bar, free badge or partner
 # co-brand) and the AI-ready inputs (``_ai_ready_inputs``: training opt-in,
 # per-site IndexNow key, canonical host); custom domains, slugs and renames; site
@@ -2743,6 +2745,84 @@ async def publish(
     )
 
 
+async def _deploy_project_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    source: dict[str, str] | None,
+    builder_origin: str | None,
+    cloudflare: Any | None,
+    local_deploy: Callable[[str, str], str] | None,
+    _store: Any | None = None,
+) -> _SiteDoc:
+    """Publish a ``project`` pocket from its stored draft build.
+
+    Nothing builds here and nothing the author wrote runs here: the bundle the sandbox
+    built for the pocket's CURRENT source (``project_build``) is materialized and
+    handed to ``_deploy_site_doc`` as a prebuilt tree, whose WfP branch deploys it
+    through ``bundle_deploy`` + the binding provisioner. A source with no finished
+    draft build is a 409 (open the preview, or run a build, then publish). The site's
+    plan is checked against the manifest first (``project_build.check_plan_allows``).
+    """
+    import shutil
+    import tempfile
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+    from pocketpaw_ee.sites import project_build
+
+    files_source = source if isinstance(source, dict) else None
+    project_build.project_files(files_source)
+    content_hash = project_build.project_content_hash(files_source or {})
+    store = _store or _default_artifact_store()
+    bundle = store.read_dist(pocket_id, project_build.bundle_key(content_hash))
+    if not bundle:
+        raise ConflictError(
+            "sites.project_build_required",
+            "This project has no finished build of its current files. Open the preview "
+            "(or run a build), wait for it to finish, then publish.",
+        )
+    work = tempfile.mkdtemp(prefix=f"paw-project-{site_id}-")
+    try:
+        try:
+            manifest = project_build.materialize_bundle(bundle, Path(work))
+        except ValueError as exc:
+            raise ValidationError(
+                "sites.bundle_invalid", f"The stored build cannot be deployed: {exc}"
+            ) from exc
+        doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+        project_build.check_plan_allows(
+            manifest,
+            paid=entitlements_service.site_paid_backends_entitled(
+                plan_tier=getattr(doc, "plan_tier", None),
+                subscription_status=getattr(doc, "subscription_status", None),
+            ),
+            has_custom_domain=bool(getattr(doc, "domains", None)),
+        )
+        return await _deploy_site_doc(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            ripple_spec=None,
+            theme={},
+            engine="project",
+            source=source,
+            pattern="landing",
+            builder_origin=builder_origin,
+            cloudflare=cloudflare,
+            local_deploy=local_deploy,
+            prebuilt_project_dir=work,
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 async def _deploy_site_doc(
     *,
     workspace_id: str,
@@ -2817,6 +2897,20 @@ async def _deploy_site_doc(
     """
     # DP0-4: fork BEFORE any build. A dynamic site defers to the provision job; only
     # a static site takes the inline build/deploy/upsert path unchanged below.
+    if normalize_engine(engine) == "project" and prebuilt_project_dir is None:
+        return await _deploy_project_site(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            source=source,
+            builder_origin=builder_origin,
+            cloudflare=cloudflare,
+            local_deploy=local_deploy,
+        )
+
     if _is_dynamic(pattern, ripple_spec):
         return await _provision_dynamic_site(
             workspace_id=workspace_id,
@@ -2951,6 +3045,10 @@ async def _deploy_site_doc(
     elif mode == "local" and cloudflare is not None:
         # An injected CF client (a test asserting the real CF branch) wins over an
         # env that requests local — mirrors the legacy ``cloudflare is None`` guard.
+        mode = "wfp"
+    if mode == "workers" and normalize_engine(engine) == "project":
+        # A project deploys only through the HTTP API from its paw-build.json: the
+        # workers path runs wrangler on this host, which would read author config.
         mode = "wfp"
 
     url = ""
@@ -9798,6 +9896,13 @@ async def get_native_artifact(
     # site's served artifact IS its source, so it is selected through its own srcdoc
     # and has no build to render here.
     engine = normalize_engine(pocket.get("engine"))
+    if engine == "project":
+        return await _project_draft_artifact(
+            pocket_id=pocket_id,
+            source=pocket.get("source"),
+            store=_store or _default_artifact_store(),
+            _pool=_pool,
+        )
     # ONE origin resolver for every armed hash (the view, the pre-warm, verify,
     # preview_site), so the agent's verify and the editor read the same render.
     resolved_origin = await resolve_armed_builder_origin(workspace_id, pocket_id, builder_origin)
@@ -9913,6 +10018,154 @@ async def get_native_artifact(
         "build_job_id": enqueued.job_id,
         "preview_url": None,
     }
+
+
+async def _project_draft_artifact(
+    *,
+    pocket_id: str,
+    source: Any,
+    store: Any,
+    _pool: Any | None = None,
+    _records: Any | None = None,
+) -> dict[str, Any]:
+    """A ``project`` draft: served from its sandbox build when one finished for the
+    current source, else a build is queued in the preview lane (``project_build``).
+
+    The same response shape as every other engine plus ``preview_mode`` (``"static"``
+    while server routes cannot run in drafts, ``"full"`` otherwise; ``None`` until a
+    build finished) and the engine's ``capabilities``. No arming: a project has no
+    generator-owned anchors, so there is no builder origin in the hash."""
+    from pocketpaw_ee.sites import build_job, project_build, verify_store
+    from pocketpaw_ee.sites.engines import engine_capabilities
+
+    capabilities = engine_capabilities("project")
+    files_source = source if isinstance(source, dict) else None
+    project_build.project_files(files_source)  # 422 on a tree that cannot build
+    content_hash = project_build.project_content_hash(files_source or {})
+    job_id = build_job._preview_job_id(pocket_id, content_hash)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    record = project_build.read_build_record(records, pocket_id, job_id)
+    if record is not None and record.get("status") == project_build.STATUS_BUILT:
+        preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+        evicted = (
+            preview_url is None
+            and preview_origin.store_supports_preview(store)
+            and preview_origin.preview_base_problem() is None
+        )
+        # A record whose files the store evicted is rebuilt, at most once per window.
+        if not evicted or not _claim_preview_retry(pocket_id, content_hash):
+            return {
+                "pocket_id": pocket_id,
+                "body_html": "",
+                "css": "",
+                "build_status": "none",
+                "build_reason": None,
+                "build_job_id": job_id,
+                "preview_url": preview_url,
+                "preview_mode": record.get("preview_mode"),
+                "capabilities": capabilities,
+            }
+
+    try:
+        enqueued = await build_job.enqueue_preview_build(
+            pocket_id=pocket_id,
+            content_hash=content_hash,
+            engine="project",
+            generator_input={"source": files_source},
+            _pool_override=_pool,
+        )
+    except Exception as exc:
+        logger.exception("sites.project: could not queue the draft build for %s", pocket_id)
+        raise CloudError(
+            503,
+            "sites.preview_build_unavailable",
+            "The preview build could not be queued. Try again in a moment.",
+        ) from exc
+    if enqueued.status == "queued":
+        project_build.write_build_record(
+            records,
+            pocket_id,
+            project_build.new_record(enqueued.job_id, content_hash, "queued"),
+        )
+    return {
+        "pocket_id": pocket_id,
+        "body_html": "",
+        "css": "",
+        "build_status": enqueued.status,
+        "build_reason": enqueued.reason,
+        "build_job_id": enqueued.job_id,
+        "preview_url": None,
+        "preview_mode": None,
+        "capabilities": capabilities,
+    }
+
+
+async def project_latest_build(
+    *, workspace_id: str, user_id: str, pocket_id: str, _records: Any | None = None
+) -> dict[str, Any]:
+    """The pocket's newest project build (no log): job id, status, rung,
+    ``preview_mode``, and whether it built the pocket's CURRENT source. Raises the
+    pockets service's 404 / 403 for a pocket the caller cannot reach, 422 for a
+    non-project pocket, and 404 when the pocket has never built."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    pocket = await _project_pocket(workspace_id, user_id, pocket_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    latest = project_build.read_latest_build(records, pocket_id)
+    if not latest or not latest.get("job_id"):
+        raise NotFound("site_build", pocket_id)
+    source = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
+    return {
+        "pocket_id": pocket_id,
+        "job_id": latest.get("job_id"),
+        "status": latest.get("status") or "queued",
+        "reason": latest.get("reason"),
+        "preview_mode": latest.get("preview_mode"),
+        "framework": latest.get("framework"),
+        "updated_at": latest.get("updated_at"),
+        "current": latest.get("content_hash") == project_build.project_content_hash(source),
+    }
+
+
+async def project_build_log(
+    *, workspace_id: str, user_id: str, pocket_id: str, job_id: str, _records: Any | None = None
+) -> dict[str, Any]:
+    """One project build's persisted log (already redacted and capped by the worker).
+    A job id that is not this pocket's is a 404, the same answer as a missing one."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    await _project_pocket(workspace_id, user_id, pocket_id)
+    if not project_build.job_belongs_to(job_id, pocket_id):
+        raise NotFound("site_build", job_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    record = project_build.read_build_record(records, pocket_id, job_id)
+    if record is None:
+        raise NotFound("site_build", job_id)
+    return {
+        "pocket_id": pocket_id,
+        "job_id": job_id,
+        "status": record.get("status") or "queued",
+        "reason": record.get("reason"),
+        "log": record.get("log") or "",
+        "log_truncated": bool(record.get("log_truncated")),
+        "preview_mode": record.get("preview_mode"),
+        "updated_at": record.get("updated_at"),
+    }
+
+
+async def _project_pocket(workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """The pocket, if it is a project the caller may read in THIS workspace: the
+    pockets service's read rule (owner / team / shared / workspace-visible) plus the
+    tenant check that rule leaves to its caller. Another workspace's pocket is a 404."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites.engines import build_requires_sandbox
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if pocket.get("workspace") != workspace_id:
+        raise NotFound("pocket", pocket_id)
+    if not build_requires_sandbox(pocket.get("engine")):
+        raise ValidationError("sites.not_a_project", "Build logs exist only for project sites.")
+    return pocket
 
 
 #: (pocket, content hash) -> monotonic time of the last attempt to give a draft a
