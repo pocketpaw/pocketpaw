@@ -136,8 +136,9 @@ Risks, and why this is interim:
   own Workers, and nothing sits in front of it (no dispatch worker to enforce
   outbound rules, limits or tags). The binding mapping still only hands it the
   site's own D1 / KV / R2 and secrets.
-- **Account limits.** Script count and per-account CPU / subrequest limits apply to
-  all sites together.
+- **Account limits.** The script count limit applies to all sites together. Each
+  site's own upload carries per-request CPU and subrequest caps by plan (see
+  "Performance"), which is the only per-tenant limit on this target.
 - **Asset store.** Hashes stay salted per workspace, as on WfP.
 - Each deploy logs `deploying as an ACCOUNT-LEVEL Worker (interim, no dispatch
   isolation)`.
@@ -176,8 +177,8 @@ then enables workers.dev:
    no buckets, the session JWT is the completion JWT.
 3. `PUT /accounts/{acct}/workers/dispatch/namespaces/{ns}/scripts/{site_id}`, multipart:
    - `metadata`: `{main_module, bindings, compatibility_date, compatibility_flags,
-     assets: {jwt, config}}`, plus `placement: {mode: "smart"}` when the worker binds
-     D1 or R2 (see "Performance" below)
+     assets: {jwt, config}}`, plus `observability`, `limits` and (opt-in)
+     `placement` for a bundle with worker modules (see "Performance" below)
    - one part per module, named by its path, typed by extension: `.js`/`.mjs`
      `application/javascript+module`, `.cjs` `application/javascript`, `.wasm`
      `application/wasm`, `.json` `application/json`, `.txt`/`.html`/`.md`/`.sql`
@@ -303,35 +304,133 @@ upload. Wrangler, drizzle-kit and the project's own config never run on the API 
 
 A site Worker runs in the Cloudflare location nearest the visitor, but its D1 primary
 (and an R2 bucket) lives in one region. Every query from a far location pays that
-round trip. Three settings narrow the gap.
+round trip. This section covers the settings we send with every bundle upload and the
+ones an operator can turn on.
 
-### Smart Placement
+Every block below goes into the script-upload `metadata` on both targets. The account
+[script upload](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/)
+and the
+[dispatch namespace script upload](https://developers.cloudflare.com/api/resources/workers_for_platforms/subresources/dispatch/subresources/namespaces/subresources/scripts/methods/update/)
+both list `placement`, `observability` and `limits` in their metadata schema (checked
+2026-10-07). They are sent only for a bundle with worker modules. An assets-only
+Worker never runs code (asset requests are served before the Worker), so it gets none
+of them.
 
-A bundle with worker modules that binds a regional backend (`d1` or `r2_bucket` in the
-mapped bindings) is uploaded with `placement: {"mode": "smart"}` in the script
-metadata, on both the `account` and `dispatch` targets. Both upload APIs accept it:
-[script upload](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/),
-[dispatch namespace script upload](https://developers.cloudflare.com/api/resources/workers_for_platforms/subresources/dispatch/subresources/namespaces/subresources/scripts/methods/update/),
-[metadata reference](https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/).
+| Metadata | Sent when | Env |
+|---|---|---|
+| `observability` | always (worker bundles) | `PAW_SITES_OBSERVABILITY=0` turns it off; `PAW_SITES_OBSERVABILITY_SAMPLE` (default `0.1`) |
+| `limits` | always (worker bundles), by the site's plan | `PAW_SITES_CPU_MS_FREE` (50), `PAW_SITES_CPU_MS_PAID` (300), `PAW_SITES_SUBREQUESTS_FREE` (50), `PAW_SITES_SUBREQUESTS_PAID` (10000) |
+| `placement` | opt-in, and only when the worker binds D1 or R2 | `PAW_SITES_SMART_PLACEMENT=1` |
 
-What it does ([Placement](https://developers.cloudflare.com/workers/configuration/placement/)):
+### Observability
 
-- Cloudflare measures request duration in different locations and forwards a request
-  to a location that is significantly faster, usually one near the backend. 1% of
-  requests stay unplaced as a baseline.
-- It only affects `fetch` handlers, and only after analysis (up to 15 minutes after
-  a deploy) and enough traffic from several locations. A quiet site reports
-  `INSUFFICIENT_INVOCATIONS` and runs as before.
-- Static assets are always served from the location nearest the visitor; assets the
-  Worker fetches through its `ASSETS` binding come from where the Worker runs.
-- D1 gets no special treatment: since 2025-02-13 Workers bound to D1 follow the same
-  latency-based logic as every other Worker
-  ([changelog](https://developers.cloudflare.com/workers/platform/changelog/)).
+Every worker bundle is uploaded with:
 
-Assets-only bundles and workers that bind nothing regional (only assets, KV or
-secrets) get no placement. KV is cached at the edge, so it does not earn placement
-on its own. Set `PAW_SITES_SMART_PLACEMENT=0` (or `false` / `no` / `off`) to turn it
-off for every bundle deploy; the next publish of each site drops it.
+```json
+"observability": {
+  "enabled": true,
+  "head_sampling_rate": 0.1,
+  "logs": {"enabled": true, "invocation_logs": true},
+  "traces": {"enabled": true, "head_sampling_rate": 0.1}
+}
+```
+
+- The field names come from the upload API's metadata schema: `observability.enabled`,
+  `head_sampling_rate` ("From 0 to 1 ... Default is 1"), `logs.{enabled,
+  invocation_logs}` and `traces.{enabled, head_sampling_rate}`. An API upload with no
+  `observability` block gets no Workers Logs, which is why sites deployed this way
+  had none.
+- The rate is `PAW_SITES_OBSERVABILITY_SAMPLE` (a number from 0 to 1, default `0.1`).
+  It applies to both logs and traces. Anything outside 0..1 is logged and the default
+  is used. `PAW_SITES_OBSERVABILITY=0` (or `false` / `no` / `off`) sends no block.
+- Cost: Workers Logs includes 20 million log events a month on Paid, then $0.60 per
+  million, with 7-day retention. From 2026-12-01 it moves to Cloudflare Observability
+  pricing ([Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/)).
+  Metrics (requests, errors, CPU and wall time) are collected whatever this setting
+  is.
+
+### Per-site CPU and subrequest limits
+
+Every worker bundle is uploaded with `limits: {cpu_ms, subrequests}`, picked by the
+site's plan. "Paid" means the same answer the binding provisioner uses for R2 and the
+larger KV cap (`entitlements.site_paid_backends_entitled`: a paid site tier with an
+active subscription). An unknown plan counts as free.
+
+| Site plan | `cpu_ms` | `subrequests` |
+|---|---|---|
+| Free | 50 (`PAW_SITES_CPU_MS_FREE`) | 50 (`PAW_SITES_SUBREQUESTS_FREE`) |
+| Paid | 300 (`PAW_SITES_CPU_MS_PAID`) | 10000 (`PAW_SITES_SUBREQUESTS_PAID`) |
+
+- The API describes `cpu_ms` as "The amount of CPU time this Worker can use in
+  milliseconds" and `subrequests` as "The number of subrequests this Worker can make
+  per request" (script upload metadata schema, both targets).
+- Ranges ([Wrangler `limits`](https://developers.cloudflare.com/workers/wrangler/configuration/#limits),
+  [limits](https://developers.cloudflare.com/workers/platform/limits/)): `cpu_ms` up
+  to 300,000; `subrequests` up to 10,000,000 on a paid account (default 10,000; 50 on
+  a free account). An env value outside 0..max, or not a number, is logged and the
+  plan default is used. `0` leaves that field out, so Cloudflare's account default
+  applies (30 s CPU on Paid).
+- The subrequest defaults mirror Cloudflare's own Free and Paid account defaults. The
+  configured limit also caps calls to Cloudflare services (D1, KV, R2 bindings count
+  as subrequests to internal services), so a free site gets 50 of those per request.
+- A Worker that keeps going over its CPU limit is terminated with an exceeded-CPU
+  error; a short burst is tolerated per isolate.
+
+**Account target.** "Limits are only supported for the Standard Usage Model"
+([Wrangler `limits`](https://developers.cloudflare.com/workers/wrangler/configuration/#limits)).
+Standard is the usage model of a Workers Paid account, which the account target
+already needs (the Free plan caps CPU at 10 ms per request, so 50 or 300 could not
+apply there). Before this change an account-level site had no cap of its own: up to
+the Paid default of 30 s CPU per request.
+
+**Dispatch target.** The dispatch upload schema accepts the same `limits` block, so
+we send it. The Workers for Platforms docs only document per-tenant limits set by the
+dispatch Worker (`env.DISPATCHER.get(name, {}, {limits: {cpuMs, subRequests}})`,
+[custom limits](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/configuration/custom-limits/)).
+Whether an upload-time `limits` is enforced on a user Worker reached through a
+dispatch binding is not documented. Our dispatch worker sets no limits today. Until a
+live WfP check confirms the upload-time cap, treat the dispatch Worker as the place
+to enforce it (follow-up: pass the plan's limits in `DISPATCHER.get`, for example from
+script tags).
+
+### Smart Placement (opt-in, off by default)
+
+`PAW_SITES_SMART_PLACEMENT=1` (or `true` / `yes` / `on`) uploads a worker bundle that
+binds `d1` or `r2_bucket` with `placement: {"mode": "smart"}`. Unset, or any other
+value, sends no `placement`. Assets-only bundles, and workers that bind nothing
+regional (only assets, KV or secrets), never get it. The next publish of each site
+applies a change.
+
+It is off by default because it rarely helps a paw site
+([Placement](https://developers.cloudflare.com/workers/configuration/placement/)):
+
+- **Quiet sites never get placed.** "Smart Placement requires consistent traffic to
+  the Worker from multiple locations to make a placement decision." A low-traffic
+  site stays `INSUFFICIENT_INVOCATIONS` and runs as if it were off.
+- **It moves the whole script.** "The entire Worker script is placed as a single
+  unit," so with `assets.run_worker_first` Cloudflare says "placement decisions are
+  not optimized correctly"
+  ([Worker script routing](https://developers.cloudflare.com/workers/static-assets/routing/worker-script/)).
+  The `vite-react-hono` starter sets `run_worker_first: ["/api/*"]`.
+- **It works against D1 read replicas.** Placement runs the Worker near the primary;
+  replicas serve reads near the visitor. A site that adopts the Sessions API (below)
+  should not also use placement.
+
+When it does run: it only affects `fetch` handlers (not RPC or named entrypoints),
+analysis takes up to 15 minutes after a deploy, 1% of requests stay unplaced as a
+baseline, static assets are always served nearest the visitor, and D1 gets no special
+treatment since 2025-02-13 ([changelog](https://developers.cloudflare.com/workers/platform/changelog/)).
+The status reads back from `GET /accounts/{acct}/workers/services/{name}`
+(`SUCCESS`, `INSUFFICIENT_INVOCATIONS`, `UNSUPPORTED_APPLICATION`, or absent before
+analysis). We don't read it yet.
+
+**Workers for Platforms: unverified.** The dispatch upload schema accepts
+`placement`, but the placement docs never mention dispatch namespaces, and a user
+Worker reached through a dispatch binding may not be placed. Don't rely on placement
+on the `dispatch` target until it is checked on a live WfP namespace.
+
+Follow-up: a per-site flag. The Site model has no settings block that fits it, so for
+now placement is one operator switch for every bundle deploy.
 
 ### D1 location hint
 
@@ -341,14 +440,21 @@ off for every bundle deploy; the next publish of each site drops it.
 `apac` and `oc`
 ([create database](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/create/),
 [data location](https://developers.cloudflare.com/d1/configuration/data-location/)).
-An unknown value is logged and left out. Unset means Cloudflare places the primary
-near the caller, which is the API host, not the visitors.
+An unknown value is logged and left out.
 
-- The hint only applies when a database is created. Existing databases keep their
-  primary; moving one means exporting it into a new database.
+- **The code default is unset**, so a self-hosted install is not pinned to a region
+  it doesn't serve: Cloudflare then places the primary near the caller, which is the
+  API host, not the visitors.
+- **Our hosted deploy sets `apac`** (most of our visitors are in India).
+- **Only new databases.** The hint is read when a database is created. Existing
+  databases (support-desk's included) keep their primary; moving one means exporting
+  it into a new database, or adding read replicas plus the Sessions API.
 - A hint is a preference: "Providing a location hint does not guarantee that D1 runs
   in your preferred location." South America, Africa and the Middle East have no hint.
-- Pick the region most visitors are in (`apac` for an India-heavy user base).
+
+Follow-up: a per-site hint (from the owner's audience). The Site model has no
+obvious field for it; `create_database` would take the hint as an argument and the
+two callers would pass the site's value before the env default.
 
 ### D1 read replication (opt-in)
 
@@ -369,7 +475,8 @@ with `PUT /accounts/{acct}/d1/database/{id}` and `{"read_replication": {"mode":
 as `assets.config._headers`, so a template that ships
 `/_next/static/*  Cache-Control: public,max-age=31536000,immutable` gets immutable
 caching for its hashed files. It applies to responses served by the asset layer, not
-to responses the Worker generates.
+to responses the Worker generates. This forwarding is not new; what was missing is a
+`_headers` file in the starters, which paw-sites adds.
 
 `html_handling` defaults to `auto-trailing-slash`: `about.html` is served at `/about`,
 `about/index.html` at `/about/`, and the other spelling gets a 307 to the canonical one
@@ -388,6 +495,10 @@ What a cold start costs is the script size and the work in its global scope
 ([startup limit](https://developers.cloudflare.com/workers/platform/limits/)), so the
 levers live in the templates: smaller worker bundles, no top-level initialization, and
 prerendered pages served as static assets instead of through the Worker.
+
+Measure before blaming a cold start: split curl's `time_connect` / `time_appconnect`
+from TTFB and read the Worker's own `Server-Timing`. Client-side TCP retransmits (a
+lost SYN waits the 1 s initial RTO) look exactly like a slow cold start.
 
 ## Secrets
 

@@ -11,8 +11,9 @@
 #     one-module multipart with bindings (dynamic sites, fixed ``index.mjs`` and
 #     ``2024-09-23``), and the multi-module bundle form (``modules=``) used by
 #     ``bundle_deploy`` for ``paw-build.json`` builds: metadata + one part per
-#     module, with compat flags, an ``assets`` block and an optional ``placement``
-#     (Smart Placement, decided by ``bundle_deploy``). The two legacy shapes are
+#     module, with compat flags, an ``assets`` block and the optional
+#     ``placement`` / ``observability`` / ``limits`` blocks ``bundle_deploy``
+#     decides (``worker_settings``). The two legacy shapes are
 #     byte-for-byte what existing engines have always sent.
 #   * Static assets: ``upload_assets`` runs the dispatch assets-upload-session,
 #     uploads the requested buckets (base64 multipart, session JWT as Bearer, never
@@ -59,6 +60,7 @@ import os
 import posixpath
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -332,7 +334,9 @@ class CloudflareClient:
         compatibility_flags: Sequence[str] | None = None,
         assets: dict | None = None,
         target: str = DISPATCH_TARGET,
-        placement: Mapping[str, str] | None = None,
+        placement: Mapping[str, Any] | None = None,
+        observability: Mapping[str, Any] | None = None,
+        limits: Mapping[str, Any] | None = None,
     ) -> bool:
         """Upload a user Worker into the dispatch namespace. Live on 200.
 
@@ -362,8 +366,8 @@ class CloudflareClient:
         ``bindings``, ``compatibility_date``, ``compatibility_flags`` and, when given,
         ``assets`` (``{"jwt": <completion jwt>, "config": {...}}``), followed by one
         part per module named by its path. An empty ``modules`` with ``assets`` is an
-        assets-only Worker (no ``main_module``). ``placement`` (bundle form only, e.g.
-        ``{"mode": "smart"}``) goes into the metadata as given. Callers vet every value
+        assets-only Worker (no ``main_module``). ``placement``, ``observability`` and
+        ``limits`` (bundle form only) go into the metadata as given. Callers vet every value
         first; this method only checks the shape is self-consistent."""
         if modules is not None:
             return await self._put_worker_bundle(
@@ -376,10 +380,16 @@ class CloudflareClient:
                 compatibility_flags=compatibility_flags or [],
                 assets=assets,
                 target=target,
-                placement=placement,
+                settings={
+                    "placement": placement,
+                    "observability": observability,
+                    "limits": limits,
+                },
             )
-        if placement:
-            raise ValidationError("sites.bundle_shape", "placement needs the bundle form")
+        if placement or observability or limits:
+            raise ValidationError(
+                "sites.bundle_shape", "placement, observability and limits need the bundle form"
+            )
         url = self._script_url(script_name, target)
         async with self._client() as client:
             if bindings:
@@ -435,7 +445,7 @@ class CloudflareClient:
         compatibility_flags: Sequence[str],
         assets: dict | None,
         target: str = DISPATCH_TARGET,
-        placement: Mapping[str, str] | None = None,
+        settings: Mapping[str, Mapping[str, Any] | None] | None = None,
     ) -> bool:
         if bundle:
             raise ValidationError(
@@ -463,8 +473,9 @@ class CloudflareClient:
         metadata["compatibility_flags"] = list(compatibility_flags)
         if assets:
             metadata["assets"] = assets
-        if placement:
-            metadata["placement"] = dict(placement)
+        for key, value in (settings or {}).items():
+            if value:
+                metadata[key] = dict(value)
         files: list[tuple[str, tuple[str | None, bytes | str, str]]] = [
             ("metadata", (None, json.dumps(metadata), "application/json"))
         ]

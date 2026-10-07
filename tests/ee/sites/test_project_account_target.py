@@ -21,9 +21,12 @@ from pocketpaw_ee.sites.cloudflare_client import CloudflareClient
 
 from tests.ee.sites.test_bundle_deploy import (
     ACCT,
+    FREE_LIMITS,
     HEADERS,
     NS_URL,
+    OBSERVABILITY_DEFAULT,
     UPLOAD_URL,
+    _default_worker_settings,  # noqa: F401 - autouse fixture: shipped env defaults
     _FakeCloudflare,
     _parts,
     next_build,  # noqa: F401 - fixture
@@ -118,6 +121,8 @@ async def test_account_target_upload_sequence_uses_account_script_urls(
         "compatibility_date": "2026-09-01",
         "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
         "assets": {"jwt": "completion-jwt", "config": {"_headers": HEADERS}},
+        "observability": OBSERVABILITY_DEFAULT,
+        "limits": FREE_LIMITS,
     }
     assert module["name"] == "worker.js"
     assert module["content_type"] == "application/javascript+module"

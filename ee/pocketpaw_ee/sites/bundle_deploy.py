@@ -38,9 +38,13 @@
 #     ever live in the binding: never in a warning, an error, a log or a repr.
 #   * limits: 64 MiB of modules, our own module-count cap (Cloudflare documents
 #     none), and the static-asset caps. Over any of them refuses before upload.
-#   * placement: a worker with modules that binds a regional backend (D1, R2) gets
-#     Smart Placement (``placement_for``) so it can run near its data; opt out with
-#     ``PAW_SITES_SMART_PLACEMENT=0``. Assets-only and backend-less workers get none.
+#   * worker settings (``worker_settings``), only for a bundle with worker modules:
+#     ``observability`` (Workers Logs + traces, sampled; ``PAW_SITES_OBSERVABILITY=0``
+#     turns it off), ``limits`` (per-request CPU and subrequest caps by the site's
+#     plan, ``paid``) and, OPT-IN via ``PAW_SITES_SMART_PLACEMENT=1``, Smart Placement
+#     for a worker that binds a regional backend (D1, R2). Off by default: quiet sites
+#     never get placed, placement moves the whole script (bad with
+#     ``run_worker_first``), and it works against D1 read replicas.
 #
 # The manifest shape is paw-sites' ``buildPawManifest`` (src/starters.ts). The
 # parser also accepts the earlier shape (no ``workerModuleDir`` / ``mainModule``,
@@ -76,9 +80,28 @@ PAW_BUILD_FILENAME = "paw-build.json"
 # Unset (or unknown) follows PAW_CF_DEPLOY_MODE (``project_deploy_target``).
 PROJECT_TARGET_ENV = "PAW_SITES_PROJECT_DEPLOY_TARGET"
 
-# Smart Placement for workers that talk to a regional backend. On unless set to a
-# falsy value. https://developers.cloudflare.com/workers/configuration/placement/
+# Smart Placement for workers that talk to a regional backend. OFF unless set to a
+# truthy value. https://developers.cloudflare.com/workers/configuration/placement/
 SMART_PLACEMENT_ENV = "PAW_SITES_SMART_PLACEMENT"
+# Workers Logs + traces in the upload metadata (``observability``). On unless set to
+# a falsy value; the head sampling rate defaults to 10%.
+# https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/
+OBSERVABILITY_ENV = "PAW_SITES_OBSERVABILITY"
+OBSERVABILITY_SAMPLE_ENV = "PAW_SITES_OBSERVABILITY_SAMPLE"
+DEFAULT_OBSERVABILITY_SAMPLE = 0.1
+# Per-request caps in the upload metadata (``limits``), by the site's plan. CPU
+# defaults: 50 ms free, 300 ms paid (captain, 2026-10-07). Subrequests default to
+# Cloudflare's own Free / Paid account defaults (50 / 10,000); 0 leaves a field out.
+# https://developers.cloudflare.com/workers/wrangler/configuration/#limits
+CPU_MS_ENV = {False: "PAW_SITES_CPU_MS_FREE", True: "PAW_SITES_CPU_MS_PAID"}
+DEFAULT_CPU_MS = {False: 50, True: 300}
+SUBREQUESTS_ENV = {False: "PAW_SITES_SUBREQUESTS_FREE", True: "PAW_SITES_SUBREQUESTS_PAID"}
+DEFAULT_SUBREQUESTS = {False: 50, True: 10_000}
+# Cloudflare caps cpu_ms at 300,000 and subrequests at 10,000,000 (Paid).
+_MAX_CPU_MS = 300_000
+_MAX_SUBREQUESTS = 10_000_000
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
 # Upload binding types whose data lives in one region: a request to them from a far
 # edge pays the round trip. KV is edge-cached and assets are served at the edge, so
 # neither earns placement on its own.
@@ -205,18 +228,102 @@ def project_deploy_target(deploy_mode: str | None) -> str:
     return ACCOUNT_TARGET if deploy_mode == "workers" else DISPATCH_TARGET
 
 
+def _env_flag(name: str) -> str:
+    return (os.environ.get(name) or "").strip().lower()
+
+
 def placement_for(bundle: PawBundle) -> dict | None:
-    """``{"mode": "smart"}`` when the worker has code and binds a regional backend,
-    else None. Smart Placement only moves a Worker's fetch handler and only after it
-    has measured traffic; static assets are always served from the nearest location.
-    ``PAW_SITES_SMART_PLACEMENT=0`` (or false/no/off) turns it off."""
-    if (os.environ.get(SMART_PLACEMENT_ENV) or "").strip().lower() in {"0", "false", "no", "off"}:
+    """``{"mode": "smart"}`` only when ``PAW_SITES_SMART_PLACEMENT`` is truthy and the
+    worker has code and binds a regional backend (D1, R2); else None.
+
+    Opt-in because it rarely helps a paw site: placement needs "consistent traffic
+    ... from multiple locations" (a quiet site stays ``INSUFFICIENT_INVOCATIONS``),
+    it places the whole script as one unit, which Cloudflare says is not optimized
+    correctly alongside ``run_worker_first`` (vite-react-hono uses it), and running
+    near the D1 primary defeats local read replicas."""
+    if _env_flag(SMART_PLACEMENT_ENV) not in _TRUTHY:
         return None
     if not bundle.modules:
         return None
     if not any(b.get("type") in _REGIONAL_BINDING_TYPES for b in bundle.bindings):
         return None
     return {"mode": "smart"}
+
+
+def _sample_rate() -> float:
+    raw = _env_flag(OBSERVABILITY_SAMPLE_ENV)
+    if not raw:
+        return DEFAULT_OBSERVABILITY_SAMPLE
+    try:
+        rate = float(raw)
+    except ValueError:
+        rate = -1.0
+    if not 0.0 <= rate <= 1.0:
+        logger.warning(
+            "sites: %s=%r is not between 0 and 1; using %s",
+            OBSERVABILITY_SAMPLE_ENV,
+            raw,
+            DEFAULT_OBSERVABILITY_SAMPLE,
+        )
+        return DEFAULT_OBSERVABILITY_SAMPLE
+    return rate
+
+
+def observability_for(bundle: PawBundle) -> dict | None:
+    """Workers Logs (invocation logs) and traces for a worker with code, sampled at
+    ``PAW_SITES_OBSERVABILITY_SAMPLE`` (default 0.1). None for an assets-only bundle
+    or when ``PAW_SITES_OBSERVABILITY`` is falsy."""
+    if not bundle.modules or _env_flag(OBSERVABILITY_ENV) in _FALSY:
+        return None
+    rate = _sample_rate()
+    return {
+        "enabled": True,
+        "head_sampling_rate": rate,
+        "logs": {"enabled": True, "invocation_logs": True},
+        "traces": {"enabled": True, "head_sampling_rate": rate},
+    }
+
+
+def _int_env(name: str, default: int, maximum: int) -> int:
+    raw = _env_flag(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= maximum:
+        logger.warning("sites: %s=%r is not 0..%d; using %d", name, raw, maximum, default)
+        return default
+    return value
+
+
+def limits_for(bundle: PawBundle, *, paid: bool) -> dict | None:
+    """``{"cpu_ms": N, "subrequests": M}`` per request for a worker with code, by the
+    site's plan (``paid`` is the provisioner's entitlement answer). A value of 0 in
+    the env leaves that field out (Cloudflare's account default applies). None for
+    an assets-only bundle: asset requests never run the worker."""
+    if not bundle.modules:
+        return None
+    out: dict[str, int] = {}
+    cpu = _int_env(CPU_MS_ENV[paid], DEFAULT_CPU_MS[paid], _MAX_CPU_MS)
+    if cpu:
+        out["cpu_ms"] = cpu
+    sub = _int_env(SUBREQUESTS_ENV[paid], DEFAULT_SUBREQUESTS[paid], _MAX_SUBREQUESTS)
+    if sub:
+        out["subrequests"] = sub
+    return out or None
+
+
+def worker_settings(bundle: PawBundle, *, paid: bool) -> dict[str, dict]:
+    """The optional upload-metadata blocks for this bundle, keyed by the
+    ``put_worker`` keyword they travel as. Empty blocks are left out."""
+    settings = {
+        "placement": placement_for(bundle),
+        "observability": observability_for(bundle),
+        "limits": limits_for(bundle, paid=paid),
+    }
+    return {k: v for k, v in settings.items() if v}
 
 
 def _rel(value: Any, what: str) -> str:
@@ -615,6 +722,7 @@ async def deploy_bundle(
     provision: Callable[[Any], Awaitable[ProvisionedResources]] | None = None,
     before_upload: Callable[[list[dict]], Awaitable[None]] | None = None,
     target: str = DISPATCH_TARGET,
+    paid: bool = False,
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -630,7 +738,11 @@ async def deploy_bundle(
 
     ``target`` is ``dispatch`` (the WfP namespace) or ``account`` (a regular
     account-level script, interim until the account has WfP: the tenant's code runs
-    as one of the account's own Workers with no dispatch isolation in front)."""
+    as one of the account's own Workers with no dispatch isolation in front).
+
+    ``paid`` is the site's ``entitlements.site_paid_backends_entitled`` answer; it
+    picks the per-request CPU and subrequest caps (``limits_for``). Unknown means
+    free, the tighter cap."""
     if target not in SCRIPT_TARGETS:
         raise _refuse(f"unknown deploy target {target!r}")
     bundle, manifest = _read_bundle(build_dir)
@@ -654,8 +766,6 @@ async def deploy_bundle(
             script_name=script_name, assets=bundle.assets, salt=salt, target=target
         )
         assets_meta = {"jwt": jwt, "config": bundle.assets_config}
-    placement = placement_for(bundle)
-    extra = {"placement": placement} if placement else {}
     await cf.put_worker(
         script_name=script_name,
         modules=bundle.modules,
@@ -665,7 +775,7 @@ async def deploy_bundle(
         compatibility_flags=bundle.compatibility_flags,
         assets=assets_meta,
         target=target,
-        **extra,
+        **worker_settings(bundle, paid=paid),
     )
     return BundleDeployResult(
         script_name=script_name,

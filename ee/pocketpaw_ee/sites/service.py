@@ -3494,6 +3494,7 @@ async def _deploy_paw_bundle(
         ),
         before_upload=before_upload,
         target=target,
+        paid=_site_paid(bundle_doc) if bundle_doc is not None else False,
     )
 
 
@@ -5594,6 +5595,7 @@ async def deploy_bundle(
         build_dir=build_dir,
         salt=str(site.workspace),
         provision=_bundle_provisioner(site, cf),
+        paid=_site_paid(site),
     )
 
 
@@ -5623,6 +5625,18 @@ def _project_migrator(
     return _migrate
 
 
+def _site_paid(site: Any) -> bool:
+    """Whether ``site`` is on a paid site tier with an active subscription: the one
+    answer that gates paid backends (R2, larger KV caps) in the provisioner and the
+    per-request CPU / subrequest caps in the upload (``bundle_deploy.limits_for``)."""
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    return entitlements_service.site_paid_backends_entitled(
+        plan_tier=getattr(site, "plan_tier", None),
+        subscription_status=getattr(site, "subscription_status", None),
+    )
+
+
 def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None = None) -> Any:
     """The ``provision`` callback ``bundle_deploy.deploy_bundle`` runs: the site's
     plan decides what it may bind, and the resource ids are saved with ``$set`` so a
@@ -5630,7 +5644,6 @@ def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None =
 
     ``d1_database_id`` pins the D1 binding (a dynamic site's resolved id); None lets
     the provisioner ensure the site's own real database."""
-    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
     from pocketpaw_ee.sites import binding_provisioner
 
     async def _save(doc: Any) -> None:
@@ -5648,10 +5661,7 @@ def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None =
             requests,
             cloudflare=cf,
             save=_save,
-            paid=entitlements_service.site_paid_backends_entitled(
-                plan_tier=getattr(site, "plan_tier", None),
-                subscription_status=getattr(site, "subscription_status", None),
-            ),
+            paid=_site_paid(site),
             derived_d1_id=_derive_d1_database_id(
                 str(getattr(site, "workspace", "")), str(getattr(site, "pocket_id", ""))
             ),
