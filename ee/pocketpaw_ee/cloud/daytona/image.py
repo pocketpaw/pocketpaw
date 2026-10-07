@@ -6,13 +6,13 @@ every project VM comes ready to run code without manual setup.
 Default image includes:
   - Python 3.12 + pip + venv + UV
   - GCC / G++ / build-essential (for C, C++, Rust compilation)
-  - Node.js 20 LTS + npm
+  - Node.js 22 LTS + npm
   - bun >= 1.2 (required by the Paw Sites source-lane build)
   - Docker CE + Compose plugin
   - Git, curl, wget, and other common CLI utilities
 
 The image can be overridden with the ``DAYTONA_SANDBOX_IMAGE`` env var
-(e.g. ``DAYTONA_SANDBOX_IMAGE=node:20``), or set to ``"standard"`` to
+(e.g. ``DAYTONA_SANDBOX_IMAGE=node:22``), or set to ``"standard"`` to
 explicitly use the pre-built environment below.
 
 Added: 2026-06-25
@@ -38,7 +38,7 @@ def sandbox_image_override() -> str | None:
     """Return the image string from the env var, or ``None``.
 
     The env var ``DAYTONA_SANDBOX_IMAGE`` can be set to:
-      - A regular Docker image reference (e.g. ``"node:20"``,
+      - A regular Docker image reference (e.g. ``"node:22"``,
         ``"python:3.12-slim"``) — used as-is.
       - ``"standard"`` or ``"default"`` — explicitly uses the
         pre-built Paw development image defined here.
@@ -64,7 +64,7 @@ def build_paw_dev_image() -> Image:
     via the ``Image.debian_slim()`` factory.
 
     Adds:
-      * Node.js 20 LTS (via NodeSource)
+      * Node.js 22 LTS (via NodeSource)
       * bun >= 1.2 (the Paw Sites source-lane build runs ``bun install`` +
         ``bun run build``; see the block below for why npm is not a substitute)
       * Docker CE + docker-compose-plugin
@@ -82,9 +82,9 @@ def build_paw_dev_image() -> Image:
             "apt-get update && apt-get install -y --no-install-recommends "
             "git curl wget ca-certificates gnupg lsb-release unzip",
         )
-        # ── Node.js 20 LTS ──────────────────────────────────────────
+        # ── Node.js 22 LTS ──────────────────────────────────────────
         .run_commands(
-            "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
+            "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
             "apt-get install -y nodejs",
             "corepack enable",
         )

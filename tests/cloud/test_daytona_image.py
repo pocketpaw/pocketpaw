@@ -52,6 +52,16 @@ class TestToolchainIsPresent:
         vendored paw-sites CLI runs under node."""
         assert "nodesource.com" in dockerfile
 
+    def test_node_is_at_least_22(self, dockerfile: str) -> None:
+        # Wrangler 4.14x (run by every worker-target base template's dry-run bundle),
+        # Astro 7, Next 16 and SvelteKit 3 all refuse Node 20. A Node 20 image made
+        # every project build fail at the packaging step after a clean compile.
+        import re
+
+        majors = [int(m) for m in re.findall(r"nodesource\.com/setup_(\d+)\.x", dockerfile)]
+        assert majors, "the image no longer installs node from nodesource"
+        assert min(majors) >= 22
+
     def test_python_base_is_retained(self, dockerfile: str) -> None:
         """The in-sandbox build wrapper serializes its result sentinel with python3
         rather than hand-rolled shell JSON. Losing the python base would silently break
