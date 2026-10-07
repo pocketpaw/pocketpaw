@@ -11,7 +11,8 @@
 #     one-module multipart with bindings (dynamic sites, fixed ``index.mjs`` and
 #     ``2024-09-23``), and the multi-module bundle form (``modules=``) used by
 #     ``bundle_deploy`` for ``paw-build.json`` builds: metadata + one part per
-#     module, with compat flags and an ``assets`` block. The two legacy shapes are
+#     module, with compat flags, an ``assets`` block and an optional ``placement``
+#     (Smart Placement, decided by ``bundle_deploy``). The two legacy shapes are
 #     byte-for-byte what existing engines have always sent.
 #   * Static assets: ``upload_assets`` runs the dispatch assets-upload-session,
 #     uploads the requested buckets (base64 multipart, session JWT as Bearer, never
@@ -31,7 +32,10 @@
 #     rename (a second POST for the same pattern is a 409).
 #   * D1: ``create_database``, ``find_database`` (exact name, crash recovery),
 #     ``delete_database``, ``query_d1`` and ``query_d1_batch`` (parameterized, never
-#     interpolated SQL).
+#     interpolated SQL). ``create_database`` adds the operator's
+#     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``) and, opt-in,
+#     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``) to the create
+#     body; both only shape NEW databases.
 #   * KV and R2 for ``binding_provisioner``: namespaces (find by title, create,
 #     delete) and buckets (exists, create, delete, expire-all lifecycle). The REST API
 #     has no object list/delete for R2, so a non-empty bucket delete reports False
@@ -49,7 +53,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import mimetypes
+import os
 import posixpath
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -61,6 +67,20 @@ from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
 
 _CF_API = "https://api.cloudflare.com/client/v4"
 
+logger = logging.getLogger(__name__)
+
+# Where a NEW site D1 puts its primary. Unset lets Cloudflare choose (near the API
+# host that issued the create). Values are the create endpoint's
+# ``primary_location_hint`` enum:
+# https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/create/
+D1_LOCATION_HINT_ENV = "PAW_SITES_D1_LOCATION_HINT"
+D1_LOCATION_HINTS = frozenset({"wnam", "enam", "weur", "eeur", "apac", "oc"})
+# Opt-in: create new site D1s with read replication on (``mode: auto``). Replicas
+# only serve queries a Worker sends through the Sessions API; everything else (and
+# every REST query, so our migrations) still goes to the primary.
+# https://developers.cloudflare.com/d1/best-practices/read-replication/
+D1_READ_REPLICATION_ENV = "PAW_SITES_D1_READ_REPLICATION"
+
 # Where ``put_worker`` / ``upload_assets`` send a script. ``dispatch`` is our WfP
 # namespace; ``account`` is a regular account-level script (no dispatch isolation).
 DISPATCH_TARGET = "dispatch"
@@ -71,6 +91,26 @@ SCRIPT_TARGETS = (DISPATCH_TARGET, ACCOUNT_TARGET)
 # messages are short sentences; the cap exists so a proxy's HTML error page cannot
 # paste a whole document into a toast.
 _ERROR_DETAIL_MAX = 300
+
+
+def d1_create_options() -> dict:
+    """Extra D1 create-body fields from env: ``primary_location_hint`` when
+    ``PAW_SITES_D1_LOCATION_HINT`` names a valid hint (an unknown value is logged and
+    left out, so Cloudflare chooses), and ``read_replication: {"mode": "auto"}`` when
+    ``PAW_SITES_D1_READ_REPLICATION`` is truthy. A hint is a preference, not a
+    guarantee (https://developers.cloudflare.com/d1/configuration/data-location/)."""
+    out: dict = {}
+    hint = (os.environ.get(D1_LOCATION_HINT_ENV) or "").strip().lower()
+    if hint in D1_LOCATION_HINTS:
+        out["primary_location_hint"] = hint
+    elif hint:
+        logger.warning(
+            "sites: unknown %s=%r; letting Cloudflare choose", D1_LOCATION_HINT_ENV, hint
+        )
+    replication = (os.environ.get(D1_READ_REPLICATION_ENV) or "").strip().lower()
+    if replication in {"1", "true", "yes", "on"}:
+        out["read_replication"] = {"mode": "auto"}
+    return out
 
 
 def _error_detail(resp: httpx.Response) -> str:
@@ -292,6 +332,7 @@ class CloudflareClient:
         compatibility_flags: Sequence[str] | None = None,
         assets: dict | None = None,
         target: str = DISPATCH_TARGET,
+        placement: Mapping[str, str] | None = None,
     ) -> bool:
         """Upload a user Worker into the dispatch namespace. Live on 200.
 
@@ -321,8 +362,9 @@ class CloudflareClient:
         ``bindings``, ``compatibility_date``, ``compatibility_flags`` and, when given,
         ``assets`` (``{"jwt": <completion jwt>, "config": {...}}``), followed by one
         part per module named by its path. An empty ``modules`` with ``assets`` is an
-        assets-only Worker (no ``main_module``). Callers vet every value first; this
-        method only checks the shape is self-consistent."""
+        assets-only Worker (no ``main_module``). ``placement`` (bundle form only, e.g.
+        ``{"mode": "smart"}``) goes into the metadata as given. Callers vet every value
+        first; this method only checks the shape is self-consistent."""
         if modules is not None:
             return await self._put_worker_bundle(
                 script_name=script_name,
@@ -334,7 +376,10 @@ class CloudflareClient:
                 compatibility_flags=compatibility_flags or [],
                 assets=assets,
                 target=target,
+                placement=placement,
             )
+        if placement:
+            raise ValidationError("sites.bundle_shape", "placement needs the bundle form")
         url = self._script_url(script_name, target)
         async with self._client() as client:
             if bindings:
@@ -390,6 +435,7 @@ class CloudflareClient:
         compatibility_flags: Sequence[str],
         assets: dict | None,
         target: str = DISPATCH_TARGET,
+        placement: Mapping[str, str] | None = None,
     ) -> bool:
         if bundle:
             raise ValidationError(
@@ -417,6 +463,8 @@ class CloudflareClient:
         metadata["compatibility_flags"] = list(compatibility_flags)
         if assets:
             metadata["assets"] = assets
+        if placement:
+            metadata["placement"] = dict(placement)
         files: list[tuple[str, tuple[str | None, bytes | str, str]]] = [
             ("metadata", (None, json.dumps(metadata), "application/json"))
         ]
@@ -722,12 +770,16 @@ class CloudflareClient:
         uuid string — the id every later step (migrate, the Worker's D1 binding,
         the generated wrangler.toml ``database_id``) keys on.
 
+        The body also carries ``d1_create_options()``: the operator's location hint
+        and the opt-in read replication. Both only apply to the database being
+        created; an existing database keeps where it is.
+
         Fail-closed: a non-2xx or a ``success: false`` envelope raises
         ValidationError via ``_unwrap``, so a failed create never silently returns
         an empty/garbage id."""
         url = f"{_CF_API}/accounts/{self._account_id}/d1/database"
         async with self._client() as client:
-            resp = await client.post(url, json={"name": name})
+            resp = await client.post(url, json={"name": name, **d1_create_options()})
         result = self._unwrap(resp)
         return result["uuid"]
 

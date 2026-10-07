@@ -671,6 +671,108 @@ def test_empty_or_broken_manifest_is_refused(tmp_path: Path):
         bundle_deploy.load_bundle(tmp_path, ProvisionedResources())
 
 
+# ------------------------------------------------------- smart placement
+
+
+def _with_requests(build: Path, requests: list[dict]) -> Path:
+    manifest = json.loads((build / "paw-build.json").read_text())
+    manifest["bindingRequests"] = [{"type": "assets", "name": "ASSETS"}, *requests]
+    (build / "paw-build.json").write_text(json.dumps(manifest))
+    return build
+
+
+async def _put_metadata(build: Path, provisioned: ProvisionedResources, target: str) -> dict:
+    fake = _FakeCloudflare()
+    await bundle_deploy.deploy_bundle(
+        fake.client(),
+        script_name="site_1",
+        build_dir=build,
+        salt="ws_1",
+        provisioned=provisioned,
+        target=target,
+    )
+    put = fake.requests[-1]
+    assert put.method == "PUT"
+    return json.loads(_parts(put)[0]["content"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["account", "dispatch"])
+async def test_a_worker_bound_to_d1_gets_smart_placement_on_both_targets(
+    next_build: Path, monkeypatch, target: str
+):
+    monkeypatch.delenv("PAW_SITES_SMART_PLACEMENT", raising=False)
+    build = _with_requests(next_build, [{"type": "d1", "name": "DB"}])
+    meta = await _put_metadata(build, ProvisionedResources(d1_database_id="our-d1"), target)
+    assert meta["placement"] == {"mode": "smart"}
+    assert {"type": "d1", "name": "DB", "id": "our-d1"} in meta["bindings"]
+
+
+@pytest.mark.asyncio
+async def test_a_worker_bound_to_r2_gets_smart_placement(next_build: Path, monkeypatch):
+    monkeypatch.delenv("PAW_SITES_SMART_PLACEMENT", raising=False)
+    build = _with_requests(next_build, [{"type": "r2", "name": "FILES"}])
+    meta = await _put_metadata(
+        build, ProvisionedResources(r2_buckets={"FILES": "paw-b"}), "account"
+    )
+    assert meta["placement"] == {"mode": "smart"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requests", "provisioned"),
+    [
+        ([], ProvisionedResources()),  # assets binding only
+        ([{"type": "kv", "name": "CACHE"}], ProvisionedResources(kv_namespaces={"CACHE": "k"})),
+    ],
+)
+async def test_no_placement_without_a_regional_backend(
+    next_build: Path, monkeypatch, requests, provisioned
+):
+    monkeypatch.delenv("PAW_SITES_SMART_PLACEMENT", raising=False)
+    meta = await _put_metadata(_with_requests(next_build, requests), provisioned, "account")
+    assert "placement" not in meta
+
+
+@pytest.mark.asyncio
+async def test_an_assets_only_worker_gets_no_placement_even_with_d1(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("PAW_SITES_SMART_PLACEMENT", raising=False)
+    _write(tmp_path, "dist/index.html", "<h1>hi</h1>")
+    _write(
+        tmp_path,
+        "paw-build.json",
+        json.dumps(
+            {
+                "assetsDir": "dist",
+                "workerModules": [],
+                "compat": {"date": "2026-09-01", "flags": []},
+                "bindingRequests": [{"type": "d1", "name": "DB"}],
+            }
+        ),
+    )
+    meta = await _put_metadata(tmp_path, ProvisionedResources(d1_database_id="our-d1"), "account")
+    assert "main_module" not in meta and "placement" not in meta
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "false", "OFF"])
+async def test_smart_placement_opt_out(next_build: Path, monkeypatch, value: str):
+    monkeypatch.setenv("PAW_SITES_SMART_PLACEMENT", value)
+    build = _with_requests(next_build, [{"type": "d1", "name": "DB"}])
+    meta = await _put_metadata(build, ProvisionedResources(d1_database_id="our-d1"), "account")
+    assert "placement" not in meta
+
+
+@pytest.mark.asyncio
+async def test_placement_is_refused_on_the_legacy_put_worker_shapes():
+    fake = _FakeCloudflare()
+    with pytest.raises(ValidationError):
+        await fake.client().put_worker(
+            script_name="s", bundle=b"export default {}", placement={"mode": "smart"}
+        )
+    assert fake.requests == []
+
+
 # ---------------------------------------------------- legacy unchanged
 
 

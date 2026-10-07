@@ -38,6 +38,9 @@
 #     ever live in the binding: never in a warning, an error, a log or a repr.
 #   * limits: 64 MiB of modules, our own module-count cap (Cloudflare documents
 #     none), and the static-asset caps. Over any of them refuses before upload.
+#   * placement: a worker with modules that binds a regional backend (D1, R2) gets
+#     Smart Placement (``placement_for``) so it can run near its data; opt out with
+#     ``PAW_SITES_SMART_PLACEMENT=0``. Assets-only and backend-less workers get none.
 #
 # The manifest shape is paw-sites' ``buildPawManifest`` (src/starters.ts). The
 # parser also accepts the earlier shape (no ``workerModuleDir`` / ``mainModule``,
@@ -72,6 +75,14 @@ PAW_BUILD_FILENAME = "paw-build.json"
 # Operator override for where project bundles deploy: ``account`` or ``dispatch``.
 # Unset (or unknown) follows PAW_CF_DEPLOY_MODE (``project_deploy_target``).
 PROJECT_TARGET_ENV = "PAW_SITES_PROJECT_DEPLOY_TARGET"
+
+# Smart Placement for workers that talk to a regional backend. On unless set to a
+# falsy value. https://developers.cloudflare.com/workers/configuration/placement/
+SMART_PLACEMENT_ENV = "PAW_SITES_SMART_PLACEMENT"
+# Upload binding types whose data lives in one region: a request to them from a far
+# edge pays the round trip. KV is edge-cached and assets are served at the edge, so
+# neither earns placement on its own.
+_REGIONAL_BINDING_TYPES = frozenset({"d1", "r2_bucket"})
 
 # Worker size: 64 MiB uncompressed on Free and Paid, no compressed cap.
 # https://developers.cloudflare.com/workers/platform/limits/
@@ -192,6 +203,20 @@ def project_deploy_target(deploy_mode: str | None) -> str:
     if raw:
         logger.warning("sites: unknown %s=%r; following the deploy mode", PROJECT_TARGET_ENV, raw)
     return ACCOUNT_TARGET if deploy_mode == "workers" else DISPATCH_TARGET
+
+
+def placement_for(bundle: PawBundle) -> dict | None:
+    """``{"mode": "smart"}`` when the worker has code and binds a regional backend,
+    else None. Smart Placement only moves a Worker's fetch handler and only after it
+    has measured traffic; static assets are always served from the nearest location.
+    ``PAW_SITES_SMART_PLACEMENT=0`` (or false/no/off) turns it off."""
+    if (os.environ.get(SMART_PLACEMENT_ENV) or "").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    if not bundle.modules:
+        return None
+    if not any(b.get("type") in _REGIONAL_BINDING_TYPES for b in bundle.bindings):
+        return None
+    return {"mode": "smart"}
 
 
 def _rel(value: Any, what: str) -> str:
@@ -629,6 +654,8 @@ async def deploy_bundle(
             script_name=script_name, assets=bundle.assets, salt=salt, target=target
         )
         assets_meta = {"jwt": jwt, "config": bundle.assets_config}
+    placement = placement_for(bundle)
+    extra = {"placement": placement} if placement else {}
     await cf.put_worker(
         script_name=script_name,
         modules=bundle.modules,
@@ -638,6 +665,7 @@ async def deploy_bundle(
         compatibility_flags=bundle.compatibility_flags,
         assets=assets_meta,
         target=target,
+        **extra,
     )
     return BundleDeployResult(
         script_name=script_name,

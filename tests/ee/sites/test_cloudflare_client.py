@@ -1,31 +1,16 @@
-# Tests for the Sites Cloudflare client (RFC 12, Task 2.2).
-# Created: 2026-05-30 (feat/paw-sites-backend) — exercises the two CF
-# surfaces the control plane uses, with httpx.MockTransport standing in
-# for the real Cloudflare API (no network):
-#   * put_worker — uploads a user Worker to the Workers-for-Platforms
-#     dispatch namespace (asserts URL + PUT verb).
-#   * create_custom_hostname — Cloudflare-for-SaaS hostname create, returns
-#     the single CNAME target the client pastes.
-#   * get_hostname_status — maps CF's status/ssl pair onto HostnameStatus.
-#   * non-2xx responses fail closed (raise).
-# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): put_worker gains an
-# optional ``bindings`` param. When supplied it switches to the Workers
-# multipart/form-data upload (a ``metadata`` JSON part carrying main_module +
-# bindings + compatibility_date, plus the module file part) so a dynamic site's
-# deployed Worker reaches its per-tenant D1. When omitted it keeps the exact
-# single-module upload (static sites unchanged) — both paths are asserted here.
-# Updated 2026-07-08 (DP0-1 — D1 provisioning): added coverage for
-# create_database(): a successful create returns the uuid at ``result.uuid``, and
-# a Cloudflare error envelope (success:false or non-2xx) fails closed by raising
-# ValidationError with code ``sites.cloudflare_error``.
-# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added coverage for
-# query_analytics_sql(), which breaks two of this module's conventions on purpose —
-# the body is raw SQL rather than JSON, and a SUCCESSFUL query answers
-# ``{meta, data, rows}`` with no ``success`` key, so ``_unwrap`` would raise on every
-# good response. Both are pinned here because either is one line of house-style
-# tidying away from breaking every read. It is fail-closed on a non-2xx, a non-JSON
-# body, and a 2xx with no data array: returning [] would render a Cloudflare outage
-# as a customer's quiet week.
+# Tests for the Sites Cloudflare client (ee/pocketpaw_ee/sites/cloudflare_client.py),
+# with httpx.MockTransport standing in for the real Cloudflare API (no network):
+#   * put_worker: the single-module PUT (static sites) and the one-module multipart
+#     with a ``bindings`` metadata part (dynamic sites' D1), URL and verb pinned.
+#   * custom hostnames: create returns the configured CNAME target; status maps CF's
+#     status/ssl pair onto HostnameStatus.
+#   * create_database: returns ``result.uuid``; the body carries the operator's
+#     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``, unknown values left
+#     out) and the opt-in ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication``).
+#   * query_analytics_sql: raw SQL body and a success body with no ``success`` key,
+#     both pinned because house-style tidying would break every read; fail-closed on
+#     a non-2xx, a non-JSON body and a 2xx with no data array.
+#   * every non-2xx or ``success: false`` fails closed with Cloudflare's own detail.
 from __future__ import annotations
 
 import json
@@ -795,3 +780,52 @@ async def test_a_real_failure_still_raises(call):
 
     with pytest.raises(ValidationError):
         await call(_client(handler))
+
+
+# ── D1 create options: location hint and read replication (new databases only) ──
+
+
+def _create_body(monkeypatch, env: dict[str, str]) -> dict:
+    import asyncio
+
+    for key in ("PAW_SITES_D1_LOCATION_HINT", "PAW_SITES_D1_READ_REPLICATION"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"success": True, "result": {"uuid": "u1"}})
+
+    assert asyncio.run(_client(handler).create_database("site-db")) == "u1"
+    return seen["body"]
+
+
+def test_create_database_sends_only_the_name_by_default(monkeypatch):
+    assert _create_body(monkeypatch, {}) == {"name": "site-db"}
+
+
+def test_create_database_passes_the_configured_location_hint(monkeypatch):
+    body = _create_body(monkeypatch, {"PAW_SITES_D1_LOCATION_HINT": " APAC "})
+    assert body == {"name": "site-db", "primary_location_hint": "apac"}
+
+
+def test_an_unknown_location_hint_is_left_out_so_cloudflare_chooses(monkeypatch):
+    body = _create_body(monkeypatch, {"PAW_SITES_D1_LOCATION_HINT": "sam"})
+    assert body == {"name": "site-db"}
+
+
+def test_read_replication_is_opt_in_at_create(monkeypatch):
+    body = _create_body(
+        monkeypatch,
+        {"PAW_SITES_D1_READ_REPLICATION": "1", "PAW_SITES_D1_LOCATION_HINT": "weur"},
+    )
+    assert body == {
+        "name": "site-db",
+        "primary_location_hint": "weur",
+        "read_replication": {"mode": "auto"},
+    }
+    assert "read_replication" not in _create_body(
+        monkeypatch, {"PAW_SITES_D1_READ_REPLICATION": "0"}
+    )

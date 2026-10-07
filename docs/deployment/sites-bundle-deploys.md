@@ -1,6 +1,7 @@
 <!-- How a paw-build.json build (project engine / base app templates) is deployed
      through the Cloudflare HTTP API (into the WfP dispatch namespace, or as an
-     account-level Worker while the account has no WfP), and what gates enabling it. -->
+     account-level Worker while the account has no WfP), its performance settings, and what
+     gates enabling it. -->
 # Sites: bundle deploys (`paw-build.json`)
 
 Builds from the `project` engine and the base app templates (Next.js via OpenNext,
@@ -175,7 +176,8 @@ then enables workers.dev:
    no buckets, the session JWT is the completion JWT.
 3. `PUT /accounts/{acct}/workers/dispatch/namespaces/{ns}/scripts/{site_id}`, multipart:
    - `metadata`: `{main_module, bindings, compatibility_date, compatibility_flags,
-     assets: {jwt, config}}`
+     assets: {jwt, config}}`, plus `placement: {mode: "smart"}` when the worker binds
+     D1 or R2 (see "Performance" below)
    - one part per module, named by its path, typed by extension: `.js`/`.mjs`
      `application/javascript+module`, `.cjs` `application/javascript`, `.wasm`
      `application/wasm`, `.json` `application/json`, `.txt`/`.html`/`.md`/`.sql`
@@ -296,6 +298,96 @@ upload. Wrangler, drizzle-kit and the project's own config never run on the API 
   `Site.d1_database_id`, for project sites as for dynamic ones. The pre-delete export
   only covers tables a dynamic site declares, so a project site's own tables are not
   in it yet.
+
+## Performance
+
+A site Worker runs in the Cloudflare location nearest the visitor, but its D1 primary
+(and an R2 bucket) lives in one region. Every query from a far location pays that
+round trip. Three settings narrow the gap.
+
+### Smart Placement
+
+A bundle with worker modules that binds a regional backend (`d1` or `r2_bucket` in the
+mapped bindings) is uploaded with `placement: {"mode": "smart"}` in the script
+metadata, on both the `account` and `dispatch` targets. Both upload APIs accept it:
+[script upload](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/),
+[dispatch namespace script upload](https://developers.cloudflare.com/api/resources/workers_for_platforms/subresources/dispatch/subresources/namespaces/subresources/scripts/methods/update/),
+[metadata reference](https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/).
+
+What it does ([Placement](https://developers.cloudflare.com/workers/configuration/placement/)):
+
+- Cloudflare measures request duration in different locations and forwards a request
+  to a location that is significantly faster, usually one near the backend. 1% of
+  requests stay unplaced as a baseline.
+- It only affects `fetch` handlers, and only after analysis (up to 15 minutes after
+  a deploy) and enough traffic from several locations. A quiet site reports
+  `INSUFFICIENT_INVOCATIONS` and runs as before.
+- Static assets are always served from the location nearest the visitor; assets the
+  Worker fetches through its `ASSETS` binding come from where the Worker runs.
+- D1 gets no special treatment: since 2025-02-13 Workers bound to D1 follow the same
+  latency-based logic as every other Worker
+  ([changelog](https://developers.cloudflare.com/workers/platform/changelog/)).
+
+Assets-only bundles and workers that bind nothing regional (only assets, KV or
+secrets) get no placement. KV is cached at the edge, so it does not earn placement
+on its own. Set `PAW_SITES_SMART_PLACEMENT=0` (or `false` / `no` / `off`) to turn it
+off for every bundle deploy; the next publish of each site drops it.
+
+### D1 location hint
+
+`PAW_SITES_D1_LOCATION_HINT` sets `primary_location_hint` on every **new** site D1
+(the bundle provisioner and the dynamic-site provision job both create through
+`CloudflareClient.create_database`). Valid values are `wnam`, `enam`, `weur`, `eeur`,
+`apac` and `oc`
+([create database](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/create/),
+[data location](https://developers.cloudflare.com/d1/configuration/data-location/)).
+An unknown value is logged and left out. Unset means Cloudflare places the primary
+near the caller, which is the API host, not the visitors.
+
+- The hint only applies when a database is created. Existing databases keep their
+  primary; moving one means exporting it into a new database.
+- A hint is a preference: "Providing a location hint does not guarantee that D1 runs
+  in your preferred location." South America, Africa and the Middle East have no hint.
+- Pick the region most visitors are in (`apac` for an India-heavy user base).
+
+### D1 read replication (opt-in)
+
+`PAW_SITES_D1_READ_REPLICATION=1` creates new site databases with
+`read_replication: {"mode": "auto"}`. Replicas cost nothing extra, but they only serve
+queries a Worker sends through the Sessions API (`env.DB.withSession(...)`); every
+other query, and every REST API query (our migrations), still goes to the primary.
+Replicas are asynchronous, so a template that adopts sessions must pass bookmarks to
+read its own writes
+([read replication](https://developers.cloudflare.com/d1/best-practices/read-replication/)).
+It is off by default until a template uses sessions. An existing database is switched
+with `PUT /accounts/{acct}/d1/database/{id}` and `{"read_replication": {"mode":
+"auto"}}`; we have no code that does that yet.
+
+### Asset caching
+
+`_headers` from the build (`assetsConfig._headers`, or lifted from `assetsDir`) is sent
+as `assets.config._headers`, so a template that ships
+`/_next/static/*  Cache-Control: public,max-age=31536000,immutable` gets immutable
+caching for its hashed files. It applies to responses served by the asset layer, not
+to responses the Worker generates.
+
+`html_handling` defaults to `auto-trailing-slash`: `about.html` is served at `/about`,
+`about/index.html` at `/about/`, and the other spelling gets a 307 to the canonical one
+([HTML handling](https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/)).
+A template whose links do not match its output format (`/about` links to a
+`about/index.html` build) pays an extra redirect on every such click; fix that in the
+template, not by changing the default. `not_found_handling` defaults to `none`, so an
+unmatched path goes to the Worker with no extra hop.
+
+### Cold starts
+
+There is no platform setting for cold starts. Cloudflare already pre-warms a Worker
+during the TLS handshake and routes to instances that are already loaded
+([Eliminating cold starts 2](https://blog.cloudflare.com/eliminating-cold-starts-2-shard-and-conquer/)).
+What a cold start costs is the script size and the work in its global scope
+([startup limit](https://developers.cloudflare.com/workers/platform/limits/)), so the
+levers live in the templates: smaller worker bundles, no top-level initialization, and
+prerendered pages served as static assets instead of through the Worker.
 
 ## Secrets
 
