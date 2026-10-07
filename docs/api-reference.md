@@ -2,6 +2,13 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-07 (perf/sites-fast-edits) — "Draft verification": edit tools
+  return the static check only (`status: "pending"`, `static`, `build`, `job_id`)
+  and the build + browser verdict arrives on the next tool result as
+  `previous_verification`; only a static failure rolls a svelte edit back; an
+  unreferenced `create=true` is `skipped`; html edits skip the browser layer;
+  `preview_site` returns at most 3 tiles. Sandbox image setup:
+  `docs/deployment/sites-verify-image.md`.
 Updated: 2026-10-06 (fix/site-source-per-site-tier) — a site's source is
   visible (`sourceVisible` on the pocket) only when the SITE is on `site` or
   `staff` with an active subscription. The workspace plan no longer grants it;
@@ -5034,8 +5041,10 @@ site can reach the publish-time 422.
 
 Every `create_svelte_site`, `create_react_site`, `create_html_site`,
 `edit_svelte_component`, `edit_react_component`, `edit_html_file` and
-`set_site_dependencies` result carries a `verification` object. It says whether the
-draft actually works:
+`set_site_dependencies` result carries a `verification` object. Creates and
+`verify_site` carry the full verdict below; edits carry the faster edit verdict
+described under "Edits: static now, build later". It says whether the draft
+actually works:
 
 ```json
 "verification": {
@@ -5088,20 +5097,87 @@ never served from the cache. The build job also stores its build + browser repor
 under the hash, so an editor pre-warm answers the next verify without a second
 sandbox.
 
-**Deadline.** A tool waits at most `PAW_SITES_VERIFY_WAIT_SEC` (default 90) for the
-sandbox layers, plus a short slack for the static check. On expiry the verdict is
-`unverified` / `timeout` and the build keeps running; the next `verify_site`
-attaches to the same job.
+**Deadline.** A create or `verify_site` waits at most `PAW_SITES_VERIFY_WAIT_SEC`
+(default 90) for the sandbox layers, plus a short slack for the static check. On
+expiry the verdict is `unverified` / `timeout` and the build keeps running; the next
+`verify_site` attaches to the same job.
 
-**`edit_svelte_component` rollback.** A `static` or `build` failure means the edit
-does not compile: the file is restored (a created file is removed) and the tool
-returns `{ok: false, status: "rolled_back", verification, message}` as data, not as
-an MCP error. A `browser` failure keeps the edit staged and reports it: the page
-builds, and the fix is usually a follow-up edit to the same file. `unverified`
-keeps the edit staged. react and html edits stay draft-only as before and simply
-carry the verdict. The svelte edit result's `site.preview_url` is now always `null`:
-no local preview deploy is made any more; the builder shows the draft from the
-verified build.
+#### Edits: static now, build later
+
+An edit tool (`edit_svelte_component`, `edit_react_component`, `edit_html_file`,
+`set_site_dependencies`) runs only the `static` layer before it answers, about a
+second. For svelte and react it then queues the preview build (build + browser) and
+returns without waiting:
+
+```json
+"verification": {
+  "status": "pending",
+  "static": "passed",
+  "build": "pending",
+  "job_id": "site-preview-<pocket_id>-<content_hash>",
+  "content_hash": "…",
+  "layers": [
+    {"name": "static",  "status": "passed"},
+    {"name": "build",   "status": "pending"},
+    {"name": "browser", "status": "pending"}
+  ],
+  "errors": [], "warnings": [],
+  "checked_at": "ISO-8601"
+}
+```
+
+`static` and `build` mirror the two layers' statuses. Other shapes an edit can
+return:
+
+| Case | `status` | Notes |
+|------|----------|-------|
+| Static check failed | `failed` | `build` / `browser` are `skipped` (`static_check_failed`); nothing is queued. |
+| This exact source was already built (a pre-warm, an earlier verify) or verified | `passed` / `failed` | The full verdict, read from the store; `cached: true` when it was a cached verdict. |
+| html | `unverified`, reason `browser_check_on_demand` | `build` is `skipped`; the browser layer runs only when `verify_site` is called. |
+| Queue down | `unverified`, reason `queue_unavailable` | |
+| `create: true` that nothing links to or imports yet | `skipped`, reason `create_half_step` | No check at all; the edit that wires the file in verifies the whole site. |
+
+**`previous_verification`.** When the queued job finishes, its verdict is attached
+to the NEXT result of an edit tool or `preview_site` for that pocket, once, as
+`previous_verification` (the full verdict plus `static`, `build` and `job_id`). On a
+success result it is a key in the JSON body; on an error result or the image result
+of `preview_site` it is a trailing text block. A verdict that `verify_site` already
+returned is not repeated. A job that never reports within 15 minutes comes back as
+`unverified` / `no_report`. There is no realtime event for it.
+
+**Superseded builds.** A new preview build for a pocket aborts the pocket's previous
+queued or running one (arq abort; the sites worker sets `allow_abort_jobs`). A
+`verify_site` that was waiting on the aborted job reads its layers as `unverified` /
+`superseded`. If the source returns to an aborted render (an undo), that render is
+queued again rather than reported as failed.
+
+**One builder origin.** The editor's native-artifact view, the post-edit pre-warm,
+the verify pipeline and `preview_site` all compute the armed content hash with the
+same origin (`service.resolve_armed_builder_origin`): the request `Origin` when
+there is one (recorded per pocket), else the origin the editor last viewed the draft
+with, else the Site row's `builder_origin`, else `PAW_SITES_BUILDER_ORIGIN`. One edit
+therefore builds one render.
+
+**The draft preview appears before the browser check.** The preview job stores the
+draft artifact (and its preview URL) as soon as the build is clean, then runs the
+browser harness.
+
+**Timing logs.** Every step logs elapsed milliseconds, so edit latency can be read
+from the logs alone: `sites.edit_tool: tool=… pocket=… result=… verification=…
+elapsed_ms=…` (API, one line per edit call), `sites.verify: layer=static …` (API),
+`sites.verify: layer=queue_wait|build|browser …` (worker) and
+`sites.verify: layer=sandbox_wait …` (API, a waiting `verify_site`).
+
+**`edit_svelte_component` rollback.** Only a `static` failure rolls an edit back,
+because it is the only failure known before the edit returns: the file is restored
+(a created file is removed) and the tool returns
+`{ok: false, status: "rolled_back", verification, message}` as data, not as an MCP
+error. A `build` or `browser` failure, found by the background job (or read from
+the store for source that was already built), keeps the edit staged and is reported;
+the agent fixes it with a follow-up edit. `unverified` keeps the edit staged. react
+and html edits stay draft-only and carry the edit verdict. The svelte edit result's
+`site.preview_url` is always `null`: no local preview deploy is made; the builder
+shows the draft from the preview build.
 
 #### `verify_site`
 
@@ -5111,7 +5187,9 @@ verified build.
 
 Returns `{ok, pocket_id, verification}`. `ok` means the check ran and answered;
 whether the site works is `verification.status`. A missing or foreign pocket is an
-error. Use it to re-check after a fix or after an `unverified` / `timeout` result.
+error. It waits for the build and browser layers (it is the waiting verify), so the
+agent calls it once at the end of a turn's edits, after a fix, or after an
+`unverified` / `timeout` result.
 
 #### `preview_site`
 
@@ -5121,12 +5199,15 @@ error. Use it to re-check after a fix or after an `unverified` / `timeout` resul
 | `device` | `desktop` \| `mobile` | Optional, default `desktop` (1280px); `mobile` is 390px. |
 
 Returns MCP `image` blocks (a full-page JPEG screenshot of the current draft, cut
-into at most six tiles, top first) followed by one text block. `verify_site` says
+into at most three tiles, top first; the capture waits for the page's `load` event)
+followed by one text block, plus a `previous_verification` text block when an
+edit's background verdict is waiting. `verify_site` says
 whether the draft builds and loads; this is how the agent sees whether it looks
 right. Nothing is stored.
 
-The draft document comes from `draft_markup` for html sites and any pocket already
-built on the host, otherwise from the cached preview render (`get_native_artifact`)
+The draft document comes from `draft_markup` for html sites and any pocket whose
+on-host build is of its current content (the build dir's content stamp must match;
+a stale build is skipped), otherwise from the cached preview render (`get_native_artifact`)
 for svelte and react. Errors, none of which mean the site is broken:
 
 - the render is still building: call `verify_site`, then ask again;
