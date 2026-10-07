@@ -281,6 +281,17 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Growth WhatsApp consent tests (tests/cloud blind spot)
+        # The inbound webhook decides prospect.opted_in (a STOP reply is an
+        # opt-out, never an opt-in) and the dispatch guard refuses a send
+        # without it. tests/cloud is excluded by the pyproject addopts.
+        run: >-
+          uv run pytest tests/cloud/growth/test_whatsapp_webhook.py
+          tests/cloud/growth/test_whatsapp_dispatch.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Craft studio preambles (tests/cloud blind spot)
         # The /studio/vector, /studio/photo and /studio/design preambles render
         # the page's document projection; tests/cloud is excluded by the
