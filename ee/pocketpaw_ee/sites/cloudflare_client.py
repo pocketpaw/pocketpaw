@@ -1,184 +1,46 @@
-# ee/pocketpaw_ee/sites/cloudflare_client.py — async Cloudflare API client for
-# the Sites control plane. Six surfaces:
-#   * Workers for Platforms — PUT a user Worker into our dispatch namespace
-#     (one synchronous call per site; live on 200; no per-account script cap),
-#     and DELETE it again on teardown; see put_worker / delete_worker.
+# ee/pocketpaw_ee/sites/cloudflare_client.py: async Cloudflare HTTP API client for
+# the Sites control plane. httpx-based, injectable transport for tests; account id
+# and token come from settings (env), never from tenant rows. Surfaces:
+#   * Workers for Platforms: ``put_worker`` uploads a user Worker into our dispatch
+#     namespace (live on 200) and ``delete_worker`` removes it. ``put_worker`` has
+#     three wire shapes: the legacy single-module PUT (no bindings), the legacy
+#     one-module multipart with bindings (dynamic sites, fixed ``index.mjs`` and
+#     ``2024-09-23``), and the multi-module bundle form (``modules=``) used by
+#     ``bundle_deploy`` for ``paw-build.json`` builds: metadata + one part per
+#     module, with compat flags and an ``assets`` block. The two legacy shapes are
+#     byte-for-byte what existing engines have always sent.
+#   * Static assets: ``upload_assets`` runs the dispatch assets-upload-session,
+#     uploads the requested buckets (base64 multipart, session JWT as Bearer, never
+#     the account token) and returns the completion JWT for ``put_worker``. Asset
+#     hashes are salted per tenant so one tenant cannot probe another's files in
+#     the namespace-shared asset store.
+#   * Account-level Workers (the ``workers`` deploy mode): ``delete_account_script``,
+#     ``list_account_scripts``. Deploys there go through ``workers_deploy.py``.
+#     ``Site.deploy_target`` decides which delete applies.
+#   * Cloudflare for SaaS: custom hostnames (create, poll, delete). The CNAME target
+#     is configured (``PAW_CF_CNAME_TARGET``), never derived from the zone id, and
+#     create refuses when it is unset. No ``custom_metadata``: it is entitlement-gated.
+#   * Worker routes: ``<hostname>/*`` -> the site's Worker, updated in place on a
+#     rename (a second POST for the same pattern is a 409).
+#   * D1: ``create_database``, ``delete_database``, and ``query_d1`` (parameterized,
+#     never interpolated SQL).
+#   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html).
+#   * Analytics Engine: ``query_analytics_sql`` sends raw SQL and reads a body with
+#     no ``success`` key, so it deliberately does not use ``_unwrap`` on success.
 #
-# Updated 2026-09-23 (VS-4 -- rename a site's address): added ``update_worker_route``,
-# the ``PUT`` that points an existing route at a different Worker. A rename moves a
-# site onto a new Worker name, and its custom domains' routes must follow. POSTing a
-# second route for the same pattern is refused by Cloudflare (409, code 10020 "a route
-# with the same pattern already exists"), and delete-then-create leaves the domain
-# unrouted in between, so the route is updated in place and keeps its id.
-#
-# Updated 2026-09-23 (VS-2 -- name-based addresses): added ``list_account_scripts``,
-# the names of every account-level Worker script. A new ``workers`` site now claims a
-# Worker name built from its own name, and a name already taken in the account (by
-# another product, a hand-made Worker, or our own ``paw-sites-dispatch``) must be
-# skipped rather than overwritten by the next ``wrangler deploy``.
-#
-# Updated 2026-09-08 (sites lifecycle, wave 1 chunk 1 — the teardown primitives):
-# added ``delete_worker``, ``delete_account_script`` and ``delete_database``. Deleting
-# a site had no way to remove the two most expensive things a publish creates: the
-# Worker that serves it and the D1 that holds its data. Only the custom hostname and
-# its route could be torn down, so every other resource was an orphan by construction.
-#
-# THERE ARE TWO WORKER DELETES BECAUSE THERE ARE TWO WORKER CREATES. ``wfp`` mode
-# uploads into the dispatch namespace through ``put_worker`` here; ``workers`` mode
-# deploys an account-level script through a ``bunx wrangler deploy`` SUBPROCESS in
-# ``workers_deploy.py``. They live at different API paths, so one delete cannot serve
-# both, and ``Site.deploy_target`` — which records what the last successful deploy
-# ACTUALLY used rather than what the env is configured for — is what picks between
-# them. Both are implemented against the HTTP API rather than ``wrangler delete``:
-# a teardown driven through a subprocess can only be proven against the real binary,
-# and an API call can be proven against the real resource.
-#   * Cloudflare for SaaS — create a custom hostname, return the single CNAME
-#     the client pastes, poll validation + TLS status, and delete it on teardown.
-#   * Worker routes — bind ``<custom hostname>/*`` to the site's Worker, and
-#     remove it again. This is the half that decides WHICH site a custom domain
-#     serves; the hostname alone only gets Cloudflare to accept the request.
-#   * D1 provisioning (DP0-1) — create a per-tenant D1 database and return its
-#     real uuid, so a Dynamic Paw Site's data plane can be stood up; see
-#     create_database.
-#   * D1 (DS-3) — query a dynamic site's per-tenant D1 over the HTTP API so the
-#     control plane can READ its data (the operator data-view); see query_d1.
-#   * Browser Rendering (SC-1) — screenshot a deployed site's live URL so its
-#     gallery card can show the page instead of a title and three pills; see
-#     capture_screenshot.
-#   * Workers Analytics Engine (SA-4) — run one SQL query against the pageview
-#     dataset a published site writes into, so the dashboard can serve real visitor
-#     numbers; see query_analytics_sql. It is the one method here whose request body
-#     is RAW SQL and whose success response is NOT the Cloudflare envelope, and it
-#     needs an ``Account Analytics Read`` token scope the deploy paths do not.
-# httpx-based; account id + token come from settings (env), not per-tenant rows
-# in v1. Non-2xx raises a CloudError so the standard envelope applies.
-#
-# Secret handling: the CF API token lives only in the in-memory Authorization
-# header — never logged, never written to disk. All errors fail closed (raise
-# ValidationError), so a failed CF call never silently reports success.
-# Created: 2026-05-30 (feat/paw-sites-backend, Task 2.2).
-#
-# Updated 2026-07-08 (DP0-1 — D1 provisioning for Dynamic Paw Sites Phase 0):
-# added create_database(). It POSTs to the Cloudflare D1 create endpoint
-# (POST /accounts/{acct}/d1/database) with a ``{"name": <name>}`` body and returns
-# the new database's real uuid (``result.uuid`` in the envelope). It mirrors the
-# existing client style exactly: the CF token in the in-memory Authorization header
-# only, and fail-closed via the shared ``_unwrap`` (a non-2xx or success:false
-# raises ValidationError). This is the FIRST step of the durable provision job: the
-# returned uuid is persisted immediately so a retry reuses the same D1 instead of
-# orphaning a second one.
-#
-# Updated 2026-06-20 (DS-3 — control-plane read of a dynamic site's D1): added
-# query_d1(). It POSTs to the Cloudflare D1 query endpoint
-# (POST /accounts/{acct}/d1/database/{db_id}/query) with a PARAMETERIZED
-# {sql, params} body and returns the rows from the FIRST statement's
-# ``result[0].results``. It mirrors the existing client style exactly: injectable
-# transport, the CF token in the in-memory Authorization header only, and
-# fail-closed via the shared ``_unwrap`` (a non-2xx or success:false raises
-# ValidationError). It NEVER interpolates SQL — the table identifier is validated
-# against the site's known objects by the service BEFORE it reaches here, and all
-# values bind through ``params``. The service layer (DS-3) owns that validation;
-# this method is a thin, SQL-agnostic transport.
-# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): ``put_worker`` gained an
-# optional ``bindings`` param. A DYNAMIC Paw Site is backed by a per-tenant
-# Cloudflare D1; its deployed Worker needs a D1 binding to reach that DB. When
-# bindings are supplied, the upload switches to the Workers multipart/form-data
-# contract — a ``metadata`` JSON part (main_module + bindings + compatibility_date)
-# plus the module file part referenced by its filename. When NO bindings are
-# supplied (a static site), it keeps the prior single-module upload byte-for-byte,
-# so the static path never regresses. The fail-closed + in-memory-token handling
-# is identical on both paths.
-# Updated 2026-06-24 (BC-10 — resell Cloudflare features by site-plan tier):
-# ``create_custom_hostname`` gained an optional ``features`` param (the
-# ``cloudflare_features`` set from the site's plan tier — e.g. ``{"waf",
-# "edge_cache", ...}``). When features are present, the custom-hostname request
-# carries the corresponding premium SSL/settings fields via ``_ssl_for_features``
-# (a pure feature-set → CF ``ssl`` payload map) plus a ``custom_metadata`` block
-# recording the resold feature set, so a HIGHER tier provisions paid security
-# (WAF / strict TLS / edge cache) at hostname-create time. When ``features`` is
-# None/empty (the BASE tier), the request is the prior basic
-# ``{"method": "http", "type": "dv"}`` ssl payload byte-for-byte, so a basic-tier
-# site never regresses. The mapping is intentionally MINIMAL + documented (a real
-# CF account tunes the exact toggles); the contract is "feature set in → those
-# CF fields out", asserted with a mocked transport.
-# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot): added
-# ``capture_screenshot``. It POSTs to the Browser Rendering screenshot endpoint
-# (POST /accounts/{acct}/browser-rendering/screenshot) with a ``{url,
-# screenshotOptions, viewport, gotoOptions}`` body and returns the raw image
-# BYTES. It is the one method here whose happy path is NOT the JSON envelope: a
-# successful render replies with the image itself (``image/png``), so the shared
-# ``_unwrap`` only governs the failure branch. Anything that is not 2xx + an
-# ``image/*`` body raises ValidationError, so a Cloudflare error page or an empty
-# body can never be stored as a site's preview. Callers must NOT pass a
-# ``quality`` in ``screenshot_options`` without also passing a ``type`` of jpeg /
-# webp — quality is incompatible with the default png and Cloudflare answers 400.
-# Updated 2026-08-07 (SC-2 — drafts get art too): ``capture_screenshot`` now takes
-# ``html`` as an alternative to ``url``. A DRAFT site has no address to point a
-# browser at — that is what makes it a draft — so it is rendered from its own
-# markup instead. Exactly one of the two is required; the method raises on both or
-# neither rather than letting Cloudflare answer 400. Note that an ``html`` body
-# renders at ``about:blank``, so nothing relative inside it resolves: assembling a
-# SELF-CONTAINED document is the caller's job (``sites.draft_markup``).
-
-# Updated 2026-08-12 (the custom-domain routing lane): three changes, all of them
-# things this module was getting wrong rather than new capability.
-#
-#   * ``cname_target`` is now CONFIGURED, not constructed. It used to return
-#     ``f"{zone_id}.cdn.cloudflare.net"`` — measured over DNS-over-HTTPS on
-#     2026-08-12, that name answers NOERROR with NO RECORDS. It is the one value the
-#     entire custom-domain flow asks a human to act on, and it could never come live.
-#     Cloudflare's getting-started doc is explicit that the target must be "a proxied
-#     CNAME that points your CNAME target to your fallback origin" — a record on OUR
-#     zone, which cannot be derived from a zone id. It is now a constructor argument
-#     (``PAW_CF_CNAME_TARGET`` at the service seam) and ``create_custom_hostname``
-#     REFUSES when it is unset rather than handing out a dead name. Fail-closed on an
-#     operator's misconfiguration beats a customer waiting forever on a hostname that
-#     can never validate.
-#
-#   * ``custom_metadata`` is GONE from the SSL payload. BC-10 attached it for any
-#     plan tier declaring ``cloudflare_features``; Cloudflare's custom-metadata doc
-#     says "only certain customers have access to this feature… contact your account
-#     team", which is a 403/1413 on an ordinary zone. It made custom domains work on
-#     FREE sites and fail on PAID ones — the worst possible split. The
-#     ``ssl.settings`` map stays: it is not entitlement-gated.
-#
-#   * Worker ROUTES are now part of this client — ``create_worker_route`` /
-#     ``delete_worker_route``, plus ``delete_custom_hostname`` to make teardown
-#     possible at all. A custom hostname only gets Cloudflare to ACCEPT the traffic;
-#     something still has to decide which site answers it. Cloudflare's
-#     worker-as-origin doc supports a route scoped to one exact hostname, so the
-#     control plane writes ``<hostname>/*`` -> that site's Worker at add time. That
-#     is the whole routing design: no dispatcher, no KV, no extra hop. (The wildcard
-#     ``*/*`` + dynamic-dispatch shape is Workers for Platforms, and it is the
-#     >1000-domain path — see the custom-domain-lane design doc, which lives in the
-#     paw-workspace repo at docs/design/drafts/2026-08-12-sites-custom-domain-lane.md.)
-
-# Updated 2026-08-12 (a 403 that could not be diagnosed): ``_unwrap``'s non-2xx
-# branch raised the bare status and never read the body, while the branch that DOES
-# read it can only run on a 2xx. So Cloudflare's own description of the failure was
-# discarded on exactly the responses somebody needed it for: a live report of
-# "Cloudflare API 403" from POST custom_hostnames, which is equally true of a token
-# missing the SSL-and-Certificates edit scope, a token with no access to the zone,
-# and a zone with no Cloudflare for SaaS entitlement — three problems, three
-# different fixes, one useless message. ``_error_detail`` now joins EVERY entry in
-# the errors array with its Cloudflare code (the docs are indexed by those numbers),
-# capped, and degrades to the status code when the body is not the JSON envelope.
-# The body is Cloudflare describing OUR request; the token only ever lives in a
-# request header, so nothing secret rides along.
-
-# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
-# ``query_analytics_sql``. It breaks two of this module's own conventions on purpose
-# and says so at the method: the request body is raw SQL rather than JSON (the
-# endpoint has no parameter binding, so nothing user-controlled may be interpolated),
-# and a SUCCESSFUL query answers ``{meta, data, rows}`` with no ``success`` key — so
-# ``_unwrap`` would raise on every good response and is deliberately not used on that
-# path. The failure branch still shares ``_error_detail``, which matters here because
-# the required token scope (``Account Analytics Read``) is one the deploy token does
-# not carry and a missing scope arrives as a 403.
-#
+# Invariants: the token lives only in the in-memory Authorization header, never in
+# logs or on disk. Every call fails closed: a non-2xx or ``success: false`` raises
+# ValidationError carrying Cloudflare's own error codes (``_error_detail``). Deletes
+# treat a 404 as already done so a resumed teardown never fails on a finished step.
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import mimetypes
+import posixpath
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 import httpx
 
@@ -238,6 +100,61 @@ _MAIN_MODULE = "index.mjs"
 # date the generator bakes into the (otherwise-ignored-on-direct-API-upload)
 # wrangler.toml so the runtime semantics are identical to a wrangler deploy.
 _COMPATIBILITY_DATE = "2024-09-23"
+
+# Multi-module uploads. Content-Type tells the runtime how to load each part:
+# https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/
+_MODULE_CONTENT_TYPES: dict[str, str] = {
+    ".js": "application/javascript+module",
+    ".mjs": "application/javascript+module",
+    ".cjs": "application/javascript",
+    ".wasm": "application/wasm",
+    ".json": "application/json",
+    ".txt": "text/plain",
+    ".html": "text/plain",
+    ".md": "text/plain",
+    ".sql": "text/plain",
+}
+
+
+def module_content_type(name: str) -> str:
+    """The part Content-Type for a Worker module, by extension. Anything unknown is
+    uploaded as data (``application/octet-stream``), which imports as an ArrayBuffer."""
+    ext = posixpath.splitext(name)[1].lower()
+    return _MODULE_CONTENT_TYPES.get(ext, "application/octet-stream")
+
+
+@dataclass(frozen=True)
+class WorkerModule:
+    """One module part of a multi-module upload. ``name`` is the part name and the
+    specifier other modules import it by: a relative posix path (``chunks/a.js``)."""
+
+    name: str
+    content: bytes
+    content_type: str
+
+
+def asset_hash(content: bytes, path: str, salt: str) -> str:
+    """The 32-hex asset hash Cloudflare keys uploads on, salted per tenant.
+
+    Assets in a dispatch namespace are deduplicated by this hash across every script
+    in it, so an unsalted content hash would let one tenant learn whether another
+    already uploaded a given file. Salting with the tenant key keeps dedupe inside the
+    tenant and makes cross-tenant probing impossible (the salt is applied here, on our
+    side, never by the author). The extension is mixed in, as wrangler does, because
+    the same bytes served as ``.js`` and ``.txt`` are different assets."""
+    ext = posixpath.splitext(path)[1].lower()
+    h = hashlib.sha256()
+    h.update(salt.encode("utf-8"))
+    h.update(b"\0")
+    h.update(content)
+    h.update(b"\0")
+    h.update(ext.encode("utf-8"))
+    return h.hexdigest()[:32]
+
+
+def _asset_part_type(path: str) -> str:
+    return mimetypes.guess_type(path)[0] or "application/octet-stream"
+
 
 # BC-10: the basic (no-feature) custom-hostname SSL payload — the prior default,
 # kept byte-for-byte so a base-tier site never regresses.
@@ -349,8 +266,13 @@ class CloudflareClient:
         self,
         *,
         script_name: str,
-        bundle: bytes,
+        bundle: bytes = b"",
         bindings: list[dict] | None = None,
+        modules: Sequence[WorkerModule] | None = None,
+        main_module: str | None = None,
+        compatibility_date: str | None = None,
+        compatibility_flags: Sequence[str] | None = None,
+        assets: dict | None = None,
     ) -> bool:
         """Upload a user Worker into the dispatch namespace. Live on 200.
 
@@ -370,11 +292,27 @@ class CloudflareClient:
         plus the module file part referenced by that filename. The
         dispatch-namespace script upload uses the same multipart contract as a
         normal Worker upload (metadata part named ``metadata``, module parts keyed
-        by filename)."""
-        url = (
-            f"{_CF_API}/accounts/{self._account_id}"
-            f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
-        )
+        by filename).
+
+        ``modules`` selects the bundle form instead (``paw-build.json`` deploys):
+        ``bundle`` must then be empty, and the metadata carries ``main_module``,
+        ``bindings``, ``compatibility_date``, ``compatibility_flags`` and, when given,
+        ``assets`` (``{"jwt": <completion jwt>, "config": {...}}``), followed by one
+        part per module named by its path. An empty ``modules`` with ``assets`` is an
+        assets-only Worker (no ``main_module``). Callers vet every value first; this
+        method only checks the shape is self-consistent."""
+        if modules is not None:
+            return await self._put_worker_bundle(
+                script_name=script_name,
+                bundle=bundle,
+                modules=modules,
+                main_module=main_module,
+                bindings=bindings or [],
+                compatibility_date=compatibility_date,
+                compatibility_flags=compatibility_flags or [],
+                assets=assets,
+            )
+        url = self._script_url(script_name)
         async with self._client() as client:
             if bindings:
                 metadata = {
@@ -403,6 +341,133 @@ class CloudflareClient:
                 )
         self._unwrap(resp)
         return True
+
+    def _script_url(self, script_name: str) -> str:
+        return (
+            f"{_CF_API}/accounts/{self._account_id}"
+            f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
+        )
+
+    async def _put_worker_bundle(
+        self,
+        *,
+        script_name: str,
+        bundle: bytes,
+        modules: Sequence[WorkerModule],
+        main_module: str | None,
+        bindings: list[dict],
+        compatibility_date: str | None,
+        compatibility_flags: Sequence[str],
+        assets: dict | None,
+    ) -> bool:
+        if bundle:
+            raise ValidationError(
+                "sites.bundle_shape", "put_worker takes either bundle or modules, not both"
+            )
+        if not compatibility_date:
+            raise ValidationError(
+                "sites.bundle_shape", "a bundle upload needs a compatibility date"
+            )
+        names = [m.name for m in modules]
+        if len(set(names)) != len(names):
+            raise ValidationError("sites.bundle_shape", "two modules share a part name")
+        if modules and main_module not in names:
+            raise ValidationError(
+                "sites.bundle_shape", f"main module {main_module!r} is not one of the modules"
+            )
+        if not modules and not assets:
+            raise ValidationError("sites.bundle_shape", "a bundle needs modules or assets")
+
+        metadata: dict = {}
+        if modules:
+            metadata["main_module"] = main_module
+        metadata["bindings"] = list(bindings)
+        metadata["compatibility_date"] = compatibility_date
+        metadata["compatibility_flags"] = list(compatibility_flags)
+        if assets:
+            metadata["assets"] = assets
+        files: list[tuple[str, tuple[str | None, bytes | str, str]]] = [
+            ("metadata", (None, json.dumps(metadata), "application/json"))
+        ]
+        files.extend((m.name, (m.name, m.content, m.content_type)) for m in modules)
+        async with self._client() as client:
+            resp = await client.put(self._script_url(script_name), files=files)
+        self._unwrap(resp)
+        return True
+
+    async def upload_assets(
+        self,
+        *,
+        script_name: str,
+        assets: Mapping[str, bytes],
+        salt: str,
+    ) -> str:
+        """Upload a script's static assets and return the completion JWT.
+
+        ``assets`` maps the served path (``/index.html``) to its bytes. The three
+        steps are Cloudflare's documented WfP static-assets flow
+        (https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/configuration/static-assets/):
+
+        1. POST ``.../scripts/{name}/assets-upload-session`` with the manifest
+           ``{path: {hash, size}}``. Cloudflare answers with a session JWT and the
+           ``buckets`` of hashes it does not already hold.
+        2. POST each bucket to ``/workers/assets/upload?base64=true`` as multipart,
+           one base64 part per hash, authorised by the SESSION JWT (the account token
+           is deliberately not sent there).
+        3. The last bucket's response carries the completion JWT. When nothing needs
+           uploading the session JWT already is the completion JWT.
+
+        The JWTs live about an hour, so call this right before ``put_worker``."""
+        if not salt:
+            raise ValidationError("sites.assets_unsalted", "asset uploads need a tenant salt")
+        if not assets:
+            raise ValidationError("sites.bundle_shape", "no assets to upload")
+        manifest: dict[str, dict] = {}
+        by_hash: dict[str, tuple[str, bytes]] = {}
+        for raw_path, content in assets.items():
+            path = "/" + raw_path.lstrip("/")
+            digest = asset_hash(content, path, salt)
+            manifest[path] = {"hash": digest, "size": len(content)}
+            by_hash.setdefault(digest, (path, content))
+
+        upload_url = f"{_CF_API}/accounts/{self._account_id}/workers/assets/upload?base64=true"
+        async with self._client() as client:
+            session_resp = await client.post(
+                f"{self._script_url(script_name)}/assets-upload-session",
+                json={"manifest": manifest},
+            )
+            session = self._unwrap(session_resp) or {}
+            session_jwt = session.get("jwt")
+            if not session_jwt:
+                raise ValidationError(
+                    "sites.cloudflare_error", "assets upload session returned no token"
+                )
+            buckets = [b for b in session.get("buckets") or [] if b]
+            completion = "" if buckets else session_jwt
+            for bucket in buckets:
+                files = []
+                for digest in bucket:
+                    if digest not in by_hash:
+                        raise ValidationError(
+                            "sites.cloudflare_error",
+                            f"Cloudflare asked for an asset hash we never sent ({digest})",
+                        )
+                    path, content = by_hash[digest]
+                    files.append(
+                        (digest, (digest, base64.b64encode(content), _asset_part_type(path)))
+                    )
+                upload_resp = await client.post(
+                    upload_url,
+                    files=files,
+                    headers={"Authorization": f"Bearer {session_jwt}"},
+                )
+                result = self._unwrap(upload_resp) or {}
+                completion = result.get("jwt") or completion
+        if not completion:
+            raise ValidationError(
+                "sites.cloudflare_error", "assets upload finished without a completion token"
+            )
+        return completion
 
     async def delete_worker(self, script_name: str) -> None:
         """Remove a user Worker from the dispatch namespace. Idempotent on a 404.

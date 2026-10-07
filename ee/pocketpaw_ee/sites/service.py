@@ -3,8 +3,9 @@
 #
 # What lives here: publish / preview / editable lanes (``publish``,
 # ``publish_pocket``, ``_deploy_site_doc``) and the three deploy targets they
-# pick between (local, workers.dev via ``workers_deploy``, Workers-for-Platforms);
-# the dynamic-site provision seams the ``provision_site`` job calls; the build
+# pick between (local, workers.dev via ``workers_deploy``, Workers-for-Platforms;
+# a WfP build carrying ``paw-build.json`` deploys through ``bundle_deploy`` and
+# ``deploy_bundle``); the dynamic-site provision seams the ``provision_site`` job calls; the build
 # stamps applied between build and deploy (concierge bar, free badge or partner
 # co-brand) and the AI-ready inputs (``_ai_ready_inputs``: training opt-in,
 # per-site IndexNow key, canonical host); custom domains, slugs and renames; site
@@ -68,7 +69,7 @@ from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.cloud.models.site_export import SiteExport as _SiteExportDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _SiteRateCounterDoc
-from pocketpaw_ee.sites import preview_origin, project_zip
+from pocketpaw_ee.sites import bundle_deploy, preview_origin, project_zip
 from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
 from pocketpaw_ee.sites.dependency_manifest import (
     DEPENDENCY_MANIFEST_PATH,
@@ -3020,13 +3021,27 @@ async def _deploy_site_doc(
         )
     else:  # "wfp"
         cf = cloudflare or _cf_client()
-        bundle = bundle_reader(build.project_dir)
-        # Only a dynamic site passes bindings; a static publish passes None so the
-        # single-module upload path stays byte-for-byte unchanged (no regress).
-        bindings = (
-            [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}] if is_dynamic else None
-        )
-        await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)
+        if bundle_deploy.has_paw_build(build.project_dir):
+            # A build that carries paw-build.json (the project engine / base app
+            # templates) deploys as a multi-module bundle with static assets. No
+            # existing engine emits that file, so their path below is unchanged.
+            await bundle_deploy.deploy_bundle(
+                cf,
+                script_name=site_id,
+                build_dir=build.project_dir,
+                salt=workspace_id,
+                provisioned=bundle_deploy.ProvisionedResources(d1_database_id=d1_database_id),
+            )
+        else:
+            bundle = bundle_reader(build.project_dir)
+            # Only a dynamic site passes bindings; a static publish passes None so the
+            # single-module upload path stays byte-for-byte unchanged (no regress).
+            bindings = (
+                [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}]
+                if is_dynamic
+                else None
+            )
+            await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)
         # CF-DISPATCH: the worker is now in the `paw-sites` dispatch namespace, but
         # a user worker in a WfP dispatch namespace is NOT directly URL-addressable
         # — it only serves when the dispatch worker
@@ -5210,6 +5225,31 @@ async def provision_deploy(
         bindings=provision_d1_bindings(d1_database_id),
     )
     return provision_site_url(site_id), "wfp"
+
+
+async def deploy_bundle(
+    site: _SiteDoc,
+    build_dir: str | Path,
+    *,
+    cloudflare: Any = None,
+) -> bundle_deploy.BundleDeployResult:
+    """Deploy a ``paw-build.json`` build of ``site`` into the WfP dispatch namespace.
+
+    The service entry point for the ``project`` engine until its publish path is
+    wired. Script name is the site id (as on every WfP deploy), asset hashes are
+    salted with the workspace id, and the only provisioned resource today is the
+    site's D1 (``d1_database_id``); any other backend request is refused. Live on
+    return; the returned warnings list everything the deploy dropped."""
+    cf = cloudflare or _cf_client()
+    return await bundle_deploy.deploy_bundle(
+        cf,
+        script_name=str(site.id),
+        build_dir=build_dir,
+        salt=str(site.workspace),
+        provisioned=bundle_deploy.ProvisionedResources(
+            d1_database_id=getattr(site, "d1_database_id", "") or ""
+        ),
+    )
 
 
 def provision_site_url(site_id: str) -> str:
