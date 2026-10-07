@@ -313,6 +313,8 @@ from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
+from pocketpaw_ee.cloud.models.social_idea import SocialIdea
+from pocketpaw_ee.cloud.models.social_profile import SocialProfile
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
 from pocketpaw_ee.cloud.models.studio_template import StudioTemplate
@@ -689,6 +691,10 @@ def get_all_documents():
         # a workspace wants, and the cadence the discovery cron runs it on.
         # Same import boundary as Prospect / Draft / MessageLog.
         Icp,
+        # Growth › Social — the per-workspace company profile and its post
+        # ideas. Only ``ee.cloud.growth.social.service`` imports these.
+        SocialProfile,
+        SocialIdea,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,

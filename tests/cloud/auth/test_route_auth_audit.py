@@ -112,6 +112,9 @@ ROUTER_MODULES = [
     # than trusted here. This is the cross-tenant surface, so it is the last
     # router that should be sitting in an unaudited backlog.
     ("platform", "pocketpaw_ee.cloud.platform.router"),
+    # Growth › Social, mounted beside the growth router. Every route carries
+    # require_action_any_workspace("growth.*") and request_context.
+    ("growth_social", "pocketpaw_ee.cloud.growth.social.router"),
     # Added 2026-09-08. Both mounted while the coverage pin was being
     # written against an older base, so dev merged at 50 unaudited
     # routers against a pin of 48. Every route on both carries a session

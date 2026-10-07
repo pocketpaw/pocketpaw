@@ -520,6 +520,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
     from pocketpaw_ee.cloud.fabric_ingest.router import router as fabric_ingest_router
     from pocketpaw_ee.cloud.growth.router import router as growth_router
+    from pocketpaw_ee.cloud.growth.social.router import router as growth_social_router
     from pocketpaw_ee.cloud.growth.webhooks import router as growth_webhooks_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
@@ -602,6 +603,9 @@ def mount_cloud(app: FastAPI) -> None:
     # Instinct-gated sends (the dedicated ``growth`` arq queue seam lives in
     # ``growth/worker.py``).
     app.include_router(growth_router, prefix="/api/v1")
+    # Growth › Social — setup wizard profile, website analysis and Blitz ideas
+    # under /growth/social. Same license gate and growth.read / growth.write RBAC.
+    app.include_router(growth_social_router, prefix="/api/v1")
     # Growth inbound webhooks (G-6) — POST /growth/webhooks/msg91. Mounted
     # SEPARATELY from growth_router because MSG91 is the caller: no license
     # gate, no RBAC, no RequestContext. Trust is the shared-secret HMAC in
@@ -994,6 +998,31 @@ def mount_cloud(app: FastAPI) -> None:
     set_production_research_fn(agent_research)
     set_production_prospect_research_fn(agent_prospect_research)
     set_production_writer_fn(agent_write_drafts)
+
+    from pocketpaw_ee.cloud.growth.social.analyst import (
+        agent_analyze,
+        set_production_analyze_fn,
+    )
+    from pocketpaw_ee.cloud.growth.social.ideas import (
+        agent_generate_ideas,
+        agent_make_media,
+        set_production_ideas_fn,
+        set_production_media_fn,
+    )
+
+    set_production_analyze_fn(agent_analyze)
+    set_production_ideas_fn(agent_generate_ideas)
+    set_production_media_fn(agent_make_media)
+
+    from pocketpaw_ee.cloud.growth.social.memes import (
+        agent_draw_character,
+        agent_make_meme,
+        set_production_character_fn,
+        set_production_meme_fn,
+    )
+
+    set_production_character_fn(agent_draw_character)
+    set_production_meme_fn(agent_make_meme)
 
     # NOTE: Composio is wired per-backend via ``pocketpaw_ee.cloud.composio.providers``
     # — each agent backend (claude_sdk, openai_agents, google_adk,

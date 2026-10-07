@@ -33,7 +33,8 @@
 #        ``requested_by`` — so a forged blob can't nominate whose role gets
 #        re-checked.
 #   F3 — the growth routes carry real RBAC: reads MEMBER, writes MEMBER,
-#        the outbound propose verb ADMIN.
+#        the outbound propose verb ADMIN. The guard sweep covers the
+#        Growth › Social router too, and checks it carries the license gate.
 #
 # Harness: the growth router (RequestContext override per workspace, mongomock
 # Beanie via ``mongo_db``) and the REAL instinct router (fake admin user +
@@ -950,6 +951,12 @@ class TestGrowthRouteRbac:
         an RBAC guard fails here rather than shipping open (F3 was exactly that
         — the actions were registered but no route enforced them)."""
         from pocketpaw_ee.cloud.growth.router import router as _growth_router
+        from pocketpaw_ee.cloud.growth.social.router import router as _social_router
+        from pocketpaw_ee.cloud.license import require_license as _require_license
+
+        assert any(dep.dependency is _require_license for dep in _social_router.dependencies), (
+            "the Growth › Social router must carry the license gate"
+        )
 
         expected = {
             ("GET", "/growth/prospects"): "growth.read",
@@ -999,10 +1006,30 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/queue/{channel}/deliver-approved"): "growth.manage",
             ("GET", "/growth/settings"): "growth.read",
             ("PATCH", "/growth/settings"): "growth.manage",
+            # Growth › Social. Nothing here leaves the workspace (no posting,
+            # no account connections), so reads are growth.read and every
+            # write — analysis and idea generation included — growth.write.
+            ("GET", "/growth/social/profiles"): "growth.read",
+            ("POST", "/growth/social/profiles"): "growth.write",
+            ("GET", "/growth/social/profile"): "growth.read",
+            ("PUT", "/growth/social/profile"): "growth.write",
+            ("POST", "/growth/social/profile/analyze"): "growth.write",
+            ("POST", "/growth/social/profile/complete"): "growth.write",
+            ("POST", "/growth/social/ideas/generate"): "growth.write",
+            ("GET", "/growth/social/ideas"): "growth.read",
+            ("PATCH", "/growth/social/ideas/{idea_id}"): "growth.write",
+            ("POST", "/growth/social/ideas/schedule"): "growth.write",
+            ("GET", "/growth/social/ideas/{idea_id}"): "growth.read",
+            ("POST", "/growth/social/ideas/{idea_id}/media"): "growth.write",
+            ("GET", "/growth/social/meme-formats"): "growth.read",
+            ("POST", "/growth/social/characters"): "growth.write",
+            ("DELETE", "/growth/social/characters/{character_id}"): "growth.write",
+            ("POST", "/growth/social/memes"): "growth.write",
+            ("POST", "/growth/social/ideas/{idea_id}/unschedule"): "growth.write",
         }
 
         seen: dict[tuple[str, str], str] = {}
-        for route in _growth_router.routes:
+        for route in [*_growth_router.routes, *_social_router.routes]:
             names = [
                 getattr(dep.dependency, "__name__", "")
                 for dep in getattr(route, "dependencies", [])
