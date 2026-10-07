@@ -311,6 +311,7 @@ from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
@@ -497,6 +498,7 @@ __all__ = [
     "SiteDomain",
     "SiteOriginClaim",
     "SiteRateCounter",
+    "SiteSecret",
     "SiteTemplate",
     "StudioTemplate",
     "DiscoverListing",
@@ -665,6 +667,8 @@ def get_all_documents():
         # concierge crawl reads it before fetching anyone's pages.
         SiteOriginClaim,
         SiteRateCounter,
+        # Per-site secrets (encrypted at rest). Only ``sites.site_secrets`` touches it.
+        SiteSecret,
         # VS-4 — an address a renamed site gave up, held 30 days for its old
         # workspace. Only ``pocketpaw_ee.sites.service`` reads/writes it.
         ReleasedSlug,

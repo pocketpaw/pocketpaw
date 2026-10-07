@@ -446,6 +446,13 @@ class AudienceResolver:
                 return await self._workspace(wid)
             return []
 
+        # --- Site secrets (request / set / delete; names only) -----------------
+        # The pocket owner fills secrets in, and the acting user (whose agent asked,
+        # or who set it) needs to see the card change. Nobody else: a secret's name
+        # and purpose are the owner's business, not workspace news.
+        if t in {"site.secret_requested", "site.secret_updated"}:
+            return list(dict.fromkeys(u for u in (d.get("owner"), d.get("user_id")) if u))
+
         # --- Site templates (user-saved; private, workspace or public) ----------
         # One recipient, named by the service in ``user_id`` (the owner, or the
         # caller for ``used``). Never fans out on ``workspace_id``: a public

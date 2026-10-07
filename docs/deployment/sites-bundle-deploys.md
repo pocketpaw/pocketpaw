@@ -76,6 +76,7 @@ can point at other tenants' resources). Fields used:
 | `assetsConfig` | `_headers` / `_redirects` strings (null when absent; lifted from `assetsDir` for older manifests), plus `html_handling`, `not_found_handling`, `run_worker_first`. They go to the upload's `assets.config`. Other keys are dropped. |
 | `compat` | `{date, flags}` (wrangler's `compatibility_*` names are accepted too). |
 | `bindingRequests` | `{type, name, required?}`. Only these three keys are read. |
+| `requiredSecrets` | Optional list of secret names the site cannot run without (also accepted as `required_secrets`). Adds to `secret` requests marked `required`. |
 | `droppedBindings` | Bindings the build refused. Logged as warnings. |
 
 The shape is paw-sites' `buildPawManifest` (`src/starters.ts`, documented in
@@ -116,8 +117,9 @@ stops one tenant probing whether another uploaded a given file.
   invalid date becomes `2026-09-01`.
 - **Bindings:** `assets` maps to the uploaded assets under the requested name. `d1`,
   `kv` and `r2` map to resources we provisioned for the site (see "Backend bindings"
-  below). `do`, `queues` and `ai` are refused as not supported yet. `secret` requests
-  take values from our store; a missing required secret refuses the deploy.
+  below). `do`, `queues` and `ai` are refused as not supported yet. Secrets come
+  from the per-site store (see "Secrets" below); a missing required secret refuses
+  the deploy.
   `service`, `dispatch_namespaces`, `tail_consumers`, `images`, routes and unknown
   types are never forwarded. Author ids are never read.
 - **Limits:** modules over 64 MiB uncompressed in total
@@ -177,6 +179,40 @@ object after a day, and an operator deletes it after that.
 **Token scopes.** Provisioning and teardown need `Workers KV Storage Write` and
 `Workers R2 Storage Write` on `PAW_CF_API_TOKEN`, in addition to the Workers scripts
 scope the deploy already uses.
+
+## Secrets
+
+Values come from the per-site secret store (`ee/pocketpaw_ee/sites/site_secrets.py`,
+API in `docs/api-reference.md` under "Sites — Secrets"). The agent asks for a secret
+by name with `request_site_secret`; the pocket owner sets the value in the builder.
+Nothing about a value is ever in the source map, `paw-build.json`, the build artifact
+or the sandbox: the build only names secrets.
+
+- **Every set secret binds**, requested or not, as
+  `{"type": "secret_text", "name": NAME, "text": value}` in the upload metadata. The
+  Worker reads it as `env.NAME`. `sites.service.deploy_bundle`'s provision step loads
+  them (`site_secrets.secrets_for_deploy`, the only code that decrypts) after the KV /
+  R2 provisioning and before the first upload.
+- **Required secrets.** A `secret` binding request with `required: true` (what
+  paw-sites' project build emits for a recipe's required secrets) or a name in
+  `requiredSecrets` that is not set refuses the deploy before any upload with 422
+  `sites.secrets_missing`: "This site needs secrets that are not set: X, Y. Set them in
+  the builder (Secrets) and publish again." An optional `secret` request that is unset
+  is skipped with a warning. Recipes declare their secrets in `recipe.json`
+  (`paw.recipes.json` in paw-sites); pocketpaw does not read recipes, so the build
+  passes the requirement through `bindingRequests` / `requiredSecrets`.
+- **Name clashes.** A set secret whose name matches another binding (`DB` as both a D1
+  and a secret) refuses the deploy; rename one.
+- **Redaction.** Warnings, refusals and log lines name secrets, never values.
+  `ProvisionedResources.secrets` and `PawBundle.bindings` are excluded from `repr`.
+  A test (`tests/ee/sites/test_site_secrets.py`) deploys through the real client and
+  asserts the value occurs exactly once across every request body, inside the
+  `secret_text` binding, and never in the captured logs.
+- **Teardown.** The delete cascade's `records` step removes the site's secrets and
+  pending requests, best effort: a failure is logged and the cascade goes on.
+- **Key.** Values are Fernet-encrypted with `CLOUD_ENCRYPTION_KEY`. Rotating that key
+  makes stored values undecryptable; a publish then fails with
+  `cloud.value_undecryptable` until the owner re-enters them.
 
 ## Before enabling: live smoke test
 

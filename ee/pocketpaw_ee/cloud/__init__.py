@@ -546,6 +546,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
     from pocketpaw_ee.sites.router import router as sites_router
+    from pocketpaw_ee.sites.secrets_router import router as site_secrets_router
 
     app.include_router(kb_router, prefix="/api/v1")
     app.include_router(knowledge_router, prefix="/api/v1")
@@ -612,6 +613,8 @@ def mount_cloud(app: FastAPI) -> None:
     # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
     # (Cloudflare for SaaS) the Domains panel drives.
     app.include_router(sites_router, prefix="/api/v1")
+    # Per-site secrets: names + status out, owner-only writes, values never returned.
+    app.include_router(site_secrets_router, prefix="/api/v1")
 
     # Model Catalog — MCG-1. License-gated, tenant-independent reads of the
     # models a self-hosted LiteLLM proxy serves: GET /catalog/models (filtered by
