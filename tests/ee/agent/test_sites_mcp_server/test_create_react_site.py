@@ -124,14 +124,20 @@ class TestReservedPathRejection:
 
         assert _reserved_react_keys(_sample_source()) == []
 
-    @pytest.mark.parametrize(
-        "path",
-        ["index.html", "package.json", "vite.config.ts", "paw-prerender.mjs"],
-    )
+    @pytest.mark.parametrize("path", ["index.html", "paw-prerender.mjs", "bun.lock"])
     def test_each_build_shell_file_is_rejected(self, path: str) -> None:
         from pocketpaw_ee.agent.mcp_servers.sites_create import _reserved_react_keys
 
         assert _reserved_react_keys({**_sample_source(), path: "x"}) == [path]
+
+    @pytest.mark.parametrize(
+        "path", ["package.json", "vite.config.ts", "vite.config.mjs", "bunfig.toml", ".npmrc"]
+    )
+    def test_root_build_files_are_the_authors(self, path: str) -> None:
+        """Open everything (2026-10-07): the generator merges these with its toolchain."""
+        from pocketpaw_ee.agent.mcp_servers.sites_create import _reserved_react_keys
+
+        assert _reserved_react_keys({**_sample_source(), path: "x"}) == []
 
     def test_generated_entry_namespace_is_rejected(self) -> None:
         """``src/paw/`` holds the generated client + server entries."""

@@ -1,17 +1,20 @@
 # tests/cloud/entitlements/test_source_visibility_entitlement.py — proves the
-# WORKSPACE capability ``Entitlements.site_source_visible`` ("may this account
-# read the source code of the sites it owns") resolves, fails closed, and is
-# overridable end to end.
+# WORKSPACE-level ``Entitlements.site_source_visible`` is the platform operator's
+# override and nothing else: no workspace plan answers it, ``True`` / ``False``
+# from an override reach the resolved object, and an expired override is absent.
+#
+# Whether a given SITE's code shows is a per-site question
+# (``entitlements.service.site_code_entitled``), pinned in
+# ``tests/cloud/pockets/test_source_visibility_per_site.py``. ``None`` here means
+# "no workspace-wide answer, each site decides".
 #
 # Four properties, in the order a reviewer should check them:
-#   (a) every paid rung resolves it True and ``free`` resolves it False;
-#   (b) a retired or unknown plan key resolves False — it must not be handed a
-#       paid grant on the way through the free-tier fallback;
-#   (c) a platform override flips it EITHER way, and an expired override set
-#       flips nothing;
+#   (a) every plan, known or stale, resolves ``None`` — the plan grants nothing;
+#   (b) an ``Entitlements`` built without the field defers (``None``), never grants;
+#   (c) a platform override sets it EITHER way, and an expired override set sets
+#       nothing;
 #   (d) the answer reaches the ``GET /entitlements`` wire and the platform
-#       console's override surface, so a client can hide the source view and
-#       name the reason instead of being refused.
+#       console's override surface.
 #
 # DETERMINISTIC AND DB-FREE. Every test drives ``resolve_entitlements`` with
 # ``get_workspace_plan`` / ``get_workspace_overrides`` monkeypatched, which is
@@ -35,12 +38,11 @@ pytestmark = pytest.mark.asyncio
 
 WS = "ws_source_visibility_test"
 
-PAID_PLANS = ["go", "pro", "pro_max", "enterprise"]
+ALL_PLANS = ["free", "go", "pro", "pro_max", "enterprise"]
 
 # Retired SITE-plan keys that still sit in stored documents, plus plain typos and
 # two keys from the pre-consumer-ladder rekey. None of them is a workspace plan
-# the catalog carries, so each lands on the unknown-key path and must come back
-# withheld.
+# the catalog carries, so each lands on the unknown-key path.
 STALE_PLANS = ["studio", "agency", "legacy_gold_tier", "business", "team"]
 
 
@@ -58,83 +60,29 @@ def patch_workspace(monkeypatch: pytest.MonkeyPatch):
 
 
 # ---------------------------------------------------------------------------
-# (a) The grant itself — paid yes, free no.
+# (a) No workspace plan answers the source question.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("plan", PAID_PLANS)
-async def test_a_paid_workspace_may_read_its_site_source(patch_workspace, plan):
-    """Every paid rung carries source visibility."""
+@pytest.mark.parametrize("plan", [*ALL_PLANS, *STALE_PLANS, None])
+async def test_a_no_workspace_plan_answers_source(patch_workspace, plan):
+    """Paid, free, stale or missing: the plan has no opinion, so each site's own
+    tier decides. A Pro Max workspace does not unlock a free site's code."""
     patch_workspace(plan)
     ent = await entitlements.resolve_entitlements(WS)
-    assert ent.plan == plan
-    assert ent.site_source_visible is True
+    assert ent.site_source_visible is None
 
 
-async def test_a_free_workspace_may_not_read_its_site_source(patch_workspace):
-    """Free is withheld — and by falling through the default, not by a denial."""
-    patch_workspace("free")
-    ent = await entitlements.resolve_entitlements(WS)
-    assert ent.plan == "free"
-    assert ent.site_source_visible is False
-
-
-async def test_the_free_floor_is_not_in_the_granting_set():
-    """The floor is absent from the allow-set, which is what makes it withheld.
-
-    Asserted on the set as well as on the resolved value because those are two
-    different bugs with the same symptom today: a resolver that stopped reading
-    the set would still answer False for free, and only this catches a later edit
-    that adds the floor to it.
-    """
-    assert "free" not in entitlements._SOURCE_VISIBLE_PLANS
-    assert set(entitlements._SOURCE_VISIBLE_PLANS) == set(PAID_PLANS)
-
-
-# ---------------------------------------------------------------------------
-# (b) Fail closed on a key the catalog does not know.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("plan", STALE_PLANS)
-async def test_a_retired_or_unknown_plan_key_is_withheld(patch_workspace, plan):
-    """A stale stored key resolves to the free floor, so it carries no source.
-
-    ``studio`` and ``agency`` are the load-bearing rows here: they are retired
-    keys that still appear in stored documents and resolve to no tier. A resolver
-    that read the RAW plan string instead of the resolved tier's key would see
-    "not free" and grant them.
-    """
-    patch_workspace(plan)
-    ent = await entitlements.resolve_entitlements(WS)
-    assert ent.plan == "free"
-    assert ent.site_source_visible is False
-
-
-async def test_a_missing_workspace_is_withheld(patch_workspace):
-    """``get_workspace_plan`` -> None (missing / deleted / malformed id)."""
-    patch_workspace(None)
-    ent = await entitlements.resolve_entitlements(WS)
-    assert ent.site_source_visible is False
-
-
-async def test_a_catalog_with_no_base_tier_is_withheld(patch_workspace, monkeypatch):
-    """The last-resort branch, reached by emptying the catalog, still withholds.
-
-    That branch carries a ``pragma: no cover`` because the base tier always
-    exists in practice, and an untested branch is where a fail-open default hides
-    — it spells out the Free values precisely so a future catalog edit cannot
-    quietly grant. Forcing ``get_plan`` to answer None for every key, including
-    the base key, is the only way to reach it.
-    """
+async def test_a_catalog_with_no_base_tier_has_no_opinion_either(patch_workspace, monkeypatch):
+    """The last-resort branch, reached by emptying the catalog, grants nothing."""
     monkeypatch.setattr(entitlements.plan_catalog, "get_plan", lambda _key: None, raising=True)
     patch_workspace("pro")
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.plan == "free"
-    assert ent.site_source_visible is False
+    assert ent.site_source_visible is None
 
 
-def _paid_entitlements(*, site_source_visible: bool = True) -> Entitlements:
+def _paid_entitlements(*, site_source_visible: bool | None = True) -> Entitlements:
     """A fully specified paid ``Entitlements``, for the tests that need an object
     rather than a resolver run."""
     return Entitlements(
@@ -152,8 +100,9 @@ def _paid_entitlements(*, site_source_visible: bool = True) -> Entitlements:
     )
 
 
-async def test_an_entitlements_object_built_without_the_field_withholds_source():
-    """The domain default is the withheld answer, so an omission cannot leak code."""
+async def test_b_an_entitlements_object_built_without_the_field_defers():
+    """The domain default is "no workspace-wide answer", so an omission can only
+    defer to the per-site rule (which fails closed), never grant."""
     ent = Entitlements(
         workspace_id=WS,
         plan="pro",
@@ -166,16 +115,16 @@ async def test_an_entitlements_object_built_without_the_field_withholds_source()
         max_storage_bytes=50_000_000_000,
         included_sites=3,
     )
-    assert ent.site_source_visible is False
+    assert ent.site_source_visible is None
 
 
 # ---------------------------------------------------------------------------
-# (c) A platform override flips it either way.
+# (c) A platform override sets it either way.
 # ---------------------------------------------------------------------------
 
 
 async def test_an_override_grants_source_to_a_free_workspace(patch_workspace):
-    """The comp lever: an operator turns source on for a tenant the plan withholds."""
+    """The comp lever: an operator turns source on for every site in a tenant."""
     patch_workspace("free", WorkspaceOverrides(site_source_visible=True))
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.plan == "free"
@@ -183,27 +132,34 @@ async def test_an_override_grants_source_to_a_free_workspace(patch_workspace):
 
 
 async def test_an_override_revokes_source_from_a_paid_workspace(patch_workspace):
-    """The other direction, which is the one a truthy overlay would silently drop.
-
-    ``False`` here must not read as "no opinion". An overlay written as
-    ``catalog_value or override`` passes the grant test above and fails this one.
-    """
+    """The abuse lever. ``False`` must survive as ``False``, not read as "no
+    opinion", because ``None`` would let every paid site keep its source."""
     patch_workspace("pro", WorkspaceOverrides(site_source_visible=False))
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.plan == "pro"
     assert ent.site_source_visible is False
 
 
-async def test_an_override_that_omits_the_field_leaves_the_plan_alone(patch_workspace):
+async def test_the_flag_overlay_lets_a_revocation_beat_a_grant():
+    """The overlay helper itself. With every catalog answer ``None`` today, an
+    overlay written as ``catalog_value or override`` would still pass the resolver
+    tests above, so the revocation is pinned against a granting catalog value."""
+    assert entitlements._resolve_override_flag(True, False) is False
+    assert entitlements._resolve_override_flag(None, False) is False
+    assert entitlements._resolve_override_flag(None, None) is None
+    assert entitlements._resolve_override_flag(False, True) is True
+
+
+async def test_an_override_that_omits_the_field_leaves_it_unset(patch_workspace):
     """An override set for some other field does not touch this one."""
     patch_workspace("pro", WorkspaceOverrides(max_seats=99))
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.max_seats == 99
-    assert ent.site_source_visible is True
+    assert ent.site_source_visible is None
 
 
 async def test_an_expired_override_cannot_grant_source(patch_workspace):
-    """An expired set is wholly absent, so the plan's answer stands."""
+    """An expired set is wholly absent, so there is no workspace-wide answer."""
     patch_workspace(
         "free",
         WorkspaceOverrides(
@@ -212,7 +168,7 @@ async def test_an_expired_override_cannot_grant_source(patch_workspace):
         ),
     )
     ent = await entitlements.resolve_entitlements(WS)
-    assert ent.site_source_visible is False
+    assert ent.site_source_visible is None
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +176,17 @@ async def test_an_expired_override_cannot_grant_source(patch_workspace):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("plan", "expected"), [("free", False), ("pro", True)])
-async def test_the_capability_reaches_the_entitlements_wire(patch_workspace, plan, expected):
-    """``GET /entitlements`` carries it, so a client need not re-derive the tier."""
-    patch_workspace(plan)
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        (None, None),
+        (WorkspaceOverrides(site_source_visible=True), True),
+        (WorkspaceOverrides(site_source_visible=False), False),
+    ],
+)
+async def test_the_override_reaches_the_entitlements_wire(patch_workspace, overrides, expected):
+    """``GET /entitlements`` carries the workspace-wide answer, ``None`` included."""
+    patch_workspace("pro", overrides)
     ent = await entitlements.resolve_entitlements(WS)
     assert entitlements_to_dto(ent).site_source_visible is expected
 
@@ -295,7 +258,7 @@ async def test_an_operators_write_reaches_the_stored_override_document(monkeypat
     )
 
     assert written == [WorkspaceOverrides(site_source_visible=True)]
-    # And the response the console renders shows the override in effect: the free
-    # plan withholds source, the override grants it.
-    assert out.catalog.site_source_visible is False
+    # And the response the console renders shows the override in effect: no plan
+    # answers source (catalog ``None``), the override grants it.
+    assert out.catalog.site_source_visible is None
     assert out.resolved.site_source_visible is True

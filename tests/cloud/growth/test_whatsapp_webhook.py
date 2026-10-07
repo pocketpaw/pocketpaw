@@ -325,3 +325,73 @@ class TestNoLeakAndNoFalseConsent:
         untouched = await _reload_prospect(bystander.id, "w2")
         assert untouched.opted_in is False
         assert untouched.status != "replied"
+
+
+# ---------------------------------------------------------------------------
+# 4 — STOP is an opt-out, never an opt-in
+# ---------------------------------------------------------------------------
+
+
+def _inbound_text(text: str, number: str = NUMBER) -> dict[str, Any]:
+    return {"type": "message", "customer_number": number, "content": {"text": text}}
+
+
+async def _opt_out_stamp(prospect_id: str) -> Any:
+    from beanie import PydanticObjectId
+    from pocketpaw_ee.cloud.models.prospect import Prospect as ProspectDoc
+
+    doc = await ProspectDoc.get(PydanticObjectId(prospect_id))
+    return getattr(doc, "whatsapp_opt_out_at", None)
+
+
+class TestStopIsAnOptOut:
+    @pytest.mark.parametrize("text", ["STOP", "stop", "Unsubscribe", "STOP ", "  Stop.\n"])
+    async def test_stop_does_not_opt_in_and_records_an_opt_out(
+        self, client: AsyncClient, text: str
+    ) -> None:
+        prospect, _draft = await _seed_sent_outreach()
+
+        resp = await _post(client, _inbound_text(text))
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"ok": True}
+        assert (await _reload_prospect(prospect.id)).opted_in is False
+        assert await _opt_out_stamp(prospect.id) is not None
+
+    async def test_stop_in_a_meta_envelope_is_an_opt_out(self, client: AsyncClient) -> None:
+        prospect, _draft = await _seed_sent_outreach()
+        payload = {"data": {"messages": [{"from": NUMBER, "text": {"body": "Stop"}}]}}
+
+        resp = await _post(client, payload)
+
+        assert resp.status_code == 200, resp.text
+        assert (await _reload_prospect(prospect.id)).opted_in is False
+        assert await _opt_out_stamp(prospect.id) is not None
+
+    async def test_stop_clears_an_existing_opt_in(self, client: AsyncClient) -> None:
+        prospect, _draft = await _seed_sent_outreach()
+        await _post(client, _inbound_text("yes, interested"))
+        assert (await _reload_prospect(prospect.id)).opted_in is True
+
+        await _post(client, _inbound_text("STOP"))
+
+        assert (await _reload_prospect(prospect.id)).opted_in is False
+        assert await _opt_out_stamp(prospect.id) is not None
+
+    async def test_a_plain_reply_after_stop_does_not_undo_it(self, client: AsyncClient) -> None:
+        prospect, _draft = await _seed_sent_outreach()
+        await _post(client, _inbound_text("STOP"))
+
+        await _post(client, _inbound_text("who is this?"))
+
+        assert (await _reload_prospect(prospect.id)).opted_in is False
+        assert await _opt_out_stamp(prospect.id) is not None
+
+    async def test_start_after_stop_opts_back_in(self, client: AsyncClient) -> None:
+        prospect, _draft = await _seed_sent_outreach()
+        await _post(client, _inbound_text("STOP"))
+
+        await _post(client, _inbound_text("Start"))
+
+        assert (await _reload_prospect(prospect.id)).opted_in is True
+        assert await _opt_out_stamp(prospect.id) is None

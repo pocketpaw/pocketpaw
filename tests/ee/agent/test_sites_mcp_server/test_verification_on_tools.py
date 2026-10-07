@@ -1,12 +1,13 @@
-# tests/ee/agent/test_sites_mcp_server/test_verification_on_tools.py — PP-2: every
-# create and edit tool result carries ``verification`` (contract §5 / §8), the new
-# ``verify_site`` tool, and the hard deadline that keeps a tool call from hanging.
-# Created 2026-09-24 (PP-2, feat/sites-verify-pipeline).
+# tests/ee/agent/test_sites_mcp_server/test_verification_on_tools.py — every create
+# and edit tool result carries ``verification`` (contract §5 / §8), the ``verify_site``
+# tool, and the hard deadlines that keep a tool call from hanging.
 #
-# The conftest autouse ``verify_recorder`` replaces ``verify.verify_site`` with a
-# recorder; these tests assert the tools CALL it for the right pocket and put its
-# verdict on the wire, and that ripple tools answer ``engine_not_verifiable`` without
-# calling it.
+# Creates and ``verify_site`` wait for the full verdict (``verify.verify_site``, the
+# conftest's ``verify_recorder``). Edits run only the static check and enqueue the
+# build (``verify.verify_edit``, ``edit_verify_recorder``), never call ``verify_site``,
+# skip an unreferenced create entirely, and attach the background verdict of the
+# pocket's previous edit to their NEXT result as ``previous_verification`` — once.
+# ripple tools answer ``engine_not_verifiable`` without calling anything.
 from __future__ import annotations
 
 import asyncio
@@ -182,7 +183,11 @@ class TestDeadline:
         assert (verdict["status"], verdict["reason"]) == ("unverified", "verify_unavailable")
 
 
-async def test_react_and_html_edits_carry_the_verdict(beanie_test_db, verify_recorder) -> None:
+async def test_react_and_html_edits_carry_the_fast_verdict(
+    beanie_test_db, verify_recorder, edit_verify_recorder
+) -> None:
+    """An edit runs the static check and enqueues the build; it never waits on the
+    full verify."""
     from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 
     ws, user = str(ObjectId()), str(ObjectId())
@@ -213,15 +218,48 @@ async def test_react_and_html_edits_carry_the_verdict(beanie_test_db, verify_rec
                 }
             )
         )
-    assert r["verification"] == verify_recorder.verdict
-    assert h["verification"] == verify_recorder.verdict
-    assert [c["pocket_id"] for c in verify_recorder.calls] == [
+    assert r["verification"] == edit_verify_recorder.verdict
+    assert h["verification"] == edit_verify_recorder.verdict
+    assert r["verification"]["build"] == "pending"
+    assert verify_recorder.calls == [], "an edit never runs the waiting verify"
+    assert [c["pocket_id"] for c in edit_verify_recorder.calls] == [
         react["pocket_id"],
         html["pocket_id"],
     ]
 
 
-async def test_set_site_dependencies_carries_the_verdict(verify_recorder) -> None:
+async def test_an_unreferenced_create_skips_verification(
+    beanie_test_db, edit_verify_recorder
+) -> None:
+    """A create nothing imports yet is a half step: no verify, and it says so."""
+    from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+    ws, user = str(ObjectId()), str(ObjectId())
+    a, b = _as(ws, user)
+    with a, b:
+        react = _body(
+            await mcp._create_react_site_handler(
+                {"source": {"src/App.tsx": "export default () => <p>hi</p>"}}
+            )
+        )
+        edit_verify_recorder.calls.clear()
+        body = _body(
+            await mcp._edit_react_component_handler(
+                {
+                    "pocket_id": react["pocket_id"],
+                    "component_path": "src/components/Faq.tsx",
+                    "new_source": "export default () => <p>faq</p>",
+                    "create": True,
+                }
+            )
+        )
+    assert body["unreferenced"] is True
+    assert body["verification"]["status"] == "skipped"
+    assert body["verification"]["reason"] == "create_half_step"
+    assert edit_verify_recorder.calls == []
+
+
+async def test_set_site_dependencies_carries_the_verdict(edit_verify_recorder) -> None:
     from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 
     a, b = _as("w", "u")
@@ -238,4 +276,163 @@ async def test_set_site_dependencies_carries_the_verdict(verify_recorder) -> Non
         body = _body(
             await mcp._set_site_dependencies_handler({"pocket_id": "p", "remove": ["three"]})
         )
-    assert body["verification"] == verify_recorder.verdict
+    assert body["verification"] == edit_verify_recorder.verdict
+
+
+class TestPreviousVerification:
+    """The background build's verdict reaches the agent on its NEXT tool result."""
+
+    @staticmethod
+    def _settle(pocket_id: str, *, status: str = "failed") -> None:
+        """Record an edit's enqueue and land its job's report, as the worker would."""
+        from pocketpaw_ee.sites import verify, verify_store
+
+        store = verify_store.default_verify_store()
+        store.write(
+            pocket_id,
+            verify_store.LATEST_KEY,
+            {
+                "pipeline_version": verify.VERIFY_PIPELINE_VERSION,
+                "content_hash": "f" * 64,
+                "job_id": "site-preview-job-1",
+                "engine": "react",
+                "static": {"name": "static", "status": "passed"},
+                "errors": [],
+                "warnings": [],
+                "note": "",
+                "enqueued_at": 0,
+                "surfaced": False,
+            },
+        )
+        store.write(
+            pocket_id,
+            verify_store.sandbox_key("f" * 64),
+            {
+                "status": "failed" if status == "failed" else "built",
+                "layers": {
+                    "build": {"status": status},
+                    "browser": {"status": "skipped" if status == "failed" else status},
+                },
+                "diagnostics": {
+                    "errors": (
+                        [{"layer": "build", "file": "src/App.tsx", "line": 2, "message": "x"}]
+                        if status == "failed"
+                        else []
+                    ),
+                    "warnings": [],
+                },
+            },
+        )
+
+    async def test_the_next_edit_carries_it_once(self, beanie_test_db) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        ws, user = str(ObjectId()), str(ObjectId())
+        a, b = _as(ws, user)
+        with a, b:
+            react = _body(
+                await mcp._create_react_site_handler(
+                    {"source": {"src/App.tsx": "export default () => <p>hi</p>"}}
+                )
+            )
+            self._settle(react["pocket_id"])
+            edit = {
+                "pocket_id": react["pocket_id"],
+                "component_path": "src/App.tsx",
+                "new_source": "export default () => <p>bye</p>",
+            }
+            first = _body(await mcp._edit_react_component_handler(edit))
+            second = _body(await mcp._edit_react_component_handler(edit))
+
+        previous = first["previous_verification"]
+        assert previous["status"] == "failed"
+        assert previous["build"] == "failed"
+        assert previous["job_id"] == "site-preview-job-1"
+        assert previous["errors"][0]["file"] == "src/App.tsx"
+        assert "previous_verification" not in second, "a verdict is handed out once"
+
+    async def test_an_error_result_still_carries_it(self, beanie_test_db) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        ws, user = str(ObjectId()), str(ObjectId())
+        a, b = _as(ws, user)
+        with a, b:
+            react = _body(
+                await mcp._create_react_site_handler(
+                    {"source": {"src/App.tsx": "export default () => <p>hi</p>"}}
+                )
+            )
+            self._settle(react["pocket_id"])
+            out = await mcp._edit_react_component_handler(
+                {
+                    "pocket_id": react["pocket_id"],
+                    "component_path": "src/App.tsx",
+                    "edits": [{"old_string": "not there", "new_string": "x"}],
+                }
+            )
+        assert out.get("is_error") is True
+        assert "previous_verification" in out["content"][-1]["text"]
+        assert '"status":"failed"' in out["content"][-1]["text"]
+
+    async def test_a_pocket_the_caller_cannot_read_reports_nothing(self, beanie_test_db) -> None:
+        """The verify store is keyed by pocket id alone; the read is gated on the
+        caller's access, so another tenant's build diagnostics never leak."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+        from pocketpaw_ee.sites import verify, verify_store
+
+        owner_ws, owner = str(ObjectId()), str(ObjectId())
+        a, b = _as(owner_ws, owner)
+        with a, b:
+            react = _body(
+                await mcp._create_react_site_handler(
+                    {"source": {"src/App.tsx": "export default () => <p>hi</p>"}}
+                )
+            )
+        self._settle(react["pocket_id"])
+
+        a, b = _as(str(ObjectId()), str(ObjectId()))
+        with a, b:
+            assert await mcp._settled_previous(react["pocket_id"]) is None
+        # Untouched: still there for the owner.
+        latest = verify_store.default_verify_store().read(
+            react["pocket_id"], verify_store.LATEST_KEY
+        )
+        assert latest["surfaced"] is False
+        assert verify.settled_verdict(react["pocket_id"]) is not None
+
+    async def test_nothing_is_attached_while_the_build_runs(self, beanie_test_db) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        ws, user = str(ObjectId()), str(ObjectId())
+        a, b = _as(ws, user)
+        with a, b:
+            react = _body(
+                await mcp._create_react_site_handler(
+                    {"source": {"src/App.tsx": "export default () => <p>hi</p>"}}
+                )
+            )
+            body = _body(
+                await mcp._edit_react_component_handler(
+                    {
+                        "pocket_id": react["pocket_id"],
+                        "component_path": "src/App.tsx",
+                        "new_source": "export default () => <p>bye</p>",
+                    }
+                )
+            )
+        assert "previous_verification" not in body
+
+
+class TestEditDeadline:
+    async def test_a_hung_edit_verify_becomes_unverified_timeout(self, monkeypatch) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+        from pocketpaw_ee.sites import verify
+
+        async def _hang(**_kw: Any) -> dict[str, Any]:
+            await asyncio.sleep(30)
+            return {}
+
+        monkeypatch.setattr(verify, "verify_edit", _hang)
+        monkeypatch.setattr(mcp, "EDIT_VERIFY_DEADLINE_SEC", 0.05)
+        verdict = await mcp._edit_verification("w", "u", "p")
+        assert (verdict["status"], verdict["reason"]) == ("unverified", "timeout")

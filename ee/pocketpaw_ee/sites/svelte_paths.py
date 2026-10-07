@@ -1,74 +1,40 @@
 # svelte_paths.py — the ONE place the svelte-track source-map path policy lives.
 #
-# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — the reserved build
-# shell grew to the set paw-sites PS-1 gives the generator: every ``vite.config.*``
-# spelling (ts/js/mjs/mts/cjs/cts), ``src/routes/+layout.ts`` / ``+layout.js``, the
-# dependency manifest ``paw.dependencies.json`` and the install config
-# (``bunfig.toml``, ``.npmrc``, ``bun.lock``, ``bun.lockb``, ``package-lock.json``)
-# join ``package.json`` / ``svelte.config.js``. Matching is now CASE-INSENSITIVE for
-# every reserved file and the ``src/lib/paw/`` namespace, as the generator's is.
-# Authors can now declare npm packages, and the manifest is written ONLY by the
-# resolver; an edit lane that could hand-write it (or a ``+layout.ts`` that turns
-# prerendering off) would route around that. The manifest
-# is matched in any spelling, case included (``dependency_manifest``).
+# Both writers of a svelte source map (``create_svelte_site`` and the
+# ``edit_svelte_component`` edit lane, which can mint new paths with ``create``) call
+# this module, so the guard exists once. It mirrors paw-sites'
+# ``svelte-scaffold.ts::isReservedPath``: checking in Python turns a build-time throw
+# far from the authoring turn into an actionable error.
 #
-# Created: 2026-09-11 (feat/sites-svelte-edit-create, SC-1) — the svelte peer of
-# ``react_paths.py`` / ``html_paths.py``, written for the same reason those were:
-# the EDIT lane is about to become a second WRITER of a svelte source map, and a
-# second writer is only safe once the guard it needs exists in one place.
+# Since 2026-10-07 ("open everything") the root build files — ``package.json``,
+# ``vite.config.*``, ``svelte.config.js``, ``bunfig.toml``, ``.npmrc`` — belong to the
+# author; the generator merges them with its toolchain. What stays generator-owned:
+# the ``src/lib/paw/`` namespace and the gated-site auth files (they carry the session
+# gate), ``src/routes/+layout.ts/.js`` (it could switch prerendering off), lockfiles,
+# and ``paw.dependencies.json`` (only the resolver writes it). ``src/app.html`` is
+# authorable: the scaffold injects the edit bridge into it after the overlay.
 #
-# Until now the svelte edit lane needed no path policy at all, and that was sound:
-# ``set_svelte_source_file`` could only OVERWRITE a key that already existed, so
-# every writable path had already been vetted when ``create_svelte_site`` landed the
-# map. Adding ``create`` removes that property — an edit can now mint an arbitrary
-# path — so "may this path be written" has to be asked, and asked before the write.
-#
-# It is deliberately NOT a copy of ``react_paths``. The tracks differ in both rules:
-#
-#   * react reserves four generator-owned files plus ``src/paw/``; svelte's
-#     generator (``svelte-scaffold.ts::isReservedPath``) reserves the
-#     ``src/lib/paw/`` namespace plus the three gated-site auth files, and THROWS on
-#     a collision. Those are mirrored here exactly — checking in Python turns a
-#     build-time throw far from the authoring turn into an actionable error.
-#   * react's authored files may live under ``src/`` or ``public/``. A svelte Paw
-#     Site has no ``public/`` and no ``static/`` (neither appears in the generator's
-#     templates), so the authorable tree is ``src/`` alone.
-#
-# WHY THE BUILD SHELL IS RESERVED HERE BUT NOT IN THE SCAFFOLD. The scaffold writes
-# ``package.json`` / ``vite.config.ts`` / ``svelte.config.js`` BEFORE it overlays the
-# source map, with an explicit comment that a map "MAY override them if it ever ships
-# its own". That tolerance is fine for create, where the whole map is authored in one
-# reviewed act; it is not fine as a per-file edit verb. An edit that could write
-# ``package.json`` would be a way to rewrite the dependency manifest one call at a
-# time. It is NOT the only thing standing there — ``materializeSource`` step 7 runs
-# ``assertAllowed()`` over whatever package.json it actually emitted, so an unvetted
-# dependency still throws — but a guard that keeps the edit lane away from the build
-# config entirely is cheaper than relying on that post-emit check to be the only one.
-#
-# NOT reserved, deliberately: ``src/app.html``. The scaffold injects the SE-1 edit
-# bridge and the EP-6 leaf manifest into it at step 6, AFTER the overlay, so an
-# authored app.html still receives both. The rule this module follows is to mirror
-# the generator's contract rather than invent a stricter one.
+# Matching is case-insensitive (a case-insensitive filesystem lands ``Package.JSON``
+# on the same file) and runs on the NORMALIZED path.
 """Svelte-track source-map path policy for Paw Sites.
 
 A svelte-engine pocket's ``source`` is a ``{relative_path: file_contents}`` map of
 hand-written SvelteKit files that the paw-sites generator materializes ON TOP of a
 project skeleton it owns. Two rules govern which paths an author may write:
 
-1. **Generator-owned paths are the generator's.** The ``src/lib/paw/`` namespace and
+1. **Generator-owned paths are the generator's.** The ``src/lib/paw/`` namespace,
    the gated-site auth files (``src/hooks.server.ts``, ``src/lib/auth.ts``,
-   ``src/app.d.ts``) carry the session gate; the build shell (``package.json``,
-   ``vite.config.ts``, ``svelte.config.js``) carries the dependency manifest and the
-   adapter/prerender configuration.
+   ``src/app.d.ts``), ``src/routes/+layout.ts/.js``, lockfiles and the dependency
+   manifest.
 
-2. **Authored files live under ``src/``.** Everything else at the project root
-   belongs to the skeleton, so a path outside that prefix is rejected rather than
-   silently written somewhere the build ignores.
+2. **Authored files live under ``src/``**, plus the root build files listed in
+   :data:`SVELTE_AUTHOR_ROOT_FILES`. Anything else at the project root is rejected
+   rather than silently written somewhere the build ignores.
 
 Both rules are applied to the NORMALIZED path: backslashes become forward slashes
 and ``.``/``..`` segments collapse (``posixpath``, not ``os.path`` — source-map keys
 are POSIX-style project-relative paths regardless of the host OS). A guard a trivial
-path spelling defeats is not a guard, and ``./package.json`` / ``src\\lib\\paw\\x.ts``
+path spelling defeats is not a guard, and ``./bun.lock`` / ``src\\lib\\paw\\x.ts``
 / ``src/lib/paw/../paw/x.ts`` are trivial spellings.
 """
 
@@ -80,9 +46,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from pocketpaw_ee.sites.dependency_manifest import (
+    AUTHOR_SHELL_FILES,
     DEPENDENCY_MANIFEST_PATH,
-    INSTALL_CONFIG_FILES,
-    VITE_CONFIG_FILES,
+    LOCKFILES,
     is_dependency_manifest_path,
 )
 
@@ -97,17 +63,20 @@ SVELTE_RESERVED_AUTH_FILES: tuple[str, ...] = (
     "src/app.d.ts",
 )
 
-# The build shell. The scaffold tolerates an override from a whole authored map;
-# the per-file edit lane does not (see the module header for why).
+# The part of the build shell that stays generator-owned: the prerender layout, the
+# resolver-written dependency manifest and the lockfiles.
 SVELTE_RESERVED_SHELL_FILES: tuple[str, ...] = (
-    "package.json",
-    *VITE_CONFIG_FILES,
-    "svelte.config.js",
     "src/routes/+layout.ts",
     "src/routes/+layout.js",
     DEPENDENCY_MANIFEST_PATH,
-    *INSTALL_CONFIG_FILES,
+    *LOCKFILES,
 )
+
+# Root build-shell files the author MAY write (2026-10-07, "open everything"):
+# package.json, vite.config.*, svelte.config.js, bunfig.toml, .npmrc. The paw-sites
+# generator merges them with its own toolchain config.
+SVELTE_AUTHOR_ROOT_FILES: tuple[str, ...] = (*AUTHOR_SHELL_FILES, "svelte.config.js")
+_AUTHOR_ROOT_FOLDED = frozenset(f.casefold() for f in SVELTE_AUTHOR_ROOT_FILES)
 
 SVELTE_RESERVED_FILES: tuple[str, ...] = (
     *SVELTE_RESERVED_AUTH_FILES,
@@ -147,13 +116,15 @@ def is_reserved_svelte_path(path: str) -> bool:
 
 
 def is_authorable_svelte_path(path: str) -> bool:
-    """True when ``path`` resolves inside ``src/``.
+    """True when ``path`` resolves inside ``src/`` or onto an author root file.
 
-    Note this is about the RESOLVED path: ``src/../package.json`` normalizes to
-    ``package.json`` and is not authorable, which is the point.
+    Note this is about the RESOLVED path: ``src/../README.md`` normalizes to
+    ``README.md`` and is not authorable.
     """
     norm = normalize_svelte_path(path)
-    return any(norm.startswith(prefix) for prefix in SVELTE_AUTHORABLE_PREFIXES)
+    return norm.casefold() in _AUTHOR_ROOT_FOLDED or any(
+        norm.startswith(prefix) for prefix in SVELTE_AUTHORABLE_PREFIXES
+    )
 
 
 def svelte_path_rejection(path: str) -> str | None:
@@ -182,18 +153,18 @@ def svelte_path_rejection(path: str) -> str | None:
             f"`{path}` resolves to `{norm}`, which the generator owns. The "
             "`src/lib/paw/` namespace and the auth files (src/hooks.server.ts, "
             "src/lib/auth.ts, src/app.d.ts) are what keep a gated site's session "
-            "gate from being shadowed, and the build shell (package.json, "
-            "vite.config.*, svelte.config.js, src/routes/+layout.ts/.js, and the "
-            "install config: bunfig.toml, .npmrc, lockfiles) carries the dependency allowlist "
-            "and the adapter/prerender configuration. Edit under `src/` outside "
-            "`src/lib/paw/`."
+            "gate from being shadowed, src/routes/+layout.ts/.js carries the "
+            "prerender configuration, and lockfiles are produced by the build. Edit "
+            "under `src/` outside `src/lib/paw/`, or the root build files "
+            "(package.json, vite.config.*, svelte.config.js, bunfig.toml, .npmrc)."
         )
     if not is_authorable_svelte_path(norm):
         return (
             f"`{path}` resolves to `{norm}`, which is outside the authored source "
             "tree. A svelte Paw Site's own files live under `src/` — its routes "
-            "under `src/routes/`, its components under `src/lib/components/`; "
-            "everything else at the project root belongs to the generated skeleton."
+            "under `src/routes/`, its components under `src/lib/components/` — plus "
+            "the root build files (package.json, vite.config.*, svelte.config.js, "
+            "bunfig.toml, .npmrc)."
         )
     return None
 

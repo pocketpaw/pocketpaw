@@ -255,6 +255,14 @@ async def test_the_tenth_active_site_lifts_to_silver_and_the_next_sale_is_discou
         "lifetime_sites_sold": 1,
         "next_tier": {"name": "gold", "at": 25, "remaining": 15},
         "benefits": {"wholesale_discount_pct": 10.0, "commission_pct": 30.0},
+        "slug": None,
+        "display_name": None,
+        "city": None,
+        "country": None,
+        "services": [],
+        "bio": None,
+        "contact_url": None,
+        "public": False,
     }
     offers = {o.sku: o.price_credits for o in await service.list_offers(ctx)}
     assert offers == {"site_year": 2600, "staff_year": 8000}

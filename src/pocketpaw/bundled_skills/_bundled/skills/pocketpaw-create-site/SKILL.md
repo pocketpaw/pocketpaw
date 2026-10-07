@@ -81,6 +81,12 @@ landing page**, not a dashboard. So this is a **two-step**:
    it.
 3. Show the user the live ``url`` + the link to **/sites**.
 
+A brand-new **full-stack** site (user accounts, its own database, server
+logic) or one in a framework the user named (Next, Astro, TanStack Start,
+SvelteKit) is not a landing page: invoke ``Skill('pocketpaw-create-project-site')``
+instead. It starts a project site from a base template; publish it only after
+its ``run_site_build`` returns ``built``.
+
 **Do NOT rebuild the landing page here, and do NOT route a new site
 through ``pocketpaw-create-pocket``** — that builds a dashboard pocket,
 which publishes as a broken dashboard, not a landing page. Use

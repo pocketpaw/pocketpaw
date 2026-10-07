@@ -3,8 +3,10 @@
 # Updated 2026-09-24 (PP-2): author-fixable refusals other than reserved_path now map
 # to a 422 carrying the generator message; only an unknown code keeps the 500.
 # legacy build-shell migration end to end:
-#   1. the pure classifier matrix: every reserved file x SAFE_DROP / CONVERTIBLE /
-#      NEEDS_REVIEW, plus case and backslash spellings;
+#   1. the pure classifier matrix: every still-reserved file x SAFE_DROP /
+#      CONVERTIBLE / NEEDS_REVIEW, plus case and backslash spellings, and the
+#      author-owned build files (package.json, vite.config.*, svelte.config.js,
+#      bunfig.toml, .npmrc — author-writable since 2026-10-07) producing no finding;
 #   2. the runner against a real (mongomock) pocket: dry run writes nothing, apply
 #      drops/converts through the pockets service and records a draft version, a
 #      second run is a no-op, a mixed pocket keeps its review files, paging resumes;
@@ -104,81 +106,27 @@ def test_canonical_manifest_is_not_a_finding():
 
 
 @pytest.mark.parametrize(
-    "key", ["package.json", "Package.JSON", "./package.json", "src\\..\\package.json"]
-)
-def test_stock_package_json_is_safe_in_any_spelling(key):
-    assert _one("svelte", key, _pkg()).classification is SAFE
-
-
-def test_package_json_with_author_packages_is_convertible():
-    f = _one("svelte", "package.json", _pkg(dependencies={"motion": "^12.40.0", "gsap": "3.15.0"}))
-    assert f.classification is CONV
-    assert dict(f.requests) == {"motion": "^12.40.0", "gsap": "3.15.0"}
-
-
-def test_package_json_author_packages_without_client_bundle_needs_review():
-    f = _one("svelte", "package.json", _pkg(dependencies={"motion": "^12.40.0"}), kcb=False)
-    assert f.classification is REVIEW
-
-
-@pytest.mark.parametrize(
-    "pkg",
+    ("engine", "key", "text"),
     [
-        _pkg(overrides={"x": "1.0.0"}),
-        _pkg(scripts={"build": "vite build && curl evil"}),
-        _pkg(devDependencies={"svelte": "^4.0.0"}),
-        _pkg(dependencies={"tailwindcss": "^4.2.2"}),
-        _pkg(dependencies={"x": "git+https://github.com/a/b"}),
-        "not json",
-        "[]",
+        ("svelte", "package.json", _pkg(dependencies={"motion": "^12.40.0"})),
+        ("svelte", "Package.JSON", _pkg()),
+        ("svelte", "./package.json", _pkg(overrides={"x": "1.0.0"})),
+        ("svelte", "src\\..\\package.json", "not json"),
+        ("svelte", "vite.config.ts", SVELTE_VITE.replace("sveltekit()]", "sveltekit(), x()]")),
+        ("svelte", "svelte.config.js", STATIC_SVELTE_CONFIG),
+        ("svelte", "bunfig.toml", "[install]\n"),
+        ("svelte", ".npmrc", "registry=https://registry.example\n"),
+        ("react", "package.json", '{"dependencies":{"lucide-react":"latest"}}'),
+        ("react", "VITE.config.mjs", REACT_VITE),
+        ("react", "BUNFIG.TOML", "[install]\n"),
     ],
 )
-def test_package_json_review_cases(pkg):
-    assert _one("svelte", "package.json", pkg).classification is REVIEW
-
-
-def test_react_package_json_stock_is_safe():
-    pkg = json.dumps(
-        {
-            "dependencies": {"react": "^19.0.0", "react-dom": "^19.0.0"},
-            "devDependencies": {"@vitejs/plugin-react": "^4.3.4", "vite": "^6.0.0"},
-        }
-    )
-    assert _one("react", "package.json", pkg).classification is SAFE
-
-
-@pytest.mark.parametrize("ext", ["ts", "js", "mjs", "mts", "cjs", "cts"])
-def test_stock_vite_config_is_safe_in_every_spelling(ext):
-    assert _one("svelte", f"vite.config.{ext}", SVELTE_VITE).classification is SAFE
-    assert _one("react", f"VITE.config.{ext}", REACT_VITE).classification is SAFE
-
-
-def test_vite_config_without_define_config_is_safe():
-    text = (
-        'import { sveltekit } from "@sveltejs/kit/vite"\nexport default { plugins: [sveltekit(),] }'
-    )
-    assert _one("svelte", "vite.config.js", text).classification is SAFE
-
-
-def test_vite_config_with_extra_plugin_needs_review():
-    text = SVELTE_VITE.replace("sveltekit()]", "sveltekit(), tailwindcss()]")
-    assert _one("svelte", "vite.config.ts", text).classification is REVIEW
-
-
-def test_generator_svelte_config_is_safe_and_an_older_subset_too():
-    assert _one("svelte", "svelte.config.js", STATIC_SVELTE_CONFIG).classification is SAFE
-    minimal = (
-        "import adapter from '@sveltejs/adapter-static';\n"
-        "export default { kit: { adapter: adapter() } };"
-    )
-    assert _one("svelte", "svelte.config.js", minimal).classification is SAFE
-
-
-def test_svelte_config_with_alias_needs_review():
-    text = STATIC_SVELTE_CONFIG.replace(
-        "adapter: adapter(),", "adapter: adapter(), alias: { x: 'y' },"
-    )
-    assert _one("svelte", "svelte.config.js", text).classification is REVIEW
+def test_author_build_files_are_not_findings(engine, key, text):
+    """The author owns these since 2026-10-07 (the generator merges them with its
+    toolchain), so the migration neither drops nor reports them."""
+    source = {**_PAGE, key: text}
+    assert generator_owned_keys(engine, source) == []
+    assert classify_source(engine, source, keeps_client_bundle=True) == []
 
 
 @pytest.mark.parametrize(
@@ -208,12 +156,6 @@ def test_lockfiles_are_safe(key):
     assert _one("react", key, "{}").classification is SAFE
 
 
-@pytest.mark.parametrize("key", ["bunfig.toml", ".npmrc"])
-def test_install_config(key):
-    assert _one("svelte", key, "# nothing\n\n").classification is SAFE
-    assert _one("react", key, "registry=https://evil.example\n").classification is REVIEW
-
-
 def test_manifest_variant_is_convertible_and_empty_one_safe():
     text = '{"schema":1,"packages":{"three":{"version":"0.170.0"}}}'
     f = _one("svelte", "PAW.dependencies.json", text)
@@ -238,7 +180,7 @@ def test_pre_ps1_namespace_is_review():
 
 
 def test_non_text_value_is_review():
-    assert _one("svelte", "package.json", {"b64": "x"}).classification is REVIEW
+    assert _one("svelte", "bun.lock", {"b64": "x"}).classification is REVIEW
 
 
 # ── 2. runner ────────────────────────────────────────────────────────────────
@@ -252,7 +194,7 @@ def _fake_resolver(reject: set[str] | None = None):
         out = ResolveResult()
         for r in requests:
             if reject and r.name in reject:
-                out.rejected.append(Rejection(r.name, "advisory", "blocked"))
+                out.rejected.append(Rejection(r.name, "not_found", "no such package"))
             else:
                 out.packages[r.name] = ResolvedPackage(r.name, "12.40.1")
         return out
@@ -288,10 +230,12 @@ async def _versions(pocket_id):
     return await versions.list_versions(scope_type="pocket", scope_id=pocket_id)
 
 
+_MOTION_VARIANT = '{"schema":1,"packages":{"motion":{"version":"12.40.0"}}}'
 LEGACY = {
     **_PAGE,
-    "package.json": _pkg(dependencies={"motion": "^12.40.0"}),
-    "vite.config.ts": SVELTE_VITE,
+    "package.json": _pkg(dependencies={"motion": "^12.40.0"}),  # author-owned: stays
+    "vite.config.ts": SVELTE_VITE,  # author-owned: stays
+    "Paw.Dependencies.json": _MOTION_VARIANT,
     "src/routes/+layout.ts": "export const prerender = true;",
     "bun.lock": "{}",
 }
@@ -314,10 +258,9 @@ async def test_dry_run_reports_and_writes_nothing(beanie_test_db):
     [entry] = report["pockets"]
     classes = {row["file"]: row["class"] for row in entry["files"]}
     assert classes == {
+        "Paw.Dependencies.json": "convertible",
         "bun.lock": "safe_drop",
-        "package.json": "convertible",
         "src/routes/+layout.ts": "safe_drop",
-        "vite.config.ts": "safe_drop",
     }
     assert await _source(pocket_id) == LEGACY
     assert len(await _versions(pocket_id)) == len(before)
@@ -332,7 +275,8 @@ async def test_apply_migrates_records_a_draft_and_is_idempotent(beanie_test_db):
 
     assert report["migrated_pockets"] == 1 and not report["errors"]
     source = await _source(pocket_id)
-    assert set(source) == {*_PAGE, "paw.dependencies.json"}
+    assert set(source) == {*_PAGE, "package.json", "vite.config.ts", "paw.dependencies.json"}
+    assert source["package.json"] == LEGACY["package.json"]
     assert json.loads(source["paw.dependencies.json"])["packages"] == {
         "motion": {"version": "12.40.1"}
     }
@@ -351,27 +295,29 @@ async def test_apply_migrates_records_a_draft_and_is_idempotent(beanie_test_db):
 async def test_mixed_pocket_applies_safe_files_and_keeps_review_ones(beanie_test_db):
     source = {
         **_PAGE,
-        "vite.config.ts": SVELTE_VITE,
+        "bun.lock": "{}",
         "src/routes/+layout.ts": "export const load = () => ({ a: 1 });",
-        "package.json": _pkg(dependencies={"left-pad": "^1.0.0"}),
+        "PAW.dependencies.json": '{"packages":{"left-pad":{"version":"1.0.0"}}}',
     }
     pocket_id = await _make_pocket(source)
 
     report = await _run(apply=True, _resolve=_fake_resolver(reject={"left-pad"}))
 
     after = await _source(pocket_id)
-    assert "vite.config.ts" not in after
+    assert "bun.lock" not in after
     assert after["src/routes/+layout.ts"] == source["src/routes/+layout.ts"]
-    assert after["package.json"] == source["package.json"]
+    assert after["PAW.dependencies.json"] == source["PAW.dependencies.json"]
     assert "paw.dependencies.json" not in after
     rows = {r["file"]: r for r in report["pockets"][0]["files"]}
-    assert rows["package.json"]["class"] == "needs_review"
-    assert rows["package.json"]["rejected"][0]["name"] == "left-pad"
+    assert rows["PAW.dependencies.json"]["class"] == "needs_review"
+    assert rows["PAW.dependencies.json"]["rejected"][0]["name"] == "left-pad"
     assert report["summary"] == {"safe_drop": 1, "convertible": 0, "needs_review": 2}
 
 
 @pytest.mark.asyncio
-async def test_existing_manifest_entries_win_and_merge(beanie_test_db):
+async def test_an_author_package_json_beside_the_manifest_is_left_alone(beanie_test_db):
+    """package.json is the author's now: the migration neither converts its packages
+    into the manifest nor drops it, so a pocket holding both is not affected."""
     manifest = '{"schema":1,"packages":{"motion":{"version":"12.0.0"}}}'
     source = {
         **_PAGE,
@@ -381,11 +327,11 @@ async def test_existing_manifest_entries_win_and_merge(beanie_test_db):
     pocket_id = await _make_pocket(source)
     resolver = _fake_resolver()
 
-    await _run(apply=True, _resolve=resolver)
+    report = await _run(apply=True, _resolve=resolver)
 
-    assert resolver.calls == [["gsap"]]
-    packages = json.loads((await _source(pocket_id))["paw.dependencies.json"])["packages"]
-    assert packages == {"gsap": {"version": "12.40.1"}, "motion": {"version": "12.0.0"}}
+    assert resolver.calls == []
+    assert report["affected_pockets"] == 0
+    assert await _source(pocket_id) == source
 
 
 @pytest.mark.asyncio
@@ -416,7 +362,7 @@ async def test_no_resolve_dry_run_reports_requests(beanie_test_db):
     await _make_pocket(LEGACY)
     report = await _run(resolve_packages=False, _resolve=None)
     rows = {r["file"]: r for r in report["pockets"][0]["files"]}
-    assert rows["package.json"]["requests"] == {"motion": "^12.40.0"}
+    assert rows["Paw.Dependencies.json"]["requests"] == {"motion": "12.40.0"}
     with pytest.raises(ValueError):
         await _run(apply=True, resolve_packages=False)
 
@@ -482,7 +428,7 @@ async def test_an_unknown_refusal_code_keeps_the_generic_envelope():
 
 @pytest.mark.asyncio
 async def test_preview_of_an_unmigrated_pocket_names_the_file(beanie_test_db):
-    pocket_id = await _make_pocket({**_PAGE, "vite.config.ts": SVELTE_VITE})
+    pocket_id = await _make_pocket({**_PAGE, "bun.lock": "{}"})
 
     class _Store:
         def read(self, *_a):
@@ -502,7 +448,7 @@ async def test_preview_of_an_unmigrated_pocket_names_the_file(beanie_test_db):
             _pool=_Pool(),
         )
     assert info.value.code == "sites.generator_owned_file"
-    assert "`vite.config.ts`" in info.value.message
+    assert "`bun.lock`" in info.value.message
 
 
 @pytest.mark.asyncio
@@ -522,8 +468,8 @@ async def test_publish_of_an_unmigrated_pocket_names_the_file_before_building():
             ripple_spec=None,
             theme={},
             engine="svelte",
-            source={**_PAGE, "Package.json": "{}"},
+            source={**_PAGE, "Bun.Lock": "{}"},
             generator=_Gen(),
         )
     assert info.value.code == "sites.generator_owned_file"
-    assert "`Package.json`" in info.value.message
+    assert "`Bun.Lock`" in info.value.message

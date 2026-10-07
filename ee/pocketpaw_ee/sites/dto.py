@@ -29,6 +29,10 @@ class PublishRequest(BaseModel):
     # features when a custom domain is later added.
     pocket_id: str
     site_plan_key: str | None = None
+    # A project site's pending D1 migration that would delete rows the site holds
+    # (DROP TABLE / DROP COLUMN / DELETE without WHERE) is refused unless the owner
+    # confirms it with this. See ``sites.project_d1``.
+    confirm_destructive_migrations: bool = False
 
 
 class SitePlanRequestBody(BaseModel):
@@ -258,6 +262,11 @@ class SiteResponse(BaseModel):
     # is a secret: the origins are public by construction.
     foreign_origin: bool = False
     allowed_origins: list[str] = Field(default_factory=list)
+    # A connected site's own page title (<title>, else og:title), read from its
+    # verified origin, whitespace-collapsed and capped at 200 chars. "" for hosted
+    # sites, before the first read, and for rows that predate the field. The owner's
+    # ``name`` is never overwritten with it; the card shows name || this || host.
+    origin_title: str = ""
 
 
 class SiteExportResponse(BaseModel):
@@ -915,13 +924,10 @@ class SiteEntitlementsResponse(BaseModel):
     second condition ANDed in, and like every field here it exists so the Download
     button can disable itself with a reason instead of 402ing when pressed.
 
-    It is NOT the same question as whether the source is VISIBLE. That one is a
-    WORKSPACE capability (``Entitlements.site_source_visible``, which gates the
-    builder's Code tab) resolved off the workspace plan by a different resolver; this
-    is a PER-SITE capability resolved off the site's own plan. A paid site inside a
-    free workspace can legitimately download a project whose source the Code tab
-    hides. A UI that gates the download button on source visibility would hide a
-    control the customer has paid for — read this field, not that one.
+    The builder's Code tab (``sourceVisible`` on the pocket wire dict) is resolved off
+    the same per-site predicate, so the two normally agree. They can still differ
+    when a platform operator overrides source visibility for the whole workspace, so
+    the Download button reads this field, never ``sourceVisible``.
     """
 
     site_id: str
@@ -1030,11 +1036,12 @@ class SiteInvoiceCreate(BaseModel):
 
 
 class NativeArtifactResponse(BaseModel):
-    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the armed
-    svelte build's body + CSS, so the native editor can shadow-render the site
-    instead of framing an iframe. ``body_html`` is the built page's ``<body>`` INNER
-    HTML — the data-uid-stamped editable leaves plus the embedded
-    ``<script id="paw-edit-manifest">`` — which the FE injects into a shadow root.
+    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the draft's
+    ``preview_url`` on the preview origin, plus (svelte/react) the armed build's body +
+    CSS, so the native editor can shadow-render the site instead of framing an iframe.
+    ``body_html`` is the built page's ``<body>`` INNER HTML — the data-uid-stamped
+    editable leaves plus the embedded ``<script id="paw-edit-manifest">`` — which the
+    FE injects into a shadow root.
     ``css`` is the built stylesheet(s) concatenated into one string the FE injects as
     a single ``<style>``.
 
@@ -1057,6 +1064,49 @@ class NativeArtifactResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+    # Absolute URL of the draft's index.html on the cookieless preview origin
+    # (``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/index.html``), the full
+    # draft with its <head> and JS. Every engine including html. ``None`` while the
+    # build is pending or failed. Append ``?paw_edit=1`` to arm the edit bridge.
+    preview_url: str | None = None
+    # project engine only (None elsewhere): "static" when the draft has server routes
+    # the preview cannot run yet (its assets are served, its worker is not), "full"
+    # when the assets are the whole site. None until a build finished.
+    preview_mode: str | None = None
+    # The engine's edit/build capability flags (``engines.engine_capabilities``):
+    # {select, text, code, build_log}. Set for project pockets; None elsewhere for now.
+    capabilities: dict[str, bool] | None = None
+
+
+class SiteBuildResponse(BaseModel):
+    """GET /sites/by-pocket/{pocket_id}/builds/latest: a project pocket's newest draft
+    build. ``status`` is ``queued`` / ``building`` / ``built`` / ``failed``; ``reason``
+    is a rung on failure, never build output. ``current`` is True when this build is
+    of the pocket's current files. Poll this (no realtime event exists for builds)."""
+
+    pocket_id: str
+    job_id: str
+    status: str
+    reason: str | None = None
+    preview_mode: str | None = None
+    framework: str | None = None
+    updated_at: str | None = None
+    current: bool = False
+
+
+class SiteBuildLogResponse(BaseModel):
+    """GET /sites/by-pocket/{pocket_id}/builds/{job_id}/log: one project build's
+    install / build / dry-run output, secrets redacted and capped to the last 64 KiB
+    (``log_truncated`` says when the head was cut). Empty while the build runs."""
+
+    pocket_id: str
+    job_id: str
+    status: str
+    reason: str | None = None
+    log: str = ""
+    log_truncated: bool = False
+    preview_mode: str | None = None
+    updated_at: str | None = None
 
 
 class SiteAssetResponse(BaseModel):
@@ -1473,3 +1523,61 @@ class ForeignConciergeResponse(BaseModel):
     concierge_enabled: bool = False
     # Has the owner created the concierge (``site_keys.concierge_exists``)?
     concierge_exists: bool = False
+
+
+# --- Project files (GET/PUT/DELETE /sites/by-pocket/{pocket_id}/files) -------------
+# The HTTP twin of the agent's project file tools; both call ``sites.project_tools``.
+
+
+class ProjectFileEntry(BaseModel):
+    path: str
+    size: int
+
+
+class ProjectFileListResponse(BaseModel):
+    pocket_id: str
+    files: list[ProjectFileEntry]
+    file_count: int
+
+
+class ProjectFileContentResponse(BaseModel):
+    path: str
+    size: int
+    content: str
+
+
+class ProjectFilesWriteRequest(BaseModel):
+    """``{files: {path: full contents}}``; every path is checked before any is saved."""
+
+    files: dict[str, str]
+
+
+class ProjectFilePatchEdit(BaseModel):
+    old: str
+    new: str
+
+
+class ProjectFilePatchRequest(BaseModel):
+    """One file, ``edits`` applied in order; each ``old`` must match exactly once."""
+
+    path: str
+    edits: list[ProjectFilePatchEdit] = Field(min_length=1)
+
+
+class ProjectFilesDeleteRequest(BaseModel):
+    paths: list[str] = Field(min_length=1)
+
+
+class ProjectFileWriteResponse(BaseModel):
+    """What every write answers. ``verification`` is the queued draft build of the new
+    source: ``{status: "pending", build: "pending", job_id}`` (``passed`` when that
+    exact source already built; ``failed`` / ``unverified`` with a ``reason``).
+    ``lockfile_removed`` lists lockfiles a package.json dependency change made stale."""
+
+    pocket_id: str
+    written: list[str] = Field(default_factory=list)
+    created: list[str] = Field(default_factory=list)
+    deleted: list[str] = Field(default_factory=list)
+    path: str | None = None
+    lockfile_removed: list[str] = Field(default_factory=list)
+    verification: dict[str, Any]

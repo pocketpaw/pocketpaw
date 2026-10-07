@@ -30,10 +30,10 @@ from pocketpaw_ee.cloud._core.http import add_error_handler  # noqa: E402
 from pocketpaw_ee.cloud.audit import listeners as audit_listeners  # noqa: E402
 from pocketpaw_ee.cloud.audit import service as audit_service  # noqa: E402
 from pocketpaw_ee.cloud.audit.router import router as audit_router  # noqa: E402
-from pocketpaw_ee.cloud.auth import current_active_user  # noqa: E402
 from pocketpaw_ee.cloud.license import require_license  # noqa: E402
 
 from pocketpaw.audit import store as audit_store_module  # noqa: E402
+from tests.cloud.conftest import override_cloud_user  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,25 +79,23 @@ def _restore_service() -> None:
         delattr(audit_service, "_orig_agent_list_audit")
 
 
-def _build_app(audit_store, *, workspace_id: str = "w1", user_id: str = "u1") -> FastAPI:
+def _build_app(
+    audit_store, monkeypatch, *, workspace_id: str = "w1", user_id: str = "u1"
+) -> FastAPI:
     """Build a FastAPI app wired to the cloud audit router + tmp store."""
     app = FastAPI()
     add_error_handler(app)
     app.include_router(audit_router)
     app.dependency_overrides[require_license] = lambda: None
-
-    user = _fake_user(user_id=user_id, workspace_id=workspace_id)
-
-    async def _fake_user_dep():
-        return user
-
-    app.dependency_overrides[current_active_user] = _fake_user_dep
+    override_cloud_user(app, _fake_user(user_id=user_id, workspace_id=workspace_id))
 
     # RBAC denial path is exercised in test_audit_router.py — here we
-    # just need a permissive guard so the handler actually runs.
+    # just need a permissive guard so the handler actually runs. Through
+    # ``monkeypatch`` so it is undone after the test: a bare assignment here
+    # once left every later file's member-403 test answering 200.
     from pocketpaw_ee.cloud._core import deps as core_deps
 
-    core_deps.check_workspace_action = AsyncMock(return_value=None)  # type: ignore[assignment]
+    monkeypatch.setattr(core_deps, "check_workspace_action", AsyncMock(return_value=None))
 
     _install_service_seam(audit_store)
     return app
@@ -143,8 +141,8 @@ async def bridged_store(audit_store_tmp, monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def w1_client(bridged_store) -> AsyncClient:
-    app = _build_app(bridged_store, workspace_id="w1")
+async def w1_client(bridged_store, monkeypatch) -> AsyncClient:
+    app = _build_app(bridged_store, monkeypatch, workspace_id="w1")
     transport = ASGITransport(app=app)
     try:
         async with AsyncClient(transport=transport, base_url="http://t") as client:
@@ -154,8 +152,8 @@ async def w1_client(bridged_store) -> AsyncClient:
 
 
 @pytest_asyncio.fixture
-async def w2_client(bridged_store) -> AsyncClient:
-    app = _build_app(bridged_store, workspace_id="w2")
+async def w2_client(bridged_store, monkeypatch) -> AsyncClient:
+    app = _build_app(bridged_store, monkeypatch, workspace_id="w2")
     transport = ASGITransport(app=app)
     try:
         async with AsyncClient(transport=transport, base_url="http://t") as client:

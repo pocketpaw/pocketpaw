@@ -65,13 +65,13 @@ from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator
 
 from pocketpaw.money import (
     DEFAULT_EXPONENT,
@@ -111,6 +111,10 @@ from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw.sites_capture.ingest import interpolate
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
 from pocketpaw_ee.cloud._core.rate_limit import _client_ip
+from pocketpaw_ee.cloud.models.site import (
+    CONCIERGE_KNOWLEDGE_CHARS_MAX,
+    CONCIERGE_KNOWLEDGE_CHARS_MIN,
+)
 from pocketpaw_ee.paw_bar.admit import admit as admit_event
 from pocketpaw_ee.paw_bar.handoff import PAW_HANDOFFS_TYPE
 
@@ -1707,6 +1711,12 @@ async def list_events(
 # ---------------------------------------------------------------------------
 
 
+# The v2 concierge's knowledge budget, in characters (``Site.concierge_knowledge_chars``).
+ConciergeKnowledgeChars = Annotated[
+    StrictInt, Field(ge=CONCIERGE_KNOWLEDGE_CHARS_MIN, le=CONCIERGE_KNOWLEDGE_CHARS_MAX)
+]
+
+
 class ConciergeSettingsUpdate(BaseModel):
     """Partial update of a Site's concierge settings (D1).
 
@@ -1740,6 +1750,10 @@ class ConciergeSettingsUpdate(BaseModel):
     # "Guide visitors around your site": on, the v2 concierge may suggest one
     # page action per reply (``paw_bar.action_spec``). Default off.
     concierge_page_actions: bool | None = None
+    # The v2 concierge's per-turn knowledge budget in characters, 4,000..60,000
+    # (out of range is a 422). Unlike the other fields an explicit null is a
+    # write: it clears the value back to the default (12,000).
+    concierge_knowledge_chars: ConciergeKnowledgeChars | None = None
     # CR-4 (2026-09-28): the guided fields. Caps and shapes are in
     # ``pocketpaw.paw_bar.concierge_fields``; each value is normalized (one line,
     # no control characters) and refused with a 422 past its cap. Clear a text
@@ -1841,6 +1855,8 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_allow_doc_code: bool = False
     concierge_lead_capture: bool = True
     concierge_page_actions: bool = False
+    # None means the default budget (12,000 characters).
+    concierge_knowledge_chars: int | None = None
     # CR-4 guided fields. "", None and [] mean unset (nothing is rendered).
     concierge_name: str = ""
     concierge_tone: ConciergeTone | None = None
@@ -1956,6 +1972,17 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
         return ""
 
 
+def _stored_knowledge_chars(site: Any) -> int | None:
+    """The site's knowledge budget as stored, or None (the default) for an old
+    row or anything that is not an int in range."""
+    value = getattr(site, "concierge_knowledge_chars", None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if not CONCIERGE_KNOWLEDGE_CHARS_MIN <= value <= CONCIERGE_KNOWLEDGE_CHARS_MAX:
+        return None
+    return value
+
+
 def _actions_snippet() -> str:
     """The page-actions tag on the public API base ``_site_embed_snippet`` uses."""
     from pocketpaw_ee.paw_bar.embed import build_actions_snippet
@@ -1996,6 +2023,7 @@ async def _concierge_settings_response(
         concierge_lead_capture=getattr(site, "concierge_lead_capture", True) is not False,
         # Only an explicit True turns it on (a row older than the field reads off).
         concierge_page_actions=getattr(site, "concierge_page_actions", False) is True,
+        concierge_knowledge_chars=_stored_knowledge_chars(site),
         # getattr again: rows older than the guided fields read as unset.
         concierge_name=getattr(site, "concierge_name", "") or "",
         concierge_tone=getattr(site, "concierge_tone", None),
@@ -2101,7 +2129,7 @@ async def update_site_concierge_settings(
     previous_name = getattr(site, "concierge_name", "") or ""
     for name in req.model_fields_set:
         value = getattr(req, name)
-        if value is not None:
+        if value is not None or name == "concierge_knowledge_chars":
             setattr(site, name, value)
     await site.save()
     # A legacy concierge answers through its dedicated agent: carry a new name
@@ -2704,6 +2732,10 @@ class SiteOverviewResponse(BaseModel):
     # The dashboard picks the create empty state off ``concierge_exists``.
     concierge_exists: bool = False
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
+    # v2 only: the ``provider:model`` visitors are answered with right now (the
+    # concierge agent's model, else the deployment's), so the owner never has to
+    # guess. "" on legacy, where the agent's own run answers.
+    answer_model: str = ""
     # The third owner setting, alongside ``enabled`` and ``greeting``: whether the
     # visitor's own messages are stored. Carried here so the dashboard renders all
     # three from the one call it already makes rather than a second round trip for
@@ -3184,13 +3216,20 @@ async def get_site_overview(
     # Conversations are pocket-scoped (a Site is 1:1 with its pocket), so the
     # count stands even when the widget row is absent.
     counts.conversations = await _count_conversations(site.pocket_id, workspace_id)
+    from pocketpaw_ee.paw_bar import concierge_runtime as v2_runtime
+
+    runtime = _site_concierge_runtime(site)
+    answer_model = (
+        await v2_runtime.answer_model(widget, site, workspace_id) if runtime == "v2" else ""
+    )
 
     return SiteOverviewResponse(
         widget=widget_view,
         enabled=site.concierge_enabled,
         greeting=site.concierge_greeting,
         concierge_exists=getattr(site, "concierge_created_at", None) is not None,
-        concierge_runtime=_site_concierge_runtime(site),
+        concierge_runtime=runtime,
+        answer_model=answer_model,
         store_transcripts=site.concierge_store_transcripts,
         counts=counts,
     )

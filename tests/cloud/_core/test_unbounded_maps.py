@@ -22,14 +22,17 @@
 #   - drop the _inflight single-flight                        -> fetch-count test
 #   - restore the hand-written cleanup_all list               -> registry test
 #   - read forwarded.split(",")[0] again                      -> proxy class
+#   - honour X-Paw-Client-IP without the key or the opt-in   -> web-key class
 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
-from pocketpaw_ee.cloud._core import timing
-from pocketpaw_ee.cloud._core.rate_limit import _client_ip
+from pocketpaw_ee.cloud._core import rate_limit, timing
+from pocketpaw_ee.cloud._core.errors import RateLimited
+from pocketpaw_ee.cloud._core.rate_limit import _client_ip, client_ip
 from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
 
 from pocketpaw.security.rate_limiter import (
@@ -214,3 +217,75 @@ class TestForwardedForTrust:
 
     def test_missing_client_is_survivable(self):
         assert _client_ip(_Req(None, {})) == "unknown"
+
+
+class TestPublicWebKeyTrust:
+    """X-Paw-Client-IP is honoured only when the caller opted in
+    (``trusted_header_ok=True``), ``Settings.public_web_key`` is set and
+    X-Paw-Web-Key matches it. Without the key the header is caller-chosen, which
+    is the same bypass as a leftmost X-Forwarded-For; without the opt-in a leaked
+    key still cannot pick buckets on the auth exchange or the meeting routes."""
+
+    EDGE = {"x-forwarded-for": "1.2.3.4, 203.0.113.9"}
+    WORKER = {"x-paw-web-key": "s3cret", "x-paw-client-ip": "198.51.100.7"}
+
+    @pytest.fixture(autouse=True)
+    def _settings(self, monkeypatch):
+        self.settings = SimpleNamespace(public_web_key="s3cret")
+        monkeypatch.setattr("pocketpaw.config.get_settings", lambda: self.settings)
+
+    def test_matching_key_and_valid_ip_win_over_xff(self):
+        req = _Req("10.0.0.1", {**self.EDGE, **self.WORKER})
+        assert _client_ip(req, trusted_header_ok=True) == "198.51.100.7"
+
+    def test_ipv6_is_normalised(self):
+        req = _Req("10.0.0.1", {"x-paw-web-key": "s3cret", "x-paw-client-ip": "2001:DB8:0:0::1"})
+        assert _client_ip(req, trusted_header_ok=True) == "2001:db8::1"
+
+    def test_wrong_key_is_ignored(self):
+        req = _Req("10.0.0.1", {**self.EDGE, **self.WORKER, "x-paw-web-key": "nope"})
+        assert _client_ip(req, trusted_header_ok=True) == "203.0.113.9"
+
+    def test_unset_key_ignores_the_header_even_when_empty_matches(self):
+        for key in (None, ""):
+            self.settings.public_web_key = key
+            for sent in ("", "s3cret"):
+                req = _Req("10.0.0.1", {**self.EDGE, **self.WORKER, "x-paw-web-key": sent})
+                assert _client_ip(req, trusted_header_ok=True) == "203.0.113.9"
+
+    def test_invalid_ip_falls_back_to_xff(self):
+        req = _Req("10.0.0.1", {**self.EDGE, **self.WORKER, "x-paw-client-ip": "not-an-ip"})
+        assert _client_ip(req, trusted_header_ok=True) == "203.0.113.9"
+
+    def test_default_path_ignores_a_valid_key(self):
+        """No opt-in, no trust: the header is never read, so the settings are not either."""
+        req = _Req("10.0.0.1", {**self.EDGE, **self.WORKER})
+        assert _client_ip(req) == "203.0.113.9"
+        assert client_ip(req) == "203.0.113.9"
+
+    @pytest.mark.asyncio
+    async def test_non_public_limiters_ignore_the_header(self):
+        """A leaked Worker key must not mint fresh buckets on the auth exchange or
+        the meeting lookup: they key on the proxy hop whatever the headers say."""
+        rate_limit._social_exchange_limiter._buckets.clear()
+        rate_limit._meeting_lookup_limiter._buckets.clear()
+        for dep, limiter in (
+            (rate_limit.rate_limit_social_exchange, rate_limit._social_exchange_limiter),
+            (rate_limit.rate_limit_meeting_lookup, rate_limit._meeting_lookup_limiter),
+        ):
+            for i in range(limiter.capacity):
+                worker = {**self.WORKER, "x-paw-client-ip": f"198.51.100.{i + 1}"}
+                await dep(_Req("10.0.0.1", {**self.EDGE, **worker}))
+            with pytest.raises(RateLimited):
+                await dep(_Req("10.0.0.1", {**self.EDGE, **self.WORKER}))
+            limiter._buckets.clear()
+
+    @pytest.mark.asyncio
+    async def test_opted_in_limiter_buckets_on_the_visitor(self):
+        """The Worker-fronted partner limiter sees each visitor, not one egress."""
+        limiter = rate_limit._partner_public_limiter
+        limiter._buckets.clear()
+        for i in range(limiter.capacity + 1):
+            worker = {**self.WORKER, "x-paw-client-ip": f"198.51.100.{i + 1}"}
+            await rate_limit.rate_limit_partner_public(_Req("10.0.0.1", {**self.EDGE, **worker}))
+        limiter._buckets.clear()

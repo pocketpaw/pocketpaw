@@ -1010,9 +1010,12 @@ class Settings(BaseSettings):
         default=False,
         description=(
             "Withhold a Paw Site's authored SOURCE from the wire unless the "
-            "workspace is entitled to read it (``Entitlements."
-            "site_source_visible``, which every paid rung grants and ``free`` "
-            "does not). OFF by default so turning the gate on is a separate, "
+            "SITE is entitled to it: its own per-site tier is ``site`` or "
+            "``staff`` with an active subscription (``entitlements.service."
+            "site_code_entitled``). The workspace plan grants nothing; a "
+            "platform override (``WorkspaceOverrides.site_source_visible``) can "
+            "grant or revoke it workspace-wide. OFF by default so turning the "
+            "gate on is a separate, "
             "revertible operational step rather than something that ships with "
             "the code. "
             "It is ANDed with a per-pocket cohort stamp (``Pocket."
@@ -1224,14 +1227,15 @@ class Settings(BaseSettings):
     )
 
     # Paw Bar concierge v2 runner (``pocketpaw_ee.paw_bar.concierge_runtime``).
-    # Fixed per deployment on purpose: a public, anonymous visitor must not be
-    # able to steer model choice or reply length.
+    # A public, anonymous visitor can never steer model choice or reply length;
+    # the model follows the site owner's pick on the concierge agent.
     pawbar_concierge_model: str = Field(
         default="",
         description=(
-            "Model the v2 Paw Bar concierge answers with, as a pydantic_ai spec "
-            "(``litellm:<model>`` or a bare name on the configured provider). "
-            "Empty uses the pydantic_ai backend's own model resolution."
+            "Model the v2 Paw Bar concierge answers with when its agent names none "
+            "pydantic_ai can serve, as a pydantic_ai spec (``litellm:<model>`` or a "
+            "bare name on the configured provider). Empty uses the pydantic_ai "
+            "backend's own model resolution."
         ),
     )
     pawbar_concierge_max_tokens: int = Field(
@@ -1589,6 +1593,13 @@ class Settings(BaseSettings):
     )
     whatsapp_verify_token: str | None = Field(
         default=None, description="WhatsApp webhook verification token"
+    )
+    whatsapp_app_secret: str | None = Field(
+        default=None,
+        description=(
+            "Meta app secret; inbound business webhooks without a matching "
+            "X-Hub-Signature-256 are rejected (unset rejects all)"
+        ),
     )
     whatsapp_allowed_phone_numbers: list[str] = Field(
         default_factory=list, description="WhatsApp phone numbers allowed to use the bot"
@@ -2609,6 +2620,18 @@ class Settings(BaseSettings):
         description=(
             "Cloudflare Turnstile secret for the free AI check. Unset (dev) skips "
             "verification with a warning. POCKETPAW_TURNSTILE_SECRET."
+        ),
+    )
+    # Shared secret the paw-web Worker sends as X-Paw-Web-Key so the public
+    # per-IP limits can trust its X-Paw-Client-IP (``cloud/_core/rate_limit``).
+    # Unset means the header is ignored everywhere. Rotate by setting the new
+    # value on both sides and redeploying both; there is no dual-key window.
+    public_web_key: str | None = Field(
+        default=None,
+        description=(
+            "Shared key the paw-web Worker sends as X-Paw-Web-Key; when it matches, "
+            "X-Paw-Client-IP is the address for public per-IP limits. Unset ignores "
+            "the header. POCKETPAW_PUBLIC_WEB_KEY."
         ),
     )
     ai_check_daily_usd: float = Field(

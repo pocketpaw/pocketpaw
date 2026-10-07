@@ -56,7 +56,8 @@ def _dotenv_key() -> str:
         from dotenv import dotenv_values
     except ImportError:
         return ""
-    return (dotenv_values().get(_ENV_VAR) or "").strip()
+    # The cwd's .env only; a bare dotenv_values() walks up into parent projects.
+    return (dotenv_values(".env").get(_ENV_VAR) or "").strip()
 
 
 def browserpod_api_key() -> str:

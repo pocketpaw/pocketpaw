@@ -27,9 +27,11 @@ description: |
 
 <!--
   Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): "What the
-  project has" now teaches declaring npm packages (`dependencies` /
-  set_site_dependencies) and loading client-only ones via a dynamic import()
-  in useEffect; a "Verify loop" section follows STEP 3 (only
+  project has" teaches declaring npm packages (`dependencies` /
+  set_site_dependencies; any package, version or dist-tag) and importing them
+  normally, with a dynamic import() in useEffect only for browser-only
+  libraries; package.json / vite.config.* are author-writable; a "Verify
+  loop" section follows STEP 3 (only
   `verification.status == passed` means ready; fix → verify_site, max 3
   rounds; unverified said plainly). The edit bullet and paw-fx entry no longer
   claim a dependency cannot be added.
@@ -264,20 +266,20 @@ The generator writes a deliberately tiny project: **react**, **react-dom**,
 declare them. There is **no router**: the site is **one page**, and
 multi-route React is not supported on this track.
 
-Anything else (an animation library like `gsap` or `motion`, `lenis`,
-`three`, a small utility) you **declare**: pass `dependencies=[{"name":
-"gsap"}]` to `create_react_site`, or call `set_site_dependencies(pocket_id,
-add=[...], remove=[...])` on an existing site. Reach for one when it earns its
-weight; plain components and plain CSS still cover most asks.
+Anything else you **declare**: pass `dependencies=[{"name": "gsap"}]` to
+`create_react_site`, or call `set_site_dependencies(pocket_id, add=[...],
+remove=[...])` on an existing site. Any public npm package works, at any exact
+version, range or dist-tag (`{"name": "x", "range": "next"}`); each is pinned to
+an exact version. `rejected` only holds what could not be resolved (a misspelt
+name, no matching version): don't import those. `warnings` carry security
+advisories or deprecation notes; mention them to the user. You may also write
+`package.json` and `vite.config.*` yourself when the build needs it.
 
-Each package is checked (published at least 7 days ago, popular enough, no
-known advisory, no install scripts or native code, a size cap, at most 20 per
-site) and pinned to an exact version. A refused one comes back in `rejected`
-with its `reason`: don't import it; pick another or build without it.
-
-**Load client-only libraries inside `useEffect` with a dynamic `import()`**,
-never at the top of a module: the page is prerendered, where `window` doesn't
-exist.
+**Import packages the normal way.** Component and icon libraries
+(`lucide-react`, `motion`, a UI kit) are fine as top-level imports. Only a
+browser-only library that touches `window` / `document` when it is imported
+(`three`, `gsap` plugins, some carousels) needs a dynamic `import()` inside
+`useEffect`, because the page is prerendered where `window` doesn't exist:
 
 ```tsx
 useEffect(() => {
@@ -289,8 +291,8 @@ useEffect(() => {
 }, []);
 ```
 
-A top-level import earns a `top_level_client_import` warning and usually
-breaks the prerender. Packages need the client bundle, so never pass
+If a `top_level_client_import` warning names a library, move that one into
+`useEffect`. Packages need the client bundle, so never pass
 `interactive=false` alongside `dependencies`.
 
 ## STEP 2 — Assemble the `source` map
@@ -312,16 +314,19 @@ src/index.css                the design system — tokens (CSS vars), @font-face
 public/*                     static assets served at the site root
 ```
 
+Root build files you MAY write when you need them (the generator merges
+them with its toolchain): `package.json`, `vite.config.*`, `bunfig.toml`,
+`.npmrc`.
+
 **Paths you may NOT write** — the generator owns them, and writing one fails the
 create:
 
 ```
 index.html                   the HTML template (carries the prerender outlet)
-package.json                 the manifest (toolchain + your declared packages)
 paw.dependencies.json        written only by `dependencies` / set_site_dependencies
-vite.config.ts               the build config
 paw-prerender.mjs            the prerender pass
 src/paw/**                   the generated client + server entries
+bun.lock / lockfiles         produced by the build
 ```
 
 That reservation is what guarantees the page cannot silently become a
@@ -388,8 +393,10 @@ works.
   which ones are left. Never call it ready.
 - **`unverified`** — it could not be checked (`reason`, e.g.
   `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
-  why. On `timeout` the build is still running, so one more `verify_site` is
-  worth it. Never report `unverified` as a pass.
+  why. When the result has a `message`, give that sentence as written: a full
+  build queue is not an outage, so never say the build server is down. On
+  `timeout` or `waiting_for_capacity` the build is still coming, so one more
+  `verify_site` is worth it. Never report `unverified` as a pass.
 - **`warnings`** don't block a pass, but move a `top_level_client_import`
   client-side anyway: it is how a prerender build breaks.
 
@@ -473,7 +480,8 @@ mcp__pocketpaw_sites_manager__edit_react_component(
   `src/App.tsx` to import and render it. Stop after the first and you have
   shipped a component nothing renders.
 - The generator-owned paths above stay refused. To add a package, call
-  `set_site_dependencies` first, then import it inside `useEffect`.
+  `set_site_dependencies` first, then import it (browser-only libraries in
+  `useEffect`).
 - Every edit returns `verification`; the verify loop above applies.
 - Every rule in this skill still binds — above all the **prerender rule**: an
   edit that swaps a static value for a `useState(0)` + count-up effect bakes
@@ -519,4 +527,4 @@ surface loads only the skill you are reading.
 - `mcp__pocketpaw_icons__search_icons` — feature icons
 - `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
   Pass `engine="react"`: an effect with `needs` comes back with `dependencies`
-  to declare via `set_site_dependencies`, loaded in `useEffect`.
+  to declare via `set_site_dependencies`.

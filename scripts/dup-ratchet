@@ -81,12 +81,12 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         "hand-rolled HMAC in cloud",
         r"hmac\.new\(",
         ("ee/pocketpaw_ee/cloud/*",),
-        # Outbound signing only. Excluded: the canonical signer and the inbound
-        # verifiers (growth, Recall), which must check a provider's own scheme.
+        # Outbound signing only. Excluded: the canonical signer and the Recall
+        # inbound verifier, which must check Svix's own scheme. Growth's inbound
+        # check uses core's whatsapp_adapter.verify_signature, so it is counted.
         # Still counted: audit/webhooks (outbound copy) and _core/ee_auth_bridge.
         (
             "ee/pocketpaw_ee/cloud/notifications/webhook_signing.py",
-            "ee/pocketpaw_ee/cloud/growth/webhooks.py",
             "ee/pocketpaw_ee/cloud/meetings/providers/recall/webhooks.py",
         ),
         2,

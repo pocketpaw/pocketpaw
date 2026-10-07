@@ -13,8 +13,9 @@
 # an anonymous check has no competitor list and AV-3 does no competitor discovery.
 #
 # The check is stored like any other (workspace and site None); the caller's IP
-# is never stored. With ``POCKETPAW_TURNSTILE_SECRET`` unset (dev) Turnstile is
-# skipped with a warning. Turnstile network errors fail closed.
+# is never stored (the shared ``_core.turnstile`` verifier). With
+# ``POCKETPAW_TURNSTILE_SECRET`` unset (dev) Turnstile is skipped with a warning.
+# Turnstile network errors fail closed.
 
 from __future__ import annotations
 
@@ -22,7 +23,8 @@ import logging
 
 import httpx
 
-from pocketpaw_ee.cloud._core.errors import BadRequest, CloudError
+from pocketpaw_ee.cloud._core.errors import CloudError
+from pocketpaw_ee.cloud._core.turnstile import verify_turnstile as _verify_turnstile
 from pocketpaw_ee.cloud.ai_visibility import service
 from pocketpaw_ee.cloud.ai_visibility.domain import Business, Location
 from pocketpaw_ee.cloud.ai_visibility.dto import AiCheckRequest, AiCheckResponse
@@ -32,7 +34,6 @@ from pocketpaw_ee.cloud.ai_visibility.judge import default_decision_models
 
 logger = logging.getLogger(__name__)
 
-TURNSTILE_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 RUNS = 2
 MAX_SOURCES = 10
 
@@ -68,28 +69,11 @@ async def verify_turnstile(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    """Raise 400 ``tools.ai_check.turnstile_failed`` unless Cloudflare accepts ``token``."""
-    from pocketpaw.config import get_settings
-
-    secret = str(get_settings().turnstile_secret or "").strip()
-    if not secret:
-        logger.warning("ai_check: POCKETPAW_TURNSTILE_SECRET unset, skipping Turnstile (dev only)")
-        return
-    data = {"secret": secret, "response": token}
-    if remote_ip:
-        data["remoteip"] = remote_ip
-    try:
-        async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
-            resp = await client.post(TURNSTILE_URL, data=data)
-            ok = resp.status_code == 200 and resp.json().get("success") is True
-    except Exception as exc:  # network / bad JSON: fail closed, never log the secret
-        logger.warning("ai_check: Turnstile verify failed: %s", type(exc).__name__)
-        ok = False
-    if not ok:
-        raise BadRequest(
-            "tools.ai_check.turnstile_failed",
-            "We couldn't confirm you're a person. Refresh the page and try again.",
-        )
+    """Raise 400 ``tools.ai_check.turnstile_failed`` unless Cloudflare accepts ``token``
+    (the shared ``_core.turnstile`` verifier with this route's error code)."""
+    await _verify_turnstile(
+        token, remote_ip, code="tools.ai_check.turnstile_failed", transport=transport
+    )
 
 
 async def run_public_check(

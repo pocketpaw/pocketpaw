@@ -5,7 +5,7 @@
 #   scripts/flake_census.sh [-r RUNS] [-n WORKERS] [-o OUTDIR] [-- extra pytest args]
 #   defaults: RUNS=10 WORKERS=4 OUTDIR=.flake-census
 #
-# Runs the default suite RUNS times with `-n WORKERS --dist load` and a fresh
+# Runs the default suite RUNS times with `-n WORKERS --dist loadgroup` and a fresh
 # --randomly-seed each run, skipping tests marked `serial`. Then one serial
 # randomized pass (no -n), which separates "order-dependent anywhere" from
 # "parallel-only". Failures are read from each run's junit XML.
@@ -78,7 +78,7 @@ run_pytest() {
 	start=$(date +%s)
 	set +e
 	perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$RUN_TIMEOUT" \
-		uv run --with "pytest-randomly>=3.15,<5" pytest "${BASE[@]}" --randomly-seed="$seed" --junitxml="$WORK/$label.xml" "$@" "${EXTRA[@]}" \
+		uv run --with "pytest-randomly>=3.15,<5" pytest "${BASE[@]}" --randomly-seed="$seed" --junitxml="$WORK/$label.xml" "$@" ${EXTRA[@]+"${EXTRA[@]}"} \
 		>"$WORK/$label.log" 2>&1
 	rc=$?
 	set -e
@@ -99,7 +99,7 @@ for i in $(seq 1 "$RUNS"); do
 		echo "budget of ${BUDGET_MIN}m reached; stopping after $((i - 1)) parallel runs"
 		break
 	fi
-	run_pytest "run$(printf %02d "$i")" $((RANDOM * 32768 + RANDOM)) -n "$WORKERS" --dist load -m "not serial"
+	run_pytest "run$(printf %02d "$i")" $((RANDOM * 32768 + RANDOM)) -n "$WORKERS" --dist loadgroup -m "not serial"
 done
 run_pytest serial $((RANDOM * 32768 + RANDOM))
 

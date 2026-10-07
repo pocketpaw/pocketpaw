@@ -30,6 +30,10 @@ threshold. Commit the gate file in a PR; it ships inside the image. Changing the
 deployment's concierge model shuts the gate again until a report for the new model
 is promoted.
 
+The gate covers the deployment's model and only decides the automatic move. Once a
+site is on v2, a model its owner sets on the concierge agent is used at runtime
+without a report of its own (see `docs/concepts/concierge-knowledge.mdx`).
+
 ## Do I need to run the move? No, it runs itself
 
 `init_cloud_db` calls `sites.migrate_concierge_v2.migrate_on_boot()` on every cloud
@@ -69,7 +73,9 @@ A site stays on legacy, with the reason logged, when:
   (`concierge-<site_id>`), which means an owner picked it by hand.
 - **The owner changed the dedicated agent**: system prompt, model, tools, scopes,
   skills, plugins, a persona other than the generated one, or disabled it. v2 uses
-  the deployment's model and a fixed frame, so those would be lost.
+  a fixed frame and no tools, so most of those would be lost. v2 would honour a
+  changed model, but the gate only certified the deployment's model, so the move
+  leaves that choice to the owner.
 - **It has no bar, no bound agent, or an agent that no longer exists.** Those bars
   don't answer on legacy today, and moving one would switch it on unasked.
 - **It could not be read.** It is retried on the next run.

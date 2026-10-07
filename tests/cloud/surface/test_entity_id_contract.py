@@ -243,6 +243,11 @@ _KNOWN_ADDRESSABLE_KINDS = frozenset(
         "pocket",
         "project",
         "prospect",
+        # ``recipe`` — ``pocketpaw_sites_manager.apply_site_recipe`` takes a
+        # required ``recipe_id``: a paw-sites recipe slug (``d1-drizzle``), not a
+        # PocketPaw entity. The agent gets it from ``list_site_recipes`` output in
+        # the same turn, like ``style`` below.
+        "recipe",
         "run",
         "scenario",
         # ``style`` — ``pocketpaw_refero.get_style`` takes a required

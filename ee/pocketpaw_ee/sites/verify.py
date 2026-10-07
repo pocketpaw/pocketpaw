@@ -1,44 +1,40 @@
 # ee/pocketpaw_ee/sites/verify.py — the three-layer verification pipeline behind every
-# agent create / edit and the ``verify_site`` tool.
-#
-# Created 2026-09-24 (PP-2, feat/sites-verify-pipeline). Contract §5 of
-# docs/design/drafts/2026-09-24-sites-deps-verify-contract.md defines the verdict this
-# returns; this header records how each layer is produced and why.
+# agent create / edit and the ``verify_site`` tool. Contract §5 of
+# docs/design/drafts/2026-09-24-sites-deps-verify-contract.md defines the verdict.
 #
 #   1. STATIC — ``paw-sites-gen check`` (``generator_client.run_static_check``) on the
-#      API host. It installs nothing, so it is safe for any source, packages included,
-#      and it is about a second. The input is the SAME generator payload the preview
-#      build gets. A static failure stops here: nothing is spent on a sandbox to confirm
-#      a failure the author already has to fix.
+#      API host, about a second, installs nothing. A static failure stops here.
 #   2. BUILD — the preview lane (``build_job.enqueue_preview_build``) keyed on the SAME
-#      armed content hash ``get_native_artifact`` and the pre-warm use. One sandbox serves
-#      the UI preview and the verdict; a verify of a render the editor already queued
-#      waits on that job instead of opening another (the job id IS the hash).
-#   3. BROWSER — the paw-sites harness, run by the preview job in that same sandbox after
-#      a clean build (``browser_check``). html has no build, so it gets its own sandbox
-#      job (``build_job.run_site_html_verify``) and its build layer is ``skipped``.
+#      armed content hash the editor view and the pre-warm use, so one sandbox serves
+#      the UI preview and the verdict (the job id IS the hash).
+#   3. BROWSER — the paw-sites harness, run by the preview job in that same sandbox
+#      after a clean build. html has no build: its own sandbox job, build ``skipped``.
 #
-# ``passed`` MEANS EVERY APPLICABLE LAYER RAN AND PASSED. A sandbox that could not be
-# created, a queue that is down, a browser that would not launch, a wait that ran out:
-# each is ``unverified`` with a reason, never ``passed``. Any ``failed`` layer makes the
-# verdict ``failed`` (it is actionable even when another layer could not run).
+# TWO ENTRY POINTS. :func:`verify_site` (the ``verify_site`` tool, creates) runs all
+# three layers and WAITS for the sandbox. :func:`verify_edit` (every edit tool) runs
+# ONLY the static layer synchronously, enqueues the sandbox layers and returns
+# ``status: "pending"`` with ``build: "pending"`` and the ``job_id``; html enqueues
+# nothing (its browser check is on demand via ``verify_site``). The enqueue is recorded
+# as the pocket's ``latest`` record, and :func:`settled_verdict` turns it into the full
+# verdict once the job's sandbox report lands — the edit tools attach that to their
+# NEXT result as ``previous_verification``, once.
 #
-# CACHED PER CONTENT HASH. A ``passed`` / ``failed`` verdict is stored in ``verify_store``
-# under the hash, so re-verifying unchanged source is a read. ``unverified`` is stored
-# for ``/status`` but never served as a cache hit — the next call tries again. The
-# preview job ALSO stores its build + browser report under the hash, so a UI pre-warm
-# answers the sandbox layers of the next verify for free.
+# ``passed`` MEANS EVERY APPLICABLE LAYER RAN AND PASSED. Anything that could not run
+# is ``unverified`` with a reason. Any ``failed`` layer makes the verdict ``failed``.
 #
-# ENGINES: svelte, react, html. ripple (landing and dynamic) returns ``unverified`` /
-# ``engine_not_verifiable``: a landing site is assembled from vetted components with no
-# authored code to check, and the dynamic track renders in a Worker the harness cannot
-# serve — saying so is honest, a silent pass would not be. A DYNAMIC svelte site verifies
-# all three layers but the browser can only load its prerendered shell, which the verdict
-# says in ``note``.
+# CACHED PER CONTENT HASH in ``verify_store``: ``passed`` / ``failed`` verdicts are
+# cache hits; ``unverified`` never is. The preview job stores its build + browser
+# report under the hash, so a pre-warm answers the next verify for free.
 #
-# THE DIAGNOSTICS ARE AGENT-ONLY. ``errors`` / ``warnings`` go through
-# ``verify_diagnostics.finalize`` (redacted, relativized, keys scrubbed, 2 KB cap).
-# :func:`status_summary` — the ``/status`` view — returns counts and never a message.
+# ENGINES: svelte, react, html. ripple returns ``unverified`` / ``engine_not_verifiable``
+# (no authored code to check). A DYNAMIC svelte site's browser layer only loads its
+# prerendered shell, which the verdict says in ``note``.
+#
+# DIAGNOSTICS ARE AGENT-ONLY: ``verify_diagnostics.finalize`` redacts and caps them, and
+# :func:`status_summary` (the ``/status`` view) returns counts, never a message.
+#
+# Every layer logs its elapsed ms (``sites.verify: layer=…``) so edit latency is
+# measurable from the API log alone.
 from __future__ import annotations
 
 import logging
@@ -174,23 +170,12 @@ def generator_input_for(inputs: RenderInputs, pocket_id: str) -> dict[str, Any]:
 
 
 async def resolve_builder_origin(workspace_id: str, pocket_id: str) -> str:
-    """The builder origin the armed hash is computed with.
-
-    The editor's VIEW hashes with its request Origin, and ``make_site_editable`` stores
-    that origin on the Site row — so the row's ``builder_origin`` is the best available
-    guess at the key the editor will read, and reusing it is what lets a verify warm the
-    editor's cache instead of building a second render. Falls back to the configured
-    ``PAW_SITES_BUILDER_ORIGIN`` (what the pre-warm and a view without an Origin use).
-    Never raises.
-    """
+    """The builder origin the armed hash is computed with: the ONE resolver
+    (``service.resolve_armed_builder_origin``) the editor view, the pre-warm and
+    ``preview_site`` use too, so one edit builds one render. Never raises."""
     from pocketpaw_ee.sites import service as sites_service
 
-    try:
-        doc = await sites_service._canonical_site_doc(workspace_id, pocket_id)
-    except Exception:  # noqa: BLE001 — an origin guess is never worth a failed verify
-        doc = None
-    stored = (getattr(doc, "builder_origin", "") or "").strip() if doc is not None else ""
-    return stored or sites_service._builder_origin()
+    return await sites_service.resolve_armed_builder_origin(workspace_id, pocket_id)
 
 
 def _layer(name: str, status: str, reason: str = "") -> dict[str, str]:
@@ -218,6 +203,13 @@ def _verdict(
         verdict["status"] = "unverified"
         first = next((layer for layer in layers if layer["status"] == "unverified"), None)
         verdict["reason"] = (first or {}).get("reason") or "not_verified"
+        # Capacity / sandbox reasons carry our own sentence, so the agent repeats it
+        # instead of improvising one ("the build server is down") from the rung.
+        from pocketpaw_ee.sites.capacity import reason_message
+
+        message = reason_message(verdict["reason"])
+        if message:
+            verdict["message"] = message
     else:
         verdict["status"] = "passed"
     verdict["layers"] = layers
@@ -303,21 +295,9 @@ async def _sandbox_layers(
     record = store.read(pocket_id, verify_store.sandbox_key(inputs.content_hash))
     if record is None:
         try:
-            if inputs.engine == "html":
-                enqueued = await build_job.enqueue_html_verify(
-                    pocket_id=pocket_id,
-                    content_hash=inputs.content_hash,
-                    generator_input=generator_input,
-                    _pool_override=pool,
-                )
-            else:
-                enqueued = await build_job.enqueue_preview_build(
-                    pocket_id=pocket_id,
-                    content_hash=inputs.content_hash,
-                    engine=inputs.engine,
-                    generator_input=generator_input,
-                    _pool_override=pool,
-                )
+            enqueued = await _enqueue_sandbox(
+                pocket_id=pocket_id, inputs=inputs, generator_input=generator_input, pool=pool
+            )
             active_pool = pool or await build_job._get_pool()
         except Exception:
             logger.warning(
@@ -330,10 +310,11 @@ async def _sandbox_layers(
                 [],
             )
         waiter = wait or build_job.wait_for_preview_result
+        waited = time.monotonic()
         try:
             record = await waiter(active_pool, enqueued.job_id, timeout=wait_seconds)
         except TimeoutError:
-            reason = "timeout"
+            reason = await _timeout_reason(active_pool, enqueued.job_id)
             return (
                 [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)],
                 [],
@@ -348,9 +329,132 @@ async def _sandbox_layers(
                 [],
                 [],
             )
-    layers = _layers_from_report(record, inputs.engine)
+        logger.info(
+            "sites.verify: layer=sandbox_wait pocket=%s job=%s elapsed_ms=%d",
+            pocket_id,
+            enqueued.job_id,
+            (time.monotonic() - waited) * 1000,
+        )
+    return _report_layers(record, inputs.engine)
+
+
+async def _timeout_reason(pool: Any, job_id: str) -> str:
+    """``waiting_for_capacity`` when the job we gave up waiting on is parked for a
+    Daytona slot, else ``timeout``. Never raises."""
+    from arq.jobs import Job, JobStatus
+
+    from pocketpaw_ee.sites import build_job
+    from pocketpaw_ee.sites.capacity import WAITING_REASON
+
+    try:
+        status = await Job(job_id, pool, _queue_name=build_job.SITE_BUILD_QUEUE_NAME).status()
+    except Exception:  # noqa: BLE001
+        return "timeout"
+    return WAITING_REASON if status is JobStatus.deferred else "timeout"
+
+
+def _report_layers(
+    record: dict[str, Any], engine: str
+) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Layers + diagnostics out of a stored / returned sandbox report."""
+    layers = _layers_from_report(record, engine)
     diagnostics = record.get("diagnostics") if isinstance(record.get("diagnostics"), dict) else {}
     return layers, list(diagnostics.get("errors") or []), list(diagnostics.get("warnings") or [])
+
+
+async def _enqueue_sandbox(
+    *, pocket_id: str, inputs: RenderInputs, generator_input: dict[str, Any], pool: Any = None
+) -> Any:
+    """Queue the sandbox job for this render (or attach to the one already queued).
+
+    Raises when the queue cannot take it; the callers turn that into
+    ``queue_unavailable`` rather than claim a job nobody will run.
+    """
+    from pocketpaw_ee.sites import build_job
+
+    if inputs.engine == "html":
+        return await build_job.enqueue_html_verify(
+            pocket_id=pocket_id,
+            content_hash=inputs.content_hash,
+            generator_input=generator_input,
+            _pool_override=pool,
+        )
+    return await build_job.enqueue_preview_build(
+        pocket_id=pocket_id,
+        content_hash=inputs.content_hash,
+        engine=inputs.engine,
+        generator_input=generator_input,
+        _pool_override=pool,
+    )
+
+
+async def _static_checks(
+    pocket: dict[str, Any],
+    inputs: RenderInputs,
+    generator_input: dict[str, Any],
+    *,
+    pocket_id: str = "",
+    check: Any = None,
+) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """The static layer plus the policy refusals that are static failures too.
+
+    Shared by :func:`verify_pocket` (the full, waiting verify) and :func:`verify_edit`
+    (the edit path's synchronous half), so both answer the same static verdict.
+    """
+    started = time.monotonic()
+    static, errors, warnings = await _static_layer(generator_input, check=check)
+
+    # A dynamic svelte site holding packages can only have got them from outside the
+    # declaration tools (which refuse it). It can never publish, so say so as a static
+    # error the agent can act on (drop the packages) rather than let a build run.
+    from pocketpaw_ee.sites.dependency_manifest import (
+        author_build_shell_files,
+        has_author_dependencies,
+        requires_sandbox,
+    )
+
+    # PP-4's legacy build-shell files: the generator refuses them at build time, so
+    # name them here as a static error and spend no sandbox finding out.
+    from pocketpaw_ee.sites.legacy_build_shell import generator_owned_keys_message
+    from pocketpaw_ee.sites.service import DYNAMIC_PACKAGES_REASON, site_refuses_author_packages
+
+    if (owned := generator_owned_keys_message(inputs.engine, inputs.source)) is not None:
+        errors = [
+            {"layer": "static", "code": "reserved_path", "message": owned},
+            *errors,
+        ]
+        static = _layer("static", "failed", "static_check_failed:reserved_path")
+
+    # The same predicate the routing uses (``requires_sandbox``): a dynamic site
+    # cannot build in the sandbox, so authored build-shell files refuse it too.
+    if site_refuses_author_packages(pocket) and requires_sandbox(inputs.source):
+        if has_author_dependencies(inputs.source):
+            refusal = {
+                "file": "paw.dependencies.json",
+                "message": DYNAMIC_PACKAGES_REASON
+                + " Remove them with set_site_dependencies(remove=[...]).",
+            }
+        else:
+            shell = author_build_shell_files(inputs.source)
+            refusal = {
+                "file": shell[0],
+                "message": "a dynamic (live-data) svelte site cannot carry its own build "
+                f"config ({', '.join(shell)}): those files build only in the isolated "
+                "sandbox, whose output cannot deploy a Worker. Delete them.",
+            }
+        errors = [
+            {"layer": "static", "code": "engine_unsupported", **refusal},
+            *errors,
+        ]
+        static = _layer("static", "failed", "static_check_failed:engine_unsupported")
+    logger.info(
+        "sites.verify: layer=static pocket=%s engine=%s status=%s elapsed_ms=%d",
+        pocket_id,
+        inputs.engine,
+        static["status"],
+        (time.monotonic() - started) * 1000,
+    )
+    return static, errors, warnings
 
 
 def _cached(record: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -416,37 +520,9 @@ async def verify_pocket(
         pass
 
     generator_input = generator_input_for(inputs, pocket_id)
-    static, errors, warnings = await _static_layer(generator_input, check=_check)
-
-    # A dynamic svelte site holding packages can only have got them from outside the
-    # declaration tools (which refuse it). It can never publish, so say so as a static
-    # error the agent can act on (drop the packages) rather than let a build run.
-    from pocketpaw_ee.sites.dependency_manifest import has_author_dependencies
-
-    # PP-4's legacy build-shell files: the generator refuses them at build time, so
-    # name them here as a static error and spend no sandbox finding out.
-    from pocketpaw_ee.sites.legacy_build_shell import generator_owned_keys_message
-    from pocketpaw_ee.sites.service import DYNAMIC_PACKAGES_REASON, site_refuses_author_packages
-
-    if (owned := generator_owned_keys_message(inputs.engine, inputs.source)) is not None:
-        errors = [
-            {"layer": "static", "code": "reserved_path", "message": owned},
-            *errors,
-        ]
-        static = _layer("static", "failed", "static_check_failed:reserved_path")
-
-    if site_refuses_author_packages(pocket) and has_author_dependencies(inputs.source):
-        errors = [
-            {
-                "layer": "static",
-                "file": "paw.dependencies.json",
-                "code": "engine_unsupported",
-                "message": DYNAMIC_PACKAGES_REASON
-                + " Remove them with set_site_dependencies(remove=[...]).",
-            },
-            *errors,
-        ]
-        static = _layer("static", "failed", "static_check_failed:engine_unsupported")
+    static, errors, warnings = await _static_checks(
+        pocket, inputs, generator_input, pocket_id=pocket_id, check=_check
+    )
     if static["status"] == "failed":
         verdict = _verdict(
             content_hash=inputs.content_hash,
@@ -480,7 +556,335 @@ async def verify_pocket(
         note=note,
     )
     _save(store, pocket_id, inputs.content_hash, verdict)
+    # An explicit verify of the source the last edit enqueued answers that edit too, so
+    # the next tool result does not repeat it as ``previous_verification``.
+    _mark_surfaced(store, pocket_id, inputs.content_hash)
     return verdict
+
+
+# ── The edit path: static now, sandbox later ────────────────────────────────────────
+# Edit tools answer in about a second. The sandbox layers ride the preview lane in the
+# background; the pocket's ``latest`` record remembers what was enqueued, and
+# :func:`settled_verdict` reads it back once the job's report has landed.
+
+#: An html edit's browser layer: not run on the edit path, ``verify_site`` runs it.
+HTML_BROWSER_ON_DEMAND = "browser_check_on_demand"
+
+#: The reason on a ``create=true`` half step that skipped verification.
+HALF_STEP_REASON = "create_half_step"
+HALF_STEP_NOTE = (
+    "not verified yet: this file is a half step (nothing links to or imports it), so "
+    "it is checked with the edit that wires it in"
+)
+
+
+def _summary(verdict: dict[str, Any], *, job_id: str | None = None) -> dict[str, Any]:
+    """Add the flat ``static`` / ``build`` fields (and ``job_id``) the edit results carry."""
+    layers = {
+        layer.get("name"): layer.get("status")
+        for layer in verdict.get("layers") or []
+        if isinstance(layer, dict)
+    }
+    out = {
+        **verdict,
+        "static": layers.get("static") or "unverified",
+        "build": layers.get("build") or "unverified",
+    }
+    if job_id:
+        out["job_id"] = job_id
+    return out
+
+
+def half_step_verdict() -> dict[str, Any]:
+    """The verdict for a ``create=true`` call nothing references yet: not checked, and
+    said so. The follow-up edit that wires the file in verifies the whole site."""
+    return _summary(
+        {
+            "status": "skipped",
+            "reason": HALF_STEP_REASON,
+            "content_hash": "",
+            "layers": [
+                _layer("static", "skipped", HALF_STEP_REASON),
+                _layer("build", "skipped", HALF_STEP_REASON),
+                _layer("browser", "skipped", HALF_STEP_REASON),
+            ],
+            "errors": [],
+            "warnings": [],
+            "note": HALF_STEP_NOTE,
+            "checked_at": _now_iso(),
+        }
+    )
+
+
+def _read_latest(store: Any, pocket_id: str) -> dict[str, Any] | None:
+    try:
+        record = store.read(pocket_id, verify_store.LATEST_KEY)
+    except Exception:  # noqa: BLE001 — a lost pointer costs one missed report
+        return None
+    if not isinstance(record, dict) or record.get("pipeline_version") != VERIFY_PIPELINE_VERSION:
+        return None
+    return record
+
+
+def _write_latest(store: Any, pocket_id: str, record: dict[str, Any]) -> None:
+    try:
+        store.write(
+            pocket_id,
+            verify_store.LATEST_KEY,
+            {"pipeline_version": VERIFY_PIPELINE_VERSION, **record},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.verify: could not record the pending verify for %s", pocket_id)
+
+
+def _mark_surfaced(store: Any, pocket_id: str, content_hash: str) -> None:
+    latest = _read_latest(store, pocket_id)
+    if latest is None or latest.get("surfaced") or latest.get("content_hash") != content_hash:
+        return
+    _write_latest(store, pocket_id, {**latest, "surfaced": True})
+
+
+def _assemble_from_latest(
+    store: Any, pocket_id: str, latest: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The full verdict for the render ``latest`` enqueued, or ``None`` while its job
+    has not reported. Stores it as the per-hash verdict so ``/status`` and the cache
+    see it too."""
+    content_hash = str(latest.get("content_hash") or "")
+    if not content_hash:
+        return None
+    if hit := _cached(store.read(pocket_id, verify_store.verdict_key(content_hash))):
+        return hit
+    record = store.read(pocket_id, verify_store.sandbox_key(content_hash))
+    if not isinstance(record, dict):
+        return None
+    static = latest.get("static")
+    if not isinstance(static, dict) or not isinstance(static.get("status"), str):
+        static = _layer("static", "passed")
+    sandbox, sb_errors, sb_warnings = _report_layers(record, str(latest.get("engine") or ""))
+    verdict = _verdict(
+        content_hash=content_hash,
+        layers=[_layer("static", static["status"], str(static.get("reason") or "")), *sandbox],
+        errors=[*(latest.get("errors") or []), *sb_errors],
+        warnings=[*(latest.get("warnings") or []), *sb_warnings],
+        note=str(latest.get("note") or ""),
+    )
+    _save(store, pocket_id, content_hash, verdict)
+    return verdict
+
+
+def settled_verdict(pocket_id: str, *, _store: Any = None) -> dict[str, Any] | None:
+    """The finished build + browser verdict for the pocket's last edit, ONCE.
+
+    ``None`` when there is nothing new to report: no edit enqueued a sandbox job, its
+    job is still running, or this verdict was already handed out (or answered by an
+    explicit ``verify_site``). A job that never reported within
+    ``verify_store.PENDING_STALE_SECONDS`` is reported ``unverified`` / ``no_report``
+    so a lost job cannot hide forever. Never raises.
+    """
+    try:
+        store = _store if _store is not None else verify_store.default_verify_store()
+        latest = _read_latest(store, pocket_id)
+        if latest is None or latest.get("surfaced"):
+            return None
+        verdict = _assemble_from_latest(store, pocket_id, latest)
+        if verdict is None:
+            enqueued_at = latest.get("enqueued_at")
+            age = time.time() - enqueued_at if isinstance(enqueued_at, (int, float)) else 0.0
+            if age < verify_store.PENDING_STALE_SECONDS:
+                return None
+            static = latest.get("static") if isinstance(latest.get("static"), dict) else {}
+            verdict = _verdict(
+                content_hash=str(latest.get("content_hash") or ""),
+                layers=[
+                    _layer("static", str(static.get("status") or "passed")),
+                    _layer("build", "unverified", "no_report"),
+                    _layer("browser", "unverified", "no_report"),
+                ],
+            )
+        _write_latest(store, pocket_id, {**latest, "surfaced": True})
+    except Exception:  # noqa: BLE001 — a report that cannot be read is skipped, not raised
+        logger.warning("sites.verify: settled verdict read failed for %s", pocket_id, exc_info=True)
+        return None
+    return _summary(verdict, job_id=str(latest.get("job_id") or "") or None)
+
+
+async def verify_edit_pocket(
+    pocket: dict[str, Any],
+    *,
+    pocket_id: str,
+    builder_origin: str | None = None,
+    _store: Any = None,
+    _pool: Any = None,
+    _check: Any = None,
+) -> dict[str, Any]:
+    """The edit path's verify: STATIC now, the sandbox layers enqueued, never waited on.
+
+    Returns, in order of preference:
+      * a cached ``passed`` / ``failed`` verdict for this exact source;
+      * a static ``failed`` verdict (sandbox layers ``skipped``; nothing enqueued);
+      * the full verdict when a sandbox report for this hash already exists (a
+        pre-warm or an earlier verify built it);
+      * html: static only, browser ``unverified`` / ``browser_check_on_demand``;
+      * otherwise ``status: "pending"``, ``build: "pending"`` and the ``job_id`` of
+        the enqueued preview build, recorded as the pocket's ``latest`` so
+        :func:`settled_verdict` can report it on the next tool result.
+    """
+    started = time.monotonic()
+    inputs = render_inputs(pocket, builder_origin=builder_origin)
+    if inputs is None:
+        return _summary(unverifiable("engine_not_verifiable"))
+    store = _store if _store is not None else verify_store.default_verify_store()
+    if hit := _cached(store.read(pocket_id, verify_store.verdict_key(inputs.content_hash))):
+        _mark_surfaced(store, pocket_id, inputs.content_hash)
+        return _summary({**hit, "cached": True})
+
+    note = WORKER_RENDERED_NOTE if inputs.dynamic else ""
+    generator_input = generator_input_for(inputs, pocket_id)
+    static, errors, warnings = await _static_checks(
+        pocket, inputs, generator_input, pocket_id=pocket_id, check=_check
+    )
+    if static["status"] == "failed":
+        verdict = _verdict(
+            content_hash=inputs.content_hash,
+            layers=[
+                static,
+                _layer("build", "skipped", "static_check_failed"),
+                _layer("browser", "skipped", "static_check_failed"),
+            ],
+            errors=errors,
+            warnings=warnings,
+            note=note,
+        )
+        _save(store, pocket_id, inputs.content_hash, verdict)
+        return _summary(verdict)
+
+    record = store.read(pocket_id, verify_store.sandbox_key(inputs.content_hash))
+    if isinstance(record, dict):
+        sandbox, sb_errors, sb_warnings = _report_layers(record, inputs.engine)
+        verdict = _verdict(
+            content_hash=inputs.content_hash,
+            layers=[static, *sandbox],
+            errors=[*errors, *sb_errors],
+            warnings=[*warnings, *sb_warnings],
+            note=note,
+        )
+        _save(store, pocket_id, inputs.content_hash, verdict)
+        return _summary(verdict)
+
+    if inputs.engine == "html":
+        return _summary(
+            _verdict(
+                content_hash=inputs.content_hash,
+                layers=[
+                    static,
+                    _layer("build", "skipped", "no_build_step"),
+                    _layer("browser", "unverified", HTML_BROWSER_ON_DEMAND),
+                ],
+                errors=errors,
+                warnings=warnings,
+                note=note,
+            )
+        )
+
+    try:
+        enqueued = await _enqueue_sandbox(
+            pocket_id=pocket_id, inputs=inputs, generator_input=generator_input, pool=_pool
+        )
+    except Exception:
+        logger.warning("sites.verify: could not queue the build for %s", pocket_id, exc_info=True)
+        reason = "queue_unavailable"
+        return _summary(
+            _verdict(
+                content_hash=inputs.content_hash,
+                layers=[
+                    static,
+                    _layer("build", "unverified", reason),
+                    _layer("browser", "unverified", reason),
+                ],
+                errors=errors,
+                warnings=warnings,
+                note=note,
+            )
+        )
+
+    _write_latest(
+        store,
+        pocket_id,
+        {
+            "content_hash": inputs.content_hash,
+            "job_id": enqueued.job_id,
+            "engine": inputs.engine,
+            "static": static,
+            "errors": errors,
+            "warnings": warnings,
+            "note": note,
+            "enqueued_at": time.time(),
+            "surfaced": False,
+        },
+    )
+    # The in-flight marker ``/status`` reports as ``pending``.
+    try:
+        store.write(
+            pocket_id,
+            verify_store.verdict_key(inputs.content_hash),
+            {
+                "pipeline_version": VERIFY_PIPELINE_VERSION,
+                "verdict": {"status": "pending", "content_hash": inputs.content_hash},
+                "started_at": time.time(),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    clean_errors, clean_warnings = finalize(errors, warnings, layer="static")
+    verdict: dict[str, Any] = {
+        "status": "pending",
+        "content_hash": inputs.content_hash,
+        "layers": [static, _layer("build", "pending"), _layer("browser", "pending")],
+        "errors": clean_errors,
+        "warnings": clean_warnings,
+        "checked_at": _now_iso(),
+    }
+    if note:
+        verdict["note"] = note
+    logger.info(
+        "sites.verify: edit verify pocket=%s static=%s job=%s queued_status=%s elapsed_ms=%d",
+        pocket_id,
+        static["status"],
+        enqueued.job_id,
+        getattr(enqueued, "status", ""),
+        (time.monotonic() - started) * 1000,
+    )
+    return _summary(verdict, job_id=enqueued.job_id)
+
+
+async def verify_edit(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    _store: Any = None,
+    _pool: Any = None,
+    _check: Any = None,
+) -> dict[str, Any]:
+    """:func:`verify_edit_pocket` for a pocket id (the edit tools' entry point).
+
+    Reads the pocket through the pockets service's public ``get`` (tenancy errors
+    propagate) and builds with the ONE armed builder origin
+    (:func:`resolve_builder_origin`). Never raises for a verification outcome.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    origin = await resolve_builder_origin(workspace_id, pocket_id)
+    return await verify_edit_pocket(
+        pocket,
+        pocket_id=pocket_id,
+        builder_origin=origin,
+        _store=_store,
+        _pool=_pool,
+        _check=_check,
+    )
 
 
 async def verify_site(
@@ -563,6 +967,17 @@ async def status_summary(
     verdict = record.get("verdict") if isinstance(record.get("verdict"), dict) else {}
     status = verdict.get("status")
     if status == "pending":
+        # An edit's sandbox job may have reported since: settle it from the job's
+        # stored report (this does not mark it handed out to the agent).
+        latest = _read_latest(store, pocket_id)
+        if latest is not None and latest.get("content_hash") == inputs.content_hash:
+            try:
+                settled = _assemble_from_latest(store, pocket_id, latest)
+            except Exception:  # noqa: BLE001
+                settled = None
+            if settled is not None:
+                verdict, status = settled, settled.get("status")
+    if status == "pending":
         started = record.get("started_at")
         fresh = isinstance(started, (int, float)) and (
             time.time() - started < verify_store.PENDING_STALE_SECONDS
@@ -589,9 +1004,13 @@ __all__ = [
     "WORKER_RENDERED_NOTE",
     "RenderInputs",
     "generator_input_for",
+    "half_step_verdict",
     "render_inputs",
+    "settled_verdict",
     "status_summary",
     "unverifiable",
+    "verify_edit",
+    "verify_edit_pocket",
     "verify_pocket",
     "verify_site",
     "verify_wait_seconds",

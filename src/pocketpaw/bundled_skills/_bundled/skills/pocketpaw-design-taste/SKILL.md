@@ -201,7 +201,7 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 - **No layout shift.** Set `width`/`height` (or `aspect-ratio`) on every image and media element so the page doesn't jump as assets load.
 - **Support light AND dark** where the family allows: use `prefers-color-scheme` and design both variants so hierarchy and contrast hold in each.
 - **Guard `window`/`document`** - they don't exist at prerender; touch them only inside `onMount` or behind `typeof window !== 'undefined'`.
-- **Packages: declare, import client-side, verify.** Declare every npm library (`set_site_dependencies`), import it inside `onMount` / a `useEffect` `import()`, never at top level, and call the site ready only on `verification.status` `passed`.
+- **Packages: declare, import client-side, verify.** Declare every npm library (`set_site_dependencies`), import it normally (only a browser-only library that touches `window` at import goes inside `onMount` / a `useEffect` `import()`), and call the site ready only on `verification.status` `passed`.
 
 ---
 

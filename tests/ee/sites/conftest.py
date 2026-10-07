@@ -131,6 +131,7 @@ OPERATOR_ENV_VARS: tuple[str, ...] = (
     "PAW_CF_SITES_DOMAIN",
     "PAW_CF_WRANGLER_CMD",
     "PAW_CF_MIGRATE_TIMEOUT_SEC",
+    "PAW_SITES_PROJECT_DEPLOY_TARGET",
     "DAYTONA_API_KEY",
     "DAYTONA_API_URL",
 )
@@ -254,6 +255,17 @@ def _site_pages_are_serving(monkeypatch):
     monkeypatch.setattr(screenshot_mod, "_url_is_serving", _serving)
     monkeypatch.setattr(screenshot_mod, "_READY_DELAYS", ())
     monkeypatch.setattr(screenshot_mod, "_READY_DELAYS_MANUAL", ())
+
+    # A connected site's card refresh reads the customer's homepage. Keep it
+    # offline: background refreshes are closed unrun, and an inline one (the
+    # preview-refresh path) resolves no DNS. test_connected_card.py patches both.
+    from pocketpaw_ee.sites import connected_card
+
+    async def _offline(host: str) -> list[str]:
+        raise OSError(f"tests are offline ({host})")
+
+    monkeypatch.setattr(connected_card, "_default_card_scheduler", lambda coro: coro.close())
+    monkeypatch.setattr(connected_card, "_resolver", _offline)
     yield
 
 

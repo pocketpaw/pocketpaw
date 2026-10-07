@@ -15,6 +15,8 @@
 #     the mock-delivery provider name + the channels it covers.
 #   * ``EmailEvidence`` / ``recordable_emails`` — a guessed address is never
 #     stored; only observed ones are.
+#   * ``whatsapp_reply_intent`` — reads an inbound WhatsApp reply as an opt-out
+#     (STOP words), an opt-in (START words) or a plain reply.
 #   * Queue and job names for the dedicated ``growth`` arq queue.
 
 from __future__ import annotations
@@ -358,6 +360,25 @@ MOCK_DELIVERY_PROVIDER = "mock"
 # hand from its queue and recorded through mark-sent, mock mode or not.
 MOCK_DELIVERY_CHANNELS: frozenset[str] = frozenset({"email", "whatsapp"})
 
+# Whole-message keywords on an inbound WhatsApp reply, matched after casefolding,
+# trimming whitespace and trailing ``.``/``!``, and collapsing inner spaces. Exact
+# match only: "stop" inside a sentence is a plain reply. English only; no Hindi
+# or Hinglish forms are listed anywhere yet.
+WHATSAPP_STOP_WORDS = frozenset(
+    {"stop", "unsubscribe", "cancel", "end", "quit", "opt out", "opt-out", "optout"}
+)
+WHATSAPP_START_WORDS = frozenset({"start", "subscribe", "resume"})
+
+
+def whatsapp_reply_intent(text: str) -> Literal["stop", "start", "reply"]:
+    """Classify an inbound WhatsApp message as an opt-out, an opt-in, or a reply."""
+    word = " ".join(text.split()).casefold().rstrip(".!").strip()
+    if word in WHATSAPP_STOP_WORDS:
+        return "stop"
+    if word in WHATSAPP_START_WORDS:
+        return "start"
+    return "reply"
+
 
 @dataclass(frozen=True)
 class MessageLog:
@@ -409,6 +430,8 @@ __all__ = [
     "SCHEDULED_CADENCES",
     "TIER_SORT_ORDER",
     "WEEKLY_DISCOVERY_WEEKDAY",
+    "WHATSAPP_START_WORDS",
+    "WHATSAPP_STOP_WORDS",
     "Draft",
     "DraftChannel",
     "DraftStatus",
@@ -426,4 +449,5 @@ __all__ = [
     "ProspectStatus",
     "ProspectTier",
     "recordable_emails",
+    "whatsapp_reply_intent",
 ]

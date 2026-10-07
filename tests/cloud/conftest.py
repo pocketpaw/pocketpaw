@@ -19,11 +19,15 @@ Also exposes:
   mounted and auth/license dependencies overridden, used by HTTP-layer
   tests so they don't need a real JWT.
 - ``override_workspace_role`` — pins a caller ROLE + workspace on a bare test
-  app so ``require_action(...)`` guards run their real role check. Added
-  2026-08-16 when the paw-bar admin routes moved off ``require_scope("admin")``
-  onto the role gate: those router-level tests mount the router with no auth
-  stack, so ``current_active_user`` has nothing to resolve and every admin
-  route answers 401 until the dep is overridden.
+  app so ``require_action(...)`` guards run their real role check. Router-level
+  tests mount the router with no auth stack, so without it every guarded route
+  answers 401 before the role check runs.
+- ``override_cloud_user`` — the one way to sign a fake user into a bare test
+  app. It overrides BOTH ``current_active_user`` (``require_action`` and the
+  ``_core.deps`` identity deps) and ``current_optional_user`` (what
+  ``request_context`` reads, which also 401s an inactive user). Overriding only
+  the first leaves every ``request_context`` route answering 401, so a 403
+  assertion behind it never reaches the guard.
 """
 
 from __future__ import annotations
@@ -177,6 +181,17 @@ def _site_pages_are_serving(monkeypatch):
     monkeypatch.setattr(screenshot_mod, "_url_is_serving", _serving)
     monkeypatch.setattr(screenshot_mod, "_READY_DELAYS", ())
     monkeypatch.setattr(screenshot_mod, "_READY_DELAYS_MANUAL", ())
+
+    # A connected site's card refresh reads the customer's homepage. Keep it
+    # offline: background refreshes are closed unrun, and an inline one (the
+    # preview-refresh path) resolves no DNS. test_connected_card.py patches both.
+    from pocketpaw_ee.sites import connected_card
+
+    async def _offline(host: str) -> list[str]:
+        raise OSError(f"tests are offline ({host})")
+
+    monkeypatch.setattr(connected_card, "_default_card_scheduler", lambda coro: coro.close())
+    monkeypatch.setattr(connected_card, "_resolver", _offline)
     yield
 
 
@@ -265,8 +280,37 @@ def fake_workspace_user(role: str = "admin", workspace_id: str = "w1", user_id: 
     return SimpleNamespace(
         id=user_id,
         active_workspace=workspace_id,
+        is_active=True,
         workspaces=[SimpleNamespace(workspace=workspace_id, role=role)],
     )
+
+
+def override_cloud_user(app: FastAPI, user: Any):
+    """Sign ``user`` into ``app`` for both auth deps; return a cleanup callable.
+
+    ``request_context`` depends on ``current_optional_user`` and returns 401 when
+    the user is None or not ``is_active``; ``require_action`` and the identity
+    deps in ``_core.deps`` depend on ``current_active_user``. A fake user with no
+    ``is_active`` attribute gets ``is_active=True``; pass ``is_active=False``
+    explicitly to exercise the inactive-user 401. Call it again to switch users.
+    """
+    from pocketpaw_ee.cloud.auth import current_active_user, current_optional_user
+
+    if not hasattr(user, "is_active"):
+        user.is_active = True
+
+    async def _user():
+        return user
+
+    deps = (current_active_user, current_optional_user)
+    for dep in deps:
+        app.dependency_overrides[dep] = _user
+
+    def _cleanup() -> None:
+        for dep in deps:
+            app.dependency_overrides.pop(dep, None)
+
+    return _cleanup
 
 
 def override_workspace_role(
@@ -291,11 +335,11 @@ def override_workspace_role(
     """
     from pocketpaw_ee.cloud._core.deps import current_workspace_id
     from pocketpaw_ee.cloud._core.http import add_error_handler
-    from pocketpaw_ee.cloud.auth import current_active_user
 
     add_error_handler(app)
-    user = fake_workspace_user(role=role, workspace_id=workspace_id, user_id=user_id)
-    app.dependency_overrides[current_active_user] = lambda: user
+    override_cloud_user(
+        app, fake_workspace_user(role=role, workspace_id=workspace_id, user_id=user_id)
+    )
     app.dependency_overrides[current_workspace_id] = lambda: workspace_id
 
 

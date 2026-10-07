@@ -223,15 +223,13 @@ async def test_edit_does_not_publish_and_does_not_enqueue_a_build(beanie_test_db
 # (b) The reserved-path guard
 # ---------------------------------------------------------------------------
 
-# Every spelling the normalizer must collapse. The plain names are the four files
-# the generator owns; the rest are the evasions — a leading ``./``, Windows
-# separators, and a ``..`` round trip through the reserved namespace. If any of
-# these lands, the create tool's allowlist has a back door.
+# Every spelling the normalizer must collapse. The plain names are files the
+# generator owns; the rest are the evasions — a leading ``./``, Windows separators,
+# and a ``..`` round trip through the reserved namespace.
 _RESERVED_SPELLINGS = [
-    "package.json",
-    "./package.json",
+    "bun.lock",
+    "./index.html",
     "index.html",
-    "vite.config.ts",
     "paw-prerender.mjs",
     "src/paw/entry.tsx",
     "src\\paw\\entry.tsx",
@@ -245,11 +243,9 @@ _RESERVED_SPELLINGS = [
 async def test_every_reserved_path_spelling_is_rejected(beanie_test_db, path: str):
     """An edit may not write a generator-owned path, however it is spelled.
 
-    ``package.json`` is the one that matters most: it is the dependency manifest, so
-    writing it defeats the generator's dependency allowlist and with it the
-    supply-chain release-age floor. The others carry the prerender contract — remove
-    ``paw-prerender.mjs`` and the page ships blank without JavaScript, which is the
-    thing this engine exists to refuse.
+    These carry the prerender contract — remove ``paw-prerender.mjs`` and the page
+    ships blank without JavaScript, which is the thing this engine exists to refuse.
+    (package.json and vite.config.* are the author's since 2026-10-07.)
 
     ``create=True`` is used deliberately: it is the STRONGER attack (an
     existence-checked edit would also have to guess a path already in the map), so
@@ -317,11 +313,25 @@ async def test_the_guard_runs_before_the_pocket_is_read(beanie_test_db):
         await sites_service.edit_react_component(
             user_id="u1",
             pocket_id="0123456789abcdef01234567",
-            component_path="package.json",
+            component_path="paw-prerender.mjs",
             new_source="{}",
             create=True,
         )
     assert exc.value.code == "site_edit.reserved_path"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["package.json", "vite.config.ts", "bunfig.toml", ".npmrc"])
+async def test_the_author_may_create_root_build_files(beanie_test_db, path: str):
+    """Open everything (2026-10-07): the generator merges these with its toolchain."""
+    pocket_id = await _make_react_pocket("ws1", "u1")
+
+    out = await sites_service.edit_react_component(
+        user_id="u1", pocket_id=pocket_id, component_path=path, new_source="{}", create=True
+    )
+
+    assert out["created"] is True
+    assert (await _source_of(pocket_id))[path] == "{}"
 
 
 # ---------------------------------------------------------------------------

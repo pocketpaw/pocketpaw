@@ -29,8 +29,9 @@ description: |
 <!--
   Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): sites take npm
   packages now. New "npm packages" subsection in STEP 2 (declare via
-  `dependencies` / set_site_dependencies, import client-only libraries inside
-  onMount, none on a dynamic site), a "Verify loop" section after STEP 3 (only
+  `dependencies` / set_site_dependencies, any package/version/tag, normal
+  imports, onMount only for browser-only libraries, none on a dynamic site),
+  a "Verify loop" section after STEP 3 (only
   `verification.status == passed` means ready; fix → verify_site, max 3 rounds;
   unverified said plainly; rolled-back vs staged svelte edits), and the edit
   bullet / paw-fx entry no longer claim a dependency cannot be added.
@@ -271,10 +272,13 @@ strings. The generator writes these files onto the paw-sites skeleton and
 prerenders.
 
 **The skeleton provides** everything infrastructural — `package.json`,
-`svelte.config.js`, `vite.config`, the adapter, and `app.html`. It does
-**not** provide a lead endpoint: the form posts straight to the shared
-capture API (see "Lead capture"). **You provide only** the route +
-component + style files. **Required keys:**
+`svelte.config.js`, `vite.config`, the adapter, and `app.html`. You may
+override `package.json`, `vite.config.*`, `svelte.config.js`, `bunfig.toml` or
+`.npmrc` at the root when the build needs it (the generator merges them with
+its toolchain), but usually you don't. It does **not** provide a lead
+endpoint: the form posts straight to the shared capture API (see "Lead
+capture"). **You provide** the route + component + style files. **Required
+keys:**
 
 ```
 src/routes/+page.svelte      the composition root — imports + renders the sections in order
@@ -354,16 +358,20 @@ The skeleton owns the toolchain (`svelte`, `@sveltejs/kit`, `vite`,
 (`three`, `gsap`, `lenis`, `ogl`, a date library) you **declare**: pass
 `dependencies=[{"name": "three"}]` (optionally with a `"range"`) to
 `create_svelte_site`, or call `set_site_dependencies(pocket_id, add=[...],
-remove=[...])` on an existing site. Never write `package.json` or
-`paw.dependencies.json` yourself.
+remove=[...])` on an existing site. Never write `paw.dependencies.json`
+yourself.
 
-Each package is checked (published at least 7 days ago, popular enough, no
-known advisory, no install scripts or native code, a size cap, at most 20 per
-site) and pinned to an exact version. A refused one comes back in `rejected`
-with its `reason`: don't import it; pick another or build without it.
+Any public npm package works, at any exact version, range or dist-tag
+(`{"name": "bits-ui", "range": "next"}`); each is pinned to an exact version.
+`rejected` only holds what could not be resolved (a misspelt name, no matching
+version): don't import those. `warnings` carry security advisories or
+deprecation notes; mention them to the user.
 
-**Import client-only libraries inside `onMount`**, never at the top of
-`<script>`: the page is prerendered on the server, where `window` doesn't exist.
+**Import packages the normal way.** Component and icon libraries
+(`bits-ui`, `lucide-svelte`) are fine as top-level imports. Only a browser-only
+library that touches `window` / `document` when it is imported (`three`, some
+animation and carousel libraries) goes inside `onMount` with a dynamic
+`import()`, because the page is prerendered where `window` doesn't exist:
 
 ```svelte
 <script>
@@ -377,8 +385,8 @@ with its `reason`: don't import it; pick another or build without it.
 <canvas bind:this={canvas}></canvas>
 ```
 
-A top-level `import * as THREE from 'three'` earns a `top_level_client_import`
-warning and usually fails the prerender build. Packages run because the site
+If a `top_level_client_import` warning names a library, move that one into
+`onMount`. Packages run because the site
 keeps its client bundle (the default). A **dynamic** svelte site takes no
 packages: they come back rejected with `engine_unsupported`.
 
@@ -421,8 +429,10 @@ works.
   which ones are left. Never call it ready.
 - **`unverified`** — it could not be checked (`reason`, e.g.
   `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
-  why. On `timeout` the build is still running, so one more `verify_site` is
-  worth it. Never report `unverified` as a pass.
+  why. When the result has a `message`, give that sentence as written: a full
+  build queue is not an outage, so never say the build server is down. On
+  `timeout` or `waiting_for_capacity` the build is still coming, so one more
+  `verify_site` is worth it. Never report `unverified` as a pass.
 - **`warnings`** don't block a pass, but move a `top_level_client_import`
   client-side anyway: it is how a prerender build breaks.
 - **After `edit_svelte_component`**: a static or build failure is rolled
@@ -487,10 +497,11 @@ mcp__pocketpaw_sites_manager__edit_svelte_component(
   and the page exists but nobody can find it — the tool tells you so with
   `unreferenced: true`, and you must not report the page as added until you
   have cleared it.
-- The generator-owned paths stay refused — `package.json`, `vite.config.ts`,
-  `svelte.config.js`, `src/lib/paw/` and the auth files — and everything you
-  write lives under `src/`. To add a package, call `set_site_dependencies`
-  first, then import it inside `onMount`.
+- The generator-owned paths stay refused — `src/routes/+layout.ts`,
+  `src/lib/paw/`, the auth files and lockfiles. You write under `src/`, plus
+  the root build files (`package.json`, `vite.config.*`, `svelte.config.js`,
+  `bunfig.toml`, `.npmrc`). To add a package, call `set_site_dependencies`
+  first, then import it (browser-only libraries inside `onMount`).
 - Every edit returns `verification`; the verify loop above applies, including
   the rolled-back vs staged split.
 - Every rule in this skill still binds — above all the **prerender rule**: an
@@ -695,7 +706,8 @@ D1 + wires the read/write layer. Done.
   `auth` bindings — see [Dynamic svelte sites](#dynamic-svelte-sites--live-data-on-the-svelte-track)).
   Returns `{ok, pocket_id, pocket, verification}`.
 - `mcp__pocketpaw_sites_manager__set_site_dependencies` — declare or drop npm
-  packages on an existing site; returns `packages`, `rejected`, `verification`.
+  packages on an existing site; returns `packages`, `rejected`, `warnings`,
+  `verification`.
 - `mcp__pocketpaw_sites_manager__verify_site` — re-run the checks after a fix.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live
   site; show the user the `url`. Call it only when the user asks to go live

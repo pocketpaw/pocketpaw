@@ -852,6 +852,8 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
 _SITES_AUTHORING_SKILL: dict[str, str] = {
     "svelte": "pocketpaw-create-svelte-site",
     "react": "pocketpaw-create-react-site",
+    # A whole repo from a base template (engine ``project``); edits files, not widgets.
+    "project": "pocketpaw-create-project-site",
 }
 
 # 2026-09-08 — the create-scoped design skills the svelte/react branch must ALSO
@@ -872,14 +874,22 @@ _SITES_AUTHORING_SKILL: dict[str, str] = {
 # ``test_sites_create_skill_names_cover_the_advertised_skills``.
 _SITES_CREATE_DESIGN_SKILLS: frozenset[str] = sites.create_design_skill_names()
 
+#: Engines whose refine edits a ``source`` map (no widget spec), so refine drops ripple.
+_SITES_SOURCE_REFINE_ENGINES: frozenset[str] = frozenset({"html", "svelte", "react", "project"})
+
 
 def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
-    """/sites is META-AWARE — three modes; only the hand-authored component
-    CREATE engines (svelte, react) lose ripple.
+    """/sites is META-AWARE — inline ripple stays ON only where the site IS a ripple
+    spec (ripple create, ripple refine, or a refine whose engine is unknown).
 
-      * refine (``meta.pocket_id`` set, ANY engine) edits the existing ripple
-        landing spec → KEEP ripple (sites default). Refine WINS over engine: a
-        ``pocket_id`` present means refine even if ``engine="svelte"``.
+      * refine (``meta.pocket_id`` set) of an html / svelte / react site edits a
+        ``source`` map, not a widget spec → DROP ripple (about 10k tokens of widget
+        catalog + delegation rule per turn the edit never uses). It asks through
+        ``ask_user``, exactly like html create. On refine ``meta.engine`` is the
+        SOURCE POCKET's engine, stamped server-side by
+        ``run_core._resolve_entity_profile``; refine of a ripple site, or one whose
+        engine could not be read, KEEPS ripple (sites default). Refine wins over the
+        create branches below: a ``pocket_id`` present is never a create.
       * create + svelte/react (``meta.engine`` in ``_SITES_AUTHORING_SKILL``, no
         ``pocket_id``) hand-authors components → DROP ripple, deny the two
         ripple-create tools, surface that engine's authoring skill.
@@ -897,6 +907,12 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
     actually grants.
     """
     sites_allow = _mcp_tool_ids().sites_allow
+    if meta.pocket_id is not None and meta.engine in _SITES_SOURCE_REFINE_ENGINES:
+        return SurfaceProfile(
+            ripple_mode="off",
+            allow_mcp_tool_ids=sites_allow,
+            deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
+        )
     authoring_skill = _SITES_AUTHORING_SKILL.get(meta.engine or "")
     if meta.pocket_id is None and authoring_skill is not None:
         return SurfaceProfile(

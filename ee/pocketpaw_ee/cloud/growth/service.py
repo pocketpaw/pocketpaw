@@ -63,6 +63,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     MessageLog,
     Prospect,
     recordable_emails,
+    whatsapp_reply_intent,
 )
 from pocketpaw_ee.cloud.growth.dto import (
     BulkIngestRequest,
@@ -2610,8 +2611,13 @@ async def _has_sent_whatsapp_draft(workspace_id: str, prospect_id: str) -> bool:
     return count > 0
 
 
-async def record_whatsapp_inbound_reply(number: str) -> int:
-    """Apply an inbound WhatsApp reply: opt the prospect in, mark them replied.
+async def record_whatsapp_inbound_reply(number: str, text: str = "") -> int:
+    """Apply an inbound WhatsApp reply and mark the prospect replied.
+
+    What the reply does to consent depends on ``text`` (``whatsapp_reply_intent``):
+    a STOP word clears ``opted_in`` and stamps ``whatsapp_opt_out_at``; a START
+    word sets ``opted_in`` and clears the stamp; any other reply sets
+    ``opted_in`` unless the prospect has opted out, which only START undoes.
 
     Returns how many prospect rows were updated — 0 for a number we don't hold,
     which the webhook turns into a plain 200 so the endpoint never reveals
@@ -2639,10 +2645,10 @@ async def record_whatsapp_inbound_reply(number: str) -> int:
     if not docs:
         return 0
 
-    # An inbound message IS the opt-in signal under Meta's rules, whether or not
-    # we had a sent draft outstanding — so "nobody messaged them" must still
-    # record consent. What it may NOT do is record it for a tenant the reply
-    # cannot be attributed to.
+    # A plain inbound reply is treated as the opt-in signal (a STOP word is an
+    # opt-out instead), whether or not we had a sent draft outstanding, so
+    # "nobody messaged them" must still record it. What it may NOT do is record
+    # consent, or an opt-out, for a tenant the reply cannot be attributed to.
     #
     # The old `messaged or docs` fallback did exactly that: when no workspace
     # had messaged the number, EVERY tenant holding it was stamped
@@ -2670,8 +2676,17 @@ async def record_whatsapp_inbound_reply(number: str) -> int:
         )
         return 0
 
+    intent = whatsapp_reply_intent(text)
+    now = datetime.now(UTC)
     for doc in targets:
-        doc.opted_in = True
+        if intent == "stop":
+            doc.opted_in = False
+            doc.whatsapp_opt_out_at = now
+        elif intent == "start":
+            doc.opted_in = True
+            doc.whatsapp_opt_out_at = None
+        elif doc.whatsapp_opt_out_at is None:
+            doc.opted_in = True
         doc.status = "replied"
         await doc.save()  # bumps updatedAt
         # no-event: growth has no realtime subscriber in v1.

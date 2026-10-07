@@ -129,6 +129,7 @@ jobs:
     # the core test scope. Proves `pip install pocketpaw` is self-sufficient.
     name: Test (OSS-only)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -160,7 +161,7 @@ jobs:
         # --deselect: pre-existing flakes/failures, mirrored from tests.yaml
         # (#1079 concurrency, #1080 kb-context) — tracked separately.
         run: >-
-          uv run pytest tests/
+          uv run pytest tests/ -n 4 -m "not serial"
           --ignore=tests/e2e
           --ignore=tests/ee
           --ignore=tests/test_frontend_syntax.py
@@ -173,12 +174,33 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run serial-marked tests
+        # Tests marked `serial` can't share a process pool; the parallel step
+        # above skips them and they run alone here. No marked test, no run.
+        run: |
+          scope=(
+            --ignore=tests/e2e
+            --ignore=tests/ee
+            --ignore=tests/test_frontend_syntax.py
+            --deselect tests/test_concurrency.py::test_session_lock_serialises_same_session
+            --deselect tests/test_concurrency.py::test_cross_session_runs_in_parallel
+            --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
+            --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
+          )
+          if grep -rqE --include='*.py' 'mark\.serial' tests/; then
+            uv run pytest tests/ -m serial "${scope[@]}" -q --tb=short
+          fi
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
   test:
     # Full install: OSS core + the `pocketpaw-ee` enterprise package. Runs the
     # complete (non-e2e) suite across the 3.11/3.12/3.13 matrix — broader than
     # tests.yaml's single-version gate, so it runs on every PR including `ee`.
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -203,7 +225,7 @@ jobs:
         # No -x — surface every failure. --deselect: pre-existing flakes
         # (#1079, #1080), mirrored from tests.yaml and the test-oss job.
         run: >-
-          uv run pytest tests/
+          uv run pytest tests/ -n 4 -m "not serial"
           --ignore=tests/e2e
           --ignore=tests/test_frontend_syntax.py
           --deselect tests/test_concurrency.py::test_session_lock_serialises_same_session
@@ -211,6 +233,25 @@ jobs:
           --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
           --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
           -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run serial-marked tests
+        # Tests marked `serial` can't share a process pool; the parallel step
+        # above skips them and they run alone here. No marked test, no run.
+        run: |
+          scope=(
+            --ignore=tests/e2e
+            --ignore=tests/test_frontend_syntax.py
+            --deselect tests/test_concurrency.py::test_session_lock_serialises_same_session
+            --deselect tests/test_concurrency.py::test_cross_session_runs_in_parallel
+            --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
+            --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
+          )
+          if grep -rqE --include='*.py' 'mark\.serial' tests/; then
+            uv run pytest tests/ -m serial "${scope[@]}" -q --tb=short
+          fi
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
@@ -266,6 +307,17 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Growth WhatsApp consent tests (tests/cloud blind spot)
+        # The inbound webhook decides prospect.opted_in (a STOP reply is an
+        # opt-out, never an opt-in) and the dispatch guard refuses a send
+        # without it. tests/cloud is excluded by the pyproject addopts.
+        run: >-
+          uv run pytest tests/cloud/growth/test_whatsapp_webhook.py
+          tests/cloud/growth/test_whatsapp_dispatch.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Craft studio preambles (tests/cloud blind spot)
         # The /studio/vector, /studio/photo and /studio/design preambles render
         # the page's document projection; tests/cloud is excluded by the
@@ -286,11 +338,44 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run platform credits tests
+        # Same addopts escape. The operator credit routes move real money, and
+        # the 404 for an unknown workspace is the only thing stopping ledger rows
+        # for a tenant that does not exist (an adjust on /workspaces/None/...).
+        run: uv run pytest tests/cloud/platform/test_credits.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run workspace API key tests
         # Same addopts escape. The only end-to-end proof that request_context
         # enforces a paw_ key's scopes: a key with the scope passes, a key
         # without it or on an unmapped route gets 403, JWT sessions unchanged.
         run: uv run pytest tests/cloud/auth/test_api_keys.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run route auth audit and coverage ratchet
+        # Same addopts escape. The audit asserts every route on an audited
+        # router has a session guard or a named allowlist reason; the coverage
+        # file pins how many mounted routers sit outside that audit, so a PR
+        # that mounts a router without auditing it fails here. Neither ran in
+        # CI before, so eight routers were mounted past the pin unnoticed.
+        run: >-
+          uv run pytest tests/cloud/auth/test_route_auth_coverage.py
+          tests/cloud/auth/test_route_auth_audit.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Discover tests
+        # Same addopts escape. tests/cloud is otherwise a blind spot; this
+        # directory pins the slug contract (write-once, unique across sources)
+        # the public /discover/{id_or_slug} route and the frontend depend on,
+        # the HTTP layer (public allow-list, per-IP rate limit, use / report)
+        # and the source contract every DiscoverSource must meet.
+        run: uv run pytest tests/cloud/discover -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
@@ -325,6 +410,25 @@ jobs:
           tests/cloud/other_hand/test_illustrate_tool.py
           tests/cloud/test_agent_router_run_start_gates.py
           tests/cloud/credits/test_enforcement.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Paw Partners and public rate-limit tests
+        # Same addopts escape. The Find a Pro directory, /pros/{slug} and
+        # /pros/apply answer anonymous callers; these files are the only
+        # proof that a private partner field never reaches the wire, that hidden
+        # partners stay hidden, that applications land in the operator queue
+        # (and the daily cap and both public buckets return 429), that the
+        # paw-web X-Paw-Client-IP header is honoured only with the key AND only
+        # on the limiters that opted in, and that Turnstile refuses when its
+        # secret is unset in production. Mutations: tests/mutations/partner_public.json.
+        run: >-
+          uv run pytest tests/cloud/partners/test_partner_public.py
+          tests/cloud/partners/test_partners.py
+          tests/cloud/partners/test_partner_tiers.py
+          tests/cloud/_core/test_unbounded_maps.py
+          tests/cloud/_core/test_turnstile.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

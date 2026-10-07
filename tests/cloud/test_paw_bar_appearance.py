@@ -457,6 +457,17 @@ def test_a_visitor_bubble_colour_brings_its_own_legible_text():
     assert sum(_channels(deep["--pawbar-bubble-fg"])) > 550
 
 
+def test_a_team_bubble_colour_brings_its_own_legible_text():
+    """Team replies inherit the thread ink (near-black on a light frame), so a
+    dark team colour showed black text until it carried its own."""
+    pale = ColorAppearance(owner_bubble="#fafafa").tokens()
+    deep = ColorAppearance(owner_bubble="#1c1c21").tokens()
+    assert sum(_channels(pale["--pawbar-owner-bubble-fg"])) < 200
+    assert sum(_channels(deep["--pawbar-owner-bubble-fg"])) > 550
+    # No team colour, no text override: the bar keeps its own ink.
+    assert "--pawbar-owner-bubble-fg" not in ColorAppearance().tokens()
+
+
 @pytest.mark.parametrize(
     ("field", "given", "expected"),
     [

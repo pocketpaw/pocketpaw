@@ -48,6 +48,9 @@ jobs:
     # cloud surface and the class stops slipping past CI.
     name: pytest (flag mode)
     runs-on: ubuntu-latest
+    # A hung pytest exit (an unclosed aiosqlite worker thread) fails fast
+    # instead of holding the runner for the 6 h default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 

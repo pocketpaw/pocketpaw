@@ -2,7 +2,9 @@
 # developer's real ~/.soul (journal.db, decisions.db), and must not leak the
 # decisions store's process-global db path from one test into the next.
 #
-# Guarded by the autouse ``_isolate_soul_data_dir`` fixture in tests/conftest.py.
+# Guarded by the autouse ``_isolate_soul_data_dir`` fixture in tests/conftest.py;
+# the restore check drives its body (``soul_data_dir_isolated``) directly, so it
+# holds in any test order.
 # Without it, any later ``mount_cloud`` replayed the whole real journal into a
 # fresh temp store (1182 s in one census run).
 #
@@ -21,6 +23,8 @@ from pocketpaw_ee.cloud.decisions import store
 from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_event
 from pocketpaw_ee.cloud.decisions.service import get_decision_graph, reset_projection_for_tests
 from soul_protocol.spec.journal import Actor
+
+from tests.conftest import soul_data_dir_isolated
 
 REAL_SOUL = Path.home() / ".soul"
 
@@ -57,17 +61,19 @@ def test_decision_event_stays_out_of_real_soul() -> None:
 
 
 class TestDbPathRestored:
-    """Two tests in file order: the first leaks a path, the second checks it."""
+    """A test that moves the decisions db path must not leak it to the next one.
 
-    leaked: Path | None = None
+    Drives the fixture's own body inside one test, so it holds in any test
+    order (random, xdist): leak a path inside the isolation, undo it the way
+    pytest does at teardown, and the path is back.
+    """
 
-    def test_a_override_db_path(self, tmp_path: Path) -> None:
-        TestDbPathRestored.leaked = tmp_path / "d.db"
-        store.set_db_path(TestDbPathRestored.leaked)
-
-    def test_b_db_path_was_restored(self) -> None:
-        leaked = TestDbPathRestored.leaked
-        assert leaked is not None, "run the whole class"
+    def test_db_path_is_restored_after_a_test_moves_it(self, tmp_path: Path) -> None:
+        before = store.get_db_path()
+        leaked = tmp_path / "leak" / "d.db"
+        with pytest.MonkeyPatch.context() as mp, soul_data_dir_isolated(tmp_path / "inner", mp):
+            assert store.get_db_path() == tmp_path / "inner" / "soul" / "decisions.db"
+            store.set_db_path(leaked)
         current = store.get_db_path()
-        assert current != leaked
+        assert current == before
         assert not current.is_relative_to(leaked.parent), current

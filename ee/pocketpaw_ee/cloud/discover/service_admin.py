@@ -1,61 +1,44 @@
 # Discover — public, cross-tenant reads plus source-sync and moderation writes.
 #
-# Created 2026-10-01 (feat/discover-index). Listings are public by design, so no
-# read here filters by workspace; that is why they live in ``service_admin`` and
-# not ``service``. Every function carries ``# admin-cross-tenant: <reason>``.
+# Listings are public by design, so no read here filters by workspace; that is
+# why they live in ``service_admin`` and not ``service``. Every function carries
+# ``# admin-cross-tenant: <reason>``.
 #
 # Invariants a reader must not break:
 #   * The public wire is ``_public`` -> ``PublicListingResponse`` (an allow-list).
 #     ``workspace``, ``owner``, ``reports``, ``hidden`` and ``source_id`` stop here.
 #   * A hidden listing is NotFound to every public read and to use / report.
 #   * A source sync (``upsert_from_source``) ``$set``s only the source-owned
-#     fields; ``featured``, ``hidden``, ``reports`` and ``remix_count`` are
-#     ``$setOnInsert``, so a template re-save never unhides a listing that
-#     Discover reports hid, and never resets its counters.
+#     fields; ``featured``, ``hidden``, ``reports``, ``dismissed_reporters`` and
+#     ``remix_count`` are ``$setOnInsert``, so a re-save never unhides a listing
+#     Discover reports hid and never resets its counters. ``hide=True`` (the
+#     source item is hidden) forces ``hidden`` on; a sync never unhides.
+#   * ``slug`` is written once and never changes: from the title (or the
+#     source's proposed ``slug``), else the ``source_id``, folded by
+#     ``sites.slug.normalize`` (the one slug dialect in EE) and made unique
+#     across every source with ``-2``, ``-3``... A new row gets it through
+#     ``$setOnInsert``; a pre-slug row gets it through a backfill guarded on
+#     ``slug: None``, so two syncs of the same row that both read "no slug"
+#     cannot re-slug it. The upsert retries when a concurrent sync wins the
+#     insert or takes the slug first.
 #   * Source items are read through their registered ``DiscoverSource``
 #     (``get_public`` / ``iter_public``) only; this module knows no source's
-#     field names.
+#     field names. ``sync_source`` lists a public item (a hidden one as a hidden
+#     listing so staff can unhide it) and removes a private or deleted one;
+#     ``reindex`` does the same for every item of a source and heals stale rows.
+#   * Moderation: hide / unhide also reach the source item (``hide_at_source``)
+#     so the owner can't re-list by re-publishing. Unhiding clears the reports
+#     and moves their authors to ``dismissed_reporters``; hiding keeps them.
+#     Staff writes record audit rows (actor "staff") in the owner's workspace.
 #
-# Updated 2026-10-01 (feat/discover-index): unhiding a listing clears its
-# reports, so one new report can't instantly re-hide it. Hiding keeps them.
-#
-# Updated 2026-10-02 (feat/discover-index, hardening): a hide / unhide here
-# reaches the source item (``sources.hide_at_source``), so the owner can't undo
-# a Discover hide by toggling the template private -> public. A public but
-# hidden template keeps a HIDDEN listing (``upsert_from_source(hide=True)``)
-# instead of losing it, so staff can unhide by listing id; reindex does the same.
-# Unhiding moves the reporters into ``dismissed_reporters`` (their later reports
-# on that listing are ignored), so the same accounts can't re-hide it at once.
-# ``reindex`` refreshes each template's ``live_url`` from its source site first
-# (sites emit no rename / unpublish / delete events), so a stale URL heals on
-# the next reindex. ``set_featured`` / ``set_hidden`` write audit rows (actor
-# "staff") in the listing owner's workspace.
-#
-# Updated 2026-10-02 (feat/discover-index, review): the listing reads and writes
-# behind ``service.use_listing`` / ``report_listing`` live here as named
-# functions (``increment_remix``, ``push_report``, ``count_reports``,
-# ``hide_listing``), so ``service`` touches no listing collection directly.
-# ``_audit`` is public as ``record_audit`` (``service`` calls it too).
-# ``upsert_from_source`` is one ``find_one_and_update(upsert=True)``; when a
-# concurrent sync wins the insert (``DuplicateKeyError`` on the unique
-# (source, source_id) index) it retries once as a plain update.
-# Updated 2026-10-02 (feat/discover-moderation): staff reads for the platform
-# moderation routes. ``list_all`` / ``get_staff`` include hidden listings and
-# return ``StaffListingResponse`` (moderation fields, workspace, owner). The
-# cursor / ``q`` paging is shared with ``list_public`` (``_page``).
-#
-# Updated 2026-10-02 (feat/discover-source-contract): source-generic sync.
-# ``sync_source(name, source_id)`` replaces ``sync_site_template`` and reads the
-# item through the source's ``get_public``; ``reindex(name)`` walks the source's
-# ``iter_public`` and works for any registered source that has one (unknown or
-# unsupported -> ``discover.reindex_unsupported``, as before). The site-template
-# mapping and ``live_url`` refresh moved to ``sources``.
-#
-# Updated 2026-10-02 (feat/studio-templates): ``_view`` carries ``media_kind`` /
-# ``media_url`` onto the public card. ``STUDIO_TEMPLATE`` names the new source.
+# ``service.use_listing`` / ``report_listing`` touch no listing collection
+# directly: their reads and writes are the named functions here
+# (``public_doc``, ``increment_remix``, ``push_report``, ``count_reports``,
+# ``hide_listing``, ``record_audit``).
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -85,6 +68,7 @@ from pocketpaw_ee.cloud.discover.dto import (
 )
 from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
+from pocketpaw_ee.sites.slug import normalize as slugify
 
 SITE_TEMPLATE = "site_template"
 STUDIO_TEMPLATE = "studio_template"
@@ -94,11 +78,42 @@ STUDIO_TEMPLATE = "studio_template"
 # ---------------------------------------------------------------------------
 
 
+def _slug_base(source_id: str, *fields: str | None) -> str:
+    """The first of ``fields`` that slugifies to something, else the slugified
+    ``source_id``, else the raw ``source_id``: a CJK or Devanagari title must
+    not collapse every listing onto one constant."""
+    for text in (*fields, source_id):
+        if text and (slug := slugify(text)):
+            return slug
+    return source_id
+
+
+async def _free_slug(base: str) -> str:
+    """``base``, or the first of ``base-2``, ``base-3``... that no listing of
+    any source holds."""
+    # admin-cross-tenant: slugs are unique across every workspace's listings.
+    # ponytail: one lookup per taken candidate; a single regex fetch if titles
+    # ever collide hundreds deep.
+    collection = DiscoverListing.get_pymongo_collection()
+    n = 1
+    while True:
+        slug = base if n == 1 else f"{base}-{n}"
+        if await collection.find_one({"slug": slug}, {"_id": 1}) is None:
+            return slug
+        n += 1
+
+
+def _slug_or_id(doc: DiscoverListing) -> str:
+    # A pre-slug row serves its id, which the public item route accepts too.
+    return doc.slug or str(doc.id)
+
+
 def _view(doc: DiscoverListing) -> DiscoverListingView:
     return DiscoverListingView(
         workspace_id=doc.workspace,
         owner=doc.owner,
         id=str(doc.id),
+        slug=_slug_or_id(doc),
         source=doc.source,
         source_id=doc.source_id,
         kind=doc.kind,
@@ -130,6 +145,7 @@ def _staff(doc: DiscoverListing) -> dict:
     """The staff wire dict: the listing plus its moderation state."""
     return StaffListingResponse(
         id=str(doc.id),
+        slug=_slug_or_id(doc),
         source=doc.source,
         source_id=doc.source_id,
         workspace_id=doc.workspace,
@@ -240,10 +256,54 @@ async def list_public(body: ListPublicListingsRequest | dict | None = None) -> d
     return PublicListingPage(items=items, next_cursor=next_cursor).model_dump(mode="json")
 
 
-async def get_public(listing_id: str) -> dict:
-    """One unhidden listing's public card, else NotFound."""
+async def public_doc_by_id_or_slug(id_or_slug: str) -> DiscoverListing:
+    """The unhidden listing whose id is ``id_or_slug``, else the one whose slug
+    is (slugs are unique across sources). NotFound when neither exists or it is
+    hidden."""
     # admin-cross-tenant: a public listing is readable by anyone.
-    return _public(await public_doc(listing_id))
+    try:
+        doc = await DiscoverListing.get(PydanticObjectId(id_or_slug))
+    except (InvalidId, TypeError, ValueError):
+        doc = None
+    if doc is None:
+        doc = await DiscoverListing.find_one({"slug": id_or_slug, "hidden": {"$ne": True}})
+    if doc is None or doc.hidden:
+        raise NotFound("discover_listing", id_or_slug)
+    return doc
+
+
+async def get_public(id_or_slug: str) -> dict:
+    """One unhidden listing's public card, by id or slug, else NotFound."""
+    # admin-cross-tenant: a public listing is readable by anyone.
+    return _public(await public_doc_by_id_or_slug(id_or_slug))
+
+
+async def list_public_for_workspaces(
+    workspace_ids: list[str], *, per_workspace: int = 12
+) -> dict[str, list[dict]]:
+    """The newest ``per_workspace`` unhidden listings of each of ``workspace_ids``
+    as public cards, grouped by workspace (a workspace with none is absent). The
+    public partner profile shows a partner's listed sites through this; the card
+    shape is the same allow-list as the index. Capped per workspace so one
+    partner with thousands of listings cannot turn a directory page into a
+    multi-megabyte anonymous response."""
+    # admin-cross-tenant: public cards only; the workspace ids come from the
+    # public partner directory, which lists them by the partner's own choice.
+    # ponytail: one capped query per workspace (at most a directory page of
+    # them, 50); a $group/$slice aggregation if that ever shows in latency.
+    if not workspace_ids:
+        return {}
+
+    async def newest(workspace_id: str) -> list[DiscoverListing]:
+        return (
+            await DiscoverListing.find({"hidden": {"$ne": True}, "workspace": workspace_id})
+            .sort([("_id", -1)])
+            .limit(per_workspace)
+            .to_list()
+        )
+
+    pages = await asyncio.gather(*(newest(w) for w in dict.fromkeys(workspace_ids)))
+    return {rows[0].workspace: [_public(r) for r in rows] for rows in pages if rows}
 
 
 # ---------------------------------------------------------------------------
@@ -343,36 +403,48 @@ async def upsert_from_source(
     body = UpsertListingRequest.model_validate(fields)
     if body.kind not in get_source(source).kinds:
         raise ValidationError("discover.bad_kind", f"{source} listings cannot be {body.kind!r}")
-    now = datetime.now(UTC)
     key = {"source": source, "source_id": source_id}
-    set_fields: dict[str, Any] = {**body.model_dump(), "updatedAt": now}
-    on_insert: dict[str, Any] = {
-        **key,
-        "featured": False,
-        "hidden": False,
-        "reports": [],
-        "dismissed_reporters": [],
-        "remix_count": 0,
-        "createdAt": now,
-    }
-    if hide:
-        # Mongo refuses one path in both $set and $setOnInsert.
-        del on_insert["hidden"]
-        set_fields["hidden"] = True
     collection = DiscoverListing.get_pymongo_collection()
-    try:
-        raw = await collection.find_one_and_update(
-            key,
-            {"$set": set_fields, "$setOnInsert": on_insert},
-            upsert=True,
-            return_document=ReturnDocument.AFTER,
-        )
-    except DuplicateKeyError:
-        # A concurrent sync inserted it between our match and our insert; it
-        # exists now, so update it.
-        raw = await collection.find_one_and_update(
-            key, {"$set": set_fields}, return_document=ReturnDocument.AFTER
-        )
+    for attempt in range(3):
+        now = datetime.now(UTC)
+        set_fields: dict[str, Any] = {**body.model_dump(exclude={"slug"}), "updatedAt": now}
+        on_insert: dict[str, Any] = {
+            **key,
+            "featured": False,
+            "hidden": False,
+            "reports": [],
+            "dismissed_reporters": [],
+            "remix_count": 0,
+            "createdAt": now,
+        }
+        if hide:
+            # Mongo refuses one path in both $set and $setOnInsert.
+            del on_insert["hidden"]
+            set_fields["hidden"] = True
+        existing = await collection.find_one(key, {"slug": 1})
+        slug = None
+        if not (existing or {}).get("slug"):
+            # Written once, never re-derived, so a rename keeps the listing's
+            # URL. Insert-only here; a pre-slug row is backfilled below.
+            slug = await _free_slug(_slug_base(source_id, body.slug, body.title))
+            on_insert["slug"] = slug
+        try:
+            raw = await collection.find_one_and_update(
+                key,
+                {"$set": set_fields, "$setOnInsert": on_insert},
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            if slug and not raw.get("slug"):
+                # Guarded on ``slug: None`` (missing or null): a sibling sync of
+                # this same row that backfilled first wins, and ours is a no-op.
+                await collection.update_one({**key, "slug": None}, {"$set": {"slug": slug}})
+            break
+        except DuplicateKeyError:
+            # A concurrent sync won the (source, source_id) insert, or took our
+            # slug, between our reads and our write: re-read and go again.
+            if attempt == 2:
+                raise
     listing_id = str(raw["_id"])
     await emit(DiscoverListingUpserted(data={"listing_id": listing_id, **key}))
     return listing_id
@@ -408,7 +480,7 @@ async def sync_source(name: str, source_id: str) -> None:
 
 async def reindex(source: str) -> dict:
     """Idempotent backfill: upsert every public item of ``source`` whose listing
-    is missing or differs (a hidden one as a hidden listing) and remove listings
+    is missing, differs or has no slug yet (a hidden one as a hidden listing) and remove listings
     whose item is gone or no longer public. Returns created / updated /
     unchanged / removed counts. A source that is unknown or has no
     ``iter_public`` can't be reindexed."""
@@ -432,8 +504,11 @@ async def reindex(source: str) -> dict:
         doc = existing.get(row["id"])
         if doc is None:
             counts["created"] += 1
-        elif any(getattr(doc, k) != v for k, v in fields.items()) or (
-            row["hidden"] and not doc.hidden
+        elif (
+            # A proposed ``slug`` only matters to a row without one (see upsert).
+            any(getattr(doc, k) != v for k, v in fields.items() if k != "slug")
+            or (row["hidden"] and not doc.hidden)
+            or doc.slug is None  # a pre-slug row: backfill it
         ):
             counts["updated"] += 1
         else:
@@ -502,13 +577,16 @@ __all__ = [
     "get_staff",
     "list_all",
     "list_public",
+    "list_public_for_workspaces",
     "public_doc",
+    "public_doc_by_id_or_slug",
     "push_report",
     "record_audit",
     "reindex",
     "remove_from_source",
     "set_featured",
     "set_hidden",
+    "slugify",
     "sync_source",
     "upsert_from_source",
 ]

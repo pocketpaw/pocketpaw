@@ -236,6 +236,14 @@ RUN if [ "$PAW_SITES_SOURCE" = "clone" ]; then \
     cp -R /build/paw-sites/templates /out/templates && \
     cp /build/paw-sites/package.json /out/package.json && \
     test -d /out/templates || ( echo "ERROR: generator templates/ missing — runtime generate would fail." && exit 1 )
+# The base app templates (starters/) and backend recipes (recipes/) that
+# `paw-sites-gen template-copy` / `apply-recipe` read. Copied without installs or build
+# output (node_modules, .wrangler, .paw), which only a clone build could carry.
+RUN mkdir -p /out/starters /out/recipes && \
+    ( cd /build/paw-sites && tar -cf - --exclude=node_modules --exclude=.wrangler --exclude=.paw starters recipes ) \
+      | tar -xf - -C /out && \
+    test -f /out/starters/astro/paw.template.json \
+      || ( echo "ERROR: paw-sites starters/ missing; template-copy would fail." && exit 1 )
 # PP-2 (2026-09-24): the browser verification harness. Four files, no node_modules —
 # the sandbox installs it from the frozen lockfile. Absent (an older generator), the
 # browser layer reports unverified/harness_unavailable rather than failing the image.

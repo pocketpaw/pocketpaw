@@ -57,6 +57,7 @@ from pocketpaw.api.v1.schemas.files import (
 from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.daytona.config import daytona_enabled
+from pocketpaw_ee.cloud.daytona.store import workspace_vm_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -280,14 +281,13 @@ async def get_workspace_vm(
         cpu = config.get("cpu", 2)
         memory = config.get("memory", 4)
         disk = config.get("disk", 10)
-        auto_stop = config.get("auto_stop_interval", 3600)
 
         info = await client.create_sandbox(
             name=sandbox_name,
             cpu=cpu,
             memory=memory,
             disk=disk,
-            auto_stop_interval=auto_stop,
+            **workspace_vm_lifecycle(config),
         )
         await set_workspace_vm(workspace_id, info.id, sandbox_name, config)
 
@@ -371,6 +371,7 @@ async def provision_workspace_vm(
         cpu=req.cpu,
         memory=req.memory,
         disk=req.disk,
+        **workspace_vm_lifecycle(config),
     )
     await set_workspace_vm(workspace_id, info.id, sandbox_name, config)
 
@@ -407,7 +408,7 @@ class UpdateWorkspaceVmConfigRequest(BaseModel):
     memory: int | None = None  # GB
     disk: int | None = None  # GB
     root_dir: str | None = None
-    auto_stop_interval: int | None = None  # seconds
+    auto_stop_interval: int | None = None  # seconds; clamped to 5 min .. 1 day
 
 
 @router.patch("/workspace/vm/config")

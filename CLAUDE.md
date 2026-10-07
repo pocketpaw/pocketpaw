@@ -110,16 +110,19 @@ uv run pocketpaw update                     # Update to latest version via uv
 #   uv sync --group ee --group dev --extra knowledge
 # Without pocketpaw_ee, tests/ee and tests/cloud FAIL collection (they used to skip).
 # The pyproject addopts hide tests/cloud: run it explicitly with -o addopts="".
-uv run pytest --ignore=tests/e2e
+# The default is 4 pytest-xdist workers (what CI runs); plain serial still works.
+uv run pytest -n 4 --ignore=tests/e2e
 uv run pytest tests/cloud -o addopts=""
 
-# Flake census: run the default suite N times under pytest-xdist in random order
-# and rank the tests that fail (writes .flake-census/<stamp>.tsv + -summary.txt).
-# Parallel runs are NOT the default yet: the suite leaks global state between
-# tests, and addopts carries `-p no:randomly` so plain runs keep collection order.
-# A test that must stay out of the parallel phase gets @pytest.mark.serial plus a
-# comment giving the reason.
+# Changing global state (a module-level cache, singleton, env var, file under
+# HOME)? Run the flake census: the default suite N times on xdist in random
+# order, then once serially, ranking the tests that fail
+# (writes .flake-census/<stamp>.tsv + -summary.txt).
 scripts/flake_census.sh -r 10 -n 4
+# A test that truly cannot share a worker pool gets @pytest.mark.serial plus a
+# one-line reason comment; CI skips it in the parallel run and runs it alone after.
+# Tests that only collide with each other (one on-disk file, say) share a worker
+# with @pytest.mark.xdist_group("name"); addopts runs --dist loadgroup.
 
 # Run only the OSS-core test scope (passes on an OSS-only `uv sync --dev`)
 uv run pytest --ignore=tests/e2e --ignore=tests/cloud --ignore=tests/ee
@@ -189,7 +192,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 - `WebSocketAdapter` — FastAPI WebSockets
 - `DiscliAdapter` — `discord-cli-agent` subprocess wrapper (optional dep `pocketpaw[discord]`). Slash command `/paw` + DM/mention support. Stream buffering with edit-in-place (1.5s rate limit). Auto-registers a `pocketpaw-discord` MCP server on startup exposing Discord operations to all MCP-capable backends. Admin commands (`/converse`, `/setstatus`, etc.) require Administrator or Manage Server permission.
 - `SlackAdapter` — slack-bolt Socket Mode (optional dep `pocketpaw[slack]`). Handles `app_mention` + DM events. No public URL needed. Thread support via `thread_ts` metadata.
-- `WhatsAppAdapter` — WhatsApp Business Cloud API via `httpx` (core dep). No streaming; accumulates chunks and sends on `stream_end`. Dashboard exposes `/webhook/whatsapp` routes; standalone mode runs its own FastAPI server.
+- `WhatsAppAdapter` — WhatsApp Business Cloud API via `httpx` (core dep). No streaming; accumulates chunks and sends on `stream_end`. Dashboard exposes `/webhook/whatsapp` routes; standalone mode runs its own FastAPI server. Both POST routes reject (403) a body whose `X-Hub-Signature-256` does not match `whatsapp_app_secret`, and reject everything while it is unset.
 
 **Dashboard channel management:** The web dashboard (default mode) auto-starts all configured adapters on startup. Channels can be configured, started, and stopped dynamically from the Channels modal in the sidebar. REST API: `GET /api/channels/status`, `POST /api/channels/save`, `POST /api/channels/toggle`.
 
@@ -200,7 +203,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 - **Security** (`security/`) — Guardian AI (secondary LLM safety check) + append-only audit log (`~/.pocketpaw/audit.jsonl`)
 - **Tools** (`tools/`) — `ToolProtocol` with `ToolDefinition` supporting both Anthropic and OpenAI schema export. Built-in tools in `tools/builtin/`
 - **Bootstrap** (`bootstrap/`) — `AgentContextBuilder` assembles the system prompt from identity, memory, and current state
-- **Config** (`config.py`) — Pydantic Settings with `POCKETPAW_` env prefix, JSON config at `~/.pocketpaw/config.json`. Channel-specific config: `discord_bot_token`, `discord_allowed_guild_ids`, `discord_allowed_user_ids`, `slack_bot_token`, `slack_app_token`, `slack_allowed_channel_ids`, `whatsapp_access_token`, `whatsapp_phone_number_id`, `whatsapp_verify_token`, `whatsapp_allowed_phone_numbers`
+- **Config** (`config.py`) — Pydantic Settings with `POCKETPAW_` env prefix, JSON config at `~/.pocketpaw/config.json`. Channel-specific config: `discord_bot_token`, `discord_allowed_guild_ids`, `discord_allowed_user_ids`, `slack_bot_token`, `slack_app_token`, `slack_allowed_channel_ids`, `whatsapp_access_token`, `whatsapp_phone_number_id`, `whatsapp_verify_token`, `whatsapp_app_secret`, `whatsapp_allowed_phone_numbers`
 - **Soul** (`soul/`) -- Optional soul-protocol integration for persistent AI identity, psychology-informed memory, OCEAN personality, emotional state, and portable `.soul` files. Enable via `soul_enabled=true`. SoulManager handles lifecycle (birth/awaken/save), auto-saves periodically, recovers from corrupt files, and wires SoulBootstrapProvider into the system prompt. Soul tools (`soul_remember`, `soul_recall`, `soul_edit_core`, `soul_status`) auto-register with all backends when active. Can be toggled at runtime via the dashboard settings.
 - **Bundled skills** (`bundled_skills/`) — AgentSkills-format SKILL.md files (under `_bundled/skills/<name>/`) that ship with PocketPaw. They reach the chat agent by two **independent** routes, because no single route covers every backend:
   1. **`~/.claude/skills/` mirror** (boot-time install, `auto_install_bundled_skills`). That path is one of the three `pocketpaw.skills.SKILL_PATHS` PocketPaw's own `SkillLoader` scans, so the desktop slash-command dispatcher resolves them on the non-SDK backends (codex_cli / openai_agents / deep_agents). **This mirror is invisible to the default `claude_agent_sdk` backend** — it launches with `setting_sources=[]` for persona isolation, which disables the SDK's filesystem skill discovery (verified 2026-06-03: a slash hits the SDK as an unknown command and the run returns with no assistant turn).

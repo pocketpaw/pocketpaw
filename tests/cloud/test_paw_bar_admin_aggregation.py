@@ -330,6 +330,33 @@ async def test_overview_shape_and_counts(client):
 
 
 @pytest.mark.asyncio
+async def test_overview_names_the_model_a_v2_concierge_answers_with(client, monkeypatch):
+    """v2 answers every turn through one model the owner can't otherwise see, so the
+    overview names it (the same resolution a turn makes). Legacy leaves it blank:
+    there the agent's own run answers."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    seen: list[str] = []
+
+    async def _answer_model(widget, site, workspace_id):
+        seen.append(workspace_id)
+        return "anthropic:claude-sonnet-4-6"
+
+    monkeypatch.setattr(concierge_runtime, "answer_model", _answer_model)
+    c, store, _fabric = client
+    v2 = await _site(concierge_runtime="v2")
+    await store.create_widget(_widget())
+    legacy = await _site(pocket_id="pocket-legacy", concierge_runtime="legacy")
+
+    v2_body = (await c.get(f"/paw-bar/admin/site/{v2.id}/overview")).json()
+    legacy_body = (await c.get(f"/paw-bar/admin/site/{legacy.id}/overview")).json()
+
+    assert v2_body["answer_model"] == "anthropic:claude-sonnet-4-6"
+    assert legacy_body["answer_model"] == ""
+    assert seen == ["ws-1"]
+
+
+@pytest.mark.asyncio
 async def test_overview_no_widget_degrades(client):
     """A site with no paw-bar widget yet still renders (widget=null, counts 0)."""
     c, _store, _fabric = client

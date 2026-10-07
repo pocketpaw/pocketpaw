@@ -162,6 +162,9 @@ class Pocket:
     # both override that default. Mirrors ``surface_profile``'s "None = use the
     # default" convention.
     keeps_client_bundle: bool | None = None
+    # Site facts that are not file content (``{"project": {template, framework,
+    # recipes}}`` on a project site). ``None`` everywhere else.
+    site_meta: dict[str, Any] | None = None
     # Optional per-entity surface-profile override (the JSON-shaped dict that
     # mirrors the surface-domain ``SurfaceProfile``). Consumed by the
     # entity-aware resolve_profile (entity-rooms chunk ①). ``None`` = use the

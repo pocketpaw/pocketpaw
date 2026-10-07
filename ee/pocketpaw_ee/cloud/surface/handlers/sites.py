@@ -293,9 +293,9 @@
 # The publish claim is fixed on every branch and the queued-build wording is gated
 # on ``sites/service.py::build_runs_async`` — react alone today — so svelte starts
 # telling the truth on its own if #1913 flips it. ASK-DON'T-ASSUME and the
-# ``ask-user-questions`` widget survive unchanged on every branch: refine keeps
-# ``ripple_mode="on"`` for all engines (``surface_registry._sites_profile``), so
-# that mechanism is real here even where create would have used ``ask_user`` chips.
+# ask mechanism survive on every branch; it is the ``ask-user-questions`` widget on
+# a ripple refine and the ``ask_user`` tool on html / svelte / react, matching the
+# ripple mode ``surface_registry._sites_profile`` grants each.
 
 # Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — the react track finally
 # has an EDIT tool, and two preambles were telling the agent the wrong thing about
@@ -328,9 +328,9 @@
 # fork's react branch rather than kept beside it: two react refine preambles, one
 # of them dead, is the drift the fork exists to prevent. Its content carries over
 # — the edit tool, the reserved shell, the dependency list, the prerender rule, the
-# draft framing — with three corrections. It used `mcp__pocketpaw_ask__ask_user`,
-# but refine holds `ripple_mode="on"` on every engine, so the `ask-user-questions`
-# widget is the mechanism this surface actually renders. It named
+# draft framing — with three corrections. Its ask mechanism now follows the
+# engine (`_refine_ask_mechanism`): refine of a source engine runs with ripple OFF,
+# so `mcp__pocketpaw_ask__ask_user` is the mechanism there. It named
 # `pocket_specialist__edit` inside its prohibition; the create preamble's react
 # branch forbids "the pocket specialist" by concept without the id, and this now
 # matches that. And it told the agent to relay the publish result, which on react
@@ -648,7 +648,7 @@ _CONCIERGE_NOTE = (
 # describing a page that ALREADY exists, so there is no sensible default: guessing
 # hands the agent the wrong edit tool. Refine passes what the pocket stored and
 # treats anything unrecognized as unknown (see ``_refine_engine``).
-_SITE_ENGINES: tuple[str, ...] = ("html", "svelte", "ripple", "react")
+_SITE_ENGINES: tuple[str, ...] = ("html", "svelte", "ripple", "react", "project")
 
 
 def _preamble_engine(raw: str | None, *, default: str) -> str:
@@ -1456,6 +1456,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
       JavaScript unless the create declares ``interactive``.
     * ``"ripple"`` — a ripple widget landing spec via the pocket specialist →
       ``create_landing_site``. The ONE engine that does not author markup by hand.
+    * ``"project"`` — a full-stack repo from a base template →
+      ``start_site_from_template``, then recipes, file edits and ``run_site_build``.
 
     Phase 1 assesses the request and, when it is vague, asks ONE round of
     high-value questions via the ``ask_user`` chips (with a "just build it"
@@ -1528,13 +1530,15 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "intent (no slash command). YOU write premium hand-written React "
             "components from your art direction and tokens + your asset URLs, and "
             "assemble a `source` map rooted at `src/App.tsx` (the composition "
-            "root; sections under `src/components/*.tsx`). The build shell is "
+            "root; sections under `src/components/*.tsx`). The prerender shell is "
             "GENERATED and reserved — your map may NOT write `index.html`, "
-            "`package.json`, `vite.config.ts`, `paw-prerender.mjs`, or anything "
-            "under `src/paw/`. The project provides react, react-dom and vite "
-            "and it is ONE page (no router). Declare any other npm package in "
-            "`dependencies` (or later with set_site_dependencies) and load "
-            "client-only ones via a dynamic import() inside useEffect. Persist it "
+            "`paw-prerender.mjs`, or anything under `src/paw/` (package.json and "
+            "vite.config.* are yours if you need them). The project provides "
+            "react, react-dom and vite and it is ONE page (no router). Declare any "
+            "other npm package (any version or dist-tag) in `dependencies` (or "
+            "later with set_site_dependencies) and import it normally; only a "
+            "browser-only library that touches window at import time needs a "
+            "dynamic import() inside useEffect. Persist it "
             "with `mcp__pocketpaw_sites_manager__create_react_site`, which stamps "
             'the source pocket `type="site"` + `pattern="landing"` + '
             '`engine="react"` as a reviewable DRAFT — it does NOT publish (see the '
@@ -1565,6 +1569,20 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "`src/App.tsx` to render it. The edit saves to the DRAFT — it does not "
             "publish, so keep offering the Preview rather than announcing a live "
             "change."
+        )
+    elif engine == "project":
+        engine_note = (
+            " On this track the site is a FULL-STACK project: a base template repo "
+            "(Astro, TanStack Start, Vite + React + Hono, Next or SvelteKit on "
+            "Cloudflare Workers) you extend with backend recipes and your own code."
+        )
+        build_step = (
+            "BUILD via the `pocketpaw-create-project-site` skill — invoke it by intent "
+            "(no slash command); it routes the request to a template. If it is "
+            "unavailable: `mcp__pocketpaw_sites_manager__list_site_templates`, pick by "
+            "`when_to_use`, then `mcp__pocketpaw_sites_manager__start_site_from_template` "
+            "ONCE (it returns the pocket_id and the repo's AGENTS.md), then STOP at the "
+            "draft — publish only on explicit request.\n" + _PROJECT_LOOP
         )
     elif engine == "ripple":
         engine_note = " The page is rendered STATICALLY (no JavaScript runs for the visitor)."
@@ -1633,7 +1651,11 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "→ `mcp__pocketpaw_sites_manager__create_react_site` (and pass "
             "`interactive=true` if any component you write needs the browser); a "
             "live-data / dynamic app (dashboards, per-user data) → "
-            "`mcp__pocketpaw_sites_manager__create_dynamic_site`. A described "
+            "`mcp__pocketpaw_sites_manager__create_dynamic_site`; a full-stack app "
+            "(user accounts, its own database, server logic) or a named framework "
+            "(Next, Astro, TanStack Start, SvelteKit) → the "
+            "`pocketpaw-create-project-site` skill "
+            "(`mcp__pocketpaw_sites_manager__start_site_from_template`). A described "
             "business, a desire for a 'nice' or 'modern' site, or the design "
             "direction the user picked is NOT such a request — stay on HTML.\n"
             "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
@@ -1817,12 +1839,17 @@ def _create_preamble(meta: SurfaceMeta) -> str:
 # descriptions; the preamble repeats it because "tell the user it is ready" is
 # written HERE, and a ready claim on a failed build is exactly the regression.
 _VERIFY_RULE = (
-    "VERIFY FIRST: every create/edit result carries `verification`. Call the site "
-    "ready ONLY when `verification.status` is `passed`. On `failed`, fix the listed "
-    "`errors` (file/line) and call `mcp__pocketpaw_sites_manager__verify_site` — at "
-    "most 3 rounds, then tell the user plainly which errors remain. On `unverified`, "
-    "say it could not be checked and why (on a ripple site `engine_not_verifiable` "
-    "only means there is no authored code to check). "
+    "VERIFY ONCE PER TURN, AT THE END: a create result carries the full "
+    "`verification`; an EDIT result carries only the static check (`static`) while "
+    "the build and browser check run in the background (`status:'pending'`). Do not "
+    "verify after each edit: make every edit the change needs, then call "
+    "`mcp__pocketpaw_sites_manager__verify_site` ONCE. Call the site ready ONLY when "
+    "it returns `passed`. If a later result carries `previous_verification` with "
+    "`failed`, fix those `errors` with a follow-up edit. On `failed`, fix the listed "
+    "`errors` (file/line) and verify again — at most 3 rounds, then tell the user "
+    "plainly which errors remain. On `unverified`, say it could not be checked and "
+    "why (on a ripple site `engine_not_verifiable` only means there is no authored "
+    "code to check). "
 )
 
 # Added 2026-09-27 (feat/sites-lean-prompt). The design phase of every create, in
@@ -1874,7 +1901,7 @@ _CRAFT_FLOOR = (
 # _VERIFY_RULE cannot answer: a page that builds cleanly can still look wrong, and
 # nothing let the agent see it. ``preview_site`` returns the draft as images.
 _LOOK_RULE = (
-    "LOOK BEFORE YOU SHOW IT: once `verification.status` is `passed`, call "
+    "LOOK BEFORE YOU SHOW IT: once verification is `passed`, call "
     "`mcp__pocketpaw_sites_manager__preview_site` (desktop, then `device: mobile`) "
     "and look at the page the way a visitor will, next to the references you "
     "opened. Fix what is off (a weak or empty fold, a placeholder that reads as a "
@@ -1994,14 +2021,42 @@ def _react_write_scope() -> str:
         f"YOU MAY ONLY WRITE under {authorable}, and never under "
         f"`{REACT_RESERVED_PREFIX}`. {reserved} and everything under "
         f"`{REACT_RESERVED_PREFIX}` are GENERATED and will be rejected — they carry "
-        "the prerender contract and the dependency list. Paths are normalized "
-        "before that check, so a `./` prefix or a `..` segment does not get around "
-        "it. The project provides react, react-dom and vite (no router, ONE page). "
-        "To add any other npm package call "
-        "`mcp__pocketpaw_sites_manager__set_site_dependencies` first, then load "
-        "client-only ones via a dynamic import() inside useEffect; a package it "
-        "returns in `rejected` must not be imported.\n"
+        "the prerender contract. The root build files (package.json, "
+        "vite.config.*, bunfig.toml, .npmrc) are yours to edit. Paths are "
+        "normalized before that check, so a `./` prefix or a `..` segment does not "
+        "get around it. The project provides react, react-dom and vite (no router, "
+        "ONE page). To add any other npm package call "
+        "`mcp__pocketpaw_sites_manager__set_site_dependencies` first, then import "
+        "it normally (a browser-only library that touches window at import time "
+        "goes in a dynamic import() inside useEffect); a package it returns in "
+        "`rejected` must not be imported.\n"
     )
+
+
+#: The loop the project tools run, shared by the create and refine branches. The tool
+#: names are read off ``agent/mcp_servers/sites_project.py``; every one rides
+#: ``SITES_TOOL_IDS``. ``request_site_secret`` is the secrets lane's tool and may be
+#: absent, so the text tells the agent what to do without it.
+_PROJECT_LOOP = (
+    "A PROJECT site is a whole repo the user owns (package.json, framework config, "
+    "wrangler.jsonc), built in a sandbox. Its files are a `source` map you edit with "
+    "`mcp__pocketpaw_sites_manager__list_site_files` / `read_site_file` / `read_site_files` / "
+    "`patch_site_file` (exact-once {old, new} blocks, preferred) / `write_site_files` / "
+    "`delete_site_files` on the SAME pocket_id. There is no rippleSpec, no pocket specialist "
+    "and no create_*_site call here. Follow the repo's AGENTS.md (read_site_file it) over "
+    "your framework defaults. Backend features come from recipes: "
+    "`list_site_recipes`, then `apply_site_recipe`; do its glue tasks in order. For each "
+    "secret a recipe names, call `request_site_secret` (or, if that tool is missing, "
+    "tell the user which secrets to set in the site's settings); NEVER write a secret "
+    "value into a file. Every write saves the DRAFT and queues a build "
+    "(`verification.status: pending`). Finish with "
+    "`mcp__pocketpaw_sites_manager__run_site_build`; on `failed` read the log (it comes with "
+    "the result, or `get_site_build_log`), fix, and build again, at most 3 rounds. Call the "
+    "site ready only on `built`. When `preview_mode` is `static`, tell the user the "
+    "preview shows the static pages only and server routes (API, actions, server "
+    "pages) run after publish. Publish deploys the finished build of the current "
+    "files, so build before you publish.\n"
+)
 
 
 def _refine_publish_step(engine: str | None, pocket_id: str) -> str:
@@ -2090,10 +2145,25 @@ def _refine_unknown_engine_step(pocket_id: str) -> str:
         "specialist CANNOT edit those — svelte uses "
         "`mcp__pocketpaw_sites_manager__edit_svelte_component`, react uses "
         "`mcp__pocketpaw_sites_manager__edit_react_component`, and html uses "
-        "`mcp__pocketpaw_sites_manager__edit_html_file`.\n"
+        "`mcp__pocketpaw_sites_manager__edit_html_file`. A `project` pocket is a whole "
+        "repo edited with `mcp__pocketpaw_sites_manager__patch_site_file` / `write_site_files`.\n"
         "If the read fails too, tell the user you could not load their site rather "
         "than attempting an edit blind.\n"
     )
+
+
+def _refine_ask_mechanism(engine: str | None) -> str:
+    """How a refine asks the user, matching ``surface_registry._sites_profile``: only a
+    ripple refine (or one whose engine is unknown) has inline ripple ON, so only there
+    is the widget real. Everywhere else a ```ui-spec block would reach the user as raw
+    JSON, and the ``ask_user`` tool (allowed on every /sites mode) is the mechanism."""
+    if engine in ("html", "svelte", "react", "project"):
+        return (
+            "with the `mcp__pocketpaw_ask__ask_user` tool (a one-line `question` and "
+            "3-5 short `options`; inline ripple is OFF on this engine), then STOP and "
+            "wait for the click"
+        )
+    return "with an `ask-user-questions` ripple widget"
 
 
 def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
@@ -2121,8 +2191,8 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
     The ripple branch is deliberately unchanged apart from the publish claim: it was
     correct there, and this is a fix for the other three engines rather than a
     rewrite of working behaviour. What is shared across all branches is the
-    ASK-DON'T-ASSUME gate, the ``ask-user-questions`` mechanism (refine keeps
-    ``ripple_mode="on"`` on every engine, so that widget is real here), the funnel /
+    ASK-DON'T-ASSUME gate (asking through :func:`_refine_ask_mechanism`, which
+    matches the ripple mode the profile grants this engine), the funnel /
     real-copy / anchor-CTA / flat-form rules, and the source ``pocket_id`` — which
     every branch still threads into the tool call it names.
     """
@@ -2197,10 +2267,12 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "Relay the tool's own `message`, and never tell the user the change is "
             "published or live. On `ok:false` nothing was staged: an old_string "
             "that matched 0 or more than 1 time needs more context, and "
-            '`status:"rolled_back"` means the edit failed the static or build '
-            "check, so fix `verification.errors` and send it again. A browser-layer "
-            "failure keeps the edit staged: fix it with a follow-up edit. To add an "
-            "npm package call set_site_dependencies, then import it inside onMount. "
+            '`status:"rolled_back"` means the edit failed the static check, so fix '
+            "`verification.errors` and send it again. A build or browser failure "
+            "found in the background keeps the edit staged: fix it with a follow-up "
+            "edit. To add an "
+            "npm package call set_site_dependencies, then import it (a browser-only "
+            "library that touches window at import time goes inside onMount). "
             + _VERIFY_RULE
             + "\n"
         )
@@ -2316,6 +2388,18 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "the full resting state lives in the HTML, never rendered only by a "
             "script.\n"
         )
+    elif engine == "project":
+        render_truth = (
+            " It is a full-stack PROJECT site: a whole repo built in a sandbox, with "
+            "server routes that run on the published site."
+        )
+        edit_step = (
+            "Treat the user's message as a change to this repo. Read before you edit: "
+            f"`mcp__pocketpaw_sites_manager__list_site_files` with pocket_id `{pocket_id}`, "
+            "then `read_site_files` on what you will touch (AGENTS.md first). NEVER call "
+            "`start_site_from_template` again: that mints a SECOND site.\n" + _PROJECT_LOOP
+        )
+        rules = _REFINE_SHARED_RULES
     else:
         render_truth = ""
         edit_step = _refine_unknown_engine_step(pocket_id)
@@ -2350,7 +2434,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "ASK, DON'T ASSUME: if the requested edit is ambiguous, or applying it "
         "needs a real fact or content you don't have (new copy, a price, a "
         "section's content, or which of several interpretations the user means), "
-        "ASK with an `ask-user-questions` ripple widget (include a 'you decide' "
+        f"ASK {_refine_ask_mechanism(engine)} (include a 'you decide' "
         "option) instead of guessing — and NEVER fabricate real-world facts "
         "(testimonials, stats, prices, addresses, contact details).\n"
         "WHEN THE ASK IS A JUDGEMENT, NOT AN EDIT: if the user asks you to review "

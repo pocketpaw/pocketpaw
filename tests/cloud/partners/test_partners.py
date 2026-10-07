@@ -1070,6 +1070,14 @@ async def test_http_me_and_rewards(partners_http) -> None:
         "lifetime_sites_sold": 0,
         "next_tier": {"name": "silver", "at": 10, "remaining": 10},
         "benefits": {"wholesale_discount_pct": 0.0, "commission_pct": 25.0},
+        "slug": None,
+        "display_name": None,
+        "city": None,
+        "country": None,
+        "services": [],
+        "bio": None,
+        "contact_url": None,
+        "public": False,
     }
     r = await client.get("/api/v1/partners/rewards")
     assert r.status_code == 200, r.text

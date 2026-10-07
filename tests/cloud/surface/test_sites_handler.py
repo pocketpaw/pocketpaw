@@ -597,10 +597,11 @@ async def test_react_create_states_the_prerender_rule() -> None:
 
 
 async def test_react_create_names_the_reserved_build_shell() -> None:
-    """The generator owns index.html / package.json / vite.config.ts /
-    paw-prerender.mjs and the src/paw/ namespace, and REJECTS a source map that
-    writes one. A preamble that doesn't say so sends the agent into a create error
-    it cannot predict — and those files are what hold the prerender contract."""
+    """The generator owns index.html / paw-prerender.mjs and the src/paw/
+    namespace, and REJECTS a source map that writes one (package.json and
+    vite.config.* are the author's since 2026-10-07, and the preamble says so). A
+    preamble that doesn't say so sends the agent into a create error it cannot
+    predict — and those files are what hold the prerender contract."""
     preamble = (
         await sites_handler.build_preamble(
             WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
@@ -608,9 +609,10 @@ async def test_react_create_names_the_reserved_build_shell() -> None:
     ).text
 
     assert "src/App.tsx" in preamble
-    for reserved in ("index.html", "package.json", "vite.config.ts", "paw-prerender.mjs"):
+    for reserved in ("index.html", "paw-prerender.mjs"):
         assert reserved in preamble, f"the preamble does not name the reserved {reserved}"
     assert "src/paw/" in preamble
+    assert "package.json and vite.config.* are yours" in preamble
 
 
 async def test_react_create_does_not_promise_a_submit_route() -> None:
@@ -1443,8 +1445,9 @@ async def test_react_refine_carries_the_prerender_and_write_scope_rules(mongo_db
     # And that the edit is a DRAFT, so the agent does not announce a live change.
     assert "draft" in lower
     assert "nothing goes live" in lower
-    # And that "ready" waits on the verify verdict.
-    assert "verification.status" in preamble
+    # And that "ready" waits on ONE verify_site at the end of the turn's edits.
+    assert "VERIFY ONCE PER TURN, AT THE END" in preamble
+    assert "previous_verification" in preamble
 
 
 async def test_ripple_refine_keeps_the_rippleSpec_merge(mongo_db: object) -> None:
@@ -1847,10 +1850,15 @@ async def test_every_refine_branch_keeps_what_transfers(engine: str | None) -> N
     # cannot name its pocket cannot act on it.
     assert REFINE_POCKET in preamble
     assert 'mode="refine"' in preamble
-    # ASK-DON'T-ASSUME and its mechanism (refine keeps ripple_mode="on" on every
-    # engine, so the widget is real here).
+    # ASK-DON'T-ASSUME and its mechanism, which follows the profile's ripple mode:
+    # the widget on a ripple (or unknown-engine) refine, the ask_user tool on the
+    # source engines, whose refine runs with inline ripple OFF.
     assert "ask, don't assume" in lower
-    assert "ask-user-questions" in preamble
+    if engine in ("html", "svelte", "react"):
+        assert "mcp__pocketpaw_ask__ask_user" in preamble
+        assert "ask-user-questions" not in preamble
+    else:
+        assert "ask-user-questions" in preamble
     assert "fabricate" in lower
     # The funnel, real copy, anchor CTAs, and the flat lead form.
     assert "hero" in lower
@@ -1891,9 +1899,10 @@ async def test_svelte_refine_names_its_own_tool_and_calls_the_edit_a_draft() -> 
     assert "not a deploy" in lower
     assert "the live page is unchanged" in lower
     assert "republish" not in lower
-    # PP-3: a failed static/build check rolls the edit back; ready waits on passed.
+    # A failed STATIC check rolls the edit back; ready waits on one verify at the end.
     assert "rolled_back" in preamble
-    assert "verification.status" in preamble
+    assert "failed the static check" in preamble
+    assert "VERIFY ONCE PER TURN, AT THE END" in preamble
     # Both edit shapes, so the agent prefers the diff over a whole-file rewrite.
     assert "old_string" in preamble
     assert "new_source" in preamble

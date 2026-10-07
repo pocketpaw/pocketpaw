@@ -3,7 +3,7 @@
 # project be downloaded") resolves, fails closed, and survives the site-plan
 # rekey.
 #
-# Four properties, in the order a reviewer should check them:
+# Five properties, in the order a reviewer should check them:
 #   (a) both paid rungs resolve it True and ``free`` resolves it False — and the
 #       floor stays False even when a subscription on it reads "active", which is
 #       what proves the allow-set is consulted rather than the branch alone;
@@ -14,16 +14,17 @@
 #   (c) a key the catalog cannot resolve — the retired ``studio``/``agency``, a
 #       typo, an absent value — lands on the free floor and resolves False;
 #   (d) a LEGACY key resolves to the tier carrying the same capabilities, so a
-#       site whose document still says ``pro`` keeps what it has always paid for.
+#       site whose document still says ``pro`` keeps what it has always paid for;
+#   (e) the download reads ``site_code_entitled``, the same predicate the builder's
+#       Code tab reads, so the two cannot disagree about a site.
 #
 # DETERMINISTIC AND DB-FREE. ``resolve_site_entitlements`` is pure and synchronous
 # — it takes the site's billing fields because ``entitlements`` may not import
 # ``models.site`` (EE cloud rule 2) — so every branch here is exercised by calling
 # it, with no database, no clock and no network.
 #
-# Updated 2026-10-02 (feat/partners-sell, PH-2): the partner-only yearly rungs
-# ``site_year`` / ``staff_year`` carry the same features as ``site`` / ``staff``,
-# so they are paid tiers here too.
+# The partner-only yearly rungs ``site_year`` / ``staff_year`` carry the same
+# features as ``site`` / ``staff``, so they are paid tiers here too.
 from __future__ import annotations
 
 import pytest
@@ -106,8 +107,8 @@ def test_the_free_floor_is_not_in_the_granting_set():
     set would still answer False for free, and only this catches a later edit that
     adds the floor to it.
     """
-    assert "free" not in entitlements._PROJECT_DOWNLOAD_PLANS
-    assert set(entitlements._PROJECT_DOWNLOAD_PLANS) == set(PAID_TIERS)
+    assert "free" not in entitlements._SITE_CODE_PLANS
+    assert set(entitlements._SITE_CODE_PLANS) == set(PAID_TIERS)
 
 
 # ---------------------------------------------------------------------------
@@ -239,3 +240,19 @@ def test_the_download_grant_leaves_the_other_paid_capabilities_alone():
     assert floor.badge_required is True
     assert floor.concierge_entitled is False
     assert floor.analytics is False
+
+
+# ---------------------------------------------------------------------------
+# (e) One rule for site code: the download and the builder's Code tab.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("plan_tier", [*PAID_TIERS, "free", "pro", "studio", None])
+@pytest.mark.parametrize("status", ["active", "cancelled", "pending", "none", None])
+def test_the_download_and_the_code_tab_read_one_predicate(plan_tier, status):
+    """``project_download`` is ``site_code_entitled``, which the pockets service also
+    asks for ``sourceVisible``. Any drift between the two fails here."""
+    ent = _resolve(plan_tier=plan_tier, subscription_status=status)
+    assert ent.project_download is entitlements.site_code_entitled(
+        plan_tier=plan_tier, subscription_status=status
+    )

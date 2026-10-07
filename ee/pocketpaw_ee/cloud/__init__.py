@@ -257,6 +257,21 @@ def mount_cloud(app: FastAPI) -> None:
     # (Tauri, MCP, scripts) bypass entirely. See ``ee/cloud/_core/csrf.py``.
     app.add_middleware(CSRFMiddleware)
 
+    # Draft preview origin — requests for ``<token>.<PAW_SITES_PREVIEW_BASE_URL host>``
+    # go straight to the sites preview app. It must be the OUTERMOST layer: the core
+    # app factories add AuthMiddleware, BodySizeLimit and CORS after this function
+    # runs, and anything they wrap gets the API's 401s and rate limits. So it is not
+    # added here; ``install_cors`` (called last by both factories) adds what
+    # ``app.state.outermost_middleware`` lists after CORS. The preview host then never
+    # touches a session, cookie, CSRF check or audit row.
+    from pocketpaw_ee.sites.preview_origin import PreviewHostDispatch, check_preview_base
+
+    check_preview_base()  # a refused base logs an ERROR and turns previews off
+    outermost = list(getattr(app.state, "outermost_middleware", ()))
+    if PreviewHostDispatch not in outermost:
+        outermost.append(PreviewHostDispatch)
+    app.state.outermost_middleware = outermost
+
     # Global error handler — extracted to ee.cloud._core.http
     add_error_handler(app)
 
@@ -307,6 +322,7 @@ def mount_cloud(app: FastAPI) -> None:
         router as meetings_webhooks_router,
     )
     from pocketpaw_ee.cloud.meetings.router import router as meetings_router
+    from pocketpaw_ee.cloud.partners.router import pros_router
     from pocketpaw_ee.cloud.partners.router import router as partners_router
     from pocketpaw_ee.cloud.planner.router import router as planner_router
     from pocketpaw_ee.cloud.platform.router import router as platform_router
@@ -338,6 +354,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(platform_router, prefix="/api/v1")
     # Paw Partners (PH-1) tenant routes; the operator switch lives under /platform.
     app.include_router(partners_router, prefix="/api/v1")
+    # Find a Pro: the public, no-sign-in face of partners (directory, profile, apply).
+    app.include_router(pros_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
     # Web Cursor sandbox registry (WC-1) — the (workspace, user, repo) -> sandbox
     # tenancy/auth oracle every later Web Cursor slice authorizes against.
@@ -495,6 +513,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
     from pocketpaw_ee.cloud.fabric_ingest.router import router as fabric_ingest_router
     from pocketpaw_ee.cloud.growth.router import router as growth_router
+    from pocketpaw_ee.cloud.growth.social.router import router as growth_social_router
     from pocketpaw_ee.cloud.growth.webhooks import router as growth_webhooks_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
@@ -520,7 +539,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.paw_bar.catalog_routes import router as paw_bar_catalog_router
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
+    from pocketpaw_ee.sites.files_router import router as site_files_router
     from pocketpaw_ee.sites.router import router as sites_router
+    from pocketpaw_ee.sites.secrets_router import router as site_secrets_router
 
     app.include_router(kb_router, prefix="/api/v1")
     app.include_router(knowledge_router, prefix="/api/v1")
@@ -575,6 +596,9 @@ def mount_cloud(app: FastAPI) -> None:
     # Instinct-gated sends (the dedicated ``growth`` arq queue seam lives in
     # ``growth/worker.py``).
     app.include_router(growth_router, prefix="/api/v1")
+    # Growth › Social — setup wizard profile, website analysis and Blitz ideas
+    # under /growth/social. Same license gate and growth.read / growth.write RBAC.
+    app.include_router(growth_social_router, prefix="/api/v1")
     # Growth inbound webhooks (G-6) — POST /growth/webhooks/msg91. Mounted
     # SEPARATELY from growth_router because MSG91 is the caller: no license
     # gate, no RBAC, no RequestContext. Trust is the shared-secret HMAC in
@@ -587,6 +611,11 @@ def mount_cloud(app: FastAPI) -> None:
     # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
     # (Cloudflare for SaaS) the Domains panel drives.
     app.include_router(sites_router, prefix="/api/v1")
+    # Per-site secrets: names + status out, owner-only writes, values never returned.
+    app.include_router(site_secrets_router, prefix="/api/v1")
+    # A project site's files (list / read / write / patch / delete) for the builder's
+    # Code view; the same service functions the agent's project file tools call.
+    app.include_router(site_files_router, prefix="/api/v1")
 
     # Model Catalog — MCG-1. License-gated, tenant-independent reads of the
     # models a self-hosted LiteLLM proxy serves: GET /catalog/models (filtered by
@@ -962,6 +991,31 @@ def mount_cloud(app: FastAPI) -> None:
     set_production_research_fn(agent_research)
     set_production_prospect_research_fn(agent_prospect_research)
     set_production_writer_fn(agent_write_drafts)
+
+    from pocketpaw_ee.cloud.growth.social.analyst import (
+        agent_analyze,
+        set_production_analyze_fn,
+    )
+    from pocketpaw_ee.cloud.growth.social.ideas import (
+        agent_generate_ideas,
+        agent_make_media,
+        set_production_ideas_fn,
+        set_production_media_fn,
+    )
+
+    set_production_analyze_fn(agent_analyze)
+    set_production_ideas_fn(agent_generate_ideas)
+    set_production_media_fn(agent_make_media)
+
+    from pocketpaw_ee.cloud.growth.social.memes import (
+        agent_draw_character,
+        agent_make_meme,
+        set_production_character_fn,
+        set_production_meme_fn,
+    )
+
+    set_production_character_fn(agent_draw_character)
+    set_production_meme_fn(agent_make_meme)
 
     # NOTE: Composio is wired per-backend via ``pocketpaw_ee.cloud.composio.providers``
     # — each agent backend (claude_sdk, openai_agents, google_adk,

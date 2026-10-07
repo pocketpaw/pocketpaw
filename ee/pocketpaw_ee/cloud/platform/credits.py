@@ -12,6 +12,13 @@ Four routes, mounted under the same ``/workspaces`` prefix as
 ``PLATFORM_ACTIONS`` (``ee/pocketpaw_ee/guards/platform.py``) — nothing new was
 added there, per the spec.
 
+BOTH WRITES 404 AN UNKNOWN WORKSPACE (``workspace.not_found``) before anything is
+audited or moved. The ledger is keyed by a bare workspace string, so without the
+lookup an adjust for ``/workspaces/None/...`` happily wrote ledger rows for a tenant
+that does not exist. A soft-deleted workspace still resolves, as it does on the
+console's detail page: a claw-back or refund on a closed tenant is a support case.
+The two reads stay lookup-free and report an empty wallet.
+
 MONEY IS MICRO-CREDITS END TO END. Every amount on this wire is
 ``*_micro`` (1_000_000 micro == 1 credit == $0.01). There is no
 ``balance_credits`` field anywhere in this module's DTOs, on purpose — see
@@ -68,6 +75,7 @@ from pocketpaw_ee.cloud.credits import service as credits_service
 from pocketpaw_ee.cloud.credits.domain import LedgerEntry
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.platform import audit
+from pocketpaw_ee.cloud.workspace import service as workspace_service
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +258,8 @@ async def adjust_credits(
     Route internals, in order (master PRD C4, and the spec's route-internals
     section names this exact order):
 
+      0. The workspace must exist (404 ``workspace.not_found``), checked with the
+         input validation so a refusal leaves no audit row and no ledger entry.
       1. ``audit.begin`` — writes the row as ``attempted``, before anything
          moves, with the pre-read balance in ``before``.
       2. ``grant`` for a positive delta, ``debit(allow_negative=False)`` for a
@@ -283,6 +293,8 @@ async def adjust_credits(
     key = body.idempotency_key.strip() if body.idempotency_key else ""
     if not key:
         raise ValidationError("platform.credits.invalid_key", "idempotency_key is required")
+
+    await workspace_service.platform_get_workspace(workspace_id)
 
     effective_key = f"operator:{key}"
     cause = "operator_grant" if body.amount_delta_micro > 0 else "operator_debit"
@@ -411,6 +423,7 @@ async def reconcile_wallet(
     reason = body.reason.strip()
     if not reason:
         raise ValidationError("platform.credits.invalid_reason", "reason is required")
+    await workspace_service.platform_get_workspace(workspace_id)
 
     before_balance = await credits_service.balance_micro(workspace_id)
     event = await audit.begin(

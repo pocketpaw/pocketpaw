@@ -2,6 +2,23 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-07 (feat/sites-project-tools) — "Project sites": the twelve agent
+  tools for `engine: "project"` (templates, recipes, generic file tools, run_site_build /
+  get_site_build_log), their path rules, caps and plan gate.
+Updated: 2026-10-07 (feat/sites-project-tools) — "Project files": list / read /
+  write / patch / delete routes under `/sites/by-pocket/{pocket_id}/files`.
+Updated: 2026-10-07 (perf/sites-fast-edits) — "Draft verification": edit tools
+  return the static check only (`status: "pending"`, `static`, `build`, `job_id`)
+  and the build + browser verdict arrives on the next tool result as
+  `previous_verification`; only a static failure rolls a svelte edit back; an
+  unreferenced `create=true` is `skipped`; html edits skip the browser layer;
+  `preview_site` returns at most 3 tiles. Sandbox image setup:
+  `docs/deployment/sites-verify-image.md`.
+Updated: 2026-10-06 (fix/site-source-per-site-tier) — a site's source is
+  visible (`sourceVisible` on the pocket) only when the SITE is on `site` or
+  `staff` with an active subscription. The workspace plan no longer grants it;
+  `site_source_visible` on `GET /entitlements` is now the operator override only
+  (`null` = each site decides). Download and template-sharing notes updated.
 Updated: 2026-10-03 (fix/paw-key-scopes) — "Workspace API key scopes": which
   route families each `paw_` key scope unlocks; everything else is a 403.
 Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
@@ -123,6 +140,12 @@ the `verification` verdict every site create/edit tool now returns, the `verify_
 agent tool, and the counts-only `verification` field on
 `GET /sites/by-pocket/{pocket_id}/status`. Rewrote the PP-1 note on
 `edit_svelte_component`, which now verifies instead of building locally.
+
+Updated: 2026-10-07 (fix/sites-open-dependencies) — `set_site_dependencies` follows
+the "open everything" policy: any public npm package, version, range or dist-tag;
+advisories and deprecation come back as `warnings`; no age, size, downloads, script
+or count gate. react / svelte authors may write `package.json`, `vite.config.*`,
+`svelte.config.js`, `bunfig.toml` and `.npmrc`.
 
 Updated: 2026-09-24 (PP-1, feat/sites-author-dependencies) — added the
 `set_site_dependencies` agent tool and the `dependencies` argument on the three
@@ -1307,6 +1330,142 @@ The milestone ladder with when each reward was credited:
 
 Needs `fabric.read` and an ACTIVE profile (**403** `partner.not_active`).
 
+### `PATCH /partners/me/profile`
+
+The caller's public partner profile; only the fields sent change. Body
+(`extra` forbidden):
+
+```json
+{
+  "slug": "ravi-prints",
+  "display_name": "Ravi Prints",
+  "city": "Bengaluru",
+  "country": "IN",
+  "services": ["print", "design"],
+  "bio": "Flex and vinyl since 2009.",
+  "contact_url": "https://wa.me/919876543210",
+  "public": true
+}
+```
+
+`display_name` and `city` are stripped of surrounding whitespace before the 1-80
+length check, so a blank value is `422`. To clear `services` send `[]`; `null`
+is `422` (the other optional fields clear on `null`). `slug` is
+`^[a-z0-9-]{3,60}$`, unique across workspaces, and may not be one of
+`directory, apply, requests, find, join, request, status` (fixed segments under
+`/pros` on the API and on the public site). `services` is a subset of
+`print, design, web, marketing, photo` (up to 5). `bio` is at most 600 chars,
+`contact_url` must start with `https://`, `country` is ISO-3166 alpha-2 (upper-cased).
+`public: true` needs a `slug` and a `display_name`. Returns the same shape as
+`GET /partners/me`, which now carries these eight fields too (defaults: nulls,
+`services: []`, `public: false`). `fabric.write`. **404** when the workspace is not a
+partner (an applied partner may fill its profile in ahead of activation; it is listed
+only once active). **422** `partners.invalid_profile` (pattern, reserved slug, unknown
+service), `partners.profile_incomplete`; **409** `partners.slug_taken`. An operator
+`PUT /platform/workspaces/{id}/partner` leaves these fields as they are. Deleting
+the workspace releases its slug (and unlists it), so another partner can take it.
+An active partner with `public: true` is listed on Find a Pro (see "Find a Pro
+(public)" below).
+
+### `GET /platform/partners/applications` · `PATCH /platform/partners/applications/{id}`
+
+Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
+session cookie), the same guard as the partner switch above. The list is newest
+first: `?status=new|contacted|rejected|accepted` filters, `cursor` pages (the
+`next_cursor` of the previous page; `422 partners.bad_cursor` when invalid),
+`limit` 1-200 (default 50). Each row is `{id, name, email, city, country,
+services, message, status, note, reviewed_by, reviewed_at, created_at}`; this is
+the review queue, so the applicant's contact details are included. Every list
+read is recorded as a platform audit read.
+
+PATCH body: `status` (one of the four), optional `note` (up to 2000, kept on the
+application), `reason` (required, non-blank; goes to the platform audit row).
+Returns the updated row with `reviewed_by` (the operator's user id) and
+`reviewed_at`. Marking an application `accepted` records the decision only; the
+applicant's workspace becomes a partner through
+`PUT /platform/workspaces/{workspace_id}/partner`. An unknown id is `404` with
+no audit row. There is no operator UI for this queue yet; it is a paw-enterprise
+follow-up.
+
+## Find a Pro (public)
+
+The public face of Paw Partners, under the brand Paw Pros by PocketPaw. Strangers
+see "Pro"; the signed-in hub, operator routes and stored data keep the partner
+name. These three routes need no sign-in, live under `/pros` and return only
+allow-listed fields. Their error codes are `pros.*` (and `pro.not_found`). Nothing
+under `/partners` is public: `/partners/directory` and `/partners/{slug}` answer
+`404`.
+
+### `GET /pros/directory`
+
+No sign-in. Pros (partners with `status: active` and `public: true`), newest first
+(by `joined_at`, then slug). Query params, all optional: `city` (case-insensitive
+exact match), `service` (one of the five), `cursor` (the opaque `next_cursor` of
+the previous page; it encodes only the card's own `joined_at` and slug, never a
+workspace id), `limit` (1-50, default 24). Limited to 60 requests a minute per
+IP, shared with `GET /pros/{slug}`; past that `429` `pros.rate_limited`.
+A bad cursor is `422` `pros.bad_cursor`.
+
+**Client IP behind the public site.** Every per-IP limit keys on the rightmost
+`X-Forwarded-For` hop. Requests relayed by the paw-web Worker all arrive from
+Cloudflare's egress, so the Worker sends two headers: `X-Paw-Client-IP` (the
+visitor's address) and `X-Paw-Web-Key` (a shared secret). Only the limits on the
+routes the Worker fronts read them: these `/pros` reads, `POST /pros/apply`
+and the public Discover reads. When the backend has `POCKETPAW_PUBLIC_WEB_KEY`
+set and the key header matches it, that IP is the bucket (and the address sent
+to Turnstile); a missing or wrong key, an unset env var or an invalid address
+falls back to the normal rule. Every other limit (the auth exchange, meeting
+lookups and knocks, `POST /tools/ai-check`) ignores both headers, so a leaked
+key cannot pick their buckets. `X-Paw-Client-IP` is never read without the key.
+Rotation: set the new key on the Worker and in the backend env, redeploy both;
+there is no dual-key window, so expect a short gap where Worker traffic shares
+one bucket.
+
+Response `200` (`ProDirectoryPage`):
+`{"items": [<pro>, ...], "next_cursor": "..." | null}`. A Pro on the wire (`ProPublicOut`) is exactly these fields (never `footer_name`,
+`billing_country`, `founding` or `status`):
+
+```json
+{
+  "slug": "ravi-prints",
+  "display_name": "Ravi Prints",
+  "city": "Bengaluru",
+  "country": "IN",
+  "services": ["print", "design"],
+  "bio": "Flex and vinyl since 2009.",
+  "contact_url": "https://wa.me/919876543210",
+  "tier": "bronze",
+  "joined_at": "2026-10-01T09:00:00Z",
+  "sites": [<Discover listing>, ...]
+}
+```
+
+`sites` are the partner workspace's public Discover listings, the same card as
+`GET /discover` (see Discover below), newest first and capped at the 12 newest;
+a Pro with more shows only those 12 here (the full set is on `GET /discover`).
+
+### `GET /pros/{slug}`
+
+No sign-in; same rate limit as the directory. One Pro by slug (`ProPublicOut`),
+`404` `pro.not_found` when there is no such slug or the partner is not active or
+not public. Registered after every fixed `/pros/<segment>` route, so
+`/pros/directory` and `/pros/apply` always win over a slug.
+
+### `POST /pros/apply`
+
+No sign-in. Apply to become a Pro. Body (`ProApplyIn`, `extra` forbidden): `name`
+(1-120), `email`, `city` (1-80), `country` (ISO-2), `services` (1-5 of the five), `message` (up to 2000, optional),
+`turnstile_token`. Order of checks: the body, then a global cap of 500
+applications a day across every address (`429` `pros.apply_daily_limit`, so a
+flood from many addresses cannot fill the queue), then the Cloudflare Turnstile
+token (`400` `pros.turnstile_failed`; with `POCKETPAW_TURNSTILE_SECRET` unset
+the check is skipped with a warning in dev and refused in a production posture,
+see the AI check below). Then exactly one application is stored in the platform's
+own `partner_applications` collection (never a workspace), with the submitting
+address kept only as a sha256 hash. **204**. Limited to 5 applications an hour
+per IP (`429` `pros.apply_rate_limited`). Operators review the queue through
+`GET /platform/partners/applications` (under Paw Partners above).
+
 ## Site templates
 
 Save a site pocket as a template, then start new sites from it. A template is a
@@ -1337,8 +1496,9 @@ Making a template public (on save or with `PATCH`) runs these checks first:
   `site_templates.private_assets`, and the message says how many. External
   images (`https://images.unsplash.com/...`) and the public Sites asset rail are
   allowed.
-- **No locked source.** If the source gate would withhold this source from the
-  owner's workspace, the request is `403` `site_templates.source_not_shareable`.
+- **Any site's plan.** The source site's own tier does not matter: a free or
+  draft site can be shared publicly. A pocket created from the template later
+  follows its own site's tier for source visibility.
 - The Sites plan gate and the 2 MB size cap, as on save.
 
 Every response and event carries the template's metadata only, never its
@@ -1560,7 +1720,8 @@ public site templates (`source: "site_template"`) and public studio templates
 (`source: "studio_template"`); a public template has one listing, hidden when
 the template is hidden. The two reads need no sign-in and
 are limited to 60 requests a minute per IP (shared between them); past that they
-return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
+return `429` with `discover.rate_limited`. Behind the paw-web Worker the IP comes
+from `X-Paw-Client-IP` when `X-Paw-Web-Key` matches (see `GET /pros/directory`). `use` and `report` need a signed-in
 user and act in the caller's active workspace.
 
 A listing on the wire is exactly these fields (never the owner, workspace,
@@ -1569,6 +1730,7 @@ reports or the source item's id):
 ```json
 {
   "id": "6660a1...",
+  "slug": "bakery",
   "source": "site_template",
   "kind": "site",
   "title": "Bakery",
@@ -1583,6 +1745,16 @@ reports or the source item's id):
   "media_url": null
 }
 ```
+
+`slug` is the listing's URL handle: the title lowercased and folded to
+`a-z0-9` with `-` between words (`Café Crème & Co!` is `cafe-creme-co`), cut
+to 40 characters, set when the listing is first indexed and never changed
+afterwards, so a renamed template keeps its link. A title that leaves no ASCII behind (CJK, Devanagari)
+falls back to the source item's id. Slugs are unique across every source; a
+second `Bakery`, whichever source lists it, gets `bakery-2`, then `bakery-3`. A
+listing indexed before slugs existed reports its `id` as `slug` until the next
+reindex (at most 30 minutes after a deploy) fills it in; the id works on the
+item route too.
 
 `media_kind` (`image`, `video`, `audio`) and `media_url` are set on studio
 template listings and `null` on site templates. Studio listings carry absolute
@@ -1603,7 +1775,10 @@ Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last
 page. A cursor that isn't one we issued returns `422` (`discover.bad_cursor`);
 `limit` above 50 returns `422`.
 
-### `GET /discover/{listing_id}` (public)
+### `GET /discover/{id_or_slug}` (public)
+
+Takes a listing id or its slug. The id is tried first, then the slug among
+unhidden listings; slugs are unique across sources, so a bare slug is enough.
 
 Response `200`: one listing. `404` when it doesn't exist or has been hidden.
 
@@ -1694,7 +1869,9 @@ Errors (`{"error": {"code", "message"}}`):
 | `503` | `tools.ai_check.daily_limit` | Today's anonymous checks spent `POCKETPAW_AI_CHECK_DAILY_USD` (default `5.0`) |
 | `502` | `tools.ai_check.engine_failed` | No OpenAI key configured, or every engine call failed |
 
-With `POCKETPAW_TURNSTILE_SECRET` unset (dev), Turnstile is skipped with a warning.
+With `POCKETPAW_TURNSTILE_SECRET` unset, Turnstile is skipped with a warning in dev
+and refused (`400 tools.ai_check.turnstile_failed`) in a production posture
+(`POCKETPAW_ENV=production` or `POCKETPAW_AUTH_COOKIE_SECURE=true`).
 
 ## AI visibility — Staff site card
 
@@ -2885,7 +3062,7 @@ so the refusal code is now `pocket.not_editable_site`. Note the two questions ar
 still separate and neither implies the other: **react** can be selected and
 refined through chat (it has an armed build) but has no TSX splice, so it is still
 refused here; **html** has a splice but no armed build, so it is accepted here and
-absent from `/native-artifact`.
+served by `/native-artifact` only as a `preview_url` (no body/css).
 
 ### `GET /sites/by-pocket/{pocket_id}/html-armed-source`
 
@@ -2901,9 +3078,9 @@ the DOM (`<section>:<tag>:<ordinal>`) while `/leaf-edits` resolves by manifest u
 something the splice could never find. This returns the document the builder
 should actually render, so both sides agree by construction.
 
-It is **not** the html branch of `/native-artifact`. That serves a built, armed
-tree for shadow-rendering and is gated on `has_native_edit_lane`, which html sits
-outside of deliberately. This is a parse and an offset splice over the source map:
+It is **not** the html branch of `/native-artifact`. That one answers an html
+pocket with a `preview_url` on the draft preview origin (no body/css to
+shadow-render). This is a parse and an offset splice over the source map:
 no bun build, no Daytona, no artifact cache — cheap enough to call when the
 operator opens Design mode.
 
@@ -2991,15 +3168,31 @@ Errors:
 
 ### `GET /sites/by-pocket/{pocket_id}/native-artifact`
 
-Serve the armed build's body markup and CSS so the native editor can
-shadow-render the site.
+Serve a site draft: its `preview_url` on the draft preview origin, plus (svelte and
+react) the armed build's body markup and CSS so the native editor can shadow-render
+the site.
 
-Available on engines with a **native edit lane** — `svelte`, and `react` since
-RX-2. Not `html` (its served artifact IS its source, so it is selected through its
-own sandboxed `srcdoc` and has no build to render) and not `ripple` (no source
-map). Both armable engines emit a prerendered `index.html`; only the build output
-directory differs (`.svelte-kit/cloudflare` or `build` vs `dist`), and the server
-resolves that per engine.
+Available on `svelte`, `react` and `html`. Not `ripple` (no source map). The two
+built engines emit a prerendered `index.html`; only the build output directory
+differs (`.svelte-kit/cloudflare` or `build` vs `dist`), and the server resolves
+that per engine.
+
+**`preview_url` — the full draft on its own origin.** An absolute URL of the form
+`https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/index.html`: the draft's
+`index.html` with its `<head>` and module scripts intact, every JS chunk, stylesheet,
+image and public file beside it, served with `Access-Control-Allow-Origin: *` and no
+cookies. `<token>` is a 32-hex-char capability minted per content hash, so an edit
+gets a new URL. `null` while a build is pending or failed; show the build state
+then. Also `null` beside a served render (`build_status: "none"`) when the artifact
+store refused or failed to keep the draft's files, or the preview base URL is
+misconfigured: the server retries that at most once per draft every 10 minutes
+rather than rebuilding on every view. Append `?paw_edit=1` (and the usual `paw_nonce`) to arm the edit bridge,
+which talks to the builder over `postMessage` exactly like the live lane. Setup:
+`docs/deployment/sites-draft-preview-origin.md`.
+
+**html never builds.** An html pocket always answers `build_status: "none"`,
+empty `body_html` / `css`, and a `preview_url` that serves its source files with the
+declared packages' import map injected.
 
 **Two response shapes, and `build_status` says which.** A warm read returns the
 render; a cold one returns a build to poll.
@@ -3013,7 +3206,8 @@ Response `200` — the **render** (cache hit):
   "css": "/* concatenated stylesheets */",
   "build_status": "none",
   "build_reason": null,
-  "build_job_id": null
+  "build_job_id": null,
+  "preview_url": "https://3f9c0d5e8a1b4c7d9e2f6a0b1c3d5e7f.paw-preview.example/index.html"
 }
 ```
 
@@ -3033,7 +3227,8 @@ Response `200` — **build pending** (cache miss, SP-2):
   "css": "",
   "build_status": "queued",
   "build_reason": null,
-  "build_job_id": "site-preview-p_abc123-9f2c…"
+  "build_job_id": "site-preview-p_abc123-9f2c…",
+  "preview_url": null
 }
 ```
 
@@ -3045,7 +3240,11 @@ Response `200` — **build pending** (cache miss, SP-2):
   publish lane's, unchanged, and **an unrecognised value means in-progress**.
 - `build_reason` carries a rung name on a failure (`build_failed:…`,
   `scaffold_failed:…`, `sandbox_unavailable:…`, `preview_unreadable:…`) — never the
-  build's stderr, which stays in the worker log.
+  build's stderr, which stays in the worker log. `sandbox_unavailable:capacity`
+  means the Daytona org's resource limit stayed full for the whole retry window
+  (try again in a few minutes); `sandbox_unavailable:no_sandbox` means a sandbox
+  could not be created for any other reason. While a build waits for capacity it
+  reads `queued` with reason `waiting_for_capacity`.
 - `build_job_id` is the handle to poll with. **Re-fetch this endpoint** until
   `build_status` reads `"none"`, which is the render shape above.
 
@@ -3077,6 +3276,142 @@ per-site capture key** — that secret is only acceptable because it lives in a 
 that is then destroyed, so such a pocket rebuilds on every view instead of caching. No
 eviction runs here (the on-disk store's `PAW_SITES_ARTIFACT_KEEP` does not apply); put a
 bucket lifecycle rule on the `site-artifacts/` prefix.
+
+**`project` pockets.** A project pocket (the author owns the whole repo: package.json,
+framework config, wrangler config) is also served here, with two extra fields:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "body_html": "",
+  "css": "",
+  "build_status": "none",
+  "build_reason": null,
+  "build_job_id": "site-preview-p_abc123-9f2c…",
+  "preview_url": "https://3f9c….paw-preview.example/index.html",
+  "preview_mode": "static",
+  "capabilities": {"select": false, "text": false, "code": true, "build_log": true}
+}
+```
+
+- It is never armed: `body_html` / `css` are always empty and the draft is only
+  `preview_url`. A cold read queues a Daytona build (`paw-sites-gen project-build`)
+  with the same `queued` / `building` / `failed` handle as above.
+- `preview_mode` is `"static"` when the build has a worker (server routes): the
+  preview origin serves its static assets, and the routes wait for the drafts
+  dispatch worker. `"full"` when the assets are the whole site. `null` until a build
+  finished.
+- `capabilities` are the engine's edit/build flags. A project has no Select or Text
+  tool yet (no generator-owned anchors); edits go through files and the agent, and
+  every build keeps a log. Other engines answer `capabilities: null` for now.
+- A project with no `package.json`, or a path that leaves the project, is a `422`.
+- `build_reason` on a failed project build is `build_failed:<code>` with the CLI's
+  code (`install_failed`, `build_failed`, `output_missing`, `wrangler_failed`,
+  `size_limit`, `unknown_framework`, ...), or one of the rungs above.
+
+### Project builds — `/sites/by-pocket/{pocket_id}/builds`
+
+Two reads for a `project` pocket's sandbox builds. Both take `fabric.write` (owner /
+editor) and the pockets service's read check, and are scoped to the caller's
+workspace: another workspace's pocket is a `404`. A non-project pocket is a `422`
+(`sites.not_a_project`). **No realtime event exists for site builds, so poll.**
+
+#### `GET /sites/by-pocket/{pocket_id}/builds/latest`
+
+The newest build, without its log. `404` when the pocket never built.
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "job_id": "site-preview-p_abc123-9f2c…",
+  "status": "building",
+  "reason": null,
+  "preview_mode": null,
+  "framework": "astro",
+  "updated_at": "2026-10-07T12:00:00+00:00",
+  "current": true
+}
+```
+
+`status` is `queued` / `building` / `built` / `failed`. `current` is true when this
+build is of the pocket's current files (an edit since makes it false).
+
+#### `GET /sites/by-pocket/{pocket_id}/builds/{job_id}/log`
+
+One build's install, build and wrangler dry-run output. A `job_id` that is not this
+pocket's is a `404`.
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "job_id": "site-preview-p_abc123-9f2c…",
+  "status": "failed",
+  "reason": "build_failed:build_failed",
+  "log": "$ bun install\n…\nerror at src/pages/index.astro:3 …",
+  "log_truncated": false,
+  "preview_mode": null,
+  "updated_at": "2026-10-07T12:01:10+00:00"
+}
+```
+
+The log is redacted before it is stored (tokens and keys, sandbox paths made
+project-relative, capture keys) and capped to its last 64 KiB; `log_truncated` says
+the head was cut. It is empty while the build is still running.
+
+### Project files — `/sites/by-pocket/{pocket_id}/files`
+
+A `project` pocket's repo, for the builder's Code view. The routes call the same
+functions as the agent's file tools (`sites/project_tools.py`), so the path rules,
+caps, lockfile rule and rebuild behaviour are identical (see "Project sites" under
+"Sites — Agent Editing Tools"). Every route takes a session, the `sites` plan
+feature and `fabric.write`; the pocket must pass the pockets read rule and belong to
+the caller's workspace (another workspace's pocket is a `404`). Writes also need edit
+access to the pocket. A non-project pocket is `422 sites.not_a_project`.
+
+| Method + path | Body / query | `200` response |
+|---|---|---|
+| `GET .../files` | `?prefix=src/` (optional) | `{pocket_id, files: [{path, size}], file_count}` (`size` = UTF-8 bytes, sorted by path) |
+| `GET .../files/content` | `?path=src/app.ts` | `{path, size, content}`, the whole file (never truncated) |
+| `PUT .../files` | `{files: {path: contents}}` | write response |
+| `POST .../files/patch` | `{path, edits: [{old, new}]}` | write response (`path` set) |
+| `DELETE .../files` | `{paths: [path, ...]}` | write response (`deleted` set) |
+
+The write response:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "written": ["src/pages/about.astro"],
+  "created": ["src/pages/about.astro"],
+  "deleted": [],
+  "path": null,
+  "lockfile_removed": [],
+  "verification": {
+    "status": "pending",
+    "build": "pending",
+    "job_id": "site-preview-p_abc123-9f2c…",
+    "layers": [{"name": "build", "status": "pending"}]
+  }
+}
+```
+
+Every write saves the draft as one version, which changes the source's content hash,
+and queues that hash's draft build: poll `GET .../builds/latest` (or the
+native-artifact preview) with the `job_id`. `verification.status` is `passed` when
+that exact source already built, `failed` with a `reason` when the tree cannot build
+at all, and `unverified` when the build queue is down; the save stands in every case.
+
+Refusals (nothing is saved): `422 sites.project_bad_path` (absolute, drive letter,
+`..`, backslash, NUL, `node_modules/`, `.git/`, `.paw/`, `paw-build.json`, a real
+`.env*` / `.dev.vars*` file other than `*.example`), `422
+sites.project_file_too_large` (over 1 MiB), `422 sites.project_call_too_large` (over
+4 MiB in one call), `422 sites.project_too_many_files` (over 200 paths),
+`422 sites.project_too_large` (the project over 5,000 files / 50 MiB),
+`422 site_edit.*` (an `old` that matches 0 or more than 1 time),
+`422 sites.project_needs_package_json` (deleting package.json), `404
+site_file.not_found` (a path to read, patch or delete that is not there).
+A change to `package.json`'s dependency lists also removes a stale lockfile and lists
+it in `lockfile_removed`.
 
 ### Site images — `/sites/by-pocket/{pocket_id}/assets`
 
@@ -3181,10 +3516,87 @@ Errors:
 
 | HTTP | Code | When |
 |------|------|------|
-| 422 | `pocket.no_native_edit_lane` | The pocket's engine has no armable build to render (html, ripple). Renamed from `pocket.not_svelte_site` in RX-2, when react joined the lane. |
+| 422 | `pocket.no_native_edit_lane` | The pocket has no source map to serve (ripple). Renamed from `pocket.not_svelte_site` in RX-2, when react joined the lane. |
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 503 | `sites.preview_build_unavailable` | The armed build could not be QUEUED (the job queue is unreachable). Retryable. A failed enqueue is deliberately an error rather than a pending response — a job id for a job nobody will run makes a client poll forever. A build that queues and then FAILS is not an error here: it comes back `200` with `build_status: "failed"` and a rung in `build_reason`. |
+
+## Sites — Secrets
+
+Runtime secrets for a site's Worker (a Stripe key, a webhook signing secret). The agent
+asks for one by name (`request_site_secret`); the pocket owner types the value into the
+builder; publishing binds every set secret as a `secret_text` binding, read in the
+Worker as `env.<NAME>`. **No endpoint, tool or event ever returns a value.** Values are
+encrypted at rest with the deployment Fernet key (`CLOUD_ENCRYPTION_KEY`); without it,
+`PUT` answers 422 `cloud.encryption_key_missing`.
+
+Secrets are keyed by pocket, so they exist before the first publish. Names are
+`UPPER_SNAKE_CASE`: a letter first, then `A-Z`, `0-9` or `_`, at most 64 characters.
+At most 50 secrets (set or pending) per site.
+
+| Method | Path | Workspace gate | Pocket gate |
+|---|---|---|---|
+| `GET` | `/sites/by-pocket/{pocket_id}/secrets` | `fabric.read` | edit access (owner, team, `shared_with`, or a workspace-visible pocket) |
+| `PUT` | `/sites/by-pocket/{pocket_id}/secrets/{name}` | `fabric.write` | pocket owner |
+| `DELETE` | `/sites/by-pocket/{pocket_id}/secrets/{name}` | `fabric.write` | pocket owner |
+
+A pocket in another workspace is a 404 for every route, owner or not.
+
+**`GET`** returns:
+
+```json
+{
+  "pocket_id": "...",
+  "can_manage": true,
+  "secrets": [
+    {"name": "STRIPE_KEY", "status": "set", "description": "", "requested_by": null,
+     "requested_at": null, "updated_at": "2026-10-07T10:00:00Z"},
+    {"name": "RESEND_KEY", "status": "pending", "description": "Resend API key for the contact form",
+     "requested_by": "agent", "requested_at": "2026-10-07T09:58:00Z", "updated_at": null}
+  ],
+  "pending": [ /* the status == "pending" subset of secrets */ ]
+}
+```
+
+`can_manage` is true only for the pocket owner; the builder shows editors the list
+read-only. `updated_at` is when the value was last set.
+
+**`PUT`** takes `{"value": "..."}` (non-empty, at most 8 KB as UTF-8) and returns one
+item in the shape above (`status: "set"`). Setting a pending secret fills the request.
+**`DELETE`** removes a secret or a pending request and answers 204.
+
+| HTTP | Code | When |
+|------|------|------|
+| 422 | `sites.secret_name_invalid` | The name is not `UPPER_SNAKE_CASE` or is over 64 characters. |
+| 422 | `sites.secret_value_empty` | `PUT` with an empty or whitespace value. |
+| 413 | `sites.secret_too_large` | `PUT` with a value over 8 KB. |
+| 422 | `sites.secret_cap` | The site already has 50 secrets or requests. |
+| 403 | `sites.secret_not_owner` | `PUT` / `DELETE` by anyone but the pocket owner. |
+| 403 | `pocket.access_denied` | `GET` without edit access to the pocket. |
+| 404 | `pocket.not_found` | Unknown pocket, or a pocket in another workspace. |
+| 404 | `site_secret.not_found` | `DELETE` of a name that has no row. |
+
+**Agent tools** (sites-manager MCP server, on `SITES_TOOL_IDS`):
+
+- `request_site_secret(pocket_id, name, description)` leaves a pending request and
+  returns `{ok, pocket_id, secret: {name, status, description, requested_by,
+  requested_at, updated_at}, message}`. It never takes a value (the schema has no
+  `value` property and forbids extra ones). Asking for a secret that is already set
+  keeps the value and answers `status: "set"`.
+- `list_site_secrets(pocket_id)` returns `{ok, pocket_id, secrets: [{name, status,
+  description}]}`.
+
+**Realtime.** `site.secret_requested` (a pending request was created or refreshed) and
+`site.secret_updated` (`status` is `"set"` or `"deleted"`) go over the workspace bus to
+the pocket owner and the acting user only. Payload: `{workspace_id, pocket_id, name,
+status, owner, user_id}` plus `description` and `requested_by` on a request. The chat
+run that asked also gets a per-run SSE `site_secret_requested` with
+`{pocket_id, secret}`, so the input card can render inline.
+
+**Publish.** A missing required secret refuses the deploy with 422
+`sites.secrets_missing`, naming each one to set; see
+[Sites bundle deploys](deployment/sites-bundle-deploys.md#secrets). The site delete
+cascade removes every secret and request for the site (best effort, logged).
 
 ## Sites — Visitor Analytics
 
@@ -3644,6 +4056,39 @@ tier stays bought, the renewal date stays where it was. An `agent_id` in another
 tenant is a 404 from inside the funnel, deliberately indistinguishable from an
 agent that does not exist.
 
+### The connected site's gallery card
+
+A connected site never deploys, so the card lanes a publish runs (screenshot,
+favicon) never fire for it. Instead one card refresh fetches the verified origin's
+homepage **once**, through the SSRF-hardened fetch (DNS pinned to a public
+address, every redirect hop re-checked, private targets refused), and records the
+page title and icon from that markup before taking the screenshot. Only the host
+the grounding crawl would use is ever fetched: verified, and proved within 30
+days.
+
+It runs in the background after a first bind, after a rebind, after
+`POST /sites/origins/verify` succeeds for a host a connected site serves on, and
+as a second chance from the knowledge sync (which reuses the crawl's homepage
+HTML and only fills fields that are still empty). None of these can fail the
+request that triggered them.
+
+| `SiteResponse` field | Meaning for a connected site |
+|----------------------|------------------------------|
+| `name` | The owner's own label. Never overwritten by the card refresh. |
+| `origin_title` | The homepage's `<title>`, falling back to `og:title`. Control characters dropped, whitespace collapsed, capped at 200 characters. `""` before the first read, when the page has no title, for hosted sites, and for rows that predate the field. |
+| `favicon_url` | The homepage's icon as a `data:` URI, fetched through the same safe path. `null` when there is none. |
+| `preview_image_url` | The screenshot of the verified origin. |
+
+Clients should show `name || origin_title || host`.
+
+`POST /sites/{site_id}/preview-refresh` on a connected site also refreshes
+`origin_title` and `favicon_url` from the same single homepage fetch, before the
+screenshot. Its error contract is unchanged: `422 sites.origin_unverified`,
+`sites.origin_verification_stale` or `sites.preview_unavailable` when there is no
+fresh verified origin, `422 sites.preview_not_serving` when the page is not
+answering. A failed title/icon read keeps the stored values and does not turn into
+an error.
+
 ## Sites — Download the project
 
 The built site handed back to its owner as an archive, rather than only served from our
@@ -3688,11 +4133,13 @@ show it.
 "the pre-check") before offering the button.** That is what the field is for — discovering the refusal by
 provoking it is the failure the per-site entitlements read exists to end.
 
-**Do not gate the button on source visibility instead.** `site_source_visible` is a
-**workspace** capability that governs whether the builder shows a Code tab;
-`project_download` is a **per-site** capability resolved off the site's own plan. A paid
-site inside a free workspace may legitimately download a project whose Code tab is
-hidden, so gating on the workspace field would hide a control the customer has paid for.
+**Do not gate the button on source visibility instead.** The pocket's `sourceVisible`
+(which governs the builder's Code tab) is resolved off the same per-site rule as
+`project_download` (`site` or `staff`, active subscription), so the two normally agree.
+They differ when a platform operator overrides source visibility for the whole
+workspace (`site_source_visible` on `GET /entitlements`, `null` when unset): that
+override reaches the Code tab only, never the download. Read `project_download` for
+the button.
 
 Self-hosted and OSS deployments have no billing, so the gate is skipped entirely there
 (`sites_enforced()`) and the download always works.
@@ -4796,15 +5243,15 @@ back from — a rollback fired on enqueue-success would revert a good edit.
 Persisting the draft is the whole job (the same shape the leaf-edits route
 documents). Publishing stays an explicit `publish` call the user asks for.
 
-**Write scope is enforced, not advisory.** The generator owns the build shell, so
-`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` and everything
-under `src/paw/` are rejected, and the resolved path must land under `src/` or
-`public/`. Paths are normalized (backslashes, `.`/`..`) before the check, so
-`./package.json` and `src/paw/../paw/entry.tsx` are rejected too. This is the same
+**Write scope is enforced, not advisory.** The generator owns the prerender shell,
+so `index.html`, `paw-prerender.mjs`, `paw.dependencies.json`, lockfiles and
+everything under `src/paw/` are rejected. The resolved path must land under `src/`
+or `public/`, or be one of the root build files the author owns (`package.json`,
+`vite.config.*`, `bunfig.toml`, `.npmrc`; the generator merges them with its
+toolchain). Paths are normalized (backslashes, `.`/`..`) before the check, so
+`./index.html` and `src/paw/../paw/entry.tsx` are rejected too. This is the same
 policy `create_react_site` applies, shared through
-`ee/pocketpaw_ee/sites/react_paths.py` — an edit that could write `package.json`
-would be writing the dependency manifest, which is where the supply-chain
-release-age floor is enforced.
+`ee/pocketpaw_ee/sites/react_paths.py`.
 
 Errors (relayed to the agent as `is_error` with the code, so it can fix and retry):
 
@@ -4813,7 +5260,7 @@ Errors (relayed to the agent as `is_error` with the code, so it can fix and retr
 | `site_edit.invalid_args` | Not exactly one of `edits` / `new_source`. |
 | `site_edit.create_needs_source` | `create` without `new_source`. |
 | `site_edit.reserved_path` | The resolved path is generator-owned. |
-| `site_edit.path_outside_source` | The resolved path is outside `src/` and `public/`. |
+| `site_edit.path_outside_source` | The resolved path is outside `src/` and `public/` and is not a root build file. |
 | `site_edit.no_match` / `site_edit.ambiguous_match` | An `old_string` matched 0 or >1 times. Make it more specific and retry. |
 | `pocket.not_react_site` | The pocket is not a react Paw Site. |
 | `pocket.react_component_exists` | `create` on a path that already exists. |
@@ -4913,41 +5360,43 @@ above refuses that path in any spelling, case included.
 | Arg | Type | Notes |
 |-----|------|-------|
 | `pocket_id` | string | Required. A svelte, react or html site pocket. ripple is refused (`site_deps.engine_unsupported`). |
-| `add` | array | `[{name, range?}]`. `range` is an npm semver range; omit it for the newest eligible version. `"name@range"` strings are accepted too. |
+| `add` | array | `[{name, range?}]`. `range` is an exact version, an npm semver range or a dist-tag (`next`, `beta`); omit it for `latest`. `"name@range"` strings are accepted too. |
 | `remove` | array | Package names to drop. Dropping the last one removes the file. |
 
 Returns `{ok, pocket_id, packages: {name: {version}}, rejected: [{name, code,
-reason}], changed, message}`. A refused package is not an error: `ok` stays true,
-and the others still land.
+reason}], warnings: [{name, code, message}], changed, message}`. A refused package
+is not an error: `ok` stays true, and the others still land.
 
-Each add is resolved from registry metadata only. Nothing is installed. The
-resolver picks the highest version that satisfies the range, was published at
-least 7 days ago (the same floor as the build sandbox's `bunfig.toml`), and is
-not deprecated. It then refuses the package when:
+Each add is resolved from registry metadata only. Nothing is installed. Any public
+npm package is allowed (the policy since 2026-10-07): there is no release-age,
+size, downloads, install-script, native-addon or package-count gate, because
+author packages install only in the Daytona build sandbox, which is the isolation
+boundary. `latest` and other dist-tags resolve through the packument's
+`dist-tags`; a range picks the highest matching version, preferring one that is
+not deprecated. The result is always pinned to an exact version. A package is
+refused only when:
 
 | `code` | When |
 |--------|------|
-| `invalid_name` / `invalid_range` | Not a valid npm name, or not a semver range (dist-tags other than `latest` are refused). |
+| `invalid_name` / `invalid_range` | Not a valid npm name, or not a version, range or dist-tag. |
 | `non_registry_spec` | git, url, file, tarball, `npm:` alias or GitHub shorthand. |
-| `toolchain_reserved` | svelte, `@sveltejs/*`, vite, react, react-dom, `@vitejs/*`, tailwindcss, `@tailwindcss/*`, `@ripple-ui/*`, valibot, `@noble/hashes`, `@cloudflare/*`. The generator provides these. |
-| `not_found` / `no_eligible_version` | Not on the registry, or nothing matches the range once the 7-day floor is applied. The reason names the newest eligible version. |
-| `deprecated` | Every matching version is deprecated. |
-| `install_scripts` / `native_build` | The chosen version has `preinstall` / `install` / `postinstall` scripts, a `gypfile` or a `binary`. |
-| `too_large` | Unpacked size over 25 MB. |
-| `low_downloads` | Under 500 downloads last week. This is the typosquat guard. |
-| `advisory` | A moderate-or-worse advisory from npm's bulk advisory endpoint affects the chosen version. |
-| `too_many` | More than 20 packages on the site. |
-| `registry_unavailable` | The registry, downloads API, advisory endpoint or (html) jsdelivr could not be read. The package is refused, never accepted unvetted. |
+| `toolchain_reserved` | The name is reserved for the build toolchain by the vendored paw-sites allowlist. None are today: svelte, vite, react and the rest may be declared, and the declared version wins over the generator's pin. |
+| `not_found` / `no_eligible_version` | Not on the registry, or no version matches the range / the dist-tag does not exist. The reason names `latest` (or the known tags). |
+| `registry_unavailable` | The registry could not be read and the request was a range or tag, which needs it. Retryable. An exact version is accepted as given instead, with an `unverified` warning. |
+
+`warnings` carry `advisory` (a moderate-or-worse npm advisory affects the chosen
+version), `deprecated` and `unverified`. They never block. An advisory-endpoint or
+jsDelivr outage is ignored rather than refusing the package.
 
 For html, each entry also carries `esm`
-(`https://cdn.jsdelivr.net/npm/<name>@<version>/+esm`) and `integrity` (sha384 of
-the bytes jsdelivr serves at that URL), which the generator turns into an
-importmap.
+(`https://cdn.jsdelivr.net/npm/<name>@<version>/+esm`), which the generator turns
+into an importmap, and `integrity` (sha384 of the bytes jsDelivr serves at that
+URL) when jsDelivr answered. `integrity` is optional.
 
 `create_svelte_site`, `create_react_site` and `create_html_site` take the same
 requests as an optional `dependencies` argument. They resolve them before the
-pocket is saved and return `packages` and `rejected` in the create body. A refused
-package never fails the create.
+pocket is saved and return `packages` and `rejected` (and `warnings` when there are
+any) in the create body. A refused package never fails the create.
 
 **Author packages install only in the build sandbox.** A static svelte site that
 declares packages publishes through the ephemeral build lane even with
@@ -4967,8 +5416,10 @@ site can reach the publish-time 422.
 
 Every `create_svelte_site`, `create_react_site`, `create_html_site`,
 `edit_svelte_component`, `edit_react_component`, `edit_html_file` and
-`set_site_dependencies` result carries a `verification` object. It says whether the
-draft actually works:
+`set_site_dependencies` result carries a `verification` object. Creates and
+`verify_site` carry the full verdict below; edits carry the faster edit verdict
+described under "Edits: static now, build later". It says whether the draft
+actually works:
 
 ```json
 "verification": {
@@ -4988,6 +5439,12 @@ draft actually works:
 ```
 
 `reason` is present only when `status` is `unverified`. `note` is optional.
+When the reason is a sandbox one (`waiting_for_capacity`,
+`sandbox_unavailable:capacity`, any other `sandbox_unavailable`), the verdict
+also carries `message`: the sentence to show the user as written. A full
+Daytona org is reported as a queue (`waiting_for_capacity`, then
+`sandbox_unavailable:capacity` once about five minutes of retries are spent),
+never as an outage. See `docs/runbooks/2026-10-07-daytona-org-capacity.md`.
 
 The three layers:
 
@@ -5021,20 +5478,87 @@ never served from the cache. The build job also stores its build + browser repor
 under the hash, so an editor pre-warm answers the next verify without a second
 sandbox.
 
-**Deadline.** A tool waits at most `PAW_SITES_VERIFY_WAIT_SEC` (default 90) for the
-sandbox layers, plus a short slack for the static check. On expiry the verdict is
-`unverified` / `timeout` and the build keeps running; the next `verify_site`
-attaches to the same job.
+**Deadline.** A create or `verify_site` waits at most `PAW_SITES_VERIFY_WAIT_SEC`
+(default 90) for the sandbox layers, plus a short slack for the static check. On
+expiry the verdict is `unverified` / `timeout` and the build keeps running; the next
+`verify_site` attaches to the same job.
 
-**`edit_svelte_component` rollback.** A `static` or `build` failure means the edit
-does not compile: the file is restored (a created file is removed) and the tool
-returns `{ok: false, status: "rolled_back", verification, message}` as data, not as
-an MCP error. A `browser` failure keeps the edit staged and reports it: the page
-builds, and the fix is usually a follow-up edit to the same file. `unverified`
-keeps the edit staged. react and html edits stay draft-only as before and simply
-carry the verdict. The svelte edit result's `site.preview_url` is now always `null`:
-no local preview deploy is made any more; the builder shows the draft from the
-verified build.
+#### Edits: static now, build later
+
+An edit tool (`edit_svelte_component`, `edit_react_component`, `edit_html_file`,
+`set_site_dependencies`) runs only the `static` layer before it answers, about a
+second. For svelte and react it then queues the preview build (build + browser) and
+returns without waiting:
+
+```json
+"verification": {
+  "status": "pending",
+  "static": "passed",
+  "build": "pending",
+  "job_id": "site-preview-<pocket_id>-<content_hash>",
+  "content_hash": "…",
+  "layers": [
+    {"name": "static",  "status": "passed"},
+    {"name": "build",   "status": "pending"},
+    {"name": "browser", "status": "pending"}
+  ],
+  "errors": [], "warnings": [],
+  "checked_at": "ISO-8601"
+}
+```
+
+`static` and `build` mirror the two layers' statuses. Other shapes an edit can
+return:
+
+| Case | `status` | Notes |
+|------|----------|-------|
+| Static check failed | `failed` | `build` / `browser` are `skipped` (`static_check_failed`); nothing is queued. |
+| This exact source was already built (a pre-warm, an earlier verify) or verified | `passed` / `failed` | The full verdict, read from the store; `cached: true` when it was a cached verdict. |
+| html | `unverified`, reason `browser_check_on_demand` | `build` is `skipped`; the browser layer runs only when `verify_site` is called. |
+| Queue down | `unverified`, reason `queue_unavailable` | |
+| `create: true` that nothing links to or imports yet | `skipped`, reason `create_half_step` | No check at all; the edit that wires the file in verifies the whole site. |
+
+**`previous_verification`.** When the queued job finishes, its verdict is attached
+to the NEXT result of an edit tool or `preview_site` for that pocket, once, as
+`previous_verification` (the full verdict plus `static`, `build` and `job_id`). On a
+success result it is a key in the JSON body; on an error result or the image result
+of `preview_site` it is a trailing text block. A verdict that `verify_site` already
+returned is not repeated. A job that never reports within 15 minutes comes back as
+`unverified` / `no_report`. There is no realtime event for it.
+
+**Superseded builds.** A new preview build for a pocket aborts the pocket's previous
+queued or running one (arq abort; the sites worker sets `allow_abort_jobs`). A
+`verify_site` that was waiting on the aborted job reads its layers as `unverified` /
+`superseded`. If the source returns to an aborted render (an undo), that render is
+queued again rather than reported as failed.
+
+**One builder origin.** The editor's native-artifact view, the post-edit pre-warm,
+the verify pipeline and `preview_site` all compute the armed content hash with the
+same origin (`service.resolve_armed_builder_origin`): the request `Origin` when
+there is one (recorded per pocket), else the origin the editor last viewed the draft
+with, else the Site row's `builder_origin`, else `PAW_SITES_BUILDER_ORIGIN`. One edit
+therefore builds one render.
+
+**The draft preview appears before the browser check.** The preview job stores the
+draft artifact (and its preview URL) as soon as the build is clean, then runs the
+browser harness.
+
+**Timing logs.** Every step logs elapsed milliseconds, so edit latency can be read
+from the logs alone: `sites.edit_tool: tool=… pocket=… result=… verification=…
+elapsed_ms=…` (API, one line per edit call), `sites.verify: layer=static …` (API),
+`sites.verify: layer=queue_wait|build|browser …` (worker) and
+`sites.verify: layer=sandbox_wait …` (API, a waiting `verify_site`).
+
+**`edit_svelte_component` rollback.** Only a `static` failure rolls an edit back,
+because it is the only failure known before the edit returns: the file is restored
+(a created file is removed) and the tool returns
+`{ok: false, status: "rolled_back", verification, message}` as data, not as an MCP
+error. A `build` or `browser` failure, found by the background job (or read from
+the store for source that was already built), keeps the edit staged and is reported;
+the agent fixes it with a follow-up edit. `unverified` keeps the edit staged. react
+and html edits stay draft-only and carry the edit verdict. The svelte edit result's
+`site.preview_url` is always `null`: no local preview deploy is made; the builder
+shows the draft from the preview build.
 
 #### `verify_site`
 
@@ -5044,7 +5568,9 @@ verified build.
 
 Returns `{ok, pocket_id, verification}`. `ok` means the check ran and answered;
 whether the site works is `verification.status`. A missing or foreign pocket is an
-error. Use it to re-check after a fix or after an `unverified` / `timeout` result.
+error. It waits for the build and browser layers (it is the waiting verify), so the
+agent calls it once at the end of a turn's edits, after a fix, or after an
+`unverified` / `timeout` result.
 
 #### `preview_site`
 
@@ -5054,12 +5580,15 @@ error. Use it to re-check after a fix or after an `unverified` / `timeout` resul
 | `device` | `desktop` \| `mobile` | Optional, default `desktop` (1280px); `mobile` is 390px. |
 
 Returns MCP `image` blocks (a full-page JPEG screenshot of the current draft, cut
-into at most six tiles, top first) followed by one text block. `verify_site` says
+into at most three tiles, top first; the capture waits for the page's `load` event)
+followed by one text block, plus a `previous_verification` text block when an
+edit's background verdict is waiting. `verify_site` says
 whether the draft builds and loads; this is how the agent sees whether it looks
 right. Nothing is stored.
 
-The draft document comes from `draft_markup` for html sites and any pocket already
-built on the host, otherwise from the cached preview render (`get_native_artifact`)
+The draft document comes from `draft_markup` for html sites and any pocket whose
+on-host build is of its current content (the build dir's content stamp must match;
+a stale build is skipped), otherwise from the cached preview render (`get_native_artifact`)
 for svelte and react. Errors, none of which mean the site is broken:
 
 - the render is still building: call `verify_site`, then ask again;
@@ -5136,6 +5665,48 @@ caller's side "this was never published" is the useful answer, and it is correct
 the pocket has no site or does not exist. The read resolves the canonical Site doc
 through `canonical_site_for_pocket`, which is tenant-scoped on the workspace — that
 filter is the access check, and there is no plan gate because nothing is mutated.
+
+### Project sites (`engine: "project"`)
+
+A project site is a whole repo started from a paw-sites base template (Astro,
+TanStack Start, Vite + React + Hono, Next, SvelteKit on Cloudflare Workers). Twelve
+tools on the same server create and edit it (`ee/pocketpaw_ee/agent/mcp_servers/sites_project.py`);
+every one refuses a pocket of any other engine. The bundled skill
+`pocketpaw-create-project-site` teaches the loop and the template routing.
+
+| Tool | Args | What it does |
+|------|------|--------------|
+| `list_site_templates` | none | `{templates: [{slug, name, summary, when_to_use, stack, target, recipes}]}` from `paw-sites-gen starters --json` (cached per process) |
+| `start_site_from_template` | `slug`, `brief`, `name?` | `template-copy` into a temp dir, then creates the draft pocket: `type="site"`, `pattern="landing"`, `engine="project"`, `site_meta.project = {template, framework, recipes: []}`. Returns `pocket_id`, `next_steps`, `verification`, and AGENTS.md as a second verbatim text block. A template with a binary file is refused (`sites.template_binary_files`) |
+| `list_site_recipes` | `template?` | `{recipes: [{id, name, summary, applies_to, requires, conflicts, plan, bindings, secrets, env}]}` |
+| `apply_site_recipe` | `pocket_id`, `recipe_id`, `dry_run?` | Runs `apply-recipe` on the source map in a temp dir and writes the changed files back in one save; records the id in `site_meta.project.recipes`. Returns `written`, `packages_added`, `migrations`, `binding_requests`, `secrets` / `secret_names`, `env_requests`, `glue_tasks`, `verify`. A conflict or error writes nothing (`is_error`, `status: "conflict"` / `"error"`) |
+| `list_site_files` | `pocket_id`, `prefix?` | `{files: [{path, size}], file_count, truncated}` |
+| `read_site_file` / `read_site_files` | `pocket_id`, `path` / `paths` | A JSON block, then one verbatim `=== FILE: <path> (<n> bytes) ===` block per file. Over 200,000 bytes a file is `truncated`; past 400,000 bytes per call a file is `omitted` |
+| `write_site_files` | `pocket_id`, `files: {path: contents}` | Create or overwrite. 1 MiB per file, 4 MiB and 200 files per call; the whole map stays under the build's 5,000 files / 50 MiB |
+| `patch_site_file` | `pocket_id`, `path`, `edits: [{old, new}]` | Each `old` must match exactly once (the same rule as the other edit tools); nothing is saved otherwise |
+| `delete_site_files` | `pocket_id`, `paths` | Every path must exist; `package.json` cannot be deleted |
+| `run_site_build` | `pocket_id` | Queues the draft build of the current files (the preview lane) and waits up to 30 s. `status` is `built` / `failed` / still `queued` or `building`; `preview_url`, `preview_mode`, and the log tail as a text block on a failure |
+| `get_site_build_log` | `pocket_id`, `job_id?` | The latest (or named) build's status, `current`, and its redacted log tail (last 12,000 characters) |
+
+**Paths.** Relative to the repo root, forward slashes. Refused
+(`sites.project_bad_path`): absolute paths, drive letters, `..`, backslashes, NUL,
+anything under `node_modules/`, `.git/` or `.paw/`, `paw-build.json`, and real
+`.env` / `.env.*` / `.dev.vars` files (only `*.example` variants). Secret values never
+live in the source map.
+
+**Every write** (`write_site_files`, `patch_site_file`, `delete_site_files`, `apply_site_recipe`)
+saves the draft as one version and queues the build of the new source:
+`verification` is `{status: "pending", build: "pending", job_id}` (or `passed` when
+that exact source already built). A change to `package.json`'s dependency lists drops
+the stale lockfile (`lockfile_removed`), because the sandbox installs with
+`--frozen-lockfile` when one exists.
+
+**Recipe plans.** A recipe's `plan` (`free` / `site` / `staff`) is checked against the
+site's own plan with `entitlements.site_paid_backends_entitled`, the predicate the
+binding provisioner uses; below it is `sites.recipe_plan_required` and nothing runs.
+
+**Secrets.** Recipes return secret NAMES. The agent requests each one with
+`request_site_secret` (the secrets lane); no tool here writes a value.
 
 ## Fabric — Transform Mappings (source→Fabric ingest)
 
@@ -5653,7 +6224,7 @@ the split is the security model:
 |---|---|
 | `POST /paw-bar/admin/site/{site_id}/concierge` | Create the site's concierge. This is the only way one comes to exist: widget create, the settings PATCH, publishing and a connected-site attach never create one. Behind `paw_bar.manage`; 404 for a site outside your workspace, 409 `concierge_exists` when it already has one. It starts **off** (`concierge_enabled: false`), mints the site's widget if there is none (empty spec, no default actions; an existing widget is kept as it is), sets `concierge_runtime` from the v2 eval gate (`v2` once a passing real-model gate report for the deployment's model is committed, `legacy` until then or when the deployment sets `POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME=legacy`) and, for a legacy concierge, binds a dedicated agent; a v2 concierge gets no agent. Optional body `{"concierge_greeting": "..."}`. Returns 201 with the settings response. A published site shows the bar from its next publish after the concierge is switched on. |
 | `DELETE /paw-bar/admin/site/{site_id}/concierge` | Delete it: the marker is cleared and the switch turned off, so every public route treats the site as having none. A legacy agent is unbound from the widget, never deleted. `?delete_conversations=true` also purges the concierge's conversations, owner and visitor lines, visitor requests and carts; without it they are kept. 404 when the site has no concierge. Returns the settings response. |
-| `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. The widget's `spec` comes without its catalog (`spec.catalog` is always `[]`); `widget.catalog_count` says how many products the [catalog store](#catalog-store) holds, and the catalog routes below page through them. |
+| `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. On a v2 concierge, `answer_model` is the `provider:model` visitors are answered with right now, resolved the way a turn resolves it (`""` on legacy, or when it can't be told). The widget's `spec` comes without its catalog (`spec.catalog` is always `[]`); `widget.catalog_count` says how many products the [catalog store](#catalog-store) holds, and the catalog routes below page through them. |
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |
 | `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance`, the owner's overrides of the site's own look (see [Appearance tokens](#appearance-tokens)). Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code`, `concierge_lead_capture` (default `true`: the v2 concierge may offer the `send_to_team` lead card and the visitor's Send writes a Lead; `false` turns the card off everywhere) and the guided fields below. Visitor options, each optional on PATCH: `concierge_disclosure` (the bar's AI line, one line of at most 140 characters, `""` keeps the bar's own wording; over the cap is a 422), `concierge_privacy_url` (`""` or an `https://` link of at most 500 characters with no whitespace, quotes or angle brackets, else 422), `concierge_consent_required` (default `false`), `concierge_voice` (default `true`) and `concierge_expandable` (default `true`); `concierge_appearance.size` is `sm`, `md` or `lg` (anything else saves as `sm`). Both frames pass these to the bar as `disclosure`, `privacyHref`, `consentRequired`, `voice`, `expandable` and `barSize`. `branding_removable` says whether the site may hide the "Powered by" line, by the same entitlement as the site badge (`PATCH /sites/{id}/branding`); a PATCH that turns `concierge_appearance.show_branding` from `true` to `false` on a site without it is a 402 `branding_not_entitled` and writes nothing. The frame sends `poweredBy` as `show_branding` or not entitled. `actions_snippet` is the copyable `<script src=".../paw-bar/actions.js" defer data-endpoint="...">` tag for page actions, on the same base as `embed_snippet` and `""` whenever that is. |
 | `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec, 422 `spec_too_large` past the [spec size cap](#spec-size-and-the-deprecated-catalog), 409 `currency_units_client_outdated` for a catalog with a non-2-decimal currency sent without `X-Paw-Money-Units: iso4217` (see Money below; the same rule holds on `PATCH /paw-bar/widgets/{id}/spec`). A non-empty `spec.catalog` is added to the catalog store (upserted by id, nothing deleted; see the deprecation note there); an absent or empty one leaves it alone. |
@@ -5689,7 +6260,7 @@ The bar follows the website it is embedded in. Its loader reads the host page's 
 | `colors.surface` | `""` | hex | `--pawbar-bg` (alpha 0.78) and `--pawbar-frame-bg` (0.82 in `tokens`, 0.55 in `tokensDark`), the bar's own glass alpha; without `colors.ink` it also sets a legible `--pawbar-fg` / `--pawbar-frame-fg` |
 | `colors.ink` | `""` | hex | `--pawbar-fg` and `--pawbar-frame-fg` |
 | `colors.user_bubble` | `""` | hex | `--pawbar-bubble-bg`, plus a legible `--pawbar-bubble-fg` |
-| `colors.owner_bubble` | `""` | hex | `--pawbar-owner-bubble-bg` |
+| `colors.owner_bubble` | `""` | hex | `--pawbar-owner-bubble-bg` + a legible `--pawbar-owner-bubble-fg` |
 | `colors.assistant_bubble`, `accent_fg`, `ring`, `danger` | `""` | hex | `--pawbar-assistant-bubble`, `--pawbar-accent-fg`, `--pawbar-ring`, `--pawbar-danger` |
 | `blur` | always emitted (default 28) | 0–48 | `--pawbar-blur` |
 
@@ -6861,11 +7432,20 @@ accept-while-you-wire-it-up mode — a forged inbound reply would flip
 `opted_in` and thereby unlock business-initiated sends to a number that never
 consented.
 
-On a verified inbound reply the handler sets `prospect.opted_in = true`, moves
-the prospect to `replied`, and walks any `sent` WhatsApp draft for that prospect
-to `replied` (through the gate seam). Under Meta's rules a user-initiated
-message both opens the 24-hour service window and *is* the opt-in signal for
-that number.
+On a verified inbound reply the handler moves the prospect to `replied` and
+walks any `sent` WhatsApp draft for that prospect to `replied` (through the gate
+seam). What the reply does to consent depends on its text, matched as a whole
+message after trimming whitespace and a trailing `.` or `!`, case-insensitively:
+
+| Reply | Effect |
+|-------|--------|
+| `stop`, `unsubscribe`, `cancel`, `end`, `quit`, `opt out`, `opt-out`, `optout` | `opted_in = false` and `whatsapp_opt_out_at` stamped, so the dispatch guard refuses later sends |
+| `start`, `subscribe`, `resume` | `opted_in = true` and `whatsapp_opt_out_at` cleared |
+| anything else | `opted_in = true`, unless `whatsapp_opt_out_at` is set (only START undoes an opt-out) |
+
+A user-initiated message opens the 24-hour service window. Reading a plain reply
+as consent to later business-initiated sends is current behaviour, not settled
+policy. A STOP word inside a longer sentence is a plain reply.
 
 Delivery-status callbacks (`status` / `delivered` / `read` / …) are accepted and
 ignored — a receipt is not consent. A number no workspace holds is a 200 no-op.
@@ -6972,6 +7552,192 @@ The stored preview only ever describes the criteria it ran against:
 |---|---|---|
 | 503 | `icp.research_unavailable` | No research backend is wired on this deployment. Nothing is recorded. |
 | 404 | `icp.not_found` | Unknown id, or another workspace's hunt. |
+
+## Growth — Social
+
+The setup wizard, website analysis and post ideas behind `/growth` › Social.
+A workspace can hold several profiles, one per brand it posts for. Every
+`/profile…` and `/ideas` route takes an optional `?profile_id=`; without it
+the route acts on the most recently updated profile, and the first `PUT`
+creates one. Ideas belong to one profile. Nothing here leaves
+the workspace: there is no posting, scheduling or account connection. Every
+route is license-gated and workspace-scoped; reads need `growth.read`, every
+other route `growth.write` (both MEMBER).
+
+| Route | What it does |
+|---|---|
+| `GET /api/v1/growth/social/profiles` | Every profile in the workspace, oldest first: `{items: SocialProfile[]}`. |
+| `POST /api/v1/growth/social/profiles` | Start a new, empty profile for another brand. |
+| `GET /api/v1/growth/social/profile` | One profile (`?profile_id=`). `404 social_profile.not_found` until the first `PUT`. |
+| `PUT /api/v1/growth/social/profile` | Partial upsert of the typed fields and, optionally, a hand-edited `analysis` (below). |
+| `POST /api/v1/growth/social/profile/analyze` | Read the website and run the analyst, in the request (below). |
+| `POST /api/v1/growth/social/profile/complete` | Finish onboarding: stamps `onboarding_completed_at`. |
+| `POST /api/v1/growth/social/ideas/generate` | Generate new post ideas (below). |
+| `GET /api/v1/growth/social/ideas` | `{items}`, newest first. Optional `status=new\|approved\|skipped`; omitted returns every idea. Any other value is a 422. |
+| `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). |
+| `POST /api/v1/growth/social/ideas/schedule` | `{items: [{idea_id, scheduled_at}], timezone?, duration_minutes?}`: date approved ideas and give each a `/calendar` event (calendar `growth-social`); rescheduling moves the same event. `409 social.idea_not_approved` if any is not approved. Nothing is posted. |
+| `POST /api/v1/growth/social/ideas/{idea_id}/unschedule` | Clear the date and delete the idea's calendar event. |
+| `GET /api/v1/growth/social/meme-formats` | The meme format templates Create offers: `{items: [{id, name, layout}]}`. Our own layouts; no third-party media. |
+| `POST /api/v1/growth/social/characters` | `{name?, description}`: the agent draws an original vector mascot (never a real person or existing franchise character), sanitised, kept on the profile (max 6, else `409 social.character_limit`). Returns the profile. |
+| `DELETE /api/v1/growth/social/characters/{character_id}` | Remove a character. Returns the profile. |
+| `POST /api/v1/growth/social/memes` | `{format?, character_id?, mention_business, prompt?, platform}`: draw a meme (character redrawn in the format's layout, as SVG) and file it as a new Blitz idea with `format: "meme"` and `poster_svg`. `409` before setup, `404` unknown character, `422` unknown format. |
+
+**Response (`SocialProfile`)** — every profile route returns this shape:
+
+```json
+{
+  "id": "6702…",
+  "workspace_id": "w1",
+  "owner_name": "Sam",
+  "company_name": "Acme Dental",
+  "website": "https://acme-dental.com",
+  "description": {
+    "product": "Family dentistry",
+    "audience": "Parents of young kids",
+    "problem": "",
+    "benefits": "",
+    "tone": "Warm, plain",
+    "avoid": "Fear tactics"
+  },
+  "team_size": "2_10",
+  "monthly_revenue": "10k_50k",
+  "role": "founder",
+  "business_model": "local_business",
+  "category": "Health",
+  "analysis_status": "ready",
+  "analysis_error": null,
+  "analysis": {
+    "summary": "A family dental practice in Austin.",
+    "product": "Checkups and cleanings",
+    "audience": "Parents of young kids",
+    "problem": "Kids who are scared of the dentist",
+    "tone": "Warm, plain",
+    "benefits": ["Same-week appointments"],
+    "differentiators": ["Kid-only hours"],
+    "competitors": [],
+    "avoid": ["Fear tactics"],
+    "content_pillars": ["First visits", "At-home habits"],
+    "hooks": ["What a first dental visit actually looks like"],
+    "pages_read": ["https://acme-dental.com/", "https://acme-dental.com/about"],
+    "logo_url": "https://acme-dental.com/logo.svg"
+  },
+  "analyzed_at": "2026-10-06T10:00:00+00:00",
+  "onboarding_completed_at": null,
+  "created_at": "2026-10-06T09:58:00+00:00",
+  "updated_at": "2026-10-06T10:00:00+00:00"
+}
+```
+
+Enums: `team_size` is `solo | 2_10 | 11_50 | 51_200 | 200_plus`;
+`monthly_revenue` is `pre_revenue | under_1k | 1k_10k | 10k_50k | 50k_250k |
+250k_plus`; `role` is `founder | marketer | social_media_manager | agency |
+creator | other`; `business_model` is `b2b_saas | b2c_app | ecommerce |
+services | local_business | creator | marketplace | other`. Each may be
+`null`. `analysis_status` is `none | ready | failed`, and `analysis` is `null`
+until the first successful analysis or hand edit.
+
+### `PUT /api/v1/growth/social/profile`
+
+Every field is optional. An omitted field is left as it is; an explicit
+`null` clears it (`owner_name` and `company_name` clear to `""`).
+`description` merges key by key, so one wizard step can send
+`{"description": {"audience": "…"}}` without wiping the others. Each
+description field is at most 2000 characters, the names 120, `category` 60.
+`website` is trimmed and gets `https://` when typed bare (`acme.com` →
+`https://acme.com`); anything that is still not an `http(s)` address with a
+dotted host is a 422. An enum value outside the lists above is a 422.
+
+`analysis` is a hand edit from the Brand page, in the same shape as the
+response's `analysis`. Only the editable fields you send are replaced
+(`summary`, `product`, `audience`, `problem`, `tone`, and the six lists).
+`pages_read` and `logo_url` belong to the server and are ignored if sent.
+Strings are at most 2000 characters; each list at most 20 items of 300
+characters (blank items are dropped). A hand edit does not touch
+`analyzed_at`. If `analysis_status` was `none` or `failed`, it becomes
+`ready` and `analysis_error` is cleared.
+
+### `POST /api/v1/growth/social/profile/analyze`
+
+No body. Runs in the request and takes 20–60 seconds, so give the call a long
+client timeout.
+
+The website address and the six description fields go to the analyst agent
+(`growth-social-analyst`, seeded in the workspace on first use and re-synced
+to its definition on every run). It is pinned to exactly `WebSearch` and
+`WebFetch`, the growth researcher's surface: it reads the homepage and up to
+four telling pages (about, pricing, product or features, customers) itself,
+and can do nothing else. What the
+owner typed wins: the analysis may sharpen a typed field but not contradict
+it, an empty analysis field is filled from the typed one, and the typed
+things-to-avoid are always kept. With no website the analysis uses the
+description alone. `pages_read` lists the http(s) URLs the agent reports it
+fetched; `logo_url` is not set.
+
+If the fetch or the model fails, the call still returns 200 with
+`analysis_status: "failed"` and a short `analysis_error`; the previous `analysis` and `analyzed_at`
+are kept. Only the analysis fields are written, so a `PUT` made while the
+analysis runs is not overwritten.
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `social.analyzer_unavailable` | No analyser is wired on this deployment. |
+| 404 | `social_profile.not_found` | The workspace has no profile yet. |
+| 422 | `social.nothing_to_analyze` | Neither a website nor any description field is set. |
+
+### `POST /api/v1/growth/social/profile/complete`
+
+No body. Needs `owner_name`, `company_name`, `team_size`, `monthly_revenue`,
+`role`, `business_model` and `category`; otherwise
+`422 social.profile_incomplete`, whose message names the missing fields.
+Stamps `onboarding_completed_at` on the first success and keeps that stamp on
+later calls. `404 social_profile.not_found` without a profile.
+
+### `POST /api/v1/growth/social/ideas/generate`
+
+Body (optional): `{"count": 6}`, 1–12, default 6. A no-tools ideas agent
+(`growth-social-ideas`) writes that many short-form post ideas from the
+completed profile and is shown the workspace's 40 most recent hooks so it does
+not repeat them. It is told never to claim results or metrics. New ideas are
+stored with `status: "new"` and returned as `{items}`:
+
+```json
+{
+  "items": [
+    {
+      "id": "6703…",
+      "workspace_id": "w1",
+      "format": "hook_demo",
+      "hook": "What a first dental visit actually looks like",
+      "on_screen_text": "No drills. No needles. Just counting teeth.",
+      "caption": "Booking a first visit? Here is the whole thing in 30 seconds.",
+      "why": "Parents worry about the unknown; showing it removes the fear.",
+      "script": ["Open on the waiting room", "Chair goes back", "Counting teeth", "Sticker"],
+      "hashtags": ["#kidsdentist", "#firstvisit"],
+      "status": "new",
+      "created_at": "2026-10-06T10:05:00+00:00",
+      "updated_at": "2026-10-06T10:05:00+00:00"
+    }
+  ]
+}
+```
+
+`format` is `hook_demo | slideshow | wall_of_text | meme | talking_head`.
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `social.ideas_unavailable` | No ideas writer is wired on this deployment. |
+| 409 | `social.onboarding_incomplete` | No profile, or onboarding not completed. |
+| 502 | `social.ideas_failed` | The run failed or returned no usable idea. Nothing is stored. |
+| 422 | — | `count` outside 1–12. |
+
+### `PATCH /api/v1/growth/social/ideas/{idea_id}`
+
+Any of `status` (`new | approved | skipped`), `hook` (non-blank, ≤ 300),
+`on_screen_text` (≤ 500), `caption` (≤ 2200), `script` and `hashtags` (blank
+items dropped, then the first 12 beats and 15 tags kept). At least one is required. `format` and `why` are the
+generator's and cannot be edited. Returns the idea. A malformed id, an
+unknown id and another workspace's id all return
+`404 social_idea.not_found`.
 
 ## Growth — the agent surface (`pocketpaw_growth` MCP)
 
@@ -7209,8 +7975,9 @@ public list), `cursor`, `limit` (1-200, default 50). Response `200`:
 
 ```json
 {
-  "id": "6660a1...", "source": "site_template", "source_id": "665f1c...",
-  "workspace_id": "w1", "owner": "u1", "kind": "site", "title": "Bakery",
+  "id": "6660a1...", "slug": "bakery", "source": "site_template",
+  "source_id": "665f1c...", "workspace_id": "w1", "owner": "u1", "kind": "site",
+  "title": "Bakery",
   "description": "", "live_url": "https://bakery.pawsites.workers.dev",
   "featured": false, "hidden": true, "report_count": 3,
   "dismissed_reporter_count": 0, "remix_count": 3,
@@ -7314,6 +8081,40 @@ when there was nothing to clear.
 ```json
 { "reason": "Trial ended" }
 ```
+
+---
+
+## Platform Wallet Credits
+
+Cross-tenant routes under `/api/v1/platform/workspaces/{workspace_id}/credits*`
+(`ee/pocketpaw_ee/cloud/platform/credits.py`). Every amount is in micro-credits
+(1,000,000 micro is one credit). Reads need `platform.credits.read` (SUPPORT), writes
+need `platform.credits.adjust` (OPERATOR), and each call leaves a `PlatformAuditEvent`.
+
+### `GET /api/v1/platform/workspaces/{workspace_id}/credits` · `GET .../credits/history`
+
+The wallet balance with `has_wallet` and `unapplied_count`, and the ledger newest first
+(`cursor`, `limit` up to 200, exact-match `cause` filter). An id with no wallet reads as
+an empty one; these two routes do not look the workspace up.
+
+### `POST /api/v1/platform/workspaces/{workspace_id}/credits/adjust`
+
+A signed `amount_delta_micro` (non-zero) with a required `reason` and
+`idempotency_key`. Positive grants as `operator_grant`, negative claws back as
+`operator_debit` and never takes the balance below zero (`402 credits.insufficient`).
+
+```json
+{ "amount_delta_micro": 375000, "reason": "Refund for a failed run", "idempotency_key": "case-7" }
+```
+
+### `POST /api/v1/platform/workspaces/{workspace_id}/credits/reconcile`
+
+Repairs drift between the ledger and the stored balance. Needs a `reason`. Run it only
+while the wallet is quiet: a grant or debit that races it can corrupt the balance.
+
+Both writes return `404 workspace.not_found` when no workspace has that id, including a
+malformed id such as `None`. The check runs before the audit row is opened, so a refused
+call writes nothing. A soft-deleted workspace still resolves.
 
 ---
 

@@ -99,12 +99,11 @@ class EntitlementsResponse(BaseModel):
     # next site is covered or costs credits. Reading it from the plan catalog on
     # the client would mean re-deriving the workspace's own tier there.
     included_sites: int | None = None
-    # May this account read the source code of the sites it owns. On the wire so
-    # the builder can hide the source view and NAME the reason, rather than
-    # offering it and having the read refused. Defaults to False: a response
-    # assembled without the field withholds source, matching the domain object's
-    # own fail-closed default.
-    site_source_visible: bool = False
+    # The operator's workspace-wide site-source override: False revokes source on
+    # every site, True grants it, None (every plan's answer) leaves each site to its
+    # own tier. Per-pocket visibility is ``sourceVisible`` on the pocket wire dict,
+    # which is what a client should gate a Code tab on.
+    site_source_visible: bool | None = None
 
 
 def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:

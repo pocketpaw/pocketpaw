@@ -1,20 +1,19 @@
 # legacy_build_shell.py — find, classify and migrate build-shell files that old Paw
 # Sites authored before the generator took ownership of them.
 #
-# Created 2026-09-24 (fix/sites-legacy-build-shell-migration, PP-4). paw-sites PS-1
-# (#55) makes the generator REFUSE a svelte source map that authors package.json,
-# any vite.config.* spelling, svelte.config.js, src/routes/+layout.ts/.js, a non-
-# canonical paw.dependencies.json, or the install config (bunfig.toml, .npmrc,
-# lockfiles). react reserves the same vite/install set. Before PS-1 an authored copy
-# silently won, so real pockets carry these files and would fail their next build.
+# Old Paw Sites authored files the generator now owns and refuses. Since 2026-10-07
+# ("open everything") package.json, vite.config.*, svelte.config.js, bunfig.toml and
+# .npmrc are author-writable again (the generator merges them), so what is left is
+# svelte's src/routes/+layout.ts/.js, lockfiles, a non-canonical spelling of
+# paw.dependencies.json, and the generator namespaces.
 #
 # Three layers live here, pure first:
 #
 #   * ``classify_source`` — a PURE classifier. For each reserved key it says
-#     SAFE_DROP (the generator emits the equivalent anyway), CONVERTIBLE (it carries
-#     npm packages that can move into paw.dependencies.json through the PP-1
-#     resolver) or NEEDS_REVIEW (anything we cannot prove equivalent; reported, never
-#     touched).
+#     SAFE_DROP (the generator emits the equivalent anyway), CONVERTIBLE (a manifest
+#     under another spelling whose packages move into paw.dependencies.json through
+#     the resolver) or NEEDS_REVIEW (anything we cannot prove equivalent; reported,
+#     never touched).
 #   * ``generator_owned_keys_message`` — the runtime safety net's wording, so a build
 #     of an unmigrated pocket names the file instead of failing as generator_failed.
 #   * ``run_migration`` — the operator runner behind
@@ -22,15 +21,12 @@
 #     through ``pockets.service.migrate_legacy_build_shell`` (one draft version per
 #     pocket, never a publish).
 #
-# The stock shapes below are copied from paw-sites' svelte-scaffold.ts /
-# react-scaffold.ts / templates/svelte.config.js.tmpl at PS-1. Comparison is
-# whitespace-, comment-, quote-, semicolon- and trailing-comma-insensitive, and
-# import order does not matter. Anything else is NEEDS_REVIEW: a false "safe" drops
-# behaviour a site depended on, a false "review" only costs a human a look.
+# The layout comparison is whitespace-, comment-, quote- and semicolon-insensitive.
+# Anything else is NEEDS_REVIEW: a false "safe" drops behaviour a site depended on, a
+# false "review" only costs a human a look.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Callable, Mapping
@@ -40,10 +36,8 @@ from typing import Any
 
 from pocketpaw_ee.sites.dependency_manifest import (
     DEPENDENCY_MANIFEST_PATH,
-    INSTALL_CONFIG_FILES,
-    VITE_CONFIG_FILES,
+    LOCKFILES,
     is_dependency_manifest_path,
-    is_toolchain_reserved,
     parse_manifest,
     render_manifest,
 )
@@ -92,7 +86,6 @@ class Finding:
 
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 _LINE_COMMENT_RE = re.compile(r"(?m)(^|[^:'\"])//.*$")
-_IMPORT_RE = re.compile(r"""import\s+(.+?)\s+from\s+['"]([^'"]+)['"]\s*;?""", re.S)
 
 
 def _strip_comments(text: str) -> str:
@@ -105,69 +98,9 @@ def _squash(text: str) -> str:
     return re.sub(r",([}\])])", r"\1", out)
 
 
-def _split_module(text: str) -> tuple[frozenset[tuple[str, str]], str]:
-    """(imports as {(clause, module)}, squashed remainder) of a config module."""
-    code = _strip_comments(text)
-    imports = frozenset((_squash(m.group(1)), m.group(2)) for m in _IMPORT_RE.finditer(code))
-    return imports, _squash(_IMPORT_RE.sub("", code))
-
-
 # --------------------------------------------------------------------------- #
-# Stock shapes (paw-sites PS-1)
+# The svelte prerender layout
 # --------------------------------------------------------------------------- #
-
-_VITE_STOCK: dict[str, tuple[str, str]] = {
-    # engine -> (plugin import clause/module, plugin call)
-    "svelte": ("{sveltekit}|@sveltejs/kit/vite", "sveltekit()"),
-    "react": ("react|@vitejs/plugin-react", "react()"),
-}
-
-
-def _is_stock_vite_config(engine: str, text: str) -> bool:
-    stock = _VITE_STOCK.get(engine)
-    if stock is None:
-        return False
-    clause, module = stock[0].split("|")
-    call = stock[1]
-    imports, body = _split_module(text)
-    plugin = (clause, module)
-    define = ("{defineConfig}", "vite")
-    if body == f"exportdefaultdefineConfig({{plugins:[{call}]}})":
-        return imports == {plugin, define}
-    if body == f"exportdefault{{plugins:[{call}]}}":
-        return imports in ({plugin}, {plugin, define})
-    return False
-
-
-def _svelte_config_bodies(*, dynamic: bool) -> set[str]:
-    if dynamic:
-        return {
-            "exportdefault{preprocess:vitePreprocess(),kit:{adapter:adapter(),"
-            "experimental:{remoteFunctions:true},prerender:{handleMissingId:'warn',"
-            "handleHttpError:'warn'}},compilerOptions:{experimental:{async:true}}}"
-        }
-    # The generator's static config, and the SUBSETS of it an older authored copy
-    # carries. Each omitted part only makes the build stricter than what the
-    # generator now emits (prerender 'fail' instead of 'warn', no top-level await),
-    # so replacing the authored file cannot break a build that worked.
-    bodies: set[str] = set()
-    for pre in ("preprocess:vitePreprocess(),", ""):
-        for prerender in (",prerender:{handleMissingId:'warn',handleHttpError:'warn'}", ""):
-            for compiler in (",compilerOptions:{experimental:{async:true}}", ""):
-                bodies.add(f"exportdefault{{{pre}kit:{{adapter:adapter(){prerender}}}{compiler}}}")
-    return bodies
-
-
-def _is_stock_svelte_config(text: str, *, dynamic: bool) -> bool:
-    imports, body = _split_module(text)
-    adapter_mod = "@sveltejs/adapter-cloudflare" if dynamic else "@sveltejs/adapter-static"
-    adapter = ("adapter", adapter_mod)
-    preprocess = ("{vitePreprocess}", "@sveltejs/vite-plugin-svelte")
-    if body not in _svelte_config_bodies(dynamic=dynamic):
-        return False
-    expected = {adapter, preprocess} if "vitePreprocess()" in body else {adapter}
-    return imports == expected
-
 
 _LAYOUT_FLAG_RE = re.compile(r"^exportconst(prerender|csr|ssr)=(true|false)$")
 
@@ -221,152 +154,12 @@ def _classify_layout(key: str, text: str, keeps_client_bundle: bool) -> Finding:
     )
 
 
-# Toolchain packages each engine's generated package.json emits (or derives from
-# what it emitted: the dynamic adapter, valibot, @noble/hashes), with their pins.
-_SVELTE_TOOLCHAIN: dict[str, str] = {
-    "@cloudflare/workers-types": "^4.20240909.0",
-    "@sveltejs/adapter-static": "^3.0.10",
-    "@sveltejs/adapter-cloudflare": "^7.0.0",
-    "@sveltejs/kit": "^2.0.0",
-    "@sveltejs/vite-plugin-svelte": "^6.0.0",
-    "svelte": "^5.0.0",
-    "vite": "^6.0.0",
-    "valibot": "^1.4.1",
-    "@noble/hashes": "^1.5.0",
-}
-_REACT_TOOLCHAIN: dict[str, str] = {
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^6.0.0",
-}
-_STOCK_SCRIPTS: dict[str, dict[str, set[str]]] = {
-    "svelte": {
-        "dev": {"vite dev"},
-        "build": {"vite build", "vite build && node scripts/prune-client.mjs"},
-        "preview": {"vite preview"},
-    },
-    "react": {
-        "dev": {"vite"},
-        "build": {
-            "vite build && vite build --ssr src/paw/entry-server.tsx --outDir .paw-ssr && "
-            "bun paw-prerender.mjs"
-        },
-        "preview": {"vite preview"},
-    },
-}
-_HARMLESS_PKG_KEYS = frozenset(
-    {
-        "name",
-        "private",
-        "type",
-        "version",
-        "description",
-        "scripts",
-        "dependencies",
-        "devDependencies",
-        "license",
-        "author",
-    }
-)
-_REGISTRY_SPEC_RE = re.compile(r"^[\s0-9A-Za-z.^~<>=|*+-]+$")
-
-
-def _classify_package_json(key: str, text: str, engine: str, keeps_client_bundle: bool) -> Finding:
-    def review(reason: str) -> Finding:
-        return Finding(key, "package_json", Classification.NEEDS_REVIEW, reason)
-
-    try:
-        pkg = json.loads(text)
-    except ValueError:
-        return review("is not valid JSON.")
-    if not isinstance(pkg, dict):
-        return review("is not a JSON object.")
-    extra = sorted(set(pkg) - _HARMLESS_PKG_KEYS)
-    if extra:
-        return review(
-            f"sets {', '.join(extra)}, which the generated package.json does not carry "
-            "and the dependency policy refuses from an author."
-        )
-    scripts = pkg.get("scripts") or {}
-    stock = _STOCK_SCRIPTS.get(engine, {})
-    if not isinstance(scripts, dict) or any(
-        name not in stock or value not in stock[name] for name, value in scripts.items()
-    ):
-        return review("defines scripts that differ from the generated build scripts.")
-
-    toolchain = _SVELTE_TOOLCHAIN if engine == "svelte" else _REACT_TOOLCHAIN
-    requests: list[tuple[str, str]] = []
-    for block in ("dependencies", "devDependencies"):
-        deps = pkg.get(block) or {}
-        if not isinstance(deps, dict):
-            return review(f"`{block}` is not an object.")
-        for name, spec in deps.items():
-            if not isinstance(spec, str):
-                return review(f"`{name}` has a non-string version.")
-            if name in toolchain:
-                if spec != toolchain[name]:
-                    return review(
-                        f"pins toolchain package `{name}` to {spec}; the generator pins "
-                        f"{toolchain[name]}. Check the site does not rely on that version."
-                    )
-                continue
-            if is_toolchain_reserved(name):
-                return review(
-                    f"declares `{name}`, which the generated build no longer includes and "
-                    "an author may not declare."
-                )
-            if not _REGISTRY_SPEC_RE.match(spec):
-                return review(
-                    f"declares `{name}` as `{spec}`, which is not a registry version range."
-                )
-            requests.append((name, spec.strip() or "latest"))
-    if not requests:
-        return Finding(
-            key,
-            "package_json",
-            Classification.SAFE_DROP,
-            "declares only toolchain packages the generator pins the same way.",
-        )
-    if engine == "svelte" and not keeps_client_bundle:
-        return review(
-            "declares npm packages but the site does not keep its client bundle, and the "
-            "generator refuses author packages on such a svelte site (they could never "
-            "run). Decide whether to set keepsClientBundle or drop the packages."
-        )
-    names = ", ".join(n for n, _ in requests)
+def _classify_lockfile(key: str) -> Finding:
     return Finding(
         key,
-        "package_json",
-        Classification.CONVERTIBLE,
-        f"declares npm packages ({names}); they move into paw.dependencies.json through "
-        "the resolver.",
-        tuple(requests),
-    )
-
-
-def _classify_install_config(key: str, folded: str, text: str) -> Finding:
-    if folded in ("bun.lock", "bun.lockb", "package-lock.json"):
-        return Finding(
-            key,
-            "lockfile",
-            Classification.SAFE_DROP,
-            "is a derived lockfile. The build resolves from the generated package.json "
-            "under the sandbox's own supply-chain floor.",
-        )
-    meaningful = [
-        line
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith(("#", ";"))
-    ]
-    if not meaningful:
-        return Finding(key, "install_config", Classification.SAFE_DROP, "is empty.")
-    return Finding(
-        key,
-        "install_config",
-        Classification.NEEDS_REVIEW,
-        "carries install settings (registry, release-age floor, auth). The build uses "
-        "the sandbox's own config now, so check nothing depended on these.",
+        "lockfile",
+        Classification.SAFE_DROP,
+        "is a derived lockfile. The build resolves from the merged package.json.",
     )
 
 
@@ -426,7 +219,10 @@ def classify_source(
     keeps_client_bundle: bool,
     dynamic: bool = False,
 ) -> list[Finding]:
-    """Classify every generator-owned key in ``source``. Pure; order is by key."""
+    """Classify every generator-owned key in ``source``. Pure; order is by key.
+
+    ``dynamic`` is accepted for callers; no remaining classification depends on it.
+    """
     findings: list[Finding] = []
     for key in generator_owned_keys(engine, source):
         assert source is not None
@@ -439,52 +235,10 @@ def classify_source(
             continue
         if is_dependency_manifest_path(key):
             findings.append(_classify_manifest_variant(key, text, source))
-        elif folded == "package.json" and engine in ("svelte", "react"):
-            findings.append(_classify_package_json(key, text, engine, keeps_client_bundle))
-        elif folded in VITE_CONFIG_FILES and engine in ("svelte", "react"):
-            if _is_stock_vite_config(engine, text):
-                findings.append(
-                    Finding(
-                        key,
-                        "vite_config",
-                        Classification.SAFE_DROP,
-                        "is the stock plugins-only config the generator writes.",
-                    )
-                )
-            else:
-                findings.append(
-                    Finding(
-                        key,
-                        "vite_config",
-                        Classification.NEEDS_REVIEW,
-                        "differs from the stock plugins-only config (extra plugins, "
-                        "aliases or build options would be lost).",
-                    )
-                )
-        elif folded == "svelte.config.js" and engine == "svelte":
-            if _is_stock_svelte_config(text, dynamic=dynamic):
-                findings.append(
-                    Finding(
-                        key,
-                        "svelte_config",
-                        Classification.SAFE_DROP,
-                        "matches the generator's svelte.config.js (or a stricter subset).",
-                    )
-                )
-            else:
-                findings.append(
-                    Finding(
-                        key,
-                        "svelte_config",
-                        Classification.NEEDS_REVIEW,
-                        "differs from the generator's svelte.config.js (adapter, aliases "
-                        "or kit options would be lost).",
-                    )
-                )
         elif folded in ("src/routes/+layout.ts", "src/routes/+layout.js") and engine == "svelte":
             findings.append(_classify_layout(key, text, keeps_client_bundle))
-        elif folded in INSTALL_CONFIG_FILES:
-            findings.append(_classify_install_config(key, folded, text))
+        elif folded in LOCKFILES:
+            findings.append(_classify_lockfile(key))
         else:
             findings.append(
                 Finding(
@@ -513,12 +267,11 @@ def reserved_path_message(keys: list[str] | str | None) -> str:
     named = ", ".join(f"`{k}`" for k in keys) if keys else "a build-shell file"
     return (
         f"This site's source map contains {named}, which the site generator now owns "
-        "and writes itself (the build shell: package.json, vite.config.*, "
-        "svelte.config.js, src/routes/+layout.ts, install config). The site was "
-        "authored before that change, so it cannot build until the one-time "
-        "build-shell migration moves the file out. An edit cannot fix it: the edit "
-        "tools refuse those paths. npm packages belong in paw.dependencies.json via "
-        "set_site_dependencies."
+        "and writes itself (src/routes/+layout.ts, lockfiles, a second spelling of "
+        "paw.dependencies.json). The site was authored before that change, so it "
+        "cannot build until the one-time build-shell migration moves the file out. "
+        "An edit cannot fix it: the edit tools refuse those paths. npm packages "
+        "belong in paw.dependencies.json via set_site_dependencies."
     )
 
 

@@ -341,12 +341,10 @@ class TestLanes:
     async def test_a_legacy_build_shell_file_is_a_static_failure_without_a_sandbox(
         self, beanie_test_db
     ) -> None:
-        from tests.ee.sites.test_legacy_build_shell import SVELTE_VITE
-
+        # A lockfile stays generator-owned (package.json / vite.config.* are the
+        # author's since 2026-10-07).
         pool = Pool()
-        verdict = await _verify(
-            await _pocket(source={**_SVELTE, "vite.config.ts": SVELTE_VITE}), _pool=pool
-        )
+        verdict = await _verify(await _pocket(source={**_SVELTE, "bun.lock": "{}"}), _pool=pool)
         assert verdict["status"] == "failed"
         assert verdict["errors"][0]["code"] == "reserved_path"
         assert pool.calls == []

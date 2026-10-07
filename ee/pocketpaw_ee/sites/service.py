@@ -3,8 +3,12 @@
 #
 # What lives here: publish / preview / editable lanes (``publish``,
 # ``publish_pocket``, ``_deploy_site_doc``) and the three deploy targets they
-# pick between (local, workers.dev via ``workers_deploy``, Workers-for-Platforms);
-# the dynamic-site provision seams the ``provision_site`` job calls; the build
+# pick between (local, workers.dev via ``workers_deploy``, Workers-for-Platforms;
+# a build carrying ``paw-build.json`` deploys through ``bundle_deploy`` and
+# ``deploy_bundle``; a ``project`` pocket publishes its stored sandbox build that way,
+# ``_deploy_project_site``, into WfP or, in workers mode, as an account-level Worker
+# named and served like a wrangler site; its drafts / build logs are read here too); the
+# dynamic-site provision seams the ``provision_site`` job calls; the build
 # stamps applied between build and deploy (concierge bar, free badge or partner
 # co-brand) and the AI-ready inputs (``_ai_ready_inputs``: training opt-in,
 # per-site IndexNow key, canonical host); custom domains, slugs and renames; site
@@ -33,6 +37,7 @@ import logging
 import re
 import secrets
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -67,13 +72,13 @@ from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.cloud.models.site_export import SiteExport as _SiteExportDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _SiteRateCounterDoc
-from pocketpaw_ee.sites import project_zip
+from pocketpaw_ee.sites import bundle_deploy, preview_origin, project_zip
 from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
 from pocketpaw_ee.sites.dependency_manifest import (
     DEPENDENCY_MANIFEST_PATH,
-    has_author_dependencies,
     parse_manifest,
     render_manifest,
+    requires_sandbox,
 )
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
@@ -519,22 +524,130 @@ class _FilesystemArtifactStore:
             return
         self._evict(pocket_dir)
 
-    def _evict(self, pocket_dir: Path) -> None:
-        """Keep only the newest ``_artifact_keep()`` artifact files (current + previous
-        by default) in the pocket dir, deleting the oldest by mtime. Best-effort."""
+    # -- Draft preview origin (preview_origin.py) ---------------------------------
+    # Beside ``<hash>.json`` a draft keeps ``<hash>.dist.tgz`` (its full served file
+    # set) and ``<hash>.token`` (its preview capability token); the token's reverse
+    # pointer lives in ``artifact_home()/_preview_tokens/<token>.json``. All three are
+    # evicted together, per content hash.
+
+    _TOKEN_DIR = "_preview_tokens"
+
+    @staticmethod
+    def _atomic_write(path: Path, data: bytes) -> None:
+        import os
+        import tempfile
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
-            files = sorted(
-                (p for p in pocket_dir.glob("*.json") if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, str(path))
         except OSError:
-            return
-        for stale in files[_artifact_keep() :]:
             try:
-                stale.unlink()
+                os.unlink(tmp)
             except OSError:
                 pass
+            raise
+
+    def write_dist(self, pocket_id: str, content_hash: str, data: bytes) -> bool:
+        """Store a draft's packed files. True when they are on disk."""
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        pocket_dir = artifact_home() / pocket_id
+        try:
+            self._atomic_write(pocket_dir / f"{content_hash}.dist.tgz", data)
+        except OSError:
+            logger.warning(
+                "sites.artifact_store: dist write failed for pocket %s", pocket_id, exc_info=True
+            )
+            return False
+        self._evict(pocket_dir)
+        return True
+
+    def read_dist(self, pocket_id: str, content_hash: str) -> bytes | None:
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        try:
+            return (artifact_home() / pocket_id / f"{content_hash}.dist.tgz").read_bytes()
+        except OSError:
+            return None
+
+    def write_preview_token(self, pocket_id: str, content_hash: str, token: str) -> bool:
+        """Record a draft's token (reverse pointer, then forward). True when both are
+        written, i.e. the token now resolves."""
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        home = artifact_home()
+        pointer = json.dumps({"pocket_id": pocket_id, "content_hash": content_hash})
+        try:
+            # Pointer first: a token the forward file names must always resolve.
+            self._atomic_write(home / self._TOKEN_DIR / f"{token}.json", pointer.encode())
+            self._atomic_write(home / pocket_id / f"{content_hash}.token", token.encode())
+        except OSError:
+            logger.warning(
+                "sites.artifact_store: token write failed for pocket %s", pocket_id, exc_info=True
+            )
+            return False
+        return True
+
+    def read_preview_token(self, pocket_id: str, content_hash: str) -> str | None:
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        try:
+            raw = (artifact_home() / pocket_id / f"{content_hash}.token").read_text("utf-8")
+        except OSError:
+            return None
+        return raw.strip() or None
+
+    def resolve_preview_token(self, token: str) -> tuple[str, str] | None:
+        from pocketpaw_ee.sites.generator_client import artifact_home
+        from pocketpaw_ee.sites.preview_origin import TOKEN_RE
+
+        if not TOKEN_RE.fullmatch(token):
+            return None
+        try:
+            data = json.loads(
+                (artifact_home() / self._TOKEN_DIR / f"{token}.json").read_text("utf-8")
+            )
+            pocket_id, content_hash = data["pocket_id"], data["content_hash"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if not isinstance(pocket_id, str) or not isinstance(content_hash, str):
+            return None
+        # The token must still be the one this draft holds (evicted drafts 404).
+        if self.read_preview_token(pocket_id, content_hash) != token:
+            return None
+        return pocket_id, content_hash
+
+    def _evict(self, pocket_dir: Path) -> None:
+        """Keep only the newest ``_artifact_keep()`` content hashes (current + previous
+        by default) in the pocket dir — their ``.json``, ``.dist.tgz`` and ``.token``
+        together — deleting the oldest by mtime. Best-effort."""
+        groups: dict[str, list[Path]] = {}
+        newest: dict[str, float] = {}
+        try:
+            for p in pocket_dir.iterdir():
+                if not p.is_file() or not p.name.endswith((".json", ".dist.tgz", ".token")):
+                    continue
+                key = p.name.split(".", 1)[0]
+                groups.setdefault(key, []).append(p)
+                newest[key] = max(newest.get(key, 0.0), p.stat().st_mtime)
+        except OSError:
+            return
+        ordered = sorted(groups, key=lambda k: newest[k], reverse=True)
+        for stale_key in ordered[_artifact_keep() :]:
+            for stale in groups[stale_key]:
+                try:
+                    if stale.name.endswith(".token"):
+                        token = stale.read_text("utf-8").strip()
+                        if token:
+                            (pocket_dir.parent / self._TOKEN_DIR / f"{token}.json").unlink(
+                                missing_ok=True
+                            )
+                    stale.unlink()
+                except OSError:
+                    pass
 
 
 _DEFAULT_ARTIFACT_STORE = _FilesystemArtifactStore()
@@ -683,7 +796,7 @@ async def _prewarm_native_artifact(
     ripple_spec = pocket.get("rippleSpec") or {}
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
     site_name = (pocket.get("name") or "").strip() or "Untitled site"
-    origin = (builder_origin or "").strip() or _builder_origin()
+    origin = await resolve_armed_builder_origin(workspace_id, pocket_id, builder_origin)
 
     # MT-1: the site's own declaration that its client JS is load-bearing, resolved the
     # SAME way publish resolves it. It rides BOTH the hash and the build below — the hash
@@ -1087,6 +1200,67 @@ def _capture_base() -> str:
 _LOCAL_BUILDER_ORIGIN = "http://localhost:8888"
 
 
+#: A request Origin worth remembering as the editor's view origin: scheme://host[:port].
+_VIEW_ORIGIN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://[^\s/?#]{1,200}$")
+
+
+def _recorded_view_origin(pocket_id: str) -> str:
+    from pocketpaw_ee.sites import verify_store
+
+    try:
+        record = verify_store.default_verify_store().read(pocket_id, verify_store.VIEW_ORIGIN_KEY)
+    except Exception:  # noqa: BLE001 — a lost record falls through to the next rung
+        return ""
+    origin = record.get("origin") if isinstance(record, dict) else None
+    return origin if isinstance(origin, str) and _VIEW_ORIGIN_RE.match(origin) else ""
+
+
+def _record_view_origin(pocket_id: str, origin: str) -> None:
+    """Remember the editor's request Origin for this pocket (only when it changed)."""
+    from pocketpaw_ee.sites import verify_store
+
+    if not _VIEW_ORIGIN_RE.match(origin) or _recorded_view_origin(pocket_id) == origin:
+        return
+    try:
+        verify_store.default_verify_store().write(
+            pocket_id, verify_store.VIEW_ORIGIN_KEY, {"origin": origin}
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("sites: could not record the view origin for %s", pocket_id)
+
+
+async def resolve_armed_builder_origin(
+    workspace_id: str, pocket_id: str, request_origin: str | None = None
+) -> str:
+    """THE builder origin for every armed-hash computation of a pocket's draft.
+
+    The origin is part of the native-artifact content hash, so two callers that pick
+    different origins build the same edit twice (or three times). Every caller goes
+    through here: the editor's native-artifact view, the post-edit pre-warm, the
+    verify pipeline and ``preview_site``. Precedence:
+
+      1. ``request_origin`` — the browser asking for the draft (and it is recorded);
+      2. the origin the editor last viewed this draft with (``verify_store``);
+      3. the Site row's stored ``builder_origin`` (``make_site_editable``);
+      4. the configured ``PAW_SITES_BUILDER_ORIGIN`` (``_builder_origin``).
+
+    So the agent-side callers (no request) build exactly the render the open editor
+    reads. Never raises.
+    """
+    requested = (request_origin or "").strip()
+    if requested:
+        _record_view_origin(pocket_id, requested)
+        return requested
+    if viewed := _recorded_view_origin(pocket_id):
+        return viewed
+    try:
+        doc = await _canonical_site_doc(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001 — an origin guess is never worth a failed call
+        doc = None
+    stored = (getattr(doc, "builder_origin", "") or "").strip() if doc is not None else ""
+    return stored or _builder_origin()
+
+
 def _builder_origin() -> str:
     """The dashboard/builder origin an editable Paw Site postMessages its
     section rects to (SE-2b). The generated edit-bridge only accepts messages
@@ -1212,7 +1386,9 @@ def _deploy_mode() -> str | None:
       * ``local``   → serve the static site from localhost (local_server.deploy_local).
       * ``workers`` → deploy as a regular Worker on the free workers.dev tier
                       (workers_deploy.deploy_workers — STATIC sites only; a dynamic
-                      site raises rather than deploying a broken site).
+                      site raises rather than deploying a broken site). A
+                      ``project`` bundle deploys here as an account-level Worker
+                      through the HTTP API (``bundle_deploy``), never wrangler.
       * ``wfp``     → the Workers-for-Platforms dispatch-namespace path
                       (cloudflare_client.put_worker) — today's Cloudflare default.
       * UNSET (``None``) → PRESERVE today's behaviour: ``_local_mode()`` selects the
@@ -1220,9 +1396,15 @@ def _deploy_mode() -> str | None:
                       changes for an environment that does not set the var.
 
     A value other than the three known modes is treated as UNSET (logged) so a typo
-    degrades to the safe legacy behaviour rather than failing the publish."""
+    degrades to the safe legacy behaviour rather than failing the publish.
+
+    ``PAW_SITES_LOCAL=1`` beats all of it and answers ``local``: it is the explicit
+    "never deploy to Cloudflare" switch, so a ``PAW_CF_DEPLOY_MODE`` that also reached
+    the environment (a stray ``.env``) must not send a local run to workers.dev."""
     import os
 
+    if os.environ.get("PAW_SITES_LOCAL") == "1":
+        return "local"
     raw = (os.environ.get("PAW_CF_DEPLOY_MODE") or "").strip().lower()
     if not raw:
         return None
@@ -1409,6 +1591,8 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # A connected (foreign-origin) site — see SiteResponse.foreign_origin.
         foreign_origin=bool(getattr(doc, "foreign_origin", False)),
         allowed_origins=list(getattr(doc, "allowed_origins", None) or []),
+        # The connected site's own page title; "" on every row that predates it.
+        origin_title=getattr(doc, "origin_title", "") or "",
         # SL-3: the build lane's state, straight off the persisted row. These three
         # were declared on the DTO by SG-9i and never populated here, so every
         # response carried the DEFAULTS — ``build_status`` frozen at "none" no matter
@@ -2107,6 +2291,7 @@ async def bind_foreign_concierge(
             )
             return existing
 
+        minted = True
         try:
             site = await mint_foreign_site(
                 workspace_id=workspace_id,
@@ -2142,6 +2327,7 @@ async def bind_foreign_concierge(
                     scopes=scopes,
                 )
             else:
+                minted = False
                 site = adopted
                 logger.info(
                     "sites.bind_foreign: lost the insert race for pocket %s; adopted "
@@ -2150,6 +2336,13 @@ async def bind_foreign_concierge(
                     str(site.id),
                 )
 
+    if minted:
+        # A connected site never deploys, so nothing else gives its card a title,
+        # an icon and a picture. Background, never raises; the winner of a race
+        # schedules its own, so an adopted row does not schedule a second.
+        from pocketpaw_ee.sites import connected_card
+
+        connected_card.schedule_connected_card(site)
     return site
 
 
@@ -2273,7 +2466,37 @@ async def rebind_foreign_concierge(
         str(site.id),
         bound or "<none>",
     )
+    from pocketpaw_ee.sites import connected_card
+
+    connected_card.schedule_connected_card(site)
     return bound
+
+
+async def schedule_connected_cards_for_origin(workspace_id: str, host: str) -> int:
+    """Refresh the card of every connected site in this workspace served on ``host``.
+
+    Called after an origin is (re-)verified: a fresh proof is what lets the card
+    refresh read the customer's page, so a site whose proof had gone stale picks up
+    its title, icon and picture here. Returns how many were scheduled. Never raises
+    to the caller's request: the verification already succeeded.
+    """
+    from pocketpaw_ee.sites import connected_card
+
+    wanted = (host or "").strip().lower()
+    if not workspace_id or not wanted:
+        return 0
+    try:
+        docs = await _SiteDoc.find({"workspace": workspace_id, "foreign_origin": True}).to_list()
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.connected_card: could not list connected sites", exc_info=True)
+        return 0
+    count = 0
+    for doc in docs:
+        hosts = {str(h).strip().lower() for h in (getattr(doc, "allowed_origins", None) or [])}
+        if wanted in hosts:
+            connected_card.schedule_connected_card(doc)
+            count += 1
+    return count
 
 
 async def publish(
@@ -2291,6 +2514,7 @@ async def publish(
     builder_origin: str | None = None,
     keeps_client_bundle: bool = False,
     preview: bool = False,
+    confirm_destructive_migrations: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -2528,7 +2752,149 @@ async def publish(
         bundle_reader=_bundle_reader,
         local_deploy=_local_deploy,
         workers_deploy=_workers_deploy,
+        confirm_destructive_migrations=confirm_destructive_migrations,
     )
+
+
+async def _deploy_project_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    source: dict[str, str] | None,
+    builder_origin: str | None,
+    cloudflare: Any | None,
+    local_deploy: Callable[[str, str], str] | None,
+    confirm_destructive_migrations: bool = False,
+    _store: Any | None = None,
+) -> _SiteDoc:
+    """Publish a ``project`` pocket from its stored draft build.
+
+    Nothing builds here and nothing the author wrote runs here: the bundle the sandbox
+    built for the pocket's CURRENT source (``project_build``) is materialized and
+    handed to ``_deploy_site_doc`` as a prebuilt tree, which deploys it through
+    ``bundle_deploy`` + the binding provisioner: into the WfP namespace, or (workers
+    mode / ``PAW_SITES_PROJECT_DEPLOY_TARGET=account``) as an account-level Worker.
+    A source with no finished draft build is a 409 (open the preview, or run a
+    build, then publish). The site's plan is checked against the manifest first
+    (``project_build.check_plan_allows``).
+
+    The Site doc is ensured (inserted undeployed on a first publish) BEFORE the deploy,
+    because the provisioner records the D1 / KV / R2 it creates on it. A ``d1``
+    binding gets the site's real database, and the project's ``migrations/*.sql``
+    (read from ``source``, the same files the bundle was built from) are applied to it
+    before the Worker upload (``project_d1``).
+    """
+    import shutil
+    import tempfile
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+    from pocketpaw_ee.sites import project_build
+
+    files_source = source if isinstance(source, dict) else None
+    project_build.project_files(files_source)
+    content_hash = project_build.project_content_hash(files_source or {})
+    store = _store or _default_artifact_store()
+    bundle = store.read_dist(pocket_id, project_build.bundle_key(content_hash))
+    if not bundle:
+        raise ConflictError(
+            "sites.project_build_required",
+            "This project has no finished build of its current files. Open the preview "
+            "(or run a build), wait for it to finish, then publish.",
+        )
+    work = tempfile.mkdtemp(prefix=f"paw-project-{site_id}-")
+    try:
+        try:
+            manifest = project_build.materialize_bundle(bundle, Path(work))
+        except ValueError as exc:
+            raise ValidationError(
+                "sites.bundle_invalid", f"The stored build cannot be deployed: {exc}"
+            ) from exc
+        doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+        project_build.check_plan_allows(
+            manifest,
+            paid=entitlements_service.site_paid_backends_entitled(
+                plan_tier=getattr(doc, "plan_tier", None),
+                subscription_status=getattr(doc, "subscription_status", None),
+            ),
+            has_custom_domain=bool(getattr(doc, "domains", None)),
+        )
+        if doc is None:
+            await _ensure_undeployed_site_doc(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                pocket_id=pocket_id,
+                site_id=site_id,
+                signed_key=signed_key,
+                site_name=site_name,
+                builder_origin=builder_origin,
+            )
+        return await _deploy_site_doc(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            ripple_spec=None,
+            theme={},
+            engine="project",
+            source=source,
+            pattern="landing",
+            builder_origin=builder_origin,
+            cloudflare=cloudflare,
+            local_deploy=local_deploy,
+            prebuilt_project_dir=work,
+            confirm_destructive_migrations=confirm_destructive_migrations,
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+async def _ensure_undeployed_site_doc(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    builder_origin: str | None,
+) -> _SiteDoc:
+    """The site's canonical doc, inserted undeployed (capture config seeded) when a
+    first publish has none yet. An existing doc is returned untouched: the
+    post-deploy upsert refreshes it, and a failed deploy must not change it."""
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is not None:
+        return doc
+    doc = _SiteDoc(
+        id=oid,
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        owner=user_id,
+        name=site_name,
+        script_name=site_id,
+        # Nothing serves yet; the post-deploy upsert flips both.
+        deployed=False,
+        url="",
+        signed_key=signed_key,
+        builder_origin=builder_origin or "",
+        allowed_origins=_default_allowed_origins(),
+        event_mapping=_DEFAULT_EVENT_MAPPING,
+    )
+    try:
+        await doc.insert()
+    except DuplicateKeyError:
+        # A concurrent publish of this site inserted it first.
+        found = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+        if found is None:
+            raise
+        doc = found
+    return doc
 
 
 async def _deploy_site_doc(
@@ -2561,6 +2927,9 @@ async def _deploy_site_doc(
     # growing a second copy of the deploy tail. One deploy path, two places the build
     # can have happened.
     prebuilt_project_dir: str | None = None,
+    # A project publish may run migrations that delete data the site holds only when
+    # the owner confirmed it (``project_d1``). Ignored by every other engine.
+    confirm_destructive_migrations: bool = False,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -2605,6 +2974,21 @@ async def _deploy_site_doc(
     """
     # DP0-4: fork BEFORE any build. A dynamic site defers to the provision job; only
     # a static site takes the inline build/deploy/upsert path unchanged below.
+    if normalize_engine(engine) == "project" and prebuilt_project_dir is None:
+        return await _deploy_project_site(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            source=source,
+            builder_origin=builder_origin,
+            cloudflare=cloudflare,
+            local_deploy=local_deploy,
+            confirm_destructive_migrations=confirm_destructive_migrations,
+        )
+
     if _is_dynamic(pattern, ripple_spec):
         return await _provision_dynamic_site(
             workspace_id=workspace_id,
@@ -2740,6 +3124,16 @@ async def _deploy_site_doc(
         # An injected CF client (a test asserting the real CF branch) wins over an
         # env that requests local — mirrors the legacy ``cloudflare is None`` guard.
         mode = "wfp"
+    # A project deploys only through the HTTP API from its paw-build.json, never via
+    # wrangler (that would read author config on this host). Its bundle target follows
+    # the mode (``workers`` -> an account-level script, ``wfp`` -> the dispatch
+    # namespace) unless PAW_SITES_PROJECT_DEPLOY_TARGET overrides it, and the mode is
+    # aligned with the target so the site is named, served, routed, stamped and
+    # deleted exactly like every other site on that target.
+    project_target: str | None = None
+    if normalize_engine(engine) == "project" and mode != "local":
+        project_target = bundle_deploy.project_deploy_target(mode)
+        mode = "workers" if project_target == bundle_deploy.ACCOUNT_TARGET else "wfp"
 
     url = ""
     # AV-1: the IndexNow key the workers deploy published, persisted below ("" = none).
@@ -2780,7 +3174,14 @@ async def _deploy_site_doc(
         # that can see the Site document the plan lives on — a Worker invocation is
         # billed where a static asset is not, so a free site must deploy the config
         # that ships no Worker at all.
-        counts_pageviews = await _site_counts_pageviews(workspace_id=workspace_id, site_id=site_id)
+        #
+        # A project bundle never counts: the counter wraps the Worker entry through
+        # wrangler, and a project's multi-module Worker is uploaded as built.
+        counts_pageviews = (
+            False
+            if project_target
+            else await _site_counts_pageviews(workspace_id=workspace_id, site_id=site_id)
+        )
         # VS-2: a site that has never deployed and has no stored Worker name claims a
         # name-based address now, BEFORE the deploy, so the Worker is created under it.
         # Returns the name the row stored BEFORE this call, which is what the guard
@@ -2810,22 +3211,46 @@ async def _deploy_site_doc(
         # AV-1: what the AI-ready files need from the row (owner's training opt-in,
         # the IndexNow key, the canonical host). A key minted here is persisted by the
         # upsert below, so the key file and the stored key never disagree.
-        ai_inputs = await _ai_ready_inputs(
-            workspace_id=workspace_id,
-            site_id=site_id,
-            site_name=site_name,
-            deploy_name=deploy_name,
-        )
-        indexnow_key = ai_inputs.indexnow_key
-        try:
-            url = await deploy_w(
-                site_id,
-                build.project_dir,
-                engine=engine,
-                analytics_entitled=counts_pageviews,
-                worker_name=deploy_name,
-                ai_ready=ai_inputs,
+        # A project bundle skips them: its assets are the author's build, uploaded as is.
+        ai_inputs = (
+            None
+            if project_target
+            else await _ai_ready_inputs(
+                workspace_id=workspace_id,
+                site_id=site_id,
+                site_name=site_name,
+                deploy_name=deploy_name,
             )
+        )
+        indexnow_key = ai_inputs.indexnow_key if ai_inputs is not None else ""
+        try:
+            if project_target:
+                # Same name, workers.dev address, routes and delete as a wrangler
+                # site; only the upload is the HTTP API bundle deploy.
+                cf = cloudflare or _cf_client()
+                await _deploy_paw_bundle(
+                    cf,
+                    script_name=deploy_name,
+                    target=project_target,
+                    workspace_id=workspace_id,
+                    site_id=site_id,
+                    project_dir=build.project_dir,
+                    engine=engine,
+                    is_dynamic=is_dynamic,
+                    d1_database_id=d1_database_id,
+                    source=source,
+                    confirm_destructive=confirm_destructive_migrations,
+                )
+                url = await _account_worker_url(cf, deploy_name)
+            else:
+                url = await deploy_w(
+                    site_id,
+                    build.project_dir,
+                    engine=engine,
+                    analytics_entitled=counts_pageviews,
+                    worker_name=deploy_name,
+                    ai_ready=ai_inputs,
+                )
         except Exception:
             if rename is not None:
                 # Whatever wrangler created under the new name before failing is ours
@@ -2864,19 +3289,39 @@ async def _deploy_site_doc(
         # failed the same check.
         from pocketpaw_ee.sites import analytics_worker
 
-        counter_deployed = any(
+        counter_deployed = project_target is None and any(
             Path(build.project_dir, name).is_file()
             for name in (analytics_worker.ENTRY_FILENAME, analytics_worker.SHIM_FILENAME)
         )
     else:  # "wfp"
         cf = cloudflare or _cf_client()
-        bundle = bundle_reader(build.project_dir)
-        # Only a dynamic site passes bindings; a static publish passes None so the
-        # single-module upload path stays byte-for-byte unchanged (no regress).
-        bindings = (
-            [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}] if is_dynamic else None
-        )
-        await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)
+        if bundle_deploy.has_paw_build(build.project_dir):
+            # A build that carries paw-build.json (the project engine / base app
+            # templates) deploys as a multi-module bundle with static assets. No
+            # existing engine emits that file, so their path below is unchanged.
+            await _deploy_paw_bundle(
+                cf,
+                script_name=site_id,
+                target=bundle_deploy.DISPATCH_TARGET,
+                workspace_id=workspace_id,
+                site_id=site_id,
+                project_dir=build.project_dir,
+                engine=engine,
+                is_dynamic=is_dynamic,
+                d1_database_id=d1_database_id,
+                source=source,
+                confirm_destructive=confirm_destructive_migrations,
+            )
+        else:
+            bundle = bundle_reader(build.project_dir)
+            # Only a dynamic site passes bindings; a static publish passes None so the
+            # single-module upload path stays byte-for-byte unchanged (no regress).
+            bindings = (
+                [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}]
+                if is_dynamic
+                else None
+            )
+            await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)
         # CF-DISPATCH: the worker is now in the `paw-sites` dispatch namespace, but
         # a user worker in a WfP dispatch namespace is NOT directly URL-addressable
         # — it only serves when the dispatch worker
@@ -3007,6 +3452,77 @@ async def _deploy_site_doc(
     # all still gets its cards' marks.
     _schedule_site_favicon(doc)
     return doc
+
+
+async def _deploy_paw_bundle(
+    cf: Any,
+    *,
+    script_name: str,
+    target: str,
+    workspace_id: str,
+    site_id: str,
+    project_dir: str,
+    engine: str,
+    is_dynamic: bool,
+    d1_database_id: str,
+    source: dict[str, str] | None,
+    confirm_destructive: bool,
+) -> None:
+    """Deploy a ``paw-build.json`` build through ``bundle_deploy`` to ``target``.
+
+    The one bundle path for both targets, so provisioning, binding mapping, secrets
+    and migrations cannot drift between them. D1 / KV / R2 are created by the
+    provisioner and recorded on the Site doc, which a project publish has ensured
+    exists by now. A project's migrations are applied to its D1 after every check,
+    before the upload."""
+    bundle_doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    before_upload = None
+    if normalize_engine(engine) == "project" and not is_dynamic:
+        before_upload = _project_migrator(
+            cf, site_id=site_id, source=source, confirm_destructive=confirm_destructive
+        )
+    await bundle_deploy.deploy_bundle(
+        cf,
+        script_name=script_name,
+        build_dir=project_dir,
+        salt=workspace_id,
+        provisioned=bundle_deploy.ProvisionedResources(d1_database_id=d1_database_id),
+        provision=(
+            _bundle_provisioner(
+                bundle_doc,
+                cf,
+                # A dynamic site's D1 was resolved above; anything else gets its own
+                # real database from the provisioner.
+                d1_database_id=d1_database_id if is_dynamic else None,
+            )
+            if bundle_doc is not None
+            else None
+        ),
+        before_upload=before_upload,
+        target=target,
+    )
+
+
+async def _account_worker_url(cf: Any, name: str) -> str:
+    """Turn on an API-uploaded account Worker's workers.dev address and return it.
+
+    ``https://<name>.<sub>.workers.dev``, the address ``wrangler deploy`` gives a
+    ``workers_dev: true`` site. ``<sub>`` is PAW_CF_WORKERS_SUBDOMAIN when set (the
+    same fallback the wrangler path uses), else the account's, read from the API.
+    ``""`` when the account has no workers.dev subdomain: the Worker is live but only
+    a custom domain can reach it."""
+    from pocketpaw_ee.sites.workers_deploy import _workers_dev_host
+
+    await cf.enable_workers_dev(name)
+    host = _workers_dev_host(name)
+    if not host:
+        subdomain = await cf.workers_dev_subdomain()
+        host = f"{name}.{subdomain}.workers.dev" if subdomain else ""
+    if not host:
+        logger.warning("sites: account has no workers.dev subdomain; %s has no public URL", name)
+        return ""
+    logger.info("sites.workers: deployed project bundle %s -> https://%s", name, host)
+    return f"https://{host}"
 
 
 async def _ai_ready_inputs(
@@ -4160,6 +4676,21 @@ async def refresh_site_preview(*, workspace_id: str, site_id: str) -> SitePrevie
                 "The site isn't answering yet. A deploy can take a moment to go "
                 "live at the edge — try the refresh again shortly.",
             )
+        if target.foreign:
+            # A connected site's card also carries the customer's page title and
+            # icon; one safe fetch of the homepage refreshes both. Best-effort: a
+            # failed read keeps the stored values and never changes this
+            # endpoint's error contract, which is about the picture.
+            from pocketpaw_ee.sites import connected_card
+
+            try:
+                await connected_card.refresh_card_meta(site)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "sites.preview_refresh: title/icon refresh failed for site %s",
+                    site_id,
+                    exc_info=True,
+                )
         # A single confirming probe immediately before the paid render, so the gate
         # has no bypass path: every call into ``take_site_screenshot`` is gated.
         image_url = await take_site_screenshot(site, ready_delays=())
@@ -4398,8 +4929,9 @@ def build_runs_async(
         return True
     if normalized != "svelte":
         return False
-    # PP-1: a static svelte pocket that declares author packages goes to the sandbox
-    # lane WHATEVER the staging flag says. Its install must never run on the API host
+    # PP-1: a static svelte pocket that declares author packages or carries an
+    # authored build-shell file (``requires_sandbox``) goes to the sandbox lane
+    # WHATEVER the staging flag says. Its install must never run on the API host
     # (``generator_client.HostInstallRefused`` refuses it there), so the inline path is
     # not an option for it; the flag only decides for pockets with nothing to install
     # beyond the vetted toolchain. A DYNAMIC one still falls through to the checks
@@ -4407,7 +4939,7 @@ def build_runs_async(
     # worker-rendered artifact can deploy from the lane.
     if (
         source is not None
-        and has_author_dependencies(source)
+        and requires_sandbox(source)
         and pattern != "dynamic"
         and not svelte_source_is_dynamic(source)
     ):
@@ -4962,7 +5494,21 @@ def provision_cf_client() -> Any:
 
     Thin public wrapper over ``_cf_client()`` so the builtin job builds the real CF
     client the SAME way ``_deploy_site_doc`` does, and tests can monkeypatch this one
-    seam to inject a fake client without importing the client class."""
+    seam to inject a fake client without importing the client class.
+
+    Refuses under ``PAW_SITES_LOCAL=1``: the job's first act with this client is
+    creating a real D1, and ``provision_deploy`` degrades ``local`` to ``workers``, so
+    a dynamic publish on a local box would otherwise reach Cloudflare. The job runs
+    this inside its try, so the refusal marks the site ``failed`` cleanly, the same
+    as an unconfigured Cloudflare on a fresh dev box."""
+    import os
+
+    if os.environ.get("PAW_SITES_LOCAL") == "1":
+        raise ValidationError(
+            "sites.local_mode",
+            "PAW_SITES_LOCAL=1 never deploys to Cloudflare, and a dynamic site needs a "
+            "Cloudflare D1. Unset PAW_SITES_LOCAL to publish dynamic sites.",
+        )
     return _cf_client()
 
 
@@ -5044,6 +5590,103 @@ async def provision_deploy(
         bindings=provision_d1_bindings(d1_database_id),
     )
     return provision_site_url(site_id), "wfp"
+
+
+async def deploy_bundle(
+    site: _SiteDoc,
+    build_dir: str | Path,
+    *,
+    cloudflare: Any = None,
+) -> bundle_deploy.BundleDeployResult:
+    """Deploy a ``paw-build.json`` build of ``site`` into the WfP dispatch namespace.
+
+    The service entry point for the ``project`` engine until its publish path is
+    wired. Script name is the site id (as on every WfP deploy), asset hashes are
+    salted with the workspace id. D1 binds the site's own database
+    (``d1_database_id``); KV and R2 requests are provisioned per site by
+    ``binding_provisioner`` under the site's plan; anything else backend-shaped is
+    refused. Live on return; the returned warnings list everything the deploy
+    dropped."""
+    cf = cloudflare or _cf_client()
+    return await bundle_deploy.deploy_bundle(
+        cf,
+        script_name=str(site.id),
+        build_dir=build_dir,
+        salt=str(site.workspace),
+        provision=_bundle_provisioner(site, cf),
+    )
+
+
+def _project_migrator(
+    cf: Any, *, site_id: str, source: dict[str, str] | None, confirm_destructive: bool
+) -> Any:
+    """The ``before_upload`` hook of a project's bundle deploy: apply the project's
+    ``migrations/*.sql`` (from ``source``, the files the bundle was built from) to the
+    D1 database the upload binds. Runs after every binding check and before the first
+    upload, so a refused or failed migration leaves the live site untouched."""
+    from pocketpaw_ee.sites import project_d1
+
+    migrations = project_d1.migrations_from_source(source)
+
+    async def _migrate(bindings: list[dict]) -> None:
+        database_id = next((b.get("id") for b in bindings if b.get("type") == "d1"), "")
+        if migrations and database_id:
+            await project_d1.apply_migrations(
+                cf, database_id, migrations, confirm_destructive=confirm_destructive
+            )
+        elif migrations:
+            logger.warning(
+                "sites: site %s ships migrations/ but binds no D1; they were not applied",
+                site_id,
+            )
+
+    return _migrate
+
+
+def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None = None) -> Any:
+    """The ``provision`` callback ``bundle_deploy.deploy_bundle`` runs: the site's
+    plan decides what it may bind, and the resource ids are saved with ``$set`` so a
+    concurrent write to other fields of the doc is not clobbered.
+
+    ``d1_database_id`` pins the D1 binding (a dynamic site's resolved id); None lets
+    the provisioner ensure the site's own real database."""
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+    from pocketpaw_ee.sites import binding_provisioner
+
+    async def _save(doc: Any) -> None:
+        await doc.set(
+            {
+                "d1_database_id": doc.d1_database_id,
+                "kv_namespaces": dict(doc.kv_namespaces),
+                "r2_buckets": dict(doc.r2_buckets),
+            }
+        )
+
+    async def _provision(requests: Any) -> bundle_deploy.ProvisionedResources:
+        res = await binding_provisioner.ensure_bindings(
+            site,
+            requests,
+            cloudflare=cf,
+            save=_save,
+            paid=entitlements_service.site_paid_backends_entitled(
+                plan_tier=getattr(site, "plan_tier", None),
+                subscription_status=getattr(site, "subscription_status", None),
+            ),
+            derived_d1_id=_derive_d1_database_id(
+                str(getattr(site, "workspace", "")), str(getattr(site, "pocket_id", ""))
+            ),
+            provision_d1=d1_database_id is None,
+        )
+        from dataclasses import replace
+
+        from pocketpaw_ee.sites import site_secrets
+
+        if d1_database_id is not None:
+            res = replace(res, d1_database_id=d1_database_id)
+        # The owner's secrets ride as secret_text bindings (values never logged).
+        return replace(res, secrets=await site_secrets.secrets_for_deploy(site))
+
+    return _provision
 
 
 def provision_site_url(site_id: str) -> str:
@@ -5267,6 +5910,33 @@ async def mark_build_running(site: _SiteDoc) -> None:
     await site.set({"build_status": "building", "build_started_at": datetime.now(UTC)})
 
 
+async def mark_build_waiting(site: _SiteDoc, *, job_id: str | None, reason: str) -> bool:
+    """Put an in-flight build back to ``queued`` with ``reason`` and RE-STAMP its clock.
+
+    Used while a build waits for Daytona capacity: the re-stamp keeps the wait inside
+    the staleness window, so a waiting build is never re-enqueued on top of itself.
+    Conditional on ``build_job_id == job_id`` — False means a newer publish claimed the
+    row, so the waiting job is superseded and must stop. ``job_id=None`` (a direct
+    call outside arq) writes unconditionally."""
+    values: dict[str, Any] = {
+        "build_status": "queued",
+        "build_reason": reason,
+        "build_started_at": datetime.now(UTC),
+    }
+    if job_id is None:
+        await site.set(values)
+        return True
+    collection = type(site).get_pymongo_collection()
+    won = await collection.find_one_and_update(
+        {"_id": site.id, "build_job_id": job_id}, {"$set": values}
+    )
+    if won is None:
+        return False
+    for field, value in values.items():
+        setattr(site, field, value)
+    return True
+
+
 async def record_build_outcome(site: _SiteDoc, *, status: str, reason: str) -> None:
     """Record a finished attempt's terminal status and the rung that produced it.
 
@@ -5442,13 +6112,12 @@ async def _assert_entitled_to_project_download(site: Any) -> None:
     own", meaning tenancy only. So deleting the call to this function does not
     degrade the download, it gives it away.
 
-    Deliberately does NOT also check ``Entitlements.site_source_visible``. That is a
-    workspace capability governing whether the builder shows a Code tab, resolved off
-    the workspace plan; this is a per-site capability resolved off the site's plan.
-    Two questions, two resolvers, and a paid site in a free workspace may download a
-    project whose source the Code tab hides. Adding the second check would also make
-    it impossible to write a test that proves this one fires (see the mutation plan:
-    two guards on one seam let a mutation escape).
+    Deliberately does NOT also check the workspace's source override
+    (``WorkspaceOverrides.site_source_visible``). The Code tab and this download read
+    the same per-site predicate (``site_code_entitled``); the override is a visibility
+    lever on the Code tab only. Adding it here as a second guard would also make it
+    impossible to write a test that proves this one fires (see the mutation plan: two
+    guards on one seam let a mutation escape).
 
     Synchronous and handed the loaded doc, because the resolver is pure and
     ``entitlements`` may not import ``models.site`` (EE cloud rule 2).
@@ -6891,6 +7560,8 @@ async def publish_pocket(
     # ``sites.buy_plan`` against the caller's role.
     purchase_authorized: bool = False,
     preview: bool = False,
+    # Owner confirmed a project migration that deletes data (``project_d1``).
+    confirm_destructive_migrations: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -7480,6 +8151,7 @@ async def publish_pocket(
             keeps_client_bundle=keeps_client_bundle,
             tier=_carried_tier,
             covered_by_plan=_plan_carries,
+            confirm_destructive_migrations=confirm_destructive_migrations,
             _generator=_generator,
             _cloudflare=_cloudflare,
             _bundle_reader=_bundle_reader,
@@ -7501,6 +8173,7 @@ async def publish_pocket(
         builder_origin=builder_origin,
         keeps_client_bundle=keeps_client_bundle,
         preview=False,
+        confirm_destructive_migrations=confirm_destructive_migrations,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
@@ -8345,6 +9018,45 @@ async def reconcile_plan_carried_sites(workspace_id: str) -> dict[str, int]:
     return {"carried": allowance, "released": released}
 
 
+async def reconcile_all_plan_carried_sites() -> dict[str, int]:
+    """Run ``reconcile_plan_carried_sites`` for every workspace carrying a site.
+
+    The periodic half of the plan rail. ``set_workspace_plan`` and the override
+    write reconcile at write time, but an allowance can also shrink with no write
+    at all — an ``included_sites`` override that reaches its ``expires_at`` — or
+    through a writer that bypasses both (a direct DB edit, a migration). Only a
+    pass on the clock converges those, so the renewal sweep calls this each tick.
+
+    Scoped to workspaces with at least one site on the plan rail; nobody else has
+    anything to release. Each workspace runs in its own try so one failure cannot
+    stop the rest. Returns ``{"workspaces": n, "released": n, "failed": n}``.
+    """
+    query = {"billing_rail": _PLAN_RAIL}
+    try:
+        workspace_ids = await _SiteDoc.get_pymongo_collection().distinct("workspace", query)
+    except Exception:
+        # mongomock-motor returns a cursor rather than an awaitable for
+        # ``distinct``; fall back to a scan (same shape as cycles.service).
+        workspace_ids = list({doc.workspace async for doc in _SiteDoc.find(query)})
+
+    counts = {"workspaces": 0, "released": 0, "failed": 0}
+    for workspace_id in workspace_ids:
+        if not workspace_id:
+            continue
+        counts["workspaces"] += 1
+        try:
+            result = await reconcile_plan_carried_sites(str(workspace_id))
+            counts["released"] += result.get("released", 0)
+        except Exception:
+            counts["failed"] += 1
+            logger.exception(
+                "sites.reconcile: could not reconcile plan-carried sites for workspace=%s; "
+                "the next sweep retries it",
+                workspace_id,
+            )
+    return counts
+
+
 async def _plan_can_carry(workspace_id: str, *, site_id: str | None) -> bool:
     """Is there a free slot on the workspace plan for this site?
 
@@ -8382,6 +9094,7 @@ async def _publish_credits_site(
     keeps_client_bundle: bool,
     tier: Any,
     covered_by_plan: bool = False,
+    confirm_destructive_migrations: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -8453,6 +9166,7 @@ async def _publish_credits_site(
         keeps_client_bundle=keeps_client_bundle,
         tier=tier,
         rail=_PLAN_RAIL if covered_by_plan else _CREDITS_RAIL,
+        confirm_destructive_migrations=confirm_destructive_migrations,
     )
 
     site_id = str(doc.id)
@@ -8559,6 +9273,7 @@ async def _publish_pending_site(
     keeps_client_bundle: bool,
     tier: Any,
     rail: str = _CREDITS_RAIL,
+    confirm_destructive_migrations: bool = False,
 ) -> tuple[_SiteDoc, dict[str, Any] | None]:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
     WITHOUT deploying it live.
@@ -8631,6 +9346,8 @@ async def _publish_pending_site(
         # and a paid interactive site would go live with its JavaScript stripped.
         "keeps_client_bundle": keeps_client_bundle,
         "name": site_name,
+        # Replayed so a confirmed destructive project migration stays confirmed.
+        "confirm_destructive_migrations": confirm_destructive_migrations,
     }
 
     # Review fix A — cap the serialized deploy-input size BEFORE any persist or
@@ -8876,6 +9593,7 @@ async def activate_site(
         # MT-1 — replay the authored declaration. A pending doc captured before
         # this field existed has no key and reads False (the prior behaviour).
         keeps_client_bundle=bool(inputs.get("keeps_client_bundle")),
+        confirm_destructive_migrations=bool(inputs.get("confirm_destructive_migrations")),
         generator=_generator,
         cloudflare=_cloudflare,
         bundle_reader=_bundle_reader,
@@ -9380,9 +10098,17 @@ async def get_native_artifact(
     builder_origin: str | None = None,
     _store: Any | None = None,
     _pool: Any | None = None,
+    _arm: Any | None = None,
 ) -> dict[str, Any]:
-    """Serve a svelte Paw Site's ARMED render as ``{pocket_id, body_html, css}`` so the
-    native editor can shadow-render it (NE-5b) instead of framing an iframe.
+    """Serve a Paw Site draft's ARMED render as ``{pocket_id, body_html, css,
+    preview_url}``.
+
+    ``preview_url`` (draft preview origin, ``preview_origin.py``) is the absolute URL of
+    the draft's index.html on the cookieless preview host — the FULL draft, head and
+    JS intact. ``None`` while a build is pending or failed. html drafts never build:
+    their source files are served directly (import map injected), so an html pocket
+    answers ``build_status="none"`` with a ``preview_url`` and empty body/css.
+    ``body_html`` / ``css`` stay for svelte/react until the builder stops reading them.
 
     READ-THROUGH cache (feat/sites-native-artifact-no-build). Viewing a site must NOT
     trigger a build — the prior behaviour ran a full SvelteKit build on EVERY call
@@ -9442,6 +10168,24 @@ async def get_native_artifact(
     # site's served artifact IS its source, so it is selected through its own srcdoc
     # and has no build to render here.
     engine = normalize_engine(pocket.get("engine"))
+    if engine == "project":
+        return await _project_draft_artifact(
+            pocket_id=pocket_id,
+            source=pocket.get("source"),
+            store=_store or _default_artifact_store(),
+            _pool=_pool,
+        )
+    # ONE origin resolver for every armed hash (the view, the pre-warm, verify,
+    # preview_site), so the agent's verify and the editor read the same render.
+    resolved_origin = await resolve_armed_builder_origin(workspace_id, pocket_id, builder_origin)
+    if engine == "html" and isinstance(pocket.get("source"), dict):
+        return await _html_draft_artifact(
+            pocket_id=pocket_id,
+            source=pocket["source"],
+            builder_origin=resolved_origin,
+            store=_store or _default_artifact_store(),
+            arm=_arm or generator_client.arm_html,
+        )
     if not has_native_edit_lane(engine) or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
             "pocket.no_native_edit_lane",
@@ -9456,9 +10200,8 @@ async def get_native_artifact(
     site_name = (pocket.get("name") or "").strip() or "Untitled site"
 
     # Arm the build: a NON-EMPTY builder_origin is what makes the generator stamp
-    # data-uid + embed the manifest. Default to the configured dashboard origin when
-    # the caller passes none, exactly like make_site_editable.
-    origin = (builder_origin or "").strip() or _builder_origin()
+    # data-uid + embed the manifest (``resolve_armed_builder_origin`` never answers "").
+    origin = resolved_origin
     # MT-1: the site's own declaration that its client JS is load-bearing, resolved the
     # SAME way publish resolves it. It rides BOTH the hash and the build below — the hash
     # because the two variants are different HTML, the build because that is the bug: this
@@ -9477,6 +10220,22 @@ async def get_native_artifact(
     # sandbox, no build. This is what makes a VIEW instant, and since SP-2 it is also
     # what keeps an editing session from billing a sandbox per keystroke.
     cached = store.read(pocket_id, content_hash)
+    preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+    if (
+        cached is not None
+        and preview_url is None
+        and preview_origin.store_supports_preview(store)
+        and preview_origin.preview_base_problem() is None
+        and _claim_preview_retry(pocket_id, content_hash)
+    ):
+        # A cached render with no preview URL: either its files landed but the token
+        # write failed (mint it now, no build), or it has no files (cached before the
+        # preview origin existed, or the store refused them). Rebuild that at most
+        # once per retry window; past it, serve the render with a null preview_url
+        # instead of billing a sandbox on every view for files the store won't keep.
+        preview_url = preview_origin.repair_preview_url(store, pocket_id, content_hash)
+        if preview_url is None:
+            cached = None
     if cached is not None:
         body_html, css = cached
         return {
@@ -9489,6 +10248,7 @@ async def get_native_artifact(
             "build_status": "none",
             "build_reason": None,
             "build_job_id": None,
+            "preview_url": preview_url,
         }
 
     # MISS: queue the armed build and hand back a handle. The job writes {body_html, css}
@@ -9528,6 +10288,258 @@ async def get_native_artifact(
         "build_status": enqueued.status,
         "build_reason": enqueued.reason,
         "build_job_id": enqueued.job_id,
+        "preview_url": None,
+    }
+
+
+async def _project_draft_artifact(
+    *,
+    pocket_id: str,
+    source: Any,
+    store: Any,
+    _pool: Any | None = None,
+    _records: Any | None = None,
+) -> dict[str, Any]:
+    """A ``project`` draft: served from its sandbox build when one finished for the
+    current source, else a build is queued in the preview lane (``project_build``).
+
+    The same response shape as every other engine plus ``preview_mode`` (``"static"``
+    while server routes cannot run in drafts, ``"full"`` otherwise; ``None`` until a
+    build finished) and the engine's ``capabilities``. No arming: a project has no
+    generator-owned anchors, so there is no builder origin in the hash."""
+    from pocketpaw_ee.sites import build_job, project_build, verify_store
+    from pocketpaw_ee.sites.engines import engine_capabilities
+
+    capabilities = engine_capabilities("project")
+    files_source = source if isinstance(source, dict) else None
+    project_build.project_files(files_source)  # 422 on a tree that cannot build
+    content_hash = project_build.project_content_hash(files_source or {})
+    job_id = build_job._preview_job_id(pocket_id, content_hash)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    record = project_build.read_build_record(records, pocket_id, job_id)
+    if record is not None and record.get("status") == project_build.STATUS_BUILT:
+        preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+        evicted = (
+            preview_url is None
+            and preview_origin.store_supports_preview(store)
+            and preview_origin.preview_base_problem() is None
+        )
+        # A record whose files the store evicted is rebuilt, at most once per window.
+        if not evicted or not _claim_preview_retry(pocket_id, content_hash):
+            return {
+                "pocket_id": pocket_id,
+                "body_html": "",
+                "css": "",
+                "build_status": "none",
+                "build_reason": None,
+                "build_job_id": job_id,
+                "preview_url": preview_url,
+                "preview_mode": record.get("preview_mode"),
+                "capabilities": capabilities,
+            }
+
+    try:
+        enqueued = await build_job.enqueue_preview_build(
+            pocket_id=pocket_id,
+            content_hash=content_hash,
+            engine="project",
+            generator_input={"source": files_source},
+            _pool_override=_pool,
+        )
+    except Exception as exc:
+        logger.exception("sites.project: could not queue the draft build for %s", pocket_id)
+        raise CloudError(
+            503,
+            "sites.preview_build_unavailable",
+            "The preview build could not be queued. Try again in a moment.",
+        ) from exc
+    if enqueued.status == "queued":
+        project_build.write_build_record(
+            records,
+            pocket_id,
+            project_build.new_record(
+                enqueued.job_id, content_hash, "queued", reason=enqueued.reason
+            ),
+        )
+    return {
+        "pocket_id": pocket_id,
+        "body_html": "",
+        "css": "",
+        "build_status": enqueued.status,
+        "build_reason": enqueued.reason,
+        "build_job_id": enqueued.job_id,
+        "preview_url": None,
+        "preview_mode": None,
+        "capabilities": capabilities,
+    }
+
+
+async def project_latest_build(
+    *, workspace_id: str, user_id: str, pocket_id: str, _records: Any | None = None
+) -> dict[str, Any]:
+    """The pocket's newest project build (no log): job id, status, rung,
+    ``preview_mode``, and whether it built the pocket's CURRENT source. Raises the
+    pockets service's 404 / 403 for a pocket the caller cannot reach, 422 for a
+    non-project pocket, and 404 when the pocket has never built."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    pocket = await _project_pocket(workspace_id, user_id, pocket_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    latest = project_build.read_latest_build(records, pocket_id)
+    if not latest or not latest.get("job_id"):
+        raise NotFound("site_build", pocket_id)
+    source = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
+    return {
+        "pocket_id": pocket_id,
+        "job_id": latest.get("job_id"),
+        "status": latest.get("status") or "queued",
+        "reason": latest.get("reason"),
+        "preview_mode": latest.get("preview_mode"),
+        "framework": latest.get("framework"),
+        "updated_at": latest.get("updated_at"),
+        "current": latest.get("content_hash") == project_build.project_content_hash(source),
+    }
+
+
+async def project_build_log(
+    *, workspace_id: str, user_id: str, pocket_id: str, job_id: str, _records: Any | None = None
+) -> dict[str, Any]:
+    """One project build's persisted log (already redacted and capped by the worker).
+    A job id that is not this pocket's is a 404, the same answer as a missing one."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    await _project_pocket(workspace_id, user_id, pocket_id)
+    if not project_build.job_belongs_to(job_id, pocket_id):
+        raise NotFound("site_build", job_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    record = project_build.read_build_record(records, pocket_id, job_id)
+    if record is None:
+        raise NotFound("site_build", job_id)
+    return {
+        "pocket_id": pocket_id,
+        "job_id": job_id,
+        "status": record.get("status") or "queued",
+        "reason": record.get("reason"),
+        "log": record.get("log") or "",
+        "log_truncated": bool(record.get("log_truncated")),
+        "preview_mode": record.get("preview_mode"),
+        "updated_at": record.get("updated_at"),
+    }
+
+
+async def _project_pocket(workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """The pocket, if it is a project the caller may read in THIS workspace: the
+    pockets service's read rule (owner / team / shared / workspace-visible) plus the
+    tenant check that rule leaves to its caller. Another workspace's pocket is a 404."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites.engines import build_requires_sandbox
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if pocket.get("workspace") != workspace_id:
+        raise NotFound("pocket", pocket_id)
+    if not build_requires_sandbox(pocket.get("engine")):
+        raise ValidationError(
+            "sites.not_a_project", "Only a project site has project files and build logs."
+        )
+    return pocket
+
+
+async def project_pocket(*, workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """The project pocket the caller may read in this workspace (the agent's project
+    tools read it here). 404 for another workspace's pocket, 422 for any other engine."""
+    return await _project_pocket(workspace_id, user_id, pocket_id)
+
+
+async def queue_project_build(
+    *, workspace_id: str, user_id: str, pocket_id: str, _pool: Any | None = None
+) -> dict[str, Any]:
+    """Queue the draft build of a project pocket's CURRENT source, the same lane the
+    preview opens (a finished build for this source is returned, not rebuilt). Returns
+    the native-artifact shape: ``build_status``, ``build_job_id``, ``preview_url``,
+    ``preview_mode``."""
+    pocket = await _project_pocket(workspace_id, user_id, pocket_id)
+    return await _project_draft_artifact(
+        pocket_id=pocket_id,
+        source=pocket.get("source"),
+        store=_default_artifact_store(),
+        _pool=_pool,
+    )
+
+
+async def project_site_plan(*, workspace_id: str, pocket_id: str) -> tuple[str | None, str | None]:
+    """``(plan_tier, subscription_status)`` of the pocket's Site doc, ``(None, None)``
+    before one exists. The recipe plan gate reads it through the same
+    ``entitlements`` predicates the binding provisioner uses."""
+    doc = await _latest_site_for_pocket(workspace_id, pocket_id)
+    if doc is None:
+        return None, None
+    return getattr(doc, "plan_tier", None), getattr(doc, "subscription_status", None)
+
+
+#: (pocket, content hash) -> monotonic time of the last attempt to give a draft a
+#: preview URL it lacked (a rebuild, or an html re-materialize). Per process, bounded.
+_preview_retry_at: OrderedDict[tuple[str, str], float] = OrderedDict()
+_PREVIEW_RETRY_WINDOW = 600.0
+_PREVIEW_RETRY_ENTRIES = 4096
+
+
+def _claim_preview_retry(pocket_id: str, content_hash: str) -> bool:
+    """True (and the window starts) when this draft may try again to get a preview
+    URL; False while a previous attempt is inside ``_PREVIEW_RETRY_WINDOW``."""
+    key, now = (pocket_id, content_hash), time.monotonic()
+    last = _preview_retry_at.get(key)
+    if last is not None and now - last < _PREVIEW_RETRY_WINDOW:
+        return False
+    _preview_retry_at[key] = now
+    _preview_retry_at.move_to_end(key)
+    while len(_preview_retry_at) > _PREVIEW_RETRY_ENTRIES:
+        _preview_retry_at.popitem(last=False)
+    return True
+
+
+#: Bump when the html draft materialization changes (import map, bridge, layout), so
+#: drafts re-materialize under a new content hash and a new preview URL.
+_HTML_PREVIEW_VERSION = "html-preview-2"
+
+
+async def _html_draft_artifact(
+    *,
+    pocket_id: str,
+    source: dict[str, Any],
+    builder_origin: str,
+    store: Any,
+    arm: Any,
+) -> dict[str, Any]:
+    """An html draft on the preview origin: no build, no sandbox. The source files are
+    materialized once per (source, builder origin) hash and served from there."""
+    content_hash = _artifact_content_hash(
+        source=source,
+        theme={},
+        builder_origin=builder_origin,
+        gen_version=_HTML_PREVIEW_VERSION,
+        engine="html",
+    )
+    preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+    if (
+        preview_url is None
+        and preview_origin.store_supports_preview(store)
+        and preview_origin.preview_base_problem() is None
+        and _claim_preview_retry(pocket_id, content_hash)
+    ):
+        # Bounded like the built lane: a store that refuses or fails the write is not
+        # re-materialized (an arm-html run) on every view.
+        files = await preview_origin.materialize_html_draft(source, builder_origin, arm=arm)
+        preview_url = preview_origin.publish_draft(
+            store, pocket_id, content_hash, preview_origin.pack_files(files)
+        )
+    return {
+        "pocket_id": pocket_id,
+        "body_html": "",
+        "css": "",
+        "build_status": "none",
+        "build_reason": None,
+        "build_job_id": None,
+        "preview_url": preview_url,
     }
 
 
@@ -9541,7 +10553,7 @@ class SvelteEditResult:
 
 
 class EditVerificationFailed(SmokeGateFailed):
-    """A svelte edit failed its static or build verification and was rolled back (PP-2).
+    """A svelte edit failed its STATIC verification and was rolled back (PP-2).
 
     A ``SmokeGateFailed`` so every caller that treated "the edit did not pass its gate"
     as a rollback keeps doing so; ``verdict`` is the full §5 verification for the agent.
@@ -9553,9 +10565,12 @@ class EditVerificationFailed(SmokeGateFailed):
 
 
 def edit_verdict_requires_rollback(verdict: dict[str, Any]) -> bool:
-    """True when the static or build layer FAILED — the edit does not compile."""
+    """True when the STATIC layer failed — the only failure an edit learns of before it
+    returns. The sandbox build runs after the edit has answered, so a build failure is
+    reported on the agent's next tool result (``previous_verification``) and fixed
+    with a follow-up edit, never rolled back behind the agent's back."""
     for layer in verdict.get("layers") or []:
-        if layer.get("name") in ("static", "build") and layer.get("status") == "failed":
+        if layer.get("name") == "static" and layer.get("status") == "failed":
             return True
     return False
 
@@ -9565,7 +10580,7 @@ async def _default_edit_verifier(
 ) -> dict[str, Any]:
     from pocketpaw_ee.sites import verify
 
-    return await verify.verify_site(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+    return await verify.verify_edit(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
 
 
 async def edit_svelte_component(
@@ -9582,14 +10597,17 @@ async def edit_svelte_component(
 ) -> SvelteEditResult:
     """Rewrite ONE component of a svelte Paw Site pocket and VERIFY the draft.
 
-    PP-2 REWRITE — read this before the older paragraphs below. The edit no longer runs
-    a local preview build (``publish(preview=True)`` → ``bun install`` on the API host).
-    It persists the file, then runs ``verify.verify_site`` (static check on the host,
-    build + browser check in the Daytona preview lane) for EVERY svelte pocket, and:
-      * static or build ``failed`` → the file is rolled back and
-        :class:`EditVerificationFailed` (a ``SmokeGateFailed``) carries the verdict;
-      * browser ``failed`` → the edit STAYS staged and the verdict reports it;
-      * ``unverified`` → the edit stays staged and the verdict says why.
+    READ THIS before the older paragraphs below. The edit no longer runs a local
+    preview build. It persists the file, then runs ``verify.verify_edit``: the STATIC
+    check synchronously (about a second) and the build + browser layers enqueued in the
+    Daytona preview lane, not waited on. Then:
+      * static ``failed`` → the file is rolled back and :class:`EditVerificationFailed`
+        (a ``SmokeGateFailed``) carries the verdict;
+      * anything else → the edit STAYS staged and the verdict says so (``pending`` with
+        the sandbox ``job_id``, or a cached / already-built verdict). A build or browser
+        failure found later reaches the agent on its next tool result;
+      * a ``create`` nothing references yet is a half step: verification is skipped
+        (``verify.half_step_verdict``) and the wiring edit verifies the whole site.
     Returns :class:`SvelteEditResult` ``(site, unreferenced, verification)``; ``site``
     is the pocket's existing Site row (or None) — no preview deploy is minted any more,
     so there is no preview URL. ``_verify`` substitutes the verifier (tests). ``name``
@@ -9740,6 +10758,18 @@ async def edit_svelte_component(
     #    (locally, then again in the Daytona pre-warm). The verify pipeline's build IS
     #    the pre-warm — it rides the preview lane under the same content hash — so the
     #    editor's next view is a cache hit off the same sandbox.
+    # Does anything reach the file we just wrote? (See the comment at the return.)
+    # Computed BEFORE verifying: an unreferenced create is a half step, and verifying
+    # it would spend a sandbox on a render that changes again with the wiring edit.
+    unreferenced = create and not svelte_path_is_referenced(
+        {**source_map, component_path: new_source}, component_path
+    )
+    if unreferenced:
+        from pocketpaw_ee.sites.verify import half_step_verdict
+
+        site = await _latest_site_for_pocket(workspace_id, pocket_id)
+        return SvelteEditResult(site=site, unreferenced=True, verification=half_step_verdict())
+
     verifier = _verify or _default_edit_verifier
     try:
         verdict = await verifier(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
@@ -9749,14 +10779,12 @@ async def edit_svelte_component(
 
         verdict = unverifiable("verify_unavailable")
 
-    # 3. ROLL BACK when the STATIC or BUILD layer failed — the preserved contract that a
-    #    broken edit is never left staged: the author's code does not compile, so the
-    #    draft keeps its last-good contents and the caller gets the errors to fix.
-    #    A BROWSER failure (an onMount throw, a blank page, a 404 asset) stays staged
-    #    and is REPORTED: the page builds and renders server-side, the defect is often
-    #    confined to one interaction, and the fix is usually a follow-up edit to the
-    #    very file just written — rolling it back would throw away what that fix needs.
-    #    ``unverified`` stays staged too: nothing proved the edit wrong.
+    # 3. ROLL BACK when the STATIC layer failed: the author's code does not compile, so
+    #    the draft keeps its last-good contents and the caller gets the errors to fix.
+    #    Build and browser failures arrive after this call returned (the sandbox runs in
+    #    the background), so they are REPORTED on the agent's next tool result and fixed
+    #    with a follow-up edit; silently undoing an edit the agent already moved past
+    #    would leave it reasoning about source that is no longer there.
     if edit_verdict_requires_rollback(verdict):
         if create:
             # A create has no prior contents to restore. Writing ``""`` back would
@@ -9787,10 +10815,7 @@ async def edit_svelte_component(
     # Scoped to ``create`` deliberately. An ordinary edit touches a file that is
     # already part of the site, and re-litigating its wiring on every headline change
     # is noise on the common path — which is how the signal on the rare path gets
-    # skimmed. The map scanned is the POST-write one.
-    unreferenced = create and not svelte_path_is_referenced(
-        {**source_map, component_path: new_source}, component_path
-    )
+    # skimmed. The map scanned is the POST-write one (computed above, before verify).
     site = await _latest_site_for_pocket(workspace_id, pocket_id)
     return SvelteEditResult(site=site, unreferenced=unreferenced, verification=verdict)
 
@@ -10214,7 +11239,8 @@ async def set_site_dependencies(
     ``dependencies`` param, which runs the same resolver. ``add`` is a list of
     ``{name, range?}`` requests; ``remove`` is a list of names. Removes apply first,
     then every add goes through :func:`dependency_resolver.resolve_dependencies`
-    (registry metadata only — nothing installs). A rejected add is reported in
+    (registry metadata only — nothing installs). Any public npm package resolves; a
+    rejected add (bad spec, unknown name, unresolvable range) is reported in
     ``rejected`` with an actionable reason and changes nothing; the rest still land.
 
     The manifest is rewritten whole, in canonical form, through the pockets
@@ -10230,7 +11256,8 @@ async def set_site_dependencies(
     ``_pockets`` / ``_resolve`` are injectable seams for tests.
 
     Returns ``{pocket_id, packages: {name: {version}}, rejected: [{name, code,
-    reason}], changed}``.
+    reason}], warnings: [{name, code, message}], changed}``. ``warnings`` (advisories,
+    deprecation) are about packages that WERE declared.
     """
     from pocketpaw_ee.sites import dependency_resolver
 
@@ -10285,9 +11312,11 @@ async def set_site_dependencies(
             for req in requests
         ]
         requests = []
+    warnings: list[dict[str, str]] = []
     if requests:
         result = await resolve(requests, engine, already_declared=packages.keys())
         rejected += [r.as_dict() for r in result.rejected]
+        warnings += list(getattr(result, "warnings", None) or [])
         for name, resolved in result.packages.items():
             packages[name] = resolved.manifest_entry()
 
@@ -10307,6 +11336,7 @@ async def set_site_dependencies(
             name: {"version": entry["version"]} for name, entry in sorted(packages.items())
         },
         "rejected": rejected,
+        "warnings": warnings,
         "changed": changed,
     }
 
@@ -11198,6 +12228,65 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
         {"_id": 0, "pocket_id": 1},
     )
     return {row["pocket_id"] async for row in cursor if row.get("pocket_id")}
+
+
+async def site_billing_for_pockets(
+    workspace_id: str, pocket_ids: list[str]
+) -> dict[str, tuple[str | None, str]]:
+    """``{pocket_id: (plan_tier, subscription_status)}`` of each pocket's canonical Site.
+
+    The per-site billing fields the pockets service needs to answer "may this
+    pocket's source go out" (``entitlements.service.site_code_entitled``), read here
+    because this service is the sole owner of Site reads. ONE query for a whole
+    gallery page, so the pockets list pays no per-row lookup. A pocket with no Site
+    row is absent from the result.
+
+    Picks the row ``_canonical_site_doc`` would when legacy dupes exist: the
+    stable-id row (a transferred row keeps its minted id), else the newest row with
+    a url, else the newest. Projected to the fields that choice and the answer need.
+    Tenant-scoped on ``workspace``.
+    """
+    if not workspace_id or not pocket_ids:
+        return {}
+    cursor = _SiteDoc.get_pymongo_collection().find(
+        {"workspace": workspace_id, "pocket_id": {"$in": list(pocket_ids)}},
+        {
+            "pocket_id": 1,
+            "plan_tier": 1,
+            "subscription_status": 1,
+            "archived": 1,
+            "identity_workspace": 1,
+            "url": 1,
+            "createdAt": 1,
+        },
+    )
+    by_pocket: dict[str, list[dict[str, Any]]] = {}
+    async for row in cursor:
+        if row.get("pocket_id"):
+            by_pocket.setdefault(row["pocket_id"], []).append(row)
+
+    def _created(row: dict[str, Any]) -> datetime:
+        stamp = row.get("createdAt")
+        return stamp.replace(tzinfo=None) if isinstance(stamp, datetime) else datetime.min
+
+    out: dict[str, tuple[str | None, str]] = {}
+    for pocket_id, rows in by_pocket.items():
+        moved = next(
+            (
+                r
+                for r in rows
+                if r.get("archived") is False
+                and r.get("identity_workspace") not in ("", None, workspace_id)
+            ),
+            None,
+        )
+        stable_id = moved["_id"] if moved is not None else _live_object_id(workspace_id, pocket_id)
+        chosen = next((r for r in rows if r["_id"] == stable_id), None)
+        if chosen is None:
+            newest = sorted(rows, key=_created, reverse=True)
+            chosen = next((r for r in newest if r.get("url")), newest[0])
+        out[pocket_id] = (chosen.get("plan_tier"), chosen.get("subscription_status") or "none")
+    return out
 
 
 async def live_site_for_pocket(*, workspace_id: str, pocket_id: str) -> tuple[str, str] | None:

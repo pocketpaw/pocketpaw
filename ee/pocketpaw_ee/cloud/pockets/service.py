@@ -29,6 +29,10 @@ INVARIANTS a reader must not break:
   being built rather than hide them. The one route that returns this dict to a
   browser calls ``get_for_wire``, and a new such route must too. Both share
   ``_fetch_readable``, so they can never drift on WHO may read a pocket.
+* SOURCE IS A PER-SITE CAPABILITY. Whether code shows is the pocket's own Site
+  tier (``site`` / ``staff``, active) through ``entitlements.service.
+  site_code_entitled``, or the operator's workspace override when one is set. The
+  workspace plan never grants it. See ``_source_entitled_by_pocket``.
 * SHARE LINKS NEVER SERVE SOURCE, on any tier. The token is a forwardable bearer
   credential with no user behind it, so there is no entitlement to resolve and
   the owner's is the wrong question. ``share_link_access`` is NOT consulted — it
@@ -309,6 +313,7 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         # undeclared into an explicit ``False`` here, before publish gets the
         # chance to apply ``sites_keep_client_bundle_default``.
         keeps_client_bundle=getattr(doc, "keeps_client_bundle", None),
+        site_meta=getattr(doc, "site_meta", None),
         # Entity-rooms chunk ② — optional per-entity surface-profile override.
         # ``getattr`` for legacy docs that pre-date the field. Dumped to a plain
         # JSON dict so the domain layer carries the wire shape, not the Beanie
@@ -421,27 +426,52 @@ async def _resolve_user_ids(user_ids: list[str]) -> dict[str, dict]:
     }
 
 
-async def _workspace_source_entitled(workspace_id: str) -> bool:
-    """Does this workspace hold ``Entitlements.site_source_visible``? (SF-2)
+async def _source_entitled_by_pocket(workspace_id: str, pocket_ids: list[str]) -> dict[str, bool]:
+    """May each pocket's code be shown? ``{pocket_id: bool}`` for every id asked. (SF-2)
 
-    Split out of ``_source_visible_for_doc`` when ``list_pockets`` needed to ask it
-    once for a whole page rather than once per row, so the two callers cannot drift
-    on WHICH resolver answers it. Fails closed on a malformed workspace id rather
-    than calling a resolver that would reject it — for a capability that exposes
-    code, "unknown means no" is the only direction a mistake may fail in.
+    Two inputs, in this order:
+
+    1. **The operator override.** ``WorkspaceOverrides.site_source_visible``,
+       surfaced as ``Entitlements.site_source_visible``: ``False`` revokes source on
+       every site in the workspace (an abuse response), ``True`` grants it on every
+       site, ``None`` has no opinion. No workspace PLAN answers it, so for an
+       ordinary workspace this is always ``None``.
+    2. **The site's own tier.** ``entitlements.service.site_code_entitled`` over the
+       pocket's canonical Site row: ``site`` or ``staff`` with an active
+       subscription, plan-carried sites included. The same predicate gates the
+       project download, so the Code tab and the download cannot disagree.
+
+    A pocket with no Site row, a draft (no tier, no subscription), a free site and
+    a lapsed one all resolve ``False``. Hiding source on drafts is intended: code is
+    a paid per-site capability, and a draft has not been bought yet.
+
+    One resolve and ONE Site query for any number of pockets, which is what keeps
+    the gallery free of an N+1. The Site rows are read through ``sites.service``,
+    the sole owner of that collection. Fails closed on a missing workspace id.
     """
     if not workspace_id:
-        return False
+        return dict.fromkeys(pocket_ids, False)
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
     ent = await entitlements_service.resolve_entitlements(workspace_id)
-    return ent.site_source_visible
+    if ent.site_source_visible is not None:
+        return dict.fromkeys(pocket_ids, ent.site_source_visible)
+
+    # Function-local import: sites.service reads pockets (cycle).
+    from pocketpaw_ee.sites import service as sites_service
+
+    billing = await sites_service.site_billing_for_pockets(workspace_id, pocket_ids)
+    return {
+        pid: pid in billing
+        and entitlements_service.site_code_entitled(
+            plan_tier=billing[pid][0], subscription_status=billing[pid][1]
+        )
+        for pid in pocket_ids
+    }
 
 
-async def _source_visible_for_doc(
-    doc: _PocketDoc, *, workspace_entitled: bool | None = None
-) -> bool:
+async def _source_visible_for_doc(doc: _PocketDoc, *, entitled: bool | None = None) -> bool:
     """May this pocket's authored ``source`` go out over the wire? (SF-2)
 
     Conditions ANDed, cheapest first, and none of them touches the database until
@@ -454,23 +484,17 @@ async def _source_visible_for_doc(
        ``sites_source_gate_retroactive`` is on.
 
        The cohort stamp is D3: flipping the gate on never re-classifies a pocket
-       that already exists, so turning it on cannot take source away from somebody
-       who already had it. That is the right default and it has a consequence that
-       went unwritten for a while — the gate shipped disabled, so EVERY pocket in
-       existence was born outside the cohort, and turning the master flag on
-       therefore gated nothing that was already here. Free-tier sites kept serving
-       their source and the Code tab kept rendering over it. The retroactive flag
-       is the deliberate second switch that closes that, and it is ANDed UNDER the
-       master flag rather than replacing it, so with the gate off it does nothing.
-
-       Neither flag writes to the document, so the rollout stays reversible in
-       both directions from either one: turn either off and every grandfathered
-       pocket has its source back immediately, with no migration and no stored
-       state to unwind.
-    3. **The workspace is entitled.** ``Entitlements.site_source_visible``: every
-       paid rung grants it, ``free`` does not. Retroactive widens WHICH pockets
-       are asked this question; it never changes the answer, so a paying
-       customer's source is untouched in every cohort.
+       that already exists. The gate shipped disabled, so every pocket that
+       predates it was born outside the cohort; the retroactive flag is the
+       deliberate second switch that reaches them. It is ANDed UNDER the master
+       flag, so with the gate off it does nothing. Neither flag writes to the
+       document, so turning either off restores source immediately, with no
+       migration and no stored state to unwind.
+    3. **The site is entitled.** ``_source_entitled_by_pocket``: the operator's
+       workspace override when one is set, otherwise the pocket's own Site on
+       ``site`` / ``staff`` with an active subscription. The workspace plan grants
+       nothing, so a paid site in a Free workspace shows its code and a free site
+       in a Pro Max workspace does not.
 
     IT DOES NOT SHORT-CIRCUIT ON ``doc.source`` BEING ABSENT, and that is not an
     oversight to optimize away. The answer is PUBLISHED as ``sourceVisible`` on the
@@ -478,24 +502,9 @@ async def _source_visible_for_doc(
     than "did anything get redacted just now". ``list_pockets`` projects ``source``
     out of its Mongo query for weight reasons, so a presence check would report
     every gallery row visible — including the gated ones a single-pocket read
-    reports withheld. The frontend would show a Code tab from the gallery and lose
-    it on open. ``workspace_entitled`` is how the gallery stays cheap instead:
-    ``list_pockets`` resolves its one workspace ONCE and passes the answer down,
-    rather than every row resolving the same workspace for itself.
-
-    THE WORKSPACE RESOLVER, NOT ``resolve_site_entitlements``. Source is a field on
-    the POCKET and pockets are workspace-scoped, so a Site row does not own the
-    thing being read. More decisively, ``create_draft_site`` sets neither
-    ``plan_tier`` nor ``subscription_status``, so a pocket's Site row sits on the
-    free floor from pocket-create until its first publish — a per-site gate would
-    withhold source on every draft, from paying customers, for exactly as long as
-    they were authoring it. A pocket with NO Site row therefore needs no special
-    case: it resolves by its workspace's plan like every other, and there is
-    nothing here that can raise on the absence.
-
-    Fails CLOSED on a malformed workspace id rather than calling a resolver that
-    would reject it. For a capability that exposes code, "unknown means no" is the
-    only direction a mistake may fail in.
+    reports withheld. ``entitled`` is how the gallery stays cheap instead:
+    ``list_pockets`` resolves its whole page in one batch and passes each pocket's
+    answer down.
     """
     from pocketpaw.config import get_settings
 
@@ -507,48 +516,37 @@ async def _source_visible_for_doc(
     if not getattr(doc, "source_gated", False) and not settings.sites_source_gate_retroactive:
         return True
 
-    if workspace_entitled is not None:
-        return workspace_entitled
-    return await _workspace_source_entitled(getattr(doc, "workspace", "") or "")
-
-
-async def snapshot_source_visible(workspace_id: str, source_gated: bool) -> bool:
-    """May ``workspace_id`` read a site snapshot carrying this ``source_gated`` stamp? (SF-2)
-
-    The same answer ``_source_visible_for_doc`` gives a pocket with that stamp in
-    that workspace, for callers holding a copied snapshot rather than a pocket
-    (sharing a site template publicly). Not a second rule: it asks the same one.
-    """
-    from types import SimpleNamespace
-
-    probe = SimpleNamespace(workspace=workspace_id, source_gated=bool(source_gated))
-    return await _source_visible_for_doc(probe)  # type: ignore[arg-type]
+    if entitled is not None:
+        return entitled
+    pocket_id = str(getattr(doc, "id", "") or "")
+    answers = await _source_entitled_by_pocket(getattr(doc, "workspace", "") or "", [pocket_id])
+    return answers[pocket_id]
 
 
 async def _resolved_wire_dict(
     doc: _PocketDoc,
     viewer_user_id: str,
     *,
-    workspace_entitled: bool | None = None,
+    source_entitled: bool | None = None,
     resolve_memo: dict | None = None,
     team_users: dict[str, dict] | None = None,
 ) -> dict:
     """The wire dict as it goes OVER THE WIRE — ``source`` withheld when the
-    workspace may not read it (SF-2). The default entry point, and the one every
+    pocket's site may not show it (SF-2). The default entry point, and the one every
     user-facing read funnels through; use ``_unredacted_wire_dict`` only where the
     caller is the build / edit pipeline and needs the real file map.
 
-    ``workspace_entitled`` lets a caller that is already serializing N pockets of
-    ONE workspace resolve the entitlement once and hand the answer down. Only
+    ``source_entitled`` lets a caller that is already serializing N pockets resolve
+    every pocket's entitlement in one batch and hand each answer down. Only
     ``list_pockets`` needs it; everything else resolves per pocket, which is one
-    workspace lookup on a single-pocket read. ``resolve_memo`` and ``team_users``
+    workspace resolve and one Site read on a single-pocket read. ``resolve_memo`` and ``team_users``
     are the same idea for the ``$source`` reads and the team lookup (see
     ``_wire_dict``).
     """
     return await _wire_dict(
         doc,
         viewer_user_id,
-        source_visible=await _source_visible_for_doc(doc, workspace_entitled=workspace_entitled),
+        source_visible=await _source_visible_for_doc(doc, entitled=source_entitled),
         resolve_memo=resolve_memo,
         team_users=team_users,
     )
@@ -1946,15 +1944,23 @@ async def list_pockets(
     # every pocket's round trips end to end, one after another — N sequential
     # awaits for a list that renders all at once. gather keeps the ordering
     # (results come back positionally) while overlapping the waits.
-    # SF-2 — resolve the source entitlement ONCE for the whole page. Every doc here
-    # belongs to ``workspace_id`` (the query is anchored on it), so the answer is
-    # the same for all of them, and letting each row resolve it would put two
-    # workspace lookups behind every card in the gallery. Skipped entirely unless
-    # some row is actually in the gated cohort — which is every row of every
-    # gallery until somebody turns the gate on.
-    workspace_entitled: bool | None = None
-    if any(getattr(d, "source_gated", False) for d in docs):
-        workspace_entitled = await _workspace_source_entitled(workspace_id)
+    # SF-2 — resolve the source entitlement for the whole page in ONE batch: one
+    # workspace resolve and one Site query, never one per card. Only pockets the
+    # gate can reach are asked about (born gated, or every pocket once the
+    # retroactive switch is on), and nothing is asked while the gate is off.
+    from pocketpaw.config import get_settings
+
+    gate = get_settings()
+    in_scope = (
+        [
+            str(d.id)
+            for d in docs
+            if getattr(d, "source_gated", False) or gate.sites_source_gate_retroactive
+        ]
+        if gate.sites_source_gate_enabled
+        else []
+    )
+    source_entitled = await _source_entitled_by_pocket(workspace_id, in_scope) if in_scope else {}
     # One ``$source`` memo for the whole page: a ``workspace.pockets`` or
     # ``workspace.members`` marker repeated across N specs is one read, not N
     # (each of those reads scans the workspace, so per-pocket it was O(N^2)).
@@ -1976,7 +1982,7 @@ async def list_pockets(
                 _resolved_wire_dict(
                     d,
                     user_id,
-                    workspace_entitled=workspace_entitled,
+                    source_entitled=source_entitled.get(str(d.id)),
                     resolve_memo=resolve_memo,
                     team_users=team_users,
                 )
@@ -2776,6 +2782,72 @@ async def set_html_source_file(
     # ``set_react_source_file`` makes.
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(file_path))
     return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_project_source(
+    pocket_id: str,
+    user_id: str,
+    *,
+    writes: dict[str, str] | None = None,
+    deletes: list[str] | None = None,
+    add_recipe: str | None = None,
+    label: str | None = None,
+) -> dict[str, Any]:
+    """Write and delete files of a ``project`` pocket's source map in ONE save.
+
+    The project engine's only source writer. A project is a whole repo, so one
+    agent step (a recipe, a multi-file edit) touches many files at once and must
+    land as one version, not one per file. Paths arrive already normalized by
+    ``sites.project_tools``; this layer owns access, the engine check, the persist,
+    the event and the draft version, mirroring ``set_html_source_file``.
+
+    ``add_recipe`` appends a recipe id to ``site_meta.project.recipes`` in the same
+    save. A delete of a path that is not there is a ``NotFound`` (nothing saved).
+    Returns ``{files, bytes, changed}`` for the saved map; a call that changes
+    nothing saves nothing and records no version.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_project_site",
+            "This pocket is not a project site, so it has no project files to edit.",
+        )
+    updated = dict(doc.source)
+    missing = [path for path in deletes or [] if path not in updated]
+    if missing:
+        raise NotFound("site_file", ", ".join(missing[:10]))
+    for path in deletes or []:
+        del updated[path]
+    for path, contents in (writes or {}).items():
+        updated[path] = contents
+    meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    project = dict(meta.get("project") or {})
+    recipes = [r for r in project.get("recipes") or [] if isinstance(r, str)]
+    meta_changed = False
+    if add_recipe and add_recipe not in recipes:
+        project.setdefault("template", None)
+        project.setdefault("framework", None)
+        project["recipes"] = [*recipes, add_recipe]
+        meta["project"] = project
+        meta_changed = True
+    changed = updated != doc.source
+    if changed or meta_changed:
+        # Reassign fresh dicts so Beanie tracks the change (same note as the peers).
+        doc.source = updated
+        if meta_changed:
+            doc.site_meta = meta
+        await doc.save()
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    if changed:
+        await _record_pocket_svelte_draft_version(
+            doc, author=user_id, label=label or "Edited project files"
+        )
+    return {
+        "files": len(updated),
+        "bytes": sum(len(str(v).encode("utf-8")) for v in updated.values()),
+        "changed": changed,
+    }
 
 
 #: Engines whose source map may carry an author dependency manifest.
@@ -5317,6 +5389,7 @@ async def agent_create(
     source: dict[str, Any] | None = None,
     keeps_client_bundle: bool | None = None,
     trusted: bool = False,
+    site_meta: dict[str, Any] | None = None,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
 
@@ -5361,6 +5434,10 @@ async def agent_create(
     feat/sites-js-by-default). Pass an explicit ``True``/``False`` only to record
     a real authorial decision; both override the setting, so ``False`` is how a
     pure-static page opts out of shipping a bundle.
+
+    ``site_meta`` carries site facts that are not file content; a ``project`` site
+    created from a base template stamps ``{"project": {template, framework,
+    recipes}}`` here.
 
     ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
     code-assembled spec the caller fully controls (the deterministic Paw Site
@@ -5416,6 +5493,7 @@ async def agent_create(
             engine=engine,
             source=source,
             keeps_client_bundle=keeps_client_bundle,
+            site_meta=site_meta,
             # SF-2 — which side of the source-gate flip this pocket is born on.
             source_gated=_source_gated_at_create(),
             visibility="workspace",
@@ -6509,7 +6587,6 @@ async def list_workspace_pocket_connector_permissions(
 
 
 __all__ = [
-    "snapshot_source_visible",
     "access_via_share_link",
     "add_agent",
     "add_collaborator",

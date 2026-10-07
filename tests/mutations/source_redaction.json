@@ -30,12 +30,12 @@
     ]
   },
   {
-    "label": "ignore the entitlement — gate everyone in the cohort, paid included",
+    "label": "ignore the site's tier — gate everyone in the cohort, paid sites included",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "    return ent.site_source_visible",
-    "replace": "    return bool(ent) and False",
+    "find": "        pid: pid in billing\n        and entitlements_service.site_code_entitled(",
+    "replace": "        pid: False\n        and entitlements_service.site_code_entitled(",
     "tests": [
-      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_paid_workspace_is_unaffected",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_paid_site_is_unaffected",
       "tests/cloud/pockets/test_source_redaction_gate.py::test_b_websocket_broadcast_is_unredacted_when_paid"
     ]
   },
@@ -110,9 +110,9 @@
     ]
   },
   {
-    "label": "the gallery resolves the entitlement per row instead of once per page, putting two workspace lookups behind every card",
+    "label": "the gallery resolves the entitlement per row instead of once per page, putting a workspace lookup and a Site read behind every card",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "                    workspace_entitled=workspace_entitled,\n                    resolve_memo=resolve_memo,",
+    "find": "                    source_entitled=source_entitled.get(str(d.id)),\n                    resolve_memo=resolve_memo,",
     "replace": "                    resolve_memo=resolve_memo,",
     "tests": [
       "tests/cloud/pockets/test_source_redaction_gate.py::test_e_list_resolves_the_entitlement_once_for_the_page"
@@ -180,6 +180,36 @@
     "replace": "    sites_source_gate_retroactive: bool = Field(\n        default=True,",
     "tests": [
       "tests/cloud/pockets/test_source_redaction_gate.py::test_h_retroactive_ships_disabled"
+    ]
+  },
+  {
+    "label": "a pocket with no Site row is granted, so every draft and orphan pocket shows its code",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        pid: pid in billing\n        and entitlements_service.site_code_entitled(",
+    "replace": "        pid: pid not in billing\n        or entitlements_service.site_code_entitled(",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_pocket_with_no_site_row_resolves_denied_not_raising",
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_b_a_pocket_with_no_site_row_in_a_pro_max_workspace_is_hidden"
+    ]
+  },
+  {
+    "label": "the operator override is ignored, so a revocation leaves a paid site's code showing",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if ent.site_source_visible is not None:\n        return dict.fromkeys(pocket_ids, ent.site_source_visible)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_f_override_false_hides_even_a_staff_site",
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_f_override_true_grants_a_free_site"
+    ]
+  },
+  {
+    "label": "the override's None is read as a revocation, so no site ever shows its code",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if ent.site_source_visible is not None:\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_c_a_paid_site_in_a_free_workspace_is_visible",
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_f_an_override_on_another_field_defers_to_the_site"
     ]
   }
 ]
