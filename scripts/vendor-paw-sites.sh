@@ -80,6 +80,10 @@ cp "$SRC/package.json" "$DEST/package.json"
 cp -R "$SRC/dist" "$DEST/dist"
 cp -R "$SRC/templates" "$DEST/templates"
 
+# The base app templates and backend recipes (template-copy / apply-recipe). git
+# archive ships tracked files only, so no node_modules, .wrangler or .paw tags along.
+git -C "$SRC" archive HEAD starters recipes | tar -x -C "$DEST"
+
 # PP-2 — the browser verification harness. Only the four files the sandbox installs
 # from; node_modules is installed IN the sandbox from the frozen lockfile.
 if [ -f "$SRC/harness/browser-check.mjs" ]; then
