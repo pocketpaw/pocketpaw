@@ -1,6 +1,7 @@
 # ee/pocketpaw_ee/sites/binding_provisioner.py: create (and tear down) the per-site
 # Cloudflare resources a bundle deploy binds, so a ``paw-build.json`` that asks for
-# ``kv`` or ``r2`` gets a namespace / bucket of its own instead of a refusal.
+# ``d1``, ``kv`` or ``r2`` gets a database / namespace / bucket of its own instead of
+# a refusal.
 #
 # ``ensure_bindings(site, requests)`` returns the ``ProvisionedResources`` that
 # ``bundle_deploy.map_bindings`` maps onto the upload. Rules:
@@ -16,7 +17,12 @@
 #     ai are refused as not supported yet. Every check runs before the first create.
 #   * Caps per site are env-configurable (see ``_cap``). Cloudflare allows 1,000 KV
 #     namespaces per ACCOUNT, so KV per site is the scarce one.
-#   * d1 is not provisioned here: it stays the site's own D1 (``d1_database_id``).
+#   * d1 is ONE database per site, whatever the binding is called: the site's own
+#     ``d1_database_id``, named ``paw-site-<id>`` like the dynamic lane's, so either
+#     lane finds the other's database instead of making a second one. A stored id
+#     equal to the legacy derived placeholder (``derived_d1_id``) was never created
+#     on Cloudflare and is replaced by a real one. Its migrations are not run here
+#     (``project_d1`` does that after this returns).
 #
 # ``teardown_bindings`` is the delete cascade's ``bindings`` step: best effort,
 # per resource, logging each failure; a bucket that still holds objects gets an
@@ -35,6 +41,7 @@ from pocketpaw_ee.sites.bundle_deploy import _BINDING_NAME, ProvisionedResources
 
 logger = logging.getLogger(__name__)
 
+D1 = "d1"
 KV = "kv"
 R2 = "r2"
 _NOT_SUPPORTED = frozenset({"do", "queues", "ai"})
@@ -78,9 +85,9 @@ def _refuse(code: str, message: str) -> ValidationError:
 
 
 def _requested(binding_requests: Any) -> dict[str, list[str]]:
-    """``{kind: [names]}`` for kv / r2, after refusing what cannot be provisioned.
-    Malformed and non-backend requests are left to ``map_bindings``."""
-    wanted: dict[str, list[str]] = {KV: [], R2: []}
+    """``{kind: [names]}`` for d1 / kv / r2, after refusing what cannot be
+    provisioned. Malformed and non-backend requests are left to ``map_bindings``."""
+    wanted: dict[str, list[str]] = {D1: [], KV: [], R2: []}
     for req in binding_requests if isinstance(binding_requests, list) else []:
         if not isinstance(req, dict):
             continue
@@ -104,6 +111,12 @@ def _requested(binding_requests: Any) -> dict[str, list[str]]:
 
 
 def _check_gates(site: Any, wanted: dict[str, list[str]], paid: bool) -> None:
+    if len(wanted[D1]) > 1:
+        raise _refuse(
+            "sites.binding_cap",
+            "A site has one D1 database; the build binds it under "
+            f"{len(wanted[D1])} names ({', '.join(wanted[D1])}). Use one binding.",
+        )
     if wanted[R2] and not paid:
         raise _refuse(
             "sites.binding_not_entitled",
@@ -130,6 +143,39 @@ def _check_gates(site: Any, wanted: dict[str, list[str]], paid: bool) -> None:
         raise _refuse("sites.bundle_invalid", "two binding names map to the same resource name")
 
 
+def database_name(site_id: str) -> str:
+    """The D1 database name for a site: the dynamic lane's ``paw-site-<id>``."""
+    from pocketpaw_ee.sites.d1_migrate import database_name as _name
+
+    return _name(str(site_id))
+
+
+async def _ensure_d1(
+    site: Any,
+    *,
+    cloudflare: Any,
+    save: Callable[[Any], Awaitable[None]],
+    derived_d1_id: str,
+) -> str:
+    stored = (getattr(site, "d1_database_id", "") or "").strip()
+    if stored and stored != derived_d1_id:
+        return stored
+    name = database_name(str(site.id))
+    db_id = await cloudflare.find_database(name)
+    if not db_id:
+        try:
+            db_id = await cloudflare.create_database(name)
+        except ValidationError:
+            # A concurrent publish may have created it between our find and create.
+            db_id = await cloudflare.find_database(name)
+            if not db_id:
+                raise
+    site.d1_database_id = db_id
+    await save(site)
+    logger.info("sites.bindings: site %s d1 -> %s", site.id, db_id)
+    return db_id
+
+
 async def ensure_bindings(
     site: Any,
     binding_requests: Any,
@@ -137,14 +183,21 @@ async def ensure_bindings(
     cloudflare: Any,
     save: Callable[[Any], Awaitable[None]],
     paid: bool,
+    derived_d1_id: str = "",
+    provision_d1: bool = True,
 ) -> ProvisionedResources:
-    """Create the site's missing KV namespaces / R2 buckets and return everything
-    ``map_bindings`` needs. ``paid`` is the site's
-    ``entitlements.site_paid_backends_entitled`` answer. ``save(site)`` persists the
-    two resource maps; it runs after each create."""
+    """Create the site's missing D1 database / KV namespaces / R2 buckets and return
+    everything ``map_bindings`` needs. ``paid`` is the site's
+    ``entitlements.site_paid_backends_entitled`` answer. ``save(site)`` persists
+    ``d1_database_id`` and the two resource maps; it runs after each create.
+    ``derived_d1_id`` is the placeholder id older publishes stored without creating
+    a database; a stored id equal to it is treated as no database. ``provision_d1``
+    False leaves D1 to the caller (a dynamic site's database is pinned upstream)."""
     wanted = _requested(binding_requests)
     _check_gates(site, wanted, paid)
 
+    if wanted[D1] and provision_d1:
+        await _ensure_d1(site, cloudflare=cloudflare, save=save, derived_d1_id=derived_d1_id)
     kv = dict(getattr(site, "kv_namespaces", None) or {})
     r2 = dict(getattr(site, "r2_buckets", None) or {})
     for name in wanted[KV]:

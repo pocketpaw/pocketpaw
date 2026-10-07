@@ -2505,6 +2505,7 @@ async def publish(
     builder_origin: str | None = None,
     keeps_client_bundle: bool = False,
     preview: bool = False,
+    confirm_destructive_migrations: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -2742,6 +2743,7 @@ async def publish(
         bundle_reader=_bundle_reader,
         local_deploy=_local_deploy,
         workers_deploy=_workers_deploy,
+        confirm_destructive_migrations=confirm_destructive_migrations,
     )
 
 
@@ -2757,6 +2759,7 @@ async def _deploy_project_site(
     builder_origin: str | None,
     cloudflare: Any | None,
     local_deploy: Callable[[str, str], str] | None,
+    confirm_destructive_migrations: bool = False,
     _store: Any | None = None,
 ) -> _SiteDoc:
     """Publish a ``project`` pocket from its stored draft build.
@@ -2767,6 +2770,12 @@ async def _deploy_project_site(
     through ``bundle_deploy`` + the binding provisioner. A source with no finished
     draft build is a 409 (open the preview, or run a build, then publish). The site's
     plan is checked against the manifest first (``project_build.check_plan_allows``).
+
+    The Site doc is ensured (inserted undeployed on a first publish) BEFORE the deploy,
+    because the provisioner records the D1 / KV / R2 it creates on it. A ``d1``
+    binding gets the site's real database, and the project's ``migrations/*.sql``
+    (read from ``source``, the same files the bundle was built from) are applied to it
+    before the Worker upload (``project_d1``).
     """
     import shutil
     import tempfile
@@ -2802,6 +2811,16 @@ async def _deploy_project_site(
             ),
             has_custom_domain=bool(getattr(doc, "domains", None)),
         )
+        if doc is None:
+            await _ensure_undeployed_site_doc(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                pocket_id=pocket_id,
+                site_id=site_id,
+                signed_key=signed_key,
+                site_name=site_name,
+                builder_origin=builder_origin,
+            )
         return await _deploy_site_doc(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -2818,9 +2837,53 @@ async def _deploy_project_site(
             cloudflare=cloudflare,
             local_deploy=local_deploy,
             prebuilt_project_dir=work,
+            confirm_destructive_migrations=confirm_destructive_migrations,
         )
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+async def _ensure_undeployed_site_doc(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    builder_origin: str | None,
+) -> _SiteDoc:
+    """The site's canonical doc, inserted undeployed (capture config seeded) when a
+    first publish has none yet. An existing doc is returned untouched: the
+    post-deploy upsert refreshes it, and a failed deploy must not change it."""
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is not None:
+        return doc
+    doc = _SiteDoc(
+        id=oid,
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        owner=user_id,
+        name=site_name,
+        script_name=site_id,
+        # Nothing serves yet; the post-deploy upsert flips both.
+        deployed=False,
+        url="",
+        signed_key=signed_key,
+        builder_origin=builder_origin or "",
+        allowed_origins=_default_allowed_origins(),
+        event_mapping=_DEFAULT_EVENT_MAPPING,
+    )
+    try:
+        await doc.insert()
+    except DuplicateKeyError:
+        # A concurrent publish of this site inserted it first.
+        found = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+        if found is None:
+            raise
+        doc = found
+    return doc
 
 
 async def _deploy_site_doc(
@@ -2853,6 +2916,9 @@ async def _deploy_site_doc(
     # growing a second copy of the deploy tail. One deploy path, two places the build
     # can have happened.
     prebuilt_project_dir: str | None = None,
+    # A project publish may run migrations that delete data the site holds only when
+    # the owner confirmed it (``project_d1``). Ignored by every other engine.
+    confirm_destructive_migrations: bool = False,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -2909,6 +2975,7 @@ async def _deploy_site_doc(
             builder_origin=builder_origin,
             cloudflare=cloudflare,
             local_deploy=local_deploy,
+            confirm_destructive_migrations=confirm_destructive_migrations,
         )
 
     if _is_dynamic(pattern, ripple_spec):
@@ -3184,12 +3251,20 @@ async def _deploy_site_doc(
             # A build that carries paw-build.json (the project engine / base app
             # templates) deploys as a multi-module bundle with static assets. No
             # existing engine emits that file, so their path below is unchanged.
-            # KV / R2 need the Site doc to record what they create; a first publish
-            # has none yet, so such a build is refused as not provisioned until the
-            # row exists.
+            # D1 / KV / R2 are created by the provisioner and recorded on the Site
+            # doc, which a project publish has ensured exists by now. A project's
+            # migrations are applied to its D1 after every check, before the upload.
             _bundle_doc = await _SiteDoc.find_one(
                 {"_id": ObjectId(site_id), "workspace": workspace_id}
             )
+            _before_upload = None
+            if normalize_engine(engine) == "project" and not is_dynamic:
+                _before_upload = _project_migrator(
+                    cf,
+                    site_id=site_id,
+                    source=source,
+                    confirm_destructive=confirm_destructive_migrations,
+                )
             await bundle_deploy.deploy_bundle(
                 cf,
                 script_name=site_id,
@@ -3197,10 +3272,17 @@ async def _deploy_site_doc(
                 salt=workspace_id,
                 provisioned=bundle_deploy.ProvisionedResources(d1_database_id=d1_database_id),
                 provision=(
-                    _bundle_provisioner(_bundle_doc, cf, d1_database_id=d1_database_id)
+                    _bundle_provisioner(
+                        _bundle_doc,
+                        cf,
+                        # A dynamic site's D1 was resolved above; anything else gets
+                        # its own real database from the provisioner.
+                        d1_database_id=d1_database_id if is_dynamic else None,
+                    )
                     if _bundle_doc is not None
                     else None
                 ),
+                before_upload=_before_upload,
             )
         else:
             bundle = bundle_reader(build.project_dir)
@@ -5422,16 +5504,49 @@ async def deploy_bundle(
     )
 
 
+def _project_migrator(
+    cf: Any, *, site_id: str, source: dict[str, str] | None, confirm_destructive: bool
+) -> Any:
+    """The ``before_upload`` hook of a project's bundle deploy: apply the project's
+    ``migrations/*.sql`` (from ``source``, the files the bundle was built from) to the
+    D1 database the upload binds. Runs after every binding check and before the first
+    upload, so a refused or failed migration leaves the live site untouched."""
+    from pocketpaw_ee.sites import project_d1
+
+    migrations = project_d1.migrations_from_source(source)
+
+    async def _migrate(bindings: list[dict]) -> None:
+        database_id = next((b.get("id") for b in bindings if b.get("type") == "d1"), "")
+        if migrations and database_id:
+            await project_d1.apply_migrations(
+                cf, database_id, migrations, confirm_destructive=confirm_destructive
+            )
+        elif migrations:
+            logger.warning(
+                "sites: site %s ships migrations/ but binds no D1; they were not applied",
+                site_id,
+            )
+
+    return _migrate
+
+
 def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None = None) -> Any:
     """The ``provision`` callback ``bundle_deploy.deploy_bundle`` runs: the site's
-    plan decides what it may bind, and the resource maps are saved with ``$set`` so a
-    concurrent write to other fields of the doc is not clobbered."""
+    plan decides what it may bind, and the resource ids are saved with ``$set`` so a
+    concurrent write to other fields of the doc is not clobbered.
+
+    ``d1_database_id`` pins the D1 binding (a dynamic site's resolved id); None lets
+    the provisioner ensure the site's own real database."""
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
     from pocketpaw_ee.sites import binding_provisioner
 
     async def _save(doc: Any) -> None:
         await doc.set(
-            {"kv_namespaces": dict(doc.kv_namespaces), "r2_buckets": dict(doc.r2_buckets)}
+            {
+                "d1_database_id": doc.d1_database_id,
+                "kv_namespaces": dict(doc.kv_namespaces),
+                "r2_buckets": dict(doc.r2_buckets),
+            }
         )
 
     async def _provision(requests: Any) -> bundle_deploy.ProvisionedResources:
@@ -5444,6 +5559,10 @@ def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None =
                 plan_tier=getattr(site, "plan_tier", None),
                 subscription_status=getattr(site, "subscription_status", None),
             ),
+            derived_d1_id=_derive_d1_database_id(
+                str(getattr(site, "workspace", "")), str(getattr(site, "pocket_id", ""))
+            ),
+            provision_d1=d1_database_id is None,
         )
         from dataclasses import replace
 
@@ -7328,6 +7447,8 @@ async def publish_pocket(
     # ``sites.buy_plan`` against the caller's role.
     purchase_authorized: bool = False,
     preview: bool = False,
+    # Owner confirmed a project migration that deletes data (``project_d1``).
+    confirm_destructive_migrations: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -7917,6 +8038,7 @@ async def publish_pocket(
             keeps_client_bundle=keeps_client_bundle,
             tier=_carried_tier,
             covered_by_plan=_plan_carries,
+            confirm_destructive_migrations=confirm_destructive_migrations,
             _generator=_generator,
             _cloudflare=_cloudflare,
             _bundle_reader=_bundle_reader,
@@ -7938,6 +8060,7 @@ async def publish_pocket(
         builder_origin=builder_origin,
         keeps_client_bundle=keeps_client_bundle,
         preview=False,
+        confirm_destructive_migrations=confirm_destructive_migrations,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
@@ -8858,6 +8981,7 @@ async def _publish_credits_site(
     keeps_client_bundle: bool,
     tier: Any,
     covered_by_plan: bool = False,
+    confirm_destructive_migrations: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -8929,6 +9053,7 @@ async def _publish_credits_site(
         keeps_client_bundle=keeps_client_bundle,
         tier=tier,
         rail=_PLAN_RAIL if covered_by_plan else _CREDITS_RAIL,
+        confirm_destructive_migrations=confirm_destructive_migrations,
     )
 
     site_id = str(doc.id)
@@ -9035,6 +9160,7 @@ async def _publish_pending_site(
     keeps_client_bundle: bool,
     tier: Any,
     rail: str = _CREDITS_RAIL,
+    confirm_destructive_migrations: bool = False,
 ) -> tuple[_SiteDoc, dict[str, Any] | None]:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
     WITHOUT deploying it live.
@@ -9107,6 +9233,8 @@ async def _publish_pending_site(
         # and a paid interactive site would go live with its JavaScript stripped.
         "keeps_client_bundle": keeps_client_bundle,
         "name": site_name,
+        # Replayed so a confirmed destructive project migration stays confirmed.
+        "confirm_destructive_migrations": confirm_destructive_migrations,
     }
 
     # Review fix A — cap the serialized deploy-input size BEFORE any persist or
@@ -9352,6 +9480,7 @@ async def activate_site(
         # MT-1 — replay the authored declaration. A pending doc captured before
         # this field existed has no key and reads False (the prior behaviour).
         keeps_client_bundle=bool(inputs.get("keeps_client_bundle")),
+        confirm_destructive_migrations=bool(inputs.get("confirm_destructive_migrations")),
         generator=_generator,
         cloudflare=_cloudflare,
         bundle_reader=_bundle_reader,

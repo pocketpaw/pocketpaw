@@ -9,8 +9,9 @@ describes that output in `paw-build.json`, and the API host deploys it into the
 `paw-sites` dispatch namespace through the Cloudflare HTTP API.
 
 Code: `ee/pocketpaw_ee/sites/bundle_deploy.py` (vetting and mapping),
-`ee/pocketpaw_ee/sites/binding_provisioner.py` (per-site KV namespaces and R2
-buckets) and `CloudflareClient.upload_assets` / `put_worker(modules=...)` in
+`ee/pocketpaw_ee/sites/binding_provisioner.py` (the per-site D1 database, KV
+namespaces and R2 buckets), `ee/pocketpaw_ee/sites/project_d1.py` (a project's D1
+migrations) and `CloudflareClient.upload_assets` / `put_worker(modules=...)` in
 `ee/pocketpaw_ee/sites/cloudflare_client.py` (the wire calls).
 
 ## When it runs
@@ -50,7 +51,9 @@ The build budget is `PAW_SITES_BUILD_TIMEOUT_SEC_PROJECT` (else the shared knob,
 600s). Supersede, single-flight and the artifact caps are the preview lane's.
 
 Publishing needs a finished build of the pocket's **current** files; otherwise it is a
-`409 sites.project_build_required`. Before the deploy the plan gate runs
+`409 sites.project_build_required`. A first publish inserts the Site document
+(undeployed) before anything is provisioned, so the D1, KV and R2 it creates are
+recorded on it. Before the deploy the plan gate runs
 (captain decision 2026-10-07): a free site may ship static output, and a worker that
 binds nothing beyond D1, KV and its own assets. Any other binding, or server code on a
 site with a custom domain, is refused with `422 sites.server_code_not_entitled` and an
@@ -135,7 +138,7 @@ bucket the author wrote is ignored.
 
 | Request | Upload binding | Resource | Plan |
 |---|---|---|---|
-| `d1` | `{type: "d1", name, id}` | The site's own D1 (`Site.d1_database_id`, created by the dynamic-site provision job). One per site. | Free and up |
+| `d1` | `{type: "d1", name, id}` | The site's own D1 (`Site.d1_database_id`), named `paw-site-<siteid>`. Created on the first publish that binds it, or by the dynamic-site provision job. One per site. | Free and up |
 | `kv` | `{type: "kv_namespace", name, namespace_id}` | One namespace per binding name (`Site.kv_namespaces`). | Free: 1 per site. Site tier and up: 3. |
 | `r2` | `{type: "r2_bucket", name, bucket_name}` | One bucket per binding name (`Site.r2_buckets`). | Site tier and up: 3 per site. Refused on free. |
 | `do`, `queues`, `ai` | none | Refused: "not supported on Paw Sites yet". | |
@@ -162,9 +165,12 @@ at most 63 characters, so it is a valid R2 bucket name (3 to 63 characters, `a-z
 The KV namespace title is the same string. The hash keeps `MY_KV` and `my_kv` apart.
 
 **Idempotent.** A resource recorded on the site is reused with no Cloudflare call.
-An unrecorded one is looked up by its derived name first (a namespace by title in
-the namespace list, a bucket with `GET /r2/buckets/{name}`), so a create that died
-before the save is found rather than duplicated. The doc is saved after each create.
+An unrecorded one is looked up by its derived name first (a database by exact name in
+`GET /d1/database?name=`, a namespace by title in the namespace list, a bucket with
+`GET /r2/buckets/{name}`), so a create that died before the save is found rather than
+duplicated. A stored D1 id equal to the placeholder older publishes derived from the
+workspace and pocket was never created on Cloudflare, so it is replaced by a real
+database. The doc is saved after each create.
 Gates and caps are checked before the first create; module, asset and compat checks
 run before provisioning, so a bundle refused for those creates nothing.
 
@@ -177,8 +183,44 @@ objects, so a bucket that still holds objects gets a lifecycle rule expiring eve
 object after a day, and an operator deletes it after that.
 
 **Token scopes.** Provisioning and teardown need `Workers KV Storage Write` and
-`Workers R2 Storage Write` on `PAW_CF_API_TOKEN`, in addition to the Workers scripts
+`Workers R2 Storage Write` (and `D1 Edit` for project databases) on
+`PAW_CF_API_TOKEN`, in addition to the Workers scripts
 scope the deploy already uses.
+
+## Project D1 migrations
+
+A project that binds D1 (the `d1-drizzle` recipe) ships its schema as
+`migrations/*.sql`. Publish applies them to the site's database through the D1 HTTP
+API (`POST /d1/database/{id}/query`), after the binding checks and before the first
+upload. Wrangler, drizzle-kit and the project's own config never run on the API host.
+
+- **Source.** Top-level `migrations/*.sql` from the pocket's source map, the same
+  files the stored bundle was built from (the bundle is keyed by their content hash).
+  Anything else under `migrations/`, such as drizzle's `meta/_journal.json`, is
+  ignored. File names may use letters, digits, `.`, `-` and `_`.
+- **Order and tracking.** Filename order. Each applied migration is a row in
+  `_paw_migrations (name, applied_at, sha256)` inside the site's D1, and is skipped
+  on later publishes.
+- **Applied migrations are immutable.** A file whose sha256 differs from its recorded
+  row refuses the publish with `422 sites.migration_changed`; add a new migration.
+- **Statements** split on drizzle's `--> statement-breakpoint` and on `;`, never inside
+  a string, a quoted identifier or a comment, and not inside a `CREATE TRIGGER ... END`
+  body. A migration's statements and its tracking row go to D1 as one batch.
+- **Destructive changes.** A pending `DROP TABLE`, `ALTER TABLE ... DROP COLUMN` or
+  `DELETE` without `WHERE` whose table already holds rows refuses the publish with
+  `422 sites.migration_destructive`, unless the publish carries
+  `confirm_destructive_migrations: true` (`POST /sites/publish`; it is captured with
+  a paid site's pending deploy too). Drizzle's table rebuild (copy rows into a new
+  table, drop the old one, rename the new one into place) keeps the data and is not
+  refused. A table that is empty or does not exist yet is not data.
+- **Failure.** A failed migration refuses the publish with `422
+  sites.migration_failed`, naming the migration and D1's error. Nothing has been
+  uploaded, so the live site keeps serving the previous version.
+- **Drafts** do not touch D1: a project draft with a worker previews its assets only.
+- **Teardown.** The delete cascade's `d1` step deletes the database recorded in
+  `Site.d1_database_id`, for project sites as for dynamic ones. The pre-delete export
+  only covers tables a dynamic site declares, so a project site's own tables are not
+  in it yet.
 
 ## Secrets
 

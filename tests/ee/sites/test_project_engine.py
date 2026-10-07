@@ -616,7 +616,9 @@ async def test_publish_deploys_the_stored_manifest(beanie_test_db, monkeypatch, 
 
     calls: list[dict] = []
 
-    async def _deploy_bundle(cf, *, script_name, build_dir, salt, provisioned=None, provision=None):
+    async def _deploy_bundle(
+        cf, *, script_name, build_dir, salt, provisioned=None, provision=None, before_upload=None
+    ):
         root = Path(build_dir)
         calls.append(
             {

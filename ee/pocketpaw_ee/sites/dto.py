@@ -29,6 +29,10 @@ class PublishRequest(BaseModel):
     # features when a custom domain is later added.
     pocket_id: str
     site_plan_key: str | None = None
+    # A project site's pending D1 migration that would delete rows the site holds
+    # (DROP TABLE / DROP COLUMN / DELETE without WHERE) is refused unless the owner
+    # confirms it with this. See ``sites.project_d1``.
+    confirm_destructive_migrations: bool = False
 
 
 class SitePlanRequestBody(BaseModel):
