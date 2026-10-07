@@ -1588,6 +1588,7 @@ reports or the source item's id):
 ```json
 {
   "id": "6660a1...",
+  "slug": "bakery",
   "source": "site_template",
   "kind": "site",
   "title": "Bakery",
@@ -1602,6 +1603,16 @@ reports or the source item's id):
   "media_url": null
 }
 ```
+
+`slug` is the listing's URL handle: the title lowercased and folded to
+`a-z0-9` with `-` between words (`Café Crème & Co!` is `cafe-creme-co`), cut
+to 40 characters, set when the listing is first indexed and never changed
+afterwards, so a renamed template keeps its link. A title that leaves no ASCII behind (CJK, Devanagari)
+falls back to the source item's id. Slugs are unique across every source; a
+second `Bakery`, whichever source lists it, gets `bakery-2`, then `bakery-3`. A
+listing indexed before slugs existed reports its `id` as `slug` until the next
+reindex (at most 30 minutes after a deploy) fills it in; the id works on the
+item route too.
 
 `media_kind` (`image`, `video`, `audio`) and `media_url` are set on studio
 template listings and `null` on site templates. Studio listings carry absolute
@@ -1622,7 +1633,10 @@ Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last
 page. A cursor that isn't one we issued returns `422` (`discover.bad_cursor`);
 `limit` above 50 returns `422`.
 
-### `GET /discover/{listing_id}` (public)
+### `GET /discover/{id_or_slug}` (public)
+
+Takes a listing id or its slug. The id is tried first, then the slug among
+unhidden listings; slugs are unique across sources, so a bare slug is enough.
 
 Response `200`: one listing. `404` when it doesn't exist or has been hidden.
 
@@ -7357,8 +7371,9 @@ public list), `cursor`, `limit` (1-200, default 50). Response `200`:
 
 ```json
 {
-  "id": "6660a1...", "source": "site_template", "source_id": "665f1c...",
-  "workspace_id": "w1", "owner": "u1", "kind": "site", "title": "Bakery",
+  "id": "6660a1...", "slug": "bakery", "source": "site_template",
+  "source_id": "665f1c...", "workspace_id": "w1", "owner": "u1", "kind": "site",
+  "title": "Bakery",
   "description": "", "live_url": "https://bakery.pawsites.workers.dev",
   "featured": false, "hidden": true, "report_count": 3,
   "dismissed_reporter_count": 0, "remix_count": 3,

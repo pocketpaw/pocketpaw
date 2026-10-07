@@ -323,6 +323,17 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run Discover tests
+        # Same addopts escape. tests/cloud is otherwise a blind spot; this
+        # directory pins the slug contract (write-once, unique across sources)
+        # the public /discover/{id_or_slug} route and the frontend depend on,
+        # the HTTP layer (public allow-list, per-IP rate limit, use / report)
+        # and the source contract every DiscoverSource must meet.
+        run: uv run pytest tests/cloud/discover -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run paw-lens proxy tests
         # Same addopts escape. Proves the lens proxy injects the caller's
         # workspace_id (never a client-supplied one), degrades to a 503, never a
