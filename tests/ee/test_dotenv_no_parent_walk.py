@@ -79,9 +79,10 @@ def test_load_license_still_reads_the_dotenv_in_the_working_directory(tmp_path: 
     assert out.stdout.strip().splitlines()[-1] == "own"
 
 
-# load_dotenv() / dotenv_values() with no positional path, optionally with keyword
-# arguments (override=False) — every form that falls back to find_dotenv's walk.
-_BARE_CALL = re.compile(r"(load_dotenv|dotenv_values)\(\s*(\)|[a-z_]+\s*=)")
+# load_dotenv() / dotenv_values() with no path, optionally with keyword arguments
+# (override=False): every form that falls back to find_dotenv's walk. dotenv_path=
+# is an explicit path, so it passes.
+_BARE_CALL = re.compile(r"(load_dotenv|dotenv_values)\(\s*(\)|(?!dotenv_path\b)[a-z_]+\s*=)")
 
 
 def test_no_library_code_calls_dotenv_without_a_path() -> None:
