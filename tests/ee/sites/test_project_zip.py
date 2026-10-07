@@ -367,17 +367,32 @@ async def test_a_site_with_no_key_yet_keeps_the_placeholders():
 
 
 @pytest.mark.asyncio
-async def test_an_authored_manifest_cannot_displace_the_vetted_shell():
+async def test_an_authored_package_json_is_merged_with_the_vetted_shell():
+    """package.json is the author's since 2026-10-07: their packages land, and the
+    toolchain pins still win so the download builds. Mutation: drop the merge →
+    either axios or @sveltejs/kit goes missing."""
     source = _svelte_source()
-    source["package.json"] = json.dumps({"dependencies": {"axios": "1.0.0"}})
-    source["src/lib/components/Hero.svelte"] = "<section>authored hero</section>\n"
+    source["package.json"] = json.dumps(
+        {"dependencies": {"axios": "1.0.0", "svelte": "^4.0.0"}, "scripts": {"lint": "x"}}
+    )
 
     _built, entries = await _archive("svelte", source)
 
-    # Control: the author's other file DID land, so the absence below is the shell
-    # winning one path and not the overlay failing wholesale.
-    assert entries["src/lib/components/Hero.svelte"] == "<section>authored hero</section>\n"
-    assert "axios" not in entries["package.json"]
+    named = _named_dependencies(entries)
+    assert named["axios"] == "1.0.0"
+    assert "@sveltejs/kit" in named
+    assert named["svelte"] == project_zip._VETTED_PINS["svelte"]
+    scripts = json.loads(entries["package.json"])["scripts"]
+    assert scripts["lint"] == "x" and scripts["build"] == "vite build"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_authored_package_json_falls_back_to_the_shell():
+    source = _svelte_source()
+    source["package.json"] = "not json"
+
+    _built, entries = await _archive("svelte", source)
+
     assert "@sveltejs/kit" in _named_dependencies(entries)
 
 
@@ -421,7 +436,7 @@ def test_every_overriding_shell_path_is_one_the_generator_reserves():
             engine, site_id=_SITE_ID, title="Aster Dental", tokens_resolved=True
         )
         reserved = [p for p in shell if project_zip._is_reserved_path(engine, p)]
-        assert "package.json" in reserved, engine
+        assert "package.json" not in reserved, engine  # author-writable, merged instead
         for path in reserved:
             assert project_zip._is_reserved_path(engine, path)
 

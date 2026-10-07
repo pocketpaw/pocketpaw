@@ -1,5 +1,10 @@
-"""WhatsApp bot gateway (standalone mode with webhook server)."""
+"""WhatsApp bot gateway (standalone mode with webhook server).
 
+The POST webhook verifies Meta's X-Hub-Signature-256 before parsing; the route
+has no other auth, so an unsigned body is refused with 403.
+"""
+
+import json
 import logging
 
 import uvicorn
@@ -35,11 +40,14 @@ def create_whatsapp_app(settings: Settings) -> FastAPI:
 
     @wa_app.post("/webhook/whatsapp")
     async def receive_webhook(request: Request):
-        """Incoming WhatsApp messages."""
+        """Incoming WhatsApp messages. Rejects a body Meta did not sign."""
         if _whatsapp_adapter is None:
             return {"status": "not configured"}
-        payload = await request.json()
-        await _whatsapp_adapter.handle_webhook_message(payload)
+        raw = await request.body()
+        signature = request.headers.get("x-hub-signature-256")
+        if not _whatsapp_adapter.verify_webhook_signature(raw, signature):
+            return PlainTextResponse("Forbidden", status_code=403)
+        await _whatsapp_adapter.handle_webhook_message(json.loads(raw))
         return {"status": "ok"}
 
     return wa_app
@@ -61,6 +69,7 @@ async def run_whatsapp_bot(settings: Settings) -> None:
         phone_number_id=settings.whatsapp_phone_number_id,
         verify_token=settings.whatsapp_verify_token,
         allowed_phone_numbers=settings.whatsapp_allowed_phone_numbers,
+        app_secret=settings.whatsapp_app_secret or "",
     )
     _whatsapp_adapter = adapter
 

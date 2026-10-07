@@ -212,7 +212,10 @@ server {
 
 ### Environment Variables
 
-Set environment variables in a `.env` file or your system's environment:
+Set environment variables in a `.env` file or your system's environment. PocketPaw
+reads the `.env` in the directory it is started from and never searches parent
+directories, so start it from the folder that holds your `.env`. A variable already
+set in the environment always wins over the file.
 
 ```bash
 # /etc/pocketpaw/env

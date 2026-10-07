@@ -93,8 +93,8 @@
   {
     "label": "once CR-3 meets CR-8, the visitor's page article goes ahead of the pinned FAQs",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    ordered = faqs + ([chunk] if chunk is not None else [])",
-    "replace": "    ordered = ([chunk] if chunk is not None else []) + faqs",
+    "find": "    ordered = faqs + page_items",
+    "replace": "    ordered = page_items + faqs",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_faqs.py::test_pinned_faqs_lead_the_page_article_and_the_kb_hits"
     ]

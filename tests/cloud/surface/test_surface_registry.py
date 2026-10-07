@@ -198,11 +198,11 @@ def test_sites_create_skill_names_cover_the_advertised_skills():
 
 
 def test_sites_refine_wins_over_react_engine():
-    """A pocket_id present means REFINE even on engine="react" — the same
-    precedence svelte has. A published react site re-opened for refine still edits
-    through the ripple/pocket tools, so ripple must stay ON."""
+    """A pocket_id present means REFINE even on engine="react": no create skills and
+    no create deny. A react refine edits the source map (not a widget spec), so the
+    inline ripple prompt is dropped and it asks through ``ask_user``."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine="react"))
-    assert profile.ripple_mode == "on"
+    assert profile.ripple_mode == "off"
     assert _own_deny(profile) == _SITES_BUILTIN_DENY
     assert profile.skill_names == frozenset()
 
@@ -228,17 +228,23 @@ def test_sites_ripple_create_keeps_ripple():
 
 
 def test_sites_refine_keeps_ripple_and_wins_over_engine():
-    """refine (pocket_id set) → ripple ON — and a pocket_id wins over engine="svelte"
-    (a published svelte site re-opened for refine still edits a ripple spec). Refine
-    keeps the ripple/pocket MCP tools (needed to edit the spec) but still drops the
-    file/shell built-ins."""
+    """refine (pocket_id set) of a ripple site, or one whose engine is unknown → ripple
+    ON: it edits a ripple spec. A source-engine refine (svelte / react / html) drops it.
+    Every refine keeps the sites MCP tools and drops the file/shell built-ins, and none
+    takes the create branch's skills."""
     for meta in (
         SurfaceMeta(pocket_id="pkt_1"),
-        SurfaceMeta(pocket_id="pkt_1", engine="svelte"),
+        SurfaceMeta(pocket_id="pkt_1", engine="ripple"),
     ):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"refine {meta!r} must keep ripple"
         assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"refine {meta!r}"
+    for engine in ("svelte", "react", "html"):
+        meta = SurfaceMeta(pocket_id="pkt_1", engine=engine)
+        profile = resolve_profile(SurfaceKind.SITES, meta)
+        assert profile.ripple_mode == "off", f"refine {meta!r} must drop ripple"
+        assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"refine {meta!r}"
+        assert profile.skill_names == frozenset(), f"refine {meta!r}"
 
 
 def test_sites_all_modes_drop_file_and_shell_builtins():

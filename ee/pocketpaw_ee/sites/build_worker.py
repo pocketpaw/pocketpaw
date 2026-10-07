@@ -2,7 +2,7 @@
 #
 # Edited 2026-09-24 (PP-2, feat/sites-verify-pipeline): registers the html verify job
 # (``build_job.run_site_html_verify``) with the preview job's timeout — build budget plus
-# the browser step — and ``max_tries=1`` like every other sandbox job.
+# the browser step — and the build jobs' capacity-only ``max_tries`` (``sites.capacity``).
 #
 # Created 2026-09-04 (fix/queue-lanes, backend-perf C1). Until now every background lane
 # this product runs — chat runs, workspace jobs, both /ship jobs and both site builds —
@@ -74,6 +74,7 @@ from pocketpaw_ee.sites.build_job import (
     site_build_job_timeout_seconds,
     site_preview_job_timeout_seconds,
 )
+from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
 from pocketpaw_ee.sites.delete_job import (
     SITE_DELETE_FUNCTION_NAME,
     run_site_delete,
@@ -143,7 +144,7 @@ _site_html_verify_fn = func(
     run_site_html_verify,
     name=HTML_VERIFY_ARQ_FUNCTION_NAME,
     timeout=site_preview_job_timeout_seconds(),
-    max_tries=1,
+    max_tries=CAPACITY_MAX_TRIES,
 )
 
 
@@ -175,6 +176,10 @@ class WorkerSettings:
     # because arq's ``worker.get_kwargs`` reads ``settings_cls.__dict__`` directly, which
     # bypasses the descriptor protocol and would hand a property object to the Worker.
     max_jobs = _sites_max_jobs()
+    # A superseded preview / html-verify job (a newer edit of the same pocket was
+    # queued) is aborted by ``build_job._supersede_previous_job``; arq only honours an
+    # abort on a worker that opts in.
+    allow_abort_jobs = True
     # Both wrapped functions carry their own per-function timeout, which is what actually
     # governs a build. This class-level value exists so the fallback is not arq's 300s
     # default, which would be under a third of a build's budget.

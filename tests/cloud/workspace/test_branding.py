@@ -323,25 +323,32 @@ class _FakeUser:
         self.workspaces = [_FakeMembership(workspace, role)]
 
 
-def test_member_denied_branding_update_via_gate() -> None:
+async def test_member_denied_branding_update_via_gate(monkeypatch) -> None:
     """A MEMBER hitting workspace.update (the gate the branding PATCH uses)
     is rejected with the workspace.insufficient_role deny code — same 403 the
     rename path gives."""
+    from unittest.mock import AsyncMock
+
+    from pocketpaw_ee.guards import deps as guards_deps
     from pocketpaw_ee.guards.deps import check_workspace_action
     from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
 
+    # Per-member overrides are a separate mechanism; pin them off so the role
+    # alone decides, without a live Mongo lookup.
+    monkeypatch.setattr(guards_deps, "_has_action_override", AsyncMock(return_value=False))
     member = _FakeUser("u-member", role="member")
     with pytest.raises(GuardForbidden) as exc:
-        check_workspace_action(member, "ws1", "workspace.update")
+        await check_workspace_action(member, "ws1", "workspace.update")
     assert exc.value.code == "workspace.insufficient_role"
 
 
-def test_admin_allowed_branding_update_via_gate() -> None:
+async def test_admin_allowed_branding_update_via_gate() -> None:
     """An ADMIN passes the same workspace.update gate the branding PATCH
     rides — sanity that the gate isn't accidentally over-restrictive."""
     from pocketpaw_ee.guards.deps import check_workspace_action
+    from pocketpaw_ee.guards.rbac import WorkspaceRole
 
     admin = _FakeUser("u-admin", role="admin")
     # Returns the resolved role on success; no raise.
-    role = check_workspace_action(admin, "ws1", "workspace.update")
-    assert role is not None
+    role = await check_workspace_action(admin, "ws1", "workspace.update")
+    assert role == WorkspaceRole.ADMIN

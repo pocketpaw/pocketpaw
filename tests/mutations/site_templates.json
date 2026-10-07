@@ -193,33 +193,21 @@
     ]
   },
   {
-    "label": "publish: skip the source-gate check",
-    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "    if not await pockets_service.snapshot_source_visible(\n",
-    "replace": "    if False and not await pockets_service.snapshot_source_visible(\n",
-    "tests": [
-      "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_gated_source",
-      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_gated_source"
-    ]
-  },
-  {
     "label": "publish: save public without the checks",
     "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "    if body.visibility == \"public\":\n        await _check_publishable(workspace_id, snapshot)\n",
+    "find": "    if body.visibility == \"public\":\n        _check_publishable(snapshot)\n",
     "replace": "",
     "tests": [
-      "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_a_private_asset",
-      "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_gated_source"
+      "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_a_private_asset"
     ]
   },
   {
     "label": "patch: make public without the checks",
     "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "        _check_size(doc.snapshot)\n        await _check_publishable(workspace_id, doc.snapshot)\n",
+    "find": "        _check_size(doc.snapshot)\n        _check_publishable(doc.snapshot)\n",
     "replace": "        _check_size(doc.snapshot)\n",
     "tests": [
-      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_private_assets",
-      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_gated_source"
+      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_private_assets"
     ]
   },
   {

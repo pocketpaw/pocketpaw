@@ -17,9 +17,8 @@ Changed 2026-09-21 (feat/site-project-download-endpoint): added
 `ProjectDownloadNotEntitled` (402, `billing.project_download_not_entitled`) for
 the project-download seam. Modelled on `CustomDomainNotEntitled` rather than on
 the `*LimitError` classes, because this is a capability a per-site plan grants or
-withholds and there is no ceiling to report. Its docstring carries the one thing a
-future reader is likely to get wrong: this is NOT the same question as
-`Entitlements.site_source_visible`, and the two must not be folded together.
+withholds and there is no ceiling to report. It answers off the same per-site
+predicate as the builder's Code tab (`entitlements.service.site_code_entitled`).
 
 Changed 2026-09-14 (feat/uploads-multipart-endpoints): added `PayloadTooLarge`
 (413). The multipart upload contract refuses an over-ceiling file at init with
@@ -408,13 +407,12 @@ class ProjectDownloadNotEntitled(CloudError):
     Not a count limit: there is no ceiling to report, only a capability
     ``SiteEntitlements.project_download`` either grants or does not.
 
-    **This is a different question from whether the source is VISIBLE.** The workspace
-    capability ``Entitlements.site_source_visible`` governs whether the builder shows a
-    Code tab; this governs whether the assembled project may be taken away as an
-    archive. A paid per-site tier inside a free workspace can legitimately download a
-    project whose source the UI hides, and that is the design rather than a hole — the
-    two are resolved by different resolvers off different plans. Do not fold them
-    together, and do not add the other one as a second check at this seam.
+    The builder's Code tab asks the same per-site predicate
+    (``entitlements.service.site_code_entitled``), so a site that may download its
+    project may also see its source, and the reverse. The one difference is the
+    operator's workspace override (``WorkspaceOverrides.site_source_visible``), which
+    reaches the Code tab only: it is a visibility lever, not a refund of a paid
+    download. Do not add the override as a second check at this seam.
 
     Gated on ``sites_enforced()`` like every other per-site cap, so OSS / self-host
     never sees it.

@@ -16,9 +16,23 @@
 # the request's ``page.tools`` through ``action_spec.valid_tools``), <history>,
 # <visitor-message>. Those tags are neutralized inside every block.
 #
-# Knowledge (``retrieve`` is a FROZEN SEAM) is pinned FAQs, then the visitor's
-# page article, then KB hits, in one budget (``select_knowledge``). A KB hit's
-# body comes from kb-go's context entries, at most ``_ITEM_CHARS`` each.
+# Model (``_turn_model_spec``, memoized ``_AGENT_MODEL_TTL_S`` per agent): the
+# provider + model the owner picked on the concierge agent (the widget's bound one,
+# else ``concierge-<site_id>``), mapped by ``_agent_spec`` (a blank model on a
+# non-pydantic_ai backend is that backend's own default); else
+# ``pawbar_concierge_model``; else the backend default. Never the agent's runtime:
+# the call stays tool-free. That one spec drives the build, proxy fields and usage.
+#
+# Knowledge (``retrieve`` is a FROZEN SEAM) goes in one per-site budget
+# (``knowledge_chars``, ``select_knowledge``), items in order, each cut to
+# min(``_ITEM_CHARS``, what is left): pinned FAQs, then the visitor's page
+# article, then KB hits. On a sectioned visitor page the question beats the
+# page: when a hit off that page carries the message's own words (the lead,
+# ``_with_page_siblings``), it leads with the rest of its page, then the
+# visitor's matching sections in a quarter of the budget, then the other hits;
+# a message naming nothing ("how much is this?") keeps the page first. A KB
+# hit's body comes from kb-go's context entries; a section is cited at the page
+# url plus the heading's anchor.
 # ``resolve_page`` accepts the request's page only on an allowed origin;
 # ``with_page_product`` finds its catalog item. <catalog> comes per turn from
 # ``catalog_for_turn``: a small catalog whole, else the page's product plus FTS
@@ -48,6 +62,7 @@ import html
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -203,6 +218,21 @@ _PATH_SAFE = "/-._~!$&'()*+,;=:@"
 # words can miss ("shoe" vs a "Footwear" section).
 _ITEM_CHARS = 4_000
 _KNOWLEDGE_CHARS = 12_000
+# The budget is per site (``knowledge_chars``: ``Site.concierge_knowledge_chars``,
+# 4,000..60,000). Items take it in rank order, each up to min(``_ITEM_CHARS``,
+# what is left); a remainder under ``_MIN_ITEM_CHARS`` ends the list, since a
+# sliver of an article answers nothing. The search goes deeper on a bigger
+# budget: one hit per ``_TOP_K_ITEM_CHARS`` (a typical compiled section),
+# never under ``_TOP_K`` nor over ``_MAX_TOP_K``. No model context window is
+# read here: settings carry none, and 60,000 characters (about 15,000 tokens)
+# is well inside any model the concierge runs on.
+_MIN_ITEM_CHARS = 500
+_TOP_K_ITEM_CHARS = 2_000
+_MAX_TOP_K = 20
+# A sectioned page: at most this many of its sections are read per turn, and its
+# sections share at most ``_page_chars(budget)`` of the budget.
+_PAGE_SECTIONS_READ = 12
+_PAGE_READ_CONCURRENCY = 4
 # History: the most recent messages of THIS conversation, clipped newest-first.
 _HISTORY_MESSAGES = 8
 _HISTORY_CHARS = 4_000
@@ -433,8 +463,11 @@ class PageContext:
     site's allowed origins. ``indexed`` — the path is in the site's crawl index:
     ``title`` is then the indexed article title and ``article_id`` its kb id, and
     ``_with_page_article`` fills ``summary`` and ``chunk`` (the article as a
-    knowledge item). Not indexed: ``title`` is the browser's, one line, at most
-    ``_PAGE_TITLE_CHARS``, and unverified. ``product`` — the widget's catalog item
+    knowledge item). A long page is several articles (``section_ids``, page
+    order, ``article_id`` the first): ``chunk`` is then the section that best
+    matches the turn and ``extra_chunks`` the others that fit. Not indexed:
+    ``title`` is the browser's, one line, at most ``_PAGE_TITLE_CHARS``, and
+    unverified. ``product`` — the widget's catalog item
     whose url is this page, if any (``with_page_product`` fills it). ``host`` and
     ``key`` — the url's host and ``page_key``, for that lookup.
     """
@@ -448,6 +481,11 @@ class PageContext:
     product: Any = None
     host: str = ""
     key: str = ""
+    section_ids: tuple[str, ...] = ()
+    extra_chunks: tuple[KnowledgeItem, ...] = ()
+    # The page's sections were chosen because they match the turn (not the
+    # first-section fallback).
+    page_matched: bool = False
 
 
 def resolve_page(widget: Any, page: Any, *, site: Any) -> PageContext | None:
@@ -472,6 +510,7 @@ def _resolve_page(widget: Any, page: Any, site: Any) -> PageContext | None:
     from pocketpaw.paw_bar.concierge_fields import one_line
     from pocketpaw.sites_capture.ingest import origin_allowed
     from pocketpaw_ee.sites.kb_ingest import page_key
+    from pocketpaw_ee.sites.page_sections import index_sections
 
     if not isinstance(page, dict):
         page = {"url": getattr(page, "url", None), "title": getattr(page, "title", None)}
@@ -491,9 +530,17 @@ def _resolve_page(widget: Any, page: Any, site: Any) -> PageContext | None:
     where = {"host": host.lower(), "key": key}
 
     entry = (getattr(site, "kb_page_index", None) or {}).get(key)
-    if isinstance(entry, dict) and entry.get("id"):
+    sections = index_sections(entry)
+    if sections:
         title = one_line(str(entry.get("title") or ""))[:_PAGE_TITLE_CHARS]
-        return PageContext(url=url, title=title, indexed=True, article_id=str(entry["id"]), **where)
+        return PageContext(
+            url=url,
+            title=title,
+            indexed=True,
+            article_id=sections[0]["id"],
+            section_ids=tuple(s["id"] for s in sections),
+            **where,
+        )
     title = one_line(raw_title if isinstance(raw_title, str) else "")[:_PAGE_TITLE_CHARS]
     return PageContext(url=url, title=title, **where)
 
@@ -563,12 +610,21 @@ def catalog_rows(items: Sequence[Any]) -> list[dict[str, Any]]:
     ]
 
 
-async def _with_page_article(page: PageContext | None, site: Any) -> PageContext | None:
+async def _with_page_article(
+    page: PageContext | None,
+    site: Any,
+    *,
+    query: str = "",
+    budget: int = _KNOWLEDGE_CHARS,
+) -> PageContext | None:
     """An indexed page with its article read (``kb show``): the summary for the
-    <page> block and the article as a knowledge item. Fail-soft under the search
+    <page> block and the article as a knowledge item. A sectioned page has its
+    sections read instead (``_page_sections``). Fail-soft under the search
     timeout: the page keeps its indexed title and goes without the article."""
     if page is None or not page.article_id:
         return page
+    if len(page.section_ids) > 1:
+        return await _page_sections(page, site, query, budget)
     from dataclasses import replace
 
     from pocketpaw.paw_bar.concierge_fields import one_line
@@ -598,6 +654,209 @@ async def _with_page_article(page: PageContext | None, site: Any) -> PageContext
     return replace(page, title=title, summary=summary, chunk=chunk)
 
 
+def _page_chars(budget: int) -> int:
+    """The share of a turn's knowledge budget the visitor's page sections may
+    take: half of it, and never less than one whole item."""
+    return max(_ITEM_CHARS, budget // 2)
+
+
+async def _page_sections(page: PageContext, site: Any, query: str, budget: int) -> PageContext:
+    """A sectioned page's knowledge for this turn.
+
+    Reads up to ``_PAGE_SECTIONS_READ`` sections (``_read_sections``). The
+    sections that match the query (``_section_scores``: only words that set a
+    section apart count) go in, best first, while they fit
+    ``_page_chars(budget)``; when none matches, the page's first section goes in
+    alone. The first chosen is ``chunk`` (cut to one item if it is bigger), the
+    rest ``extra_chunks``. The <page> summary is the page's first readable
+    section's. A failed or timed-out read leaves the page without knowledge."""
+    from dataclasses import replace
+
+    scope = f"pocket:{getattr(site, 'pocket_id', '') or ''}"
+    found = await _read_sections(scope, page.section_ids, fallback_title=page.title)
+    if not found:
+        return page
+    scores = _section_scores(query, [text for _id, text, _s in found])
+    matched = sorted((i for i in range(len(found)) if scores[i] > 0), key=lambda i: -scores[i])
+    allowance = _page_chars(budget)
+    chosen: list[KnowledgeItem] = []
+    for i in matched or [0]:
+        article_id, text, _summary = found[i]
+        if not chosen:
+            text = _clip(text, _ITEM_CHARS)
+        elif len(text) > min(allowance, _ITEM_CHARS):
+            continue
+        allowance -= len(text)
+        chosen.append(KnowledgeItem(id=article_id, source=scope, text=text, score=1.0))
+    return replace(
+        page,
+        summary=found[0][2],
+        chunk=chosen[0],
+        extra_chunks=tuple(chosen[1:]),
+        page_matched=bool(matched),
+    )
+
+
+async def _read_sections(
+    scope: str, ids: Sequence[str], *, fallback_title: str = ""
+) -> list[tuple[str, str, str]]:
+    """``(id, "## title\\nbody", summary)`` for each of the first
+    ``_PAGE_SECTIONS_READ`` ``ids`` that ``kb show`` returns with a body, in the
+    given order. A few reads at a time, all under the search timeout; a section
+    that fails to read is skipped, and a timeout returns nothing."""
+    from pocketpaw.paw_bar.concierge_fields import one_line
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+    from pocketpaw_ee.cloud.chat.agent_service import _KB_SEARCH_TIMEOUT_SECONDS
+
+    gate = asyncio.Semaphore(_PAGE_READ_CONCURRENCY)
+
+    async def _read(article_id: str) -> Any:
+        async with gate:
+            return await KnowledgeService.get_article_for_scope(scope, article_id)
+
+    wanted = list(ids)[:_PAGE_SECTIONS_READ]
+    try:
+        read = await asyncio.wait_for(
+            asyncio.gather(*(_read(i) for i in wanted), return_exceptions=True),
+            timeout=_KB_SEARCH_TIMEOUT_SECONDS,
+        )
+    except Exception:  # noqa: BLE001 — timeout: the turn goes on without these
+        logger.warning("concierge v2: could not read page sections in %s", scope)
+        return []
+    found: list[tuple[str, str, str]] = []
+    for article_id, article in zip(wanted, read, strict=True):
+        if not isinstance(article, dict):
+            continue
+        body = str(article.get("content") or article.get("summary") or "").strip()
+        if not body:
+            continue
+        heading = one_line(str(article.get("title") or "")) or fallback_title
+        summary = one_line(str(article.get("summary") or ""))[:_PAGE_SUMMARY_CHARS]
+        found.append((article_id, f"## {heading}\n{body}".strip(), summary))
+    return found
+
+
+def _message_terms(message: str, page: PageContext | None) -> set[str]:
+    """The visitor's own words worth matching (``_query_terms``), less the page
+    title's: the title rides in the search query, so it cannot say what the
+    visitor asked about."""
+    title = _query_terms(page.title) if page is not None else set()
+    return _query_terms(message) - title
+
+
+async def _with_page_siblings(
+    items: Sequence[KnowledgeItem],
+    site: Any,
+    page: PageContext | None,
+    *,
+    budget: int,
+    message: str = "",
+) -> tuple[list[KnowledgeItem], tuple[int, int] | None]:
+    """The KB hits with the lead hit's page filled in, and where the lead sits.
+
+    The lead is the first hit that is off the visitor's page and carries one of
+    the message's own words (``_message_terms``); a message with no such words
+    ("how much is this?") has no lead, and the visitor's page keeps first place
+    (``select_knowledge``). kb ranks by the whole query, page title included, so
+    on a sectioned page its rank alone would let the page's title win.
+
+    A section is found by the words it shares with the question, and a question
+    can miss the words of the section that answers it ("shoe sizes" against a
+    "Footwear" table, when every section of the size guide says "size"). So a
+    lead that is a section of a sectioned page brings that page's other
+    sections, read with ``_read_sections`` and inserted right after it in page
+    order, while they fit ``_page_chars(budget)`` together with the lead.
+
+    Returns ``(items, (start, end))``, ``items[start:end]`` being the lead and
+    its siblings, or ``(items, None)`` without a lead. Fail-soft: a failed read
+    leaves the lead alone."""
+    from pocketpaw_ee.sites.page_sections import index_sections
+
+    items = list(items)
+    terms = _message_terms(message, page)
+    if not terms:
+        return items, None
+    scope = f"pocket:{getattr(site, 'pocket_id', '') or ''}"
+    on_page: set[str] = set()
+    if page is not None and page.indexed:
+        on_page = set(page.section_ids or (page.article_id,))
+    lead = next(
+        (
+            n
+            for n, hit in enumerate(items)
+            if hit.source != "faq"
+            and not (hit.source == scope and hit.id in on_page)
+            and any(term in hit.text.lower() for term in terms)
+        ),
+        None,
+    )
+    if lead is None:
+        return items, None
+    hit = items[lead]
+    ids: list[str] = []
+    index = getattr(site, "kb_page_index", None) or {}
+    for entry in index.values() if isinstance(index, dict) and hit.source == scope else []:
+        sections = [s["id"] for s in index_sections(entry)]
+        if len(sections) > 1 and hit.id in sections:
+            ids = sections
+            break
+    present = {i.id for i in items if i.source == scope}
+    wanted = [i for i in ids if i not in present]
+    found = await _read_sections(scope, wanted) if wanted else []
+    allowance = _page_chars(budget) - len(hit.text)
+    siblings: list[KnowledgeItem] = []
+    for article_id, text, _summary in found:
+        if len(text) > min(allowance, _ITEM_CHARS):
+            continue
+        allowance -= len(text)
+        siblings.append(KnowledgeItem(id=article_id, source=scope, text=text, score=hit.score))
+    out = [*items[: lead + 1], *siblings, *items[lead + 1 :]]
+    return out, (lead, lead + 1 + len(siblings))
+
+
+_WORD_RE = re.compile(r"[^\W_]+")
+# Words too common in a question to say which section it is about.
+_QUERY_STOPWORDS = frozenset(
+    "the and for with this that what how are you your can does from have tell about "
+    "there which when where who why any all our get got need want please show give".split()
+)
+
+
+def _query_terms(query: str) -> set[str]:
+    """The query's words worth matching: lowercased, 3+ letters, stopwords out,
+    a plural's trailing "s" dropped so "sizes" finds "size"."""
+    terms = set()
+    for word in _WORD_RE.findall((query or "").lower()):
+        if len(word) < 3 or word in _QUERY_STOPWORDS:
+            continue
+        terms.add(word[:-1] if len(word) > 4 and word.endswith("s") else word)
+    return terms
+
+
+def _section_scores(query: str, texts: Sequence[str]) -> list[float]:
+    """Each text's match to ``query``: the sum, over the query terms it contains,
+    of log(1 + n / df), where df is how many of the n texts contain the term. A
+    term every text contains (the page title in each section's breadcrumb) sets
+    none apart and counts for nothing."""
+    import math
+
+    terms = _query_terms(query)
+    lowered = [t.lower() for t in texts]
+    n = len(texts)
+    df = {term: sum(term in t for t in lowered) for term in terms}
+    useful = [term for term in terms if 0 < df[term] < n]
+    return [sum(math.log(1 + n / df[term]) for term in useful if term in t) for t in lowered]
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` cut to at most ``limit`` characters, at a line end when one falls
+    in the second half of the limit."""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit)
+    return text[: cut if cut >= limit // 2 else limit]
+
+
 def _retrieval_query(
     message: str, history: Sequence[dict[str, str]], page: PageContext | None
 ) -> str:
@@ -623,12 +882,18 @@ def _source_items(
     listed by id with both empty, so no private file name leaves the server."""
     from urllib.parse import quote, urlsplit
 
+    from pocketpaw_ee.sites.page_sections import index_sections
+
     scope = f"pocket:{getattr(site, 'pocket_id', '') or ''}"
-    pages = {
-        str(entry["id"]): (key, str(entry.get("title") or "").strip())
-        for key, entry in (getattr(site, "kb_page_index", None) or {}).items()
-        if isinstance(entry, dict) and entry.get("id")
-    }
+    # Every article of every page: a sectioned page cites the section's own
+    # breadcrumb title and its heading's anchor; a one-article page its title.
+    pages: dict[str, tuple[str, str, str]] = {}
+    for key, entry in (getattr(site, "kb_page_index", None) or {}).items():
+        sections = index_sections(entry)
+        page_title = str(entry.get("title") or "").strip() if sections else ""
+        for section in sections:
+            title = section["title"].strip() if len(sections) > 1 else ""
+            pages.setdefault(section["id"], (key, title or page_title, section["anchor"]))
     base = str(getattr(site, "url", "") or "").strip().rstrip("/")
     if not base and page is not None:
         parts = urlsplit(page.url)
@@ -639,13 +904,14 @@ def _source_items(
         if hit is None or not base:
             out.append({"id": item.id, "title": "", "url": ""})
             continue
-        key, title = hit
+        key, title, anchor = hit
         heading = item.text.split("\n", 1)[0].removeprefix("## ").strip()
+        fragment = f"#{quote(anchor, safe=_PATH_SAFE)}" if anchor else ""
         out.append(
             {
                 "id": item.id,
                 "title": title or heading,
-                "url": f"{base}/{quote(key, safe=_PATH_SAFE)}",
+                "url": f"{base}/{quote(key, safe=_PATH_SAFE)}{fragment}",
             }
         )
     return out
@@ -668,42 +934,98 @@ def _data(text: str) -> str:
     return _BLOCK_TAG_RE.sub(lambda m: "‹" + m.group(0)[1:], text or "")
 
 
-def _within_budget(items: Sequence[KnowledgeItem]) -> list[KnowledgeItem]:
-    """The leading items that fit ``_KNOWLEDGE_CHARS`` (~3,000 tokens), in order;
-    the first one that does not fit ends the list."""
+def _within_budget(
+    items: Sequence[KnowledgeItem], budget: int = _KNOWLEDGE_CHARS
+) -> list[KnowledgeItem]:
+    """The items that fit ``budget``, in order (rank order: the caller's), each
+    cut to min(``_ITEM_CHARS``, what is left). The top hits arrive whole; the
+    first that does not fit is cut to the remainder instead of dropped, and a
+    remainder under ``_MIN_ITEM_CHARS`` ends the list. Deterministic, and a
+    second pass over its own output changes nothing. (``_data`` keeps lengths:
+    it swaps one character for one.)"""
+    from dataclasses import replace
+
     kept: list[KnowledgeItem] = []
-    budget = _KNOWLEDGE_CHARS
+    remaining = budget
     for item in items:
-        size = len(_data(item.text))
-        if size > budget:
-            break
-        budget -= size
+        cap = min(_ITEM_CHARS, remaining)
+        if len(item.text) > cap:
+            if cap < _MIN_ITEM_CHARS:
+                break
+            item = replace(item, text=_clip(item.text, cap))
+        remaining -= len(item.text)
         kept.append(item)
     return kept
 
 
+def knowledge_chars(site: Any) -> int:
+    """The site's per-turn knowledge budget: ``Site.concierge_knowledge_chars``
+    clamped to its bounds, or the default when unset or not a number."""
+    from pocketpaw_ee.cloud.models.site import (
+        CONCIERGE_KNOWLEDGE_CHARS_DEFAULT,
+        CONCIERGE_KNOWLEDGE_CHARS_MAX,
+        CONCIERGE_KNOWLEDGE_CHARS_MIN,
+    )
+
+    value = getattr(site, "concierge_knowledge_chars", None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return CONCIERGE_KNOWLEDGE_CHARS_DEFAULT
+    return max(CONCIERGE_KNOWLEDGE_CHARS_MIN, min(CONCIERGE_KNOWLEDGE_CHARS_MAX, value))
+
+
+def _top_k(budget: int) -> int:
+    """How many hits to search for a ``budget`` (see ``_TOP_K_ITEM_CHARS``)."""
+    return max(_TOP_K, min(_MAX_TOP_K, budget // _TOP_K_ITEM_CHARS))
+
+
 def select_knowledge(
-    items: Sequence[KnowledgeItem], page: PageContext | None = None
+    items: Sequence[KnowledgeItem],
+    page: PageContext | None = None,
+    *,
+    budget: int = _KNOWLEDGE_CHARS,
+    lead: tuple[int, int] | None = None,
 ) -> list[KnowledgeItem]:
-    """The knowledge a turn is given, cut to the budget: the owner's pinned FAQs
-    first (they are authoritative), then the visitor's page's own article (when
-    the page is indexed and its article was read), then the retrieved KB hits
-    without it. The prompt, the code-grounding check and the ``sources`` event all
-    read this one list, so a source is always something the model saw."""
-    chunk = page.chunk if page is not None else None
+    """The knowledge a turn is given, in this order, cut to ``budget``
+    (``knowledge_chars``, see ``_within_budget``):
+
+    1. the owner's pinned FAQs (they are authoritative);
+    2. on a sectioned visitor page with a ``lead`` (``_with_page_siblings``:
+       a hit off the page carrying the message's own words), the lead and its
+       page's other sections; then the visitor's page sections, only when they
+       matched the turn, in at most a quarter of the budget; then the other
+       hits, without the visitor page's own (unmatched) sections;
+    3. otherwise (no lead, a one-article page, no page) the visitor's page
+       article or sections, then the hits. A one-article page is at most a
+       quarter of the default budget and is what "how much is this?" on a
+       product page needs, so it keeps first place.
+
+    The prompt, the code-grounding check and the ``sources`` event all read
+    this one list, so a source is always something the model saw."""
+    page_items: list[KnowledgeItem] = []
+    if page is not None and page.chunk is not None:
+        page_items = [page.chunk, *page.extra_chunks]
     faqs = [i for i in items if i.source == "faq"]
-    ordered = faqs + ([chunk] if chunk is not None else [])
-    ordered += [
+    sectioned = page is not None and len(page.section_ids) > 1
+    if lead is None or not sectioned or not page_items:
+        seen = {(i.id, i.source) for i in page_items}
+        ordered = faqs + page_items
+        ordered += [i for i in items if i.source != "faq" and (i.id, i.source) not in seen]
+        return _within_budget(ordered, budget)
+    head = [i for i in items[lead[0] : lead[1]] if i.source != "faq"]
+    on_page = {(i.source, s) for i in page_items for s in page.section_ids}
+    page_part = _within_budget(page_items, budget // 4) if page.page_matched else []
+    taken = {(i.id, i.source) for i in head + page_part}
+    rest = [
         i
         for i in items
-        if i.source != "faq" and (chunk is None or (i.id, i.source) != (chunk.id, chunk.source))
+        if i.source != "faq" and (i.id, i.source) not in taken and (i.source, i.id) not in on_page
     ]
-    return _within_budget(ordered)
+    return _within_budget(faqs + head + page_part + rest, budget)
 
 
-def _knowledge_block(items: Sequence[KnowledgeItem]) -> str:
+def _knowledge_block(items: Sequence[KnowledgeItem], budget: int = _KNOWLEDGE_CHARS) -> str:
     lines = ["<knowledge>"]
-    for item in _within_budget(items):
+    for item in _within_budget(items, budget):
         text = _data(item.text)
         ident = html.escape(item.id, quote=True)
         source = html.escape(item.source, quote=True)
@@ -1027,7 +1349,9 @@ def build_prompt(
     blocks = [owner] if owner else []
     if page is not None:
         blocks.append(_page_block(page))
-    blocks.append(_knowledge_block(items))
+    blocks.append(
+        _knowledge_block(items, knowledge_chars(site) if site is not None else _KNOWLEDGE_CHARS)
+    )
     catalog_block = _catalog_and_actions_block(
         widget, catalog, lead_capture=site is not None and lead_capture_on(site)
     )
@@ -1076,17 +1400,153 @@ def _builder(settings: Any) -> Any:
 
 
 def _model_spec(settings: Any) -> str | None:
+    """The deployment's ``pawbar_concierge_model``; None leaves the backend default."""
     return (getattr(settings, "pawbar_concierge_model", "") or "").strip() or None
 
 
-def _build_model(settings: Any) -> Any:
-    """The pydantic_ai model for ``pawbar_concierge_model`` (the backend's own
-    resolution when that is empty). The test seam for the model call."""
-    return _builder(settings)._build_model(_model_spec(settings))
+# The concierge agent's model, memoized per (workspace, bound agent, site) so a
+# visitor turn does not read Mongo every time. An owner's change shows within the
+# TTL; ``forget_agent_model`` drops it at once.
+_AGENT_MODEL_TTL_S = 30.0
+_AGENT_MODEL_MEMO_MAX = 2_048
+_AGENT_MODELS: dict[tuple[str, str, str], tuple[float, str, str | None]] = {}
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def forget_agent_model(agent_id: str | None = None) -> None:
+    """Drop the memoized model of ``agent_id`` (every entry when None)."""
+    if agent_id is None:
+        _AGENT_MODELS.clear()
+        return
+    for key in [k for k, v in _AGENT_MODELS.items() if agent_id in (k[1], v[1])]:
+        _AGENT_MODELS.pop(key, None)
+
+
+def _agent_spec(settings: Any, backend: str, model: str) -> str | None:
+    """The pydantic_ai ``provider:model`` spec for an agent's backend + model, or
+    None when it has no model or names one pydantic_ai cannot serve.
+
+    A pydantic_ai agent's model already is a spec; a blank one is None. On any
+    other backend a blank model means that backend's default, so it resolves the
+    way the agent itself would run: the backend's settings field, then
+    ``resolve_model``'s provider chain (a Claude Agent SDK agent on anthropic
+    gets the anthropic default, never the deployment's concierge model). Any
+    other backend's model is
+    read the way the pool routes it (``route_model``'s ``_BACKEND_MODEL_ATTR``
+    table, legacy names resolved first) and paired with that backend's own
+    ``<backend>_provider`` setting; a backend without one (``deep_agents``)
+    carries ``provider:model`` in the model itself. Only a provider pydantic_ai
+    knows is accepted, so a Codex, opencode, Copilot or Google ADK model falls
+    back instead of reaching a provider that cannot serve it."""
+    from pocketpaw.agents.pydantic_ai import _KNOWN_PROVIDERS
+    from pocketpaw.agents.registry import _LEGACY_BACKENDS
+    from pocketpaw.llm.providers.base import (
+        _BACKEND_MODEL_ATTR,
+        _BACKEND_MODEL_ATTR_ALIASES,
+        resolve_model,
+    )
+
+    model = (model or "").strip()
+    backend = _LEGACY_BACKENDS.get(backend, backend)
+    if backend == "pydantic_ai":
+        return model or None
+    attr = _BACKEND_MODEL_ATTR.get(backend) or _BACKEND_MODEL_ATTR_ALIASES.get(backend)
+    if not attr:
+        return None
+    provider_field = attr.removesuffix("_model") + "_provider"
+    provider = str(getattr(settings, provider_field, "") or "").strip()
+    if not model:
+        model = str(getattr(settings, attr, "") or "").strip()
+        model = model or str(resolve_model(settings, backend, provider) or "").strip()
+    if not model:
+        return None
+    spec = f"{provider}:{model}" if provider else model
+    head, sep, _rest = spec.partition(":")
+    return spec if sep and head in _KNOWN_PROVIDERS else None
+
+
+async def _concierge_agent(workspace_id: str, bound: str, site_id: str) -> Any | None:
+    """The agent the concierge belongs to: the widget's bound agent when it is live
+    and in this workspace, else the site's dedicated ``concierge-<site_id>``."""
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.paw_bar.agent_provisioning import concierge_slug
+
+    if bound:
+        try:
+            agent = await agents_service.get(bound)
+        except Exception:  # noqa: BLE001 — a missing agent falls through
+            agent = None
+        if agent is not None and agent.workspace_id == workspace_id and not agent.disabled:
+            return agent
+    if not (workspace_id and site_id):
+        return None
+    try:
+        agent = await agents_service.get_by_slug(workspace_id, concierge_slug(site_id))
+    except Exception:  # noqa: BLE001 — no dedicated agent: the deployment model
+        return None
+    return None if agent.disabled else agent
+
+
+async def _turn_model_spec(settings: Any, widget: Any, site: Any, workspace_id: str) -> str | None:
+    """The spec this turn answers with: the concierge agent's model when pydantic_ai
+    can serve it, else ``pawbar_concierge_model``, else None (backend default).
+    Only the model is followed; the turn never runs on the agent's backend."""
+    bound = str(getattr(widget, "agent_id", "") or "").strip()
+    key = (workspace_id, bound, str(getattr(site, "id", "") or ""))
+    now = _now()
+    hit = _AGENT_MODELS.get(key)
+    if hit is not None and hit[0] > now:
+        agent_id, spec = hit[1], hit[2]
+    else:
+        agent_id, spec = "", None
+        try:
+            agent = await _concierge_agent(*key)
+            if agent is not None:
+                agent_id = str(agent.id)
+                spec = _agent_spec(settings, agent.config.backend, agent.config.model)
+        except Exception:  # noqa: BLE001 — the model choice never fails a turn
+            logger.debug("concierge v2: agent model lookup failed", exc_info=True)
+        if len(_AGENT_MODELS) >= _AGENT_MODEL_MEMO_MAX:
+            for stale in [k for k, v in _AGENT_MODELS.items() if v[0] <= now]:
+                _AGENT_MODELS.pop(stale, None)
+            if len(_AGENT_MODELS) >= _AGENT_MODEL_MEMO_MAX:
+                _AGENT_MODELS.clear()
+        _AGENT_MODELS[key] = (now + _AGENT_MODEL_TTL_S, agent_id, spec)
+    if spec:
+        logger.debug("concierge v2 model: %s from agent %s", spec, agent_id)
+        return spec
+    fallback = _model_spec(settings)
+    logger.debug(
+        "concierge v2 model: %s",
+        f"{fallback} from pawbar_concierge_model" if fallback else "the backend default",
+    )
+    return fallback
+
+
+async def answer_model(widget: Any, site: Any, workspace_id: str) -> str:
+    """The ``provider:model`` a v2 turn on ``widget`` answers with now, for the
+    owner's dashboard: the same resolution a turn makes. '' when it can't be told."""
+    settings = _settings()
+    try:
+        spec = await _turn_model_spec(settings, widget, site, workspace_id)
+        provider, model = _builder(settings)._parse_provider_model(spec)
+    except Exception:  # noqa: BLE001 — a label never fails the overview
+        logger.debug("concierge v2: answer model lookup failed", exc_info=True)
+        return ""
+    return f"{provider}:{model}" if provider and model else (model or "")
+
+
+def _build_model(settings: Any, spec: str | None) -> Any:
+    """The pydantic_ai model for ``spec`` (the backend's own resolution when None).
+    The test seam for the model call."""
+    return _builder(settings)._build_model(spec)
 
 
 def _model_settings(
-    settings: Any, workspace_id: str, *, tags: Sequence[str] = ()
+    settings: Any, spec: str | None, workspace_id: str, *, tags: Sequence[str] = ()
 ) -> dict[str, Any]:
     """Fixed output cap, temperature and timeout, the optional reasoning effort,
     plus spend attribution on the proxy.
@@ -1097,7 +1557,8 @@ def _model_settings(
 
     ``tags`` (the site and the widget) ride LiteLLM's ``metadata.tags``, which the
     proxy stores on the spend row as ``request_tags``. Proxy providers only: a
-    direct provider rejects a body field it does not know."""
+    direct provider rejects a body field it does not know. The provider is the
+    one ``spec`` (this turn's resolved model) names."""
     from pocketpaw.agents.spend_attribution import is_proxy_provider
 
     out: dict[str, Any] = {
@@ -1112,7 +1573,7 @@ def _model_settings(
     if effort:
         out["openai_reasoning_effort"] = effort
     try:
-        provider, _model = _builder(settings)._parse_provider_model(_model_spec(settings))
+        provider, _model = _builder(settings)._parse_provider_model(spec)
     except Exception:  # noqa: BLE001 — attribution must never break the reply
         provider = ""
     if workspace_id and is_proxy_provider(provider):
@@ -1122,13 +1583,16 @@ def _model_settings(
     return out
 
 
-def _usage(settings: Any, result: Any) -> dict[str, Any]:
-    """The run's usage in the shape the meter reads (the backend's own builder)."""
+def _usage(settings: Any, result: Any, spec: str | None) -> dict[str, Any]:
+    """The run's usage in the shape the meter reads (the backend's own builder),
+    priced as the model the response names, else the model ``spec`` resolved to."""
     try:
         run_usage = result.usage
         if callable(run_usage):
             run_usage = run_usage()
         model_name = getattr(getattr(result, "response", None), "model_name", None)
+        if not model_name:
+            model_name = _builder(settings)._parse_provider_model(spec)[1] or None
         event = _builder(settings)._usage_event_from(run_usage, model_name=model_name)
         usage = dict(event.metadata or {})
     except Exception:  # noqa: BLE001 — usage is bookkeeping, never the reply
@@ -1681,14 +2145,20 @@ async def run_concierge_v2(
         page_ctx = resolve_page(widget, page, site=site)
         page_ctx = await with_page_product(page_ctx, widget, store)
         query = _retrieval_query(message, history, page_ctx)
+        budget = knowledge_chars(site)
         # The search and the page's own article are two kb reads, and the catalog
         # a SQLite one; run them together.
-        retrieved, page_ctx, catalog = await asyncio.gather(
-            retrieve(site, query, agent_id=agent_id or None),
-            _with_page_article(page_ctx, site),
+        # The model the owner picked on the concierge agent rides along (memoized).
+        retrieved, page_ctx, catalog, model_spec = await asyncio.gather(
+            retrieve(site, query, agent_id=agent_id or None, k=_top_k(budget)),
+            _with_page_article(page_ctx, site, query=query, budget=budget),
             catalog_for_turn(store, widget, query, page_ctx),
+            _turn_model_spec(settings, widget, site, workspace_id),
         )
-        items = select_knowledge(retrieved, page_ctx)
+        retrieved, lead = await _with_page_siblings(
+            retrieved, site, page_ctx, budget=budget, message=message
+        )
+        items = select_knowledge(retrieved, page_ctx, budget=budget, lead=lead)
         declared = _declared_tools(site, tools, page_ctx)
         prompt = build_prompt(
             items,
@@ -1700,7 +2170,7 @@ async def run_concierge_v2(
             catalog=catalog,
             tools=declared,
         )
-        model = _build_model(settings)
+        model = _build_model(settings, model_spec)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
         # Constraint 3), asserted in tests and guarded by a mutation plan. The frame
         # is one of four constants; the owner's doc-code and lead-capture switches
@@ -1728,7 +2198,7 @@ async def run_concierge_v2(
 
         # Spend attribution: the proxy's spend row names the site and the widget.
         tags = [f"pawbar_site:{site_id}", f"pawbar_widget:{widget_id}"]
-        model_settings = _model_settings(settings, workspace_id, tags=tags)
+        model_settings = _model_settings(settings, model_spec, workspace_id, tags=tags)
         # A visitor asking for a person always leaves with a route to the team,
         # whatever the model does (``contact_route``).
         contact = is_contact_request(message)
@@ -1747,7 +2217,7 @@ async def run_concierge_v2(
                         for piece in await fences.afeed(delta or ""):
                             full_text += piece
                             yield _sse("chunk", {"content": piece, "type": "text"})
-                    usage = {**_usage(settings, result), **spend_tags}
+                    usage = {**_usage(settings, result, model_spec), **spend_tags}
                 break
             except Exception as exc:
                 if attempt > 1 or full_text or not _is_transient(exc):

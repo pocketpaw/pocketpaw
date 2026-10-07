@@ -1,10 +1,13 @@
-# tests/ee/sites/test_dependency_resolver.py — the author-dependency resolver (PP-1).
+# tests/ee/sites/test_dependency_resolver.py — the author-dependency resolver.
 #
-# Created: 2026-09-24 (feat/sites-author-dependencies). The resolver runs against a
-# RECORDED FAKE REGISTRY (an ``httpx.MockTransport`` serving packuments, download
-# counts, advisories and jsdelivr bytes) with a fixed clock, so every rejection reason
-# is exercised without the network. Each gate test names the mutation that breaks it;
-# ``tests/mutations/sites_author_dependencies.json`` applies those mutations.
+# The resolver runs against a RECORDED FAKE REGISTRY (an ``httpx.MockTransport``
+# serving packuments, download counts, advisories and jsdelivr bytes) with a fixed
+# clock, so every remaining rejection reason, every warning and every fail-open path
+# is exercised without the network. Policy is "open everything" (2026-10-07): only
+# non-registry specs, bad names, unreadable ranges, unknown packages and unmatched
+# ranges/tags are refused; toolchain names resolve like any other package.
+# ``tests/mutations/sites_author_dependencies.json`` applies the mutations the gate
+# tests name.
 
 from __future__ import annotations
 
@@ -16,7 +19,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from pocketpaw_ee.sites import dependency_resolver as dr
-from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG, MINIMUM_RELEASE_AGE_SECONDS
+from pocketpaw_ee.sites.bun_supply_chain import (
+    BUILD_BUNFIG,
+    HOST_BUNFIG,
+    MINIMUM_RELEASE_AGE_SECONDS,
+)
 
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 
@@ -25,12 +32,20 @@ def _ago(days: float) -> str:
     return (NOW - timedelta(days=days)).isoformat().replace("+00:00", "Z")
 
 
-def _packument(name: str, versions: dict[str, dict], times: dict[str, float]) -> dict:
-    return {
+def _packument(
+    name: str,
+    versions: dict[str, dict],
+    times: dict[str, float],
+    tags: dict[str, str] | None = None,
+) -> dict:
+    out = {
         "name": name,
         "versions": {v: {"name": name, "version": v, **m} for v, m in versions.items()},
         "time": {v: _ago(d) for v, d in times.items()},
     }
+    if tags is not None:
+        out["dist-tags"] = tags
+    return out
 
 
 ESM_BYTES = b"export default 42;\n"
@@ -44,10 +59,13 @@ class FakeRegistry:
             "three": _packument(
                 "three",
                 {"0.169.0": {}, "0.170.0": {}, "0.171.0": {}},
-                # 0.171.0 is only 2 days old: the floor must fall back to 0.170.0.
+                # 0.171.0 is only 2 days old and is `latest`: no age floor, so it wins.
                 {"0.169.0": 60, "0.170.0": 20, "0.171.0": 2},
+                tags={"latest": "0.171.0"},
             ),
             "gsap": _packument("gsap", {"3.12.5": {}, "3.13.0": {}}, {"3.12.5": 300, "3.13.0": 90}),
+            "svelte": _packument("svelte", {"5.1.0": {}}, {"5.1.0": 100}),
+            "@sveltejs/kit": _packument("@sveltejs/kit", {"2.5.0": {}}, {"2.5.0": 100}),
             "@scope/pkg": _packument("@scope/pkg", {"1.0.0": {}}, {"1.0.0": 100}),
             "old-thing": _packument(
                 "old-thing", {"1.0.0": {"deprecated": "use new-thing"}}, {"1.0.0": 900}
@@ -138,14 +156,17 @@ def _codes(result: dr.ResolveResult) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# The floor constant is the bunfig's floor
+# The release-age floor lives on the HOST only
 # ---------------------------------------------------------------------------
 
 
-def test_the_resolver_floor_is_the_sandbox_bunfig_floor():
-    """The version the agent is told about must be one the sandbox will install."""
+def test_the_host_bunfig_keeps_the_floor_and_the_sandbox_bunfig_does_not():
+    """The resolver applies no age floor; the sandbox installs anything it resolves."""
     assert MINIMUM_RELEASE_AGE_SECONDS == 7 * 24 * 3600
-    assert f"minimumReleaseAge = {MINIMUM_RELEASE_AGE_SECONDS}" in BUILD_BUNFIG
+    assert f"minimumReleaseAge = {MINIMUM_RELEASE_AGE_SECONDS}" in HOST_BUNFIG
+    assert "ignoreScripts = true" in HOST_BUNFIG
+    assert "minimumReleaseAge" not in BUILD_BUNFIG
+    assert "ignoreScripts" not in BUILD_BUNFIG
 
 
 # ---------------------------------------------------------------------------
@@ -198,20 +219,35 @@ def test_prerelease_orders_below_its_release():
 
 
 # ---------------------------------------------------------------------------
-# The happy path and the floor fallback
+# The happy path
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_resolves_the_newest_version_old_enough_to_install(registry):
-    """0.171.0 is 2 days old, so the floor falls back to 0.170.0.
+async def test_latest_is_the_registrys_latest_dist_tag_however_new(registry):
+    """0.171.0 is 2 days old and tagged `latest`, so it is the pick.
 
-    Mutation: drop the ``p[2] <= cutoff`` filter → 0.171.0 is picked.
+    Mutation: ignore ``dist-tags`` → still 0.171.0 here, so the tag test below
+    (where `latest` is NOT the highest version) is the one that catches it.
     """
     result = await _resolve(registry, {"name": "three"})
     assert result.rejected == []
-    assert result.packages["three"].version == "0.170.0"
-    assert result.packages["three"].manifest_entry() == {"version": "0.170.0"}
+    assert result.packages["three"].version == "0.171.0"
+    assert result.packages["three"].manifest_entry() == {"version": "0.171.0"}
+
+
+@pytest.mark.asyncio
+async def test_latest_follows_the_tag_not_the_highest_version(registry):
+    registry.packuments["tagged"] = _packument(
+        "tagged",
+        {"1.0.0": {}, "2.0.0-beta.1": {}, "1.5.0": {}},
+        {"1.0.0": 90, "2.0.0-beta.1": 1, "1.5.0": 1},
+        tags={"latest": "1.0.0", "next": "2.0.0-beta.1"},
+    )
+    result = await _resolve(registry, {"name": "tagged"})
+    assert result.packages["tagged"].version == "1.0.0"
+    result = await _resolve(registry, {"name": "tagged", "range": "next"})
+    assert result.packages["tagged"].version == "2.0.0-beta.1"
 
 
 @pytest.mark.asyncio
@@ -239,21 +275,20 @@ async def test_a_deprecated_version_is_skipped_for_an_older_good_one(registry):
 
 
 @pytest.mark.asyncio
-async def test_no_satisfying_version_names_the_newest_eligible(registry):
+async def test_no_satisfying_version_names_latest(registry):
     result = await _resolve(registry, {"name": "three", "range": "^1.0.0"})
     [rej] = result.rejected
     assert rej.code == dr.NO_ELIGIBLE_VERSION
-    assert "0.170.0" in rej.reason  # the newest ELIGIBLE, not the too-new 0.171.0
+    assert "0.171.0" in rej.reason
     assert "three" not in result.packages
 
 
 @pytest.mark.asyncio
-async def test_only_too_new_versions_is_refused_with_the_floor_named(registry):
-    """Mutation: treat ``aged == []`` as ok → brand-new@1.0.0 is accepted."""
-    result = await _resolve(registry, {"name": "brand-new"})
+async def test_an_unknown_dist_tag_names_the_known_ones(registry):
+    result = await _resolve(registry, {"name": "three", "range": "canary"})
     [rej] = result.rejected
     assert rej.code == dr.NO_ELIGIBLE_VERSION
-    assert "7 days" in rej.reason
+    assert "`latest`" in rej.reason
 
 
 @pytest.mark.asyncio
@@ -270,22 +305,9 @@ async def test_only_too_new_versions_is_refused_with_the_floor_named(registry):
         ({"name": "three", "range": "npm:other@1"}, dr.NON_REGISTRY_SPEC),
         ({"name": "three", "range": "https://x.test/three.tgz"}, dr.NON_REGISTRY_SPEC),
         ({"name": "three", "range": "mrdoob/three.js"}, dr.NON_REGISTRY_SPEC),
-        ({"name": "three", "range": "next"}, dr.INVALID_RANGE),
-        ({"name": "svelte"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "@sveltejs/kit"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "react-dom"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "@tailwindcss/vite"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "@ripple-ui/svelte"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "@cloudflare/workers-types"}, dr.TOOLCHAIN_RESERVED),
-        ({"name": "valibot"}, dr.TOOLCHAIN_RESERVED),
+        ({"name": "three", "range": "not a range"}, dr.INVALID_RANGE),
+        ({"name": "three", "range": "^^1"}, dr.INVALID_RANGE),
         ({"name": "does-not-exist"}, dr.NOT_FOUND),
-        ({"name": "old-thing"}, dr.DEPRECATED),
-        ({"name": "scripted"}, dr.INSTALL_SCRIPTS),
-        ({"name": "native"}, dr.NATIVE_BUILD),
-        ({"name": "binaryish"}, dr.NATIVE_BUILD),
-        ({"name": "huge"}, dr.TOO_LARGE),
-        ({"name": "typosquat"}, dr.LOW_DOWNLOADS),
-        ({"name": "vulnerable"}, dr.ADVISORY),
     ],
 )
 async def test_every_rejection_reason(registry, spec, code):
@@ -297,24 +319,65 @@ async def test_every_rejection_reason(registry, spec, code):
 
 
 @pytest.mark.asyncio
-async def test_a_low_severity_or_unaffected_advisory_does_not_block(registry):
+@pytest.mark.parametrize(
+    ("name", "version"),
+    [
+        ("scripted", "1.0.0"),  # install scripts: the sandbox runs them
+        ("native", "1.0.0"),  # gypfile
+        ("binaryish", "1.0.0"),
+        ("huge", "1.0.0"),  # 30 MB unpacked
+        ("typosquat", "1.0.0"),  # 12 weekly downloads
+        ("brand-new", "1.0.0"),  # published yesterday
+        ("vulnerable", "2.0.0"),  # high advisory: a warning, not a refusal
+        ("old-thing", "1.0.0"),  # deprecated: a warning, not a refusal
+    ],
+)
+async def test_the_old_gates_no_longer_refuse(registry, name, version):
+    """Open everything (2026-10-07). Mutation: any old gate restored → a row fails."""
+    result = await _resolve(registry, {"name": name})
+    assert result.rejected == []
+    assert result.packages[name].version == version
+
+
+@pytest.mark.asyncio
+async def test_an_affecting_advisory_is_a_warning(registry):
+    result = await _resolve(registry, {"name": "vulnerable"})
+    [warning] = result.warnings
+    assert warning["name"] == "vulnerable"
+    assert warning["code"] == dr.ADVISORY
+    assert "Prototype pollution" in warning["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_deprecated_only_package_resolves_with_a_warning(registry):
+    result = await _resolve(registry, {"name": "old-thing"})
+    assert [w["code"] for w in result.warnings] == [dr.DEPRECATED]
+    assert "use new-thing" in result.warnings[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_low_severity_or_unaffected_advisory_is_not_even_a_warning(registry):
     result = await _resolve(registry, {"name": "vulnerable", "range": "^1"})
     assert result.packages["vulnerable"].version == "1.0.0"
+    assert result.warnings == []
 
 
 @pytest.mark.asyncio
-async def test_toolchain_names_never_reach_the_network(registry):
-    await _resolve(registry, {"name": "svelte"})
-    assert registry.calls == []
+async def test_toolchain_names_resolve_like_any_package(registry):
+    """The vendored allowlist reserves nothing, so svelte is an ordinary package."""
+    result = await _resolve(registry, {"name": "svelte"}, {"name": "@sveltejs/kit"})
+    assert result.rejected == []
+    assert result.packages["svelte"].version == "5.1.0"
+    assert result.packages["@sveltejs/kit"].version == "2.5.0"
 
 
 @pytest.mark.asyncio
-async def test_more_than_twenty_is_refused_past_the_cap(registry):
-    """Mutation: raise MAX_DECLARED_PACKAGES → the 21st is accepted."""
+async def test_there_is_no_package_count_cap(registry):
+    """Mutation: reintroduce a cap → gsap (the 21st) is refused."""
     already = [f"pkg-{i}" for i in range(19)]
     result = await _resolve(registry, {"name": "three"}, {"name": "gsap"}, already=already)
-    assert "three" in result.packages
-    assert _codes(result) == {"gsap": dr.TOO_MANY}
+    assert result.rejected == []
+    assert {"three", "gsap"} <= set(result.packages)
 
 
 @pytest.mark.asyncio
@@ -332,7 +395,7 @@ async def test_ripple_refuses_everything(registry):
 
 
 # ---------------------------------------------------------------------------
-# html: esm URL + SRI
+# html: esm URL, SRI when computable
 # ---------------------------------------------------------------------------
 
 
@@ -340,10 +403,10 @@ async def test_ripple_refuses_everything(registry):
 async def test_html_gets_the_jsdelivr_url_and_a_sha384_of_its_bytes(registry):
     result = await _resolve(registry, {"name": "three"}, engine="html")
     pkg = result.packages["three"]
-    assert pkg.esm == "https://cdn.jsdelivr.net/npm/three@0.170.0/+esm"
+    assert pkg.esm == "https://cdn.jsdelivr.net/npm/three@0.171.0/+esm"
     expected = "sha384-" + base64.b64encode(hashlib.sha384(ESM_BYTES).digest()).decode()
     assert pkg.integrity == expected
-    assert pkg.manifest_entry() == {"version": "0.170.0", "esm": pkg.esm, "integrity": expected}
+    assert pkg.manifest_entry() == {"version": "0.171.0", "esm": pkg.esm, "integrity": expected}
 
 
 @pytest.mark.asyncio
@@ -355,26 +418,47 @@ async def test_svelte_and_react_get_no_esm_fields(registry):
 
 
 # ---------------------------------------------------------------------------
-# Registry down: never a silent accept
+# Network failures: fail open where we can
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("which", ["registry", "downloads", "advisories"])
-async def test_an_unreachable_registry_refuses_rather_than_accepts(registry, which):
-    """Mutation: return the package on an advisory failure → accepted unvetted."""
+@pytest.mark.parametrize("which", ["downloads", "advisories"])
+async def test_an_advice_lookup_failure_still_accepts(registry, which):
+    """Mutation: turn an advisory failure back into a rejection → this fails."""
     registry.down.add(which)
     result = await _resolve(registry, {"name": "three"})
-    assert result.packages == {}
-    assert _codes(result) == {"three": dr.REGISTRY_UNAVAILABLE}
+    assert result.rejected == []
+    assert result.packages["three"].version == "0.171.0"
 
 
 @pytest.mark.asyncio
-async def test_an_unreachable_cdn_refuses_an_html_package(registry):
-    registry.down.add("cdn")
-    result = await _resolve(registry, {"name": "three"}, engine="html")
+async def test_an_unreachable_registry_accepts_an_exact_pin_with_a_warning(registry):
+    registry.down.add("registry")
+    result = await _resolve(registry, {"name": "three", "range": "v0.170.0"})
+    assert result.rejected == []
+    assert result.packages["three"].version == "0.170.0"
+    assert [w["code"] for w in result.warnings] == [dr.UNVERIFIED]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rng", ["latest", "^0.170.0", "next"])
+async def test_an_unreachable_registry_cannot_resolve_a_range_or_tag(registry, rng):
+    registry.down.add("registry")
+    result = await _resolve(registry, {"name": "three", "range": rng})
     assert result.packages == {}
     assert _codes(result) == {"three": dr.REGISTRY_UNAVAILABLE}
+    assert "try again" in result.rejected[0].reason
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_cdn_keeps_the_html_package_without_integrity(registry):
+    registry.down.add("cdn")
+    result = await _resolve(registry, {"name": "three"}, engine="html")
+    pkg = result.packages["three"]
+    assert pkg.esm == "https://cdn.jsdelivr.net/npm/three@0.171.0/+esm"
+    assert pkg.integrity is None
+    assert "integrity" not in pkg.manifest_entry()
 
 
 # ---------------------------------------------------------------------------

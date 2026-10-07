@@ -752,12 +752,11 @@ def pocket_to_wire_dict(p, *, source_visible: bool) -> dict:
         # Both read the SAME parameter and cannot disagree: a ``sourceVisible:
         # true`` beside a withheld ``source`` would put a Code tab over nothing.
         #
-        # It exists because the client cannot re-derive it. The gate is the
-        # workspace capability AND the pocket's ``source_gated`` cohort stamp, and
-        # only the first of those is on any wire (``GET /entitlements``) — so a
-        # client gating on the capability alone would hide the Code tab on
-        # GRANDFATHERED pockets whose source this dict is still sending. Emitting
-        # the resolved answer keeps the rule in one place instead of two that drift.
+        # It exists because the client cannot re-derive it. The gate combines the
+        # two gate flags, the pocket's ``source_gated`` cohort stamp, the operator's
+        # workspace override and the pocket's own Site tier, and most of that is on
+        # no wire the client reads. Emitting the resolved answer keeps the rule in
+        # one place instead of two that drift.
         "sourceVisible": source_visible,
         # MT-1 — this site keeps its client bundle. camelCased like every other
         # multi-word wire key, which also matches the generator's
@@ -767,6 +766,8 @@ def pocket_to_wire_dict(p, *, source_visible: bool) -> dict:
         # ``sites_keep_client_bundle_default`` only to the former. Coercing to a
         # bool here would erase that distinction before publish ever sees it.
         "keepsClientBundle": getattr(p, "keeps_client_bundle", None),
+        # A project site's template slug, framework and applied recipes.
+        "siteMeta": getattr(p, "site_meta", None),
         # Entity-rooms chunk ② — optional per-entity surface-profile override
         # (JSON dict mirroring the surface-domain ``SurfaceProfile``), or
         # ``None`` for legacy pockets. Two-word key → camelCase wire form, like

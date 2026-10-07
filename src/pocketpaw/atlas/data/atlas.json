@@ -2193,6 +2193,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /pocketpaw-create-project-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-create-project-site",
+      "keywords": [
+        "pocketpaw-create-project-site"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-create-project-site",
+      "narrative": "Build a FULL-STACK Paw Site as a project: a whole repo started from a paw-sites base template (Astro, TanStack Start, Vite + React + Hono, Next, SvelteKit on Cloudflare Workers), extended with backend recipes (D1 + Drizzle, accounts, KV, R2, Supabase) and your own code, built in a sandbox. Invoke when the site needs server logic, user accounts, its own database, or when the user names one of those frameworks (\"build it in Next\", \"a SvelteKit app\", \"a SaaS with sign-in\"). Plain marketing and landing pages stay on the html / react tracks. You edit files with the project file tools; there is no rippleSpec and no pocket specialist.",
+      "requires": [],
+      "summary": "Build a FULL-STACK Paw Site as a project: a whole repo started from a paw-sites base template (Astro, TanStack Start, Vite + React + Hono, Next, SvelteKit on Cloudflare Workers), extended with…",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-create-react-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-create-react-site",
       "keywords": [
@@ -3051,6 +3065,33 @@
       "slash": "deep-work",
       "summary": "Operator + approvals surface at /deep-work: unified work feed with cycles, plan, activity, and analytics tabs, plus the approvals tray, filterable by project.",
       "surface": "/deep-work"
+    },
+    {
+      "agent_openable": false,
+      "gist": "",
+      "how": "HTTP only: GET /api/v1/pros/directory?city=&service=&cursor=&limit= (public, 60/min per IP), GET /api/v1/pros/{slug} (public), POST /api/v1/pros/apply {name, email, city, country, services, message, turnstile_token} (public, 5/hour per IP). A Pro edits its own listing with PATCH /api/v1/partners/me/profile.",
+      "id": "surface:partners-directory",
+      "keywords": [
+        "find a pro",
+        "paw pros",
+        "pro directory",
+        "become a pro",
+        "local web designer",
+        "print shop",
+        "pro near me",
+        "partner directory",
+        "paw partners",
+        "find a partner",
+        "reseller",
+        "agency"
+      ],
+      "kind": "surface",
+      "name": "Find a Pro",
+      "narrative": "Find a Pro is the public directory of Paw Pros by PocketPaw: local shops that chose to be found and that set up and run websites for the businesses around them. Each Pro's profile shows their name, city, services, a short bio, a contact link and the sites they have published to Discover. Anyone can browse it, filter by city or service, open one Pro by its slug, or apply to become a Pro through a short form (no sign-in). Point a user here when they want someone nearby to build or run their site, or when a shop asks how to join Paw Pros. Inside the product and for operators these accounts are partners (the signed-in hub is /partners).",
+      "presentation": "window",
+      "requires": [],
+      "summary": "Find a Pro: local print, design, web, marketing and photo pros who build and run sites for nearby businesses, listed by city and service, open to browse and apply to without signing in.",
+      "surface": "/pros/find"
     },
     {
       "agent_openable": true,

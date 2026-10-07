@@ -1,10 +1,16 @@
-"""Cross-tenant Paw Partners switch: an operator turns a workspace into a partner.
+"""Cross-tenant Paw Partners operator routes: the partner switch and the
+application queue.
 
-Created: 2026-10-02 (feat/partners-foundation, PH-1). Modelled on
-``platform/entitlements.py`` (``set_overrides`` / ``clear_overrides``): OPERATOR
-rung via ``require_platform``, ``workspace_id`` as an explicit path parameter
-under ``/platform``, a required ``reason``, and an audit row wrapped around the
-write with ``audit.begin`` / ``audit.settle``.
+``router`` (``/platform/workspaces/{id}/partner``) turns a workspace into a
+partner; ``applications_router`` (``/platform/partners/applications``) lists and
+reviews the public ``POST /pros/apply`` submissions through
+``partners.service_admin`` (never the Beanie doc; the PartnerApplications
+import-linter contract binds this module). Both are modelled on
+``platform/entitlements.py``: OPERATOR rung via ``require_platform``
+(``platform.partners.write`` for every route here), targets as explicit path
+parameters under ``/platform``, a required ``reason`` on writes, and an audit row
+wrapped around each write with ``audit.begin`` / ``audit.settle``; the list read
+is recorded with ``audit.record_read``.
 
 An ``active`` profile turns the per-site billing seams on for that workspace
 (``billing.enforcement.sites_enforced``), which is why this is an operator write.
@@ -13,12 +19,13 @@ PUT requires a body (no "empty body clears"); clearing is its own DELETE, the
 same split ``clear_overrides`` uses, so a client that drops the body cannot
 silently switch a partner's billing off.
 
-Updated 2026-10-02 (feat/partners-tiers, PH-15): the volume ``tier`` is
-system-owned now (``partners.service.refresh_standing``). The PUT can still set
-it — a manual promotion — and it stands until the next recompute moves it: an
-upgrade after a sale / client payment, or the monthly review. The PUT keeps the
-profile's ``tier_reviewed_at``, so a promotion is reviewed at the next month
-boundary rather than within minutes.
+The volume ``tier`` is system-owned (``partners.service.refresh_standing``). The
+PUT can still set it, a manual promotion, and it stands until the next recompute
+moves it: an upgrade after a sale / client payment, or the monthly review. The
+PUT keeps the profile's ``tier_reviewed_at``, so a promotion is reviewed at the
+next month boundary rather than within minutes, and keeps the partner's own
+public-profile fields (slug, display name, ...), which only the partner edits
+through PATCH /partners/me/profile.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
@@ -39,11 +46,20 @@ from pocketpaw_ee.cloud.models.workspace import (
     PartnerTier,
 )
 from pocketpaw_ee.cloud.partners import service as partners_service
-from pocketpaw_ee.cloud.partners.dto import PartnerProfileOut
+from pocketpaw_ee.cloud.partners import service_admin as partners_admin
+from pocketpaw_ee.cloud.partners.dto import (
+    PartnerApplicationOut,
+    PartnerApplicationPage,
+    PartnerApplicationReviewIn,
+    PartnerApplicationStatus,
+    PartnerProfileOut,
+)
+from pocketpaw_ee.cloud.partners.service import PUBLIC_PROFILE_FIELDS
 from pocketpaw_ee.cloud.platform import audit
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 
 router = APIRouter(prefix="/workspaces", tags=["platform"])
+applications_router = APIRouter(prefix="/partners", tags=["platform"])
 
 _ACTION = "platform.partners.write"
 Operator = Annotated[User, Depends(require_platform(_ACTION))]
@@ -126,6 +142,8 @@ async def set_partner(
     current = await partners_service.partner_profile_for_workspace(workspace_id)
     if current is not None:
         data["tier_reviewed_at"] = current.tier_reviewed_at
+        # The partner's own public profile is not the operator's to reset.
+        data.update(current.model_dump(include=PUBLIC_PROFILE_FIELDS))
     if data["joined_at"] is None:
         if current is not None:
             data["joined_at"] = current.joined_at
@@ -143,3 +161,61 @@ async def clear_partner(
     """Remove a workspace's partner profile (site billing reverts to the global flags)."""
     _require_reason(body.reason)
     return await _write(workspace_id, None, reason=body.reason, request=request, operator=operator)
+
+
+# ---------------------------------------------------------------- application queue
+
+
+@applications_router.get("/applications", response_model=PartnerApplicationPage)
+async def list_applications(
+    request: Request,
+    operator: Operator,
+    status: Annotated[PartnerApplicationStatus | None, Query()] = None,
+    cursor: Annotated[str | None, Query(max_length=64)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> PartnerApplicationPage:
+    """The public partner applications, newest first, with the applicant's
+    contact details (this is the review queue); ``status`` filters."""
+    page = await partners_admin.list_applications(status=status, cursor=cursor, limit=limit)
+    await audit.record_read(
+        operator=operator,
+        action=_ACTION,
+        query=f"status={status!r} cursor={cursor!r} limit={limit}",
+        target_type="partner_application",
+        request=request,
+    )
+    return page
+
+
+@applications_router.patch("/applications/{application_id}", response_model=PartnerApplicationOut)
+async def review_application(
+    application_id: str, body: PartnerApplicationReviewIn, request: Request, operator: Operator
+) -> PartnerApplicationOut:
+    """Set an application's status (new | contacted | rejected | accepted) and note.
+    Accepting is a decision, not a side effect: the applicant's workspace still
+    becomes a partner through PUT /platform/workspaces/{id}/partner."""
+    _require_reason(body.reason)
+    before = await partners_admin.get_application(application_id)  # 404 before any audit row
+    event = await audit.begin(
+        operator=operator,
+        action=_ACTION,
+        reason=body.reason,
+        target_type="partner_application",
+        before={"application_id": application_id, "status": before.status},
+        request=request,
+    )
+    ok = False
+    try:
+        out = await partners_admin.review_application(
+            application_id, status=body.status, note=body.note, reviewed_by=str(operator.id)
+        )
+        ok = True
+    finally:
+        await audit.settle(
+            event,
+            ok=ok,
+            after={"application_id": application_id, "status": body.status, "note": body.note}
+            if ok
+            else {},
+        )
+    return out

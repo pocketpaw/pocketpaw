@@ -1,70 +1,20 @@
-# events.py — Realtime Event dataclass registry for the cloud bus.
-# Updated 2026-10-02 (feat/studio-templates): StudioTemplateSaved / Updated /
-#   Deleted (``studio_template.*``), same payload shape as the site-template ones.
-# Each subclass pins an EVENT_TYPE literal that routes both the WebSocket
-# fan-out and any in-process bus subscribers.
-# Updated: 2026-05-22 (RFC 05 M2b.2) — added PocketOutcomeEvent
-#   (type="pocket.outcome"), emitted after a successful write action whose
-#   binding declared a named `outcome`. Feeds the outcomes JSONL ledger.
-# Updated: 2026-05-28 (feat/wave-3a-instinct-dispatch) — added the three
-#   instinct.approval.* events (created / approved / rejected) for the
-#   RFC 03 v2 template-level approval queue. Emitted by
-#   ``instinct_approvals.service`` on every state-mutating function per
-#   the EE cloud rule 9 (``emit on every write``).
-# Updated: 2026-05-28 (feat/wave-3b-action-pipeline) — added
-#   ``BulkActionDispatched`` (type="pocket.bulk_action.dispatched"),
-#   emitted by ``pockets.service.dispatch_bulk_action`` after a bulk
-#   fan-out completes. Carries the dispatch summary (counts + optional
-#   batch approval id) so downstream listeners (audit, analytics) can
-#   key off a single event per dispatch call.
-# Updated: 2026-05-28 (feat/wave-3c-outcomes) — added ``OutcomeEmitted``
-#   (type="pocket.outcome_emitted"), emitted by
-#   ``pockets.outcomes_emitter.emit_outcomes`` for EACH name declared in
-#   an action's ``outcomes_emitted[]`` after a successful write. RFC 03
-#   v2's template-driven outcomes catalog is distinct from M2b.2's
-#   binding-driven ``PocketOutcomeEvent``: the template-level emit fires
-#   per declared catalog event (multiple per action allowed), the M2b.2
-#   binding-level emit fires the single ``binding.outcome`` name. Both
-#   coexist on the bus under different EVENT_TYPE strings.
-# Updated: 2026-05-28 (feat/wave-3d-temporal-scheduler) — added
-#   ``TemporalSweepCompleted`` (type="pocket.temporal_sweep_completed"),
-#   emitted once per per-pocket sweep tick by
-#   ``temporal_sweeps.service.upsert_state``. Carries the sweep tally
-#   (edges_fired / blocked / escalated / errors / sweep_duration_ms) so
-#   audit + dashboards listen to one event per dispatch rather than N
-#   per-row events, the same shape ``BulkActionDispatched`` uses.
-# Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — added
-#   ``WorkspaceJobQueued`` (type="workspace_job.queued") and
-#   ``WorkspaceJobUpdated`` (type="workspace_job.updated") for the workspace
-#   jobs primitive. Queued is emitted at dispatch; Updated on a terminal
-#   transition by the ARQ worker. Worker-side emits route over the xproc
-#   bridge to the web bus, the same path ``PocketUpdated`` uses.
-# Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added
-#   ``RuleCreated`` (type="instinct.rule.created") and ``RuleArchived``
-#   (type="instinct.rule.archived") for the discovered-rules entity. Emitted by
-#   ``rules.service`` on every state-mutating call per cloud rule 9 (emit on
-#   every write).
-# Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — added ``AgentDisabled``
-#   (type="agent.disabled") and ``AgentEnabled`` (type="agent.enabled") for the
-#   agent soft-disable / revoke-everywhere flow. Emitted by ``agents.service``
-#   on disable / enable, mirroring ``AgentDeleted``'s payload shape.
-# Updated: 2026-07-15 (WC-1, feat/websandbox-registry) — added
-#   ``WebSandboxRegistered`` (type="websandbox.registered") and
-#   ``WebSandboxStatusChanged`` (type="websandbox.status_changed") for the Web
-#   Cursor sandbox registry. Emitted by ``websandbox.service`` on every
-#   state-mutating call per cloud rule 9.
-# Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — added the six
-#   ship.* events (box.created, app.created, app.updated, deploy.queued,
-#   deploy.status_changed, destroy.proposed) for the /ship managed-deploy
-#   surface. Emitted by ``ship.service`` + the arq deploy job on every
-#   state-mutating call per cloud rule 9.
-# Updated: 2026-08-15 (HTN-5, feat/agent-plan-surface) — added
-#   ``AgentPlanUpdated`` (type="agent.plan_updated") for the agent plan panel.
-#   Emitted by ``shared/agent_bridge.py`` when a backend's plan tool call
-#   normalizes to a plan that actually changed.
-# Updated: 2026-10-01 (DS-1, feat/discover-index) — added the five
-#   ``discover.listing.*`` events (upserted / removed / used / reported /
-#   moderated) for the Discover index. No audience entry: they stay in-process.
+# events.py — the realtime Event base class, its registry, and the shared
+# event vocabulary for the cloud bus.
+#
+# Each ``Event`` subclass pins an ``EVENT_TYPE`` literal that routes both the
+# WebSocket fan-out (see ``audience.py``) and in-process bus subscribers.
+# ``Event.__init_subclass__`` registers every subclass in ``EVENT_REGISTRY`` so
+# ``rebuild_event`` can turn a cross-process JSON envelope back into its class.
+#
+# Invariant: one class per ``EVENT_TYPE`` across the codebase. A second class
+# with the same type silently replaces the first in the registry, depending on
+# import order. A domain that owns its own vocabulary declares it in its own
+# module (``meetings/events.py``, ``mandates/events.py``) and NOT here too;
+# ``tests/cloud/realtime/test_event_registry.py`` fails on any duplicate.
+# Such a module must also be listed in ``_DOMAIN_EVENT_MODULES`` so a process
+# that never imported it can still rebuild its events.
+#
+# Where a group has a payload contract, the comment above it documents it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -72,6 +22,27 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 EVENT_REGISTRY: dict[str, type[Event]] = {}
+
+# Domain modules that declare their own Event subclasses. A process that never
+# imported one (an arq worker) loads them on the first registry miss, so
+# ``rebuild_event`` still finds the owning class. Imported lazily: each of
+# these imports this module.
+_DOMAIN_EVENT_MODULES = (
+    "pocketpaw_ee.cloud.meetings.events",
+    "pocketpaw_ee.cloud.mandates.events",
+)
+_domain_events_loaded = False
+
+
+def _load_domain_events() -> None:
+    global _domain_events_loaded
+    if _domain_events_loaded:
+        return
+    _domain_events_loaded = True
+    import importlib
+
+    for name in _DOMAIN_EVENT_MODULES:
+        importlib.import_module(name)
 
 
 @dataclass
@@ -112,6 +83,8 @@ def rebuild_event(payload: dict) -> Event:
         ts = datetime.now(UTC)
     else:
         ts = datetime.fromisoformat(str(ts_raw))
+    if evt_type not in EVENT_REGISTRY:
+        _load_domain_events()
     cls = EVENT_REGISTRY.get(evt_type, Event)
     inst = cls(data=data, ts=ts)
     # Subclasses overwrite `type` in __post_init__; the base Event needs the
@@ -589,6 +562,22 @@ class SiteCreated(Event):
     EVENT_TYPE: ClassVar[str] = "site.created"
 
 
+# Sites: per-site secrets (``sites.site_secrets``). NAMES ONLY, never a value.
+# ``site.secret_requested``: an agent (or user) asked the owner for a secret; the
+# builder shows the secure input card. ``site.secret_updated``: a secret was set or
+# deleted (``status`` is "set" or "deleted"). data: {workspace_id, pocket_id, name,
+# status, description, requested_by, owner, user_id}. Routed to the pocket owner and
+# the acting user only (see audience.py), not the whole workspace.
+@dataclass
+class SiteSecretRequested(Event):
+    EVENT_TYPE: ClassVar[str] = "site.secret_requested"
+
+
+@dataclass
+class SiteSecretUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "site.secret_updated"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):
@@ -726,25 +715,11 @@ class CallParticipantLeft(Event):
     EVENT_TYPE: ClassVar[str] = "call.participant_left"
 
 
-# Meetings — scheduled group meeting lifecycle
-@dataclass
-class MeetingScheduled(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.scheduled"
-
-
+# Meetings — the realtime ``meeting.updated`` the meetings service emits.
+# Every other ``meeting.*`` event is owned by ``meetings/events.py``.
 @dataclass
 class MeetingUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "meeting.updated"
-
-
-@dataclass
-class MeetingCancelled(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.cancelled"
-
-
-@dataclass
-class MeetingStarted(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.started"
 
 
 # Foresight — RFC 08 scenario runs. ``ForesightRunCreated`` fires when a
@@ -1268,3 +1243,18 @@ class ShipDeployStatusChanged(Event):
 @dataclass
 class ShipDestroyProposed(Event):
     EVENT_TYPE: ClassVar[str] = "ship.destroy.proposed"
+
+
+# Paw Partners public profile. ``updated`` carries ``workspace_id``, ``slug`` and
+# ``public`` after a partner edits its directory profile; ``applied`` carries the
+# ``application_id`` and ``country`` of a new partner application (never the
+# applicant's contact details). No audience: in-process listeners and the audit
+# trail only.
+@dataclass
+class PartnerProfileUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.profile.updated"
+
+
+@dataclass
+class PartnerApplied(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.applied"

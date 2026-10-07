@@ -71,11 +71,13 @@ from urllib.parse import urlsplit
 # into Settings fields — it never reaches os.environ, so the validator below
 # (which uses os.getenv) would miss the opt-in and block every localhost URL
 # even when the operator set the flag. python-dotenv is an indirect dep via
-# pydantic-settings; fall back silently if it's somehow unavailable.
+# pydantic-settings; fall back silently if it's somehow unavailable. Only the
+# working directory's .env (the one Settings reads): a bare call walks up the tree
+# and imports whatever parent project's .env it finds first.
 try:
     from dotenv import load_dotenv as _load_dotenv
 
-    _load_dotenv(override=False)
+    _load_dotenv(".env", override=False)
 except Exception:  # pragma: no cover — dotenv is optional
     pass
 

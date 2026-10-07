@@ -35,8 +35,8 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 >    deletes the emitted hydration bundle. There, ship the CSS fallback alone.
 > 2. **Libraries are declared packages.** On **svelte** and **react**, `three`,
 >    `ogl` or `gsap` go through `set_site_dependencies` (or the create's
->    `dependencies`) and are imported inside `onMount` / a `useEffect` dynamic
->    `import()`; a top-level import breaks the prerender. `get_effect` returns an
+>    `dependencies`) and the scene is built inside `onMount` / `useEffect` (a library that
+>    touches `window` at import time goes in a dynamic `import()` there). `get_effect` returns an
 >    effect's `needs` as `dependencies` to declare on **react**; on **html**
 >    and **svelte** it ships them vendored. A dynamic svelte site takes no packages: use `needs_js=false`
 >    effects or hand-written GLSL there. See `pocketpaw-design-taste` §2.C, which

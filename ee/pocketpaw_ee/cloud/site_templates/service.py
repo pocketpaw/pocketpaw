@@ -17,8 +17,10 @@
 #     NotFound, never Forbidden, so ids are not an existence oracle. Delete and
 #     PATCH are owner-only by query (``_owned``).
 #   * Making a template public runs ``_check_publishable``: no reference to a
-#     workspace's private files (``assets.find_private_asset_refs``) and no
-#     source the owner's workspace may not read under SF-2.
+#     workspace's private files (``assets.find_private_asset_refs``), which other
+#     workspaces could not load. The source site's own plan/tier plays no part:
+#     any site, free or draft, may be shared publicly. A pocket made FROM a
+#     template follows its own site's tier (SF-2) through the copied stamp.
 #   * Reports: one per user (enforced by the conditional ``$push``), at most
 #     ``MAX_REPORTS`` stored; ``HIDE_THRESHOLD`` of them set ``hidden``.
 #   * Caps: a snapshot over ``MAX_SNAPSHOT_BYTES`` of JSON is refused
@@ -188,22 +190,17 @@ def _check_size(snapshot: dict) -> None:
         )
 
 
-async def _check_publishable(workspace_id: str, snapshot: dict) -> None:
-    """Refuse to make ``snapshot`` public if it points at the workspace's own files
-    or carries source the workspace may not read (SF-2)."""
+def _check_publishable(snapshot: dict) -> None:
+    """Refuse to make ``snapshot`` public if it points at the workspace's own files.
+
+    Deliberately independent of the source site's plan or tier.
+    """
     refs = find_private_asset_refs(snapshot)
     if refs:
         raise ValidationError(
             "site_templates.private_assets",
             f"This site references {len(refs)} private workspace file(s), which other "
             "workspaces cannot load. Replace them with public images before sharing it publicly.",
-        )
-    if not await pockets_service.snapshot_source_visible(
-        workspace_id, bool(snapshot.get("source_gated"))
-    ):
-        raise Forbidden(
-            "site_templates.source_not_shareable",
-            "This site's source is not available on your plan, so it can't be shared publicly",
         )
 
 
@@ -315,7 +312,7 @@ async def save_template(
             f"This workspace already has {MAX_TEMPLATES_PER_WORKSPACE} templates",
         )
     if body.visibility == "public":
-        await _check_publishable(workspace_id, snapshot)
+        _check_publishable(snapshot)
 
     doc = SiteTemplate(
         workspace=workspace_id,
@@ -399,7 +396,7 @@ async def update_template(
 
         await sites_service.require_sites_plan(workspace_id)
         _check_size(doc.snapshot)
-        await _check_publishable(workspace_id, doc.snapshot)
+        _check_publishable(doc.snapshot)
 
     changes = body.model_dump(exclude_none=True)
     if changes:

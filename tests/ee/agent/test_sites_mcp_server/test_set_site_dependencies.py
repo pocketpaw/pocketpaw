@@ -214,7 +214,7 @@ class TestCreateWithDependencies:
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
         from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 
-        rej = dr.Rejection("left-pad", dr.LOW_DOWNLOADS, "too quiet")
+        rej = dr.Rejection("left-pad", dr.NOT_FOUND, "no such package")
         resolve = _fake_resolve({"three": {"version": "0.170.0"}}, [rej])
         a, b = _identity(str(ObjectId()), str(ObjectId()))
         with a, b, patch.object(dr, "resolve_dependencies", new=resolve):
@@ -286,9 +286,7 @@ class TestCreateWithDependencies:
         assert "dependencies" in out["content"][0]["text"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "path", ["package.json", "vite.config.js", "src/routes/+layout.ts", ".npmrc"]
-    )
+    @pytest.mark.parametrize("path", ["src/routes/+layout.ts", "bun.lock", "src/lib/paw/x.ts"])
     async def test_svelte_create_refuses_the_reserved_build_shell(self, path) -> None:
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 
@@ -297,6 +295,15 @@ class TestCreateWithDependencies:
             out = await mcp._create_svelte_site_handler({"source": {**_SVELTE, path: "x"}})
         assert out.get("is_error")
         assert path in out["content"][0]["text"]
+
+    @pytest.mark.parametrize(
+        "path", ["package.json", "vite.config.js", "svelte.config.js", "bunfig.toml", ".npmrc"]
+    )
+    def test_svelte_create_lets_the_author_write_root_build_files(self, path) -> None:
+        """Open everything (2026-10-07): the create's reserved-key check passes them."""
+        from pocketpaw_ee.sites import svelte_paths
+
+        assert svelte_paths.reserved_svelte_keys({**_SVELTE, path: "x"}) == []
 
 
 # ---------------------------------------------------------------------------

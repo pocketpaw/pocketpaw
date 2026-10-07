@@ -1,10 +1,11 @@
 """Workspace domain — business logic service.
 
-Updated 2026-10-02 (feat/partners-foundation, PH-1): added the platform-only
-partner-profile writer beside ``platform_set_workspace_overrides``.
-Updated 2026-10-02 (feat/partners-tiers, PH-15): ``set_partner_tier`` — the
-system's compare-and-set write of a partner's volume tier (and the monthly
-review stamp), called only by ``partners.service``.
+Paw Partners writes live here too: the platform-only partner-profile writer
+(``platform_set_partner_profile``, beside ``platform_set_workspace_overrides``)
+and two targeted ``$set`` helpers called only by ``partners.service`` —
+``set_partner_tier`` (compare-and-set of the system-owned volume tier plus the
+monthly review stamp) and ``set_partner_public_profile`` (the partner's own
+public-profile fields).
 
 Sole owner of writes to the ``Workspace`` and ``Invite`` Beanie documents.
 Module-level ``async def`` API. Members are embedded ``WorkspaceMembership``
@@ -40,6 +41,8 @@ Invariants a reader must not break:
 - ``platform_*`` helpers take no membership check and are listed in
   test_platform_boundary.py's ``_CROSS_TENANT_HELPERS``.
 - ``get_default_workspace_id`` skips soft-deleted workspaces.
+- ``delete`` releases a partner's public slug (and unlists it) so the partial
+  unique index on ``partner.slug`` never keeps a dead workspace's slug.
 - ``get_delete_preview``'s ``room_count`` leaves out hidden ``type="meeting"``
   rooms (2026-10-01, feat/meetings-instant): users never see them as rooms.
 """
@@ -50,7 +53,7 @@ import logging
 import os
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from beanie import PydanticObjectId
 from pydantic import ValidationError as PydanticValidationError
@@ -744,6 +747,12 @@ async def delete(ctx: RequestContext, workspace_id: str) -> None:
         raise NotFound("workspace", workspace_id)
 
     doc.deleted_at = datetime.now(UTC)
+    if doc.partner is not None and doc.partner.slug is not None:
+        # The partial unique index on partner.slug ignores deleted_at, so a
+        # soft-deleted partner would hold its public slug forever: the service
+        # pre-check says free, the write raises, 409 every time. Release it.
+        doc.partner.slug = None
+        doc.partner.public = False
     await doc.save()
 
     # Cascade: strip workspace from every member's User.workspaces
@@ -2030,8 +2039,9 @@ async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
     #
     # BEST-EFFORT, always. The plan move is the thing the customer paid for and it
     # has already landed; a failure to tidy sites must not undo it or 500 a webhook
-    # that will never be redelivered. The periodic sites sweep re-runs this, so a
-    # failure here costs a delay rather than the outcome.
+    # that will never be redelivered. The renewal sweep re-runs this for every
+    # workspace carrying a site (``reconcile_all_plan_carried_sites``) on each
+    # tick, so a failure here costs a delay rather than the outcome.
     try:
         from pocketpaw_ee.sites import service as sites_service
 
@@ -2554,6 +2564,29 @@ async def platform_set_workspace_overrides(
         raise NotFound("workspace", workspace_id)
     doc.overrides = overrides
     await doc.save()
+
+    # An ``included_sites`` override moves the site allowance exactly like a plan
+    # does, so clearing or lowering one must release the overflow the same way
+    # ``set_workspace_plan`` does. Best-effort: the override write stands, and the
+    # renewal sweep converges whatever this misses.
+    try:
+        from pocketpaw_ee.sites import service as sites_service
+
+        reconciled = await sites_service.reconcile_plan_carried_sites(workspace_id)
+        if reconciled.get("released"):
+            logger.info(
+                "workspace.platform_set_workspace_overrides: workspace=%s released %d "
+                "site(s) the new allowance does not carry",
+                workspace_id,
+                reconciled["released"],
+            )
+    except Exception:
+        logger.exception(
+            "workspace.platform_set_workspace_overrides: could not reconcile plan-carried "
+            "sites for workspace=%s — the override write STANDS; the sites sweep will "
+            "converge it",
+            workspace_id,
+        )
     return doc
 
 
@@ -2604,6 +2637,26 @@ async def set_partner_tier(
         {"_id": oid, "deleted_at": None, "partner.tier": expected}, {"$set": fields}
     )
     # no-event: the tier is read on demand (/partners/me); nothing subscribes to it.
+    return res.matched_count == 1
+
+
+async def set_partner_public_profile(workspace_id: str, fields: dict[str, Any]) -> bool:
+    """``$set`` the partner's public-profile fields (``partner.<name>``) in one write.
+
+    Matches only a workspace that IS a partner, so a non-partner never gets a
+    partial ``partner`` subdocument; False when nothing matched. Called only by
+    ``partners.service.update_public_profile`` with the caller's own workspace.
+    Raises ``DuplicateKeyError`` when the slug lost the unique-index race.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return False
+    res = await _WorkspaceDoc.get_pymongo_collection().update_one(
+        {"_id": oid, "deleted_at": None, "partner": {"$ne": None}},
+        {"$set": {f"partner.{k}": v for k, v in fields.items()}},
+    )
+    # no-event: partners.service emits PartnerProfileUpdated after this returns.
     return res.matched_count == 1
 
 

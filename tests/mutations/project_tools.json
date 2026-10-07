@@ -1,0 +1,141 @@
+[
+  {
+    "label": "a path climbing out with .. is accepted as a project file",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "    rel = safe_rel(raw)\n    if rel is None or rel == \".\":\n        raise _bad_path(raw, \"it must stay inside the project\")",
+    "replace": "    rel = raw.strip()",
+    "tests": [
+      "tests/ee/sites/test_project_tools.py::test_normalize_path_refuses_unsafe_and_reserved"
+    ]
+  },
+  {
+    "label": "a real .env / .dev.vars file can be written, so a secret value lands in the source map",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "    if name in _SECRET_FILES or (",
+    "replace": "    if False and (",
+    "tests": [
+      "tests/ee/sites/test_project_tools.py::test_normalize_path_refuses_unsafe_and_reserved",
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestFileTools::test_write_refuses_unsafe_paths"
+    ]
+  },
+  {
+    "label": "a recipe that needs the Site plan applies on a free site",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "    if min_plan in (None, \"free\"):\n        return True",
+    "replace": "    if True:\n        return True",
+    "tests": [
+      "tests/ee/sites/test_project_tools.py::test_recipe_plan_gate",
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestRecipes::test_plan_gate_refuses_before_running"
+    ]
+  },
+  {
+    "label": "a recipe conflict still writes the recipe's files into the draft",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "        if payload.get(\"ok\") and not dry_run and not payload.get(\"alreadyApplied\"):",
+    "replace": "        if not dry_run and not payload.get(\"alreadyApplied\"):",
+    "tests": [
+      "tests/ee/sites/test_project_tools.py::test_apply_recipe_conflict_and_dry_run_return_no_writes"
+    ]
+  },
+  {
+    "label": "a dependency change keeps the stale lockfile, so the sandbox's frozen install fails",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "    return [lf for lf in LOCKFILES if lf in source and lf not in writes and lf not in gone]",
+    "replace": "    return []",
+    "tests": [
+      "tests/ee/sites/test_project_tools.py::test_a_dependency_change_drops_the_lockfile",
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestFileTools::test_a_dependency_write_drops_the_lockfile"
+    ]
+  },
+  {
+    "label": "the file tools edit an html site's source map",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    \"\"\"The project pocket the caller may read in this workspace (the agent's project\n    tools read it here). 404 for another workspace's pocket, 422 for any other engine.\"\"\"\n    return await _project_pocket(workspace_id, user_id, pocket_id)",
+    "replace": "    \"\"\"The project pocket the caller may read in this workspace (the agent's project\n    tools read it here). 404 for another workspace's pocket, 422 for any other engine.\"\"\"\n    from pocketpaw_ee.cloud.pockets import service as pockets_service\n\n    return await pockets_service.get(pocket_id, user_id)",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestFileTools::test_other_engines_are_refused"
+    ]
+  },
+  {
+    "label": "start_site_from_template stops stamping the project engine",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_project.py",
+    "find": "            engine=\"project\",\n            source=source,",
+    "replace": "            engine=\"html\",\n            source=source,",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestTemplates::test_start_creates_a_project_pocket"
+    ]
+  },
+  {
+    "label": "an applied recipe is not recorded in site_meta.project.recipes",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_project.py",
+    "find": "        add_recipe=recipe_id,\n",
+    "replace": "        add_recipe=None,\n",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestRecipes::test_apply_writes_back_records_and_returns_secret_names"
+    ]
+  },
+  {
+    "label": "a write no longer queues the draft build, so the preview never rebuilds",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"verification\": await build_verification(\n            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id\n        ),",
+    "replace": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"verification\": {\"status\": \"pending\", \"job_id\": \"site-preview-p-abc\"},",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestFileTools::test_write_patch_delete_round_trip",
+      "tests/ee/sites/test_project_files_routes.py::test_a_write_bumps_the_hash_and_queues_that_build"
+    ]
+  },
+  {
+    "label": "the project tools drop off the /sites allow-list",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "    *SITES_PROJECT_TOOL_IDS,\n)",
+    "replace": ")",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestRegistration"
+    ]
+  },
+  {
+    "label": "a project refine keeps inline ripple on",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "frozenset({\"html\", \"svelte\", \"react\", \"project\"})",
+    "replace": "frozenset({\"html\", \"svelte\", \"react\"})",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestRegistration::test_the_sites_surface_allows_them"
+    ]
+  },
+  {
+    "label": "the files routes stop requiring fabric.write, so a non-member can read and write a project",
+    "file": "ee/pocketpaw_ee/sites/files_router.py",
+    "find": "async def write_project_files(\n    pocket_id: str,\n    body: ProjectFilesWriteRequest,\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(require_action_any_workspace(\"fabric.write\")),\n)",
+    "replace": "async def write_project_files(\n    pocket_id: str,\n    body: ProjectFilesWriteRequest,\n    ctx: RequestContext = Depends(request_context),\n)",
+    "tests": [
+      "tests/ee/sites/test_project_files_routes.py::test_a_non_member_is_403"
+    ]
+  },
+  {
+    "label": "the project read stops checking the workspace, so another workspace's member edits the files",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    pocket = await pockets_service.get(pocket_id, user_id)\n    if pocket.get(\"workspace\") != workspace_id:\n        raise NotFound(\"pocket\", pocket_id)\n    if not build_requires_sandbox(pocket.get(\"engine\")):",
+    "replace": "    pocket = await pockets_service.get(pocket_id, user_id)\n    if not build_requires_sandbox(pocket.get(\"engine\")):",
+    "tests": [
+      "tests/ee/sites/test_project_files_routes.py::test_another_workspace_is_404"
+    ]
+  },
+  {
+    "label": "the HTTP read returns a truncated file, which the Code view would save back",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "    return [{\"path\": p, \"size\": _text_bytes(source[p]), \"content\": source[p]} for p in wanted]",
+    "replace": "    return [{\"path\": p, \"size\": _text_bytes(source[p]), \"content\": source[p][:3]} for p in wanted]",
+    "tests": [
+      "tests/ee/sites/test_project_files_routes.py::test_list_read_write_patch_delete"
+    ]
+  },
+  {
+    "label": "the files router drops out of the route-auth audit",
+    "file": "tests/cloud/auth/test_route_auth_audit.py",
+    "find": "    (\"site_files\", \"pocketpaw_ee.sites.files_router\"),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/auth/test_route_auth_coverage.py"
+    ]
+  }
+]

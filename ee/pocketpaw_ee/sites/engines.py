@@ -1,46 +1,22 @@
-# Canonical engine-capability module for Paw Sites.
+# ee/pocketpaw_ee/sites/engines.py — the single source of truth for "what can this
+# site engine do". Callers branch on a capability predicate here, never on an engine
+# string, so a new engine that combines capabilities in a new way adds a predicate
+# instead of overloading one (react split "builds" from "emits a worker"; svelte's two
+# adapters split the name-only predicates from the artifact-resolving ones).
 #
-# Created 2026-07-10 (HE-2): the single source of truth for "what can this site
-# engine do", replacing scattered ``== "svelte"`` / ``!= "svelte"`` string-equality
-# checks across the sites + cloud/surface code. Workspace-charter principle: one
-# canonical reference module beats phased propagation.
+# Five engines: ripple (rippleSpec), svelte / html / react (source maps over a scaffold
+# the generator owns) and project (the author owns the whole repo: package.json,
+# framework config, wrangler config; built only in the Daytona sandbox by
+# ``paw-sites-gen project-build``, deployed only from its ``paw-build.json``).
 #
-# Edited 2026-08-07 (RX-1 — the react engine): registered ``"react"`` across the
-# four predicates and added a FIFTH, :func:`emits_server_worker`. react is the first
-# engine that needs a per-site Node build yet emits NO server entry, which broke the
-# assumption ``workers_deploy`` had been making — that ``needs_node_build`` could
-# stand in for "there is a ``_worker.js`` to deploy". Those were the same fact for
-# ripple/svelte/html and are not for react, so the deploy shape now reads its own
-# predicate. That is this module's whole design: capabilities stay orthogonal, and a
-# new engine that combines them in a new way adds a predicate rather than overloading
-# one.
-#
-# Edited 2026-08-10 (SL-2 slice 2 — the build lane got its first caller): added
-# :func:`expects_server_worker`, a SIXTH predicate, for the question a caller holding only
-# a finished ARTIFACT has to ask: not "would a worker be deployed" but "is its absence a
-# problem". Those were one question until SL-1 split the svelte track across two adapters,
-# and a cross-check that keeps conflating them warns on every healthy static svelte build.
-# It returns a tri-state — ``None`` means the engine name genuinely cannot say — which is
-# the honest shape and the reason it is a new predicate rather than an edit to either
-# existing one.
-#
-# Edited 2026-08-10 (SL-1 — the static svelte landing lane): added
-# :func:`resolve_static_output_rel` and :func:`resolve_emits_server_worker`, the
-# ARTIFACT-resolving siblings of the last two predicates. The svelte track now builds
-# on adapter-static for a static landing site (output ``build``, no ``_worker.js``) and
-# adapter-cloudflare for a dynamic/auth one — a property of the SITE, not of the engine
-# string, so for the first time a capability here is NOT a function of the engine name
-# and the name-only predicates genuinely cannot answer it.
-#
-# This follows RX-1's design rather than departing from it: a new combination adds a
-# predicate instead of overloading one. What is new is that these two read the
-# filesystem, which no other predicate here does. That exception is deliberate and
-# narrow — see :func:`resolve_static_output_rel` for why reading the artifact beats
-# threading a static/dynamic flag through six call sites, two of which have no
-# generate in scope to thread it from.
+# Invariants: every predicate routes through :func:`normalize_engine`, which falls an
+# unknown engine back to ripple (never raises). Only the ``resolve_*`` functions read
+# the filesystem; everything else is pure. The FE mirror is
+# paw-enterprise ``core/sites/engines.ts``; :func:`engine_capabilities` is the wire
+# shape it reads.
 """Engine capability predicates for Paw Sites.
 
-Four site-generation engines are modeled:
+Five site-generation engines are modeled:
 
 * ``"ripple"`` — the DEFAULT. The pocket's authored content is a ``rippleSpec`` (a
   widget tree). Publishing runs a per-site Node build (``bun install`` + Vite +
@@ -60,6 +36,12 @@ Four site-generation engines are modeled:
   markup prerendered by ``react-dom/server`` and NO server entry. So react is the
   first engine that is source-map-backed AND build-requiring AND server-less — the
   combination that motivated :func:`emits_server_worker`.
+* ``"project"`` — the pocket's content is a ``{path: contents}`` source map of a WHOLE
+  project the author owns (package.json, framework config, ``wrangler.jsonc``, ...).
+  Nothing in it is generator-owned: no scaffold, no ripple, author packages allowed.
+  It builds only in the Daytona sandbox (``paw-sites-gen project-build``), which
+  stages ``paw-build.json`` plus the files it names under ``.paw/out``; publishing
+  deploys from that manifest (``bundle_deploy``), never from the author's config.
 
 The five predicates split the engine question into orthogonal capabilities:
 
@@ -112,15 +94,19 @@ from pathlib import Path
 
 _DEFAULT_ENGINE = "ripple"
 
+#: Where a ``project`` sandbox build stages its deployable bundle, relative to the
+#: project dir. A dot-dir so it never collides with an author's own ``dist``/``build``.
+PROJECT_STAGE_REL = ".paw/out"
+
 # Engines whose pocket content is a {path: contents} source map (as opposed to a
 # rippleSpec). The one place the "source map vs rippleSpec" fact is encoded.
-_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({"svelte", "html", "react"})
+_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({"svelte", "html", "react", "project"})
 
 # Engines that require a per-site Node build (bun install + a Vite/SvelteKit build +
 # for the SvelteKit tracks a workerd smoke render) before deploy. Note html is
 # source-map-backed yet needs NO build — "source map" and "node build" are
 # deliberately distinct capabilities.
-_NODE_BUILD_ENGINES: frozenset[str] = frozenset({"ripple", "svelte", "react"})
+_NODE_BUILD_ENGINES: frozenset[str] = frozenset({"ripple", "svelte", "react", "project"})
 
 # Engines whose build emits a ``_worker.js`` SERVER entry that must be deployed as a
 # Worker script (with ``main`` + ``nodejs_compat``), as opposed to a purely static
@@ -149,6 +135,11 @@ _STATIC_OUTPUT_REL: dict[str, str] = {
     "svelte": ".svelte-kit/cloudflare",
     "html": ".",
     "react": "dist",
+    # Not an assets dir: where the sandbox build STAGES the deployable bundle
+    # (``paw-build.json`` + the assets and worker modules it names). The assets live
+    # at the manifest's ``assetsDir`` inside it; :func:`resolve_static_output_rel`
+    # reads that off disk.
+    "project": PROJECT_STAGE_REL,
 }
 
 # SL-1 — where a STATIC svelte site's output lands instead. adapter-static's default.
@@ -166,6 +157,10 @@ _STATIC_OUTPUT_REL: dict[str, str] = {
 # the adapter for static sites removed the worker; it also moved the output dir, which
 # is what these two resolvers exist to absorb.
 _SVELTE_STATIC_OUTPUT_REL = "build"
+
+#: The project engine's build manifest (paw-sites ``buildPawManifest``). Same name as
+#: ``bundle_deploy.PAW_BUILD_FILENAME``; spelled here so this module imports nothing.
+PAW_BUILD_FILENAME = "paw-build.json"
 
 
 def normalize_engine(engine: str | None) -> str:
@@ -257,6 +252,67 @@ def write_back_lane(engine: str | None) -> str | None:
     return _ENGINE_LANE.get(normalize_engine(engine))
 
 
+#: Engines whose AUTHOR owns the whole build: package.json, lockfile, framework and
+#: wrangler config. Nothing in the source map is generator-owned.
+_AUTHORED_PROJECT_ENGINES: frozenset[str] = frozenset({"project"})
+
+
+def has_generator_scaffold(engine: str | None) -> bool:
+    """True when the generator owns this engine's build shell and the author fills
+    only the content (a rippleSpec, or ``src/`` over a generated vite/svelte/wrangler
+    config). False for ``project``, whose tree is entirely the author's.
+
+    Ripple's widget runtime only ever ships inside a generated scaffold, so this is
+    also the "may this site carry ripple" answer: a project site never does.
+    """
+    return normalize_engine(engine) not in _AUTHORED_PROJECT_ENGINES
+
+
+def takes_author_packages(engine: str | None) -> bool:
+    """True when the author's own ``package.json`` IS the dependency list: any
+    package, any version, installed in the sandbox. Only ``project``.
+
+    The scaffold engines can still declare packages, but through
+    ``paw.dependencies.json``, which the generator vets against its policy
+    (``dependency_manifest``). A project has no such file and no such policy.
+    """
+    return normalize_engine(engine) in _AUTHORED_PROJECT_ENGINES
+
+
+def build_requires_sandbox(engine: str | None) -> bool:
+    """True when EVERY build of this engine runs in the Daytona sandbox and never on
+    the API host. Only ``project``: its install runs author scripts and its build runs
+    author config, so a host build would be remote code execution.
+
+    A scaffold engine needs the sandbox only when its source asks for it
+    (``dependency_manifest.requires_sandbox``); that is a property of the source, not
+    of the engine, and is checked where the source is in hand.
+    """
+    return normalize_engine(engine) in _AUTHORED_PROJECT_ENGINES
+
+
+def engine_capabilities(engine: str | None) -> dict[str, bool]:
+    """The edit/build capabilities the frontend gates its tools on, as a wire dict.
+
+    * ``select`` — a click on the rendered page maps back to source (an armed native
+      edit lane, or html's own write-back lane).
+    * ``text`` — an in-place text edit can be spliced back into source.
+    * ``code`` — the content is a file tree the generic file editor can open.
+    * ``build_log`` — drafts build in the sandbox and keep a per-build log
+      (``GET /sites/by-pocket/{id}/builds/{job_id}/log``).
+
+    ``project`` answers ``{select: False, text: False, code: True, build_log: True}``:
+    it has no generator-owned anchors yet, so edits go through files and the agent.
+    """
+    has_scaffold = has_generator_scaffold(engine)
+    return {
+        "select": has_scaffold and (has_native_edit_lane(engine) or has_write_back_lane(engine)),
+        "text": has_scaffold and has_write_back_lane(engine),
+        "code": is_source_engine(engine),
+        "build_log": build_requires_sandbox(engine),
+    }
+
+
 def content_key(engine: str | None) -> str:
     """The pocket-dict key holding this engine's authored content.
 
@@ -305,6 +361,8 @@ def expects_server_worker(engine: str | None) -> bool | None:
     * svelte → ``None``. Since SL-1 the track spans two adapters chosen by a property of
       the SITE: a static landing site emits none, a dynamic/auth one emits one. Both are
       correct builds.
+    * project → ``None``. A project may be static or carry a worker; its
+      ``paw-build.json`` says which (:func:`resolve_emits_server_worker`).
 
     ADDED 2026-08-10 (SL-2 slice 2) for the one question :func:`emits_server_worker`
     cannot answer: not "would a worker be deployed" but "is its ABSENCE a problem". Those
@@ -320,7 +378,7 @@ def expects_server_worker(engine: str | None) -> bool | None:
     — only an artifact and a question about whether it looks complete.
     """
     normalized = normalize_engine(engine)
-    if normalized == "svelte":
+    if normalized in ("svelte", "project"):
         return None
     return normalized in _SERVER_WORKER_ENGINES
 
@@ -399,6 +457,8 @@ def resolve_static_output_rel(project_dir: str | os.PathLike[str], engine: str |
     source of truth that can disagree with the artifact. Reading the artifact cannot.
     """
     normalized = normalize_engine(engine)
+    if normalized == "project":
+        return _project_assets_rel(Path(project_dir))
     if normalized != "svelte":
         return _STATIC_OUTPUT_REL[normalized]
     root = Path(project_dir)
@@ -427,7 +487,60 @@ def resolve_emits_server_worker(project_dir: str | os.PathLike[str], engine: str
     so an ``is_file()`` check would report "no worker" for a big dynamic site and
     silently deploy it assets-only — a working site replaced by a broken one.
     """
+    if normalize_engine(engine) == "project":
+        manifest = _read_project_manifest(Path(project_dir))
+        return manifest_has_worker(manifest) if manifest is not None else False
     if normalize_engine(engine) not in _SERVER_WORKER_ENGINES:
         return False
     out_dir = Path(project_dir) / resolve_static_output_rel(project_dir, engine)
     return (out_dir / "_worker.js").exists()
+
+
+# ---------------------------------------------------------------------------
+# project: the artifact is described by its paw-build.json
+# ---------------------------------------------------------------------------
+
+
+def safe_rel(value: object) -> str | None:
+    """A manifest path that stays inside its root, POSIX-normalized, or ``None``."""
+    if not isinstance(value, str) or not value.strip() or "\\" in value or "\x00" in value:
+        return None
+    parts = [seg for seg in value.strip().split("/") if seg not in ("", ".")]
+    if value.startswith("/") or any(seg == ".." for seg in parts):
+        return None
+    if parts and len(parts[0]) > 1 and parts[0][1] == ":":
+        return None
+    return "/".join(parts) or "."
+
+
+def _read_project_manifest(root: Path) -> dict | None:
+    import json
+
+    try:
+        data = json.loads((root / PAW_BUILD_FILENAME).read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def manifest_has_worker(manifest: dict) -> bool:
+    """True when a ``paw-build.json`` describes a worker script (server routes), not
+    just static assets. A static target writes no ``workerEntry`` and no modules."""
+    modules = manifest.get("workerModules")
+    return bool(manifest.get("workerEntry")) or (isinstance(modules, list) and bool(modules))
+
+
+def _project_assets_rel(root: Path) -> str:
+    """The assets dir of a project bundle under ``root``: the manifest's ``assetsDir``
+    when ``root`` IS the bundle (an unpacked artifact), the same under
+    :data:`PROJECT_STAGE_REL` when ``root`` is the project the build staged it in, else
+    the nominal stage dir (the caller then reports a missing build at a real path)."""
+    for base in ("", PROJECT_STAGE_REL):
+        manifest = _read_project_manifest(root / base if base else root)
+        if manifest is None:
+            continue
+        rel = safe_rel(manifest.get("assetsDir"))
+        if rel is None:
+            break
+        return rel if not base else (base if rel == "." else f"{base}/{rel}")
+    return PROJECT_STAGE_REL

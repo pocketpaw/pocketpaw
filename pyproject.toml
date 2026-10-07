@@ -690,7 +690,8 @@ camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--ignore=tests/cloud --ignore=tests/e2e"
+# --dist loadgroup keeps xdist_group-marked tests on one worker under -n; inert without -n.
+addopts = "--ignore=tests/cloud --ignore=tests/e2e --dist loadgroup"
 markers = [
     "serial: test must run alone, outside the parallel phase; give the reason in a comment",
     "enforce_scope: opt a test out of the global _TESTING_FULL_ACCESS bypass so require_scope fails closed as in production",

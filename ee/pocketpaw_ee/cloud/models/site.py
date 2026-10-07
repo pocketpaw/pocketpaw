@@ -56,6 +56,15 @@ from pocketpaw.paw_bar.appearance import ConciergeAppearance
 from pocketpaw.paw_bar.concierge_fields import ConciergeEscalation, ConciergeTone
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
+# ``Site.concierge_knowledge_chars``: the default and the bounds. 4,000 is one
+# whole knowledge item (``concierge_runtime._ITEM_CHARS``): below it not even a
+# single section arrives whole. 60,000 (about 15,000 tokens) is five times the
+# default, enough for a docs site's answer spread over many sections, and keeps
+# a public, per-visitor turn's prompt cost and latency bounded.
+CONCIERGE_KNOWLEDGE_CHARS_DEFAULT = 12_000
+CONCIERGE_KNOWLEDGE_CHARS_MIN = 4_000
+CONCIERGE_KNOWLEDGE_CHARS_MAX = 60_000
+
 
 class SiteDomain(BaseModel):
     """A custom hostname attached to a site (Cloudflare for SaaS)."""
@@ -294,6 +303,13 @@ class Site(TimestampedDocument):
     # Stable across re-publishes (publish reuses the stored value) so the D1
     # binding target — and the data behind it — never moves under a live site.
     d1_database_id: str = ""
+    # Bundle-deploy backends ``sites.binding_provisioner`` created for this site,
+    # keyed by the binding NAME the build requested: namespace id per KV binding,
+    # bucket name per R2 binding. Written only by the provisioner (never from
+    # author input), saved right after each create so a retry reuses rather than
+    # duplicates, and torn down by the delete cascade's ``bindings`` step.
+    kv_namespaces: dict[str, str] = Field(default_factory=dict)
+    r2_buckets: dict[str, str] = Field(default_factory=dict)
     # DP0-1: where a dynamic site sits in the durable D1 provision job
     # (none | provisioning | provisioned | failed). Contract: the job persists
     # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still
@@ -741,6 +757,12 @@ class Site(TimestampedDocument):
     # the field): the model is never told about actions and any it writes is
     # dropped.
     concierge_page_actions: bool = False
+    # The v2 concierge's per-turn knowledge budget, in characters of the
+    # <knowledge> block (``concierge_runtime.knowledge_chars``). None (the
+    # default, and rows older than the field) means
+    # ``CONCIERGE_KNOWLEDGE_CHARS_DEFAULT``. The settings PATCH accepts
+    # ``CONCIERGE_KNOWLEDGE_CHARS_MIN``..``_MAX``; the runtime clamps to the same.
+    concierge_knowledge_chars: int | None = None
     # Visitor options the frame passes to the bar (``router._pawbar_frame_config``).
     # The two texts are validated on the settings PATCH
     # (``pocketpaw.paw_bar.concierge_fields``). The disclosure is the bar's AI
@@ -774,12 +796,16 @@ class Site(TimestampedDocument):
     # deleted page left behind WITHOUT touching the rest of the scope, which also
     # holds owner-uploaded files. Empty until the first sync, so no migration.
     kb_article_ids: list[str] = Field(default_factory=list)
-    # The crawl index (CR-3): ``{page_key: {"id": article id, "title": title}}``
-    # for each page the last sync ingested, keyed by ``kb_ingest.page_key``. The v2
-    # concierge looks the visitor's page up here (``concierge_runtime.resolve_page``);
-    # kb-go names articles by title, so this is the only page-to-article link. Empty
-    # until the site's next sync, so no migration: a page then reads as not indexed.
-    kb_page_index: dict[str, dict[str, str]] = Field(default_factory=dict)
+    # The crawl index (CR-3): ``{page_key: {"id", "title", "sections"}}`` for each
+    # page the last sync ingested, keyed by ``kb_ingest.page_key``. ``sections``
+    # lists the page's articles in page order (``{id, title, source, hash,
+    # anchor}``, see ``sites.page_sections``) and ``id`` is the first of them, so
+    # an entry written before sections (``{"id", "title"}`` only) still reads,
+    # through ``page_sections.index_sections``. The v2 concierge looks the
+    # visitor's page up here (``concierge_runtime.resolve_page``); this is the
+    # only page-to-article link. Empty until the site's next sync, so no
+    # migration: a page then reads as not indexed.
+    kb_page_index: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # When the last sync ran (success or not) and why it produced nothing, so the
     # dashboard can tell "this concierge has no knowledge yet" apart from "syncing
     # is broken". "" means the last sync was clean.
@@ -812,6 +838,11 @@ class Site(TimestampedDocument):
     # back to the globe on empty, so this is never a gate on publishing. Defaults ""
     # so every existing row reads "no icon" — no migration.
     favicon_url: str = ""
+    # What a CONNECTED site's own homepage calls itself (its <title>, else
+    # og:title), sanitised and capped. Written by ``sites.connected_card`` from one
+    # safe fetch of the verified origin. Never the owner's ``name``: the card shows
+    # name, then this, then the host. "" for hosted sites and rows that predate it.
+    origin_title: str = ""
     # The site owner's record of WHO this site is for, and what they have billed
     # them. Two billing relationships meet on this document and they are not the
     # same one: ``plan_tier`` / ``subscription_status`` above are what the owner

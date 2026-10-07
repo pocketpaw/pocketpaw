@@ -75,11 +75,20 @@ class _FakeGenerator:
         return BuildResult(project_dir="/tmp/site", ripple_version=None)
 
 
-async def _build_fails(**_kw):
-    """A verifier whose BUILD layer failed — the PP-2 analogue of a failed smoke gate."""
+async def _static_fails(**_kw):
+    """A verifier whose STATIC layer failed — the one failure an edit rolls back on."""
     from tests.ee.sites.conftest import verdict_with
 
-    return verdict_with(build="failed")
+    return verdict_with(static="failed", build="skipped", browser="skipped")
+
+
+async def _link_about(pocket_id: str) -> None:
+    """Wire ``/about`` in first, so a later create of it is not a half step."""
+    await _edit(
+        pocket_id,
+        component_path="src/routes/+page.svelte",
+        edits=[{"old_string": "<Hero/>", "new_string": "<Hero/><a href='/about'>About</a>"}],
+    )
 
 
 class _FakeCF:
@@ -158,8 +167,10 @@ async def test_create_adds_a_new_page_to_a_live_svelte_site(beanie_test_db):
 @pytest.mark.asyncio
 async def test_the_created_file_reaches_the_verified_build(beanie_test_db, edit_verifier):
     """Persisting is not enough — the new route has to be in the source the verify
-    pipeline builds, or the page exists on the pocket and nowhere else."""
+    pipeline builds, or the page exists on the pocket and nowhere else. (Linked first,
+    so the create is not a half step and is verified.)"""
     pocket_id = await _make_svelte_pocket("w1", "u1")
+    await _link_about(pocket_id)
 
     await _edit(
         pocket_id,
@@ -171,6 +182,32 @@ async def test_the_created_file_reaches_the_verified_build(beanie_test_db, edit_
     assert edit_verifier.seen_sources, "the edit must run the verify pipeline"
     verified = edit_verifier.seen_sources[-1]
     assert verified.get("src/routes/about/+page.svelte") == "<h1>About us</h1>"
+
+
+@pytest.mark.asyncio
+async def test_an_unreferenced_create_is_a_half_step_and_skips_verification(
+    beanie_test_db, edit_verifier
+):
+    """Nothing links the new file yet, so verifying would spend a sandbox on a render
+    the wiring edit changes again: skipped, and said so."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    pocket_id = await _make_svelte_pocket("w1", "u1")
+    edit_verifier.calls.clear()
+
+    result = await sites_service.edit_svelte_component(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/routes/about/+page.svelte",
+        new_source="<h1>About us</h1>",
+        create=True,
+    )
+
+    assert edit_verifier.calls == []
+    assert result.unreferenced is True
+    assert result.verification["status"] == "skipped"
+    assert result.verification["reason"] == "create_half_step"
 
 
 @pytest.mark.asyncio
@@ -216,11 +253,10 @@ _RESERVED_SPELLINGS = [
     "src/hooks.server.ts",
     "src/lib/auth.ts",
     "src/app.d.ts",
-    "package.json",
-    "./package.json",
-    "src/../package.json",
-    "vite.config.ts",
-    "svelte.config.js",
+    "src/routes/+layout.ts",
+    "./src/routes/+layout.js",
+    "bun.lock",
+    "src/../bun.lock",
 ]
 
 
@@ -258,11 +294,25 @@ async def test_the_guard_runs_before_the_pocket_is_read(beanie_test_db):
     with pytest.raises(CloudError) as exc:
         await _edit(
             "pocket-that-does-not-exist",
-            component_path="package.json",
+            component_path="src/lib/paw/x.ts",
             new_source="{}",
             create=True,
         )
     assert exc.value.code == "site_edit.reserved_path"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["package.json", "vite.config.ts", "svelte.config.js", "bunfig.toml", ".npmrc"]
+)
+async def test_the_author_may_create_root_build_files(beanie_test_db, path: str):
+    """Open everything (2026-10-07): the generator merges these with its toolchain."""
+    pocket_id = await _make_svelte_pocket("w1", "u1")
+
+    await _edit(pocket_id, component_path=path, new_source="{}", create=True)
+
+    pocket = await pockets_service.get(pocket_id, "u1")
+    assert pocket["source"][path] == "{}"
 
 
 @pytest.mark.asyncio
@@ -397,7 +447,7 @@ async def test_create_returns_no_previous_source_to_roll_back_to(beanie_test_db)
 
 @pytest.mark.asyncio
 async def test_a_failed_create_removes_the_key_rather_than_blanking_it(beanie_test_db):
-    """A create that fails the smoke gate must leave the map exactly as it was.
+    """A create that fails the static check must leave the map exactly as it was.
 
     The pre-existing rollback restores ``previous_source``; a create HAS none, and
     writing an empty string back would leave an empty file at a real route — a blank
@@ -405,6 +455,8 @@ async def test_a_failed_create_removes_the_key_rather_than_blanking_it(beanie_te
     to prevent rather than a recovery from it.
     """
     pocket_id = await _make_svelte_pocket("w1", "u1")
+    await _link_about(pocket_id)
+    linked = (await pockets_service.get(pocket_id, "u1"))["source"]
 
     with pytest.raises(SmokeGateFailed):
         await _edit(
@@ -412,14 +464,14 @@ async def test_a_failed_create_removes_the_key_rather_than_blanking_it(beanie_te
             component_path="src/routes/about/+page.svelte",
             new_source="<h1>boom</h1>",
             create=True,
-            _verify=_build_fails,
+            _verify=_static_fails,
         )
 
     pocket = await pockets_service.get(pocket_id, "u1")
     assert "src/routes/about/+page.svelte" not in pocket["source"], (
         "a rolled-back create must REMOVE the key, not leave an empty file behind"
     )
-    assert set(pocket["source"]) == set(_SVELTE_SOURCE)
+    assert pocket["source"] == linked
 
 
 @pytest.mark.asyncio
@@ -432,7 +484,7 @@ async def test_a_failed_ordinary_edit_still_restores_the_prior_contents(beanie_t
             pocket_id,
             component_path="src/lib/components/Hero.svelte",
             new_source=_HERO_V2,
-            _verify=_build_fails,
+            _verify=_static_fails,
         )
 
     pocket = await pockets_service.get(pocket_id, "u1")

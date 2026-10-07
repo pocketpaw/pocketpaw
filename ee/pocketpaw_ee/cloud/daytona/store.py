@@ -49,15 +49,51 @@ _MAP_PATH = Path.home() / ".pocketpaw" / "daytona_workspace_map.json"
 WS_VM_MAP_PATH = Path.home() / ".pocketpaw" / "daytona_workspace_vm_map.json"
 
 # Default VM configuration
-# TODO(bug): root_dir should be /home/daytona; auto_stop_interval is MINUTES not
-# 3600s. Changing these VALUES alters legacy VM behavior — out of scope here.
+# TODO(bug): root_dir should be /home/daytona. Changing it alters legacy VM layout.
+# ``auto_stop_interval`` is SECONDS here (the API's documented unit); it is converted
+# to Daytona's MINUTES by :func:`workspace_vm_lifecycle`, never passed through raw.
 _DEFAULT_VM_CONFIG: dict = {
     "cpu": 2,
     "memory": 4,  # GB
     "disk": 10,  # GB
     "root_dir": "/workspace",
-    "auto_stop_interval": 3600,
+    "auto_stop_interval": 1800,  # seconds — 30 min idle
 }
+
+# Workspace VM lifecycle, in Daytona's MINUTES. The VM is persistent: it holds the
+# workspace's project files and ``resolve_daytona_context`` restarts it when it is
+# stopped or archived. So an idle VM STOPS (frees its cpu/memory from the org's
+# running total, which site builds also draw from), is ARCHIVED a day later (frees
+# disk; files survive, a restore takes longer), and is NEVER auto-deleted.
+WORKSPACE_VM_DEFAULT_AUTO_STOP_MINUTES = 30
+#: Ceiling on a configured auto-stop: a VM idling longer than a day holds 4 GiB of
+#: the org's memory limit for nobody.
+WORKSPACE_VM_MAX_AUTO_STOP_MINUTES = 24 * 60
+WORKSPACE_VM_MIN_AUTO_STOP_MINUTES = 5
+WORKSPACE_VM_AUTO_ARCHIVE_MINUTES = 24 * 60
+WORKSPACE_VM_AUTO_DELETE_MINUTES = -1  # never
+
+
+def workspace_vm_lifecycle(config: dict | None) -> dict[str, int]:
+    """``create_sandbox`` lifecycle kwargs (MINUTES) for a workspace VM.
+
+    ``config["auto_stop_interval"]`` is read as SECONDS (the unit the config API has
+    always documented) and clamped to [5 min, 1 day]. Before this, the raw number
+    reached Daytona as minutes, so the 3600 default kept an idle VM up for 60 hours."""
+    raw = (config or {}).get("auto_stop_interval")
+    if isinstance(raw, int | float) and not isinstance(raw, bool) and raw > 0:
+        minutes = -(-int(raw) // 60)  # ceil
+    else:
+        minutes = WORKSPACE_VM_DEFAULT_AUTO_STOP_MINUTES
+    minutes = max(
+        WORKSPACE_VM_MIN_AUTO_STOP_MINUTES, min(minutes, WORKSPACE_VM_MAX_AUTO_STOP_MINUTES)
+    )
+    return {
+        "auto_stop_interval": minutes,
+        "auto_archive_interval": WORKSPACE_VM_AUTO_ARCHIVE_MINUTES,
+        "auto_delete_interval": WORKSPACE_VM_AUTO_DELETE_MINUTES,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Per-project accessors (LEGACY — DEPRECATED, still JSON-file-backed)

@@ -32,8 +32,8 @@
   {
     "label": "react stops being a source-map engine (publish reads rippleSpec and finds nothing)",
     "file": "ee/pocketpaw_ee/sites/engines.py",
-    "find": "_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({\"svelte\", \"html\", \"react\"})",
-    "replace": "_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({\"svelte\", \"html\"})",
+    "find": "_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({\"svelte\", \"html\", \"react\", \"project\"})",
+    "replace": "_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({\"svelte\", \"html\", \"project\"})",
     "tests": [
       "tests/ee/sites/test_engines.py"
     ]
@@ -41,8 +41,8 @@
   {
     "label": "react skips its node build (nothing is ever built, so there is no dist to deploy)",
     "file": "ee/pocketpaw_ee/sites/engines.py",
-    "find": "_NODE_BUILD_ENGINES: frozenset[str] = frozenset({\"ripple\", \"svelte\", \"react\"})",
-    "replace": "_NODE_BUILD_ENGINES: frozenset[str] = frozenset({\"ripple\", \"svelte\"})",
+    "find": "_NODE_BUILD_ENGINES: frozenset[str] = frozenset({\"ripple\", \"svelte\", \"react\", \"project\"})",
+    "replace": "_NODE_BUILD_ENGINES: frozenset[str] = frozenset({\"ripple\", \"svelte\", \"project\"})",
     "tests": [
       "tests/ee/sites/test_engines.py"
     ]

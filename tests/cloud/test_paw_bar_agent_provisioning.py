@@ -710,18 +710,25 @@ class TestSiteVisitorVisibility:
         returns ``visible_to_site_visitors`` beside ``items``."""
         from unittest.mock import AsyncMock, patch
 
+        from pocketpaw_ee.cloud._core.errors import NotFound
         from pocketpaw_ee.cloud.agents.router import list_knowledge
 
         agent = await _agent_doc()
         await bar_store.create_widget(_widget(agent_id=str(agent.id)))
         internal = await _agent_doc(slug="hr-assistant", name="HR Assistant")
 
+        # The route is called directly, so pass the viewer FastAPI would inject:
+        # the agents' owner in their workspace. The ensure_can_read gate runs for real.
+        viewer = {"workspace_id": _WS, "user_id": _OWNER}
         with patch(
             "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.list_articles",
             new=AsyncMock(return_value=[{"id": "a1", "title": "Hours"}]),
         ):
-            public = await list_knowledge(str(agent.id))
-            private = await list_knowledge(str(internal.id))
+            public = await list_knowledge(str(agent.id), **viewer)
+            private = await list_knowledge(str(internal.id), **viewer)
+            # Same private agent, someone else's eyes: the gate still refuses.
+            with pytest.raises(NotFound):
+                await list_knowledge(str(internal.id), workspace_id="ws-2", user_id="user:eve")
 
         assert public["visible_to_site_visitors"] is True
         assert public["items"] == [{"id": "a1", "title": "Hours"}]

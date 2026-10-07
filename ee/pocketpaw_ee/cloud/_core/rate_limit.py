@@ -1,46 +1,35 @@
 """Rate-limit Depends factories for cloud routes.
 
-Layered on top of the OSS in-memory limiter from
-``pocketpaw.security.rate_limiter`` — no new dependency. The dashboard's
-middleware already enforces a per-IP api_limiter on every request; these
-deps add a finer-grained per-(actor, resource) bucket so abuse from a
-single authenticated actor is bounded even when the IP bucket isn't.
+Layered on the OSS in-memory ``RateLimiter`` (no new dependency). The dashboard
+middleware already enforces a coarse per-IP limit on every request; the deps
+here add finer per-(actor, resource) or per-IP buckets for routes that need
+them: workspace invites, the social exchange code, slug checks, meeting lookup
+and knocks, the public Discover and Find a Pro reads, the public AI check. New
+public routes build theirs with ``per_ip_limit`` instead of copying a function.
 
-In-memory backing is per-process. A multi-instance backend needs the
-Redis-backed Wave 3 limiter; until then a single-instance deploy is the
-assumption.
+Client address rule (``client_ip``): the RIGHTMOST ``X-Forwarded-For`` entry,
+which is the hop the single trusted proxy (Traefik) appended; the leftmost is
+caller-chosen and keying on it is a bypass. Values are validated as IPs so a
+junk header never becomes a bucket key. One exception, OPT-IN PER LIMITER
+(``trusted_header_ok=True``): when ``Settings.public_web_key``
+(``POCKETPAW_PUBLIC_WEB_KEY``) is set and a request carries ``X-Paw-Web-Key``
+equal to it (constant-time compare) plus a valid ``X-Paw-Client-IP``, that IP
+is the address. That is how the paw-web Worker, whose every request would
+otherwise share one Cloudflare egress bucket, passes the visitor through. Only
+the limiters on routes the Worker fronts opt in (the public /pros reads and
+apply, the public Discover reads); the auth exchange, meetings, the AI check
+and everything else never read the header, so a leaked key cannot pick their
+buckets. Rotation: set the new key on the Worker and here, redeploy both; there
+is no dual-key window.
 
-Updated: 2026-09-23 (VS-4, feat/sites-rename) — added ``rate_limit_slug_check``,
-a per-user bucket (30/min) on ``GET /sites/slug-available``. The check reads Mongo
-and the Cloudflare account listing on every keystroke of an address field, and
-it answers "is this name taken" for names in any workspace, so it must not be a
-free enumeration oracle.
-
-Updated: 2026-10-01 (MC-2, feat/meetings-by-code) — added
-``rate_limit_meeting_lookup``, a per-IP bucket (30/min) on the unauthenticated
-``GET /meetings/by-code/{code}`` so the lookup can't be used to sweep codes.
-
-Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added
-``rate_limit_meeting_knock`` (per IP 10/min AND per meeting code 30/min on the
-public ``POST /meetings/by-code/{code}/knock``) and
-``rate_limit_meeting_knock_poll`` (per IP 120/min on the guest's knock status
-poll and cancel). ``client_ip`` is public so the knock route can key the
-one-minute re-knock cooldown after a denial on the same address.
-
-Updated: 2026-10-01 (feat/discover-index, DS-1) — added
-``rate_limit_discover_public``, a per-IP bucket (60/min) on the unauthenticated
-``GET /discover`` and ``GET /discover/{id}`` reads.
-
-Updated: 2026-10-02 (feat/discover-index, hardening) — added
-``rate_limit_discover_report``, a per-user bucket (10/hour across all listings)
-on ``POST /discover/{id}/report``, so one account can't spray reports.
-
-``rate_limit_ai_check_public`` is a per-IP bucket (5/hour) on the public
-``POST /tools/ai-check``: every call spends platform money on AI engines.
+Buckets are per-process. A multi-instance backend needs the Redis-backed
+limiter; a single-instance deploy is the assumption today.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from hmac import compare_digest
 from ipaddress import ip_address
 
 from fastapi import Depends, Request
@@ -93,6 +82,12 @@ _ai_check_public_limiter = RateLimiter(rate=5.0 / 3600.0, capacity=5)
 # account sweeping the index gets 10 an hour.
 _discover_report_limiter = RateLimiter(rate=10.0 / 3600.0, capacity=10)
 
+# Public partner directory / profile reads: same shape as the Discover reads.
+_partner_public_limiter = RateLimiter(rate=60.0 / 60.0, capacity=60)
+# Partner applications: each one lands a proposal in front of an operator. A
+# person applies once; a script gets 5 an hour.
+_partner_apply_limiter = RateLimiter(rate=5.0 / 3600.0, capacity=5)
+
 # Knocks (a guest asking to join). Per IP: a guest knocks once, maybe again after
 # a denial. Per code: every knock puts a card in front of the people in the call,
 # so one meeting can't be flooded by many addresses either.
@@ -103,28 +98,22 @@ _meeting_knock_code_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
 _meeting_knock_poll_limiter = RateLimiter(rate=120.0 / 60.0, capacity=120)
 
 
-def _client_ip(request: Request) -> str:
+def _client_ip(request: Request, *, trusted_header_ok: bool = False) -> str:
     """Best available client address for rate-limit bucketing.
 
-    Reads the RIGHTMOST ``X-Forwarded-For`` entry, not the leftmost.
-
-    The leftmost entry is whatever the caller sent. A proxy APPENDS the address
-    it actually observed, so on a request through our edge the header reads
-    ``<whatever the client claimed>, <real client>`` and only the last element
-    is trustworthy. Keying on the first one meant an attacker chose their own
-    bucket: a fresh value per request both evaded the limit entirely and minted
-    an unbounded number of ``_Bucket`` objects on an endpoint that requires no
-    authentication.
-
-    This assumes exactly one trusted proxy in front of the app, which matches
-    the current deployment (Traefik terminating for a single backend). Adding a
-    second hop means trusting the last N entries instead, and that wants real
-    trusted-proxy configuration — uvicorn's ``forwarded_allow_ips`` is unset
-    today, which is tracked separately in the operability audit.
-
-    Values are validated as IP addresses so a malformed header cannot become a
-    cache key on its own.
+    With ``trusted_header_ok`` (only the limiters on Worker-fronted public
+    routes pass it), a request carrying the shared key and a valid
+    ``X-Paw-Client-IP`` is bucketed on that address. Everything else uses the
+    RIGHTMOST ``X-Forwarded-For`` entry: a proxy APPENDS the address it saw, so
+    only the last element is trustworthy and keying on the first let an
+    attacker pick a fresh bucket per request. Exactly one trusted proxy is
+    assumed (Traefik for a single backend); a second hop wants real
+    trusted-proxy configuration, tracked in the operability audit.
     """
+    if trusted_header_ok:
+        trusted = _trusted_client_ip(request)
+        if trusted:
+            return trusted
     peer = request.client.host if request.client else "unknown"
     forwarded = request.headers.get("x-forwarded-for", "")
     if not forwarded:
@@ -138,9 +127,61 @@ def _client_ip(request: Request) -> str:
         return peer
 
 
-def client_ip(request: Request) -> str:
-    """Public name for ``_client_ip`` (same rightmost-XFF rule)."""
-    return _client_ip(request)
+def _trusted_client_ip(request: Request) -> str | None:
+    """``X-Paw-Client-IP`` when the request proves it came from the public site."""
+    from pocketpaw.config import get_settings
+
+    key = str(getattr(get_settings(), "public_web_key", None) or "").strip()
+    if not key:
+        return None
+    sent = request.headers.get("x-paw-web-key", "")
+    if not compare_digest(sent.encode(), key.encode()):
+        return None
+    try:
+        return str(ip_address(request.headers.get("x-paw-client-ip", "").strip()))
+    except ValueError:
+        return None
+
+
+def client_ip(request: Request, *, trusted_header_ok: bool = False) -> str:
+    """Public name for ``_client_ip`` (rightmost XFF; the Worker header only on opt-in)."""
+    return _client_ip(request, trusted_header_ok=trusted_header_ok)
+
+
+def per_ip_limit(
+    limiter: RateLimiter,
+    *,
+    prefix: str,
+    code: str,
+    message: str,
+    trusted_header_ok: bool = False,
+) -> Callable[[Request], Awaitable[None]]:
+    """A per-IP ``Depends`` over ``limiter``: 429 ``code`` when the bucket is empty.
+    ``trusted_header_ok`` only for a route the paw-web Worker fronts."""
+
+    async def dep(request: Request) -> None:
+        addr = _client_ip(request, trusted_header_ok=trusted_header_ok)
+        if not limiter.check(f"{prefix}:{addr}").allowed:
+            raise RateLimited(code, message)
+
+    dep.__name__ = f"rate_limit_{prefix.replace('-', '_')}"
+    return dep
+
+
+rate_limit_partner_public = per_ip_limit(
+    _partner_public_limiter,
+    prefix="partner-public",
+    code="pros.rate_limited",
+    message="Too many requests - wait a moment and try again.",
+    trusted_header_ok=True,
+)
+rate_limit_partner_apply = per_ip_limit(
+    _partner_apply_limiter,
+    prefix="partner-apply",
+    code="pros.apply_rate_limited",
+    message="Too many applications from here - try again in an hour.",
+    trusted_header_ok=True,
+)
 
 
 async def rate_limit_social_exchange(request: Request) -> None:
@@ -163,8 +204,9 @@ async def rate_limit_meeting_lookup(request: Request) -> None:
 
 
 async def rate_limit_discover_public(request: Request) -> None:
-    """Per-IP bucket guarding the public Discover reads (unauthenticated)."""
-    if not _discover_public_limiter.check(f"discover-public:{_client_ip(request)}").allowed:
+    """Per-IP bucket guarding the public Discover reads (unauthenticated; paw-web fronts them)."""
+    addr = _client_ip(request, trusted_header_ok=True)
+    if not _discover_public_limiter.check(f"discover-public:{addr}").allowed:
         raise RateLimited(
             "discover.rate_limited",
             "Too many requests - wait a moment and try again.",
@@ -291,5 +333,8 @@ __all__ = [
     "rate_limit_meeting_knock",
     "rate_limit_meeting_knock_poll",
     "rate_limit_meeting_lookup",
+    "rate_limit_partner_apply",
+    "rate_limit_partner_public",
     "rate_limit_slug_check",
+    "per_ip_limit",
 ]

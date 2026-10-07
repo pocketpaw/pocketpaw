@@ -24,13 +24,13 @@ import pytest
 
 pytest.importorskip("pocketpaw_ee")
 
-from unittest.mock import AsyncMock
-
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from pocketpaw_ee.cloud._core.realtime.events import Event, PocketOutcomeEvent  # noqa: E402
 from pocketpaw_ee.cloud.outcomes import service as outcomes_service  # noqa: E402
 from pocketpaw_ee.cloud.outcomes.dto import CountOutcomesRequest  # noqa: E402
+
+from tests.cloud.conftest import fake_workspace_user, override_cloud_user  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -264,21 +264,13 @@ async def test_broken_subscriber_does_not_break_publish():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def outcomes_client():
-    """A TestClient over the outcomes router with auth + RBAC bypassed.
+def _outcomes_app(user) -> FastAPI:
+    """The outcomes router on a bare app, license bypassed, ``user`` signed in.
 
-    ``current_active_user`` is overridden to a SimpleNamespace member;
-    ``check_workspace_action`` is stubbed on its consumer module
-    (``ee.cloud._core.deps`` — patching the source module is too late,
-    the import binding already points at the original) so the
-    ``outcomes.read`` guard passes. Same pattern as test_audit_router.py.
+    The ``outcomes.read`` guard is NOT stubbed: it runs for real against the
+    user's workspace membership.
     """
-    from types import SimpleNamespace
-
-    from pocketpaw_ee.cloud._core import deps as core_deps
     from pocketpaw_ee.cloud._core.http import add_error_handler
-    from pocketpaw_ee.cloud.auth import current_active_user
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.cloud.outcomes.router import router
 
@@ -286,25 +278,15 @@ def outcomes_client():
     add_error_handler(app)
     app.include_router(router, prefix="/api/v1")
     app.dependency_overrides[require_license] = lambda: None
+    override_cloud_user(app, user)
+    return app
 
-    user = SimpleNamespace(
-        id="u1",
-        active_workspace="w1",
-        workspaces=[SimpleNamespace(workspace="w1", role="admin")],
-    )
 
-    async def _fake_user_dep():
-        return user
-
-    app.dependency_overrides[current_active_user] = _fake_user_dep
-
-    _orig = core_deps.check_workspace_action
-    core_deps.check_workspace_action = AsyncMock(return_value=None)
-
-    with TestClient(app) as client:
+@pytest.fixture
+def outcomes_client():
+    """A TestClient over the outcomes router as an admin of w1."""
+    with TestClient(_outcomes_app(fake_workspace_user(role="admin"))) as client:
         yield client
-
-    core_deps.check_workspace_action = _orig
 
 
 async def test_get_outcomes_counts(outcomes_client):
@@ -323,6 +305,16 @@ def test_get_outcomes_rejects_workspace_id_query(outcomes_client):
     res = outcomes_client.get("/api/v1/outcomes?workspace_id=w2")
     assert res.status_code == 400
     assert res.json()["error"]["code"] == "outcomes.workspace_id_forbidden"
+
+
+def test_get_outcomes_denies_non_member():
+    """A caller whose active workspace is w1 but who is not a member of it gets 403."""
+    user = fake_workspace_user(role="admin", workspace_id="w2")
+    user.active_workspace = "w1"
+    with TestClient(_outcomes_app(user)) as client:
+        res = client.get("/api/v1/outcomes")
+    assert res.status_code == 403
+    assert res.json()["error"]["code"] == "workspace.not_member"
 
 
 def test_event_type_is_pocket_outcome():

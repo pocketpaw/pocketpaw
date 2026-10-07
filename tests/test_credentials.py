@@ -526,6 +526,7 @@ class TestSecretFieldsList:
             "slack_app_token",
             "whatsapp_access_token",
             "whatsapp_verify_token",
+            "whatsapp_app_secret",
             "tavily_api_key",
             "brave_search_api_key",
             "parallel_api_key",
@@ -555,6 +556,7 @@ class TestSecretFieldsList:
             "ai_visibility_anthropic_api_key",
             "ai_visibility_cf_api_token",
             "turnstile_secret",
+            "public_web_key",
         }
         assert SECRET_FIELDS == expected
 

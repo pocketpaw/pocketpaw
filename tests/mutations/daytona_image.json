@@ -23,7 +23,7 @@
   {
     "label": "node is substituted away by bun, breaking the generated project's `node scripts/prune-client.mjs` build step and the vendored paw-sites CLI",
     "file": "ee/pocketpaw_ee/cloud/daytona/image.py",
-    "find": "            \"curl -fsSL https://deb.nodesource.com/setup_20.x | bash -\",\n",
+    "find": "            \"curl -fsSL https://deb.nodesource.com/setup_22.x | bash -\",\n",
     "replace": "",
     "tests": ["tests/cloud/test_daytona_image.py"]
   },

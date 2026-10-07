@@ -16,21 +16,25 @@ from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.audit.router import router as audit_router
-from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.license import require_license
 
+from tests.cloud.conftest import override_cloud_user
 
-def _fake_user(user_id: str = "u1", workspace_id: str | None = "w1") -> SimpleNamespace:
+
+def _fake_user(
+    user_id: str = "u1", workspace_id: str | None = "w1", role: str = "admin"
+) -> SimpleNamespace:
     """Lightweight User stand-in shaped like ``ee.cloud.models.user.User``.
 
     Only the attributes the audit-router auth chain reads are filled in
     (``id``, ``active_workspace``, ``workspaces``). RBAC is bypassed via
-    a separate monkeypatch on ``check_workspace_action``.
+    a separate monkeypatch on ``check_workspace_action`` when a
+    ``monkeypatch`` is passed to ``_build_app``; without one the real guard runs.
     """
     return SimpleNamespace(
         id=user_id,
         active_workspace=workspace_id,
-        workspaces=[SimpleNamespace(workspace=workspace_id, role="admin")] if workspace_id else [],
+        workspaces=[SimpleNamespace(workspace=workspace_id, role=role)] if workspace_id else [],
     )
 
 
@@ -61,13 +65,14 @@ def _build_app(
     skip_auth_override: bool = False,
     permission_denier: bool = False,
     monkeypatch=None,
+    role: str = "admin",
 ) -> FastAPI:
     """Build a FastAPI app wired to the audit router.
 
-    Auth: ``current_active_user`` is overridden to a ``SimpleNamespace``
-    user. RBAC's ``check_workspace_action`` is patched on the platform
-    guards module so the action-guard factory's deny path can be flipped
-    per-test (matches the pattern in ``test_knowledge_router.py``).
+    Auth: ``override_cloud_user`` signs in a ``SimpleNamespace`` user. When
+    ``monkeypatch`` is passed, RBAC's ``check_workspace_action`` is patched so
+    the action guard's deny path can be flipped per-test; without it the real
+    guard runs.
     """
     app = FastAPI()
     add_error_handler(app)
@@ -75,12 +80,7 @@ def _build_app(
     app.dependency_overrides[require_license] = lambda: None
 
     if not skip_auth_override:
-        user = _fake_user(user_id=user_id, workspace_id=workspace_id)
-
-        async def _fake_user_dep():
-            return user
-
-        app.dependency_overrides[current_active_user] = _fake_user_dep
+        override_cloud_user(app, _fake_user(user_id=user_id, workspace_id=workspace_id, role=role))
 
         if monkeypatch is not None:
             # ``check_workspace_action`` is imported at module load into
@@ -286,6 +286,19 @@ async def test_missing_audit_read_permission_returns_403(audit_store_tmp, monkey
             r = await client.get("/audit")
             assert r.status_code == 403, r.text
             assert r.json()["error"]["code"] == "audit.permission_denied"
+    finally:
+        _restore_service()
+
+
+async def test_member_role_denied_audit_read(audit_store_tmp) -> None:
+    """``audit.read`` is ADMIN. No guard stub here: the real role check denies a member."""
+    app = _build_app(audit_store_tmp, workspace_id="w1", role="member")
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.get("/audit")
+            assert r.status_code == 403, r.text
+            assert r.json()["error"]["code"] == "workspace.insufficient_role"
     finally:
         _restore_service()
 

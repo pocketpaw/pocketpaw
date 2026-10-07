@@ -2,10 +2,6 @@
 # (BC-6, the Entitlement primitive). Module-level ``async def`` API, not a class,
 # per EE cloud rule and mirroring ``credits.service`` / ``billing.service``.
 #
-# Updated 2026-10-02 (feat/partners-sell, PH-2): ``_PROJECT_DOWNLOAD_PLANS`` adds the
-# partner-only yearly rungs ``site_year`` / ``staff_year`` (same features as
-# ``site`` / ``staff``). Every other per-site answer reads the catalog row.
-#
 # WORKSPACE scope:
 #   * ``entitlements_from_plan(workspace_id, plan_key)`` — PURE, no DB. The plan
 #     catalog's answer for a tier key. The platform console reads it to show an
@@ -17,8 +13,9 @@
 #     codebase calls through, which is what makes one override reach all of them.
 #
 # PER-SITE scope (a different source and cadence — see ``SiteEntitlements``):
-#   * ``site_domain_allowance`` / ``site_analytics_entitled`` — pure predicates,
-#     shared by the seams that hold two strings rather than a resolved object.
+#   * ``site_domain_allowance`` / ``site_analytics_entitled`` /
+#     ``site_code_entitled`` — pure predicates, shared by the seams that hold two
+#     strings rather than a resolved object.
 #   * ``resolve_site_entitlements`` — the per-site object, whose fields CALL those
 #     predicates rather than re-deriving them.
 #
@@ -61,23 +58,6 @@ from pocketpaw_ee.cloud.entitlements.domain import Entitlements, SiteEntitlement
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud.models.workspace import WorkspaceOverrides
-
-
-# Which workspace plans may read the SOURCE CODE of the sites they own. Every
-# paid rung does; ``free`` is absent, so a free workspace resolves ``False`` by
-# not being named here rather than by being listed as denied.
-#
-# AN EXPLICIT ALLOW-SET, NOT ``key != BASE_PLAN_KEY``. Deriving a capability by
-# negating the floor is how ``SitePlanTier.sells_concierge`` came to claim it
-# survived the site-plan rekey when it did not — the middle rung is also "not
-# free" and must not sell what the top rung sells. Here the same shortcut would
-# grant source to any tier added to the catalog later, silently, on the day it
-# was added. A key this set does not name resolves ``False``: a retired one
-# (``studio``, ``agency`` — both retired SITE-plan keys that still sit in stored
-# documents and resolve to no tier), a typo'd one, or a rung invented next
-# quarter. For a capability that exposes code, "unknown means no" is the only
-# direction a mistake may fail in.
-_SOURCE_VISIBLE_PLANS = frozenset({"go", "pro", "pro_max", "enterprise"})
 
 
 def entitlements_from_plan(workspace_id: str, plan_key: str | None) -> Entitlements:
@@ -124,9 +104,6 @@ def entitlements_from_plan(workspace_id: str, plan_key: str | None) -> Entitleme
                 # whether a site is billed AT ALL, so a generous default is free
                 # hosting that nothing later reclaims.
                 included_sites=0,
-                # And no site source. The catalog having lost its base tier is
-                # no reason to hand out code.
-                site_source_visible=False,
                 features=frozenset(),
             )
 
@@ -141,12 +118,6 @@ def entitlements_from_plan(workspace_id: str, plan_key: str | None) -> Entitleme
         max_call_seconds_per_day=tier.max_call_seconds_per_day,
         max_storage_bytes=tier.max_storage_bytes,
         included_sites=tier.included_sites,
-        # Read off the RESOLVED tier's key, never the raw ``plan_key`` argument.
-        # An unknown or retired key has already been replaced by the base tier
-        # above, so ``free`` is what reaches this line and ``False`` is what it
-        # answers. Testing ``plan_key`` here instead would hand a stale document
-        # a paid grant.
-        site_source_visible=tier.key in _SOURCE_VISIBLE_PLANS,
         features=tier.features,
     )
 
@@ -170,7 +141,7 @@ def _resolve_override_value(catalog_value: int | None, override: int | str | Non
     return override
 
 
-def _resolve_override_flag(catalog_value: bool, override: bool | None) -> bool:
+def _resolve_override_flag(catalog_value: bool | None, override: bool | None) -> bool | None:
     """Overlay one BOOLEAN capability: ``None`` keeps the catalog answer,
     ``True`` or ``False`` replaces it.
 
@@ -182,10 +153,10 @@ def _resolve_override_flag(catalog_value: bool, override: bool | None) -> bool:
     to express is meaningless for a flag, which already has three states of its
     own (on, off, no opinion).
 
-    Note what ``False`` means here: an operator REVOKING a capability the plan
-    grants, which is a real lever (an abuse response) and distinct from ``None``.
-    So this cannot be written as ``catalog_value or override`` — that reads a
-    revocation as no opinion and leaves the capability on.
+    Note what ``False`` means here: an operator REVOKING a capability, which is a
+    real lever (an abuse response) and distinct from ``None``. So this cannot be
+    written as ``catalog_value or override`` — that reads a revocation as no
+    opinion and leaves the capability on.
     """
     if override is None:
         return catalog_value
@@ -261,7 +232,7 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
     This is the SINGLE choke point every enforcement path in the codebase calls
     through, which is what makes an override here reach all of them (seat caps,
     the LiveKit call-time gate, storage, connectors, pockets, the monthly
-    ceiling, included sites, site-source visibility) with no other code changed.
+    ceiling, included sites, the site-source override) with no other code changed.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
@@ -319,17 +290,18 @@ def _subscription_is_active(subscription_status: str | None) -> bool:
     return (subscription_status or "none") in _ACTIVE_SITE_SUBSCRIPTION_STATUSES
 
 
-# Which per-site tiers may have the site's PROJECT DOWNLOADED — the built site
-# handed back to its owner as an archive rather than only served from our edge.
-# The two paid rungs do; ``free`` is absent, so a floor site resolves ``False`` by
-# not being named here rather than by being listed as denied.
+# Which per-site tiers may have the site's CODE handed to its owner: the project
+# downloaded as an archive, and the source shown in the builder's Code tab. The
+# two paid rungs (and their partner-only yearly twins) do; ``free`` is absent, so a
+# floor site resolves ``False`` by not being named here rather than by being
+# listed as denied.
 #
 # AN EXPLICIT ALLOW-SET, NOT ``key != BASE_SITE_PLAN_KEY``. Deriving a per-site
 # capability by negating the floor is a mistake this catalog has already made
 # once: ``sells_concierge`` was written that way, which was only ever correct
 # while nothing sold the concierge — the moment ``staff`` did, "not free" handed
-# the $7 rung the $19 rung's feature. The same shortcut here would grant the
-# download to whatever rung the ladder gains next, silently, on the day it is
+# the $7 rung the $19 rung's feature. The same shortcut here would grant code
+# access to whatever rung the ladder gains next, silently, on the day it is
 # added. A key this set does not name resolves ``False``: a retired one
 # (``studio``, ``agency``, both retired on 2026-09-06 and still sitting in stored
 # documents), a typo, or a tier invented next quarter.
@@ -339,12 +311,9 @@ def _subscription_is_active(subscription_status: str | None) -> bool:
 # still says ``pro`` resolves to ``site`` and is entitled to what it has always
 # paid for, without ``pro`` and ``business`` having to be listed here too.
 #
-# It lives here rather than on ``SitePlanTier`` because one caller needs it. The
-# catalog grew ``sells_concierge`` only when a SECOND caller did (the resolver and
-# the buyer-facing plan-card DTO), which is the bar for lifting a rule out of the
-# resolver; until a plan card sells the download, a catalog field would be a
-# second home for a rule with one reader.
-_PROJECT_DOWNLOAD_PLANS = frozenset({"site", "staff", "site_year", "staff_year"})
+# Read only through ``site_code_entitled`` below, so the download and the Code tab
+# cannot disagree about which sites may have their code.
+_SITE_CODE_PLANS = frozenset({"site", "staff", "site_year", "staff_year"})
 
 
 def site_domain_allowance(*, plan_tier: str | None, subscription_status: str | None) -> int | None:
@@ -424,6 +393,42 @@ def site_analytics_entitled(*, plan_tier: str | None, subscription_status: str |
     return site_plan_catalog.ANALYTICS_FEATURE in tier.cloudflare_features
 
 
+def site_code_entitled(*, plan_tier: str | None, subscription_status: str | None) -> bool:
+    """May THIS site's code be handed to its owner?
+
+    THE ONE PREDICATE for site code, asked by two seams that must agree: the
+    project download (``SiteEntitlements.project_download``) and the builder's Code
+    tab (``pockets.service`` publishing ``sourceVisible``). A site whose archive
+    downloads while its Code tab is hidden, or the reverse, is the drift a second
+    copy of this rule would produce.
+
+    A PAID grant: the tier is in ``_SITE_CODE_PLANS`` AND the subscription is
+    active. A plan-carried site is ``staff`` with an active status, so it passes
+    with no special case. Drafts (no tier), free sites, lapsed or never-charged
+    subscriptions, and unknown or org-scoped keys all resolve ``False``.
+
+    Reads the RESOLVED tier's key, so a legacy key (``pro`` → ``site``) keeps what
+    it has always paid for; matching the raw string would demote every un-migrated
+    site.
+    """
+    if not _subscription_is_active(subscription_status):
+        return False
+    tier = site_plan_catalog.site_scoped_tier(plan_tier)
+    return tier is not None and tier.key in _SITE_CODE_PLANS
+
+
+def site_paid_backends_entitled(*, plan_tier: str | None, subscription_status: str | None) -> bool:
+    """May THIS site bind the paid-tier backends (R2 today; Durable Objects and BYO
+    backends when they ship)? Captain decision 2026-10-07: free gets D1 and KV under
+    tight limits, everything else needs the ``site`` tier or above.
+
+    Delegates to ``site_code_entitled`` (one rule, one place): a paid rung AND an
+    active subscription. A plan-carried site is ``staff`` + active, so it passes.
+    Unknown, org-scoped, lapsed and never-charged all resolve ``False``.
+    """
+    return site_code_entitled(plan_tier=plan_tier, subscription_status=subscription_status)
+
+
 def resolve_site_entitlements(
     *,
     site_id: str,
@@ -495,13 +500,19 @@ def resolve_site_entitlements(
         plan_tier=plan_tier, subscription_status=subscription_status
     )
 
+    # --- The code grant, borrowed for the same reason ------------------------ #
+    # ``site_code_entitled`` also answers the builder's Code tab; one predicate
+    # keeps the download and the tab in step.
+    project_download = site_code_entitled(
+        plan_tier=plan_tier, subscription_status=subscription_status
+    )
+
     # --- PAID grants: the tier AND an active subscription ------------------- #
     # Written as an explicit branch rather than ``paid and tier.x`` so the
     # None-narrowing is visible to the type checker instead of resting on
     # short-circuit evaluation.
     badge_removal = False
     concierge_entitled = False
-    project_download = False
     if tier is not None and subscription_active:
         badge_removal = tier.badge_removal
         # Any tier ABOVE the free floor sells the concierge. The rule itself now
@@ -510,12 +521,6 @@ def resolve_site_entitlements(
         # read it, do not re-express it. What stays HERE is the AND with an active
         # subscription, which is this resolver's whole job.
         concierge_entitled = tier.sells_concierge
-        # ``tier.key`` and not the ``plan_tier`` argument. The resolved key is the
-        # CURRENT name for a site whose document still holds a pre-rekey one, so a
-        # ``pro`` site is entitled to the download exactly as the ``site`` it
-        # resolves to. Matching the raw string instead would quietly demote every
-        # site that has not been migrated.
-        project_download = tier.key in _PROJECT_DOWNLOAD_PLANS
 
     return SiteEntitlements(
         site_id=site_id,

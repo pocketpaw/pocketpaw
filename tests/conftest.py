@@ -21,6 +21,8 @@ the tests that ran before it in the same process.
   decisions DB go to ``tmp_path``; the paw-bar per-IP limiter is emptied; catalog
   syncs are recorded, not run; spawning the real livekit call-bot is refused (it
   never exits under pytest and hangs the suite).
+* Exit-hang guard. At session end any live aiosqlite worker thread (an unclosed
+  connection; non-daemon, so it blocks interpreter exit) is named on stderr.
 * mongomock's ``create_indexes`` is shimmed to keep ``partialFilterExpression``
   so partial unique indexes behave as in MongoDB.
 """
@@ -60,7 +62,9 @@ import functools  # noqa: E402
 import importlib.metadata  # noqa: E402
 import importlib.util  # noqa: E402
 import statistics  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
 import pytest  # noqa: E402
@@ -264,7 +268,9 @@ def _setup_asyncio_child_watcher():
 # Process-global reset, before every test (see the module docstring)
 # ---------------------------------------------------------------------------
 
-# Zero-arg reset hooks, as (module, function). Import-time registries
+# Zero-arg reset hooks, as (module, function). A dotted function name is resolved
+# attribute by attribute, so ``"_CACHE.clear"`` empties a module-level dict in
+# place when the module has no reset hook of its own. Import-time registries
 # (meetings ``providers.base._REGISTRY``, ``ripple_resolver._REGISTRY``) are left
 # out on purpose: they are filled when their modules import, and modules never
 # re-import, so clearing them would drop providers for every later test.
@@ -320,6 +326,9 @@ _RESETS: tuple[tuple[str, str], ...] = (
     ("pocketpaw_ee.foresight.api.run_store", "reset_run_store"),
     ("pocketpaw_ee.foresight.insights_llm", "reset_cache"),
     ("pocketpaw_ee.foresight.persona", "reset_paw_social_agent_counter"),
+    # 60 s per-member override cache: a grant cached by one test lets a later
+    # test's member through its 403 check.
+    ("pocketpaw_ee.guards.deps", "_ACTION_OVERRIDE_CACHE.clear"),
     ("pocketpaw_ee.sites.artifact_store_s3", "reset_shared_adapter"),
 )
 
@@ -417,7 +426,7 @@ def _reset_process_globals(monkeypatch):
         if mod is None:
             continue
         try:
-            getattr(mod, func_name)()
+            functools.reduce(getattr, func_name.split("."), mod)()
         except Exception as exc:  # noqa: BLE001 — one broken hook must not fail every test
             _reset_failures.setdefault(f"{mod_name}.{func_name}", repr(exc))
     for mod_name, attr, default in _GLOBALS:
@@ -446,6 +455,24 @@ def pytest_sessionfinish(session, exitstatus):
         sys.stderr.write(
             f"\n_reset_process_globals: {len(ms)} tests, median {statistics.median(ms):.4f} ms, "
             f"p99 {p99:.4f} ms, max {ms[-1]:.3f} ms\n"
+        )
+
+    # An aiosqlite connection that is never closed keeps a NON-daemon worker
+    # thread alive, and the interpreter waits on it forever at exit: the run
+    # passes, then hangs. Name the leak so the hang is not a mystery.
+    workers = [
+        t
+        for t in threading.enumerate()
+        if t.is_alive() and not t.daemon and "_connection_worker_thread" in t.name
+    ]
+    if workers:
+        names = ", ".join(
+            f"{t.name} (target={getattr(getattr(t, '_target', None), '__qualname__', '?')})"
+            for t in workers
+        )
+        sys.stderr.write(
+            f"\nWARNING: {len(workers)} unclosed aiosqlite connection(s) leaked by this run; "
+            f"their non-daemon worker threads will block interpreter exit: {names}\n"
         )
 
 
@@ -508,16 +535,16 @@ def _clear_journal_cache() -> None:
         fn.cache_clear()
 
 
-@pytest.fixture(autouse=True)
-def _isolate_soul_data_dir(tmp_path, monkeypatch):
-    """Keep every test out of the developer's real ``~/.soul``.
+@contextmanager
+def soul_data_dir_isolated(tmp_path, monkeypatch):
+    """Keep a test out of the developer's real ``~/.soul`` (the autouse fixture below).
 
     The org journal (``pocketpaw.journal_dep``) lives under ``SOUL_DATA_DIR`` or
     ``~/.soul``, and the decisions store's ``_DB_PATH`` global defaults to
     ``~/.soul/decisions.db``; tests that ``set_db_path(tmp_path)`` never restored it.
     The next ``mount_cloud`` then replayed the whole real journal (~137k events)
-    into a fresh temp store: 1182 s in one census run. Both now point at this
-    test's tmp dir and are restored afterwards.
+    into a fresh temp store: 1182 s in one census run. Both point at this test's
+    tmp dir; ``monkeypatch`` puts them back when it is undone.
     """
     soul_dir = tmp_path / "soul"
     monkeypatch.setenv("SOUL_DATA_DIR", str(soul_dir))
@@ -528,8 +555,16 @@ def _isolate_soul_data_dir(tmp_path, monkeypatch):
         from pocketpaw_ee.cloud.decisions import store
 
         monkeypatch.setattr(store, "_DB_PATH", soul_dir / "decisions.db")
-    yield
-    _clear_journal_cache()
+    try:
+        yield
+    finally:
+        _clear_journal_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_soul_data_dir(tmp_path, monkeypatch):
+    with soul_data_dir_isolated(tmp_path, monkeypatch):
+        yield
 
 
 # ---------------------------------------------------------------------------
