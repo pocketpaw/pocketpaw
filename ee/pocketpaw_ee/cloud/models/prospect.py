@@ -24,6 +24,8 @@
 # ``research`` holds the structured profile from the last single-prospect
 # research run (a plain dict, validated by ``growth.dto.ProspectResearch`` on
 # the way in and out) and ``researched_at`` when it ran; both None until then.
+# ``whatsapp_opt_out_at`` is set when the prospect replies STOP on WhatsApp and
+# cleared by START; while it is set, no other reply turns ``opted_in`` back on.
 
 from __future__ import annotations
 
@@ -59,6 +61,8 @@ class Prospect(TimestampedDocument):
     linkedin_url: str | None = None
     whatsapp_number: str | None = None
     opted_in: bool = False
+    # When the prospect replied STOP (or another opt-out keyword) on WhatsApp.
+    whatsapp_opt_out_at: datetime | None = None
     status: str = "new"  # new | qualified | drafted | in_sequence | replied | dead
     # The standing ICP that discovered this row, when discovery did. None on a
     # typed or imported prospect.
