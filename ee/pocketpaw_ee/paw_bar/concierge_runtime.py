@@ -16,6 +16,13 @@
 # the request's ``page.tools`` through ``action_spec.valid_tools``), <history>,
 # <visitor-message>. Those tags are neutralized inside every block.
 #
+# Model (``_turn_model_spec``, memoized ``_AGENT_MODEL_TTL_S`` per agent): the
+# provider + model the owner picked on the concierge agent (the widget's bound one,
+# else ``concierge-<site_id>``), mapped by ``_agent_spec`` (a blank model on a
+# non-pydantic_ai backend is that backend's own default); else
+# ``pawbar_concierge_model``; else the backend default. Never the agent's runtime:
+# the call stays tool-free. That one spec drives the build, proxy fields and usage.
+#
 # Knowledge (``retrieve`` is a FROZEN SEAM) goes in one per-site budget
 # (``knowledge_chars``, ``select_knowledge``), items in order, each cut to
 # min(``_ITEM_CHARS``, what is left): pinned FAQs, then the visitor's page
@@ -55,6 +62,7 @@ import html
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -1392,17 +1400,153 @@ def _builder(settings: Any) -> Any:
 
 
 def _model_spec(settings: Any) -> str | None:
+    """The deployment's ``pawbar_concierge_model``; None leaves the backend default."""
     return (getattr(settings, "pawbar_concierge_model", "") or "").strip() or None
 
 
-def _build_model(settings: Any) -> Any:
-    """The pydantic_ai model for ``pawbar_concierge_model`` (the backend's own
-    resolution when that is empty). The test seam for the model call."""
-    return _builder(settings)._build_model(_model_spec(settings))
+# The concierge agent's model, memoized per (workspace, bound agent, site) so a
+# visitor turn does not read Mongo every time. An owner's change shows within the
+# TTL; ``forget_agent_model`` drops it at once.
+_AGENT_MODEL_TTL_S = 30.0
+_AGENT_MODEL_MEMO_MAX = 2_048
+_AGENT_MODELS: dict[tuple[str, str, str], tuple[float, str, str | None]] = {}
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def forget_agent_model(agent_id: str | None = None) -> None:
+    """Drop the memoized model of ``agent_id`` (every entry when None)."""
+    if agent_id is None:
+        _AGENT_MODELS.clear()
+        return
+    for key in [k for k, v in _AGENT_MODELS.items() if agent_id in (k[1], v[1])]:
+        _AGENT_MODELS.pop(key, None)
+
+
+def _agent_spec(settings: Any, backend: str, model: str) -> str | None:
+    """The pydantic_ai ``provider:model`` spec for an agent's backend + model, or
+    None when it has no model or names one pydantic_ai cannot serve.
+
+    A pydantic_ai agent's model already is a spec; a blank one is None. On any
+    other backend a blank model means that backend's default, so it resolves the
+    way the agent itself would run: the backend's settings field, then
+    ``resolve_model``'s provider chain (a Claude Agent SDK agent on anthropic
+    gets the anthropic default, never the deployment's concierge model). Any
+    other backend's model is
+    read the way the pool routes it (``route_model``'s ``_BACKEND_MODEL_ATTR``
+    table, legacy names resolved first) and paired with that backend's own
+    ``<backend>_provider`` setting; a backend without one (``deep_agents``)
+    carries ``provider:model`` in the model itself. Only a provider pydantic_ai
+    knows is accepted, so a Codex, opencode, Copilot or Google ADK model falls
+    back instead of reaching a provider that cannot serve it."""
+    from pocketpaw.agents.pydantic_ai import _KNOWN_PROVIDERS
+    from pocketpaw.agents.registry import _LEGACY_BACKENDS
+    from pocketpaw.llm.providers.base import (
+        _BACKEND_MODEL_ATTR,
+        _BACKEND_MODEL_ATTR_ALIASES,
+        resolve_model,
+    )
+
+    model = (model or "").strip()
+    backend = _LEGACY_BACKENDS.get(backend, backend)
+    if backend == "pydantic_ai":
+        return model or None
+    attr = _BACKEND_MODEL_ATTR.get(backend) or _BACKEND_MODEL_ATTR_ALIASES.get(backend)
+    if not attr:
+        return None
+    provider_field = attr.removesuffix("_model") + "_provider"
+    provider = str(getattr(settings, provider_field, "") or "").strip()
+    if not model:
+        model = str(getattr(settings, attr, "") or "").strip()
+        model = model or str(resolve_model(settings, backend, provider) or "").strip()
+    if not model:
+        return None
+    spec = f"{provider}:{model}" if provider else model
+    head, sep, _rest = spec.partition(":")
+    return spec if sep and head in _KNOWN_PROVIDERS else None
+
+
+async def _concierge_agent(workspace_id: str, bound: str, site_id: str) -> Any | None:
+    """The agent the concierge belongs to: the widget's bound agent when it is live
+    and in this workspace, else the site's dedicated ``concierge-<site_id>``."""
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.paw_bar.agent_provisioning import concierge_slug
+
+    if bound:
+        try:
+            agent = await agents_service.get(bound)
+        except Exception:  # noqa: BLE001 — a missing agent falls through
+            agent = None
+        if agent is not None and agent.workspace_id == workspace_id and not agent.disabled:
+            return agent
+    if not (workspace_id and site_id):
+        return None
+    try:
+        agent = await agents_service.get_by_slug(workspace_id, concierge_slug(site_id))
+    except Exception:  # noqa: BLE001 — no dedicated agent: the deployment model
+        return None
+    return None if agent.disabled else agent
+
+
+async def _turn_model_spec(settings: Any, widget: Any, site: Any, workspace_id: str) -> str | None:
+    """The spec this turn answers with: the concierge agent's model when pydantic_ai
+    can serve it, else ``pawbar_concierge_model``, else None (backend default).
+    Only the model is followed; the turn never runs on the agent's backend."""
+    bound = str(getattr(widget, "agent_id", "") or "").strip()
+    key = (workspace_id, bound, str(getattr(site, "id", "") or ""))
+    now = _now()
+    hit = _AGENT_MODELS.get(key)
+    if hit is not None and hit[0] > now:
+        agent_id, spec = hit[1], hit[2]
+    else:
+        agent_id, spec = "", None
+        try:
+            agent = await _concierge_agent(*key)
+            if agent is not None:
+                agent_id = str(agent.id)
+                spec = _agent_spec(settings, agent.config.backend, agent.config.model)
+        except Exception:  # noqa: BLE001 — the model choice never fails a turn
+            logger.debug("concierge v2: agent model lookup failed", exc_info=True)
+        if len(_AGENT_MODELS) >= _AGENT_MODEL_MEMO_MAX:
+            for stale in [k for k, v in _AGENT_MODELS.items() if v[0] <= now]:
+                _AGENT_MODELS.pop(stale, None)
+            if len(_AGENT_MODELS) >= _AGENT_MODEL_MEMO_MAX:
+                _AGENT_MODELS.clear()
+        _AGENT_MODELS[key] = (now + _AGENT_MODEL_TTL_S, agent_id, spec)
+    if spec:
+        logger.debug("concierge v2 model: %s from agent %s", spec, agent_id)
+        return spec
+    fallback = _model_spec(settings)
+    logger.debug(
+        "concierge v2 model: %s",
+        f"{fallback} from pawbar_concierge_model" if fallback else "the backend default",
+    )
+    return fallback
+
+
+async def answer_model(widget: Any, site: Any, workspace_id: str) -> str:
+    """The ``provider:model`` a v2 turn on ``widget`` answers with now, for the
+    owner's dashboard: the same resolution a turn makes. '' when it can't be told."""
+    settings = _settings()
+    try:
+        spec = await _turn_model_spec(settings, widget, site, workspace_id)
+        provider, model = _builder(settings)._parse_provider_model(spec)
+    except Exception:  # noqa: BLE001 — a label never fails the overview
+        logger.debug("concierge v2: answer model lookup failed", exc_info=True)
+        return ""
+    return f"{provider}:{model}" if provider and model else (model or "")
+
+
+def _build_model(settings: Any, spec: str | None) -> Any:
+    """The pydantic_ai model for ``spec`` (the backend's own resolution when None).
+    The test seam for the model call."""
+    return _builder(settings)._build_model(spec)
 
 
 def _model_settings(
-    settings: Any, workspace_id: str, *, tags: Sequence[str] = ()
+    settings: Any, spec: str | None, workspace_id: str, *, tags: Sequence[str] = ()
 ) -> dict[str, Any]:
     """Fixed output cap, temperature and timeout, the optional reasoning effort,
     plus spend attribution on the proxy.
@@ -1413,7 +1557,8 @@ def _model_settings(
 
     ``tags`` (the site and the widget) ride LiteLLM's ``metadata.tags``, which the
     proxy stores on the spend row as ``request_tags``. Proxy providers only: a
-    direct provider rejects a body field it does not know."""
+    direct provider rejects a body field it does not know. The provider is the
+    one ``spec`` (this turn's resolved model) names."""
     from pocketpaw.agents.spend_attribution import is_proxy_provider
 
     out: dict[str, Any] = {
@@ -1428,7 +1573,7 @@ def _model_settings(
     if effort:
         out["openai_reasoning_effort"] = effort
     try:
-        provider, _model = _builder(settings)._parse_provider_model(_model_spec(settings))
+        provider, _model = _builder(settings)._parse_provider_model(spec)
     except Exception:  # noqa: BLE001 — attribution must never break the reply
         provider = ""
     if workspace_id and is_proxy_provider(provider):
@@ -1438,13 +1583,16 @@ def _model_settings(
     return out
 
 
-def _usage(settings: Any, result: Any) -> dict[str, Any]:
-    """The run's usage in the shape the meter reads (the backend's own builder)."""
+def _usage(settings: Any, result: Any, spec: str | None) -> dict[str, Any]:
+    """The run's usage in the shape the meter reads (the backend's own builder),
+    priced as the model the response names, else the model ``spec`` resolved to."""
     try:
         run_usage = result.usage
         if callable(run_usage):
             run_usage = run_usage()
         model_name = getattr(getattr(result, "response", None), "model_name", None)
+        if not model_name:
+            model_name = _builder(settings)._parse_provider_model(spec)[1] or None
         event = _builder(settings)._usage_event_from(run_usage, model_name=model_name)
         usage = dict(event.metadata or {})
     except Exception:  # noqa: BLE001 — usage is bookkeeping, never the reply
@@ -2000,10 +2148,12 @@ async def run_concierge_v2(
         budget = knowledge_chars(site)
         # The search and the page's own article are two kb reads, and the catalog
         # a SQLite one; run them together.
-        retrieved, page_ctx, catalog = await asyncio.gather(
+        # The model the owner picked on the concierge agent rides along (memoized).
+        retrieved, page_ctx, catalog, model_spec = await asyncio.gather(
             retrieve(site, query, agent_id=agent_id or None, k=_top_k(budget)),
             _with_page_article(page_ctx, site, query=query, budget=budget),
             catalog_for_turn(store, widget, query, page_ctx),
+            _turn_model_spec(settings, widget, site, workspace_id),
         )
         retrieved, lead = await _with_page_siblings(
             retrieved, site, page_ctx, budget=budget, message=message
@@ -2020,7 +2170,7 @@ async def run_concierge_v2(
             catalog=catalog,
             tools=declared,
         )
-        model = _build_model(settings)
+        model = _build_model(settings, model_spec)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
         # Constraint 3), asserted in tests and guarded by a mutation plan. The frame
         # is one of four constants; the owner's doc-code and lead-capture switches
@@ -2048,7 +2198,7 @@ async def run_concierge_v2(
 
         # Spend attribution: the proxy's spend row names the site and the widget.
         tags = [f"pawbar_site:{site_id}", f"pawbar_widget:{widget_id}"]
-        model_settings = _model_settings(settings, workspace_id, tags=tags)
+        model_settings = _model_settings(settings, model_spec, workspace_id, tags=tags)
         # A visitor asking for a person always leaves with a route to the team,
         # whatever the model does (``contact_route``).
         contact = is_contact_request(message)
@@ -2067,7 +2217,7 @@ async def run_concierge_v2(
                         for piece in await fences.afeed(delta or ""):
                             full_text += piece
                             yield _sse("chunk", {"content": piece, "type": "text"})
-                    usage = {**_usage(settings, result), **spend_tags}
+                    usage = {**_usage(settings, result, model_spec), **spend_tags}
                 break
             except Exception as exc:
                 if attempt > 1 or full_text or not _is_transient(exc):

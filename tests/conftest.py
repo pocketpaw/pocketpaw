@@ -1,43 +1,73 @@
-"""Pytest configuration.
+"""Root pytest configuration: keeps every test hermetic from the machine and from
+the tests that ran before it in the same process.
 
-Autouse ``_refuse_real_livekit_agent`` (bottom of this file) turns a test that
-would spawn the real ``pocketpaw_ee.cloud.livekit.agent`` child into a failure
-naming the patch target; unpatched, that child never exits and the suite hangs.
-Updated: 2026-09-26 (fix/pawbar-public-route-gates) -- autouse
-``_reset_paw_bar_public_ip_limiter`` empties the paw-bar router's per-IP bucket
-before each test. It is module-level and every in-process test client shares one
-address, so without the reset one suite's requests spend the next suite's budget
-and unrelated tests start answering 429.
-Updated: 2026-09-24 (fix/tests-dotenv-hermetic, on feat/sites-author-dependencies) --
-the test process no longer reads ANY ``.env``. ``PYTHON_DOTENV_DISABLED`` is set before
-the first ``pocketpaw`` import (so ``url_validators``' import-time ``load_dotenv`` and
-every lazy call are no-ops) and ``Settings`` drops ``env_file``. A worktree nested
-under a checkout that has a real ``.env`` (``pocketPaw/.worktrees/*``) was picking the
-parent's file up, and variables outside the per-tree allowlists
-(``POCKETPAW_SITES_BILLING_ENFORCED``, ``PAW_SITES_GEN_CMD``) turned sites tests red
-on that machine only while CI stayed green. Export ``PYTHON_DOTENV_DISABLED=0`` to opt
-back in for a deliberate local integration run.
-Updated: 2026-09-23 (VS-2, feat/sites-first-publish-slug) -- mongomock's
-``Collection.create_indexes`` drops ``partialFilterExpression``, so a partial unique
-index (``Site.slug``) became a plain unique one in every Beanie test DB and the second
-row with ``slug: null`` failed to insert. Real MongoDB honours the filter; the shim
-below forwards it so tests see the same index production does.
-Updated: 2026-06-12 (connector-store-unification CS-1) — added
-_isolate_connector_state so the registry's write-through state store never
-persists test config to the real ~/.pocketpaw/connectors/state.
-Updated: 2026-06-12 (CS-2) — the same fixture also redirects the registry's
-home-dir definition scan (~/.pocketpaw/connectors/*.yaml) to a temp dir so
-YAMLs on a dev machine can't leak into test registries.
+* Temp HOME. The block at the very top runs before any ``pocketpaw`` import and
+  points ``HOME`` at a fresh per-process temp dir (each xdist worker imports this
+  file itself), so nothing writes under the developer's real ``~/.pocketpaw``,
+  ``~/.soul`` or ``~/.config``. Tool caches (uv, Playwright, XDG) and the global
+  git config are exported from the real home first so they keep working.
+* No ``.env``. ``PYTHON_DOTENV_DISABLED`` and ``Settings.env_file = None`` make
+  every local run read the environment CI sees; Logfire is pinned off.
+* Process globals reset before every test. ``_reset_process_globals`` runs the
+  ``_RESETS`` table (lifecycle registry, settings/provider caches, every
+  ``reset_*`` / ``_reset_for_tests`` hook) and blanks the ``_GLOBALS`` table with
+  ``monkeypatch``. It only touches modules already in ``sys.modules``, it is the
+  first function-scoped autouse fixture so it never wipes what the others set
+  up, and a reset that raises fails the session once, by name. Set
+  ``PP_RESET_TIMING=1`` to print its median/p99 cost at session end. Store
+  caches are evicted per test even though ``tests/cloud``'s ``local_store_home``
+  keeps one data dir for the session; handles reopen under that same dir.
+* Other autouse isolation: connector state, audit log, ``SOUL_DATA_DIR`` and the
+  decisions DB go to ``tmp_path``; the paw-bar per-IP limiter is emptied; catalog
+  syncs are recorded, not run; spawning the real livekit call-bot is refused (it
+  never exits under pytest and hangs the suite).
+* Exit-hang guard. At session end any live aiosqlite worker thread (an unclosed
+  connection; non-daemon, so it blocks interpreter exit) is named on stderr.
+* mongomock's ``create_indexes`` is shimmed to keep ``partialFilterExpression``
+  so partial unique indexes behave as in MongoDB.
 """
 
-import asyncio
-import importlib.util
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
+# Temp HOME, before anything can resolve ``Path.home()`` at import. Real-home tool
+# paths are exported first: uv and Playwright would otherwise re-download into the
+# temp dir, and subprocess git would lose its identity.
+assert not any(m == "pocketpaw" or m.startswith("pocketpaw.") for m in sys.modules), (
+    "tests/conftest.py must set HOME before the first pocketpaw import"
+)
+_REAL_HOME = Path.home()
+os.environ.setdefault("XDG_CACHE_HOME", str(_REAL_HOME / ".cache"))
+os.environ.setdefault("UV_CACHE_DIR", str(Path(os.environ["XDG_CACHE_HOME"]) / "uv"))
+os.environ.setdefault(
+    "PLAYWRIGHT_BROWSERS_PATH",
+    str(
+        _REAL_HOME / "Library/Caches/ms-playwright"
+        if sys.platform == "darwin"
+        else Path(os.environ["XDG_CACHE_HOME"]) / "ms-playwright"
+    ),
+)
+if (_REAL_HOME / ".gitconfig").exists():
+    os.environ.setdefault("GIT_CONFIG_GLOBAL", str(_REAL_HOME / ".gitconfig"))
+_TEST_HOME = tempfile.mkdtemp(prefix="pp-test-home-")
+os.environ["HOME"] = _TEST_HOME
+atexit.register(shutil.rmtree, _TEST_HOME, True)
+
+import asyncio  # noqa: E402
+import functools  # noqa: E402
+import importlib.metadata  # noqa: E402
+import importlib.util  # noqa: E402
+import statistics  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+import pytest  # noqa: E402
 
 # A test run reads NO ``.env`` file. This must run before the first ``pocketpaw``
 # import: ``security/url_validators.py`` calls ``load_dotenv()`` at import, and
@@ -52,8 +82,17 @@ import pytest
 # export ``PYTHON_DOTENV_DISABLED=0`` for a deliberate integration run.
 os.environ.setdefault("PYTHON_DOTENV_DISABLED", "1")
 
+import pocketpaw._registry as _pp_registry  # noqa: E402
 from pocketpaw.config import Settings  # noqa: E402
 from pocketpaw.security.audit import AuditLogger  # noqa: E402
+
+# ``_reset_process_globals`` clears the provider cache before every test, and a
+# rebuild re-scans installed metadata (~17 ms per group). Installed entry points
+# cannot change mid-run, so the scan is memoised here; the providers themselves
+# are still re-instantiated per test.
+# ponytail: a test that installs a dist mid-run would not see it; none does.
+_scan_entry_points = functools.cache(lambda group: importlib.metadata.entry_points(group=group))
+_pp_registry.entry_points = lambda *, group: _scan_entry_points(group)
 
 # The pydantic-settings half of the same leak: ``env_file=".env"`` reads the CWD's
 # file into Settings fields (``sites_billing_enforced`` among them) without touching
@@ -225,6 +264,218 @@ def _setup_asyncio_child_watcher():
     yield
 
 
+# ---------------------------------------------------------------------------
+# Process-global reset, before every test (see the module docstring)
+# ---------------------------------------------------------------------------
+
+# Zero-arg reset hooks, as (module, function). A dotted function name is resolved
+# attribute by attribute, so ``"_CACHE.clear"`` empties a module-level dict in
+# place when the module has no reset hook of its own. Import-time registries
+# (meetings ``providers.base._REGISTRY``, ``ripple_resolver._REGISTRY``) are left
+# out on purpose: they are filled when their modules import, and modules never
+# re-import, so clearing them would drop providers for every later test.
+_RESETS: tuple[tuple[str, str], ...] = (
+    ("pocketpaw.lifecycle", "reset_all"),
+    ("pocketpaw._registry", "clear_cache"),
+    ("pocketpaw._store_locks", "reset_audit_locks"),
+    ("pocketpaw.api.api_keys", "reset_api_key_manager"),
+    ("pocketpaw.api.oauth2.server", "reset_oauth_server"),
+    ("pocketpaw.deep_work", "reset_deep_work_session"),
+    ("pocketpaw.journal_dep", "reset_journal_cache"),
+    ("pocketpaw.kits.store", "reset_kit_store"),
+    ("pocketpaw.mission_control.executor", "reset_mc_task_executor"),
+    ("pocketpaw.mission_control.heartbeat", "reset_heartbeat_daemon"),
+    ("pocketpaw.mission_control.manager", "reset_mission_control_manager"),
+    ("pocketpaw.mission_control.store", "reset_mission_control_store"),
+    ("pocketpaw.retrieval.router", "reset_store_cache"),
+    ("pocketpaw.runtime.connector_bus", "reset_for_tests"),
+    ("pocketpaw.security.pii", "reset_pii_scanner"),
+    ("pocketpaw.soul._manager", "_reset_manager"),
+    ("pocketpaw.stores", "reset_store_caches"),
+    ("pocketpaw.widget.router", "reset_store_cache"),
+    ("pocketpaw_ee.cloud._core.realtime.broadcast", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud._core.realtime.presence", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud._core.realtime.xproc", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud._core.redis_client", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud._core.request_log", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud._core.sweep_runtime", "reset"),
+    ("pocketpaw_ee.cloud._core.temporal_scheduler", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud._core.timing", "reset_buffers"),
+    ("pocketpaw_ee.cloud.auth.api_keys", "_reset_caches_for_tests"),
+    ("pocketpaw_ee.cloud.auth.sso.crypto", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud.auth.sso.oidc", "_clear_discovery_cache"),
+    ("pocketpaw_ee.cloud.chat.runs.executor", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud.chat.runs.transport", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud.chat.runs.worker", "_reset_bootstrap_for_tests"),
+    ("pocketpaw_ee.cloud.codeagent.bridge", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud.composio.providers", "reset_cache_for_tests"),
+    ("pocketpaw_ee.cloud.composio.service", "reset_client_cache_for_tests"),
+    ("pocketpaw_ee.cloud.decisions.explain.cache", "reset_explain_cache_for_tests"),
+    ("pocketpaw_ee.cloud.decisions.reconciler", "reset_reconciler_for_tests"),
+    ("pocketpaw_ee.cloud.decisions.service", "reset_projection_for_tests"),
+    ("pocketpaw_ee.cloud.embeddings.cost_tracker", "reset_cost_tracker_for_tests"),
+    ("pocketpaw_ee.cloud.fabric_ingest.scheduler", "reset_scheduler_for_tests"),
+    ("pocketpaw_ee.cloud.files.content_search", "reset_compiled_with_cache"),
+    ("pocketpaw_ee.cloud.member_ingest.scheduler", "reset_scheduler_for_tests"),
+    ("pocketpaw_ee.cloud.pockets._refresh_budget", "reset_budget"),
+    ("pocketpaw_ee.cloud.pockets.layouts", "reset_user_template_store"),
+    ("pocketpaw_ee.cloud.pockets.refresh_scheduler", "_reset_for_tests"),
+    ("pocketpaw_ee.cloud.push.coalesce", "reset"),
+    ("pocketpaw_ee.cloud.websandbox.githubapp", "_reset_client_for_tests"),
+    ("pocketpaw_ee.cloud.websandbox.requirements", "_reset_cache_for_tests"),
+    ("pocketpaw_ee.foresight.api.run_store", "reset_run_store"),
+    ("pocketpaw_ee.foresight.insights_llm", "reset_cache"),
+    ("pocketpaw_ee.foresight.persona", "reset_paw_social_agent_counter"),
+    # 60 s per-member override cache: a grant cached by one test lets a later
+    # test's member through its 403 check.
+    ("pocketpaw_ee.guards.deps", "_ACTION_OVERRIDE_CACHE.clear"),
+    ("pocketpaw_ee.sites.artifact_store_s3", "reset_shared_adapter"),
+)
+
+# Singletons with no reset hook, as (module, attr, default), blanked with
+# ``monkeypatch``. A one-shot "already subscribed" flag sits next to the thing it
+# subscribed to: the message bus is dropped by ``lifecycle.reset_all`` and
+# ``mount_cloud`` installs a new realtime bus per app, so a flag left True would
+# skip subscribing on the new bus. ``security.audit._audit_logger`` is absent:
+# ``_isolate_audit_log`` gives each test its own.
+_GLOBALS: tuple[tuple[str, str, object], ...] = (
+    ("pocketpaw.agents.plan_mode", "_plan_manager", None),
+    ("pocketpaw.agents.pool", "_pool", None),
+    ("pocketpaw.api.v1.connectors", "_registry", None),
+    ("pocketpaw.audit.store", "_audit_store", None),
+    ("pocketpaw.automations.evaluator", "_evaluator", None),
+    ("pocketpaw.automations.store", "_instance", None),
+    ("pocketpaw.bus.commands", "_handler", None),
+    ("pocketpaw.bus.media", "_downloader", None),
+    ("pocketpaw.daemon.context", "_context_hub", None),
+    ("pocketpaw.daemon.intentions", "_intention_store", None),
+    ("pocketpaw.daemon.proactive", "_daemon", None),
+    ("pocketpaw.health", "_instance", None),
+    ("pocketpaw.mcp.manager", "_ws_broadcast", None),
+    ("pocketpaw.recent_files", "_tracker", None),
+    ("pocketpaw.security.guardian", "_guardian", None),
+    ("pocketpaw.security.injection_scanner", "_scanner", None),
+    ("pocketpaw.security.rate_limiter", "_api_key_limiter", None),
+    ("pocketpaw.skills.executor", "_skill_executor", None),
+    ("pocketpaw.skills.loader", "_skill_loader", None),
+    ("pocketpaw.tools.builtin.connector_tools", "_registry", None),
+    ("pocketpaw.usage_tracker", "_tracker", None),
+    ("pocketpaw.web_server", "_session_secret", None),
+    ("pocketpaw.web_server", "_settings", None),
+    # message bus (lifecycle) + its one-shot subscriber
+    ("pocketpaw_ee.cloud.sessions.title_listener", "_subscribed", False),
+    # realtime bus (replaced per mount_cloud) + its subscriber and its buffer
+    ("pocketpaw_ee.cloud.activity.buffer", "_buffer", None),
+    ("pocketpaw_ee.cloud.activity.buffer", "_registered", False),
+    # per-test audit logger + the bridge installed on it
+    ("pocketpaw_ee.cloud.audit.listeners", "_BRIDGE_REGISTERED", False),
+    ("pocketpaw_ee.cloud.connectors.service", "_registry", None),
+    ("pocketpaw_ee.cloud.license", "_cached_license", None),
+    ("pocketpaw_ee.cloud.license", "_license_error", None),
+    ("pocketpaw_ee.cloud.license", "_no_license_until", 0.0),
+    ("pocketpaw_ee.cloud.shared.db", "_client", None),
+    ("pocketpaw_ee.sites.local_server", "_server", None),
+)
+
+_reset_ns: list[int] = []
+_reset_failures: dict[str, str] = {}
+
+
+def _check_reset_tables() -> None:
+    """A misspelt module would look exactly like "not imported yet" and silently
+    no-op, so every name must exist on disk. Checked by path, not ``find_spec``
+    on the dotted name, which would import every parent package (all of
+    ``pocketpaw_ee.cloud``) at conftest load."""
+    roots = {}
+    for top in ("pocketpaw", "pocketpaw_ee"):
+        spec = importlib.util.find_spec(top)
+        if spec is not None and spec.origin:
+            roots[top] = Path(spec.origin).parent
+    bad = []
+    for name in sorted({m for m, _ in _RESETS} | {m for m, _, _ in _GLOBALS}):
+        top, _, rest = name.partition(".")
+        if top not in roots:
+            if top != "pocketpaw_ee":  # OSS-only install: ee rows are inert
+                bad.append(name)
+            continue
+        path = roots[top].joinpath(*rest.split("."))
+        if not (path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()):
+            bad.append(name)
+    if bad:
+        raise pytest.UsageError(f"tests/conftest.py reset tables name unknown modules: {bad}")
+
+
+_check_reset_tables()
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_globals(monkeypatch):
+    """Start every test from fresh process singletons (see the module docstring).
+
+    First function-scoped autouse fixture in the tree, so the isolation fixtures
+    below and every suite's own fixtures set up on top of a clean slate."""
+    t0 = time.perf_counter_ns()
+    modules = sys.modules
+    # Looked up each time: some tests swap get_settings for a plain stub.
+    config = modules.get("pocketpaw.config")
+    clear = getattr(getattr(config, "get_settings", None), "cache_clear", None)
+    if clear is not None:
+        clear()
+    for mod_name, func_name in _RESETS:
+        mod = modules.get(mod_name)
+        if mod is None:
+            continue
+        try:
+            functools.reduce(getattr, func_name.split("."), mod)()
+        except Exception as exc:  # noqa: BLE001 — one broken hook must not fail every test
+            _reset_failures.setdefault(f"{mod_name}.{func_name}", repr(exc))
+    for mod_name, attr, default in _GLOBALS:
+        mod = modules.get(mod_name)
+        if mod is None:
+            continue
+        try:
+            monkeypatch.setattr(mod, attr, default)
+        except Exception as exc:  # noqa: BLE001
+            _reset_failures.setdefault(f"{mod_name}.{attr}", repr(exc))
+    _reset_ns.append(time.perf_counter_ns() - t0)
+    yield
+
+
+def pytest_sessionfinish(session, exitstatus):
+    # Runs in every xdist worker and in the controller; workers' stdout is not
+    # shown, so report on stderr, and only from a process that ran tests.
+    if _reset_failures:
+        lines = "\n".join(f"  {k}: {v}" for k, v in sorted(_reset_failures.items()))
+        sys.stderr.write(f"\nERROR: process-global resets raised (tests/conftest.py):\n{lines}\n")
+        if session.exitstatus == 0:
+            session.exitstatus = 1
+    if os.environ.get("PP_RESET_TIMING") == "1" and _reset_ns:
+        ms = sorted(n / 1e6 for n in _reset_ns)
+        p99 = ms[min(len(ms) - 1, int(len(ms) * 0.99))]
+        sys.stderr.write(
+            f"\n_reset_process_globals: {len(ms)} tests, median {statistics.median(ms):.4f} ms, "
+            f"p99 {p99:.4f} ms, max {ms[-1]:.3f} ms\n"
+        )
+
+    # An aiosqlite connection that is never closed keeps a NON-daemon worker
+    # thread alive, and the interpreter waits on it forever at exit: the run
+    # passes, then hangs. Name the leak so the hang is not a mystery.
+    workers = [
+        t
+        for t in threading.enumerate()
+        if t.is_alive() and not t.daemon and "_connection_worker_thread" in t.name
+    ]
+    if workers:
+        names = ", ".join(
+            f"{t.name} (target={getattr(getattr(t, '_target', None), '__qualname__', '?')})"
+            for t in workers
+        )
+        sys.stderr.write(
+            f"\nWARNING: {len(workers)} unclosed aiosqlite connection(s) leaked by this run; "
+            f"their non-daemon worker threads will block interpreter exit: {names}\n"
+        )
+
+
 @pytest.fixture(autouse=True)
 def _enable_test_full_access(request, monkeypatch):
     """Flip the require_scope testing-bypass on for all tests by default.
@@ -284,16 +535,16 @@ def _clear_journal_cache() -> None:
         fn.cache_clear()
 
 
-@pytest.fixture(autouse=True)
-def _isolate_soul_data_dir(tmp_path, monkeypatch):
-    """Keep every test out of the developer's real ``~/.soul``.
+@contextmanager
+def soul_data_dir_isolated(tmp_path, monkeypatch):
+    """Keep a test out of the developer's real ``~/.soul`` (the autouse fixture below).
 
     The org journal (``pocketpaw.journal_dep``) lives under ``SOUL_DATA_DIR`` or
     ``~/.soul``, and the decisions store's ``_DB_PATH`` global defaults to
     ``~/.soul/decisions.db``; tests that ``set_db_path(tmp_path)`` never restored it.
     The next ``mount_cloud`` then replayed the whole real journal (~137k events)
-    into a fresh temp store: 1182 s in one census run. Both now point at this
-    test's tmp dir and are restored afterwards.
+    into a fresh temp store: 1182 s in one census run. Both point at this test's
+    tmp dir; ``monkeypatch`` puts them back when it is undone.
     """
     soul_dir = tmp_path / "soul"
     monkeypatch.setenv("SOUL_DATA_DIR", str(soul_dir))
@@ -304,8 +555,16 @@ def _isolate_soul_data_dir(tmp_path, monkeypatch):
         from pocketpaw_ee.cloud.decisions import store
 
         monkeypatch.setattr(store, "_DB_PATH", soul_dir / "decisions.db")
-    yield
-    _clear_journal_cache()
+    try:
+        yield
+    finally:
+        _clear_journal_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_soul_data_dir(tmp_path, monkeypatch):
+    with soul_data_dir_isolated(tmp_path, monkeypatch):
+        yield
 
 
 # ---------------------------------------------------------------------------

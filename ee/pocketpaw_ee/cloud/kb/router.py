@@ -122,7 +122,7 @@ async def ingest_text(
 
     Routes through :meth:`KnowledgeService.ingest_document_to_scope`: a long
     document is compiled section by section, each section through the
-    hardened funnel (agent-backend compile on keyless boxes, verbatim-
+    hardened funnel (agent-backend compile, verbatim-
     fallback rejection, subprocess off the event loop). Never call ``_kb``
     for ingest directly.
     """

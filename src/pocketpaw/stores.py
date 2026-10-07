@@ -310,14 +310,14 @@ def _schedule_aclose(store: Any) -> None:
 
     * A running event loop is present (the common case — eviction fires from an
       async request building another store): fire-and-forget the async
-      ``aclose`` as a task on that loop, so we don't block the request and we
-      reuse the live loop's aiosqlite worker.
+      ``aclose`` as a task on that loop, so we don't block the request. That
+      task may be orphaned if the loop closes first (pytest-asyncio closes each
+      test's loop without cancelling tasks), so the SQLite stores' ``aclose``
+      checkpoints with stdlib ``sqlite3`` in a worker thread, never through an
+      aiosqlite connection whose non-daemon worker would block process exit.
     * No running loop (a sync caller, or test teardown via
       ``reset_store_caches``): do the checkpoint SYNCHRONOUSLY with stdlib
-      ``sqlite3`` instead of spinning up a throwaway ``asyncio.run`` loop. A
-      short-lived loop would start an aiosqlite worker thread that races process
-      teardown and emits noisy "Event loop is closed" warnings; a plain
-      ``sqlite3`` checkpoint is faster and side-effect-free.
+      ``sqlite3`` instead of spinning up a throwaway ``asyncio.run`` loop.
 
     Any failure is swallowed — eviction cleanup must never raise into the caller
     building a DIFFERENT store.
@@ -342,12 +342,11 @@ def _sync_checkpoint(store: Any) -> None:
     re-fetch of the same path re-runs ``_ensure_schema`` cleanly. Best-effort:
     a missing DB / WAL is fine and is swallowed.
     """
-    import sqlite3
+    from pocketpaw.sqlite_migrations import checkpoint_wal
 
     store._initialized = False
     try:
-        with sqlite3.connect(store._db_path) as conn:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        checkpoint_wal(store._db_path)
     except Exception:  # noqa: BLE001 — eviction cleanup is best-effort
         logger.debug("evicted %s sync checkpoint skipped", type(store).__name__, exc_info=True)
 

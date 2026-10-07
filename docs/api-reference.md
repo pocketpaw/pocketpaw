@@ -2,6 +2,18 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-07 (perf/sites-fast-edits) — "Draft verification": edit tools
+  return the static check only (`status: "pending"`, `static`, `build`, `job_id`)
+  and the build + browser verdict arrives on the next tool result as
+  `previous_verification`; only a static failure rolls a svelte edit back; an
+  unreferenced `create=true` is `skipped`; html edits skip the browser layer;
+  `preview_site` returns at most 3 tiles. Sandbox image setup:
+  `docs/deployment/sites-verify-image.md`.
+Updated: 2026-10-06 (fix/site-source-per-site-tier) — a site's source is
+  visible (`sourceVisible` on the pocket) only when the SITE is on `site` or
+  `staff` with an active subscription. The workspace plan no longer grants it;
+  `site_source_visible` on `GET /entitlements` is now the operator override only
+  (`null` = each site decides). Download and template-sharing notes updated.
 Updated: 2026-10-03 (fix/paw-key-scopes) — "Workspace API key scopes": which
   route families each `paw_` key scope unlocks; everything else is a 403.
 Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
@@ -123,6 +135,12 @@ the `verification` verdict every site create/edit tool now returns, the `verify_
 agent tool, and the counts-only `verification` field on
 `GET /sites/by-pocket/{pocket_id}/status`. Rewrote the PP-1 note on
 `edit_svelte_component`, which now verifies instead of building locally.
+
+Updated: 2026-10-07 (fix/sites-open-dependencies) — `set_site_dependencies` follows
+the "open everything" policy: any public npm package, version, range or dist-tag;
+advisories and deprecation come back as `warnings`; no age, size, downloads, script
+or count gate. react / svelte authors may write `package.json`, `vite.config.*`,
+`svelte.config.js`, `bunfig.toml` and `.npmrc`.
 
 Updated: 2026-09-24 (PP-1, feat/sites-author-dependencies) — added the
 `set_site_dependencies` agent tool and the `dependencies` argument on the three
@@ -1337,8 +1355,9 @@ Making a template public (on save or with `PATCH`) runs these checks first:
   `site_templates.private_assets`, and the message says how many. External
   images (`https://images.unsplash.com/...`) and the public Sites asset rail are
   allowed.
-- **No locked source.** If the source gate would withhold this source from the
-  owner's workspace, the request is `403` `site_templates.source_not_shareable`.
+- **Any site's plan.** The source site's own tier does not matter: a free or
+  draft site can be shared publicly. A pocket created from the template later
+  follows its own site's tier for source visibility.
 - The Sites plan gate and the 2 MB size cap, as on save.
 
 Every response and event carries the template's metadata only, never its
@@ -2885,7 +2904,7 @@ so the refusal code is now `pocket.not_editable_site`. Note the two questions ar
 still separate and neither implies the other: **react** can be selected and
 refined through chat (it has an armed build) but has no TSX splice, so it is still
 refused here; **html** has a splice but no armed build, so it is accepted here and
-absent from `/native-artifact`.
+served by `/native-artifact` only as a `preview_url` (no body/css).
 
 ### `GET /sites/by-pocket/{pocket_id}/html-armed-source`
 
@@ -2901,9 +2920,9 @@ the DOM (`<section>:<tag>:<ordinal>`) while `/leaf-edits` resolves by manifest u
 something the splice could never find. This returns the document the builder
 should actually render, so both sides agree by construction.
 
-It is **not** the html branch of `/native-artifact`. That serves a built, armed
-tree for shadow-rendering and is gated on `has_native_edit_lane`, which html sits
-outside of deliberately. This is a parse and an offset splice over the source map:
+It is **not** the html branch of `/native-artifact`. That one answers an html
+pocket with a `preview_url` on the draft preview origin (no body/css to
+shadow-render). This is a parse and an offset splice over the source map:
 no bun build, no Daytona, no artifact cache — cheap enough to call when the
 operator opens Design mode.
 
@@ -2991,15 +3010,31 @@ Errors:
 
 ### `GET /sites/by-pocket/{pocket_id}/native-artifact`
 
-Serve the armed build's body markup and CSS so the native editor can
-shadow-render the site.
+Serve a site draft: its `preview_url` on the draft preview origin, plus (svelte and
+react) the armed build's body markup and CSS so the native editor can shadow-render
+the site.
 
-Available on engines with a **native edit lane** — `svelte`, and `react` since
-RX-2. Not `html` (its served artifact IS its source, so it is selected through its
-own sandboxed `srcdoc` and has no build to render) and not `ripple` (no source
-map). Both armable engines emit a prerendered `index.html`; only the build output
-directory differs (`.svelte-kit/cloudflare` or `build` vs `dist`), and the server
-resolves that per engine.
+Available on `svelte`, `react` and `html`. Not `ripple` (no source map). The two
+built engines emit a prerendered `index.html`; only the build output directory
+differs (`.svelte-kit/cloudflare` or `build` vs `dist`), and the server resolves
+that per engine.
+
+**`preview_url` — the full draft on its own origin.** An absolute URL of the form
+`https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/index.html`: the draft's
+`index.html` with its `<head>` and module scripts intact, every JS chunk, stylesheet,
+image and public file beside it, served with `Access-Control-Allow-Origin: *` and no
+cookies. `<token>` is a 32-hex-char capability minted per content hash, so an edit
+gets a new URL. `null` while a build is pending or failed; show the build state
+then. Also `null` beside a served render (`build_status: "none"`) when the artifact
+store refused or failed to keep the draft's files, or the preview base URL is
+misconfigured: the server retries that at most once per draft every 10 minutes
+rather than rebuilding on every view. Append `?paw_edit=1` (and the usual `paw_nonce`) to arm the edit bridge,
+which talks to the builder over `postMessage` exactly like the live lane. Setup:
+`docs/deployment/sites-draft-preview-origin.md`.
+
+**html never builds.** An html pocket always answers `build_status: "none"`,
+empty `body_html` / `css`, and a `preview_url` that serves its source files with the
+declared packages' import map injected.
 
 **Two response shapes, and `build_status` says which.** A warm read returns the
 render; a cold one returns a build to poll.
@@ -3013,7 +3048,8 @@ Response `200` — the **render** (cache hit):
   "css": "/* concatenated stylesheets */",
   "build_status": "none",
   "build_reason": null,
-  "build_job_id": null
+  "build_job_id": null,
+  "preview_url": "https://3f9c0d5e8a1b4c7d9e2f6a0b1c3d5e7f.paw-preview.example/index.html"
 }
 ```
 
@@ -3033,7 +3069,8 @@ Response `200` — **build pending** (cache miss, SP-2):
   "css": "",
   "build_status": "queued",
   "build_reason": null,
-  "build_job_id": "site-preview-p_abc123-9f2c…"
+  "build_job_id": "site-preview-p_abc123-9f2c…",
+  "preview_url": null
 }
 ```
 
@@ -3181,7 +3218,7 @@ Errors:
 
 | HTTP | Code | When |
 |------|------|------|
-| 422 | `pocket.no_native_edit_lane` | The pocket's engine has no armable build to render (html, ripple). Renamed from `pocket.not_svelte_site` in RX-2, when react joined the lane. |
+| 422 | `pocket.no_native_edit_lane` | The pocket has no source map to serve (ripple). Renamed from `pocket.not_svelte_site` in RX-2, when react joined the lane. |
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 503 | `sites.preview_build_unavailable` | The armed build could not be QUEUED (the job queue is unreachable). Retryable. A failed enqueue is deliberately an error rather than a pending response — a job id for a job nobody will run makes a client poll forever. A build that queues and then FAILS is not an error here: it comes back `200` with `build_status: "failed"` and a rung in `build_reason`. |
@@ -3644,6 +3681,39 @@ tier stays bought, the renewal date stays where it was. An `agent_id` in another
 tenant is a 404 from inside the funnel, deliberately indistinguishable from an
 agent that does not exist.
 
+### The connected site's gallery card
+
+A connected site never deploys, so the card lanes a publish runs (screenshot,
+favicon) never fire for it. Instead one card refresh fetches the verified origin's
+homepage **once**, through the SSRF-hardened fetch (DNS pinned to a public
+address, every redirect hop re-checked, private targets refused), and records the
+page title and icon from that markup before taking the screenshot. Only the host
+the grounding crawl would use is ever fetched: verified, and proved within 30
+days.
+
+It runs in the background after a first bind, after a rebind, after
+`POST /sites/origins/verify` succeeds for a host a connected site serves on, and
+as a second chance from the knowledge sync (which reuses the crawl's homepage
+HTML and only fills fields that are still empty). None of these can fail the
+request that triggered them.
+
+| `SiteResponse` field | Meaning for a connected site |
+|----------------------|------------------------------|
+| `name` | The owner's own label. Never overwritten by the card refresh. |
+| `origin_title` | The homepage's `<title>`, falling back to `og:title`. Control characters dropped, whitespace collapsed, capped at 200 characters. `""` before the first read, when the page has no title, for hosted sites, and for rows that predate the field. |
+| `favicon_url` | The homepage's icon as a `data:` URI, fetched through the same safe path. `null` when there is none. |
+| `preview_image_url` | The screenshot of the verified origin. |
+
+Clients should show `name || origin_title || host`.
+
+`POST /sites/{site_id}/preview-refresh` on a connected site also refreshes
+`origin_title` and `favicon_url` from the same single homepage fetch, before the
+screenshot. Its error contract is unchanged: `422 sites.origin_unverified`,
+`sites.origin_verification_stale` or `sites.preview_unavailable` when there is no
+fresh verified origin, `422 sites.preview_not_serving` when the page is not
+answering. A failed title/icon read keeps the stored values and does not turn into
+an error.
+
 ## Sites — Download the project
 
 The built site handed back to its owner as an archive, rather than only served from our
@@ -3688,11 +3758,13 @@ show it.
 "the pre-check") before offering the button.** That is what the field is for — discovering the refusal by
 provoking it is the failure the per-site entitlements read exists to end.
 
-**Do not gate the button on source visibility instead.** `site_source_visible` is a
-**workspace** capability that governs whether the builder shows a Code tab;
-`project_download` is a **per-site** capability resolved off the site's own plan. A paid
-site inside a free workspace may legitimately download a project whose Code tab is
-hidden, so gating on the workspace field would hide a control the customer has paid for.
+**Do not gate the button on source visibility instead.** The pocket's `sourceVisible`
+(which governs the builder's Code tab) is resolved off the same per-site rule as
+`project_download` (`site` or `staff`, active subscription), so the two normally agree.
+They differ when a platform operator overrides source visibility for the whole
+workspace (`site_source_visible` on `GET /entitlements`, `null` when unset): that
+override reaches the Code tab only, never the download. Read `project_download` for
+the button.
 
 Self-hosted and OSS deployments have no billing, so the gate is skipped entirely there
 (`sites_enforced()`) and the download always works.
@@ -4796,15 +4868,15 @@ back from — a rollback fired on enqueue-success would revert a good edit.
 Persisting the draft is the whole job (the same shape the leaf-edits route
 documents). Publishing stays an explicit `publish` call the user asks for.
 
-**Write scope is enforced, not advisory.** The generator owns the build shell, so
-`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` and everything
-under `src/paw/` are rejected, and the resolved path must land under `src/` or
-`public/`. Paths are normalized (backslashes, `.`/`..`) before the check, so
-`./package.json` and `src/paw/../paw/entry.tsx` are rejected too. This is the same
+**Write scope is enforced, not advisory.** The generator owns the prerender shell,
+so `index.html`, `paw-prerender.mjs`, `paw.dependencies.json`, lockfiles and
+everything under `src/paw/` are rejected. The resolved path must land under `src/`
+or `public/`, or be one of the root build files the author owns (`package.json`,
+`vite.config.*`, `bunfig.toml`, `.npmrc`; the generator merges them with its
+toolchain). Paths are normalized (backslashes, `.`/`..`) before the check, so
+`./index.html` and `src/paw/../paw/entry.tsx` are rejected too. This is the same
 policy `create_react_site` applies, shared through
-`ee/pocketpaw_ee/sites/react_paths.py` — an edit that could write `package.json`
-would be writing the dependency manifest, which is where the supply-chain
-release-age floor is enforced.
+`ee/pocketpaw_ee/sites/react_paths.py`.
 
 Errors (relayed to the agent as `is_error` with the code, so it can fix and retry):
 
@@ -4813,7 +4885,7 @@ Errors (relayed to the agent as `is_error` with the code, so it can fix and retr
 | `site_edit.invalid_args` | Not exactly one of `edits` / `new_source`. |
 | `site_edit.create_needs_source` | `create` without `new_source`. |
 | `site_edit.reserved_path` | The resolved path is generator-owned. |
-| `site_edit.path_outside_source` | The resolved path is outside `src/` and `public/`. |
+| `site_edit.path_outside_source` | The resolved path is outside `src/` and `public/` and is not a root build file. |
 | `site_edit.no_match` / `site_edit.ambiguous_match` | An `old_string` matched 0 or >1 times. Make it more specific and retry. |
 | `pocket.not_react_site` | The pocket is not a react Paw Site. |
 | `pocket.react_component_exists` | `create` on a path that already exists. |
@@ -4913,41 +4985,43 @@ above refuses that path in any spelling, case included.
 | Arg | Type | Notes |
 |-----|------|-------|
 | `pocket_id` | string | Required. A svelte, react or html site pocket. ripple is refused (`site_deps.engine_unsupported`). |
-| `add` | array | `[{name, range?}]`. `range` is an npm semver range; omit it for the newest eligible version. `"name@range"` strings are accepted too. |
+| `add` | array | `[{name, range?}]`. `range` is an exact version, an npm semver range or a dist-tag (`next`, `beta`); omit it for `latest`. `"name@range"` strings are accepted too. |
 | `remove` | array | Package names to drop. Dropping the last one removes the file. |
 
 Returns `{ok, pocket_id, packages: {name: {version}}, rejected: [{name, code,
-reason}], changed, message}`. A refused package is not an error: `ok` stays true,
-and the others still land.
+reason}], warnings: [{name, code, message}], changed, message}`. A refused package
+is not an error: `ok` stays true, and the others still land.
 
-Each add is resolved from registry metadata only. Nothing is installed. The
-resolver picks the highest version that satisfies the range, was published at
-least 7 days ago (the same floor as the build sandbox's `bunfig.toml`), and is
-not deprecated. It then refuses the package when:
+Each add is resolved from registry metadata only. Nothing is installed. Any public
+npm package is allowed (the policy since 2026-10-07): there is no release-age,
+size, downloads, install-script, native-addon or package-count gate, because
+author packages install only in the Daytona build sandbox, which is the isolation
+boundary. `latest` and other dist-tags resolve through the packument's
+`dist-tags`; a range picks the highest matching version, preferring one that is
+not deprecated. The result is always pinned to an exact version. A package is
+refused only when:
 
 | `code` | When |
 |--------|------|
-| `invalid_name` / `invalid_range` | Not a valid npm name, or not a semver range (dist-tags other than `latest` are refused). |
+| `invalid_name` / `invalid_range` | Not a valid npm name, or not a version, range or dist-tag. |
 | `non_registry_spec` | git, url, file, tarball, `npm:` alias or GitHub shorthand. |
-| `toolchain_reserved` | svelte, `@sveltejs/*`, vite, react, react-dom, `@vitejs/*`, tailwindcss, `@tailwindcss/*`, `@ripple-ui/*`, valibot, `@noble/hashes`, `@cloudflare/*`. The generator provides these. |
-| `not_found` / `no_eligible_version` | Not on the registry, or nothing matches the range once the 7-day floor is applied. The reason names the newest eligible version. |
-| `deprecated` | Every matching version is deprecated. |
-| `install_scripts` / `native_build` | The chosen version has `preinstall` / `install` / `postinstall` scripts, a `gypfile` or a `binary`. |
-| `too_large` | Unpacked size over 25 MB. |
-| `low_downloads` | Under 500 downloads last week. This is the typosquat guard. |
-| `advisory` | A moderate-or-worse advisory from npm's bulk advisory endpoint affects the chosen version. |
-| `too_many` | More than 20 packages on the site. |
-| `registry_unavailable` | The registry, downloads API, advisory endpoint or (html) jsdelivr could not be read. The package is refused, never accepted unvetted. |
+| `toolchain_reserved` | The name is reserved for the build toolchain by the vendored paw-sites allowlist. None are today: svelte, vite, react and the rest may be declared, and the declared version wins over the generator's pin. |
+| `not_found` / `no_eligible_version` | Not on the registry, or no version matches the range / the dist-tag does not exist. The reason names `latest` (or the known tags). |
+| `registry_unavailable` | The registry could not be read and the request was a range or tag, which needs it. Retryable. An exact version is accepted as given instead, with an `unverified` warning. |
+
+`warnings` carry `advisory` (a moderate-or-worse npm advisory affects the chosen
+version), `deprecated` and `unverified`. They never block. An advisory-endpoint or
+jsDelivr outage is ignored rather than refusing the package.
 
 For html, each entry also carries `esm`
-(`https://cdn.jsdelivr.net/npm/<name>@<version>/+esm`) and `integrity` (sha384 of
-the bytes jsdelivr serves at that URL), which the generator turns into an
-importmap.
+(`https://cdn.jsdelivr.net/npm/<name>@<version>/+esm`), which the generator turns
+into an importmap, and `integrity` (sha384 of the bytes jsDelivr serves at that
+URL) when jsDelivr answered. `integrity` is optional.
 
 `create_svelte_site`, `create_react_site` and `create_html_site` take the same
 requests as an optional `dependencies` argument. They resolve them before the
-pocket is saved and return `packages` and `rejected` in the create body. A refused
-package never fails the create.
+pocket is saved and return `packages` and `rejected` (and `warnings` when there are
+any) in the create body. A refused package never fails the create.
 
 **Author packages install only in the build sandbox.** A static svelte site that
 declares packages publishes through the ephemeral build lane even with
@@ -4967,8 +5041,10 @@ site can reach the publish-time 422.
 
 Every `create_svelte_site`, `create_react_site`, `create_html_site`,
 `edit_svelte_component`, `edit_react_component`, `edit_html_file` and
-`set_site_dependencies` result carries a `verification` object. It says whether the
-draft actually works:
+`set_site_dependencies` result carries a `verification` object. Creates and
+`verify_site` carry the full verdict below; edits carry the faster edit verdict
+described under "Edits: static now, build later". It says whether the draft
+actually works:
 
 ```json
 "verification": {
@@ -5021,20 +5097,87 @@ never served from the cache. The build job also stores its build + browser repor
 under the hash, so an editor pre-warm answers the next verify without a second
 sandbox.
 
-**Deadline.** A tool waits at most `PAW_SITES_VERIFY_WAIT_SEC` (default 90) for the
-sandbox layers, plus a short slack for the static check. On expiry the verdict is
-`unverified` / `timeout` and the build keeps running; the next `verify_site`
-attaches to the same job.
+**Deadline.** A create or `verify_site` waits at most `PAW_SITES_VERIFY_WAIT_SEC`
+(default 90) for the sandbox layers, plus a short slack for the static check. On
+expiry the verdict is `unverified` / `timeout` and the build keeps running; the next
+`verify_site` attaches to the same job.
 
-**`edit_svelte_component` rollback.** A `static` or `build` failure means the edit
-does not compile: the file is restored (a created file is removed) and the tool
-returns `{ok: false, status: "rolled_back", verification, message}` as data, not as
-an MCP error. A `browser` failure keeps the edit staged and reports it: the page
-builds, and the fix is usually a follow-up edit to the same file. `unverified`
-keeps the edit staged. react and html edits stay draft-only as before and simply
-carry the verdict. The svelte edit result's `site.preview_url` is now always `null`:
-no local preview deploy is made any more; the builder shows the draft from the
-verified build.
+#### Edits: static now, build later
+
+An edit tool (`edit_svelte_component`, `edit_react_component`, `edit_html_file`,
+`set_site_dependencies`) runs only the `static` layer before it answers, about a
+second. For svelte and react it then queues the preview build (build + browser) and
+returns without waiting:
+
+```json
+"verification": {
+  "status": "pending",
+  "static": "passed",
+  "build": "pending",
+  "job_id": "site-preview-<pocket_id>-<content_hash>",
+  "content_hash": "…",
+  "layers": [
+    {"name": "static",  "status": "passed"},
+    {"name": "build",   "status": "pending"},
+    {"name": "browser", "status": "pending"}
+  ],
+  "errors": [], "warnings": [],
+  "checked_at": "ISO-8601"
+}
+```
+
+`static` and `build` mirror the two layers' statuses. Other shapes an edit can
+return:
+
+| Case | `status` | Notes |
+|------|----------|-------|
+| Static check failed | `failed` | `build` / `browser` are `skipped` (`static_check_failed`); nothing is queued. |
+| This exact source was already built (a pre-warm, an earlier verify) or verified | `passed` / `failed` | The full verdict, read from the store; `cached: true` when it was a cached verdict. |
+| html | `unverified`, reason `browser_check_on_demand` | `build` is `skipped`; the browser layer runs only when `verify_site` is called. |
+| Queue down | `unverified`, reason `queue_unavailable` | |
+| `create: true` that nothing links to or imports yet | `skipped`, reason `create_half_step` | No check at all; the edit that wires the file in verifies the whole site. |
+
+**`previous_verification`.** When the queued job finishes, its verdict is attached
+to the NEXT result of an edit tool or `preview_site` for that pocket, once, as
+`previous_verification` (the full verdict plus `static`, `build` and `job_id`). On a
+success result it is a key in the JSON body; on an error result or the image result
+of `preview_site` it is a trailing text block. A verdict that `verify_site` already
+returned is not repeated. A job that never reports within 15 minutes comes back as
+`unverified` / `no_report`. There is no realtime event for it.
+
+**Superseded builds.** A new preview build for a pocket aborts the pocket's previous
+queued or running one (arq abort; the sites worker sets `allow_abort_jobs`). A
+`verify_site` that was waiting on the aborted job reads its layers as `unverified` /
+`superseded`. If the source returns to an aborted render (an undo), that render is
+queued again rather than reported as failed.
+
+**One builder origin.** The editor's native-artifact view, the post-edit pre-warm,
+the verify pipeline and `preview_site` all compute the armed content hash with the
+same origin (`service.resolve_armed_builder_origin`): the request `Origin` when
+there is one (recorded per pocket), else the origin the editor last viewed the draft
+with, else the Site row's `builder_origin`, else `PAW_SITES_BUILDER_ORIGIN`. One edit
+therefore builds one render.
+
+**The draft preview appears before the browser check.** The preview job stores the
+draft artifact (and its preview URL) as soon as the build is clean, then runs the
+browser harness.
+
+**Timing logs.** Every step logs elapsed milliseconds, so edit latency can be read
+from the logs alone: `sites.edit_tool: tool=… pocket=… result=… verification=…
+elapsed_ms=…` (API, one line per edit call), `sites.verify: layer=static …` (API),
+`sites.verify: layer=queue_wait|build|browser …` (worker) and
+`sites.verify: layer=sandbox_wait …` (API, a waiting `verify_site`).
+
+**`edit_svelte_component` rollback.** Only a `static` failure rolls an edit back,
+because it is the only failure known before the edit returns: the file is restored
+(a created file is removed) and the tool returns
+`{ok: false, status: "rolled_back", verification, message}` as data, not as an MCP
+error. A `build` or `browser` failure, found by the background job (or read from
+the store for source that was already built), keeps the edit staged and is reported;
+the agent fixes it with a follow-up edit. `unverified` keeps the edit staged. react
+and html edits stay draft-only and carry the edit verdict. The svelte edit result's
+`site.preview_url` is always `null`: no local preview deploy is made; the builder
+shows the draft from the preview build.
 
 #### `verify_site`
 
@@ -5044,7 +5187,9 @@ verified build.
 
 Returns `{ok, pocket_id, verification}`. `ok` means the check ran and answered;
 whether the site works is `verification.status`. A missing or foreign pocket is an
-error. Use it to re-check after a fix or after an `unverified` / `timeout` result.
+error. It waits for the build and browser layers (it is the waiting verify), so the
+agent calls it once at the end of a turn's edits, after a fix, or after an
+`unverified` / `timeout` result.
 
 #### `preview_site`
 
@@ -5054,12 +5199,15 @@ error. Use it to re-check after a fix or after an `unverified` / `timeout` resul
 | `device` | `desktop` \| `mobile` | Optional, default `desktop` (1280px); `mobile` is 390px. |
 
 Returns MCP `image` blocks (a full-page JPEG screenshot of the current draft, cut
-into at most six tiles, top first) followed by one text block. `verify_site` says
+into at most three tiles, top first; the capture waits for the page's `load` event)
+followed by one text block, plus a `previous_verification` text block when an
+edit's background verdict is waiting. `verify_site` says
 whether the draft builds and loads; this is how the agent sees whether it looks
 right. Nothing is stored.
 
-The draft document comes from `draft_markup` for html sites and any pocket already
-built on the host, otherwise from the cached preview render (`get_native_artifact`)
+The draft document comes from `draft_markup` for html sites and any pocket whose
+on-host build is of its current content (the build dir's content stamp must match;
+a stale build is skipped), otherwise from the cached preview render (`get_native_artifact`)
 for svelte and react. Errors, none of which mean the site is broken:
 
 - the render is still building: call `verify_site`, then ask again;
@@ -5653,7 +5801,7 @@ the split is the security model:
 |---|---|
 | `POST /paw-bar/admin/site/{site_id}/concierge` | Create the site's concierge. This is the only way one comes to exist: widget create, the settings PATCH, publishing and a connected-site attach never create one. Behind `paw_bar.manage`; 404 for a site outside your workspace, 409 `concierge_exists` when it already has one. It starts **off** (`concierge_enabled: false`), mints the site's widget if there is none (empty spec, no default actions; an existing widget is kept as it is), sets `concierge_runtime` from the v2 eval gate (`v2` once a passing real-model gate report for the deployment's model is committed, `legacy` until then or when the deployment sets `POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME=legacy`) and, for a legacy concierge, binds a dedicated agent; a v2 concierge gets no agent. Optional body `{"concierge_greeting": "..."}`. Returns 201 with the settings response. A published site shows the bar from its next publish after the concierge is switched on. |
 | `DELETE /paw-bar/admin/site/{site_id}/concierge` | Delete it: the marker is cleared and the switch turned off, so every public route treats the site as having none. A legacy agent is unbound from the widget, never deleted. `?delete_conversations=true` also purges the concierge's conversations, owner and visitor lines, visitor requests and carts; without it they are kept. 404 when the site has no concierge. Returns the settings response. |
-| `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. The widget's `spec` comes without its catalog (`spec.catalog` is always `[]`); `widget.catalog_count` says how many products the [catalog store](#catalog-store) holds, and the catalog routes below page through them. |
+| `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. On a v2 concierge, `answer_model` is the `provider:model` visitors are answered with right now, resolved the way a turn resolves it (`""` on legacy, or when it can't be told). The widget's `spec` comes without its catalog (`spec.catalog` is always `[]`); `widget.catalog_count` says how many products the [catalog store](#catalog-store) holds, and the catalog routes below page through them. |
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |
 | `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance`, the owner's overrides of the site's own look (see [Appearance tokens](#appearance-tokens)). Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code`, `concierge_lead_capture` (default `true`: the v2 concierge may offer the `send_to_team` lead card and the visitor's Send writes a Lead; `false` turns the card off everywhere) and the guided fields below. Visitor options, each optional on PATCH: `concierge_disclosure` (the bar's AI line, one line of at most 140 characters, `""` keeps the bar's own wording; over the cap is a 422), `concierge_privacy_url` (`""` or an `https://` link of at most 500 characters with no whitespace, quotes or angle brackets, else 422), `concierge_consent_required` (default `false`), `concierge_voice` (default `true`) and `concierge_expandable` (default `true`); `concierge_appearance.size` is `sm`, `md` or `lg` (anything else saves as `sm`). Both frames pass these to the bar as `disclosure`, `privacyHref`, `consentRequired`, `voice`, `expandable` and `barSize`. `branding_removable` says whether the site may hide the "Powered by" line, by the same entitlement as the site badge (`PATCH /sites/{id}/branding`); a PATCH that turns `concierge_appearance.show_branding` from `true` to `false` on a site without it is a 402 `branding_not_entitled` and writes nothing. The frame sends `poweredBy` as `show_branding` or not entitled. `actions_snippet` is the copyable `<script src=".../paw-bar/actions.js" defer data-endpoint="...">` tag for page actions, on the same base as `embed_snippet` and `""` whenever that is. |
 | `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec, 422 `spec_too_large` past the [spec size cap](#spec-size-and-the-deprecated-catalog), 409 `currency_units_client_outdated` for a catalog with a non-2-decimal currency sent without `X-Paw-Money-Units: iso4217` (see Money below; the same rule holds on `PATCH /paw-bar/widgets/{id}/spec`). A non-empty `spec.catalog` is added to the catalog store (upserted by id, nothing deleted; see the deprecation note there); an absent or empty one leaves it alone. |
@@ -5674,7 +5822,7 @@ the split is the security model:
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge` | What the concierge can answer from, and a resync. The response also carries the last [catalog site sync](#site-sync) a knowledge sync started: `catalog_synced_at` (`""` when none has run), `catalog_status` (`ok`, `partial`, `empty`, the import's failure reason, or `sync_failed`), `catalog_added`, `catalog_updated` and `catalog_sold_out`. The POST answers before its own catalog sync finishes, so these describe the previous one until the next GET. |
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge/faqs`, `PATCH/DELETE …/knowledge/faqs/{faq_id}` | Pinned answers: question/answer pairs a v2 concierge reads ahead of every KB hit, on every turn. GET returns `{site_id, faqs, max_count, max_chars}`; POST takes `{question, answer}` and returns the new FAQ (201); PATCH takes either field; DELETE is a 204. Both texts are stripped and must not be blank. Caps come from config (`POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_COUNT`, default 15, and `…_FAQ_MAX_CHARS`, default 500 for question and answer together): 409 `faq_limit_reached`, 422 `faq_too_long`. GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `faq_id`, is a 404. The text is treated as data, never as instructions to the model. |
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge/sources`, `POST …/knowledge/sources/{source_id}/refetch`, `DELETE …/knowledge/sources/{source_id}` | Uploaded files and single links the concierge answers from, read into the site pocket KB. GET returns `{site_id, sources, plan, max_count, max_bytes, max_chars, accepted_types}`. POST is a form (multipart, or urlencoded for a link alone; a JSON body is a 422) with exactly one of `file` (`.pdf`, `.docx`, `.md`, `.txt`) or `url`, otherwise 422 `one_source_required` (a `url` over 2,048 characters is 422 `url_too_long`), and returns the new row with status `processing` (202); poll GET until it changes. A row is `{id, kind: "file"|"link", name, url, mime, size_bytes, status, reason, chars, truncated, article_ids, sections_total, sections_failed, sections_truncated, created_at, updated_at, indexed_at}`; a long document is compiled section by section, so `article_ids` lists one article per section that landed, `sections_failed` counts the sections that did not compile (the row is `ready` once one did) and `sections_truncated` the sections past `max_chars` that were never read; `status` is `processing`, `ready`, `failed` (`reason`: `unreadable`, `unreachable`, `no_content`, `ingest_failed`, `kb_unavailable`, `interrupted`), `too_large`, `unsupported` or `blocked`. Refusals write nothing and carry the code as `detail`: 409 `over_limit`, 413 `too_large`, 415 `unsupported` (the type is sniffed from the bytes and must match the extension; the client `Content-Type` is ignored), 422 `blocked` (not a public http(s) address). Refetch re-reads a link (409 `not_a_link` for a file, 409 `already_processing`), DELETE un-indexes and is a 204. Links are fetched through the SSRF-safe fetcher, which re-checks every redirect hop. The file bytes are not stored. Caps come from config: `POCKETPAW_PAWBAR_CONCIERGE_SOURCE_MAX_COUNT_FREE`/`_SITE`/`_STAFF` (3/20/50, by the site plan), `…_SOURCE_MAX_BYTES` (10 MiB), `…_SOURCE_MAX_CHARS` (100,000). GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `source_id`, is a 404. |
-| `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. Framed by the dashboard origin only, and carries the same CSP as the public frame. Behind the bar it frames the site's own published page as a sandboxed scene (`allow-scripts`, no `allow-same-origin`) with `?pawbar=sniff`: that page's own bar stays down and its loader posts the detected site theme to the preview, so the preview follows the site like the public bar. A page without the loader shows the bar defaults. |
+| `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. Framed by the dashboard origin only, and carries the same CSP as the public frame. Behind the bar it frames the site's own page as a sandboxed scene (`allow-scripts`, no `allow-same-origin`) with `?pawbar=sniff`. For a hosted site that is its published `url`. For a connected site (no `url`) it is `https://<host>/` for the verified, fresh origin, falling back to the first `allowed_origins` entry when none is verified, and no scene when there are no origins. A customer site that refuses framing (X-Frame-Options / `frame-ancestors`) leaves the scene blank and the editor reports the theme as not detected. With the scene loaded, that page's own bar stays down and its loader posts the detected site theme to the preview, so the preview follows the site like the public bar. A page without the loader shows the bar defaults. |
 | `POST /paw-bar/admin/site/{site_id}/preview-config` | Render the owner's UNSAVED settings to the frame config they would boot. Writes nothing. Body, every field optional (one not sent, or `null`, is the stored value): `concierge_appearance`, `concierge_disclosure`, `concierge_privacy_url`, `concierge_consent_required`, `concierge_voice`, `concierge_expandable`. A text the settings PATCH would refuse is a 422 here too. Returns `{"config": {...}, "concierge_appearance": {...}}`: `config` holds exactly `tokens`, `tokensDark`, `scheme`, `launcher`, `side`, `barSize`, `logo`, `launcherLabel`, `disclosure`, `privacyHref`, `consentRequired`, `voice`, `poweredBy`, `expandable`, built by the same code as the frame (so with an empty draft it equals the preview frame's boot config); `concierge_appearance` is the appearance as validated (clamped, unsafe values dropped). `poweredBy` applies the real entitlement. The editor posts `config` to the preview frame as `{type: "pawbar:preview-config", config}`. Behind `paw_bar.manage`; a site outside the workspace is 404. `POST …/appearance/preview-tokens` (`{tokens, tokens_dark, concierge_appearance}` for a draft appearance) stays for older editors. |
 
 #### Appearance tokens
@@ -5689,7 +5837,7 @@ The bar follows the website it is embedded in. Its loader reads the host page's 
 | `colors.surface` | `""` | hex | `--pawbar-bg` (alpha 0.78) and `--pawbar-frame-bg` (0.82 in `tokens`, 0.55 in `tokensDark`), the bar's own glass alpha; without `colors.ink` it also sets a legible `--pawbar-fg` / `--pawbar-frame-fg` |
 | `colors.ink` | `""` | hex | `--pawbar-fg` and `--pawbar-frame-fg` |
 | `colors.user_bubble` | `""` | hex | `--pawbar-bubble-bg`, plus a legible `--pawbar-bubble-fg` |
-| `colors.owner_bubble` | `""` | hex | `--pawbar-owner-bubble-bg` |
+| `colors.owner_bubble` | `""` | hex | `--pawbar-owner-bubble-bg` + a legible `--pawbar-owner-bubble-fg` |
 | `colors.assistant_bubble`, `accent_fg`, `ring`, `danger` | `""` | hex | `--pawbar-assistant-bubble`, `--pawbar-accent-fg`, `--pawbar-ring`, `--pawbar-danger` |
 | `blur` | always emitted (default 28) | 0–48 | `--pawbar-blur` |
 

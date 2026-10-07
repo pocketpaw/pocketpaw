@@ -19,10 +19,12 @@
 # WHERE THE MARKUP COMES FROM — a deliberate cost ladder, cheapest rung first,
 # because this runs for a picture on a gallery card and must never be worth its
 # cost:
-#   1. An EXISTING build on disk (``build_home()/<pocket>/<static_output_rel>``).
-#      A pocket that has ever been previewed, armed or published already has its
-#      built output sitting there (PERF-3 keeps the per-pocket build dir), so this
-#      rung costs a few file reads.
+#   1. An EXISTING build on disk (``build_home()/<pocket>/<static_output_rel>``),
+#      but ONLY when it is a build of the pocket's CURRENT content: the build dir's
+#      stamp (``generator_client.DRAFT_SOURCE_STAMP_FILE``) must equal
+#      ``draft_source_hash`` of the pocket now. A stale or unstamped build falls
+#      through to the next rung, so an edit is never photographed as the old page.
+#      A few file reads.
 #   2. NO BUILD NEEDED (the ``html`` engine — a zip/from-url import). ``engines``
 #      says an html site runs no Node build and its served artifact is byte-identical
 #      to the authored source, so the pocket's own ``source`` map IS the static tree.
@@ -370,17 +372,36 @@ def _built_root(pocket_id: str, engine: str) -> Path:
     return project_dir / resolve_static_output_rel(project_dir, engine)
 
 
-def _built_static_dir(pocket_id: str, engine: str) -> Path | None:
+def _built_static_dir(
+    pocket_id: str, engine: str, pocket: dict[str, Any] | None = None
+) -> Path | None:
     """The already-built static output for a pocket, or None (ladder rung 1).
 
     ``build_home()/<pocket_id>/`` is PERF-3's persistent per-pocket working dir, and
     ``static_output_rel`` says where inside it the servable files land per engine.
     An ``index.html`` there means some earlier preview / arm / publish already paid
-    for this build and the capture can just read it.
+    for a build — but it is served only when its stamp matches the CURRENT content of
+    ``pocket``: an edit since then makes it stale, and a stale build is ``None``.
     """
+    from pocketpaw_ee.sites.generator_client import (
+        build_home,
+        draft_source_hash,
+        read_draft_source_stamp,
+    )
+
     try:
         static_dir = _built_root(pocket_id, engine)
-        return static_dir if (static_dir / "index.html").is_file() else None
+        if not (static_dir / "index.html").is_file():
+            return None
+        current = draft_source_hash(
+            engine=engine,
+            source=(pocket or {}).get("source"),
+            ripple_spec=(pocket or {}).get("rippleSpec"),
+        )
+        if read_draft_source_stamp(build_home() / pocket_id) != current:
+            logger.debug("sites.draft_markup: on-disk build of %s is stale — skipped", pocket_id)
+            return None
+        return static_dir
     except (OSError, KeyError):
         return None
 
@@ -454,7 +475,7 @@ async def build_draft_markup(
     engine = (pocket.get("engine") or "ripple").strip()
 
     # Rung 1 — somebody already paid for this build.
-    static_dir = _built_static_dir(pocket_id, engine)
+    static_dir = _built_static_dir(pocket_id, engine, pocket)
     read: Callable[[str], bytes | None]
     if static_dir is not None:
         index_html = (static_dir / "index.html").read_text(encoding="utf-8", errors="replace")

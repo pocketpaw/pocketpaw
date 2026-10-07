@@ -659,19 +659,19 @@ async def test_patch_changes_metadata_not_version(recording_bus) -> None:
 
 @pytest.fixture
 def source_gate(monkeypatch) -> dict[str, bool]:
-    """SF-2 on, and the workspace NOT entitled to read gated source unless
-    ``["entitled"]`` is set."""
+    """SF-2 on, and the source site NOT entitled to show its source (a free-tier
+    site) unless ``["entitled"]`` is set. Sharing publicly must not care."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     from pocketpaw.config import get_settings
 
     state = {"entitled": False}
 
-    async def _entitled(workspace_id: str) -> bool:
-        return state["entitled"]
+    async def _entitled(workspace_id: str, pocket_ids: list[str]) -> dict[str, bool]:
+        return dict.fromkeys(pocket_ids, state["entitled"])
 
     monkeypatch.setattr(get_settings(), "sites_source_gate_enabled", True)
-    monkeypatch.setattr(pockets_service, "_workspace_source_entitled", _entitled)
+    monkeypatch.setattr(pockets_service, "_source_entitled_by_pocket", _entitled)
     return state
 
 
@@ -688,12 +688,12 @@ async def test_patch_to_public_refuses_private_assets() -> None:
 
 
 @pytest.mark.asyncio
-async def test_patch_to_public_refuses_gated_source(source_gate: dict[str, bool]) -> None:
+async def test_patch_to_public_ignores_the_source_sites_tier(source_gate: dict[str, bool]) -> None:
+    # A free-tier source site (gate on, not entitled) may still go public.
     meta = await _saved(await _site(source_gated=True))
-    with pytest.raises(Forbidden) as exc:
-        await svc.update_template(WS, OWNER, meta["id"], {"visibility": "public"})
-    assert exc.value.code == "site_templates.source_not_shareable"
-    assert (await SiteTemplate.get(meta["id"])).visibility == "private"
+    updated = await svc.update_template(WS, OWNER, meta["id"], {"visibility": "public"})
+    assert updated["visibility"] == "public"
+    assert (await SiteTemplate.get(meta["id"])).visibility == "public"
 
 
 @pytest.mark.asyncio
@@ -759,17 +759,14 @@ async def test_publish_allows_external_images() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_refuses_gated_source(source_gate: dict[str, bool]) -> None:
-    src = await _site(source_gated=True)
-    with pytest.raises(Forbidden) as exc:
-        await _saved(src, visibility="public")
-    assert exc.value.code == "site_templates.source_not_shareable"
-    assert await SiteTemplate.find_all().count() == 0
-    # Workspace sharing stays inside the workspace: no check.
-    await _saved(src, visibility="workspace")
-    # An entitled workspace may publish it.
-    source_gate["entitled"] = True
-    assert (await _saved(src, visibility="public"))["visibility"] == "public"
+async def test_publish_ignores_the_source_sites_tier(source_gate: dict[str, bool]) -> None:
+    # A free-tier source site (gate on, not entitled) may be saved as public.
+    meta = await _saved(await _site(source_gated=True), visibility="public")
+    assert meta["visibility"] == "public"
+    doc = await SiteTemplate.get(meta["id"])
+    assert doc.visibility == "public"
+    # The cohort stamp still travels with the snapshot.
+    assert doc.snapshot["source_gated"] is True
 
 
 @pytest.mark.asyncio

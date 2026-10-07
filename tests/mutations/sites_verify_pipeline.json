@@ -22,8 +22,8 @@
   {
     "label": "PP-2 static short-circuit removed: a static failure still spends a sandbox on a build the author already has to fix",
     "file": "ee/pocketpaw_ee/sites/verify.py",
-    "find": "    if static[\"status\"] == \"failed\":",
-    "replace": "    if False:",
+    "find": "        pass\n\n    generator_input = generator_input_for(inputs, pocket_id)\n    static, errors, warnings = await _static_checks(\n        pocket, inputs, generator_input, pocket_id=pocket_id, check=_check\n    )\n    if static[\"status\"] == \"failed\":",
+    "replace": "        pass\n\n    generator_input = generator_input_for(inputs, pocket_id)\n    static, errors, warnings = await _static_checks(\n        pocket, inputs, generator_input, pocket_id=pocket_id, check=_check\n    )\n    if False:",
     "tests": [
       "tests/ee/sites/test_verify_pipeline.py::TestLayers::test_a_static_failure_spends_no_sandbox"
     ]
@@ -151,11 +151,12 @@
     ]
   },
   {
-    "label": "PP-2 edit: a browser failure also rolls the edit back, throwing away the file the fix needs",
+    "label": "edit: a build or browser failure (found after the edit returned) also rolls the edit back, undoing source the agent already moved past",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        if layer.get(\"name\") in (\"static\", \"build\") and layer.get(\"status\") == \"failed\":",
+    "find": "        if layer.get(\"name\") == \"static\" and layer.get(\"status\") == \"failed\":",
     "replace": "        if layer.get(\"status\") == \"failed\":",
     "tests": [
+      "tests/ee/sites/test_component_edit.py::test_a_build_failure_stays_staged_and_is_reported",
       "tests/ee/sites/test_component_edit.py::test_a_browser_failure_stays_staged_and_is_reported"
     ]
   },
@@ -193,6 +194,51 @@
     "replace": "            timeout=None,",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_verification_on_tools.py::TestDeadline::test_a_hung_verify_becomes_unverified_timeout"
+    ]
+  },
+  {
+    "label": "edit path: a static failure still enqueues a sandbox build of source that cannot compile",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "    note = WORKER_RENDERED_NOTE if inputs.dynamic else \"\"\n    generator_input = generator_input_for(inputs, pocket_id)\n    static, errors, warnings = await _static_checks(\n        pocket, inputs, generator_input, pocket_id=pocket_id, check=_check\n    )\n    if static[\"status\"] == \"failed\":",
+    "replace": "    note = WORKER_RENDERED_NOTE if inputs.dynamic else \"\"\n    generator_input = generator_input_for(inputs, pocket_id)\n    static, errors, warnings = await _static_checks(\n        pocket, inputs, generator_input, pocket_id=pocket_id, check=_check\n    )\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_fast_edit_verify.py::TestVerifyEdit::test_a_static_failure_enqueues_nothing"
+    ]
+  },
+  {
+    "label": "settled verdict is never marked handed out, so the same build failure is repeated on every later tool result",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "        _write_latest(store, pocket_id, {**latest, \"surfaced\": True})\n    except Exception:",
+    "replace": "        pass\n    except Exception:",
+    "tests": [
+      "tests/ee/sites/test_fast_edit_verify.py::TestSettledVerdict::test_it_surfaces_the_background_verdict_once"
+    ]
+  },
+  {
+    "label": "the preview job stores the draft only after the browser check, so the preview waits on the harness",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "                after_build=_after_build,\n                on_artifact=_on_artifact,\n",
+    "replace": "                after_build=_after_build,\n",
+    "tests": [
+      "tests/ee/sites/test_fast_edit_verify.py::TestPreviewArtifactBeforeBrowser"
+    ]
+  },
+  {
+    "label": "a newly accepted preview job no longer aborts the superseded one, so one edit burst builds every intermediate render",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        await Job(previous, pool, _queue_name=SITE_BUILD_QUEUE_NAME).abort(timeout=0.01)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/ee/sites/test_fast_edit_verify.py::TestSupersede::test_a_new_job_aborts_the_previous_one"
+    ]
+  },
+  {
+    "label": "draft markup serves an on-disk build without checking it renders the current content (the stale preview bug)",
+    "file": "ee/pocketpaw_ee/sites/draft_markup.py",
+    "find": "        if read_draft_source_stamp(build_home() / pocket_id) != current:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py::test_a_stale_on_disk_build_is_not_served"
     ]
   }
 ]

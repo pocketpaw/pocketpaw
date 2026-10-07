@@ -1,54 +1,35 @@
-# ee/pocketpaw_ee/sites/renewal_sweeper.py — the RENEWAL for site plans bought
-# from the workspace credit wallet.
+# ee/pocketpaw_ee/sites/renewal_sweeper.py — the periodic sweep for site plans:
+# renews the ones bought from the workspace credit wallet, and converges the ones
+# a workspace plan carries for free.
 #
-# Updated 2026-10-02 (feat/partners-commissions, PH-13): CLIENT-PAID partner
-# sites (``billing_rail == "client"``: the partner's client paid the year through
-# a one-time pay link) are never charged here — the debit query stays
-# ``== "credits"`` — and at their renewal date they LAPSE to the free floor (the
-# site stays up) through ``sites.service.lapse_due_client_paid_sites``, counted
-# under ``lapsed``. The client renews by paying a new link.
+# CREDITS RENEWAL. A paid site bills against the workspace's credit balance, not a
+# gateway subscription, so nothing else makes a recurring plan recur: once a
+# site's ``renewal_date`` passes, ONE PERIOD of its tier (``tier.period_months``:
+# 1 for monthly rungs, 12 for partner-only yearly rungs) is debited at
+# ``billing.service.site_plan_price_usd`` and the date steps forward.
+# ``period_paid_usd`` records what was actually charged. Runs on the shared
+# 5-minute heartbeat (``pocketpaw_ee.extensions``).
 #
-# Updated 2026-10-02 (feat/partners-sell, PH-2): a renewal buys ONE PERIOD of the
-# tier — ``tier.period_months`` (1 for every monthly rung, 12 for the partner-only
-# yearly rungs) — priced by ``billing.service.site_plan_price_usd`` (the partner's
-# country price for partner rungs, ``monthly_price_usd`` otherwise).
-# ``period_paid_usd`` records the amount actually charged; for a partner whose
-# profile has since been removed it is the renewal price only if it is a real
-# price of the tier. Otherwise there is no price, and the site LAPSES to the free
-# floor like a short wallet (it stays up) rather than keeping paid features unpaid.
-# Monthly behaviour is unchanged; partner sites ride this same sweep.
+# LAPSING IS GENTLE. A wallet that cannot cover the period, or a partner rung with
+# no price left to renew at, drops the site to the free floor (``cancelled``): the
+# badge returns, the custom domain stops resolving, the concierge goes quiet — but
+# THE SITE ITSELF IS NEVER TAKEN DOWN. Client-paid partner sites
+# (``billing_rail == "client"``) are never charged here; at their renewal date
+# they lapse the same way via ``sites.service.lapse_due_client_paid_sites``.
 #
-# Created 2026-09-05 (fix/sites-plan-credits). A paid site now bills against the
-# workspace's own credit balance rather than a Dodo subscription, and a Dodo
-# subscription is the thing that used to make a MONTHLY plan actually recur. With
-# nothing in its place a customer would pay for month one and hold every paid
-# capability forever — the mirror image of the bug this branch set out to fix,
-# and a worse one, because it looks like everything is working.
+# PLAN-CARRIED SITES (``billing_rail == "plan"``) are never charged either. Each
+# tick first runs ``sites.service.reconcile_all_plan_carried_sites``, which
+# releases sites past what the workspace's plan (or override) now carries — the
+# only thing that catches an override expiring on the clock or a plan written
+# outside ``set_workspace_plan``. It moves no money, so the renewals kill switch
+# does not stop it.
 #
-# So this is the missing half of the credits rail rather than an optimisation:
-# once a site's ``renewal_date`` passes, its next month is debited and the date
-# steps forward. It runs on the same 5-minute heartbeat as the pending sweeper.
-#
-# LAPSING IS THE INTERESTING CASE and it is deliberately gentle. When the wallet
-# cannot cover the month the site is marked ``cancelled`` — which drops it to the
-# free floor for every entitlement, so the badge returns, the custom domain stops
-# resolving and the concierge goes quiet — but THE SITE ITSELF IS NEVER TAKEN
-# DOWN. That is the rule the pricing spec states plainly ("the SITE itself always
-# stays up"), and it is also just correct: a customer whose card lapses should
-# lose the paid extras, not have their public web presence deleted. Republishing
-# after a top-up buys the tier again through the ordinary purchase path.
-#
-# It NEVER deletes, never redeploys and never touches a site on another rail: a
-# site with a Dodo subscription id or an add-on cart line renews at the gateway,
-# and debiting it here would charge the customer twice for one month. The rail
-# check is the whole tenancy of this module.
-#
-# A RENEWAL IS A DEBIT AND A DATE, AND NOTHING ELSE. It must stay that way: the
-# rail now carries FOREIGN sites — a Paw Bar concierge on a page the customer
-# hosts themselves — which have no Worker to redeploy and would fail any sweep
-# that tried. That is also why ``foreign_origin`` is the one exception to the
-# "never charge an undeployed site" skip below; every other undeployed row still
-# means a deploy that went wrong, and still goes uncharged.
+# It NEVER deletes, never redeploys and never debits a site on another rail: a
+# site renewing at a gateway would be charged twice. A RENEWAL IS A DEBIT AND A
+# DATE, AND NOTHING ELSE — the rail carries FOREIGN sites (a Paw Bar concierge on
+# a page the customer hosts) with no Worker to redeploy, which is also why
+# ``foreign_origin`` is the one exception to the "never charge an undeployed
+# site" skip below.
 
 from __future__ import annotations
 
@@ -90,7 +71,9 @@ def _enabled() -> bool:
 
 async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
     """Charge the next month for every credits-paid site whose renewal is due —
-    and END the ones that asked to be ended.
+    and END the ones that asked to be ended. Before any of that, plan-carried
+    sites are reconciled against each workspace's current allowance (see the
+    module header); that pass is not reflected in the returned counts.
 
     Returns a count of what happened: ``{"renewed": n, "lapsed": n, "failed": n,
     "not_live": n, "closed": n}``. The last two are the rows this deliberately
@@ -117,6 +100,24 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
     retries it — the debit is idempotent per (site, tier, renewal day), so a
     retry after a partial failure cannot double-charge.
     """
+    from pocketpaw_ee.sites import service as sites_service
+
+    # Plan-carried sites converge first, ahead of the kill switch: releasing a site
+    # the plan no longer carries moves no money. Best-effort, and kept out of the
+    # returned counts (those are about renewals); its own log line reports it.
+    try:
+        reconciled = await sites_service.reconcile_all_plan_carried_sites()
+        if reconciled["released"] or reconciled["failed"]:
+            logger.warning(
+                "sites.renewal_sweeper: plan-carried reconcile over %d workspace(s) "
+                "released=%d failed=%d",
+                reconciled["workspaces"],
+                reconciled["released"],
+                reconciled["failed"],
+            )
+    except Exception:
+        logger.exception("sites.renewal_sweeper: plan-carried reconcile pass failed")
+
     if not _enabled():
         return {"renewed": 0, "lapsed": 0, "failed": 0, "not_live": 0, "closed": 0}
 
@@ -124,7 +125,6 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
     from pocketpaw_ee.cloud.billing import site_plans
 
     at = now or datetime.now(UTC)
-    from pocketpaw_ee.sites import service as sites_service
 
     # PH-13: a client-paid year that ran out lapses; nothing is debited for it.
     client_lapsed = await sites_service.lapse_due_client_paid_sites(at)

@@ -101,7 +101,8 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     - ``run_cutover_sweep``: WU-F per-tenant LiteLLM spend (off/shadow/live).
     - ``sweep_pending_sites``: log paid sites stuck pending (visibility only).
     - ``sweep_site_renewals``: charge wallet-paid site plans that came due; an
-      unaffordable site drops to the free floor and stays live.
+      unaffordable site drops to the free floor and stays live. Also releases
+      plan-carried sites past the workspace's current site allowance.
     - ``sweep_partner_tiers``: PH-15 monthly Paw Partners tier review (lowers a
       tier the active sold sites no longer earn); acts once per partner per month.
       After the renewals, so a site that just lapsed no longer counts.

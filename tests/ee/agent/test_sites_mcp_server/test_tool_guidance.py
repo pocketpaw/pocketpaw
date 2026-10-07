@@ -4,8 +4,10 @@
 # (PP-1) and the verify pipeline (PP-2) shipped:
 #   1. no create/edit description still claims a site cannot take a dependency;
 #      each one names ``set_site_dependencies`` instead;
-#   2. every create/edit description carries the verification contract: only
-#      ``passed`` means ready, ``failed`` means fix and call ``verify_site``.
+#   2. every create description carries the verification contract (only ``passed``
+#      means ready, ``failed`` means fix and call ``verify_site``), and every edit
+#      description the edit contract: static now, the build verdict on the next
+#      result as ``previous_verification``, ``verify_site`` once at the end.
 """Tool-description guidance for packages and verification on the sites server."""
 
 from __future__ import annotations
@@ -57,7 +59,11 @@ def test_no_stale_no_dependency_claim(name: str) -> None:
     assert "set_site_dependencies" in description
 
 
-@pytest.mark.parametrize("name", SOURCE_TOOLS)
+CREATE_TOOLS = tuple(t for t in SOURCE_TOOLS if t.startswith("create_"))
+EDIT_TOOLS = (*(t for t in SOURCE_TOOLS if not t.startswith("create_")), "set_site_dependencies")
+
+
+@pytest.mark.parametrize("name", CREATE_TOOLS)
 def test_carries_the_verification_contract(name: str) -> None:
     """The agent must not call a draft ready on a failed or unchecked build."""
     description = _descriptions()[name]
@@ -65,3 +71,15 @@ def test_carries_the_verification_contract(name: str) -> None:
     assert "passed" in description
     assert "verify_site" in description
     assert "unverified" in description
+
+
+@pytest.mark.parametrize("name", EDIT_TOOLS)
+def test_edits_carry_the_verify_once_contract(name: str) -> None:
+    """An edit returns the static check only; the agent verifies ONCE at the end and
+    acts on the background verdict that arrives as ``previous_verification``."""
+    description = _descriptions()[name]
+    assert "VERIFY ONCE PER TURN, AT THE END" in description
+    assert "previous_verification" in description
+    assert "verify_site" in description
+    assert "passed" in description
+    assert "pending" in description

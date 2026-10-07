@@ -16,6 +16,11 @@
 #     It carries its start time and goes stale after :data:`PENDING_STALE_SECONDS`, so a
 #     crashed verify cannot pin a site in "pending" forever.
 #
+# Two per-pocket POINTER records sit beside them, one each, overwritten in place and
+# exempt from eviction: ``latest`` (the last edit's enqueued sandbox job, read back by
+# ``verify.settled_verdict``) and ``view-origin`` (the builder origin the editor last
+# viewed the draft with, read by ``service.resolve_armed_builder_origin``).
+#
 # THE BACKEND FOLLOWS THE ARTIFACT STORE'S. The worker writes and the web process reads,
 # which is already true of preview artifacts, so this uses the same selection:
 # ``PAW_SITES_ARTIFACT_STORE=s3`` → the shared ``StorageAdapter`` under
@@ -48,6 +53,16 @@ PENDING_STALE_SECONDS = 900
 VERIFY_KEY_PREFIX = "site-verify"
 
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,200}$")
+
+
+#: The last edit-path enqueue for a pocket (``verify.verify_edit_pocket``).
+LATEST_KEY = "latest"
+
+#: The builder origin the editor last viewed the draft with.
+VIEW_ORIGIN_KEY = "view-origin"
+
+#: Pointer records: one per pocket, never evicted to make room for hash records.
+_POINTER_KEYS = frozenset({LATEST_KEY, VIEW_ORIGIN_KEY})
 
 
 def sandbox_key(content_hash: str) -> str:
@@ -104,7 +119,11 @@ class FilesystemVerifyStore:
     def _evict(self, directory: Path) -> None:
         try:
             files = sorted(
-                (p for p in directory.glob("*.json") if p.is_file()),
+                (
+                    p
+                    for p in directory.glob("*.json")
+                    if p.is_file() and p.stem not in _POINTER_KEYS
+                ),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
@@ -173,7 +192,9 @@ def default_verify_store() -> Any:
 
 __all__ = [
     "KEEP_PER_POCKET",
+    "LATEST_KEY",
     "PENDING_STALE_SECONDS",
+    "VIEW_ORIGIN_KEY",
     "BlobVerifyStore",
     "FilesystemVerifyStore",
     "default_verify_store",

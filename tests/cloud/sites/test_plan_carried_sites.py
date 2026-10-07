@@ -535,3 +535,129 @@ def test_the_site_allowance_only_ever_goes_up_the_ladder():
     priced = [t for t in plan_catalog.list_plans() if t.included_sites is not None]
     counts = [t.included_sites for t in priced]
     assert counts == sorted(counts), [(t.key, t.included_sites) for t in priced]
+
+
+# --------------------------------------------------------------------------- #
+# Allowance shrinks WITHOUT going through set_workspace_plan
+# --------------------------------------------------------------------------- #
+#
+# The reconcile only runs inside ``set_workspace_plan``. Every other way the
+# allowance can shrink leaves the extra sites riding the plan rail at ``staff``
+# forever — the reported bug: a Pro Max workspace holding more than ten carried
+# staff sites. These three pin each such path.
+
+
+async def _seed_carried(ws: str, n: int) -> list[Site]:
+    """``n`` sites already riding the plan rail, oldest first by ``createdAt``.
+
+    Seeded rather than published: slots are counted on ``billing_rail``, so a
+    seeded row is exactly what a publish under a larger allowance leaves behind,
+    without eleven local deploys."""
+    base = datetime.now(UTC) - timedelta(days=60)
+    docs: list[Site] = []
+    for i in range(n):
+        doc = Site(
+            workspace=ws,
+            pocket_id=f"carried-{i}-{uuid4().hex}",
+            owner="u1",
+            name=f"Carried {i}",
+            deployed=True,
+            url=f"http://local/carried-{i}/",
+            plan_tier="staff",
+            subscription_status="active",
+            billing_rail="plan",
+        )
+        await doc.insert()
+        doc.createdAt = base + timedelta(days=i)
+        await doc.save()
+        docs.append(doc)
+    return docs
+
+
+async def _assert_released_past(docs: list[Site], allowance: int) -> None:
+    for doc in docs[:allowance]:
+        assert (await _site_for(doc.pocket_id)).billing_rail == "plan"
+    for doc in docs[allowance:]:
+        fresh = await _site_for(doc.pocket_id)
+        assert fresh.billing_rail == ""
+        assert fresh.plan_tier != "staff"
+        assert fresh.deployed is True, "a released site stays live on the free floor"
+
+
+async def test_clearing_an_included_sites_override_releases_the_overflow(
+    mongo_db,  # noqa: ARG001
+):
+    """A platform operator lifts a Pro Max workspace to uncapped sites, it publishes
+    eleven, and the override is cleared. The workspace is back to ten — and the
+    override write must reconcile like a plan write does, or the eleventh stays
+    a free staff site."""
+    from pocketpaw_ee.cloud.models.workspace import WorkspaceOverrides
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    ws = await _make_workspace("pro_max")
+    await workspace_service.platform_set_workspace_overrides(
+        ws, WorkspaceOverrides(included_sites="uncapped")
+    )
+    docs = await _seed_carried(ws, 11)
+    assert await sites_service.plan_site_slots(ws) == (11, None)
+
+    await workspace_service.platform_set_workspace_overrides(ws, None)
+
+    assert await sites_service.plan_site_slots(ws) == (10, 10)
+    await _assert_released_past(docs, 10)
+
+
+async def test_an_expired_included_sites_override_is_converged_by_the_sweep(
+    mongo_db,  # noqa: ARG001
+):
+    """An override with ``expires_at`` lapses on the clock — no write happens, so
+    nothing at write time can reconcile it. Only a periodic sites sweep can, and
+    the sweep that runs today is the renewal sweep."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceOverrides
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    ws = await _make_workspace("pro_max")
+    await workspace_service.platform_set_workspace_overrides(
+        ws,
+        WorkspaceOverrides(
+            included_sites="uncapped", expires_at=datetime.now(UTC) + timedelta(days=1)
+        ),
+    )
+    docs = await _seed_carried(ws, 11)
+    assert await sites_service.plan_site_slots(ws) == (11, None)
+
+    # Time passes: the override is now in the past. Written straight to the
+    # document because that is what "the clock ran out" looks like — no service
+    # call, no hook.
+    ws_doc = await Workspace.get(ws)
+    ws_doc.overrides.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    await ws_doc.save()
+    assert (await sites_service.plan_site_slots(ws))[1] == 10
+
+    await sweep_site_renewals()
+
+    assert await sites_service.plan_site_slots(ws) == (10, 10)
+    await _assert_released_past(docs, 10)
+
+
+async def test_a_plan_written_outside_set_workspace_plan_is_converged_by_the_sweep(
+    mongo_db,  # noqa: ARG001
+):
+    """Enterprise (uncapped) publishes eleven sites, then the workspace lands on
+    Pro Max through a writer that is not ``set_workspace_plan`` — a direct DB edit,
+    a migration, a future code path. The service comment promises "the periodic
+    sites sweep re-runs this"; nothing actually does."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    ws = await _make_workspace("enterprise")
+    docs = await _seed_carried(ws, 11)
+    assert await sites_service.plan_site_slots(ws) == (11, None)
+
+    ws_doc = await Workspace.get(ws)
+    ws_doc.plan = "pro_max"
+    await ws_doc.save()
+
+    await sweep_site_renewals()
+
+    assert await sites_service.plan_site_slots(ws) == (10, 10)
+    await _assert_released_past(docs, 10)

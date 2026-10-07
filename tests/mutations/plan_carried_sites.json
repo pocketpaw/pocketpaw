@@ -179,5 +179,24 @@
       "tests/cloud/sites/test_plan_carried_sites.py::test_the_plan_ladder_carries_the_decided_site_counts",
       "tests/cloud/sites/test_plan_carried_sites.py::test_a_workspace_on_free_carries_nothing"
     ]
+  },
+  {
+    "label": "clearing an included_sites override never reconciles, so the overflow stays a free staff site",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "        reconciled = await sites_service.reconcile_plan_carried_sites(workspace_id)",
+    "replace": "        reconciled = {\"carried\": 0, \"released\": 0}",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_clearing_an_included_sites_override_releases_the_overflow"
+    ]
+  },
+  {
+    "label": "the renewal sweep never converges plan-carried sites, so an expired override or an out-of-band plan write leaks forever",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "        reconciled = await sites_service.reconcile_all_plan_carried_sites()",
+    "replace": "        reconciled = {\"workspaces\": 0, \"released\": 0, \"failed\": 0}",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_an_expired_included_sites_override_is_converged_by_the_sweep",
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_plan_written_outside_set_workspace_plan_is_converged_by_the_sweep"
+    ]
   }
 ]

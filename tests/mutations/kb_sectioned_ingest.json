@@ -2,8 +2,8 @@
   {
     "label": "a long document is compiled whole again — sectioning is bypassed and dense facts are compressed away",
     "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
-    "find": "            if len(sections) > 1:",
-    "replace": "            if len(sections) > 10_000:",
+    "find": "        if len(sections) > 1:",
+    "replace": "        if len(sections) > 10_000:",
     "tests": [
       "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_every_fact_in_the_real_field_guide_lands_in_some_article"
     ]
@@ -11,8 +11,8 @@
   {
     "label": "a short document is sectioned too — the whole-document compile path changes for small docs",
     "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
-    "find": "            if len(sections) > 1:",
-    "replace": "            if len(sections) > 0:",
+    "find": "        if len(sections) > 1:",
+    "replace": "        if len(sections) > 0:",
     "tests": [
       "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_a_short_document_keeps_the_whole_document_compile"
     ]

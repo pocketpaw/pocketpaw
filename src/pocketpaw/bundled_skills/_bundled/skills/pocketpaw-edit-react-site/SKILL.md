@@ -25,7 +25,8 @@ description: |
 <!--
   Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): "What you
   cannot change" no longer says a dependency cannot be added; packages go
-  through set_site_dependencies and load client-side in useEffect. "Reading
+  through set_site_dependencies (any package, version or dist-tag), import
+  normally, and package.json / vite.config.* are editable. "Reading
   the response" gains `verification` and a "Verify loop" section (only
   `passed` means ready; fix → verify_site, max 3 rounds; unverified said
   plainly). Quality bar and paw-fx entry follow.
@@ -196,27 +197,25 @@ build tree-shakes it), so prefer that over a delete you cannot undo.
 
 ## What you cannot change
 
-**Generator-owned paths are refused** — `index.html`, `package.json`,
-`vite.config.ts`, `paw-prerender.mjs`, and anything under `src/paw/**`. That
+**Generator-owned paths are refused** — `index.html`, `paw-prerender.mjs`,
+`paw.dependencies.json`, lockfiles, and anything under `src/paw/**`. That
 reservation is what guarantees the page cannot silently become a
 blank-without-JavaScript SPA shell.
 
 The path is **normalized before it is checked**, and the resolved result must sit
-under `src/` or `public/`. So `./package.json` and `src/paw/../paw/thing.tsx` are
-refused too — a relative dodge is not a way around the reservation, it is just a
-rejected call.
+under `src/` or `public/`, or be one of the root build files (`package.json`,
+`vite.config.*`, `bunfig.toml`, `.npmrc`). So `src/paw/../paw/thing.tsx` is
+refused too — a relative dodge is not a way around the reservation.
 
-**Packages are declared, never edited in.** `package.json` and
-`paw.dependencies.json` are generator-owned. The project starts with
-**react**, **react-dom**, **vite** and **@vitejs/plugin-react**; to add a
-library, call `set_site_dependencies(pocket_id, add=[{"name": "gsap"}])`
-(`remove=[...]` drops one), then import it: client-only libraries inside
-`useEffect` with a dynamic `import()`, never at the top of a module.
-
-Each package is checked (published at least 7 days ago, popular enough, no
-known advisory, no install scripts or native code, a size cap, at most 20 per
-site) and pinned to an exact version. A refused one comes back in `rejected`
-with its `reason`: don't import it; pick another or build without it.
+**Packages.** The project starts with **react**, **react-dom**, **vite** and
+**@vitejs/plugin-react**; to add a library, call
+`set_site_dependencies(pocket_id, add=[{"name": "gsap"}])` (`remove=[...]`
+drops one). Any public npm package works, at any version, range or dist-tag,
+and is pinned to an exact version. `rejected` only holds what could not be
+resolved (misspelt, no matching version); `warnings` carry advisories worth
+passing on. Import packages normally; only a browser-only library that touches
+`window` at import time needs a dynamic `import()` inside `useEffect`. You may
+also edit `package.json` or `vite.config.*` when the build needs it.
 
 Plain React and plain CSS still cover most asks (carousels, accordions,
 reveals, sticky nav, marquees), so add a package only when it earns its weight.
@@ -472,5 +471,5 @@ works.
 - `mcp__pocketpaw_icons__search_icons` — feature icons
 - `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
   Pass `engine="react"`: an effect with `needs` comes back with `dependencies`
-  to declare via `set_site_dependencies`, loaded in `useEffect`.
+  to declare via `set_site_dependencies`.
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour

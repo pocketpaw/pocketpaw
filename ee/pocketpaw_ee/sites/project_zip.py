@@ -38,11 +38,12 @@
 # truth that rots. The shell is the smallest manifest + config set that makes the
 # AUTHORED source install and build locally, and it carries none of the hosting: no
 # wrangler.toml, no adapter-cloudflare, no edit bridge, no D1 data layer. Every
-# dependency it names is pinned to ``VETTED_DEPENDENCIES`` in
-# paw-sites/src/allowlist.ts. A shell file at a generator-RESERVED path (the manifest
-# and the configs) overwrites an authored copy, because nothing downstream re-runs
-# ``assertAllowed`` and this is the only place that invariant can be held; a shell
-# file in the authorable tree is only a default, exactly as the generator treats it.
+# toolchain dependency it names is pinned to ``VETTED_DEPENDENCIES`` in
+# paw-sites/src/allowlist.ts. A shell file at a generator-RESERVED path overwrites an
+# authored copy; a shell file in the authorable tree is only a default, exactly as
+# the generator treats it. package.json is author-writable (2026-10-07), so an
+# authored one is MERGED with the shell's: the author's fields and packages, with the
+# toolchain pins on top, the same way the generator merges it.
 #
 # No lockfile, ever: ``daytona_runner`` records that the generator deliberately emits
 # none. The download is buildable, not byte-reproducible. The zip itself IS
@@ -432,9 +433,9 @@ def _is_reserved_path(engine: str, path: str) -> bool:
     Read from ``svelte_paths`` / ``react_paths`` rather than restated here, because
     those modules already mirror paw-sites' own ``isReservedPath`` and are the
     per-track path policy. This is what decides whether a shell file overrides the
-    authored copy or merely supplies one: the reserved build shell (package.json and
-    the configs) must win, and a file in the authorable tree — ``src/app.html``,
-    ``src/routes/+layout.ts``, the thank-you route, the README — is only a default,
+    authored copy or merely supplies one: a reserved file (``src/routes/+layout.ts``,
+    ``index.html``) must win, and a file in the authorable tree — ``src/app.html``,
+    the root build files, the thank-you route, the README — is only a default,
     because the generator lets an authored map override exactly those.
     """
     if engine == "svelte":
@@ -519,10 +520,8 @@ def plan_project_files(
             )
         planned[_safe_rel_path(raw)] = contents
 
-    # A shell file at a RESERVED path goes on last, so it wins instead. Nothing
-    # downstream re-runs paw-sites' ``assertAllowed``, so letting an authored
-    # package.json through would put an arbitrary dependency set into a project we
-    # hand out.
+    # A shell file at a RESERVED path goes on last, so it wins instead, matching the
+    # generator. package.json is not reserved; it is merged below.
     for path, contents in shell.items():
         if not _is_reserved_path(normalized, path):
             continue
@@ -530,8 +529,34 @@ def plan_project_files(
             logger.info("project zip: the vetted %s replaces the authored copy", path)
         planned[path] = contents
 
+    shell_pkg = shell.get("package.json")
+    if shell_pkg is not None and planned.get("package.json", shell_pkg) != shell_pkg:
+        planned["package.json"] = _merge_package_json(shell_pkg, planned["package.json"])
+
     _enforce_caps(planned)
     return planned
+
+
+def _merge_package_json(shell_text: str, authored_text: str) -> str:
+    """An authored package.json merged with the shell's: the author's fields, scripts
+    and packages, with every toolchain pin from the shell written on top so the
+    download still builds. An unreadable authored file falls back to the shell."""
+    try:
+        authored = json.loads(authored_text)
+    except ValueError:
+        authored = None
+    if not isinstance(authored, dict):
+        logger.info("project zip: the authored package.json is not a JSON object; using the shell")
+        return shell_text
+    shell = json.loads(shell_text)
+    merged: dict[str, Any] = {**shell, **authored}
+    for block in ("scripts", "dependencies", "devDependencies"):
+        mine = authored.get(block) if isinstance(authored.get(block), dict) else {}
+        ours = shell.get(block) or {}
+        combined = {**ours, **mine} if block == "scripts" else {**mine, **ours}
+        if combined:
+            merged[block] = combined
+    return json.dumps(merged, indent=2) + "\n"
 
 
 def _write_zip(planned: dict[str, str]) -> bytes:

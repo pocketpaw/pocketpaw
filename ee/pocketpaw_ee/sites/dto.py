@@ -258,6 +258,11 @@ class SiteResponse(BaseModel):
     # is a secret: the origins are public by construction.
     foreign_origin: bool = False
     allowed_origins: list[str] = Field(default_factory=list)
+    # A connected site's own page title (<title>, else og:title), read from its
+    # verified origin, whitespace-collapsed and capped at 200 chars. "" for hosted
+    # sites, before the first read, and for rows that predate the field. The owner's
+    # ``name`` is never overwritten with it; the card shows name || this || host.
+    origin_title: str = ""
 
 
 class SiteExportResponse(BaseModel):
@@ -915,13 +920,10 @@ class SiteEntitlementsResponse(BaseModel):
     second condition ANDed in, and like every field here it exists so the Download
     button can disable itself with a reason instead of 402ing when pressed.
 
-    It is NOT the same question as whether the source is VISIBLE. That one is a
-    WORKSPACE capability (``Entitlements.site_source_visible``, which gates the
-    builder's Code tab) resolved off the workspace plan by a different resolver; this
-    is a PER-SITE capability resolved off the site's own plan. A paid site inside a
-    free workspace can legitimately download a project whose source the Code tab
-    hides. A UI that gates the download button on source visibility would hide a
-    control the customer has paid for — read this field, not that one.
+    The builder's Code tab (``sourceVisible`` on the pocket wire dict) is resolved off
+    the same per-site predicate, so the two normally agree. They can still differ
+    when a platform operator overrides source visibility for the whole workspace, so
+    the Download button reads this field, never ``sourceVisible``.
     """
 
     site_id: str
@@ -1030,11 +1032,12 @@ class SiteInvoiceCreate(BaseModel):
 
 
 class NativeArtifactResponse(BaseModel):
-    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the armed
-    svelte build's body + CSS, so the native editor can shadow-render the site
-    instead of framing an iframe. ``body_html`` is the built page's ``<body>`` INNER
-    HTML — the data-uid-stamped editable leaves plus the embedded
-    ``<script id="paw-edit-manifest">`` — which the FE injects into a shadow root.
+    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the draft's
+    ``preview_url`` on the preview origin, plus (svelte/react) the armed build's body +
+    CSS, so the native editor can shadow-render the site instead of framing an iframe.
+    ``body_html`` is the built page's ``<body>`` INNER HTML — the data-uid-stamped
+    editable leaves plus the embedded ``<script id="paw-edit-manifest">`` — which the
+    FE injects into a shadow root.
     ``css`` is the built stylesheet(s) concatenated into one string the FE injects as
     a single ``<style>``.
 
@@ -1057,6 +1060,11 @@ class NativeArtifactResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+    # Absolute URL of the draft's index.html on the cookieless preview origin
+    # (``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/index.html``), the full
+    # draft with its <head> and JS. Every engine including html. ``None`` while the
+    # build is pending or failed. Append ``?paw_edit=1`` to arm the edit bridge.
+    preview_url: str | None = None
 
 
 class SiteAssetResponse(BaseModel):

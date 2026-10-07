@@ -1,11 +1,10 @@
 # tests/ee/sites/test_paw_sites_allowlist_vendored.py — the vendored paw-sites
 # allowlist is pinned, and the dependency rules come from it.
-# Created 2026-10-02 (fix/canon-cross-repo-pins, CN-8). vetted_pins' fallback pins
-# and dependency_manifest's TOOLCHAIN_RESERVED / MAX_DECLARED_PACKAGES used to be
-# hand copies of paw-sites' allowlist.ts. They now read
+# vetted_pins' fallback pins and dependency_manifest's TOOLCHAIN_RESERVED read
 # ee/pocketpaw_ee/sites/paw-sites-allowlist.json (``paw-sites-gen allowlist`` at
-# the commit in paw-sites-allowlist.pin.json). Refresh with
-# scripts/vendor-paw-sites-allowlist.sh.
+# the commit in paw-sites-allowlist.pin.json). Since paw-sites opened author
+# dependencies, the reserved list is empty and maxAuthorPackages is null (no cap).
+# Refresh with scripts/vendor-paw-sites-allowlist.sh.
 """Hash pin and derivation checks for the vendored paw-sites allowlist."""
 
 from __future__ import annotations
@@ -35,14 +34,23 @@ def test_the_vendored_allowlist_matches_its_pin():
 
 def test_the_rules_are_read_from_the_vendored_allowlist():
     vendored = vetted_pins.VENDORED_ALLOWLIST
-    assert dm.MAX_DECLARED_PACKAGES == vendored["maxAuthorPackages"]
+    assert vendored["maxAuthorPackages"] is None
+    assert not hasattr(dm, "MAX_DECLARED_PACKAGES")
     assert dm.TOOLCHAIN_RESERVED == tuple(
         e[:-1] if e.endswith("/*") else e for e in vendored["toolchainReserved"]
     )
+    assert dm.TOOLCHAIN_RESERVED == ()
+    assert not dm.is_toolchain_reserved("svelte")
     assert vetted_pins.FALLBACK_PINS == vendored["vetted"]
-    # Scope entries keep their meaning across the '/*' -> '/' spelling change.
+
+
+def test_a_scope_entry_reserves_the_scope(monkeypatch):
+    """If a re-vendor brings back '@scope/*' it reserves that scope, not its prefix."""
+    monkeypatch.setattr(dm, "TOOLCHAIN_RESERVED", ("@sveltejs/", "vite"))
     assert dm.is_toolchain_reserved("@sveltejs/kit")
+    assert dm.is_toolchain_reserved("vite")
     assert not dm.is_toolchain_reserved("@sveltejs")
+    assert not dm.is_toolchain_reserved("vitest")
 
 
 def _paw_sites_source_at_pin() -> str:
@@ -72,6 +80,7 @@ def test_the_vendored_rules_are_what_paw_sites_declared_at_the_pinned_commit():
     block = re.search(r"TOOLCHAIN_RESERVED[^=]*=\s*Object\.freeze\(\[(.*?)\]\)", source, re.S)
     assert block, "TOOLCHAIN_RESERVED not found in allowlist.ts"
     reserved = re.findall(r"'([^']+)'", block.group(1))
-    cap = re.search(r"MAX_AUTHOR_PACKAGES\s*=\s*(\d+)", source)
     assert reserved == vetted_pins.VENDORED_ALLOWLIST["toolchainReserved"]
-    assert cap and int(cap.group(1)) == vetted_pins.VENDORED_ALLOWLIST["maxAuthorPackages"]
+    # paw-sites dropped the cap constant; the vendored copy says null.
+    assert "MAX_AUTHOR_PACKAGES" not in source
+    assert vetted_pins.VENDORED_ALLOWLIST["maxAuthorPackages"] is None

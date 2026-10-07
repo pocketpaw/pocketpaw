@@ -1,60 +1,35 @@
-# bun_supply_chain.py — the ONE place the site-build install-time supply-chain
-# floor lives.
+# bun_supply_chain.py — the bunfig each site-build install host writes before
+# ``bun install``: an OPEN one for the Daytona sandbox, a FLOORED one for the API host.
 #
-# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — added
-# ``MINIMUM_RELEASE_AGE_SECONDS``, the same 7-day floor as a number. The dependency
-# resolver (``dependency_resolver``) picks the newest version that is at least this
-# old when an author declares a package, so the version the agent is told about is
-# the one the sandbox's bunfig will actually let install. The literal inside
-# ``BUILD_BUNFIG`` stays spelled out (a mutation plan anchors on it); a test pins the
-# two together.
+# Two hosts install, and they install different things:
 #
-# Created: 2026-09-12 (fix/sites-install-supply-chain-floor) — extracted from
-# ``daytona_runner.py``, which owned ``SANDBOX_BUNFIG`` / ``SANDBOX_BUNFIG_REL``
-# because the sandbox was the only build host that wrote one. It was not the only
-# build host that INSTALLS. ``generator_client._SubprocessRunner.install`` runs
-# ``bun install`` too — on the path ``dev_server``, ``draft_markup``, ``service``
-# and the deployed Coolify image all use — and it wrote no bunfig at all, so that
-# path resolved from the open registry with lifecycle scripts enabled. A second
-# installer with no copy of the floor is how a floor stops being a floor, so the
-# constant moved HERE and both runners call it. ``daytona_runner`` re-exports both
-# names unchanged (the same re-export pattern ``sites_create`` uses for
-# ``react_paths``), so nothing that imported them from there had to change.
-"""Install-time supply-chain floor for generated Paw Site builds.
+#   * The Daytona sandbox (``daytona_runner``) installs the generated project INCLUDING
+#     the author's declared packages. Policy since 2026-10-07 ("open everything"): the
+#     author may use any npm package, fresh publishes and install scripts included.
+#     The sandbox is the isolation boundary, so its bunfig (:data:`BUILD_BUNFIG`, a.k.a.
+#     :data:`SANDBOX_BUNFIG`) sets no release-age floor and does not ignore scripts.
+#   * The API host (``generator_client._SubprocessRunner``) only ever installs our own
+#     toolchain: ``generator_client`` refuses a host build whose source declares author
+#     packages or authored build-shell files (``HostInstallRefused``, keyed on
+#     ``dependency_manifest.requires_sandbox``). That host holds the app's secrets,
+#     so as defence in depth its bunfig (:data:`HOST_BUNFIG`) pins the public npm
+#     registry, keeps the 7-day release-age floor and ``ignoreScripts``; any project
+#     ``.npmrc`` is deleted before install; and install + build run with
+#     :func:`host_build_env`, an allowlisted environment with no API secrets.
+"""Install-time bunfig for generated Paw Site builds.
 
-WHY THIS FILE HAS TO EXIST AT ALL. This workspace's protections live in a
-DEVELOPER'S HOME DIR (``~/.npmrc``, ``~/.bunfig.toml``) and are in no repo, so
-neither a fresh Daytona container nor the Coolify runtime image inherits any of
-them: no release-age floor, no ``ignoreScripts``. A build host that resolves from
-the open registry with lifecycle scripts enabled is strictly weaker than the
-runtime image beside it.
-
-``minimumReleaseAge`` is the same 7-day floor the dev machines enforce, expressed
-in SECONDS because that is bun's unit — 604800. It is the control that would catch
-a compromised fresh publish of an already-vetted package, which the allowlist
-cannot: the allowlist pins WHICH packages, and a caret pin still floats the
-VERSION.
-
-``ignoreScripts`` matters more on a build host than on a laptop. A postinstall
-script here runs with the host's network and filesystem, next to the artifact we
-are about to deploy — and on the Coolify path, as the backend user in the
-container holding the app's secrets. Nothing in the vetted set needs one.
-
-DELIBERATELY WRITTEN AT THE BUILD BOUNDARY, NOT TEMPLATED INTO THE GENERATED
-PROJECT. Two reasons: it is a property of the BUILD HOST, not of the customer's
-site, so it has no business in their source tree; and applying it at this boundary
-means a template change cannot silently drop it. It lands in the project dir
-because that is where bun looks.
-
-DISPLACES rather than merges. A project-emitted ``bunfig.toml`` is overwritten, not
-respected and not merged, so a future template change cannot lower the floor by
-shipping its own. No generated project emits one today; this is a guard against
-the change that would.
+The developer machines' protections live in ``~/.npmrc`` / ``~/.bunfig.toml``, in no
+repo, so neither a fresh container nor the deployed runtime image inherits them. The
+host bunfig is written at the build boundary (not templated into the project) so a
+template change cannot drop it, and it DISPLACES any project-supplied bunfig.toml so
+an author file cannot lower the host floor.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+from collections.abc import Mapping
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -62,37 +37,111 @@ logger = logging.getLogger(__name__)
 #: Where bun looks, relative to the project root it installs in.
 BUILD_BUNFIG_REL = "bunfig.toml"
 
-#: The release-age floor in seconds (7 days). ``BUILD_BUNFIG`` spells the same value
-#: out literally; ``test_dependency_resolver`` asserts they agree.
+#: The host release-age floor in seconds (7 days, bun's unit).
 MINIMUM_RELEASE_AGE_SECONDS = 604800
 
-#: The floor itself. Read the module docstring before changing either value.
-BUILD_BUNFIG = """# Written by pocketpaw's build lane — NOT part of your site's source.
-# Install-time supply-chain floor for this build. See bun_supply_chain.BUILD_BUNFIG.
+#: The SANDBOX bunfig: no floor, scripts allowed. The sandbox is the isolation.
+BUILD_BUNFIG = """# Written by pocketpaw's build lane for the Daytona build sandbox.
+# Author packages install here with no release-age floor and with lifecycle
+# scripts enabled: the sandbox is the isolation boundary. See bun_supply_chain.
 [install]
+"""
+SANDBOX_BUNFIG = BUILD_BUNFIG
+
+#: The HOST bunfig. Read the module header before changing either value.
+HOST_BUNFIG = """# Written by pocketpaw's build lane — NOT part of your site's source.
+# Install-time supply-chain floor for host builds. See bun_supply_chain.HOST_BUNFIG.
+[install]
+# The public registry, always. An authored bunfig/.npmrc never reaches the host, and
+# this pin means one that did still could not point the install anywhere else.
+registry = "https://registry.npmjs.org/"
 # 7 days, in seconds. Matches the floor the dev machines enforce via ~/.bunfig.toml.
 minimumReleaseAge = 604800
-# No lifecycle scripts. Nothing in the vetted dependency set needs one, and a
-# postinstall here would run beside the artifact we are about to deploy.
+# No lifecycle scripts. The host installs only our toolchain, and a postinstall here
+# would run next to the app's secrets.
 ignoreScripts = true
 """
 
 
-def write_build_bunfig(project_dir: str | Path) -> None:
-    """Write the floor into ``project_dir``, displacing any bunfig already there.
+def write_host_bunfig(project_dir: str | Path) -> None:
+    """Write the host floor into ``project_dir``, displacing any bunfig already there,
+    and delete any project ``.npmrc`` (any case spelling).
 
-    Call this IMMEDIATELY BEFORE spawning ``bun install``. Written after the install
-    has started, it is not a floor — it is a file.
-
-    Logs when it displaces one, because a generated project that started emitting a
-    bunfig is a template change someone should hear about rather than a condition to
-    swallow silently.
+    Call this IMMEDIATELY BEFORE spawning ``bun install`` on the API host. Logs when
+    it displaces a file, since authored install config is expected only in the sandbox.
     """
+    for entry in Path(project_dir).iterdir() if Path(project_dir).is_dir() else ():
+        if entry.name.casefold() == ".npmrc" and entry.is_file():
+            logger.warning(
+                "sites.build.npmrc_removed dir=%s — a project-supplied .npmrc was deleted "
+                "before the host install",
+                project_dir,
+            )
+            entry.unlink()
     target = Path(project_dir, BUILD_BUNFIG_REL)
     if target.is_file():
         logger.warning(
             "sites.build.bunfig_displaced dir=%s — a project-supplied bunfig.toml was "
-            "overwritten by the build lane's supply-chain floor",
+            "overwritten by the host build's supply-chain floor",
             project_dir,
         )
-    target.write_text(BUILD_BUNFIG, encoding="utf-8")
+    target.write_text(HOST_BUNFIG, encoding="utf-8")
+
+
+#: Environment variables a host ``bun install`` / ``bun run build`` may see. Toolchain
+#: plumbing only (search path, home and temp dirs, Windows system dirs, locale, bun's
+#: cache, TLS trust and proxy settings); never an API secret. Matched
+#: case-insensitively because Windows env names are.
+HOST_BUILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "TMP",
+        "TEMP",
+        "TMPDIR",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "OS",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TERM",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "BUN_INSTALL",
+        "BUN_INSTALL_CACHE_DIR",
+        "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    }
+)
+
+
+def host_build_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The scrubbed environment for a host ``bun install`` / ``bun run build``.
+
+    Only :data:`HOST_BUILD_ENV_ALLOWLIST` names pass, so the API's secrets (cloud
+    keys, database URLs, LLM keys) never reach a package manager or a build that
+    runs site code.
+    """
+    src = os.environ if environ is None else environ
+    return {k: v for k, v in src.items() if k.upper() in HOST_BUILD_ENV_ALLOWLIST}

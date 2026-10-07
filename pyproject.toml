@@ -481,6 +481,8 @@ dev = [
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
+    # parallel runs; scripts/flake_census.sh adds pytest-randomly per run with `uv run --with`
+    "pytest-xdist>=3.5,<4",
     "pytest-playwright>=0.4.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
@@ -603,6 +605,8 @@ dev = [
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
+    # parallel runs; scripts/flake_census.sh adds pytest-randomly per run with `uv run --with`
+    "pytest-xdist>=3.5,<4",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
     "pytest-playwright>=0.7.2",
@@ -686,8 +690,10 @@ camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--ignore=tests/cloud --ignore=tests/e2e"
+# --dist loadgroup keeps xdist_group-marked tests on one worker under -n; inert without -n.
+addopts = "--ignore=tests/cloud --ignore=tests/e2e --dist loadgroup"
 markers = [
+    "serial: test must run alone, outside the parallel phase; give the reason in a comment",
     "enforce_scope: opt a test out of the global _TESTING_FULL_ACCESS bypass so require_scope fails closed as in production",
 ]
 

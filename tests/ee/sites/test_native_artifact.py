@@ -478,6 +478,8 @@ async def test_native_artifact_store_hit_skips_build(beanie_test_db):
         "build_status": "none",
         "build_reason": None,
         "build_job_id": None,
+        # A body/css-only store holds no draft files, so there is no preview URL.
+        "preview_url": None,
     }
     assert store.writes == 0, "a cache hit must not re-store"
     assert pool.calls == [], "a cache hit must not queue a sandbox"

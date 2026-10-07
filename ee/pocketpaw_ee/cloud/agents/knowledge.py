@@ -6,11 +6,11 @@
 # and named: a site page's headings); the caller decides the scope string (``agent:{id}``,
 # ``workspace:{id}``, ``pocket:{id}``). File extraction runs through
 # ``ee.cloud.extraction`` and URL extraction through
-# ``sites.kb_ingest.html_to_markdown`` (a page's tables and headings kept); kb-go
-# does compile, search, index and storage.
+# ``sites.kb_ingest.html_to_markdown`` (a page's tables and headings kept).
+# PocketPaw compiles every article itself; kb-go only stores, indexes and searches.
 #
 # kb-go searches compiled articles only, so a fact a compile drops cannot be
-# found. Without an API key, ``ingest_document_to_scope`` splits a document over
+# found. ``ingest_document_to_scope`` splits a document over
 # ``_SECTION_HARD_MAX_CHARS`` (``knowledge_sections``) and compiles each section
 # with a restructure-not-compress prompt, three at a time under one deadline;
 # the receipt lists every article id. Concierge sources, site sync, the kb REST
@@ -19,11 +19,14 @@
 # the book agent does too, because it ingests inside a request.
 #
 # Invariants a reader must not break:
-#   * A document is NEVER stored verbatim. With ANTHROPIC_API_KEY, kb compiles
-#     it. Without one, ``_compile_article_with_agent`` compiles it through
-#     PocketPaw's own agent backend and pipes the article to
-#     ``kb ingest --article-json``. A compile failure raises; there is no
-#     fallback. Any receipt with ``compiled_with == "none (fallback)"`` is
+#   * kb-go never calls an LLM. Every compile runs through PocketPaw's own
+#     agent backend (``_compile_article_with_agent``, metered and observable)
+#     whatever keys the environment holds, and the article is piped to
+#     ``kb ingest --article-json``. ``_kb`` refuses the LLM-backed kb commands
+#     (plain ``ingest``, ``build``, ``recompile``, ``watch``, ``lint --llm``)
+#     before a subprocess starts.
+#   * A document is NEVER stored verbatim. A compile failure raises; there is
+#     no fallback. Any receipt with ``compiled_with == "none (fallback)"`` is
 #     rejected, and on the --article-json path a receipt with NO compiled_with
 #     means an old binary that ignored the flag (kb-go skips unknown flags), so
 #     that raises ``KnowledgeEngineUnavailable`` naming the article to purge.
@@ -48,10 +51,11 @@
 #     key order (id, article_id, article).
 """Agent knowledge service — thin wrapper over the `kb` Go binary.
 
-The kb binary (github.com/qbtrix/kb-go) handles compilation, search, indexing,
-and storage. URL extraction stays inline (HTML to Markdown). File extraction is
-routed through `ee.cloud.extraction.build_chain` so cloud captioning can be
-configured without touching this file.
+The kb binary (github.com/qbtrix/kb-go) handles search, indexing and storage;
+PocketPaw's agent backend compiles every article. URL extraction stays inline
+(HTML to Markdown). File extraction is routed through
+`ee.cloud.extraction.build_chain` so cloud captioning can be configured without
+touching this file.
 """
 
 from __future__ import annotations
@@ -214,8 +218,29 @@ class KnowledgeEngineUnavailable(RuntimeError):
     so a batch caller should stop rather than fail once per document."""
 
 
+# kb commands that make kb-go call an LLM itself. ``ingest`` is allowed only
+# with ``--article-json`` (a pre-compiled article) or ``--vec`` (a vector).
+_KB_COMPILE_COMMANDS = frozenset({"build", "recompile", "watch"})
+
+
+def _refuse_kb_compile(args: tuple[str, ...]) -> None:
+    """Raise before kb-go is asked to compile with its own LLM call."""
+    command = args[0] if args else ""
+    if (
+        command in _KB_COMPILE_COMMANDS
+        or (command == "ingest" and "--article-json" not in args and "--vec" not in args)
+        or (command == "lint" and "--llm" in args)
+    ):
+        raise RuntimeError(
+            f"kb-go must not compile: `kb {' '.join(args[:2])}` makes kb call an LLM. "
+            "Compile with PocketPaw's agent backend and write with `kb ingest --article-json`."
+        )
+
+
 def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict | list | str:
-    """Call kb binary, return parsed JSON or raw text."""
+    """Call kb binary, return parsed JSON or raw text. Refuses the LLM-backed
+    commands (``_refuse_kb_compile``)."""
+    _refuse_kb_compile(args)
     cmd = [KB_BIN, *args, "--json"]
     try:
         result = subprocess.run(
@@ -246,9 +271,7 @@ def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict |
         return result.stdout.strip()
 
 
-def _check_ingest_result(
-    result: dict | list | str, scope: str, *, require_compiled_with: bool = False
-) -> dict | list | str:
+def _check_ingest_result(result: dict | list | str, scope: str) -> dict | list | str:
     """Reject verbatim-fallback articles (defense in depth).
 
     kb-go marks an article it stored WITHOUT LLM compilation as
@@ -258,7 +281,7 @@ def _check_ingest_result(
     chat turn for junk snippets — so any ingest that produced one is treated
     as a failure, never a success.
 
-    ``require_compiled_with`` is the old-binary detector for the
+    A missing ``compiled_with`` is the old-binary detector for the
     ``--article-json`` path. kb-go parses flags by hand and silently IGNORES
     unknown flags — an old binary never errors on ``--article-json``; it
     reads the ``{"raw_text": ..., "article": ...}`` payload from stdin as
@@ -282,7 +305,7 @@ def _check_ingest_result(
             f"kb ingest produced a verbatim fallback article (scope={scope}, "
             f"article_id={article_id}); refusing to accept uncompiled content"
         )
-    if require_compiled_with and (not isinstance(result, dict) or "compiled_with" not in result):
+    if not isinstance(result, dict) or "compiled_with" not in result:
         article_id = "?"
         if isinstance(result, dict):
             article_id = (
@@ -443,15 +466,13 @@ def _normalized_article(article: dict, *, title: str, content: str, source: str)
 async def _compile_article_with_agent(text: str, source: str, lang: str | None = None) -> dict:
     """Compile ``text`` into a kb article using PocketPaw's own agent backend.
 
-    This is the no-ANTHROPIC_API_KEY path: kb's internal LLM compile cannot
-    run, so we produce the article with the same backend infrastructure the
-    chat runtime uses (``PocketPawCompilerBackend`` → agent registry → the
-    active backend, e.g. the Claude Code SDK backend which authenticates via
-    the CLI, not the API key).
+    The only compile path: the article is produced with the same backend
+    infrastructure the chat runtime uses (``PocketPawCompilerBackend`` → agent
+    registry → the active backend), so every compile is metered and observable
+    there. kb-go never compiles.
 
     ``lang`` (when the source is a recognized code file) steers the article
-    toward documenting code structure instead of prose-summarizing — the
-    keyless stand-in for the AST parse kb-go runs on the keyed path.
+    toward documenting code structure instead of prose-summarizing.
 
     Failures raise: compile timeouts and invalid/garbage articles are
     translated to ``RuntimeError``; backend-level errors (an unavailable
@@ -653,7 +674,7 @@ async def _ingest_compiled_article(scope: str, raw_text: str, article: dict) -> 
         # Belt-and-braces only: current kb-go parses flags by hand and
         # silently IGNORES unknown ones, so an old binary never produces
         # a flag error. The PRIMARY old-binary detector is the missing
-        # ``compiled_with`` key below (require_compiled_with).
+        # ``compiled_with`` key (``_check_ingest_result``).
         msg = str(exc)
         if "unknown flag" in msg or "flag provided but not defined" in msg:
             raise KnowledgeEngineUnavailable(
@@ -665,7 +686,7 @@ async def _ingest_compiled_article(scope: str, raw_text: str, article: dict) -> 
     # The paired binary ALWAYS emits compiled_with on this path; a result
     # without it means the flag was silently ignored (old binary) and the
     # payload was stored verbatim — reject loudly, naming the article.
-    return _check_ingest_result(result, scope, require_compiled_with=True)
+    return _check_ingest_result(result, scope)
 
 
 async def _ingest_sections(
@@ -825,30 +846,15 @@ class KnowledgeService:
         (e.g. ``"workspace:w1"``, ``"agent:a1"``, ``"pocket:p1"``). No
         validation here — kb-go rejects unknown scope shapes itself.
 
-        Compilation strategy (2026-08-04 hardening):
+        The article is compiled with PocketPaw's own agent backend and handed
+        to kb pre-compiled via ``kb ingest --article-json``; kb makes no LLM
+        call of its own, whatever keys the environment holds.
 
-        * ``ANTHROPIC_API_KEY`` set → plain ``kb ingest``; kb compiles the
-          article with its own LLM call (fast, works, unchanged).
-        * No key (e.g. the Claude Code agent-backend deployment) → compile
-          the article with PocketPaw's OWN agent backend and hand kb the
-          pre-compiled article via ``kb ingest --article-json``. kb makes no
-          LLM call of its own on this path.
-
-        Either way, a compile failure RAISES. There is no verbatim
+        A compile failure RAISES. There is no verbatim
         fallback — an uncompiled article poisons the scope and makes every
         chat turn pay O(raw corpus) search cost for junk snippets.
         """
-        lang = _lang_for_source(source)
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            args = ["ingest", "--scope", scope, "--source", source]
-            if lang:
-                # Stdin carries no file path, so kb-go can't detect the
-                # language itself — the hint re-enables its AST parse.
-                args += ["--lang", lang]
-            result = await asyncio.to_thread(_kb, *args, input_text=text)
-            return _check_ingest_result(result, scope)
-
-        article = await _compile_article_with_agent(text, source, lang=lang)
+        article = await _compile_article_with_agent(text, source, lang=_lang_for_source(source))
         return await _ingest_compiled_article(scope, text, article)
 
     @staticmethod
@@ -859,12 +865,12 @@ class KnowledgeService:
 
         The sectioned twin of :meth:`ingest_text_to_scope`, for callers whose
         documents can be long and dense (price lists, policies, spec sheets).
-        Without ``ANTHROPIC_API_KEY``, a document over ``_SECTION_HARD_MAX_CHARS``
-        is split by ``split_into_sections`` and each section is compiled and
-        ingested as its own article (``_ingest_sections``); the receipt lists
-        every article id under ``articles``. A short document, and every
-        document on the API-key path, goes through :meth:`ingest_text_to_scope`
-        unchanged, and its receipt gains a one-element ``articles`` list.
+        A document over ``_SECTION_HARD_MAX_CHARS`` is split by
+        ``split_into_sections`` and each section is compiled and ingested as its
+        own article (``_ingest_sections``); the receipt lists every article id
+        under ``articles``. A short document goes through
+        :meth:`ingest_text_to_scope` unchanged, and its receipt gains a
+        one-element ``articles`` list.
 
         ``doc_key`` is the caller's stable identity for the document (a source
         id, a site page). It is hashed into every section title, so two
@@ -875,15 +881,12 @@ class KnowledgeService:
         Raises when nothing was ingested. A partial result returns with
         ``sections_failed`` > 0 and a ``failures`` list.
         """
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            sections = split_into_sections(
-                text, target=_SECTION_TARGET_CHARS, hard_max=_SECTION_HARD_MAX_CHARS
-            )
-            if len(sections) > 1:
-                tag = _document_tag(scope, source, doc_key)
-                return await _ingest_sections(
-                    scope, sections, source, _lang_for_source(source), tag
-                )
+        sections = split_into_sections(
+            text, target=_SECTION_TARGET_CHARS, hard_max=_SECTION_HARD_MAX_CHARS
+        )
+        if len(sections) > 1:
+            tag = _document_tag(scope, source, doc_key)
+            return await _ingest_sections(scope, sections, source, _lang_for_source(source), tag)
         result = await KnowledgeService.ingest_text_to_scope(scope, text, source)
         if isinstance(result, dict):
             article_id = extract_ingest_article_id(result)
@@ -942,8 +945,8 @@ class KnowledgeService:
             text = await _extract_file(file_path)
             return await KnowledgeService.ingest_document_to_scope(f"agent:{agent_id}", text, label)
         # Text/code files: read in Python and route through the common ingest
-        # path so they get the same compile guarantees (agent-backend compile
-        # without an API key, verbatim-fallback rejection) as every other doc.
+        # path so they get the same compile guarantees (agent-backend compile,
+        # verbatim-fallback rejection) as every other doc.
         text = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
         return await KnowledgeService.ingest_document_to_scope(f"agent:{agent_id}", text, label)
 

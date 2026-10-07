@@ -320,9 +320,9 @@ async def _pocket(source: dict[str, Any], pattern: str = "landing") -> str:
 
 class TestPrewarmPreflight:
     async def test_a_legacy_build_shell_pocket_is_not_queued(self, beanie_test_db) -> None:
-        from tests.ee.sites.test_legacy_build_shell import SVELTE_VITE
-
-        pocket_id = await _pocket({**_SVELTE, "vite.config.ts": SVELTE_VITE})
+        # A lockfile stays generator-owned (package.json / vite.config.* are the
+        # author's since 2026-10-07).
+        pocket_id = await _pocket({**_SVELTE, "bun.lock": "{}"})
 
         class _Pool:
             calls = 0

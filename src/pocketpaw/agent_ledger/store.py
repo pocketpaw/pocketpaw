@@ -37,6 +37,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import Counter
@@ -48,7 +49,7 @@ import aiosqlite
 
 from pocketpaw.agent_ledger.models import ATTR_CART_CURRENCY, ATTR_CART_VALUE_CENTS, LedgerRow
 from pocketpaw.money import DEFAULT_EXPONENT, convert_legacy_minor, exponent
-from pocketpaw.sqlite_migrations import run_once
+from pocketpaw.sqlite_migrations import checkpoint_wal, run_once
 
 logger = logging.getLogger(__name__)
 
@@ -208,8 +209,7 @@ class AgentLedgerStore:
         """
         self._initialized = False
         try:
-            async with aiosqlite.connect(self._db_path) as db:
-                await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await asyncio.to_thread(checkpoint_wal, self._db_path)
         except Exception:  # noqa: BLE001 — eviction cleanup is best-effort
             logger.debug("AgentLedgerStore.aclose checkpoint skipped", exc_info=True)
 

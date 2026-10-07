@@ -1,6 +1,5 @@
 """Tests for session index management and REST endpoints.
 
-Created: 2026-02-10
 Tests Phase A (session index), Phase B (WS switching), Phase D (recent), Phase E (search).
 """
 
@@ -406,7 +405,7 @@ class TestWebSocketSessionSwitching:
         ``dashboard_ws`` gates a resume on a file existing at the hardcoded
         ``Path.home() / ".pocketpaw" / "memory" / "sessions"`` and then loads
         history through ``get_memory_manager()._store``. Point both at the same
-        tmp-path location so the resume test stays fully isolated from the real
+        tmp-path location so the resume and traversal tests stay isolated from the real
         ``~/.pocketpaw`` while exercising the genuine resume-reads-persisted-
         session path. Returns the swapped FileMemoryStore so the test can write
         its session file under ``store.sessions_path``.
@@ -502,7 +501,7 @@ class TestWebSocketSessionSwitching:
             if session_file.exists():
                 session_file.unlink()
 
-    def test_websocket_resume_session_path_traversal_blocked(self, client):
+    def test_websocket_resume_session_path_traversal_blocked(self, client, _hermetic_home_store):
         """Path traversal in resume_session must be rejected (falls back to fresh session).
 
         The payload ``websocket_x/../../escaped`` produces:
@@ -544,7 +543,7 @@ class TestWebSocketSessionSwitching:
         finally:
             escaped_target.unlink(missing_ok=True)
 
-    def test_websocket_switch_session_path_traversal_blocked(self, client):
+    def test_websocket_switch_session_path_traversal_blocked(self, client, _hermetic_home_store):
         """Path traversal in switch_session must return empty history.
 
         Same strategy as above: a decoy file is placed at the escaped

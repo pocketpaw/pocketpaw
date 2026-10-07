@@ -548,8 +548,8 @@
   {
     "label": "CR-5 tags: the run's usage (what the meter prices) no longer names the site and widget",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "            usage = {**_usage(settings, result), **spend_tags}\n",
-    "replace": "            usage = _usage(settings, result)\n",
+    "find": "            usage = {**_usage(settings, result, model_spec), **spend_tags}\n",
+    "replace": "            usage = _usage(settings, result, model_spec)\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_the_metered_call_is_tagged_with_the_site_and_widget"
     ]
@@ -624,6 +624,34 @@
     "replace": "                    if True:\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_contact.py::test_a_contact_request_the_provider_failed_gets_the_lead_card"
+    ]
+  },
+  {
+    "label": "agent model: the owner's pick on the concierge agent is ignored again",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        model = _build_model(settings, model_spec)\n",
+    "replace": "        model = _build_model(settings, _model_spec(settings))\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_agent_model.py::test_the_bound_agents_model_builds_the_turn",
+      "tests/cloud/test_paw_bar_concierge_v2_agent_model.py::test_a_claude_sdk_agent_still_gets_one_tool_free_call_on_its_model"
+    ]
+  },
+  {
+    "label": "agent model: proxy attribution reads the deployment model, not the turn's",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        provider, _model = _builder(settings)._parse_provider_model(spec)\n",
+    "replace": "        provider, _model = _builder(settings)._parse_provider_model(_model_spec(settings))\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_agent_model.py::test_proxy_attribution_follows_the_resolved_provider"
+    ]
+  },
+  {
+    "label": "agent model: an agent in another workspace is followed",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if agent is not None and agent.workspace_id == workspace_id and not agent.disabled:\n",
+    "replace": "        if agent is not None and not agent.disabled:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_agent_model.py::test_an_agent_in_another_workspace_is_never_followed"
     ]
   }
 ]

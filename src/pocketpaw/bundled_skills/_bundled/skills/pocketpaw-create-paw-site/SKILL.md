@@ -93,9 +93,9 @@ verification }`; hand `pocket_id` to `publish` exactly like the copy path
 (STEP 3). If `ok` is false, relay the error.
 
 **npm packages on this track.** Pass `dependencies=[{"name": "gsap"}]` (or
-call `set_site_dependencies(pocket_id, add=[...])` later). Each is
-policy-checked, pinned, and served from jsDelivr with SRI through a generated
-importmap, so import it by bare name inside a module script:
+call `set_site_dependencies(pocket_id, add=[...])` later). Any public npm
+package, version or dist-tag works; each is pinned and served from jsDelivr
+through a generated importmap, so import it by bare name inside a module script:
 `<script type="module">import { gsap } from 'gsap';</script>`. A package in
 `rejected` must not be imported.
 

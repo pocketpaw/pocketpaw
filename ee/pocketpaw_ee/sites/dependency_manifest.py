@@ -1,24 +1,24 @@
 # dependency_manifest.py — the shape and the rules of ``paw.dependencies.json``.
 #
-# Updated: 2026-10-02 (fix/canon-cross-repo-pins, CN-8). ``TOOLCHAIN_RESERVED`` and
-# ``MAX_DECLARED_PACKAGES`` are read from the vendored paw-sites allowlist
-# (``vetted_pins.VENDORED_ALLOWLIST``, i.e. ``paw-sites-gen allowlist`` at a pinned
-# commit) instead of being hand copies of paw-sites' ``TOOLCHAIN_RESERVED`` /
-# ``MAX_AUTHOR_PACKAGES``. Same values today; paw-sites' ``@scope/*`` spelling is
-# turned into this module's ``@scope/``, and import fails on any other ``*`` pattern.
-# Still network-free: the file is package data.
+# Authors declare npm packages on the svelte, react and html tracks. The resolved
+# set rides the pocket's own source map as ONE reserved file, ``paw.dependencies.json``,
+# so draft versioning, revert, the preview content hash, the project zip and
+# ``read_site_source`` all see it without a second storage field. Cross-repo
+# contract: docs/design/drafts/2026-09-24-sites-deps-verify-contract.md §1/§2.
+# ``TOOLCHAIN_RESERVED`` comes from the vendored paw-sites allowlist (package data, so
+# still network-free). It is empty: authors may declare toolchain names too, and there
+# is no package-count cap (the vendored ``maxAuthorPackages`` is null).
 #
-# Created: 2026-09-24 (feat/sites-author-dependencies, PP-1). Authors can now
-# declare npm packages on the svelte, react and html tracks. The resolved set rides
-# the pocket's own source map as ONE reserved file, ``paw.dependencies.json``, so
-# draft versioning, revert, the preview content hash, the project zip and
-# ``read_site_source`` all see it without a second storage field. The cross-repo
-# contract is docs/design/drafts/2026-09-24-sites-deps-verify-contract.md §1/§2.
+# It also owns ``requires_sandbox``, the one host-vs-sandbox predicate: a source that
+# declares packages OR carries any authored build-shell file (package.json,
+# vite.config.*, svelte.config.*, bunfig.toml, .npmrc) never builds on the API host.
+# Invariant: every caller deciding host vs sandbox uses it, never
+# ``has_author_dependencies`` alone, and it fails closed.
 #
-# This module is deliberately network-free and dependency-free. It is imported by
-# the three path policies, by ``generator_client`` (the host-install guard) and by
-# ``project_zip``; the resolver that talks to the npm registry lives next door in
-# ``dependency_resolver`` and imports THIS, never the other way round.
+# Network-free and dependency-free: imported by the path policies, by
+# ``generator_client`` (the host-install guard), ``service``/``verify`` (routing) and
+# ``project_zip``; the registry resolver lives in ``dependency_resolver`` and imports
+# THIS, never the other way round.
 """The ``paw.dependencies.json`` manifest: path, schema, and name/version rules.
 
 Only the resolver writes this file (``sites.service.set_site_dependencies`` and the
@@ -43,9 +43,6 @@ DEPENDENCY_MANIFEST_PATH = "paw.dependencies.json"
 
 #: The manifest schema version this module writes and reads.
 MANIFEST_SCHEMA = 1
-
-#: Most packages one site may declare (contract §2). paw-sites ``MAX_AUTHOR_PACKAGES``.
-MAX_DECLARED_PACKAGES: int = int(VENDORED_ALLOWLIST["maxAuthorPackages"])
 
 #: npm's own ceiling on a package name.
 MAX_NAME_LENGTH = 214
@@ -80,11 +77,14 @@ _BLOCKED_NAMES = frozenset(
     }
 )
 
-#: Toolchain-owned packages an author may not declare (contract §2), from paw-sites
-#: ``TOOLCHAIN_RESERVED``. A string ending in ``/`` reserves the whole scope (paw-sites
-#: writes ``@scope/*``). paw-sites' ``engineToolchainReserved`` (motion, ripple only)
-#: needs no twin here: ripple is not in ``DEPENDENCY_ENGINES``.
-_RESERVED_RAW: list[str] = VENDORED_ALLOWLIST["toolchainReserved"]
+#: Toolchain-owned packages an author may not declare, from paw-sites
+#: ``TOOLCHAIN_RESERVED``. Empty since paw-sites retired it: an author may declare a
+#: toolchain name and their version wins over the generator's pin. Still read, so a
+#: re-vendor that reserves names again takes effect. A string ending in ``/``
+#: reserves the whole scope (paw-sites writes ``@scope/*``). paw-sites'
+#: ``engineToolchainReserved`` needs no twin here: ripple is not in
+#: ``DEPENDENCY_ENGINES``.
+_RESERVED_RAW: list[str] = list(VENDORED_ALLOWLIST.get("toolchainReserved") or [])
 # A '*' anywhere but a trailing '/*' would be a pattern this module cannot honour.
 # A raise, not an assert, so it still fires under python -O.
 if any("*" in e and not (e.endswith("/*") and e.count("*") == 1) for e in _RESERVED_RAW):
@@ -96,16 +96,38 @@ VITE_CONFIG_FILES: tuple[str, ...] = tuple(
     f"vite.config.{ext}" for ext in ("ts", "js", "mjs", "mts", "cjs", "cts")
 )
 
-#: Install configuration and lockfiles an authored map may never ship: each one
-#: changes how ``bun install`` resolves (registry, release-age floor, pinned tree),
-#: which is the build lane's decision, not the author's (paw-sites PS-1).
-INSTALL_CONFIG_FILES: tuple[str, ...] = (
-    "bunfig.toml",
-    ".npmrc",
-    "bun.lock",
-    "bun.lockb",
-    "package-lock.json",
+#: Install configuration an author MAY ship at the project root (2026-10-07). It
+#: only takes effect in the Daytona sandbox; a host install displaces bunfig.toml
+#: with the host floor (``bun_supply_chain.write_host_bunfig``).
+AUTHOR_INSTALL_CONFIG_FILES: tuple[str, ...] = ("bunfig.toml", ".npmrc")
+
+#: Lockfiles stay generator-owned: the generator merges the author's package.json
+#: with its toolchain, so an authored lockfile would pin a tree that no longer matches.
+LOCKFILES: tuple[str, ...] = ("bun.lock", "bun.lockb", "package-lock.json")
+
+#: Every install-config file (the legacy build-shell classifier still recognises all
+#: of them in old source maps).
+INSTALL_CONFIG_FILES: tuple[str, ...] = (*AUTHOR_INSTALL_CONFIG_FILES, *LOCKFILES)
+
+#: Build-shell files an author may write at the project root on svelte and react
+#: (2026-10-07). The paw-sites generator merges them with its toolchain.
+AUTHOR_SHELL_FILES: tuple[str, ...] = (
+    "package.json",
+    *VITE_CONFIG_FILES,
+    *AUTHOR_INSTALL_CONFIG_FILES,
 )
+
+#: Every spelling of the SvelteKit config. Only ``svelte.config.js`` is authorable,
+#: but the sandbox-routing check matches them all so a spelling cannot slip past it.
+SVELTE_CONFIG_FILES: tuple[str, ...] = tuple(
+    f"svelte.config.{ext}" for ext in ("js", "ts", "mjs", "mts", "cjs", "cts")
+)
+
+#: Root files whose presence in a source map forces the build into the sandbox
+#: (:func:`requires_sandbox`): every author-writable build-shell file. Each one
+#: changes what ``bun install`` / ``bun run build`` fetches or executes.
+SANDBOX_ONLY_SHELL_FILES: tuple[str, ...] = (*AUTHOR_SHELL_FILES, *SVELTE_CONFIG_FILES)
+_SANDBOX_ONLY_FOLDED = frozenset(f.casefold() for f in SANDBOX_ONLY_SHELL_FILES)
 
 #: Engines whose authored code can import a declared package. ripple has no
 #: authored code, so it refuses a manifest.
@@ -228,6 +250,39 @@ def has_author_dependencies(source: Mapping[str, Any] | None) -> bool:
         return True
 
 
+def author_build_shell_files(source: Mapping[str, Any] | None) -> list[str]:
+    """The source-map keys that land on an author-writable build-shell file.
+
+    Normalized like :func:`is_dependency_manifest_path` (backslashes, ``.``/``..``
+    segments, a leading ``/``) and compared case-insensitively, with trailing dots
+    and spaces dropped because Windows drops them too: any spelling that would
+    materialize as ``package.json`` at the project root counts.
+    """
+    if not isinstance(source, Mapping):
+        return []
+    hits: list[str] = []
+    for key in source:
+        if not isinstance(key, str):
+            continue
+        norm = posixpath.normpath(key.replace("\\", "/")).lstrip("/").rstrip(". ")
+        if norm.casefold() in _SANDBOX_ONLY_FOLDED:
+            hits.append(key)
+    return sorted(hits)
+
+
+def requires_sandbox(source: Mapping[str, Any] | None) -> bool:
+    """True when building ``source`` must happen in the Daytona sandbox, never the host.
+
+    The single host-vs-sandbox predicate: the host-install refusal, the publish
+    routing and verify all key on it. A source needs the sandbox when it declares
+    packages (:func:`has_author_dependencies`, fail-closed) OR carries any authored
+    build-shell file (package.json, vite.config.*, svelte.config.*, bunfig.toml,
+    .npmrc). Those files steer the install and the build: an authored ``.npmrc``
+    can point bun at another registry and send it a token read from the host env.
+    """
+    return has_author_dependencies(source) or bool(author_build_shell_files(source))
+
+
 def author_packages(source: Mapping[str, Any] | None) -> dict[str, str]:
     """``{name: exact_version}`` for a source map's manifest, ``{}`` when absent.
 
@@ -247,14 +302,19 @@ def author_packages(source: Mapping[str, Any] | None) -> dict[str, str]:
 
 
 __all__ = [
+    "AUTHOR_INSTALL_CONFIG_FILES",
+    "AUTHOR_SHELL_FILES",
+    "SANDBOX_ONLY_SHELL_FILES",
+    "SVELTE_CONFIG_FILES",
     "DEPENDENCY_ENGINES",
+    "LOCKFILES",
     "DEPENDENCY_MANIFEST_PATH",
     "EXACT_VERSION_RE",
     "INSTALL_CONFIG_FILES",
     "VITE_CONFIG_FILES",
     "MANIFEST_SCHEMA",
-    "MAX_DECLARED_PACKAGES",
     "TOOLCHAIN_RESERVED",
+    "author_build_shell_files",
     "author_packages",
     "has_author_dependencies",
     "is_dependency_manifest_path",
@@ -263,5 +323,6 @@ __all__ = [
     "manifest_text",
     "npm_name_problem",
     "parse_manifest",
+    "requires_sandbox",
     "render_manifest",
 ]

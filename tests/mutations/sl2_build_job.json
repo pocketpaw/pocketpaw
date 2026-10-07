@@ -31,8 +31,8 @@
   {
     "label": "the enqueue stops scrubbing the per-site capture key, so a real secret is written into the Redis job payload and uploaded into a third-party sandbox — the exposure the ephemeral-sandbox decision rests on NOT being durable",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "            scrub_build_input(generator_input),",
-    "replace": "            generator_input,",
+    "find": "            site_id,\n            scrub_build_input(generator_input),",
+    "replace": "            site_id,\n            generator_input,",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestTheCaptureSecretNeverLeavesThisProcess::test_the_key_never_enters_the_arq_payload"
     ]

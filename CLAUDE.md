@@ -110,8 +110,19 @@ uv run pocketpaw update                     # Update to latest version via uv
 #   uv sync --group ee --group dev --extra knowledge
 # Without pocketpaw_ee, tests/ee and tests/cloud FAIL collection (they used to skip).
 # The pyproject addopts hide tests/cloud: run it explicitly with -o addopts="".
-uv run pytest --ignore=tests/e2e
+# The default is 4 pytest-xdist workers (what CI runs); plain serial still works.
+uv run pytest -n 4 --ignore=tests/e2e
 uv run pytest tests/cloud -o addopts=""
+
+# Changing global state (a module-level cache, singleton, env var, file under
+# HOME)? Run the flake census: the default suite N times on xdist in random
+# order, then once serially, ranking the tests that fail
+# (writes .flake-census/<stamp>.tsv + -summary.txt).
+scripts/flake_census.sh -r 10 -n 4
+# A test that truly cannot share a worker pool gets @pytest.mark.serial plus a
+# one-line reason comment; CI skips it in the parallel run and runs it alone after.
+# Tests that only collide with each other (one on-disk file, say) share a worker
+# with @pytest.mark.xdist_group("name"); addopts runs --dist loadgroup.
 
 # Run only the OSS-core test scope (passes on an OSS-only `uv sync --dev`)
 uv run pytest --ignore=tests/e2e --ignore=tests/cloud --ignore=tests/ee

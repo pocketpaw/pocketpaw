@@ -154,12 +154,13 @@ async def test_live_publish_runs_smoke(beanie_test_db):
 
 async def test_live_publish_still_rolls_back_on_smoke_failure(beanie_test_db, edit_verifier):
     """PERF-4 guard, carried through PP-2: edit_svelte_component still ROLLS BACK the
-    persisted source when the edit does not build — the gate is now the verify
-    pipeline's build layer, and the exception is still a ``SmokeGateFailed``.
+    persisted source when the edit does not compile — the gate is now the verify
+    pipeline's STATIC layer (the build runs after the edit returns), and the exception
+    is still a ``SmokeGateFailed``.
     """
     from tests.ee.sites.conftest import verdict_with
 
-    edit_verifier.verdict = verdict_with(build="failed")
+    edit_verifier.verdict = verdict_with(static="failed", build="skipped", browser="skipped")
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
     with pytest.raises(SmokeGateFailed):

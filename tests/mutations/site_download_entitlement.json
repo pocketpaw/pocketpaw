@@ -2,8 +2,8 @@
   {
     "label": "the grant is deleted — a paying site is told it may not download its own project",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "        project_download = tier.key in _PROJECT_DOWNLOAD_PLANS",
-    "replace": "        project_download = False",
+    "find": "    return tier is not None and tier.key in _SITE_CODE_PLANS",
+    "replace": "    return False",
     "tests": [
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_paying_site_may_download_its_project",
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_the_download_grant_leaves_the_other_paid_capabilities_alone"
@@ -12,8 +12,8 @@
   {
     "label": "the allow-set is never consulted — anything reaching the paid branch is granted",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "        project_download = tier.key in _PROJECT_DOWNLOAD_PLANS",
-    "replace": "        project_download = True",
+    "find": "    return tier is not None and tier.key in _SITE_CODE_PLANS",
+    "replace": "    return tier is not None",
     "tests": [
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_free_site_with_an_active_subscription_is_still_withheld"
     ]
@@ -21,8 +21,8 @@
   {
     "label": "the grant matches the RAW plan_tier — every un-migrated legacy key is demoted",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "        project_download = tier.key in _PROJECT_DOWNLOAD_PLANS",
-    "replace": "        project_download = plan_tier in _PROJECT_DOWNLOAD_PLANS",
+    "find": "    return tier is not None and tier.key in _SITE_CODE_PLANS",
+    "replace": "    return plan_tier in _SITE_CODE_PLANS",
     "tests": [
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_legacy_key_resolves_to_the_tier_that_carries_the_same_capabilities"
     ]
@@ -30,8 +30,8 @@
   {
     "label": "the fail-closed default inverts — a free, lapsed or unknown site is handed the download",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "    project_download = False\n    if tier is not None and subscription_active:",
-    "replace": "    project_download = True\n    if tier is not None and subscription_active:",
+    "find": "    if not _subscription_is_active(subscription_status):\n        return False\n    tier = site_plan_catalog.site_scoped_tier(plan_tier)\n    return tier is not None and tier.key in _SITE_CODE_PLANS",
+    "replace": "    if not _subscription_is_active(subscription_status):\n        return True\n    tier = site_plan_catalog.site_scoped_tier(plan_tier)\n    return tier is None or tier.key in _SITE_CODE_PLANS",
     "tests": [
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_free_site_may_not_download_its_project",
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_retired_or_unknown_tier_may_not_download",
@@ -50,8 +50,8 @@
   {
     "label": "the free floor is added to the allow-set — the download stops being a paid capability",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "_PROJECT_DOWNLOAD_PLANS = frozenset({\"site\", \"staff\", \"site_year\", \"staff_year\"})",
-    "replace": "_PROJECT_DOWNLOAD_PLANS = frozenset({\"free\", \"site\", \"staff\", \"site_year\", \"staff_year\"})",
+    "find": "_SITE_CODE_PLANS = frozenset({\"site\", \"staff\", \"site_year\", \"staff_year\"})",
+    "replace": "_SITE_CODE_PLANS = frozenset({\"free\", \"site\", \"staff\", \"site_year\", \"staff_year\"})",
     "tests": [
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_the_free_floor_is_not_in_the_granting_set",
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_free_site_with_an_active_subscription_is_still_withheld"
@@ -60,8 +60,8 @@
   {
     "label": "the top rung is dropped from the allow-set — the most expensive site loses the feature",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "_PROJECT_DOWNLOAD_PLANS = frozenset({\"site\", \"staff\", \"site_year\", \"staff_year\"})",
-    "replace": "_PROJECT_DOWNLOAD_PLANS = frozenset({\"site\", \"site_year\", \"staff_year\"})",
+    "find": "_SITE_CODE_PLANS = frozenset({\"site\", \"staff\", \"site_year\", \"staff_year\"})",
+    "replace": "_SITE_CODE_PLANS = frozenset({\"site\", \"site_year\", \"staff_year\"})",
     "tests": [
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_paying_site_may_download_its_project",
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_the_free_floor_is_not_in_the_granting_set"
@@ -70,8 +70,8 @@
   {
     "label": "the subscription half of the gate is dropped — a cancelled site downloads forever",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "    if tier is not None and subscription_active:",
-    "replace": "    if tier is not None:",
+    "find": "    if not _subscription_is_active(subscription_status):\n        return False\n    tier = site_plan_catalog.site_scoped_tier(plan_tier)",
+    "replace": "    tier = site_plan_catalog.site_scoped_tier(plan_tier)",
     "tests": [
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_paid_tier_without_an_active_subscription_may_not_download",
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_a_legacy_key_without_a_paying_subscription_is_still_withheld",
@@ -85,6 +85,15 @@
     "replace": "    project_download: bool = True",
     "tests": [
       "tests/cloud/entitlements/test_site_download_entitlement.py::test_the_field_defaults_to_withheld_when_a_construction_omits_it"
+    ]
+  },
+  {
+    "label": "the resolver re-derives the download instead of asking the shared predicate, so it can drift from the Code tab",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    project_download = site_code_entitled(\n        plan_tier=plan_tier, subscription_status=subscription_status\n    )",
+    "replace": "    project_download = tier is not None and tier.key in _SITE_CODE_PLANS",
+    "tests": [
+      "tests/cloud/entitlements/test_site_download_entitlement.py::test_the_download_and_the_code_tab_read_one_predicate"
     ]
   }
 ]

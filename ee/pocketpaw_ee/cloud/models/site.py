@@ -303,6 +303,13 @@ class Site(TimestampedDocument):
     # Stable across re-publishes (publish reuses the stored value) so the D1
     # binding target — and the data behind it — never moves under a live site.
     d1_database_id: str = ""
+    # Bundle-deploy backends ``sites.binding_provisioner`` created for this site,
+    # keyed by the binding NAME the build requested: namespace id per KV binding,
+    # bucket name per R2 binding. Written only by the provisioner (never from
+    # author input), saved right after each create so a retry reuses rather than
+    # duplicates, and torn down by the delete cascade's ``bindings`` step.
+    kv_namespaces: dict[str, str] = Field(default_factory=dict)
+    r2_buckets: dict[str, str] = Field(default_factory=dict)
     # DP0-1: where a dynamic site sits in the durable D1 provision job
     # (none | provisioning | provisioned | failed). Contract: the job persists
     # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still
@@ -831,6 +838,11 @@ class Site(TimestampedDocument):
     # back to the globe on empty, so this is never a gate on publishing. Defaults ""
     # so every existing row reads "no icon" — no migration.
     favicon_url: str = ""
+    # What a CONNECTED site's own homepage calls itself (its <title>, else
+    # og:title), sanitised and capped. Written by ``sites.connected_card`` from one
+    # safe fetch of the verified origin. Never the owner's ``name``: the card shows
+    # name, then this, then the host. "" for hosted sites and rows that predate it.
+    origin_title: str = ""
     # The site owner's record of WHO this site is for, and what they have billed
     # them. Two billing relationships meet on this document and they are not the
     # same one: ``plan_tier`` / ``subscription_status`` above are what the owner

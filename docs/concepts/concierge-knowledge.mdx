@@ -115,11 +115,11 @@ one publish into an unbounded run of article compilations.
 ### Every article is LLM-compiled — never stored verbatim
 
 Ingest always compiles the extracted text into structured articles (title, summary,
-markdown content) before anything is stored. On deployments with an
-`ANTHROPIC_API_KEY`, the kb binary runs that compilation itself. On deployments
-without one (for example the Claude Code agent-backend cloud box), PocketPaw
-compiles the articles with its own agent backend and hands them pre-compiled to the
-kb binary. If compilation fails, the ingest **fails loudly**. The document is never
+markdown content) before anything is stored. PocketPaw compiles every article with
+its own agent backend, the same metered LLM path chat uses, and hands it
+pre-compiled to the kb binary. The kb binary only stores, indexes and searches; it
+never calls an LLM, so no `ANTHROPIC_API_KEY` is needed or used for knowledge. If
+compilation fails, the ingest **fails loudly**. The document is never
 stored verbatim, because uncompiled raw text poisons the scope and makes every chat
 turn pay full-corpus search cost for junk snippets.
 
@@ -128,8 +128,7 @@ turn pay full-corpus search cost for junk snippets.
 The knowledge base searches compiled articles only; the raw text it keeps beside them
 is never searched. So a fact the compiler leaves out cannot be found, and owners'
 documents (price lists, policies, contracts, spec sheets) are dense: every line is a
-fact. On the agent-backend path, site pages and knowledge sources go through a
-sectioned ingest:
+fact. So site pages and knowledge sources go through a sectioned ingest:
 
 - **A document over 2,000 characters is split into sections** of about 1,500
   characters. Cuts fall at headings (markdown headings and heading-like lines in PDF
@@ -160,9 +159,8 @@ binary's context search returns an article's body only below that, and the conci
 keeps up to 2,000 characters of each retrieved item. One question can pull in
 several sections of the same document.
 
-A document of 2,000 characters or less is still compiled whole, as is everything on
-the `ANTHROPIC_API_KEY` path. For whole-document compiles on the agent backend, two
-bounds apply:
+A document of 2,000 characters or less is still compiled whole. For whole-document
+compiles, two bounds apply:
 
 - **The compiler sees at most the first 80,000 characters** of a document. The
   full raw text is still stored alongside the article, but for a very large
@@ -423,10 +421,25 @@ size guide whose every section says "size" and whose answer sits under "Footwear
 a lead that is a section of a sectioned page brings the rest of that page with it,
 right after the lead and in page order, up to half the budget.
 
-The model and the reply cap are fixed per deployment:
-`POCKETPAW_PAWBAR_CONCIERGE_MODEL` (a pydantic_ai model spec such as `litellm:<model>`;
-empty uses the deployment's pydantic_ai default) and
-`POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS` (default 600).
+The model follows the owner's pick on the concierge's agent: the agent bound to the
+widget, else the site's dedicated `concierge-<site_id>` agent. Only its provider and model
+are used. The turn is still the one tool-free call above, whatever backend the agent runs
+on, so a Claude Agent SDK or Codex agent's tools, MCP servers and skills never reach a
+visitor. A pydantic_ai agent's model is used as is; another backend's model is paired with
+that backend's provider setting (`claude_sdk_provider` and the like) and used when
+pydantic_ai can serve that provider. When the agent has no model, or one pydantic_ai can't
+reach (Codex, opencode, Copilot, Google ADK), the deployment's
+`POCKETPAW_PAWBAR_CONCIERGE_MODEL` (a pydantic_ai model spec such as `litellm:<model>`)
+applies, and when that is empty the deployment's pydantic_ai default. The choice is cached
+for 30 seconds per agent, so a changed model shows up within that window. Spend
+attribution on the proxy and usage pricing use the same model.
+
+The eval gate certifies the deployment's model and governs only the automatic move from
+legacy to v2. An owner's explicit model on their own agent is honoured at runtime without
+a gate report.
+
+The reply cap is fixed per deployment: `POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS`
+(default 2000).
 
 ### What a v2 reply can contain
 
