@@ -8,6 +8,8 @@
 #                                 (admin-gated); optional GitHub remote
 #   * GET  /belt/runs           — list this workspace's station runs (newest-first)
 #   * GET  /belt/runs/{action_id} — one run + its proposed diff (capped ~200 KB)
+#   * GET  /belt/runs/{action_id}/feed?stage=develop — what a station step did,
+#                                 as chat-shaped ``steps`` (``belt.read``)
 #
 # Updated: 2026-06-11 (feat/belt-repo-init) — added ``POST /belt/repos/init``.
 # Same ADMIN gate as the add-repo mutation (``belt.manage``) and the same
@@ -32,7 +34,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud._core.deps import (
@@ -194,6 +196,22 @@ async def get_run(
     confirm a cross-tenant Action exists)."""
     try:
         return await belt_service.get_run(workspace_id, action_id)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/runs/{action_id}/feed")
+async def get_run_feed(
+    action_id: str,
+    stage: str = Query(default="develop", pattern=r"^[a-z]{1,20}$"),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """What one station step of a run did: ``{action_id, stage, steps?,
+    stepsOmitted?}``, the steps in the chat history wire shape. No ``steps``
+    key when the stage recorded none; a foreign or non-belt run is a 404."""
+    try:
+        return await belt_service.get_run_feed(workspace_id, action_id, stage)
     except belt_service.BeltConsoleError as exc:
         raise _to_cloud_error(exc) from exc
 

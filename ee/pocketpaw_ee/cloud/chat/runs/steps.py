@@ -1,25 +1,26 @@
-"""Record the tool calls and thinking an agent run streams, for the Message.
+"""Record the tool calls and thinking an agent run streams, as ordered steps.
 
-Created: 2026-09-28 (feat/persist-tool-steps) — tool calls, tool results and
-thinking a chat run streams used to reach only the Redis run stream (1h TTL), so
-a refresh showed the reply and none of the work behind it. ``StepRecorder`` is
-fed the same ``(event_name, event_data)`` frames the run loop writes to that
-stream and folds them into the ordered ``steps`` list stored on the assistant
-``Message``. The group/DM bridge feeds it the same frame shapes, so both surfaces
-persist steps one way.
+Tool calls, tool results and thinking a chat run streams reach the Redis run
+stream (1h TTL) live; ``StepRecorder`` folds the same ``(event_name, event_data)``
+frames into the ordered ``steps`` list stored on the assistant ``Message``, so a
+refresh still shows the work behind a reply. ``record_agent_event`` adapts one
+``AgentEvent`` to those frames: the group/DM bridge and the Belt develop
+station's feed (``belt/feed.py``) both feed the recorder through it, so every
+surface records a call the same way.
 
 Why a recorder and not the raw frames: the frames are a live-UI protocol, not a
 record. A claude_sdk call is announced twice (a provisional ``input_pending``
-frame, then the real one), thinking arrives as many small deltas, and results
-carry no call id. Storing them verbatim would show phantom calls and hundreds of
-one-word thinking rows. Everything stored is bounded (per-field and per-message
-caps) and passed through the same scrub/redact the audit log uses, because a
-Message is durable and readable by everyone in the thread, and tool I/O is where
-secrets leak.
+frame, then the real one), thinking arrives as many small deltas, and chat
+results carry no call id (a result pairs with its call by ``call_id`` when the
+source has one, else by tool name). Storing them verbatim would show phantom calls and hundreds of
+one-word thinking rows. Everything stored is bounded (per-field caps, plus a
+per-recorder step and byte budget: the chat defaults below, larger for a develop
+feed) and passed through the same scrub/redact the audit log uses, string values
+of tool inputs included, because tool I/O is where secrets leak.
 
 ``steps_wire_fields`` is the one step -> wire conversion, shared by every UI
-history mapper. Steps are display data only: the LLM history reader never reads
-them.
+history mapper and the belt feed route. Steps are display data only: the LLM
+history reader never reads them.
 """
 
 from __future__ import annotations
@@ -58,14 +59,29 @@ def _stringify(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _redact_leaves(value: Any) -> Any:
+    """Redact every string inside ``value``. An Edit's ``new_string`` or a Bash
+    command carries a key under a harmless name, which ``scrub_params`` (names
+    only) never sees. Leaves, not the encoded JSON: there a key at the start of
+    a line follows a literal ``\\n`` and the patterns' word boundary misses it."""
+    if isinstance(value, str):
+        return redact_output(value[:_REDACT_SCAN_CHARS])
+    if isinstance(value, dict):
+        return {k: _redact_leaves(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_leaves(v) for v in value]
+    return value
+
+
 def _cap_input(value: Any) -> Any:
-    """Scrub secret-named args, then keep the dict if it is small.
+    """Scrub secret-named args and redact secret-shaped values, then keep the
+    dict if it is small.
 
     Round-tripped through JSON so what lands in Mongo is plain JSON types. An
     over-size input is stored as a truncated JSON string: the step still shows
     what was asked, without one huge argument blowing the message budget.
     """
-    scrubbed = scrub_params(value)
+    scrubbed = _redact_leaves(scrub_params(value))
     try:
         encoded = json.dumps(scrubbed, default=str)
     except (TypeError, ValueError):
@@ -94,14 +110,21 @@ class StepRecorder:
     ignored.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, max_steps: int = MAX_STEPS, max_total_bytes: int = MAX_TOTAL_BYTES
+    ) -> None:
+        self._max_steps = max_steps
+        self._max_total_bytes = max_total_bytes
         self._steps: list[dict[str, Any]] = []
         self._omitted = 0
-        # Open tool calls, oldest first: (step, provisional). No call id reaches
-        # this layer, so a result pairs with the OLDEST open call of its tool.
-        self._open: list[tuple[dict[str, Any], bool]] = []
-        # Calls dropped by the step cap that are still "open", per tool, so
-        # their results and resolving frames don't count as a second drop.
+        # Open tool calls, oldest first: (step, provisional, call_id). A result
+        # pairs with the open call carrying its ``call_id`` when the source
+        # sends one (the belt feed does; the chat backends don't); otherwise
+        # with the OLDEST open call of its tool.
+        self._open: list[tuple[dict[str, Any], bool, str]] = []
+        # Calls dropped by the step cap that are still "open" (by id, else per
+        # tool), so their results and resolving frames don't count twice.
+        self._dropped_ids: set[str] = set()
         self._dropped_open: dict[str, int] = {}
         self._dropped_provisional: dict[str, int] = {}
         self._thinking: dict[str, Any] | None = None
@@ -129,7 +152,7 @@ class StepRecorder:
             self._close_thinking(at)
 
     def _append(self, step: dict[str, Any]) -> bool:
-        if len(self._steps) >= MAX_STEPS:
+        if len(self._steps) >= self._max_steps:
             self._omitted += 1
             return False
         self._steps.append(step)
@@ -176,17 +199,20 @@ class StepRecorder:
         narration = data.get("narration")
         narration = narration if isinstance(narration, str) else ""
         pending = data.get("input_pending") is True
+        call_id = str(data.get("call_id") or "")
         if not pending:
             # The resolved frame for a call announced provisionally: upgrade
             # that step instead of recording a phantom second call.
-            for index, (step, provisional) in enumerate(self._open):
-                if provisional and step["tool"] == tool:
+            for index, (step, provisional, cid) in enumerate(self._open):
+                if provisional and _same_call(step, cid, tool, call_id):
                     step["input"] = _cap_input(data.get("input"))
                     if narration:
                         step["narration"] = narration
-                    self._open[index] = (step, False)
+                    self._open[index] = (step, False, cid or call_id)
                     return
-            if self._dropped_provisional.get(tool):
+            if call_id in self._dropped_ids:
+                return
+            if not call_id and self._dropped_provisional.get(tool):
                 self._dropped_provisional[tool] -= 1
                 return
         step = self._new_step(
@@ -197,7 +223,9 @@ class StepRecorder:
             input=None if pending else _cap_input(data.get("input")),
         )
         if self._append(step):
-            self._open.append((step, pending))
+            self._open.append((step, pending, call_id))
+        elif call_id:
+            self._dropped_ids.add(call_id)
         else:
             self._dropped_open[tool] = self._dropped_open.get(tool, 0) + 1
             if pending:
@@ -205,13 +233,29 @@ class StepRecorder:
 
     def _on_tool_result(self, data: dict[str, Any], at: datetime) -> None:
         tool = str(data.get("tool") or "")
+        call_id = str(data.get("call_id") or "")
         output, truncated = _cap_output(data.get("output"))
-        for index, (step, _provisional) in enumerate(self._open):
-            if step["tool"] == tool:
-                del self._open[index]
-                break
+        match = next(
+            (i for i, (_s, _p, cid) in enumerate(self._open) if call_id and cid == call_id),
+            None,
+        )
+        if match is None and call_id in self._dropped_ids:
+            # Its call was dropped by the cap and already counted.
+            self._dropped_ids.discard(call_id)
+            return
+        if match is None:
+            match = next(
+                (
+                    i
+                    for i, (s, _p, cid) in enumerate(self._open)
+                    if _same_call(s, cid, tool, call_id)
+                ),
+                None,
+            )
+        if match is not None:
+            step = self._open.pop(match)[0]
         else:
-            if self._dropped_open.get(tool):
+            if not call_id and self._dropped_open.get(tool):
                 # Its call was dropped by the cap and already counted.
                 self._dropped_open[tool] -= 1
                 return
@@ -237,16 +281,16 @@ class StepRecorder:
             return
         at = now or _now()
         self._close_thinking(at)
-        for step, _provisional in self._open:
+        for step, _provisional, _call_id in self._open:
             step["status"] = "missing_result"
             step["ended_at"] = at
         self._open = []
-        # The per-message byte budget. Checked here, not per event, because a
+        # The byte budget. Checked here, not per event, because a
         # step's size is only known once its result has landed.
         total = 0
         for index, step in enumerate(self._steps):
             total += len(json.dumps(step, default=str))
-            if total > MAX_TOTAL_BYTES:
+            if total > self._max_total_bytes:
                 self._omitted += len(self._steps) - index
                 del self._steps[index:]
                 break
@@ -270,6 +314,60 @@ class StepRecorder:
         if not self._steps and not self._omitted:
             return {}
         return {"steps": list(self._steps), "steps_omitted": self._omitted}
+
+
+def _same_call(step: dict[str, Any], step_call_id: str, tool: str, call_id: str) -> bool:
+    """Whether a frame belongs to an open call: by id when both carry one,
+    else by tool name."""
+    if call_id and step_call_id:
+        return call_id == step_call_id
+    return step["tool"] == tool
+
+
+def record_agent_event(
+    recorder: StepRecorder,
+    event: Any,
+    tool_name: str = "",
+    tool_input: Any = None,
+    narration: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Adapt one ``AgentEvent`` to the run_core frame the recorder takes.
+
+    ``tool_use`` arrives with its name, input and narration already resolved by
+    the caller (the bridge resolves them for its WS chip too). ``tool_result``
+    resolves its own name from ``metadata`` or a dict ``content``. ``now`` is the
+    event's own time when the source carries one (the belt feed parses it off
+    each CLI line); otherwise the recorder stamps the moment it observes.
+    """
+    etype = getattr(event, "type", "")
+    content = getattr(event, "content", None)
+    meta = getattr(event, "metadata", None)
+    meta = meta if isinstance(meta, dict) else {}
+    if etype == "thinking":
+        text = content if isinstance(content, str) else ""
+        recorder.observe("thinking", {"content": text}, now)
+    elif etype in {"message", "text"}:
+        recorder.observe("chunk", {}, now)
+    elif etype == "tool_use":
+        frame: dict[str, Any] = {"tool": tool_name, "input": tool_input}
+        if narration:
+            frame["narration"] = narration
+        if meta.get("input_pending") is True:
+            frame["input_pending"] = True
+        if meta.get("call_id"):
+            frame["call_id"] = meta["call_id"]
+        recorder.observe("tool_start", frame, now)
+    elif etype == "tool_result":
+        name = meta.get("name") or meta.get("tool") or ""
+        output: Any = content
+        if isinstance(content, dict):
+            name = name or content.get("tool") or content.get("name") or ""
+            output = content.get("result", content)
+        frame = {"tool": name, "output": output}
+        if meta.get("call_id"):
+            frame["call_id"] = meta["call_id"]
+        recorder.observe("tool_result", frame, now)
 
 
 def steps_wire_fields(steps: Any, steps_omitted: int = 0) -> dict[str, Any]:
@@ -308,4 +406,4 @@ def _step_to_wire(step: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["StepRecorder", "steps_wire_fields"]
+__all__ = ["StepRecorder", "record_agent_event", "steps_wire_fields"]

@@ -9,7 +9,14 @@
 #            ``git worktree add --detach`` at ``origin/<base>`` (fetched) or ``<base>``.
 #   ORIENT   LLM work only: ``orient.orient_block`` (loom world model, else the
 #            repo's C4 list) rides the develop + review prompts; a miss is a note.
-#   WORK     a charter recipe → that command; else DEVELOP → ``claude -p``.
+#   WORK     a charter recipe → that command; else DEVELOP → ``claude -p`` in
+#            ``stream-json``: its events fold into the run's step feed
+#            (``belt/feed.py``, scrubbed + capped), stored via the belt service
+#            before any error is raised (the stage is emptied when a develop
+#            starts); a failed save never fails the run. Seat output and every
+#            error tail have the worktree and repo paths made relative and the
+#            host's OS account name, where it names the account (``ls -l``
+#            owner/group, a home dir), replaced by ``user``.
 #   CHECK    every charter check; FIX (``claude -p`` with the failure) while
 #            attempts last. REVIEW: read-only ``claude -p`` judges the diff,
 #            failing duplicates of existing code; strict ``{"verdict","notes"}``.
@@ -44,9 +51,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import getpass
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -57,10 +66,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pocketpaw.security.redact import REDACT_PATTERNS, redact_output
+from pocketpaw_ee.cloud.belt.feed import fold_feed, stream_events
 from pocketpaw_ee.cloud.belt.headless import DevelopRequest, DevelopResult
 from pocketpaw_ee.cloud.belt.orient import orient_block
 from pocketpaw_ee.cloud.mandates.dto import command_refusal
-from pocketpaw_ee.cloud.mandates.foreman import claude_cli_argv, claude_result_text
+from pocketpaw_ee.cloud.mandates.foreman import (
+    claude_cli_argv,
+    claude_result_envelope,
+    claude_result_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,10 +201,11 @@ class CheckResult:
         return self.code == 0
 
 
-def _tail(text: str) -> str:
-    """The last lines of some output, secrets redacted — every tail ends up in
-    a prompt or on the stored blob."""
-    lines = text.strip().splitlines()[-_TAIL_LINES:]
+def _tail(text: str, *roots: Path) -> str:
+    """The last lines of some output, secrets redacted and paths under
+    ``roots`` made relative — every tail ends up in a prompt or on the stored
+    blob."""
+    lines = _relative_paths(text, *roots).strip().splitlines()[-_TAIL_LINES:]
     return redact_output("\n".join(lines))[-_TAIL_CHARS:]
 
 
@@ -208,16 +223,32 @@ async def _default_charter_for(workspace_id: str, mandate_id: str) -> dict[str, 
     return await mandate_service.charter_for_mandate(workspace_id, mandate_id)
 
 
+async def _default_save_feed(
+    workspace_id: str, action_id: str, stage: str, steps: list[dict[str, Any]], omitted: int
+) -> None:
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    await belt_service.save_run_feed(workspace_id, action_id, stage, steps, omitted)
+
+
 @dataclass
 class ClaudeCodeDevelop:
     """Production ``DevelopFn``: worktree → develop/recipe → checks → fix loop →
-    review → diff. ``run`` and ``charter_for`` are injectable for tests."""
+    review → diff. ``run``, ``charter_for`` and ``save_feed`` are injectable for
+    tests."""
 
     run: Runner = run_subprocess
     charter_for: Callable[[str, str], Awaitable[dict[str, Any] | None]] = _default_charter_for
+    save_feed: Callable[[str, str, str, list[dict[str, Any]], int], Awaitable[None]] = (
+        _default_save_feed
+    )
     max_fix_attempts: int = 2
 
     async def __call__(self, request: DevelopRequest) -> DevelopResult:
+        # A re-develop starts from an empty feed, so a run that fails before
+        # its develop seat (screen, charter, base fetch, recipe) never shows
+        # the previous attempt's steps as this one's.
+        await self._store_feed(request, "DEVELOP", "")
         _screen_task(request)
         found = await self.charter_for(request.workspace_id, request.mandate_id)
         if found is None:
@@ -283,7 +314,7 @@ class ClaudeCodeDevelop:
                 if code != 0:
                     raise DevelopStationError(
                         f"WORK: recipe {request.recipe!r} ({command}) exited {code}:\n"
-                        f"{_tail(out + err)}"
+                        f"{_tail(out + err, worktree)}"
                     )
             else:
                 await self._claude(
@@ -292,6 +323,8 @@ class ClaudeCodeDevelop:
                     step="DEVELOP",
                     checks=checks,
                     trust=trust,
+                    feed_for=request,
+                    repo=repo,
                 )
                 _assert_intact(worktree, git_snapshot)
 
@@ -315,6 +348,7 @@ class ClaudeCodeDevelop:
                         step="FIX",
                         checks=checks,
                         trust=trust,
+                        repo=repo,
                     )
                     _assert_intact(worktree, git_snapshot)
                     continue
@@ -325,7 +359,7 @@ class ClaudeCodeDevelop:
                 await self._git(worktree, "add", "-A")
                 diff = await self._git(worktree, "diff", "--cached", base_sha)
                 passed, review_notes = await self._review(
-                    request, diff, worktree, orient=orient, trust=trust
+                    request, diff, worktree, orient=orient, trust=trust, repo=repo
                 )
                 if passed:
                     verdict = "pass"
@@ -342,6 +376,7 @@ class ClaudeCodeDevelop:
                     step="FIX",
                     checks=checks,
                     trust=trust,
+                    repo=repo,
                 )
                 _assert_intact(worktree, git_snapshot)
 
@@ -426,7 +461,9 @@ class ClaudeCodeDevelop:
     async def _git(self, cwd: Path, *args: str) -> str:
         code, out, err = await self.run([*_GIT, *args], cwd=cwd, timeout=_GIT_TIMEOUT)
         if code != 0:
-            raise DevelopStationError(f"git {args[0]} failed (exit {code}): {_tail(err or out)}")
+            raise DevelopStationError(
+                f"git {args[0]} failed (exit {code}): {_tail(err or out, cwd)}"
+            )
         return out
 
     async def _check(self, cwd: Path, command: str) -> CheckResult:
@@ -435,7 +472,7 @@ class ClaudeCodeDevelop:
             cwd=cwd,
             timeout=_env_seconds("POCKETPAW_FACTORY_CHECK_TIMEOUT", 600),
         )
-        return CheckResult(command=command, code=code, tail=_tail(out + "\n" + err))
+        return CheckResult(command=command, code=code, tail=_tail(out + "\n" + err, cwd))
 
     async def _claude(
         self,
@@ -446,15 +483,24 @@ class ClaudeCodeDevelop:
         checks: list[str] | tuple[str, ...] = (),
         edits: bool = True,
         trust: _Trust | None = None,
+        feed_for: DevelopRequest | None = None,
+        repo: Path | None = None,
     ) -> str:
         """One claude seat. ``trust`` set = owner setup: the worktree's agent
         config is restored to the base commit first, and only then does the
-        call drop the isolation flags (the two never come apart)."""
+        call drop the isolation flags (the two never come apart). ``feed_for``
+        set = the seat streams and its steps are stored as that run's feed for
+        this step, before any failure below is raised. ``repo`` (the bound
+        repo, which the worktree's ``.git`` file names) is stripped from the
+        output like the worktree."""
         if trust is not None:
             await self._restore_trusted(cwd, trust)
         mode = ["--permission-mode", "acceptEdits"] if edits else []
         argv = claude_cli_argv(
-            *mode, *_tool_flags(edits=edits, checks=checks), isolated=trust is None
+            *mode,
+            *_tool_flags(edits=edits, checks=checks),
+            isolated=trust is None,
+            stream=feed_for is not None,
         )
         code, out, err = await self.run(
             argv,
@@ -462,15 +508,47 @@ class ClaudeCodeDevelop:
             timeout=_env_seconds("POCKETPAW_FACTORY_DEVELOP_TIMEOUT", 900),
             stdin=prompt,
         )
+        # Worktree paths read relative everywhere downstream: the feed, the
+        # error tails that land on the run blob, the returned text.
+        roots = (cwd, repo) if repo is not None else (cwd,)
+        out, err = _relative_paths(out, *roots), _relative_paths(err, *roots)
+        if feed_for is not None:
+            await self._store_feed(feed_for, step, out)
         if code != 0:
-            raise DevelopStationError(f"{step}: claude exited {code}: {_tail(err or out)}")
-        try:
-            envelope = json.loads(out)
-        except json.JSONDecodeError:
-            envelope = None
-        if isinstance(envelope, dict) and envelope.get("is_error"):
-            raise DevelopStationError(f"{step}: claude reported an error: {_tail(out)}")
+            said = err or _claude_said(out)
+            raise DevelopStationError(f"{step}: claude exited {code}: {_tail(said)}")
+        envelope = claude_result_envelope(out)
+        if envelope is not None and envelope.get("is_error"):
+            raise DevelopStationError(
+                f"{step}: claude reported an error: {_tail(_claude_said(out))}"
+            )
         return claude_result_text(out)
+
+    async def _store_feed(self, request: DevelopRequest, step: str, stdout: str) -> None:
+        """Fold a seat's stream-json into steps and store them under the run,
+        replacing the stage's last feed even when this attempt printed nothing
+        (a timeout), so the page never shows a previous attempt as this one.
+        Best-effort: a run without an ``action_id`` stores nothing, and a fold
+        or save failure is logged."""
+        if not request.action_id:
+            return
+        try:
+            # Parsing and redacting a few MB is CPU work; keep it off the loop.
+            recorder = await asyncio.to_thread(lambda: fold_feed(stream_events(stdout)))
+            await self.save_feed(
+                request.workspace_id,
+                request.action_id,
+                step.lower(),
+                recorder.steps,
+                recorder.steps_omitted,
+            )
+        except Exception:  # noqa: BLE001 — the feed is a view; it never fails a run
+            logger.warning(
+                "belt: could not store the %s feed for run %s",
+                step.lower(),
+                request.action_id,
+                exc_info=True,
+            )
 
     async def _restore_trusted(self, worktree: Path, trust: _Trust) -> None:
         """Delete every ``_TRUST_NAMES`` entry on disk (tracked, untracked or
@@ -492,9 +570,15 @@ class ClaudeCodeDevelop:
         *,
         orient: str = "",
         trust: _Trust | None = None,
+        repo: Path | None = None,
     ) -> tuple[bool, list[str]]:
         text = await self._claude(
-            _review_prompt(request, diff, orient), cwd=cwd, step="REVIEW", edits=False, trust=trust
+            _review_prompt(request, diff, orient),
+            cwd=cwd,
+            step="REVIEW",
+            edits=False,
+            trust=trust,
+            repo=repo,
         )
         start, end = text.find("{"), text.rfind("}")
         try:
@@ -505,6 +589,64 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"REVIEW: unparseable verdict: {text[:300]!r}")
         notes = [str(n) for n in verdict.get("notes") or []]
         return verdict["verdict"] == "pass", notes
+
+
+# A root counts only where a path STARTS: not mid-path (``src/app/x`` with a
+# ``/app`` root, ``/private/var`` holding ``/var``). In raw stream-json a path
+# that opens a line follows a literal ``\n`` / ``\t`` escape, so those count as
+# a start too.
+_PATH_START = r"(?:(?<=\\[nrt])|(?<![\w.\-/~]))"
+# A bare root ends where its name does: a sentence's full stop (``in <wt>.``)
+# still ends it, a sibling's name (``<wt>.bak``, ``<wt>_v2``, ``<wt>-old``) doesn't.
+_BARE_END = r"(?![\w\-]|\.[\w\-])"
+# An ``ls -l`` line's mode, link count, owner and group, at a line start (or a
+# ``\n`` escape): type + 9 bits, maybe ``@`` (xattrs) / ``+`` (ACL) / ``.``.
+_LS_LONG = re.compile(
+    r"(?:(?<=\\[nrt])|(?<![\w\-]))([-bcdlps][-rwxsStT]{9}[@+.]?[ \t]+\d+[ \t]+)(\S+)([ \t]+)(\S+)"
+)
+
+
+def _relative_paths(text: str, *roots: Path) -> str:
+    """``text`` with every path under ``roots`` made relative: ``<root>/x`` ->
+    ``x`` and a bare ``<root>`` (``cd <root> &&``, a ``pwd`` result) -> ``.``.
+    Only whole paths match (``_PATH_START`` / ``_BARE_END``). The CLI reports the
+    PHYSICAL path (macOS: ``/private/var/...`` for a ``/var/...`` temp dir), so
+    both spellings go, the longer first. Then the host's OS account name reads
+    ``user``, but only where it names the account: an ``ls -l`` owner or group
+    column and a home dir (``/Users/<u>``, ``/home/<u>``). The images run as
+    ``pocketpaw``, so the bare word is also the package. After the roots, which
+    can sit under the home."""
+    spellings = {str(r) for r in roots} | {os.path.realpath(r) for r in roots}
+    for root in sorted(spellings, key=len, reverse=True):
+        escaped = re.escape(root)
+        text = re.sub(_PATH_START + escaped + "/", "", text)
+        text = re.sub(_PATH_START + escaped + _BARE_END, ".", text)
+    try:
+        me = getpass.getuser()
+    except (OSError, KeyError):  # no login name and no passwd entry
+        me = ""
+    if me:
+
+        def acct(name: str) -> str:
+            return "user" if name == me else name
+
+        text = _LS_LONG.sub(lambda m: m[1] + acct(m[2]) + m[3] + acct(m[4]), text)
+        home = _PATH_START + r"(/(?:Users|home)/)" + re.escape(me) + _BARE_END
+        text = re.sub(home, r"\1user", text)
+    return text
+
+
+def _claude_said(stdout: str) -> str:
+    """What a failed claude call said, for an error message: the result
+    envelope's text, else a stream's last assistant prose, else a bare-text
+    stdout. Never raw stream-json (callers redact it through ``_tail``)."""
+    envelope = claude_result_envelope(stdout)
+    if envelope is not None:
+        return str(envelope.get("result") or envelope.get("subtype") or "no message")
+    prose = [e.content for e in stream_events(stdout) if e.type == "message"]
+    if prose:
+        return str(prose[-1])
+    return "no message" if stdout.lstrip().startswith("{") else stdout
 
 
 @dataclass(frozen=True)

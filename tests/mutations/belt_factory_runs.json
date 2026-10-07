@@ -232,5 +232,336 @@
     "tests": [
       "tests/cloud/test_belt_mandates.py::test_shift_gives_the_foreman_the_repo_c4_components"
     ]
+  },
+  {
+    "label": "feed: a tool result is stored unredacted (the scrub is gone)",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/steps.py",
+    "find": "    text = redact_output(text[:_REDACT_SCAN_CHARS])\n",
+    "replace": "    text = text[:_REDACT_SCAN_CHARS]\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: a tool input's values are stored unredacted",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/steps.py",
+    "find": "    scrubbed = _redact_leaves(scrub_params(value))\n",
+    "replace": "    scrubbed = scrub_params(value)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: the develop seat keeps json output, so nothing streams",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            stream=feed_for is not None,\n",
+    "replace": "            stream=False,\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: a failed develop raises before its feed is stored",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        if feed_for is not None:\n            await self._store_feed(feed_for, step, out)\n        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n",
+    "replace": "        if code != 0:\n            said = err or _claude_said(out)\n            raise DevelopStationError(f\"{step}: claude exited {code}: {_tail(said)}\")\n        if feed_for is not None:\n            await self._store_feed(feed_for, step, out)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: a stream's trailing system line hides the result envelope",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "        for line in reversed(stdout.splitlines()):\n",
+    "replace": "        for line in stdout.splitlines()[-1:]:\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_stream_result_envelope_is_the_seat_result"
+    ]
+  },
+  {
+    "label": "feed: the step cap is lifted",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=FEED_MAX_BYTES)\n",
+    "replace": "    recorder = StepRecorder(max_steps=10**9, max_total_bytes=FEED_MAX_BYTES)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_feed_caps_steps_and_counts_the_rest"
+    ]
+  },
+  {
+    "label": "feed: the byte cap is lifted",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=FEED_MAX_BYTES)\n",
+    "replace": "    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=10**12)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_feed_caps_bytes"
+    ]
+  },
+  {
+    "label": "feed: the route serves another workspace's run",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    await _owned_run(workspace_id, action_id)\n    doc = await BeltRunFeed.find_one(\n",
+    "replace": "    doc = await BeltRunFeed.find_one(\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_feed_route_tenancy_and_empty"
+    ]
+  },
+  {
+    "label": "feed: the worktree prefix is left on seat output",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        out, err = _relative_paths(out, *roots), _relative_paths(err, *roots)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served",
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: a failing save fails the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        except Exception:  # noqa: BLE001 — the feed is a view; it never fails a run\n",
+    "replace": "        except ValueError:  # noqa: BLE001 — the feed is a view; it never fails a run\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_failing_save_never_fails_the_run"
+    ]
+  },
+  {
+    "label": "feed: a failed develop records raw stream-json as its error",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "            said = err or _claude_said(out)\n",
+    "replace": "            said = err or out\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: back-to-back prose blocks run together",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "                sep = \"\\n\\n\" if prose_open else \"\"\n",
+    "replace": "                sep = \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: stderr reaches headless_error with absolute worktree paths",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        out, err = _relative_paths(out, *roots), _relative_paths(err, *roots)\n",
+    "replace": "        out = _relative_paths(out, *roots)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: a timed-out attempt leaves the earlier attempt's feed in place",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        if not request.action_id:\n            return\n        try:\n",
+    "replace": "        if not request.action_id or not stdout:\n            return\n        try:\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_timed_out_redevelop_replaces_the_earlier_feed"
+    ]
+  },
+  {
+    "label": "feed: a tool result loses its call id, so parallel same-name calls pair by name",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "                    {**meta, \"name\": names.get(call_id, \"\"), \"call_id\": call_id},\n",
+    "replace": "                    {**meta, \"name\": names.get(call_id, \"\")},\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_parallel_same_name_calls_pair_by_id"
+    ]
+  },
+  {
+    "label": "feed: the step adapter drops a result's call id",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/steps.py",
+    "find": "        frame = {\"tool\": name, \"output\": output}\n        if meta.get(\"call_id\"):\n            frame[\"call_id\"] = meta[\"call_id\"]\n",
+    "replace": "        frame = {\"tool\": name, \"output\": output}\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_parallel_same_name_calls_pair_by_id"
+    ]
+  },
+  {
+    "label": "feed: a dropped call's result (by id) is counted as a second omission",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/steps.py",
+    "find": "        elif call_id:\n            self._dropped_ids.add(call_id)\n",
+    "replace": "        elif False:\n            self._dropped_ids.add(call_id)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_feed_caps_steps_and_counts_the_rest"
+    ]
+  },
+  {
+    "label": "feed: a stream cut after system/init reads as the result envelope",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "    if isinstance(envelope, dict) and envelope.get(\"type\", \"result\") == \"result\":\n",
+    "replace": "    if isinstance(envelope, dict):\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_stream_result_envelope_is_the_seat_result"
+    ]
+  },
+  {
+    "label": "feed: a bare worktree path (cd <wt>, a pwd result) is stored absolute",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        text = re.sub(_PATH_START + escaped + _BARE_END, \".\", text)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served",
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "feed: a sibling <wt>-old path is cut as if it were the worktree",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        text = re.sub(_PATH_START + escaped + _BARE_END, \".\", text)\n",
+    "replace": "        text = re.sub(_PATH_START + escaped, \".\", text)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_worktree_paths_are_relative_whatever_the_prefix_order"
+    ]
+  },
+  {
+    "label": "feed: the bound repo root the .git file names stays in the feed",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        roots = (cwd, repo) if repo is not None else (cwd,)\n",
+    "replace": "        roots = (cwd,)\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "feed: a re-develop failing before its seat keeps the previous attempt's feed",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        await self._store_feed(request, \"DEVELOP\", \"\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_redevelop_that_fails_before_its_seat_clears_the_feed"
+    ]
+  },
+  {
+    "label": "feed: a failing check's tail lands on the run with the worktree path",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        return CheckResult(command=command, code=code, tail=_tail(out + \"\\n\" + err, cwd))\n",
+    "replace": "        return CheckResult(command=command, code=code, tail=_tail(out + \"\\n\" + err))\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_check_tail_carries_no_worktree_path"
+    ]
+  },
+  {
+    "label": "feed: the upsert filter drops the workspace, so tenants share a row",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        {\"workspace\": workspace_id, \"action_id\": action_id, \"stage\": stage},\n",
+    "replace": "        {\"action_id\": action_id, \"stage\": stage},\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_save_run_feed_upserts_per_workspace_and_keeps_created_at"
+    ]
+  },
+  {
+    "label": "feed: every save rewrites createdAt",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            \"$set\": {\"steps\": steps, \"steps_omitted\": steps_omitted, \"updatedAt\": now},\n            \"$setOnInsert\": {\"createdAt\": now},\n",
+    "replace": "            \"$set\": {\n                \"steps\": steps,\n                \"steps_omitted\": steps_omitted,\n                \"updatedAt\": now,\n                \"createdAt\": now,\n            },\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_save_run_feed_upserts_per_workspace_and_keeps_created_at"
+    ]
+  },
+  {
+    "label": "feed: a root matches mid-path, so /app cuts src/app/page.tsx (and /private/var holds /var)",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_PATH_START = r\"(?:(?<=\\\\[nrt])|(?<![\\w.\\-/~]))\"\n",
+    "replace": "_PATH_START = \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_short_repo_root_only_strips_whole_paths"
+    ]
+  },
+  {
+    "label": "feed: a path opening a line in stream-json (after a literal \\n) is left absolute",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_PATH_START = r\"(?:(?<=\\\\[nrt])|(?<![\\w.\\-/~]))\"\n",
+    "replace": "_PATH_START = r\"(?<![\\w.\\-/~])\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_a_short_repo_root_only_strips_whole_paths"
+    ]
+  },
+  {
+    "label": "feed: a bare path ending a sentence (in <wt>.) is left absolute",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_BARE_END = r\"(?![\\w\\-]|\\.[\\w\\-])\"\n",
+    "replace": "_BARE_END = r\"(?![\\w.\\-])\"\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served",
+      "tests/cloud/test_belt_feed.py::test_failed_develop_still_stores_its_feed"
+    ]
+  },
+  {
+    "label": "factory claude seats persist their session (prompt + crew instructions) on the host",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "    argv.append(\"--no-session-persistence\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_every_claude_seat_leaves_no_session_on_disk",
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_drops_isolation_and_keeps_the_tool_rules"
+    ]
+  },
+  {
+    "label": "feed tool rows carry no label, so collapsed rows all read the tool's kind",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "recorder, event, name, tool_input, narration=_label(name, tool_input), now=at",
+    "replace": "recorder, event, name, tool_input, now=at",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_tool_rows_are_labelled_by_their_subject",
+      "tests/cloud/test_belt_feed.py::test_develop_feed_is_stored_in_order_and_served"
+    ]
+  },
+  {
+    "label": "a Bash row's label carries a secret from its command",
+    "file": "ee/pocketpaw_ee/cloud/belt/feed.py",
+    "find": "first = redact_output(lines[0]) if lines else \"\"",
+    "replace": "first = lines[0] if lines else \"\"",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_tool_rows_are_labelled_by_their_subject"
+    ]
+  },
+  {
+    "label": "the host's OS account reads user wherever it is a word, so the images' pocketpaw package and paths read user",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "text = re.sub(home, r\"\\1user\", text)",
+    "replace": "text = re.sub(r\"(?<!\\w)\" + re.escape(me) + r\"(?!\\w)\", \"user\", text)",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account",
+      "tests/cloud/test_belt_feed.py::test_a_check_tail_carries_no_host_user_name"
+    ]
+  },
+  {
+    "label": "a home dir (/home/<u>, /Users/<u>) keeps the host's OS account name",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "        text = re.sub(home, r\"\\1user\", text)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account"
+    ]
+  },
+  {
+    "label": "an ls -l group column keeps the host's OS account name (the images' pocketpaw:pocketpaw)",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "m[3] + acct(m[4])",
+    "replace": "m[3] + m[4]",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account"
+    ]
+  },
+  {
+    "label": "an ls -l line with @ (xattrs) or + (ACL) after the mode keeps its owner",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "[-rwxsStT]{9}[@+.]?",
+    "replace": "[-rwxsStT]{9}",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account"
+    ]
+  },
+  {
+    "label": "the feed and headless_error carry the host's OS account name",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "    if me:\n",
+    "replace": "    if me and False:\n",
+    "tests": [
+      "tests/cloud/test_belt_feed.py::test_the_host_account_reads_user_only_where_it_names_the_account",
+      "tests/cloud/test_belt_feed.py::test_a_check_tail_carries_no_host_user_name"
+    ]
   }
 ]

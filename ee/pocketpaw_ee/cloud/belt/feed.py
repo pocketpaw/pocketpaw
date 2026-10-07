@@ -1,0 +1,164 @@
+# ee/pocketpaw_ee/cloud/belt/feed.py — the develop station's step feed.
+#
+# The station runs ``claude -p --output-format stream-json --verbose`` through
+# its own ``Runner`` (env scrub, argv lists, process-group kill), so the SDK
+# client's event stream is not available; this module reads the CLI's stdout
+# instead. Nothing else in the codebase parses stream-json, hence the module.
+#
+#   * ``stream_events`` — stdout lines -> ``AgentEvent`` (the one event schema,
+#     ``agents/protocol.py``): assistant ``text`` -> message, non-empty
+#     ``thinking`` -> thinking, ``tool_use`` -> tool_use (name, input, and the
+#     block id as ``call_id``), and a user ``tool_result`` -> tool_result with
+#     its ``tool_use_id`` as ``call_id`` and the name looked up from it, so the
+#     recorder pairs parallel same-name calls by id. Each event carries the
+#     line's ISO ``timestamp`` in ``metadata``. Other lines (system,
+#     rate limits, the final result envelope) and unparseable ones are skipped.
+#   * ``fold_feed`` — events -> ``StepRecorder`` through
+#     ``steps.record_agent_event``, so a feed is the chat steps shape: same
+#     per-field caps, same scrub/redact (inputs and outputs), same wire mapper.
+#     The developer's prose between tool calls has no chat-step kind; it is
+#     recorded as a ``thinking`` step so the run page shows the why with the what.
+#     Each tool step's ``narration`` is its subject, so a collapsed row reads
+#     more than the tool's kind: the path (Read/Edit/Write), the command's first
+#     line (Bash) or the pattern (Grep/Glob), cut to 80 chars by the chat
+#     narration renderer. The recorder never redacts a narration, so it is
+#     redacted here first.
+#   * Caps: ``FEED_MAX_STEPS`` steps and ``FEED_MAX_BYTES`` per stored feed; the
+#     overflow is counted in ``steps_omitted``. BF-3 stores one stage (develop),
+#     so the per-stage cap is the per-run cap.
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from datetime import datetime
+from typing import Any
+
+from pocketpaw.agents.protocol import AgentEvent
+from pocketpaw.security.redact import redact_output
+from pocketpaw.tools.narration import Narration, render
+from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder, record_agent_event
+
+FEED_MAX_STEPS = 2_000
+FEED_MAX_BYTES = 2_000_000
+# The input arg a Claude Code tool's row label reads.
+_LABEL_ARGS = {
+    "Read": "file_path",
+    "Edit": "file_path",
+    "Write": "file_path",
+    "Bash": "command",
+    "Grep": "pattern",
+    "Glob": "pattern",
+}
+
+
+def _parse_time(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _result_text(content: Any) -> str:
+    """A ``tool_result`` block's content: a string, or a list of blocks whose
+    ``text`` parts are joined (images and other blocks are dropped)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(b.get("text") or "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return "" if content is None else str(content)
+
+
+def _label(tool: str, tool_input: Any) -> str | None:
+    """A tool row's narration (see the header), or ``None``."""
+    arg = _LABEL_ARGS.get(tool)
+    value = tool_input.get(arg) if arg and isinstance(tool_input, dict) else None
+    if not isinstance(value, str):
+        return None
+    lines = value.strip().splitlines()
+    first = redact_output(lines[0]) if lines else ""
+    return render(Narration(active=f"{{{arg}}}", bare="", safe_args=(arg,)), {arg: first})
+
+
+def stream_events(stdout: str) -> Iterator[AgentEvent]:
+    """Yield the ``AgentEvent``s a ``stream-json`` stdout carries, in order."""
+    names: dict[str, str] = {}  # tool_use id -> tool name
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type") if isinstance(event, dict) else None
+        if kind not in ("assistant", "user"):
+            continue
+        message = event.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        meta = {"timestamp": event.get("timestamp")}
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if kind == "assistant" and btype == "text" and block.get("text"):
+                yield AgentEvent("message", str(block["text"]), dict(meta))
+            elif kind == "assistant" and btype == "thinking" and block.get("thinking"):
+                yield AgentEvent("thinking", str(block["thinking"]), dict(meta))
+            elif kind == "assistant" and btype == "tool_use":
+                call_id = str(block.get("id") or "")
+                name = str(block.get("name") or "")
+                names[call_id] = name
+                raw_input = block.get("input")
+                tool_input = raw_input if isinstance(raw_input, dict) else {}
+                yield AgentEvent(
+                    "tool_use",
+                    name,
+                    {**meta, "name": name, "input": tool_input, "call_id": call_id},
+                )
+            elif kind == "user" and btype == "tool_result":
+                call_id = str(block.get("tool_use_id") or "")
+                yield AgentEvent(
+                    "tool_result",
+                    _result_text(block.get("content")),
+                    {**meta, "name": names.get(call_id, ""), "call_id": call_id},
+                )
+
+
+def fold_feed(events: Iterator[AgentEvent] | list[AgentEvent]) -> StepRecorder:
+    """Fold events into a finalized, capped ``StepRecorder``. Consecutive whole
+    prose/thinking blocks land in one thinking step, a blank line apart (the
+    recorder itself concatenates, being built for streamed deltas)."""
+    recorder = StepRecorder(max_steps=FEED_MAX_STEPS, max_total_bytes=FEED_MAX_BYTES)
+    prose_open = False
+    for event in events:
+        at = _parse_time(event.metadata.get("timestamp"))
+        if event.type in ("message", "thinking"):
+            # The developer's prose is kept as a thought (see the header).
+            text = event.content if isinstance(event.content, str) else ""
+            if text:
+                sep = "\n\n" if prose_open else ""
+                recorder.observe("thinking", {"content": sep + text}, at)
+                prose_open = True
+            continue
+        prose_open = False
+        if event.type == "tool_use":
+            name, tool_input = event.metadata.get("name", ""), event.metadata.get("input")
+            record_agent_event(
+                recorder, event, name, tool_input, narration=_label(name, tool_input), now=at
+            )
+            continue
+        record_agent_event(recorder, event, now=at)
+    recorder.finalize()
+    return recorder
+
+
+__all__ = ["FEED_MAX_BYTES", "FEED_MAX_STEPS", "fold_feed", "stream_events"]

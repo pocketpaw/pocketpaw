@@ -20,6 +20,10 @@
 #     ``headless_error`` / ``headless_state`` / ``redevelop``) are read
 #     STRUCTURALLY off the blob; ``error`` is the failure reason (``Action.error``, else
 #     ``headless_error``). The mandates digest reads this same list.
+#   * ``save_run_feed`` / ``get_run_feed`` — a run stage's step feed (what the
+#     develop station's claude seat did), one ``BeltRunFeed`` row per (workspace,
+#     run, stage), kept out of the Action blob that ``list_runs`` reads in bulk.
+#     The read shares ``get_run``'s tenancy 404 and returns chat-shaped steps.
 #
 # Security: git runs through ``create_subprocess_exec`` with argv lists; a
 # submitted path is realpath-resolved and confirmed to be a git repo before it
@@ -721,15 +725,12 @@ async def list_runs(workspace_id: str) -> dict[str, Any]:
     return {"runs": runs}
 
 
-async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
-    """Return a single run + its proposed diff (capped at ~200 KB).
+async def _owned_run(workspace_id: str, action_id: str) -> tuple[Any, dict[str, Any]]:
+    """The run's Action and its ``_code_change`` blob, or a 404.
 
-    Tenancy: the Action must carry a ``_code_change`` blob whose ``workspace_id``
-    matches the caller's workspace — a foreign or non-belt Action is a 404 (we
-    never confirm a cross-tenant Action exists). The diff is read off the blob
-    and truncated to ``MAX_DIFF_BYTES``; a ``diff_truncated`` flag tells the UI
-    when it was cut.
-    """
+    Tenancy: the blob's ``workspace_id`` must match the caller's workspace — a
+    foreign or non-belt Action is a 404 (we never confirm a cross-tenant Action
+    exists)."""
     from pocketpaw.stores import get_instinct_store
 
     # ISO: HTTP console path (no ``current_workspace`` ContextVar) — scope the
@@ -743,7 +744,17 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
     if str(blob.get("workspace_id") or "") != workspace_id:
         # Don't distinguish "wrong workspace" from "missing" — same 404.
         raise BeltConsoleError(404, "Run not found.")
+    return action, blob
 
+
+async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
+    """Return a single run + its proposed diff (capped at ~200 KB).
+
+    A foreign or non-belt Action is a 404 (``_owned_run``). The diff is read off
+    the blob and truncated to ``MAX_DIFF_BYTES``; a ``diff_truncated`` flag tells
+    the UI when it was cut.
+    """
+    action, blob = await _owned_run(workspace_id, action_id)
     summary = _run_summary(action, blob)
     diff = blob.get("diff")
     diff_text = diff if isinstance(diff, str) else ""
@@ -757,6 +768,61 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
     return summary
 
 
+# ---------------------------------------------------------------------------
+# run feeds — what a station step did, stored beside (not in) the run blob
+# ---------------------------------------------------------------------------
+
+
+async def save_run_feed(
+    workspace_id: str,
+    action_id: str,
+    stage: str,
+    steps: list[dict[str, Any]],
+    steps_omitted: int = 0,
+) -> None:
+    """Store one run stage's steps (already scrubbed and capped by
+    ``belt/feed.py``), replacing that stage's previous feed: a re-develop shows
+    its latest attempt. Raises on a Mongo failure; the station treats the save
+    as best-effort. Only this module reads/writes ``BeltRunFeed``. One atomic
+    upsert on the unique (workspace, run, stage) key, so two writers never race
+    into a duplicate-key error (the raw update skips Beanie's timestamp hooks,
+    hence the explicit ``updatedAt`` / ``createdAt``)."""
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud.models.belt_run_feed import BeltRunFeed
+
+    now = datetime.now(UTC)
+    await BeltRunFeed.get_pymongo_collection().update_one(
+        {"workspace": workspace_id, "action_id": action_id, "stage": stage},
+        {
+            "$set": {"steps": steps, "steps_omitted": steps_omitted, "updatedAt": now},
+            "$setOnInsert": {"createdAt": now},
+        },
+        upsert=True,
+    )
+    # no-event: the run page reads the feed on open; live tailing is a later slice.
+
+
+async def get_run_feed(workspace_id: str, action_id: str, stage: str) -> dict[str, Any]:
+    """One run stage's feed: ``{action_id, stage, steps?, stepsOmitted?}``,
+    steps in the chat history wire shape (``steps_wire_fields``), so the UI maps
+    them with the same code. A run with no feed yet returns no ``steps`` key; a
+    foreign or non-belt run is a 404, same as ``get_run``."""
+    from pocketpaw_ee.cloud.chat.runs.steps import steps_wire_fields
+    from pocketpaw_ee.cloud.models.belt_run_feed import BeltRunFeed
+
+    await _owned_run(workspace_id, action_id)
+    doc = await BeltRunFeed.find_one(
+        BeltRunFeed.workspace == workspace_id,
+        BeltRunFeed.action_id == action_id,
+        BeltRunFeed.stage == stage,
+    )
+    out: dict[str, Any] = {"action_id": action_id, "stage": stage}
+    if doc is not None:
+        out.update(steps_wire_fields(doc.steps, doc.steps_omitted))
+    return out
+
+
 __all__ = [
     "BeltConsoleError",
     "GhCliRepoCreator",
@@ -767,7 +833,9 @@ __all__ = [
     "discover_repos",
     "emit_belt_run_updated",
     "get_run",
+    "get_run_feed",
     "init_repo",
     "list_runs",
     "resolve_allowlist_roots",
+    "save_run_feed",
 ]
