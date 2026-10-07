@@ -606,6 +606,50 @@ class TestBuilds:
         assert body["status"] == "building" and body["preview_url"] is None
         assert "do not report the site as built" in body["message"]
 
+    async def test_run_build_waiting_for_capacity_says_queued_not_down(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_project
+        from pocketpaw_ee.sites import capacity, project_build
+
+        pocket_id = await _start(cli)
+        monkeypatch.setattr(sites_project, "RUN_BUILD_WAIT_SEC", 0)
+        monkeypatch.setattr(
+            project_build,
+            "read_build_record",
+            lambda *_a: {"status": "queued", "reason": capacity.WAITING_REASON},
+        )
+        body = _body(await _call("run_site_build", {"pocket_id": pocket_id}))
+        assert body["status"] == "queued"
+        assert body["message"].startswith(capacity.CAPACITY_WAITING_MESSAGE)
+        assert "down" not in body["message"]
+
+    @pytest.mark.parametrize(
+        ("reason", "expected"),
+        [
+            ("sandbox_unavailable:capacity", "CAPACITY_EXHAUSTED_MESSAGE"),
+            ("sandbox_unavailable:no_sandbox", "NO_SANDBOX_MESSAGE"),
+        ],
+    )
+    async def test_run_build_sandbox_failures_get_our_sentence_not_a_log(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch, reason, expected
+    ) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_project
+        from pocketpaw_ee.sites import capacity, project_build
+
+        pocket_id = await _start(cli)
+        monkeypatch.setattr(sites_project, "RUN_BUILD_POLL_SEC", 0)
+        monkeypatch.setattr(
+            project_build,
+            "read_build_record",
+            lambda *_a: {"status": "failed", "reason": reason, "log": ""},
+        )
+        out = await _call("run_site_build", {"pocket_id": pocket_id})
+        body = _body(out)
+        assert body["reason"] == reason
+        assert body["message"] == getattr(capacity, expected)
+        assert "Fix the files" not in body["message"]
+
     async def test_get_build_log_reads_the_latest(
         self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
     ) -> None:

@@ -1,0 +1,77 @@
+[
+  {
+    "label": "every DaytonaValidationError reads as capacity, so a bad image or invalid resource request is retried for five minutes and reported as 'capacity full' instead of failing fast",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "        if _is_validation_error(exc) and _CAPACITY_PATTERN.search(str(exc)):",
+    "replace": "        if _is_validation_error(exc):",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestClassification"
+    ]
+  },
+  {
+    "label": "any exception carrying the limit wording reads as capacity, so a non-Daytona error is retried as if the org were full",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "        if _is_validation_error(exc) and _CAPACITY_PATTERN.search(str(exc)):",
+    "replace": "        if _CAPACITY_PATTERN.search(str(exc)):",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestClassification"
+    ]
+  },
+  {
+    "label": "the retry budget never runs out, so a build waits on a full org forever instead of settling sandbox_unavailable:capacity",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "    if not isinstance(job_try, int) or job_try < 1 or job_try > len(RETRY_DELAYS_SECONDS):\n        return None\n    base = RETRY_DELAYS_SECONDS[job_try - 1]",
+    "replace": "    if not isinstance(job_try, int) or job_try < 1:\n        return None\n    base = RETRY_DELAYS_SECONDS[min(job_try, len(RETRY_DELAYS_SECONDS)) - 1]",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestRetrySchedule",
+      "tests/ee/sites/test_sandbox_capacity.py::TestPreviewLane",
+      "tests/ee/sites/test_sandbox_capacity.py::TestPublishLane"
+    ]
+  },
+  {
+    "label": "a superseded preview job keeps retrying on a full org, holding a queue slot for a render nobody will view",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return bool(current) and current != job_id",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestPreviewLane",
+      "tests/ee/sites/test_sandbox_capacity.py::TestProjectLane"
+    ]
+  },
+  {
+    "label": "a waiting publish is not re-stamped queued/waiting_for_capacity, so the row reads 'building' while nothing builds",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            site, job_id=job_id, reason=capacity.WAITING_REASON\n",
+    "replace": "            site, job_id=job_id, reason=\"\"\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestPublishLane"
+    ]
+  },
+  {
+    "label": "the project lane reports capacity as no_sandbox, the prod bug: 'no build machine was free' and an agent saying the build server is down",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "        if capacity.is_capacity_error(exc):\n            return await _capacity_outcome(",
+    "replace": "        if False:\n            return await _capacity_outcome(",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestProjectLane"
+    ]
+  },
+  {
+    "label": "the workspace VM passes the raw seconds value to Daytona as minutes again, keeping an idle 4 GiB box up for 60 hours",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "        minutes = -(-int(raw) // 60)  # ceil",
+    "replace": "        minutes = int(raw)",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
+    ]
+  },
+  {
+    "label": "a stopped workspace VM is never resumed, so the 30-minute auto-stop breaks the agent's next tool call",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        await client.start_sandbox(sandbox_id)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  }
+]

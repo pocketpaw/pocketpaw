@@ -703,5 +703,7 @@ class TestTheWorkerRunsThePreviewLane:
         # followed by the harness in the same sandbox.
         assert preview.timeout_s > bj.site_build_job_timeout_seconds()
         assert preview.timeout_s == bj.site_preview_job_timeout_seconds()
-        # A preview is billed per attempt too, so the retry decision is the caller's.
-        assert preview.max_tries == 1
+        # A preview is billed per attempt too: arq retries only the capacity ``Retry``.
+        from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
+
+        assert preview.max_tries == CAPACITY_MAX_TRIES

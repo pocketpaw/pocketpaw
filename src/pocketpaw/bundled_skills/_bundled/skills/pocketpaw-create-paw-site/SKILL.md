@@ -113,8 +113,10 @@ works.
   which ones are left. Never call it ready.
 - **`unverified`** — it could not be checked (`reason`, e.g.
   `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
-  why. On `timeout` the build is still running, so one more `verify_site` is
-  worth it. Never report `unverified` as a pass.
+  why. When the result has a `message`, give that sentence as written: a full
+  build queue is not an outage, so never say the build server is down. On
+  `timeout` or `waiting_for_capacity` the build is still coming, so one more
+  `verify_site` is worth it. Never report `unverified` as a pass.
 - **`warnings`** don't block a pass, but move a `top_level_client_import`
   client-side anyway: it is how a prerender build breaks.
 
