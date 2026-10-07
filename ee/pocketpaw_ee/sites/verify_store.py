@@ -16,10 +16,12 @@
 #     It carries its start time and goes stale after :data:`PENDING_STALE_SECONDS`, so a
 #     crashed verify cannot pin a site in "pending" forever.
 #
-# Two per-pocket POINTER records sit beside them, one each, overwritten in place and
+# Three per-pocket POINTER records sit beside them, one each, overwritten in place and
 # exempt from eviction: ``latest`` (the last edit's enqueued sandbox job, read back by
-# ``verify.settled_verdict``) and ``view-origin`` (the builder origin the editor last
-# viewed the draft with, read by ``service.resolve_armed_builder_origin``).
+# ``verify.settled_verdict``), ``view-origin`` (the builder origin the editor last
+# viewed the draft with, read by ``service.resolve_armed_builder_origin``) and
+# ``latest-build`` (a project pocket's newest build job, ``project_build``). The project
+# lane's per-job build logs are ordinary ``build-<job id>`` records.
 #
 # THE BACKEND FOLLOWS THE ARTIFACT STORE'S. The worker writes and the web process reads,
 # which is already true of preview artifacts, so this uses the same selection:
@@ -61,8 +63,11 @@ LATEST_KEY = "latest"
 #: The builder origin the editor last viewed the draft with.
 VIEW_ORIGIN_KEY = "view-origin"
 
+#: The pocket's newest project-engine build (``project_build``): job id + status.
+LATEST_BUILD_KEY = "latest-build"
+
 #: Pointer records: one per pocket, never evicted to make room for hash records.
-_POINTER_KEYS = frozenset({LATEST_KEY, VIEW_ORIGIN_KEY})
+_POINTER_KEYS = frozenset({LATEST_KEY, VIEW_ORIGIN_KEY, LATEST_BUILD_KEY})
 
 
 def sandbox_key(content_hash: str) -> str:

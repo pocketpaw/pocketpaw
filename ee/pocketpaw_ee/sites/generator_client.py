@@ -341,6 +341,7 @@ from pocketpaw_ee.sites.bun_supply_chain import (
 )
 from pocketpaw_ee.sites.dependency_manifest import requires_sandbox
 from pocketpaw_ee.sites.engines import (
+    build_requires_sandbox,
     candidate_static_output_rels,
     is_source_engine,
     needs_node_build,
@@ -2041,7 +2042,9 @@ class GeneratorClient:
         # written and nothing installs. html is exempt: it never installs (its
         # packages load from the CDN through an importmap). Fails closed
         # (``requires_sandbox``).
-        if needs_node_build(engine) and requires_sandbox(source):
+        if build_requires_sandbox(engine) or (
+            needs_node_build(engine) and requires_sandbox(source)
+        ):
             raise HostInstallRefused(
                 "this site declares npm packages or carries its own build config "
                 "(package.json, vite/svelte config, bunfig.toml, .npmrc), and those "

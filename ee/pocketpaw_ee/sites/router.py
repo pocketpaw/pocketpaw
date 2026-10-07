@@ -65,6 +65,8 @@ from pocketpaw_ee.sites.dto import (
     SiteAssetListResponse,
     SiteAssetResponse,
     SiteBrandingUpdate,
+    SiteBuildLogResponse,
+    SiteBuildResponse,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
@@ -592,6 +594,41 @@ async def dev_preview_by_pocket(
         pocket_id=pocket_id,
         builder_origin=builder_origin,
     )
+
+
+@router.get("/sites/by-pocket/{pocket_id}/builds/latest", response_model=SiteBuildResponse)
+async def latest_build_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteBuildResponse:
+    """A project pocket's newest draft build (job id, status, ``preview_mode``), for
+    polling: no realtime event exists for site builds. 404 when it never built, 422
+    for a non-project pocket, the pockets service's 404 / 403 for no access."""
+    result = await sites_service.project_latest_build(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteBuildResponse(**result)
+
+
+@router.get(
+    "/sites/by-pocket/{pocket_id}/builds/{job_id}/log",
+    response_model=SiteBuildLogResponse,
+)
+async def build_log_by_pocket(
+    pocket_id: str,
+    job_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteBuildLogResponse:
+    """One project build's log (install, build and wrangler dry-run output), redacted
+    and capped by the worker before it was stored. Owner/editor only, like the other
+    by-pocket write routes: the log is the author's own build output. A job id that is
+    not this pocket's is a 404."""
+    result = await sites_service.project_build_log(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, job_id=job_id
+    )
+    return SiteBuildLogResponse(**result)
 
 
 @router.get("/sites/by-pocket/{pocket_id}/status", response_model=SiteStatusResponse)

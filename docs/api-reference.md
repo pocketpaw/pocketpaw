@@ -3115,6 +3115,87 @@ that is then destroyed, so such a pocket rebuilds on every view instead of cachi
 eviction runs here (the on-disk store's `PAW_SITES_ARTIFACT_KEEP` does not apply); put a
 bucket lifecycle rule on the `site-artifacts/` prefix.
 
+**`project` pockets.** A project pocket (the author owns the whole repo: package.json,
+framework config, wrangler config) is also served here, with two extra fields:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "body_html": "",
+  "css": "",
+  "build_status": "none",
+  "build_reason": null,
+  "build_job_id": "site-preview-p_abc123-9f2c…",
+  "preview_url": "https://3f9c….paw-preview.example/index.html",
+  "preview_mode": "static",
+  "capabilities": {"select": false, "text": false, "code": true, "build_log": true}
+}
+```
+
+- It is never armed: `body_html` / `css` are always empty and the draft is only
+  `preview_url`. A cold read queues a Daytona build (`paw-sites-gen project-build`)
+  with the same `queued` / `building` / `failed` handle as above.
+- `preview_mode` is `"static"` when the build has a worker (server routes): the
+  preview origin serves its static assets, and the routes wait for the drafts
+  dispatch worker. `"full"` when the assets are the whole site. `null` until a build
+  finished.
+- `capabilities` are the engine's edit/build flags. A project has no Select or Text
+  tool yet (no generator-owned anchors); edits go through files and the agent, and
+  every build keeps a log. Other engines answer `capabilities: null` for now.
+- A project with no `package.json`, or a path that leaves the project, is a `422`.
+- `build_reason` on a failed project build is `build_failed:<code>` with the CLI's
+  code (`install_failed`, `build_failed`, `output_missing`, `wrangler_failed`,
+  `size_limit`, `unknown_framework`, ...), or one of the rungs above.
+
+### Project builds — `/sites/by-pocket/{pocket_id}/builds`
+
+Two reads for a `project` pocket's sandbox builds. Both take `fabric.write` (owner /
+editor) and the pockets service's read check, and are scoped to the caller's
+workspace: another workspace's pocket is a `404`. A non-project pocket is a `422`
+(`sites.not_a_project`). **No realtime event exists for site builds, so poll.**
+
+#### `GET /sites/by-pocket/{pocket_id}/builds/latest`
+
+The newest build, without its log. `404` when the pocket never built.
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "job_id": "site-preview-p_abc123-9f2c…",
+  "status": "building",
+  "reason": null,
+  "preview_mode": null,
+  "framework": "astro",
+  "updated_at": "2026-10-07T12:00:00+00:00",
+  "current": true
+}
+```
+
+`status` is `queued` / `building` / `built` / `failed`. `current` is true when this
+build is of the pocket's current files (an edit since makes it false).
+
+#### `GET /sites/by-pocket/{pocket_id}/builds/{job_id}/log`
+
+One build's install, build and wrangler dry-run output. A `job_id` that is not this
+pocket's is a `404`.
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "job_id": "site-preview-p_abc123-9f2c…",
+  "status": "failed",
+  "reason": "build_failed:build_failed",
+  "log": "$ bun install\n…\nerror at src/pages/index.astro:3 …",
+  "log_truncated": false,
+  "preview_mode": null,
+  "updated_at": "2026-10-07T12:01:10+00:00"
+}
+```
+
+The log is redacted before it is stored (tokens and keys, sandbox paths made
+project-relative, capture keys) and capped to its last 64 KiB; `log_truncated` says
+the head was cut. It is empty while the build is still running.
+
 ### Site images — `/sites/by-pocket/{pocket_id}/assets`
 
 Three endpoints for the images a site DISPLAYS. Added 2026-08-31

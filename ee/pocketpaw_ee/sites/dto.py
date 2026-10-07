@@ -1065,6 +1065,44 @@ class NativeArtifactResponse(BaseModel):
     # draft with its <head> and JS. Every engine including html. ``None`` while the
     # build is pending or failed. Append ``?paw_edit=1`` to arm the edit bridge.
     preview_url: str | None = None
+    # project engine only (None elsewhere): "static" when the draft has server routes
+    # the preview cannot run yet (its assets are served, its worker is not), "full"
+    # when the assets are the whole site. None until a build finished.
+    preview_mode: str | None = None
+    # The engine's edit/build capability flags (``engines.engine_capabilities``):
+    # {select, text, code, build_log}. Set for project pockets; None elsewhere for now.
+    capabilities: dict[str, bool] | None = None
+
+
+class SiteBuildResponse(BaseModel):
+    """GET /sites/by-pocket/{pocket_id}/builds/latest: a project pocket's newest draft
+    build. ``status`` is ``queued`` / ``building`` / ``built`` / ``failed``; ``reason``
+    is a rung on failure, never build output. ``current`` is True when this build is
+    of the pocket's current files. Poll this (no realtime event exists for builds)."""
+
+    pocket_id: str
+    job_id: str
+    status: str
+    reason: str | None = None
+    preview_mode: str | None = None
+    framework: str | None = None
+    updated_at: str | None = None
+    current: bool = False
+
+
+class SiteBuildLogResponse(BaseModel):
+    """GET /sites/by-pocket/{pocket_id}/builds/{job_id}/log: one project build's
+    install / build / dry-run output, secrets redacted and capped to the last 64 KiB
+    (``log_truncated`` says when the head was cut). Empty while the build runs."""
+
+    pocket_id: str
+    job_id: str
+    status: str
+    reason: str | None = None
+    log: str = ""
+    log_truncated: bool = False
+    preview_mode: str | None = None
+    updated_at: str | None = None
 
 
 class SiteAssetResponse(BaseModel):
