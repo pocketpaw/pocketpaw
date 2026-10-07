@@ -29,6 +29,7 @@ import logging
 from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+from pocketpaw_ee.sites.capacity import reason_message
 
 from ._audit import record_tool_call
 from .sites_create import (
@@ -775,6 +776,12 @@ async def _run_site_build_handler(args: dict) -> dict:
         body["message"] = "The draft built." + (
             " " + STATIC_PREVIEW_NOTE if preview_mode == "static" else ""
         )
+    elif status == "failed" and reason_message(
+        reason := (record or {}).get("reason") or art.get("build_reason")
+    ):
+        # No sandbox ran, so there is no log and nothing in the files to fix.
+        body["reason"] = reason
+        body["message"] = reason_message(reason)
     elif status == "failed":
         body["reason"] = (record or {}).get("reason") or art.get("build_reason")
         tail, cut = _log_tail(str((record or {}).get("log") or ""))
@@ -785,7 +792,8 @@ async def _run_site_build_handler(args: dict) -> dict:
         )
         blocks.append(f"=== BUILD LOG ({job_id}) ===\n{tail}")
     else:
-        body["message"] = (
+        waiting = reason_message((record or {}).get("reason") or art.get("build_reason"))
+        body["message"] = (waiting + " " if waiting else "") + (
             f"Still {status} after {int(RUN_BUILD_WAIT_SEC)}s. Keep working and call "
             "run_site_build or get_site_build_log again shortly; do not report the site as built."
         )

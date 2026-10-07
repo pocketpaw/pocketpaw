@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites import capacity
 from pocketpaw_ee.sites.engines import (
     PAW_BUILD_FILENAME,
     PROJECT_STAGE_REL,
@@ -501,9 +502,11 @@ async def run_project_preview_build(
             ssr_markers=(),
             log_tail_bytes=LOG_CAP_BYTES,
         )
-    except Exception:
+    except Exception as exc:
+        if capacity.is_capacity_error(exc):
+            return await _capacity_outcome(ctx, pocket_id, job_id, _finish, records, content_hash)
         logger.exception("sites.project: no sandbox for pocket %s", pocket_id)
-        _finish("failed", f"{build_job.RUNG_SANDBOX_UNAVAILABLE}:no_sandbox")
+        _finish("failed", f"{build_job.RUNG_SANDBOX_UNAVAILABLE}:{capacity.NO_SANDBOX_CAUSE}")
         raise
 
     settlement = build_job.resolve_build_settlement(result)
@@ -539,6 +542,48 @@ async def run_project_preview_build(
         framework=framework,
         **logged,
     )
+
+
+async def _capacity_outcome(
+    ctx: dict[str, Any],
+    pocket_id: str,
+    job_id: str,
+    finish: Any,
+    records: Any,
+    content_hash: str,
+) -> dict[str, Any]:
+    """The org's Daytona limit refused the sandbox. Superseded → stop and write
+    nothing (the newer job owns ``latest-build``). Tries left → record ``queued`` /
+    ``waiting_for_capacity`` and let ``Retry`` re-run the job. Budget spent → settle
+    ``failed`` / ``sandbox_unavailable:capacity`` without raising."""
+    from arq.worker import Retry
+
+    from pocketpaw_ee.sites import build_job
+
+    if await build_job._preview_superseded(ctx, pocket_id):
+        logger.info("sites.project: pocket %s job %s superseded — not retrying", pocket_id, job_id)
+        return {
+            "status": "failed",
+            "reason": build_job.SUPERSEDED_REASON,
+            "job_id": job_id,
+            "preview_mode": None,
+        }
+    delay = capacity.next_retry_delay(ctx)
+    if delay is not None:
+        logger.warning(
+            "sites.project: Daytona capacity full for pocket %s; retrying in %.0fs (try %s)",
+            pocket_id,
+            delay,
+            ctx.get("job_try"),
+        )
+        write_build_record(
+            records,
+            pocket_id,
+            new_record(job_id, content_hash, "queued", reason=capacity.WAITING_REASON),
+        )
+        raise Retry(defer=delay)
+    logger.warning("sites.project: Daytona capacity still full for pocket %s; giving up", pocket_id)
+    return finish("failed", f"{build_job.RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}")
 
 
 # ---------------------------------------------------------------------------

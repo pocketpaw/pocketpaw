@@ -5678,6 +5678,33 @@ async def mark_build_running(site: _SiteDoc) -> None:
     await site.set({"build_status": "building", "build_started_at": datetime.now(UTC)})
 
 
+async def mark_build_waiting(site: _SiteDoc, *, job_id: str | None, reason: str) -> bool:
+    """Put an in-flight build back to ``queued`` with ``reason`` and RE-STAMP its clock.
+
+    Used while a build waits for Daytona capacity: the re-stamp keeps the wait inside
+    the staleness window, so a waiting build is never re-enqueued on top of itself.
+    Conditional on ``build_job_id == job_id`` — False means a newer publish claimed the
+    row, so the waiting job is superseded and must stop. ``job_id=None`` (a direct
+    call outside arq) writes unconditionally."""
+    values: dict[str, Any] = {
+        "build_status": "queued",
+        "build_reason": reason,
+        "build_started_at": datetime.now(UTC),
+    }
+    if job_id is None:
+        await site.set(values)
+        return True
+    collection = type(site).get_pymongo_collection()
+    won = await collection.find_one_and_update(
+        {"_id": site.id, "build_job_id": job_id}, {"$set": values}
+    )
+    if won is None:
+        return False
+    for field, value in values.items():
+        setattr(site, field, value)
+    return True
+
+
 async def record_build_outcome(site: _SiteDoc, *, status: str, reason: str) -> None:
     """Record a finished attempt's terminal status and the rung that produced it.
 
@@ -10088,7 +10115,9 @@ async def _project_draft_artifact(
         project_build.write_build_record(
             records,
             pocket_id,
-            project_build.new_record(enqueued.job_id, content_hash, "queued"),
+            project_build.new_record(
+                enqueued.job_id, content_hash, "queued", reason=enqueued.reason
+            ),
         )
     return {
         "pocket_id": pocket_id,

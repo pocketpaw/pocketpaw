@@ -152,6 +152,7 @@ from pocketpaw_ee.sites.build_job import (
     site_build_job_timeout_seconds,
     site_preview_job_timeout_seconds,
 )
+from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
 
 logger = logging.getLogger(__name__)
 
@@ -495,27 +496,28 @@ _ship_deploy_fn = func(
 # timeouts above, so a deploy that retunes ``PAW_SITES_BUILD_TIMEOUT_SEC*`` picks it up
 # on the worker restart the deploy performs anyway.
 #
-# ``max_tries=1`` matches the rest of this worker and is load-bearing here: a build is
-# billed per attempt in a third-party sandbox, and the retry decision belongs to
-# ``build_state.settle`` (which records WHY it gave up), not to arq silently re-running a
-# job whose row already says ``failed``.
+# ``max_tries`` admits ONLY the job's own capacity retries (``sites.capacity``): the job
+# raises arq's ``Retry`` when Daytona refuses a sandbox because the org's resource limit
+# is full, and nothing else in it raises ``Retry``. Every other outcome still settles on
+# the first try, because a build is billed per attempt and the retry decision belongs to
+# ``build_state.settle``, not to arq silently re-running a job whose row says ``failed``.
 _site_build_fn = func(
     run_site_build,
     name=SITE_BUILD_FUNCTION_NAME,
     timeout=site_build_job_timeout_seconds(),
-    max_tries=1,
+    max_tries=CAPACITY_MAX_TRIES,
 )
 
 # SP-2: the DRAFT-PREVIEW build. Same sandbox, same budget (it is the same build — only
-# what happens to the artifact differs), and the same ``max_tries=1``: a preview is billed
-# per attempt too, and a client re-triggers by asking for the render again rather than by
-# arq silently re-running a job whose result already says why it failed.
+# what happens to the artifact differs), and the same capacity-only ``max_tries``: a
+# preview is billed per attempt too, and a client re-triggers by asking for the render
+# again rather than by arq silently re-running a job whose result says why it failed.
 # PP-2: plus the browser check that now runs in the same sandbox after the build.
 _site_preview_build_fn = func(
     run_site_preview_build,
     name=SITE_PREVIEW_BUILD_FUNCTION_NAME,
     timeout=site_preview_job_timeout_seconds(),
-    max_tries=1,
+    max_tries=CAPACITY_MAX_TRIES,
 )
 
 

@@ -379,10 +379,11 @@ class TestTheJobCarriesItsOwnTimeout:
         assert site_build.coroutine is bj.run_site_build
         assert site_build.timeout_s == bj.site_build_job_timeout_seconds()
         assert site_build.timeout_s != registered["execute_workspace_job"].timeout_s
-        # A build is billed per attempt in a third-party sandbox, and the retry decision
-        # belongs to ``settle`` (which records why it gave up), not to a silent arq retry
-        # of a job whose row already reads ``failed``.
-        assert site_build.max_tries == 1
+        # A build is billed per attempt, so arq retries ONLY the job's own capacity
+        # ``Retry`` (Daytona's org limit was full and nothing ran): one try per delay.
+        from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
+
+        assert site_build.max_tries == CAPACITY_MAX_TRIES
 
 
 # ---------------------------------------------------------------------------

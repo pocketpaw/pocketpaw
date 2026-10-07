@@ -237,8 +237,10 @@ from typing import Any
 
 from arq.constants import result_key_prefix
 from arq.jobs import Job, JobStatus
+from arq.worker import Retry
 
 from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
+from pocketpaw_ee.sites import capacity
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.build_state import BuildStatus, settle
 from pocketpaw_ee.sites.daytona_build import resolve_build_timeout_seconds
@@ -665,7 +667,12 @@ async def run_site_build(
                 client=_client,
                 artifact_rel=artifact_rel,
             )
-        except Exception:
+        except Exception as exc:
+            if capacity.is_capacity_error(exc):
+                # The org is full, not down: wait for a slot (row stays ``queued``),
+                # and only settle once the retry budget is spent.
+                await _publish_capacity_wait(ctx, site, site_id, attempts_left)
+                return
             # Nothing ran: Daytona unconfigured, or the sandbox could not be created.
             # Record it (so the site is immediately republishable and the row says why)
             # and re-raise so the worker log carries the real exception.
@@ -717,6 +724,40 @@ async def run_site_build(
             raise
 
     await _record(site, settlement)
+
+
+async def _publish_capacity_wait(ctx: Any, site: Any, site_id: str, attempts_left: int) -> None:
+    """Re-queue a publish refused for capacity, or settle it once the budget is spent.
+
+    Raises ``Retry`` while tries remain, after stamping the row ``queued`` /
+    ``waiting_for_capacity`` (re-stamping its clock, so the wait never reads as a stale
+    build). The stamp is conditional on the row still naming THIS job: a newer publish
+    that claimed the row means this one is superseded, and it stops without writing."""
+    delay = capacity.next_retry_delay(ctx)
+    if delay is not None:
+        job_id = ctx.get("job_id") if isinstance(ctx, dict) else None
+        if not await sites_service.mark_build_waiting(
+            site, job_id=job_id, reason=capacity.WAITING_REASON
+        ):
+            logger.info("sites.build: site %s build %s superseded — not retrying", site_id, job_id)
+            return
+        logger.warning(
+            "sites.build: Daytona capacity full for site %s; retrying in %.0fs (try %s)",
+            site_id,
+            delay,
+            ctx.get("job_try"),
+        )
+        raise Retry(defer=delay)
+    logger.warning("sites.build: Daytona capacity still full for site %s; giving up", site_id)
+    await _record(
+        site,
+        _settlement(
+            RUNG_SANDBOX_UNAVAILABLE,
+            capacity.CAPACITY_CAUSE,
+            retryable=True,
+            attempts_left=attempts_left,
+        ),
+    )
 
 
 async def _deploy_built_artifact(
@@ -1066,6 +1107,10 @@ async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]
     """
     job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)
     status = await job.status()
+    if status is JobStatus.deferred:
+        # Nothing on this lane enqueues with a delay, so a deferred job is one that
+        # ``preview_capacity_outcome`` put back to wait for a Daytona slot.
+        return "queued", capacity.WAITING_REASON
     if status is not JobStatus.complete:
         return "building", None
     info = await job.result_info()
@@ -1387,7 +1432,9 @@ async def run_site_preview_build(
                 after_build=_after_build,
                 on_artifact=_on_artifact,
             )
-        except Exception:
+        except Exception as exc:
+            if capacity.is_capacity_error(exc):
+                return await preview_capacity_outcome(ctx, pocket_id, content_hash, lane="preview")
             logger.exception("sites.preview: no sandbox for pocket %s", pocket_id)
             raise
     finally:
@@ -1504,7 +1551,11 @@ async def run_site_html_verify(
             return {"status": "failed", "reason": f"{RUNG_SCAFFOLD_EMPTY}:no_files_generated"}
         try:
             browser = await standalone(files, static_rel=static_output_rel("html"), client=_client)
-        except Exception:
+        except Exception as exc:
+            if capacity.is_capacity_error(exc):
+                return await preview_capacity_outcome(
+                    ctx, pocket_id, content_hash, lane="html_verify"
+                )
             logger.exception("sites.verify: no sandbox for html pocket %s", pocket_id)
             raise
     finally:
@@ -1585,6 +1636,69 @@ async def _supersede_previous_job(pool: Any, pocket_id: str, job_id: str) -> str
     return previous
 
 
+async def _preview_superseded(ctx: Any, pocket_id: str) -> bool:
+    """True when a newer job replaced this one as the pocket's current preview /
+    html-verify job (the :func:`_supersede_previous_job` pointer). Never raises; an
+    unreadable pointer reads as "not superseded", the pre-existing behaviour."""
+    if not isinstance(ctx, dict):
+        return False
+    job_id, redis = ctx.get("job_id"), ctx.get("redis")
+    if not job_id or redis is None:
+        return False
+    try:
+        current = await redis.get(_CURRENT_JOB_KEY.format(pocket_id=pocket_id))
+    except Exception:  # noqa: BLE001
+        return False
+    if isinstance(current, bytes):
+        current = current.decode("utf-8", "replace")
+    return bool(current) and current != job_id
+
+
+def _superseded_result() -> dict[str, Any]:
+    superseded = {"status": "unverified", "reason": SUPERSEDED_REASON}
+    return {
+        "status": "failed",
+        "reason": SUPERSEDED_REASON,
+        "layers": {"build": superseded, "browser": superseded},
+    }
+
+
+async def preview_capacity_outcome(
+    ctx: Any, pocket_id: str, content_hash: str, *, lane: str
+) -> dict[str, Any]:
+    """A preview / html-verify / project job whose sandbox create hit the org limit.
+
+    Superseded (a newer edit owns the pocket) → stop with the superseded result. Tries
+    left → raise ``Retry`` so arq re-runs it after a jittered delay; meanwhile the job
+    reads as ``queued`` / ``waiting_for_capacity`` (:func:`_preview_job_outcome`).
+    Budget spent → ``failed`` / ``sandbox_unavailable:capacity``. That result is NOT
+    written to ``verify_store``: a cached capacity miss would stop the next verify of
+    the same source from trying again."""
+    if await _preview_superseded(ctx, pocket_id):
+        logger.info("sites.%s: pocket %s job superseded — not retrying", lane, pocket_id)
+        return _superseded_result()
+    delay = capacity.next_retry_delay(ctx)
+    if delay is not None:
+        logger.warning(
+            "sites.%s: Daytona capacity full for pocket %s; retrying in %.0fs (try %s)",
+            lane,
+            pocket_id,
+            delay,
+            ctx.get("job_try"),
+        )
+        raise Retry(defer=delay)
+    logger.warning("sites.%s: Daytona capacity still full for pocket %s", lane, pocket_id)
+    reason = f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}"
+    if lane == "html_verify":
+        build = _layer("skipped", "no_build_step")
+    else:
+        build = _layer("unverified", reason)
+    report = _sandbox_report(
+        content_hash, build=build, browser=_layer("unverified", reason), errors=[]
+    )
+    return {"status": "failed", "reason": reason, **report}
+
+
 async def _clear_aborted_result(pool: Any, job_id: str) -> bool:
     """Free a job id whose last run was ABORTED (superseded), so the same render can be
     queued again — an undo back to that source must build, not read "failed" for the
@@ -1659,12 +1773,7 @@ async def wait_for_preview_result(
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise
-        superseded = {"status": "unverified", "reason": SUPERSEDED_REASON}
-        return {
-            "status": "failed",
-            "reason": SUPERSEDED_REASON,
-            "layers": {"build": superseded, "browser": superseded},
-        }
+        return _superseded_result()
     if isinstance(result, dict):
         return result
     return {"status": "failed", "reason": "preview_result_unreadable"}

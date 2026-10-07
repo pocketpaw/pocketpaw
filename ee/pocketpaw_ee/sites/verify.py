@@ -203,6 +203,13 @@ def _verdict(
         verdict["status"] = "unverified"
         first = next((layer for layer in layers if layer["status"] == "unverified"), None)
         verdict["reason"] = (first or {}).get("reason") or "not_verified"
+        # Capacity / sandbox reasons carry our own sentence, so the agent repeats it
+        # instead of improvising one ("the build server is down") from the rung.
+        from pocketpaw_ee.sites.capacity import reason_message
+
+        message = reason_message(verdict["reason"])
+        if message:
+            verdict["message"] = message
     else:
         verdict["status"] = "passed"
     verdict["layers"] = layers
@@ -307,7 +314,7 @@ async def _sandbox_layers(
         try:
             record = await waiter(active_pool, enqueued.job_id, timeout=wait_seconds)
         except TimeoutError:
-            reason = "timeout"
+            reason = await _timeout_reason(active_pool, enqueued.job_id)
             return (
                 [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)],
                 [],
@@ -329,6 +336,21 @@ async def _sandbox_layers(
             (time.monotonic() - waited) * 1000,
         )
     return _report_layers(record, inputs.engine)
+
+
+async def _timeout_reason(pool: Any, job_id: str) -> str:
+    """``waiting_for_capacity`` when the job we gave up waiting on is parked for a
+    Daytona slot, else ``timeout``. Never raises."""
+    from arq.jobs import Job, JobStatus
+
+    from pocketpaw_ee.sites import build_job
+    from pocketpaw_ee.sites.capacity import WAITING_REASON
+
+    try:
+        status = await Job(job_id, pool, _queue_name=build_job.SITE_BUILD_QUEUE_NAME).status()
+    except Exception:  # noqa: BLE001
+        return "timeout"
+    return WAITING_REASON if status is JobStatus.deferred else "timeout"
 
 
 def _report_layers(

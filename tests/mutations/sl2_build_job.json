@@ -150,8 +150,8 @@
   {
     "label": "the sandbox is held to a budget re-derived from the environment instead of the one the enqueue measured its staleness window against, so a config change mid-flight leaves a live build outside its own window and it gets re-enqueued on top of itself",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "                timeout_seconds=timeout_seconds,\n                client=_client,\n                artifact_rel=artifact_rel,\n            )\n        except Exception:\n            # Nothing ran: Daytona unconfigured, or the sandbox could not be created.",
-    "replace": "                timeout_seconds=resolve_build_timeout_seconds(engine),\n                client=_client,\n                artifact_rel=artifact_rel,\n            )\n        except Exception:\n            # Nothing ran: Daytona unconfigured, or the sandbox could not be created.",
+    "find": "                timeout_seconds=timeout_seconds,\n                client=_client,\n                artifact_rel=artifact_rel,\n            )\n        except Exception as exc:\n            if capacity.is_capacity_error(exc):\n                # The org is full, not down",
+    "replace": "                timeout_seconds=resolve_build_timeout_seconds(engine),\n                client=_client,\n                artifact_rel=artifact_rel,\n            )\n        except Exception as exc:\n            if capacity.is_capacity_error(exc):\n                # The org is full, not down",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_the_sandbox_is_held_to_the_budget_it_was_enqueued_with"
     ]

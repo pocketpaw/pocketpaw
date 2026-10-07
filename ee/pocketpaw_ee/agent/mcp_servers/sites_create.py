@@ -579,7 +579,8 @@ VERIFY_CONTRACT = (
     " VERIFY: the result carries `verification`. Tell the user the site is ready "
     "ONLY when `verification.status` is `passed`. On `failed`, fix the "
     "`verification.errors` (file/line) and call verify_site. On `unverified`, say "
-    "it could not be checked and give the `reason`."
+    "it could not be checked and give the `reason`; when there is a `message`, give "
+    "that sentence as written (a full build queue is not an outage)."
 )
 
 #: Appended to every EDIT tool description. An edit answers in about a second with the
