@@ -138,6 +138,9 @@ ROUTER_MODULES = [
     ("projects", "pocketpaw_ee.cloud.projects.router"),
     ("sessions", "pocketpaw_ee.cloud.sessions.router"),
     ("site_templates", "pocketpaw_ee.cloud.site_templates.router"),
+    # A project site's files (2026-10-07): every route takes request_context and
+    # fabric.write, the same guards as the sites router's build-log routes.
+    ("site_files", "pocketpaw_ee.sites.files_router"),
     ("workspace", "pocketpaw_ee.cloud.workspace.router"),
     # Mounted without joining this list while CI never ran the coverage
     # ratchet. Every route on each was walked by hand: all are session-guarded

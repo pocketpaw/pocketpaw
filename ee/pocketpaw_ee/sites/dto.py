@@ -1519,3 +1519,61 @@ class ForeignConciergeResponse(BaseModel):
     concierge_enabled: bool = False
     # Has the owner created the concierge (``site_keys.concierge_exists``)?
     concierge_exists: bool = False
+
+
+# --- Project files (GET/PUT/DELETE /sites/by-pocket/{pocket_id}/files) -------------
+# The HTTP twin of the agent's project file tools; both call ``sites.project_tools``.
+
+
+class ProjectFileEntry(BaseModel):
+    path: str
+    size: int
+
+
+class ProjectFileListResponse(BaseModel):
+    pocket_id: str
+    files: list[ProjectFileEntry]
+    file_count: int
+
+
+class ProjectFileContentResponse(BaseModel):
+    path: str
+    size: int
+    content: str
+
+
+class ProjectFilesWriteRequest(BaseModel):
+    """``{files: {path: full contents}}``; every path is checked before any is saved."""
+
+    files: dict[str, str]
+
+
+class ProjectFilePatchEdit(BaseModel):
+    old: str
+    new: str
+
+
+class ProjectFilePatchRequest(BaseModel):
+    """One file, ``edits`` applied in order; each ``old`` must match exactly once."""
+
+    path: str
+    edits: list[ProjectFilePatchEdit] = Field(min_length=1)
+
+
+class ProjectFilesDeleteRequest(BaseModel):
+    paths: list[str] = Field(min_length=1)
+
+
+class ProjectFileWriteResponse(BaseModel):
+    """What every write answers. ``verification`` is the queued draft build of the new
+    source: ``{status: "pending", build: "pending", job_id}`` (``passed`` when that
+    exact source already built; ``failed`` / ``unverified`` with a ``reason``).
+    ``lockfile_removed`` lists lockfiles a package.json dependency change made stale."""
+
+    pocket_id: str
+    written: list[str] = Field(default_factory=list)
+    created: list[str] = Field(default_factory=list)
+    deleted: list[str] = Field(default_factory=list)
+    path: str | None = None
+    lockfile_removed: list[str] = Field(default_factory=list)
+    verification: dict[str, Any]
