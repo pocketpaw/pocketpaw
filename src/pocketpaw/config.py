@@ -1594,6 +1594,13 @@ class Settings(BaseSettings):
     whatsapp_verify_token: str | None = Field(
         default=None, description="WhatsApp webhook verification token"
     )
+    whatsapp_app_secret: str | None = Field(
+        default=None,
+        description=(
+            "Meta app secret; inbound business webhooks without a matching "
+            "X-Hub-Signature-256 are rejected (unset rejects all)"
+        ),
+    )
     whatsapp_allowed_phone_numbers: list[str] = Field(
         default_factory=list, description="WhatsApp phone numbers allowed to use the bot"
     )

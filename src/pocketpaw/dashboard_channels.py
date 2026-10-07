@@ -10,6 +10,7 @@ _stop_channel_adapter(), and all channel-related REST endpoints:
 """
 
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -103,6 +104,7 @@ async def _start_channel_adapter(channel: str, settings: Settings | None = None)
                 phone_number_id=settings.whatsapp_phone_number_id,
                 verify_token=settings.whatsapp_verify_token or "",
                 allowed_phone_numbers=settings.whatsapp_allowed_phone_numbers,
+                app_secret=settings.whatsapp_app_secret or "",
             )
             await adapter.start(bus)
             _channel_adapters["whatsapp"] = adapter
@@ -226,12 +228,16 @@ async def whatsapp_verify(
 
 @channels_router.post("/webhook/whatsapp")
 async def whatsapp_incoming(request: Request):
-    """Incoming WhatsApp messages via webhook."""
+    """Incoming WhatsApp messages via webhook. Rejects a body Meta did not sign."""
+    from fastapi.responses import PlainTextResponse
+
     wa = _channel_adapters.get("whatsapp")
     if wa is None:
         return {"status": "not configured"}
-    payload = await request.json()
-    await wa.handle_webhook_message(payload)
+    raw = await request.body()
+    if not wa.verify_webhook_signature(raw, request.headers.get("x-hub-signature-256")):
+        return PlainTextResponse("Forbidden", status_code=403)
+    await wa.handle_webhook_message(json.loads(raw))
     return {"status": "ok"}
 
 
