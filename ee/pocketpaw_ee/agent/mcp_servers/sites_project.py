@@ -5,11 +5,14 @@
 # rides ``SITES_TOOL_IDS`` so the /sites allow-list carries it.
 #
 # Twelve tools: ``list_site_templates``, ``start_site_from_template``,
-# ``list_site_recipes``, ``apply_site_recipe``, ``list_files``, ``read_file``,
-# ``read_files``, ``write_files``, ``patch_file``, ``delete_files``, ``run_build``,
-# ``get_build_log``. The CLI work, path policy, caps and plan gate live in
-# ``sites/project_tools.py``; the persist is ``pockets.service.set_project_source``;
-# builds and logs are A1's lane in ``sites/service.py`` / ``sites/project_build.py``.
+# ``list_site_recipes``, ``apply_site_recipe``, ``list_site_files``,
+# ``read_site_file``, ``read_site_files``, ``write_site_files``, ``patch_site_file``,
+# ``delete_site_files``, ``run_site_build``, ``get_site_build_log``. File and build
+# tools carry ``site`` in their names: pydantic-ai flattens toolsets, so a generic
+# ``read_file`` here would collide with another server's. The CLI work, path policy,
+# caps and plan gate live in ``sites/project_tools.py``; the persist is
+# ``pockets.service.set_project_source``; builds and logs are A1's lane in
+# ``sites/service.py`` / ``sites/project_build.py``.
 #
 # Invariants: the file tools refuse every engine but ``project`` (the other engines
 # have their own edit tools and path rules); every write queues the draft build of
@@ -44,36 +47,36 @@ LIST_SITE_TEMPLATES_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_templates"
 START_SITE_FROM_TEMPLATE_TOOL_ID = f"mcp__{SERVER_NAME}__start_site_from_template"
 LIST_SITE_RECIPES_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_recipes"
 APPLY_SITE_RECIPE_TOOL_ID = f"mcp__{SERVER_NAME}__apply_site_recipe"
-LIST_FILES_TOOL_ID = f"mcp__{SERVER_NAME}__list_files"
-READ_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__read_file"
-READ_FILES_TOOL_ID = f"mcp__{SERVER_NAME}__read_files"
-WRITE_FILES_TOOL_ID = f"mcp__{SERVER_NAME}__write_files"
-PATCH_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__patch_file"
-DELETE_FILES_TOOL_ID = f"mcp__{SERVER_NAME}__delete_files"
-RUN_BUILD_TOOL_ID = f"mcp__{SERVER_NAME}__run_build"
-GET_BUILD_LOG_TOOL_ID = f"mcp__{SERVER_NAME}__get_build_log"
+LIST_SITE_FILES_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_files"
+READ_SITE_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__read_site_file"
+READ_SITE_FILES_TOOL_ID = f"mcp__{SERVER_NAME}__read_site_files"
+WRITE_SITE_FILES_TOOL_ID = f"mcp__{SERVER_NAME}__write_site_files"
+PATCH_SITE_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__patch_site_file"
+DELETE_SITE_FILES_TOOL_ID = f"mcp__{SERVER_NAME}__delete_site_files"
+RUN_SITE_BUILD_TOOL_ID = f"mcp__{SERVER_NAME}__run_site_build"
+GET_SITE_BUILD_LOG_TOOL_ID = f"mcp__{SERVER_NAME}__get_site_build_log"
 
 SITES_PROJECT_TOOL_IDS = (
     LIST_SITE_TEMPLATES_TOOL_ID,
     START_SITE_FROM_TEMPLATE_TOOL_ID,
     LIST_SITE_RECIPES_TOOL_ID,
     APPLY_SITE_RECIPE_TOOL_ID,
-    LIST_FILES_TOOL_ID,
-    READ_FILE_TOOL_ID,
-    READ_FILES_TOOL_ID,
-    WRITE_FILES_TOOL_ID,
-    PATCH_FILE_TOOL_ID,
-    DELETE_FILES_TOOL_ID,
-    RUN_BUILD_TOOL_ID,
-    GET_BUILD_LOG_TOOL_ID,
+    LIST_SITE_FILES_TOOL_ID,
+    READ_SITE_FILE_TOOL_ID,
+    READ_SITE_FILES_TOOL_ID,
+    WRITE_SITE_FILES_TOOL_ID,
+    PATCH_SITE_FILE_TOOL_ID,
+    DELETE_SITE_FILES_TOOL_ID,
+    RUN_SITE_BUILD_TOOL_ID,
+    GET_SITE_BUILD_LOG_TOOL_ID,
 )
 
-#: ``run_build`` waits this long for the sandbox build, polling every few seconds.
+#: ``run_site_build`` waits this long for the sandbox build, polling every few seconds.
 RUN_BUILD_WAIT_SEC = 30.0
 RUN_BUILD_POLL_SEC = 2.0
 #: How much of a build log one tool result carries (the stored log keeps 64 KiB).
 LOG_TAIL_CHARS = 12_000
-#: ``list_files`` lists at most this many paths per call.
+#: ``list_site_files`` lists at most this many paths per call.
 MAX_LISTED = 1_000
 
 _TERMINAL = frozenset({"built", "failed"})
@@ -176,7 +179,7 @@ async def _queue_build(workspace_id: str, user_id: str, pocket_id: str) -> dict[
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
     )
     if out.get("status") == "pending":
-        out["next"] = "call run_build to wait for it, or get_build_log to read it"
+        out["next"] = "call run_site_build to wait for it, or get_site_build_log to read it"
     return out
 
 
@@ -192,14 +195,14 @@ def _cli_error(exc: Exception) -> dict[str, Any]:
 
 def _file_error(tool: str, exc: Exception) -> dict[str, Any]:
     """A file operation's failure as the agent reads it: the wrong engine names the
-    right tools, a missing file points at list_files, everything else by code."""
+    right tools, a missing file points at list_site_files, everything else by code."""
     from pocketpaw_ee.cloud._core.errors import CloudError
 
     if isinstance(exc, CloudError) and exc.code == "sites.not_a_project":
         return _error_response(NOT_PROJECT.format(tool=tool))
     if isinstance(exc, CloudError) and exc.code == "site_file.not_found":
         return _error_response(
-            f"{exc.code}: {exc.message}. Nothing was changed; call list_files to see the tree."
+            f"{exc.code}: {exc.message}. Nothing was changed; call list_site_files to see the tree."
         )
     return _cli_error(exc)
 
@@ -340,8 +343,9 @@ async def _start_site_from_template_handler(args: dict) -> dict:
             "Need a database, accounts or storage? list_site_recipes, then "
             "apply_site_recipe for each, before writing the features that use them.",
             "Request each secret a recipe returns with request_site_secret.",
-            "Edit with read_file / patch_file / write_files (list_files for the tree).",
-            "run_build, and on failure get_build_log; fix and build again.",
+            "Edit with read_site_file / patch_site_file / write_site_files "
+            "(list_site_files for the tree).",
+            "run_site_build, and on failure get_site_build_log; fix and build again.",
         ],
         "message": (
             "The project is saved as a DRAFT site; nothing is live. AGENTS.md follows verbatim."
@@ -534,8 +538,8 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _list_files_handler(args: dict) -> dict:
-    tool = "list_files"
+async def _list_site_files_handler(args: dict) -> dict:
+    tool = "list_site_files"
     workspace_id, user_id, err = await _begin(tool)
     if err:
         return err
@@ -605,7 +609,7 @@ async def _read(tool: str, args: dict, paths: Any) -> dict:
         "files": meta,
         "message": (
             "Each file follows verbatim after its `=== FILE ===` header line (the header "
-            "is not part of the file). Copy `old` for patch_file exactly from it. "
+            "is not part of the file). Copy `old` for patch_site_file exactly from it. "
             "truncated: only the start is shown (usually a generated file you should not "
             "edit); omitted: over this call's read budget, read it in another call."
         ),
@@ -613,25 +617,25 @@ async def _read(tool: str, args: dict, paths: Any) -> dict:
     return _with_text_blocks(body, blocks)
 
 
-async def _read_file_handler(args: dict) -> dict:
-    return await _read("read_file", args, [args.get("path")])
+async def _read_site_file_handler(args: dict) -> dict:
+    return await _read("read_site_file", args, [args.get("path")])
 
 
-async def _read_files_handler(args: dict) -> dict:
+async def _read_site_files_handler(args: dict) -> dict:
     args = coerce_json_object_args(args, ("paths",))
-    return await _read("read_files", args, args.get("paths"))
+    return await _read("read_site_files", args, args.get("paths"))
 
 
 def _draft_body(result: dict[str, Any], message: str) -> dict[str, Any]:
     out = {"ok": True, "status": "draft", "is_live": False, **result}
     out["message"] = message + _lockfile_note(result.get("lockfile_removed") or [])
     if out.get("verification", {}).get("status") == "pending":
-        out["verification"]["next"] = "call run_build to wait for it, or get_build_log"
+        out["verification"]["next"] = "call run_site_build to wait for it, or get_site_build_log"
     return _success_response(out)
 
 
-async def _write_files_handler(args: dict) -> dict:
-    tool = "write_files"
+async def _write_site_files_handler(args: dict) -> dict:
+    tool = "write_site_files"
     workspace_id, user_id, err = await _begin(tool)
     if err:
         return err
@@ -653,8 +657,8 @@ async def _write_files_handler(args: dict) -> dict:
     return _draft_body(result, "Saved to the draft; nothing is live.")
 
 
-async def _patch_file_handler(args: dict) -> dict:
-    tool = "patch_file"
+async def _patch_site_file_handler(args: dict) -> dict:
+    tool = "patch_site_file"
     workspace_id, user_id, err = await _begin(tool)
     if err:
         return err
@@ -677,8 +681,8 @@ async def _patch_file_handler(args: dict) -> dict:
     return _draft_body(result, "Saved to the draft; nothing is live.")
 
 
-async def _delete_files_handler(args: dict) -> dict:
-    tool = "delete_files"
+async def _delete_site_files_handler(args: dict) -> dict:
+    tool = "delete_site_files"
     workspace_id, user_id, err = await _begin(tool)
     if err:
         return err
@@ -725,8 +729,8 @@ async def _wait_for_build(pocket_id: str, job_id: str) -> dict[str, Any] | None:
     return record
 
 
-async def _run_build_handler(args: dict) -> dict:
-    tool = "run_build"
+async def _run_site_build_handler(args: dict) -> dict:
+    tool = "run_site_build"
     workspace_id, user_id, err = await _begin(tool)
     if err:
         return err
@@ -777,13 +781,13 @@ async def _run_build_handler(args: dict) -> dict:
         body["log_truncated"] = cut or bool((record or {}).get("log_truncated"))
         body["message"] = (
             "The build failed. The log tail follows; the error is usually near the end. "
-            "Fix the files it names and run_build again."
+            "Fix the files it names and run_site_build again."
         )
         blocks.append(f"=== BUILD LOG ({job_id}) ===\n{tail}")
     else:
         body["message"] = (
             f"Still {status} after {int(RUN_BUILD_WAIT_SEC)}s. Keep working and call "
-            "run_build or get_build_log again shortly; do not report the site as built."
+            "run_site_build or get_site_build_log again shortly; do not report the site as built."
         )
     out = _with_text_blocks(body, blocks)
     if status == "failed":
@@ -791,8 +795,8 @@ async def _run_build_handler(args: dict) -> dict:
     return out
 
 
-async def _get_build_log_handler(args: dict) -> dict:
-    tool = "get_build_log"
+async def _get_site_build_log_handler(args: dict) -> dict:
+    tool = "get_site_build_log"
     workspace_id, user_id, err = await _begin(tool)
     if err:
         return err
@@ -817,7 +821,7 @@ async def _get_build_log_handler(args: dict) -> dict:
     except CloudError as exc:
         if exc.code.endswith("not_found") or getattr(exc, "status_code", None) == 404:
             return _error_response(
-                f"{exc.code}: no build found. Call run_build to build the draft first."
+                f"{exc.code}: no build found. Call run_site_build to build the draft first."
             )
         return _error_response(f"{exc.code}: {exc.message}")
     tail, cut = _log_tail(result.get("log") or "")
@@ -942,7 +946,7 @@ def make_project_tools(tool: Any) -> list[Any]:
         return await _apply_site_recipe_handler(args)
 
     @tool(
-        "list_files",
+        "list_site_files",
         (
             "List a project site's files (path + bytes). `prefix` narrows it to a "
             "directory, e.g. 'src/'. Project sites only."
@@ -957,11 +961,11 @@ def make_project_tools(tool: Any) -> list[Any]:
             "additionalProperties": False,
         },
     )
-    async def list_files(args):  # type: ignore[no-untyped-def]
-        return await _list_files_handler(args)
+    async def list_site_files(args):  # type: ignore[no-untyped-def]
+        return await _list_site_files_handler(args)
 
     @tool(
-        "read_file",
+        "read_site_file",
         (
             "Read one file of a project site, verbatim, in a text block after a "
             "`=== FILE ===` header. Very large (usually generated) files are truncated."
@@ -976,14 +980,14 @@ def make_project_tools(tool: Any) -> list[Any]:
             "additionalProperties": False,
         },
     )
-    async def read_file(args):  # type: ignore[no-untyped-def]
-        return await _read_file_handler(args)
+    async def read_site_file(args):  # type: ignore[no-untyped-def]
+        return await _read_site_file_handler(args)
 
     @tool(
-        "read_files",
+        "read_site_files",
         (
             "Read several files of a project site in one call (each in its own "
-            "verbatim block). Prefer it over repeated read_file calls."
+            "verbatim block). Prefer it over repeated read_site_file calls."
         ),
         {
             "type": "object",
@@ -1000,18 +1004,18 @@ def make_project_tools(tool: Any) -> list[Any]:
             "additionalProperties": False,
         },
     )
-    async def read_files(args):  # type: ignore[no-untyped-def]
-        return await _read_files_handler(args)
+    async def read_site_files(args):  # type: ignore[no-untyped-def]
+        return await _read_site_files_handler(args)
 
     @tool(
-        "write_files",
+        "write_site_files",
         (
             "Create or overwrite files of a project site: `files` maps a relative path "
             "to its FULL new contents. Paths are relative to the repo root, no '..'; "
             "node_modules, .git, .paw/, paw-build.json and real .env / .dev.vars files "
             "are refused (secret values never go in the source). Changing package.json "
             "dependencies drops the stale lockfile. Saves to the draft and queues a "
-            "build (verification.status pending). Prefer patch_file for small edits."
+            "build (verification.status pending). Prefer patch_site_file for small edits."
         ),
         {
             "type": "object",
@@ -1027,14 +1031,14 @@ def make_project_tools(tool: Any) -> list[Any]:
             "additionalProperties": False,
         },
     )
-    async def write_files(args):  # type: ignore[no-untyped-def]
-        return await _write_files_handler(args)
+    async def write_site_files(args):  # type: ignore[no-untyped-def]
+        return await _write_site_files_handler(args)
 
     @tool(
-        "patch_file",
+        "patch_site_file",
         (
             "Edit one existing file of a project site with search/replace blocks. Each "
-            "`old` must match the current file EXACTLY ONCE (copy it from read_file); "
+            "`old` must match the current file EXACTLY ONCE (copy it from read_site_file); "
             "blocks apply in order. 0 or several matches fails and saves nothing. Saves "
             "to the draft and queues a build."
         ),
@@ -1061,11 +1065,11 @@ def make_project_tools(tool: Any) -> list[Any]:
             "additionalProperties": False,
         },
     )
-    async def patch_file(args):  # type: ignore[no-untyped-def]
-        return await _patch_file_handler(args)
+    async def patch_site_file(args):  # type: ignore[no-untyped-def]
+        return await _patch_site_file_handler(args)
 
     @tool(
-        "delete_files",
+        "delete_site_files",
         (
             "Delete files from a project site's draft. Every path must exist (else "
             "nothing is deleted); package.json cannot be deleted."
@@ -1080,11 +1084,11 @@ def make_project_tools(tool: Any) -> list[Any]:
             "additionalProperties": False,
         },
     )
-    async def delete_files(args):  # type: ignore[no-untyped-def]
-        return await _delete_files_handler(args)
+    async def delete_site_files(args):  # type: ignore[no-untyped-def]
+        return await _delete_site_files_handler(args)
 
     @tool(
-        "run_build",
+        "run_site_build",
         (
             "Build a project site's current draft in the sandbox (install, build, "
             "wrangler dry-run) and wait up to ~30 s. Returns status built / failed / "
@@ -1100,14 +1104,14 @@ def make_project_tools(tool: Any) -> list[Any]:
             "additionalProperties": False,
         },
     )
-    async def run_build(args):  # type: ignore[no-untyped-def]
-        return await _run_build_handler(args)
+    async def run_site_build(args):  # type: ignore[no-untyped-def]
+        return await _run_site_build_handler(args)
 
     @tool(
-        "get_build_log",
+        "get_site_build_log",
         (
             "Read a project site build's status and redacted log tail: the latest "
-            "build, or `job_id` (from run_build or a write's verification)."
+            "build, or `job_id` (from run_site_build or a write's verification)."
         ),
         {
             "type": "object",
@@ -1119,38 +1123,38 @@ def make_project_tools(tool: Any) -> list[Any]:
             "additionalProperties": False,
         },
     )
-    async def get_build_log(args):  # type: ignore[no-untyped-def]
-        return await _get_build_log_handler(args)
+    async def get_site_build_log(args):  # type: ignore[no-untyped-def]
+        return await _get_site_build_log_handler(args)
 
     return [
         list_site_templates,
         start_site_from_template,
         list_site_recipes,
         apply_site_recipe,
-        list_files,
-        read_file,
-        read_files,
-        write_files,
-        patch_file,
-        delete_files,
-        run_build,
-        get_build_log,
+        list_site_files,
+        read_site_file,
+        read_site_files,
+        write_site_files,
+        patch_site_file,
+        delete_site_files,
+        run_site_build,
+        get_site_build_log,
     ]
 
 
 __all__ = [
     "APPLY_SITE_RECIPE_TOOL_ID",
-    "DELETE_FILES_TOOL_ID",
-    "GET_BUILD_LOG_TOOL_ID",
-    "LIST_FILES_TOOL_ID",
+    "DELETE_SITE_FILES_TOOL_ID",
+    "GET_SITE_BUILD_LOG_TOOL_ID",
+    "LIST_SITE_FILES_TOOL_ID",
     "LIST_SITE_RECIPES_TOOL_ID",
     "LIST_SITE_TEMPLATES_TOOL_ID",
-    "PATCH_FILE_TOOL_ID",
-    "READ_FILES_TOOL_ID",
-    "READ_FILE_TOOL_ID",
-    "RUN_BUILD_TOOL_ID",
+    "PATCH_SITE_FILE_TOOL_ID",
+    "READ_SITE_FILES_TOOL_ID",
+    "READ_SITE_FILE_TOOL_ID",
+    "RUN_SITE_BUILD_TOOL_ID",
     "SITES_PROJECT_TOOL_IDS",
     "START_SITE_FROM_TEMPLATE_TOOL_ID",
-    "WRITE_FILES_TOOL_ID",
+    "WRITE_SITE_FILES_TOOL_ID",
     "make_project_tools",
 ]

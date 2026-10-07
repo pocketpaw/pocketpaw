@@ -45,7 +45,7 @@ When two fit, the user's named framework wins, then `when_to_use`.
 1. `start_site_from_template(slug, brief, name?)`, ONCE. It creates the draft
    site and returns `pocket_id`, the repo's AGENTS.md and the next steps. Never
    call it again for a change: that makes a second site.
-2. Read AGENTS.md (it came with the result; `read_file` it again after a recipe
+2. Read AGENTS.md (it came with the result; `read_site_file` it again after a recipe
    adds a section). It says where pages, server functions, data access, auth
    and tokens go, and which files are generated. Follow it over your framework
    habits.
@@ -60,14 +60,14 @@ When two fit, the user's named framework wins, then `when_to_use`.
    the site needs. Never write a secret value into any file, `.env` or
    `.dev.vars`; only names go in `.dev.vars.example`.
 5. Edit. Do the recipe's `glue_tasks` in order, then build the features:
-   `list_files`, `read_files` before you change anything, `patch_file` with
-   exact-once `{old, new}` blocks for edits, `write_files` for new or rewritten
-   files, `delete_files` to remove. Paths are relative to the repo root. Keep
+   `list_site_files`, `read_site_files` before you change anything, `patch_site_file` with
+   exact-once `{old, new}` blocks for edits, `write_site_files` for new or rewritten
+   files, `delete_site_files` to remove. Paths are relative to the repo root. Keep
    to the template's structure and its shadcn tokens. Changing package.json
    dependencies drops the stale lockfile on its own.
-6. `run_build`. It waits about 30 seconds. Still building: keep working and
+6. `run_site_build`. It waits about 30 seconds. Still building: keep working and
    call it again.
-7. On `failed`, read the log tail in the result (or `get_build_log`), fix what
+7. On `failed`, read the log tail in the result (or `get_site_build_log`), fix what
    it names, build again. Three rounds at most, then tell the user what still
    fails.
 8. On `built`, show the preview. If `preview_mode` is `static`, say that the
@@ -84,4 +84,4 @@ finished build of the current files, so build first.
 - Edit generated files AGENTS.md names (`worker-configuration.d.ts`, build
   output). Recipes and wrangler changes are the way to add bindings.
 - Put resource ids or secret values in wrangler.jsonc or any file.
-- Report the site as ready before `run_build` returns `built`.
+- Report the site as ready before `run_site_build` returns `built`.

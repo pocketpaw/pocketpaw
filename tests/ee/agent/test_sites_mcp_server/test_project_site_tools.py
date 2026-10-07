@@ -7,7 +7,7 @@
 # other engines and unsafe paths, and every write lands in the source map and queues
 # a build; apply_site_recipe writes the CLI's files back, records the recipe, returns
 # secret names, writes NOTHING on a conflict, and refuses below the recipe's plan;
-# run_build / get_build_log read A1's build records. The CLI is the fake in
+# run_site_build / get_site_build_log read A1's build records. The CLI is the fake in
 # tests/ee/sites/project_cli_fake.py; the sandbox queue is stubbed.
 from __future__ import annotations
 
@@ -26,14 +26,14 @@ TOOL_NAMES = {
     "start_site_from_template",
     "list_site_recipes",
     "apply_site_recipe",
-    "list_files",
-    "read_file",
-    "read_files",
-    "write_files",
-    "patch_file",
-    "delete_files",
-    "run_build",
-    "get_build_log",
+    "list_site_files",
+    "read_site_file",
+    "read_site_files",
+    "write_site_files",
+    "patch_site_file",
+    "delete_site_files",
+    "run_site_build",
+    "get_site_build_log",
 }
 
 
@@ -181,7 +181,7 @@ class TestRegistration:
         tools = asyncio.run(handler(types.ListToolsRequest(method="tools/list"))).root.tools
         names = {t.name for t in tools}
         assert TOOL_NAMES <= names
-        patch_schema = next(t for t in tools if t.name == "patch_file").inputSchema
+        patch_schema = next(t for t in tools if t.name == "patch_site_file").inputSchema
         assert patch_schema["properties"]["edits"]["items"]["required"] == ["old", "new"]
         recipe = next(t for t in tools if t.name == "apply_site_recipe")
         assert "request_site_secret" in (recipe.description or "")
@@ -199,6 +199,60 @@ class TestRegistration:
         )
         assert refine.ripple_mode == "off"
         assert set(SITES_PROJECT_TOOL_IDS) <= set(refine.allow_mcp_tool_ids or ())
+
+    def test_no_sites_manager_tool_name_collides_with_another_tool(self) -> None:
+        """pydantic-ai flattens toolsets into one namespace, and a duplicate name
+        fails the whole run with ``UserError: ... conflicts with existing tool``.
+        The sources are the ones the pydantic-ai backend joins: every other
+        in-process MCP server (``tool_bridge.build_inprocess_mcp_toolsets``) and
+        the bridged PocketPaw builtins (pydantic-ai and deep-agents bridges).
+        A generic ``read_file`` here once broke every pydantic-ai run."""
+        import asyncio
+
+        pytest.importorskip("pydantic_ai")
+        import mcp.types as mcp_types
+        from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME
+
+        from pocketpaw._registry import providers
+        from pocketpaw.agents.tool_bridge import (
+            _bridge_inprocess_server,
+            build_deep_agents_tools,
+            build_pydantic_ai_tools,
+        )
+        from pocketpaw.config import Settings
+
+        async def server_tool_names() -> dict[str, set[str]]:
+            out: dict[str, set[str]] = {}
+            for provider in providers("pocketpaw.mcp_servers"):
+                built = provider.build_server()
+                if not built:
+                    continue
+                name, server = built
+                instance = server.get("instance") if isinstance(server, dict) else None
+                if instance is None:
+                    continue
+                tools = await _bridge_inprocess_server(name, instance, mcp_types)
+                out[name] = {t.name for t in tools}
+            return out
+
+        by_server = asyncio.run(server_tool_names())
+        if SERVER_NAME not in by_server:
+            pytest.skip("claude_agent_sdk not installed; the sites server is not built")
+        sites = by_server.pop(SERVER_NAME)
+        assert TOOL_NAMES <= sites
+
+        others: dict[str, str] = {}
+        for server, names in by_server.items():
+            for name in names:
+                others.setdefault(name, f"in-process server {server}")
+        settings = Settings()
+        for t in build_pydantic_ai_tools(settings):
+            others.setdefault(t.name, "pydantic-ai builtin")
+        for t in build_deep_agents_tools(settings):
+            others.setdefault(getattr(t, "name", ""), "deep-agents builtin")
+
+        clashes = {n: others[n] for n in sites if n in others}
+        assert not clashes, f"sites_manager tool names collide: {clashes}"
 
 
 # ---------------------------------------------------------------------------
@@ -264,14 +318,14 @@ class TestFileTools:
     @pytest.mark.parametrize(
         ("tool", "args"),
         [
-            ("list_files", {}),
-            ("read_file", {"path": "index.html"}),
-            ("read_files", {"paths": ["index.html"]}),
-            ("write_files", {"files": {"index.html": "<p>x</p>"}}),
-            ("patch_file", {"path": "index.html", "edits": [{"old": "a", "new": "b"}]}),
-            ("delete_files", {"paths": ["index.html"]}),
-            ("run_build", {}),
-            ("get_build_log", {}),
+            ("list_site_files", {}),
+            ("read_site_file", {"path": "index.html"}),
+            ("read_site_files", {"paths": ["index.html"]}),
+            ("write_site_files", {"files": {"index.html": "<p>x</p>"}}),
+            ("patch_site_file", {"path": "index.html", "edits": [{"old": "a", "new": "b"}]}),
+            ("delete_site_files", {"paths": ["index.html"]}),
+            ("run_site_build", {}),
+            ("get_site_build_log", {}),
             ("apply_site_recipe", {"recipe_id": "d1-drizzle"}),
         ],
     )
@@ -289,14 +343,14 @@ class TestFileTools:
         self, cli, identity, builds, beanie_test_db, recording_bus
     ) -> None:
         pocket_id = await _start(cli)
-        listed = _body(await _call("list_files", {"pocket_id": pocket_id, "prefix": "src/"}))
+        listed = _body(await _call("list_site_files", {"pocket_id": pocket_id, "prefix": "src/"}))
         assert [f["path"] for f in listed["files"]] == ["src/pages/index.astro"]
         out = await _call(
-            "read_files", {"pocket_id": pocket_id, "paths": ["package.json", "./AGENTS.md"]}
+            "read_site_files", {"pocket_id": pocket_id, "paths": ["package.json", "./AGENTS.md"]}
         )
         assert [f["path"] for f in _body(out)["files"]] == ["package.json", "AGENTS.md"]
         assert out["content"][2]["text"].endswith(TEMPLATE_FILES["AGENTS.md"])
-        missing = await _call("read_file", {"pocket_id": pocket_id, "path": "nope.ts"})
+        missing = await _call("read_site_file", {"pocket_id": pocket_id, "path": "nope.ts"})
         assert missing["is_error"] and "nope.ts" in missing["content"][0]["text"]
 
     async def test_read_truncates_a_huge_file(
@@ -306,7 +360,7 @@ class TestFileTools:
 
         monkeypatch.setattr(project_tools, "MAX_READ_FILE_BYTES", 10)
         pocket_id = await _start(cli)
-        out = await _call("read_file", {"pocket_id": pocket_id, "path": "package.json"})
+        out = await _call("read_site_file", {"pocket_id": pocket_id, "path": "package.json"})
         assert _body(out)["files"][0]["truncated"] is True
         assert len(out["content"][1]["text"].split("\n", 1)[1]) == 10
 
@@ -315,7 +369,7 @@ class TestFileTools:
     ) -> None:
         pocket_id = await _start(cli)
         out = await _call(
-            "write_files",
+            "write_site_files",
             {"pocket_id": pocket_id, "files": {"src/pages/about.astro": "<h1>About</h1>\n"}},
         )
         body = _body(out)
@@ -323,7 +377,7 @@ class TestFileTools:
         assert body["verification"]["status"] == "pending"
 
         out = await _call(
-            "patch_file",
+            "patch_site_file",
             {
                 "pocket_id": pocket_id,
                 "path": "src/pages/about.astro",
@@ -332,7 +386,7 @@ class TestFileTools:
         )
         assert not out.get("is_error"), out
         out = await _call(
-            "delete_files", {"pocket_id": pocket_id, "paths": ["src/pages/index.astro"]}
+            "delete_site_files", {"pocket_id": pocket_id, "paths": ["src/pages/index.astro"]}
         )
         assert _body(out)["deleted"] == ["src/pages/index.astro"]
 
@@ -347,7 +401,7 @@ class TestFileTools:
     ) -> None:
         pocket_id = await _start(cli)
         out = await _call(
-            "patch_file",
+            "patch_site_file",
             {
                 "pocket_id": pocket_id,
                 "path": "src/pages/index.astro",
@@ -365,7 +419,7 @@ class TestFileTools:
     ) -> None:
         pocket_id = await _start(cli)
         out = await _call(
-            "write_files", {"pocket_id": pocket_id, "files": {"ok.ts": "1", path: "x"}}
+            "write_site_files", {"pocket_id": pocket_id, "files": {"ok.ts": "1", path: "x"}}
         )
         assert out["is_error"] and "sites.project_bad_path" in out["content"][0]["text"]
         assert (await _doc(pocket_id)).source == TEMPLATE_FILES
@@ -377,7 +431,7 @@ class TestFileTools:
 
         monkeypatch.setattr(project_tools, "MAX_WRITE_FILE_BYTES", 5)
         pocket_id = await _start(cli)
-        out = await _call("write_files", {"pocket_id": pocket_id, "files": {"a.ts": "123456"}})
+        out = await _call("write_site_files", {"pocket_id": pocket_id, "files": {"a.ts": "123456"}})
         assert out["is_error"] and "sites.project_file_too_large" in out["content"][0]["text"]
 
     async def test_a_dependency_write_drops_the_lockfile(
@@ -388,7 +442,8 @@ class TestFileTools:
         pkg["dependencies"]["zod"] = "4.1.0"
         body = _body(
             await _call(
-                "write_files", {"pocket_id": pocket_id, "files": {"package.json": json.dumps(pkg)}}
+                "write_site_files",
+                {"pocket_id": pocket_id, "files": {"package.json": json.dumps(pkg)}},
             )
         )
         assert body["lockfile_removed"] == ["bun.lock"]
@@ -398,9 +453,9 @@ class TestFileTools:
         self, cli, identity, builds, beanie_test_db, recording_bus
     ) -> None:
         pocket_id = await _start(cli)
-        out = await _call("delete_files", {"pocket_id": pocket_id, "paths": ["package.json"]})
+        out = await _call("delete_site_files", {"pocket_id": pocket_id, "paths": ["package.json"]})
         assert out["is_error"]
-        missing = await _call("delete_files", {"pocket_id": pocket_id, "paths": ["gone.ts"]})
+        missing = await _call("delete_site_files", {"pocket_id": pocket_id, "paths": ["gone.ts"]})
         assert missing["is_error"]
         assert (await _doc(pocket_id)).source == TEMPLATE_FILES
 
@@ -517,7 +572,7 @@ class TestBuilds:
         )
         monkeypatch.setattr(sites_project, "RUN_BUILD_POLL_SEC", 0)
         monkeypatch.setattr(project_build, "read_build_record", lambda *_a: next(records))
-        out = await _call("run_build", {"pocket_id": pocket_id})
+        out = await _call("run_site_build", {"pocket_id": pocket_id})
         assert out["is_error"]
         body = _body(out)
         assert body["status"] == "failed" and body["reason"] == "build_failed:build_failed"
@@ -533,7 +588,7 @@ class TestBuilds:
             "preview_url": "https://preview.example/x/",
             "preview_mode": "static",
         }
-        body = _body(await _call("run_build", {"pocket_id": pocket_id}))
+        body = _body(await _call("run_site_build", {"pocket_id": pocket_id}))
         assert body["status"] == "built"
         assert body["preview_url"] == "https://preview.example/x/"
         assert "after publish" in body["message"]
@@ -547,7 +602,7 @@ class TestBuilds:
         pocket_id = await _start(cli)
         monkeypatch.setattr(sites_project, "RUN_BUILD_WAIT_SEC", 0)
         monkeypatch.setattr(project_build, "read_build_record", lambda *_a: {"status": "building"})
-        body = _body(await _call("run_build", {"pocket_id": pocket_id}))
+        body = _body(await _call("run_site_build", {"pocket_id": pocket_id}))
         assert body["status"] == "building" and body["preview_url"] is None
         assert "do not report the site as built" in body["message"]
 
@@ -573,7 +628,7 @@ class TestBuilds:
             }
         )
         monkeypatch.setattr(sites_service, "project_build_log", log)
-        out = await _call("get_build_log", {"pocket_id": pocket_id})
+        out = await _call("get_site_build_log", {"pocket_id": pocket_id})
         body = _body(out)
         assert body["job_id"] == "site-preview-p-1" and body["current"] is True
         assert log.await_args.kwargs["job_id"] == "site-preview-p-1"
@@ -598,9 +653,9 @@ def test_the_project_skill_ships_lean_and_routes_by_template() -> None:
         "start_site_from_template",
         "apply_site_recipe",
         "request_site_secret",
-        "patch_file",
-        "run_build",
-        "get_build_log",
+        "patch_site_file",
+        "run_site_build",
+        "get_site_build_log",
     ):
         assert tool in text
     assert "preview_mode" in text and "static" in text
@@ -619,12 +674,12 @@ def test_create_and_refine_preambles_route_project_sites() -> None:
     create = handler._create_preamble(SurfaceMeta(engine="project"))
     assert 'engine="project"' in create
     assert "pocketpaw-create-project-site" in create
-    assert "start_site_from_template" in create and "run_build" in create
+    assert "start_site_from_template" in create and "run_site_build" in create
     assert "request_site_secret" in create
     assert "create_html_site" not in create
 
     refine = handler._refine_preamble(SurfaceMeta(pocket_id="pk1"), engine="project")
-    assert "patch_file" in refine and "`pk1`" in refine
+    assert "patch_site_file" in refine and "`pk1`" in refine
     assert "mcp__pocketpaw_ask__ask_user" in refine
     assert "edit_html_file" not in refine
 

@@ -3,8 +3,8 @@ docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
 Updated: 2026-10-07 (feat/sites-project-tools) — "Project sites": the twelve agent
-  tools for `engine: "project"` (templates, recipes, generic file tools, run_build /
-  get_build_log), their path rules, caps and plan gate.
+  tools for `engine: "project"` (templates, recipes, generic file tools, run_site_build /
+  get_site_build_log), their path rules, caps and plan gate.
 Updated: 2026-10-07 (feat/sites-project-tools) — "Project files": list / read /
   write / patch / delete routes under `/sites/by-pocket/{pocket_id}/files`.
 Updated: 2026-10-07 (perf/sites-fast-edits) — "Draft verification": edit tools
@@ -5517,13 +5517,13 @@ every one refuses a pocket of any other engine. The bundled skill
 | `start_site_from_template` | `slug`, `brief`, `name?` | `template-copy` into a temp dir, then creates the draft pocket: `type="site"`, `pattern="landing"`, `engine="project"`, `site_meta.project = {template, framework, recipes: []}`. Returns `pocket_id`, `next_steps`, `verification`, and AGENTS.md as a second verbatim text block. A template with a binary file is refused (`sites.template_binary_files`) |
 | `list_site_recipes` | `template?` | `{recipes: [{id, name, summary, applies_to, requires, conflicts, plan, bindings, secrets, env}]}` |
 | `apply_site_recipe` | `pocket_id`, `recipe_id`, `dry_run?` | Runs `apply-recipe` on the source map in a temp dir and writes the changed files back in one save; records the id in `site_meta.project.recipes`. Returns `written`, `packages_added`, `migrations`, `binding_requests`, `secrets` / `secret_names`, `env_requests`, `glue_tasks`, `verify`. A conflict or error writes nothing (`is_error`, `status: "conflict"` / `"error"`) |
-| `list_files` | `pocket_id`, `prefix?` | `{files: [{path, size}], file_count, truncated}` |
-| `read_file` / `read_files` | `pocket_id`, `path` / `paths` | A JSON block, then one verbatim `=== FILE: <path> (<n> bytes) ===` block per file. Over 200,000 bytes a file is `truncated`; past 400,000 bytes per call a file is `omitted` |
-| `write_files` | `pocket_id`, `files: {path: contents}` | Create or overwrite. 1 MiB per file, 4 MiB and 200 files per call; the whole map stays under the build's 5,000 files / 50 MiB |
-| `patch_file` | `pocket_id`, `path`, `edits: [{old, new}]` | Each `old` must match exactly once (the same rule as the other edit tools); nothing is saved otherwise |
-| `delete_files` | `pocket_id`, `paths` | Every path must exist; `package.json` cannot be deleted |
-| `run_build` | `pocket_id` | Queues the draft build of the current files (the preview lane) and waits up to 30 s. `status` is `built` / `failed` / still `queued` or `building`; `preview_url`, `preview_mode`, and the log tail as a text block on a failure |
-| `get_build_log` | `pocket_id`, `job_id?` | The latest (or named) build's status, `current`, and its redacted log tail (last 12,000 characters) |
+| `list_site_files` | `pocket_id`, `prefix?` | `{files: [{path, size}], file_count, truncated}` |
+| `read_site_file` / `read_site_files` | `pocket_id`, `path` / `paths` | A JSON block, then one verbatim `=== FILE: <path> (<n> bytes) ===` block per file. Over 200,000 bytes a file is `truncated`; past 400,000 bytes per call a file is `omitted` |
+| `write_site_files` | `pocket_id`, `files: {path: contents}` | Create or overwrite. 1 MiB per file, 4 MiB and 200 files per call; the whole map stays under the build's 5,000 files / 50 MiB |
+| `patch_site_file` | `pocket_id`, `path`, `edits: [{old, new}]` | Each `old` must match exactly once (the same rule as the other edit tools); nothing is saved otherwise |
+| `delete_site_files` | `pocket_id`, `paths` | Every path must exist; `package.json` cannot be deleted |
+| `run_site_build` | `pocket_id` | Queues the draft build of the current files (the preview lane) and waits up to 30 s. `status` is `built` / `failed` / still `queued` or `building`; `preview_url`, `preview_mode`, and the log tail as a text block on a failure |
+| `get_site_build_log` | `pocket_id`, `job_id?` | The latest (or named) build's status, `current`, and its redacted log tail (last 12,000 characters) |
 
 **Paths.** Relative to the repo root, forward slashes. Refused
 (`sites.project_bad_path`): absolute paths, drive letters, `..`, backslashes, NUL,
@@ -5531,7 +5531,7 @@ anything under `node_modules/`, `.git/` or `.paw/`, `paw-build.json`, and real
 `.env` / `.env.*` / `.dev.vars` files (only `*.example` variants). Secret values never
 live in the source map.
 
-**Every write** (`write_files`, `patch_file`, `delete_files`, `apply_site_recipe`)
+**Every write** (`write_site_files`, `patch_site_file`, `delete_site_files`, `apply_site_recipe`)
 saves the draft as one version and queues the build of the new source:
 `verification` is `{status: "pending", build: "pending", job_id}` (or `passed` when
 that exact source already built). A change to `package.json`'s dependency lists drops

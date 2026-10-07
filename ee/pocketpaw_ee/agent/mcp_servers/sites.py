@@ -4,8 +4,8 @@
 # This module owns ``publish``, ``get_site_build_status`` and ``list_site_assets``,
 # and registers on the SAME server object the create / edit / read / verify / preview
 # tools built in sites_create.py and the twelve project-site tools built in
-# sites_project.py (templates, recipes, generic file tools, run_build /
-# get_build_log). One server, because claude_sdk keys servers by name and a second
+# sites_project.py (templates, recipes, generic file tools, run_site_build /
+# get_site_build_log). One server, because claude_sdk keys servers by name and a second
 # ``create_sdk_mcp_server`` under this name would clobber the first.
 #
 # Invariants a reader must not break:

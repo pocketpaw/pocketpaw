@@ -1457,7 +1457,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     * ``"ripple"`` — a ripple widget landing spec via the pocket specialist →
       ``create_landing_site``. The ONE engine that does not author markup by hand.
     * ``"project"`` — a full-stack repo from a base template →
-      ``start_site_from_template``, then recipes, file edits and ``run_build``.
+      ``start_site_from_template``, then recipes, file edits and ``run_site_build``.
 
     Phase 1 assesses the request and, when it is vague, asks ONE round of
     high-value questions via the ``ask_user`` chips (with a "just build it"
@@ -2040,18 +2040,18 @@ def _react_write_scope() -> str:
 _PROJECT_LOOP = (
     "A PROJECT site is a whole repo the user owns (package.json, framework config, "
     "wrangler.jsonc), built in a sandbox. Its files are a `source` map you edit with "
-    "`mcp__pocketpaw_sites_manager__list_files` / `read_file` / `read_files` / "
-    "`patch_file` (exact-once {old, new} blocks, preferred) / `write_files` / "
-    "`delete_files` on the SAME pocket_id. There is no rippleSpec, no pocket specialist "
-    "and no create_*_site call here. Follow the repo's AGENTS.md (read_file it) over "
+    "`mcp__pocketpaw_sites_manager__list_site_files` / `read_site_file` / `read_site_files` / "
+    "`patch_site_file` (exact-once {old, new} blocks, preferred) / `write_site_files` / "
+    "`delete_site_files` on the SAME pocket_id. There is no rippleSpec, no pocket specialist "
+    "and no create_*_site call here. Follow the repo's AGENTS.md (read_site_file it) over "
     "your framework defaults. Backend features come from recipes: "
     "`list_site_recipes`, then `apply_site_recipe`; do its glue tasks in order. For each "
     "secret a recipe names, call `request_site_secret` (or, if that tool is missing, "
     "tell the user which secrets to set in the site's settings); NEVER write a secret "
     "value into a file. Every write saves the DRAFT and queues a build "
     "(`verification.status: pending`). Finish with "
-    "`mcp__pocketpaw_sites_manager__run_build`; on `failed` read the log (it comes with "
-    "the result, or `get_build_log`), fix, and build again, at most 3 rounds. Call the "
+    "`mcp__pocketpaw_sites_manager__run_site_build`; on `failed` read the log (it comes with "
+    "the result, or `get_site_build_log`), fix, and build again, at most 3 rounds. Call the "
     "site ready only on `built`. When `preview_mode` is `static`, tell the user the "
     "preview shows the static pages only and server routes (API, actions, server "
     "pages) run after publish. Publish deploys the finished build of the current "
@@ -2146,7 +2146,7 @@ def _refine_unknown_engine_step(pocket_id: str) -> str:
         "`mcp__pocketpaw_sites_manager__edit_svelte_component`, react uses "
         "`mcp__pocketpaw_sites_manager__edit_react_component`, and html uses "
         "`mcp__pocketpaw_sites_manager__edit_html_file`. A `project` pocket is a whole "
-        "repo edited with `mcp__pocketpaw_sites_manager__patch_file` / `write_files`.\n"
+        "repo edited with `mcp__pocketpaw_sites_manager__patch_site_file` / `write_site_files`.\n"
         "If the read fails too, tell the user you could not load their site rather "
         "than attempting an edit blind.\n"
     )
@@ -2395,8 +2395,8 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         )
         edit_step = (
             "Treat the user's message as a change to this repo. Read before you edit: "
-            f"`mcp__pocketpaw_sites_manager__list_files` with pocket_id `{pocket_id}`, "
-            "then `read_files` on what you will touch (AGENTS.md first). NEVER call "
+            f"`mcp__pocketpaw_sites_manager__list_site_files` with pocket_id `{pocket_id}`, "
+            "then `read_site_files` on what you will touch (AGENTS.md first). NEVER call "
             "`start_site_from_template` again: that mints a SECOND site.\n" + _PROJECT_LOOP
         )
         rules = _REFINE_SHARED_RULES
