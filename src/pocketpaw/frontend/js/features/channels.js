@@ -35,7 +35,7 @@ window.PocketPaw.Channels = {
             channelForms: {
                 discord: { bot_token: '' },
                 slack: { bot_token: '', app_token: '' },
-                whatsapp: { access_token: '', phone_number_id: '', verify_token: '' },
+                whatsapp: { access_token: '', phone_number_id: '', verify_token: '', app_secret: '' },
                 telegram: { bot_token: '' },
                 signal: { api_url: '', phone_number: '' },
                 matrix: { homeserver: '', user_id: '', access_token: '' },
