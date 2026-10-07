@@ -852,6 +852,8 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
 _SITES_AUTHORING_SKILL: dict[str, str] = {
     "svelte": "pocketpaw-create-svelte-site",
     "react": "pocketpaw-create-react-site",
+    # A whole repo from a base template (engine ``project``); edits files, not widgets.
+    "project": "pocketpaw-create-project-site",
 }
 
 # 2026-09-08 — the create-scoped design skills the svelte/react branch must ALSO
@@ -873,7 +875,7 @@ _SITES_AUTHORING_SKILL: dict[str, str] = {
 _SITES_CREATE_DESIGN_SKILLS: frozenset[str] = sites.create_design_skill_names()
 
 #: Engines whose refine edits a ``source`` map (no widget spec), so refine drops ripple.
-_SITES_SOURCE_REFINE_ENGINES: frozenset[str] = frozenset({"html", "svelte", "react"})
+_SITES_SOURCE_REFINE_ENGINES: frozenset[str] = frozenset({"html", "svelte", "react", "project"})
 
 
 def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:

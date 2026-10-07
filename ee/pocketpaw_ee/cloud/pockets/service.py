@@ -313,6 +313,7 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         # undeclared into an explicit ``False`` here, before publish gets the
         # chance to apply ``sites_keep_client_bundle_default``.
         keeps_client_bundle=getattr(doc, "keeps_client_bundle", None),
+        site_meta=getattr(doc, "site_meta", None),
         # Entity-rooms chunk ② — optional per-entity surface-profile override.
         # ``getattr`` for legacy docs that pre-date the field. Dumped to a plain
         # JSON dict so the domain layer carries the wire shape, not the Beanie
@@ -2781,6 +2782,72 @@ async def set_html_source_file(
     # ``set_react_source_file`` makes.
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(file_path))
     return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_project_source(
+    pocket_id: str,
+    user_id: str,
+    *,
+    writes: dict[str, str] | None = None,
+    deletes: list[str] | None = None,
+    add_recipe: str | None = None,
+    label: str | None = None,
+) -> dict[str, Any]:
+    """Write and delete files of a ``project`` pocket's source map in ONE save.
+
+    The project engine's only source writer. A project is a whole repo, so one
+    agent step (a recipe, a multi-file edit) touches many files at once and must
+    land as one version, not one per file. Paths arrive already normalized by
+    ``sites.project_tools``; this layer owns access, the engine check, the persist,
+    the event and the draft version, mirroring ``set_html_source_file``.
+
+    ``add_recipe`` appends a recipe id to ``site_meta.project.recipes`` in the same
+    save. A delete of a path that is not there is a ``NotFound`` (nothing saved).
+    Returns ``{files, bytes, changed}`` for the saved map; a call that changes
+    nothing saves nothing and records no version.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_project_site",
+            "This pocket is not a project site, so it has no project files to edit.",
+        )
+    updated = dict(doc.source)
+    missing = [path for path in deletes or [] if path not in updated]
+    if missing:
+        raise NotFound("site_file", ", ".join(missing[:10]))
+    for path in deletes or []:
+        del updated[path]
+    for path, contents in (writes or {}).items():
+        updated[path] = contents
+    meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    project = dict(meta.get("project") or {})
+    recipes = [r for r in project.get("recipes") or [] if isinstance(r, str)]
+    meta_changed = False
+    if add_recipe and add_recipe not in recipes:
+        project.setdefault("template", None)
+        project.setdefault("framework", None)
+        project["recipes"] = [*recipes, add_recipe]
+        meta["project"] = project
+        meta_changed = True
+    changed = updated != doc.source
+    if changed or meta_changed:
+        # Reassign fresh dicts so Beanie tracks the change (same note as the peers).
+        doc.source = updated
+        if meta_changed:
+            doc.site_meta = meta
+        await doc.save()
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    if changed:
+        await _record_pocket_svelte_draft_version(
+            doc, author=user_id, label=label or "Edited project files"
+        )
+    return {
+        "files": len(updated),
+        "bytes": sum(len(str(v).encode("utf-8")) for v in updated.values()),
+        "changed": changed,
+    }
 
 
 #: Engines whose source map may carry an author dependency manifest.
@@ -5322,6 +5389,7 @@ async def agent_create(
     source: dict[str, Any] | None = None,
     keeps_client_bundle: bool | None = None,
     trusted: bool = False,
+    site_meta: dict[str, Any] | None = None,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
 
@@ -5366,6 +5434,10 @@ async def agent_create(
     feat/sites-js-by-default). Pass an explicit ``True``/``False`` only to record
     a real authorial decision; both override the setting, so ``False`` is how a
     pure-static page opts out of shipping a bundle.
+
+    ``site_meta`` carries site facts that are not file content; a ``project`` site
+    created from a base template stamps ``{"project": {template, framework,
+    recipes}}`` here.
 
     ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
     code-assembled spec the caller fully controls (the deterministic Paw Site
@@ -5421,6 +5493,7 @@ async def agent_create(
             engine=engine,
             source=source,
             keeps_client_bundle=keeps_client_bundle,
+            site_meta=site_meta,
             # SF-2 — which side of the source-gate flip this pocket is born on.
             source_gated=_source_gated_at_create(),
             visibility="workspace",

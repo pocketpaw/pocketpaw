@@ -10167,8 +10167,42 @@ async def _project_pocket(workspace_id: str, user_id: str, pocket_id: str) -> di
     if pocket.get("workspace") != workspace_id:
         raise NotFound("pocket", pocket_id)
     if not build_requires_sandbox(pocket.get("engine")):
-        raise ValidationError("sites.not_a_project", "Build logs exist only for project sites.")
+        raise ValidationError(
+            "sites.not_a_project", "Only a project site has project files and build logs."
+        )
     return pocket
+
+
+async def project_pocket(*, workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """The project pocket the caller may read in this workspace (the agent's project
+    tools read it here). 404 for another workspace's pocket, 422 for any other engine."""
+    return await _project_pocket(workspace_id, user_id, pocket_id)
+
+
+async def queue_project_build(
+    *, workspace_id: str, user_id: str, pocket_id: str, _pool: Any | None = None
+) -> dict[str, Any]:
+    """Queue the draft build of a project pocket's CURRENT source, the same lane the
+    preview opens (a finished build for this source is returned, not rebuilt). Returns
+    the native-artifact shape: ``build_status``, ``build_job_id``, ``preview_url``,
+    ``preview_mode``."""
+    pocket = await _project_pocket(workspace_id, user_id, pocket_id)
+    return await _project_draft_artifact(
+        pocket_id=pocket_id,
+        source=pocket.get("source"),
+        store=_default_artifact_store(),
+        _pool=_pool,
+    )
+
+
+async def project_site_plan(*, workspace_id: str, pocket_id: str) -> tuple[str | None, str | None]:
+    """``(plan_tier, subscription_status)`` of the pocket's Site doc, ``(None, None)``
+    before one exists. The recipe plan gate reads it through the same
+    ``entitlements`` predicates the binding provisioner uses."""
+    doc = await _latest_site_for_pocket(workspace_id, pocket_id)
+    if doc is None:
+        return None, None
+    return getattr(doc, "plan_tier", None), getattr(doc, "subscription_status", None)
 
 
 #: (pocket, content hash) -> monotonic time of the last attempt to give a draft a

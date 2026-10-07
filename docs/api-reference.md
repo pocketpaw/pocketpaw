@@ -2,6 +2,11 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-07 (feat/sites-project-tools) — "Project sites": the twelve agent
+  tools for `engine: "project"` (templates, recipes, generic file tools, run_site_build /
+  get_site_build_log), their path rules, caps and plan gate.
+Updated: 2026-10-07 (feat/sites-project-tools) — "Project files": list / read /
+  write / patch / delete routes under `/sites/by-pocket/{pocket_id}/files`.
 Updated: 2026-10-07 (perf/sites-fast-edits) — "Draft verification": edit tools
   return the static check only (`status: "pending"`, `static`, `build`, `job_id`)
   and the build + browser verdict arrives on the next tool result as
@@ -3196,6 +3201,61 @@ The log is redacted before it is stored (tokens and keys, sandbox paths made
 project-relative, capture keys) and capped to its last 64 KiB; `log_truncated` says
 the head was cut. It is empty while the build is still running.
 
+### Project files — `/sites/by-pocket/{pocket_id}/files`
+
+A `project` pocket's repo, for the builder's Code view. The routes call the same
+functions as the agent's file tools (`sites/project_tools.py`), so the path rules,
+caps, lockfile rule and rebuild behaviour are identical (see "Project sites" under
+"Sites — Agent Editing Tools"). Every route takes a session, the `sites` plan
+feature and `fabric.write`; the pocket must pass the pockets read rule and belong to
+the caller's workspace (another workspace's pocket is a `404`). Writes also need edit
+access to the pocket. A non-project pocket is `422 sites.not_a_project`.
+
+| Method + path | Body / query | `200` response |
+|---|---|---|
+| `GET .../files` | `?prefix=src/` (optional) | `{pocket_id, files: [{path, size}], file_count}` (`size` = UTF-8 bytes, sorted by path) |
+| `GET .../files/content` | `?path=src/app.ts` | `{path, size, content}`, the whole file (never truncated) |
+| `PUT .../files` | `{files: {path: contents}}` | write response |
+| `POST .../files/patch` | `{path, edits: [{old, new}]}` | write response (`path` set) |
+| `DELETE .../files` | `{paths: [path, ...]}` | write response (`deleted` set) |
+
+The write response:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "written": ["src/pages/about.astro"],
+  "created": ["src/pages/about.astro"],
+  "deleted": [],
+  "path": null,
+  "lockfile_removed": [],
+  "verification": {
+    "status": "pending",
+    "build": "pending",
+    "job_id": "site-preview-p_abc123-9f2c…",
+    "layers": [{"name": "build", "status": "pending"}]
+  }
+}
+```
+
+Every write saves the draft as one version, which changes the source's content hash,
+and queues that hash's draft build: poll `GET .../builds/latest` (or the
+native-artifact preview) with the `job_id`. `verification.status` is `passed` when
+that exact source already built, `failed` with a `reason` when the tree cannot build
+at all, and `unverified` when the build queue is down; the save stands in every case.
+
+Refusals (nothing is saved): `422 sites.project_bad_path` (absolute, drive letter,
+`..`, backslash, NUL, `node_modules/`, `.git/`, `.paw/`, `paw-build.json`, a real
+`.env*` / `.dev.vars*` file other than `*.example`), `422
+sites.project_file_too_large` (over 1 MiB), `422 sites.project_call_too_large` (over
+4 MiB in one call), `422 sites.project_too_many_files` (over 200 paths),
+`422 sites.project_too_large` (the project over 5,000 files / 50 MiB),
+`422 site_edit.*` (an `old` that matches 0 or more than 1 time),
+`422 sites.project_needs_package_json` (deleting package.json), `404
+site_file.not_found` (a path to read, patch or delete that is not there).
+A change to `package.json`'s dependency lists also removes a stale lockfile and lists
+it in `lockfile_removed`.
+
 ### Site images — `/sites/by-pocket/{pocket_id}/assets`
 
 Three endpoints for the images a site DISPLAYS. Added 2026-08-31
@@ -5442,6 +5502,48 @@ caller's side "this was never published" is the useful answer, and it is correct
 the pocket has no site or does not exist. The read resolves the canonical Site doc
 through `canonical_site_for_pocket`, which is tenant-scoped on the workspace — that
 filter is the access check, and there is no plan gate because nothing is mutated.
+
+### Project sites (`engine: "project"`)
+
+A project site is a whole repo started from a paw-sites base template (Astro,
+TanStack Start, Vite + React + Hono, Next, SvelteKit on Cloudflare Workers). Twelve
+tools on the same server create and edit it (`ee/pocketpaw_ee/agent/mcp_servers/sites_project.py`);
+every one refuses a pocket of any other engine. The bundled skill
+`pocketpaw-create-project-site` teaches the loop and the template routing.
+
+| Tool | Args | What it does |
+|------|------|--------------|
+| `list_site_templates` | none | `{templates: [{slug, name, summary, when_to_use, stack, target, recipes}]}` from `paw-sites-gen starters --json` (cached per process) |
+| `start_site_from_template` | `slug`, `brief`, `name?` | `template-copy` into a temp dir, then creates the draft pocket: `type="site"`, `pattern="landing"`, `engine="project"`, `site_meta.project = {template, framework, recipes: []}`. Returns `pocket_id`, `next_steps`, `verification`, and AGENTS.md as a second verbatim text block. A template with a binary file is refused (`sites.template_binary_files`) |
+| `list_site_recipes` | `template?` | `{recipes: [{id, name, summary, applies_to, requires, conflicts, plan, bindings, secrets, env}]}` |
+| `apply_site_recipe` | `pocket_id`, `recipe_id`, `dry_run?` | Runs `apply-recipe` on the source map in a temp dir and writes the changed files back in one save; records the id in `site_meta.project.recipes`. Returns `written`, `packages_added`, `migrations`, `binding_requests`, `secrets` / `secret_names`, `env_requests`, `glue_tasks`, `verify`. A conflict or error writes nothing (`is_error`, `status: "conflict"` / `"error"`) |
+| `list_site_files` | `pocket_id`, `prefix?` | `{files: [{path, size}], file_count, truncated}` |
+| `read_site_file` / `read_site_files` | `pocket_id`, `path` / `paths` | A JSON block, then one verbatim `=== FILE: <path> (<n> bytes) ===` block per file. Over 200,000 bytes a file is `truncated`; past 400,000 bytes per call a file is `omitted` |
+| `write_site_files` | `pocket_id`, `files: {path: contents}` | Create or overwrite. 1 MiB per file, 4 MiB and 200 files per call; the whole map stays under the build's 5,000 files / 50 MiB |
+| `patch_site_file` | `pocket_id`, `path`, `edits: [{old, new}]` | Each `old` must match exactly once (the same rule as the other edit tools); nothing is saved otherwise |
+| `delete_site_files` | `pocket_id`, `paths` | Every path must exist; `package.json` cannot be deleted |
+| `run_site_build` | `pocket_id` | Queues the draft build of the current files (the preview lane) and waits up to 30 s. `status` is `built` / `failed` / still `queued` or `building`; `preview_url`, `preview_mode`, and the log tail as a text block on a failure |
+| `get_site_build_log` | `pocket_id`, `job_id?` | The latest (or named) build's status, `current`, and its redacted log tail (last 12,000 characters) |
+
+**Paths.** Relative to the repo root, forward slashes. Refused
+(`sites.project_bad_path`): absolute paths, drive letters, `..`, backslashes, NUL,
+anything under `node_modules/`, `.git/` or `.paw/`, `paw-build.json`, and real
+`.env` / `.env.*` / `.dev.vars` files (only `*.example` variants). Secret values never
+live in the source map.
+
+**Every write** (`write_site_files`, `patch_site_file`, `delete_site_files`, `apply_site_recipe`)
+saves the draft as one version and queues the build of the new source:
+`verification` is `{status: "pending", build: "pending", job_id}` (or `passed` when
+that exact source already built). A change to `package.json`'s dependency lists drops
+the stale lockfile (`lockfile_removed`), because the sandbox installs with
+`--frozen-lockfile` when one exists.
+
+**Recipe plans.** A recipe's `plan` (`free` / `site` / `staff`) is checked against the
+site's own plan with `entitlements.site_paid_backends_entitled`, the predicate the
+binding provisioner uses; below it is `sites.recipe_plan_required` and nothing runs.
+
+**Secrets.** Recipes return secret NAMES. The agent requests each one with
+`request_site_secret` (the secrets lane); no tool here writes a value.
 
 ## Fabric — Transform Mappings (source→Fabric ingest)
 

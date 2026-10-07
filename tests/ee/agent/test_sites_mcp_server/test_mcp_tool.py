@@ -149,7 +149,12 @@ class TestSitesMcpServerRegistration:
         assert LIST_SITE_SECRETS_TOOL_ID == "mcp__pocketpaw_sites_manager__list_site_secrets"
         assert REQUEST_SITE_SECRET_TOOL_ID in SITES_TOOL_IDS
         assert LIST_SITE_SECRETS_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 17
+        # The project engine's twelve tools (templates, recipes, generic files,
+        # sandbox builds) ride the same allow-list.
+        from pocketpaw_ee.agent.mcp_servers.sites_project import SITES_PROJECT_TOOL_IDS
+
+        assert set(SITES_PROJECT_TOOL_IDS) <= set(SITES_TOOL_IDS)
+        assert len(SITES_TOOL_IDS) == 29
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

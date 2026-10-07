@@ -175,6 +175,12 @@ class Pocket(TimestampedDocument):
     # below. Still additive with no Mongo migration: the key is simply absent on
     # legacy docs, which is exactly the undeclared state.
     keeps_client_bundle: bool | None = None
+    # Site facts that are not file content. Today only ``project`` (engine
+    # ``project``): ``{template: slug | None, framework, recipes: [ids]}``, stamped by
+    # the agent's template and recipe tools so a later turn knows which base
+    # template the repo came from and which backend recipes are applied. ``None``
+    # on every other pocket.
+    site_meta: dict[str, Any] | None = None
     # Default "workspace": new pockets are visible to every workspace member.
     # Owner can tighten to "private" (owner-only + explicit shared_with) via
     # the visibility toggle in the pocket UI.

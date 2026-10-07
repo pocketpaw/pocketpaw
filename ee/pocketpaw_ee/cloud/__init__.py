@@ -545,6 +545,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.paw_bar.catalog_routes import router as paw_bar_catalog_router
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
+    from pocketpaw_ee.sites.files_router import router as site_files_router
     from pocketpaw_ee.sites.router import router as sites_router
     from pocketpaw_ee.sites.secrets_router import router as site_secrets_router
 
@@ -615,6 +616,9 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(sites_router, prefix="/api/v1")
     # Per-site secrets: names + status out, owner-only writes, values never returned.
     app.include_router(site_secrets_router, prefix="/api/v1")
+    # A project site's files (list / read / write / patch / delete) for the builder's
+    # Code view; the same service functions the agent's project file tools call.
+    app.include_router(site_files_router, prefix="/api/v1")
 
     # Model Catalog — MCG-1. License-gated, tenant-independent reads of the
     # models a self-hosted LiteLLM proxy serves: GET /catalog/models (filtered by
