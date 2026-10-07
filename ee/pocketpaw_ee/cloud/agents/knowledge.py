@@ -1,8 +1,9 @@
 # knowledge.py — agent knowledge service over the kb-go binary.
 #
 # Every ingest funnels through ``KnowledgeService.ingest_text_to_scope`` (one
-# document, one article) or ``ingest_document_to_scope`` (a long document, one
-# article per section); the caller decides the scope string (``agent:{id}``,
+# document, one article), ``ingest_document_to_scope`` (a long document, one
+# article per section) or ``ingest_sections_to_scope`` (sections the caller cut
+# and named: a site page's headings); the caller decides the scope string (``agent:{id}``,
 # ``workspace:{id}``, ``pocket:{id}``). File extraction runs through
 # ``ee.cloud.extraction`` and URL extraction through
 # ``sites.kb_ingest.html_to_markdown`` (a page's tables and headings kept).
@@ -37,9 +38,10 @@
 #     checked only for empty fields and runaway output
 #     (``_validate_section_article``): it is small and the owner's own text.
 #   * Section titles lead with the document name, a tag hashed from the
-#     caller's ``doc_key`` and "part i of n": kb-go keys an article by its
+#     caller's ``doc_key`` and "part i of n": an article id starts as its
 #     title's slug (80 chars), so no two sections, and no two documents with
-#     one file name, may share one.
+#     one file name, may share one. A ``NamedSection`` keeps its caller's title
+#     and source instead; kb-go v0.3.0 keys it on that source.
 #   * Chat-turn search (``search_context_for_scope``) fails soft: a 5s timeout
 #     or a kb error returns "" with a warning, so the KB never stalls a turn.
 #     ``search_context_entries_for_scope`` (the concierge) reads kb-go's
@@ -69,11 +71,23 @@ import shutil
 import subprocess
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from pocketpaw_ee.cloud.agents.knowledge_sections import Section, split_into_sections
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class NamedSection:
+    """A section whose caller fixes its identity (``ingest_sections_to_scope``):
+    the kb ``source`` it is keyed on and the article ``title``."""
+
+    source: str
+    title: str
+    text: str
+
 
 # The chat turn budget: a KB search that takes longer than this gets killed
 # and the turn proceeds without a KB block. See search_context_for_scope.
@@ -573,6 +587,7 @@ async def _compile_section_with_agent(
     lang: str | None = None,
     *,
     tag: str = "",
+    title: str | None = None,
     retry: bool = False,
     timeout: float = _AGENT_COMPILE_TIMEOUT_S,
 ) -> dict:
@@ -581,6 +596,7 @@ async def _compile_section_with_agent(
     The prompt RESTRUCTURES, it does not compress: every name, number, price,
     date, quantity, condition and contact detail stays as written. ``retry``
     adds a JSON-only reminder for the second attempt. The returned title is
+    ``title`` when the caller fixes one (a site section's breadcrumb), else
     ``_section_title`` around the compiler's topic. Raises ``RuntimeError`` on
     a timeout or an unusable article; backend errors propagate.
     """
@@ -635,7 +651,7 @@ async def _compile_section_with_agent(
         )
     except ValueError as exc:
         raise RuntimeError(f"section {index} of {total} compile failed: {exc}")
-    article["title"] = _section_title(article["title"], doc_source, index, total, tag)
+    article["title"] = title or _section_title(article["title"], doc_source, index, total, tag)
     article["compiled_with"] = f"pocketpaw-agent:{get_settings().agent_backend}"
     return article
 
@@ -674,10 +690,17 @@ async def _ingest_compiled_article(scope: str, raw_text: str, article: dict) -> 
 
 
 async def _ingest_sections(
-    scope: str, sections: list[Section], source: str, lang: str | None, tag: str
+    scope: str,
+    sections: list[Section],
+    source: str,
+    lang: str | None,
+    tag: str,
+    *,
+    named: list[NamedSection] | None = None,
 ) -> dict:
     """Compile and ingest each section as its own article, titled with the
-    document's ``tag`` (``_document_tag``).
+    document's ``tag`` (``_document_tag``). With ``named`` (one per section),
+    each article takes that section's own source and fixed title instead.
 
     At most ``_SECTION_CONCURRENCY`` compiles run at once, and the kb writes
     are serialized (each ``kb ingest`` rebuilds the scope's indexes from the
@@ -706,11 +729,12 @@ async def _ingest_sections(
             try:
                 return await _compile_section_with_agent(
                     section,
-                    source,
+                    named[index - 1].source if named else source,
                     index,
                     total,
                     lang,
                     tag=tag,
+                    title=named[index - 1].title if named else None,
                     retry=retry,
                     timeout=min(_AGENT_COMPILE_TIMEOUT_S, remaining),
                 )
@@ -761,6 +785,7 @@ async def _ingest_sections(
 
     ids: list[str] = []
     titles: list[str] = []
+    by_section = [""] * total
     compiled_with = ""
     for index in sorted(receipts):
         article_id = extract_ingest_article_id(receipts[index])
@@ -768,6 +793,7 @@ async def _ingest_sections(
             failures[index] = "no article id in the kb receipt"
             continue
         ids.append(article_id)
+        by_section[index - 1] = article_id
         titles.append(str(receipts[index].get("title") or ""))
         compiled_with = compiled_with or str(receipts[index].get("compiled_with") or "")
     for index in sorted(failures):
@@ -792,6 +818,7 @@ async def _ingest_sections(
         "title": titles[0],
         "articles": ids,
         "titles": titles,
+        "section_articles": by_section,
         "compiled_with": compiled_with,
         "sections_total": total,
         "sections_failed": len(failures),
@@ -870,6 +897,27 @@ class KnowledgeService:
                 "sections_failed": 0,
             }
         return result
+
+    @staticmethod
+    async def ingest_sections_to_scope(scope: str, sections: list[NamedSection]) -> dict:
+        """Ingest sections the caller already cut and named (a site page's
+        heading sections): one article per section, keyed on its own source.
+
+        Every section, with or without ``ANTHROPIC_API_KEY``, goes through
+        PocketPaw's fact-preserving section compile (``_ingest_sections``: the
+        agent backend, three at a time, one retry, one deadline) under the
+        caller's title, and is written with ``kb ingest --article-json``: kb-go
+        never compiles these. The receipt is ``_ingest_sections``'s, whose
+        ``section_articles`` lists the id of each section in order ("" for one
+        that failed). Raises ``KnowledgeEngineUnavailable`` for a missing or
+        outdated binary, and ``RuntimeError`` when no section landed.
+        """
+        if not sections:
+            raise ValueError("no sections to ingest")
+        plain = [Section(title_hint=s.title, text=s.text) for s in sections]
+        return await _ingest_sections(
+            scope, plain, sections[0].source, None, "", named=list(sections)
+        )
 
     @staticmethod
     async def ingest_text(agent_id: str, text: str, source: str = "manual") -> dict:

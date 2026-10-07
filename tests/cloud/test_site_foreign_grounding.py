@@ -32,6 +32,8 @@ from pocketpaw_ee.sites import foreign_grounding, kb_ingest
 from pocketpaw_ee.sites import screenshot as screenshot_mod
 from pocketpaw_ee.sites.foreign_grounding import ForeignHarvest
 
+from tests.cloud.test_site_kb_ingest import patch_page_ingest
+
 _LONG = (
     "Brew and Co opens at 8am every weekday and 9am on Saturday. A flat white is "
     "320 rupees and the back room seats thirty."
@@ -100,9 +102,7 @@ def _patch_kb(monkeypatch) -> dict[str, Any]:
         hits = list(store.get(scope, {}).values())[:limit]
         return "\n".join(hits)
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _ingest
-    )
+    patch_page_ingest(monkeypatch, _ingest)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.remove_article", _remove
     )
@@ -366,9 +366,7 @@ async def test_every_page_failing_to_ingest_reports_ingest_failed(monkeypatch):
     async def _boom(scope, text, source):
         raise RuntimeError("kb unreachable")
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _boom
-    )
+    patch_page_ingest(monkeypatch, _boom)
     _patch_harvest(monkeypatch, ForeignHarvest(host="customer.example", source=_HARVEST_SOURCE))
     _forbid_pocket_read(monkeypatch)
     site = _FakeSite(kb_article_ids=["site-home"])

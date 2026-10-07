@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Installing Brewkit | Brewkit docs</title>
+<style>body { font-family: sans-serif; }</style>
+</head>
+<body>
+<nav><a href="/">Home</a> <a href="/docs/">Docs</a></nav>
+<main>
+<h1>Installing Brewkit</h1>
+<p>Brewkit is the command-line tool that runs a Brew &amp; Co. espresso machine fleet. This page covers what you need before you start, how to install it on each platform, how to configure it, and what to do when something goes wrong.</p>
+
+<h2 id="requirements">Requirements</h2>
+<p>Brewkit runs on macOS 13 or later, Windows 11 (22H2 or later) and Ubuntu 22.04 or later. It needs 200 MB of free disk space, a network connection on port 7443 to each machine, and an account with the Fleet Operator role. Python is not required: Brewkit ships as a single binary. Machines must run firmware 4.2 or later; older firmware answers the handshake with error E-102 and must be updated from the machine's own service menu first.</p>
+<p>Each workstation can manage up to 40 machines. Larger fleets need the Brewkit Hub add-on, which costs $19 per month per site and lifts the limit to 400 machines per workstation.</p>
+
+<h2 id="macos">Install on macOS</h2>
+<p>Install with Homebrew: run <code>brew install brewco/tap/brewkit</code>. The formula installs the binary to /opt/homebrew/bin and the bash and zsh completions alongside it. To install without Homebrew, download brewkit-macos-universal.tar.gz from the releases page, check its SHA-256 against the value printed on that page, unpack it and move the brewkit binary to /usr/local/bin.</p>
+<p>The first run asks for permission to reach devices on the local network. Allow it, or Brewkit cannot find any machine. If you clicked Don't Allow, turn it back on under System Settings, Privacy &amp; Security, Local Network.</p>
+
+<h2 id="windows">Install on Windows</h2>
+<p>Windows has two supported installers. Pick one; do not install both, or the PATH entry of the second hides the first. Both need Windows 11 22H2 or later on x64 or Arm64; on Arm64 the x64 build runs under emulation and is about 30% slower to start. Both installers are signed by Brew &amp; Co. Fleet Tools Ltd; SmartScreen warnings mean the download was tampered with or is not ours.</p>
+<h3 id="windows-winget">With winget</h3>
+<p>Open PowerShell and run <code>winget install BrewCo.Brewkit</code>. Winget installs Brewkit for the current user under %LOCALAPPDATA%\Programs\Brewkit and adds it to the user PATH. Open a new terminal afterwards so the PATH change takes effect. Updates arrive with <code>winget upgrade BrewCo.Brewkit</code>; the tool checks for updates once a day and prints a notice, but never updates itself. Corporate machines that block winget can use the MSI instead. Brewkit needs the Visual C++ 2022 runtime, which winget installs as a dependency; on a machine without internet access, install vc_redist.x64.exe from the offline bundle first.</p>
+<p>Uninstall with <code>winget uninstall BrewCo.Brewkit</code>. Your configuration in %APPDATA%\Brewkit is kept so a reinstall picks it up; delete that folder for a clean slate. Logs live in %LOCALAPPDATA%\Brewkit\logs and rotate at 10 MB, keeping five files.</p>
+<p>To pin a version, run <code>winget install BrewCo.Brewkit --version 3.4.1</code> and add <code>winget pin add BrewCo.Brewkit</code> so a later upgrade of all packages skips it. Pinned installs still print the daily update notice. Behind a proxy, winget reads the system proxy settings; Brewkit itself reads HTTPS_PROXY, and a proxy that inspects TLS must have its root certificate in the Windows certificate store, or every fleet call fails with error E-301.</p>
+<h3 id="windows-msi">With the MSI</h3>
+<p>Download brewkit-windows-x64.msi from the releases page and run it as an administrator. The MSI installs for all users under C:\Program Files\Brewkit and adds it to the system PATH. For a silent install from a deployment tool, run <code>msiexec /i brewkit-windows-x64.msi /qn ACCEPT_EULA=1</code>; the ACCEPT_EULA property is required, and without it the silent install exits with code 1603 and writes nothing. The MSI also accepts FLEET_URL to pre-set the fleet address and NO_TELEMETRY=1 to switch off anonymous usage reports.</p>
+<p>The MSI registers a Windows service called BrewkitAgent that keeps the fleet connection open in the background. It starts automatically and runs as LocalService. Stop it with <code>sc stop BrewkitAgent</code> before an upgrade; the upgrade restarts it. Removing Brewkit from Apps and Features removes the service too, but keeps C:\ProgramData\Brewkit, which holds the fleet certificates.</p>
+<p>Group Policy deployments can push the MSI as an assigned application to computers, never to users, because the service needs machine scope. A transform file (MST) can set FLEET_URL and NO_TELEMETRY for the whole organisation. Repair a broken install with <code>msiexec /fa brewkit-windows-x64.msi</code>; it restores missing files and the service registration without touching the configuration.</p>
+
+<h2 id="configuration">Configuration</h2>
+<p>Run <code>brewkit init</code> to write a starter configuration file. It asks for the fleet address (for example fleet.brewco.example:7443) and an access token from the Brew &amp; Co. dashboard under Settings, API tokens. Tokens expire after 90 days; brewkit warns 14 days before. The file lives at ~/.config/brewkit/config.toml on macOS and Linux and %APPDATA%\Brewkit\config.toml on Windows.</p>
+<h3>Notes</h3>
+<p>Never commit config.toml to a repository: it holds your token. Use the BREWKIT_TOKEN environment variable in CI instead; it overrides the file.</p>
+
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p>Error E-101 means the machine did not answer on port 7443: check that it is on the same network and that no firewall blocks the port. Error E-102 is outdated firmware (see Requirements). Error E-201 means the token expired or was revoked: create a new one and run <code>brewkit login</code>. If a machine shows as offline in the dashboard but answers <code>brewkit ping</code>, restart the BrewkitAgent service or, on macOS, run <code>brewkit agent restart</code>.</p>
+<h3>Notes</h3>
+<p>Run any command with --verbose to print the network trace, and attach the output when you contact support at help@brewco.example.</p>
+</main>
+<footer><p>Brew &amp; Co. Fleet Tools. Support Monday to Friday, 9 am to 6 pm CET.</p></footer>
+</body>
+</html>

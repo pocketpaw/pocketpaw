@@ -129,8 +129,8 @@
   {
     "label": "site sync records only a long page's first section — the rest are never pruned",
     "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
-    "find": "        report.article_ids.extend(article_ids)",
-    "replace": "        report.article_ids.append(article_ids[0])",
+    "find": "        report.article_ids.extend(ids[i] for i in kept)",
+    "replace": "        report.article_ids.extend(ids[i] for i in kept[:1])",
     "tests": [
       "tests/cloud/test_site_kb_ingest.py::test_a_long_page_records_every_section_and_prunes_the_old_set"
     ]

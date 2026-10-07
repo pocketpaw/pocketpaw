@@ -176,6 +176,34 @@ Owner uploads in the Files panel and the book agent still compile one article pe
 document: hide-from-AI tracks one article per file, and the book agent compiles
 inside the request.
 
+### Long site pages are cut at their headings
+
+A site page is split by its own structure rather than by size:
+
+- **A page of 3,000 characters or less stays one article**, under the page's source
+  (`site-<path>`) and the page's own title. It gets the same restructure-not-compress
+  compile as a section: a business page keeps every fact.
+- **PocketPaw compiles every site article**, with or without an `ANTHROPIC_API_KEY`,
+  and writes it with `kb ingest --article-json`; the kb binary never compiles a page.
+- **A longer page is cut at its H1 and H2 headings**, and an H2 section still over
+  3,000 characters is cut at its H3s. A piece under 500 characters (a heading and a
+  line or two) joins its neighbour. Text with no usable heading, and a section with
+  no H3 that is still too long, fall back to the size split above. 3,000 raw
+  characters leaves room for the compile to add markdown and still fit the
+  concierge's 4,000-character slice of one item, so a section reaches the model
+  whole.
+- **Each section is its own article.** Its title is a breadcrumb, `Size guide ›
+  Footwear`, which also leads the section's text so the compile keeps the page's
+  context. Its source is `<page source>#<heading slug>` (`site-size-guide#footwear`,
+  with `-2`, `-3` on a repeated heading), so a re-sync replaces it in place. It is
+  compiled with the restructure-not-compress section prompt, three at a time.
+- **The crawl index lists every section** of a page, in order:
+  `kb_page_index[page] = {"id", "title", "sections": [{"id", "title", "source",
+  "hash", "anchor"}]}`. `id` is the first section, so anything that read the older
+  `{"id", "title"}` entry still works, and an index written before sections is
+  still read. `anchor` is the `id` the heading had in the page's HTML, when it had
+  one.
+
 ### When it runs
 
 - **On publish.** The site's content just changed, so what the concierge can quote
@@ -220,7 +248,13 @@ currency). New products stop at the catalog cap, in the reader's order.
 Article sources are deterministic, so re-ingesting a page updates that article rather
 than adding a second copy of it. The site records which articles it produced, and a
 later sync removes the ones it has stopped producing, which is how a renamed or
-deleted page stops being quotable.
+deleted page, or a section removed from a page, stops being quotable.
+
+A section whose text is unchanged since the last sync is not compiled again: the
+index keeps a hash of each section, and a match reuses its article. A section whose
+compile fails keeps its previous article (and its old hash, so the next sync tries
+again) instead of being removed, and an unreadable pocket or a failed crawl removes
+nothing.
 
 A sync never clears the scope. Owner-uploaded files live in the same pocket scope and
 must survive; only articles the sync is certain it wrote are ever removed.
@@ -303,7 +337,8 @@ On the v2 runtime the list is not a second search. It is the knowledge the model
 actually given for that reply, item for item and in the same order, sent as
 `{"items": [{"id", "title", "url"}]}` (and the same list under `sources`, for widget
 bundles that only read that key). Every item carries its id. Only a page the site sync
-recorded gets a title and a link; an owner's upload or an agent file is listed by id
+recorded gets a title and a link (a section of a long page gets its breadcrumb title
+and the page link plus `#anchor` when its heading had an id); an owner's upload or an agent file is listed by id
 with an empty title and url, so its name never leaves the server and the widget, which
 shows only entries with a link, shows nothing for it.
 
@@ -345,8 +380,8 @@ automatically once the gate opens, as described below.
   tool lockdown described above.
 - **v2** answers in one streamed model call with **no tools at all**. Before the call it
   searches the same two scopes a legacy run reads (`pocket:<pocket_id>`, then
-  `agent:<agent_id>` when the widget has an agent) and puts up to six matching items into
-  the prompt, along with the turn's products from the widget's catalog (the whole
+  `agent:<agent_id>` when the widget has an agent) and puts the matching items into
+  the prompt within the site's knowledge budget (below), along with the turn's products from the widget's catalog (the whole
   catalog when it has 50 products or fewer, otherwise the product on the visitor's page
   and the ones that match the conversation), its declared actions and the recent turns
   of this conversation. The instructions are a fixed frame: answer only about this site and
@@ -360,6 +395,31 @@ knowledge scope comes from the site key; and it ignores the pocket's connectors,
 a call with no tools cannot reach them. A v2 turn is stored as the same concierge run
 record, so transcripts, memory, stats and retention behave as they do for legacy, and the
 widget receives the same stream events.
+
+**The knowledge budget.** Each site has `concierge_knowledge_chars`, readable and
+writable through the settings route: the characters of knowledge one turn may carry.
+Unset (`null`, the default) means 12,000; the accepted range is 4,000 to 60,000, and
+anything else is a 422. Sending `null` puts the default back. Items fill it in rank
+order (pinned FAQs, then the visitor's page, then search hits), each up to 4,000
+characters or whatever is left, whichever is smaller; once less than 500 is left the
+list ends. The search goes deeper on a bigger budget, one hit per 2,000 characters,
+between 6 and 20 hits.
+
+**The question beats the page.** The search query carries the visitor's page title, so
+on a long page cut into sections, the page's own sections tend to rank first whatever
+was asked. The order is therefore decided by the visitor's own words (the message,
+less the page title's words): the lead is the first search hit that is off the
+visitor's page and contains one of them. When there is a lead, the knowledge is
+pinned FAQs, then the lead, then the rest of the lead's page (below), then the
+visitor's page sections that matched the question, in at most a quarter of the
+budget, then the other hits. When there is none ("how much is this?" names nothing),
+the visitor's page comes first, as before. A page that is one article (a product page,
+say) always comes first: it is at most a quarter of the default budget.
+
+A question can miss the words of the section that answers it: "shoe sizes" against a
+size guide whose every section says "size" and whose answer sits under "Footwear". So
+a lead that is a section of a sectioned page brings the rest of that page with it,
+right after the lead and in page order, up to half the budget.
 
 The model follows the owner's pick on the concierge's agent: the agent bound to the
 widget, else the site's dedicated `concierge-<site_id>` agent. Only its provider and model
@@ -479,7 +539,11 @@ It is the visitor's browser talking, so none of it is trusted:
   the extension and any trailing `index` removed, so `/about`, `about.html` and
   `about/index.html` are one page). On a hit the prompt gets the indexed title, the
   article's summary and, first in the knowledge, the article itself, which also lets a
-  documentation site quote code from the page being read.
+  documentation site quote code from the page being read. On a page cut into sections,
+  the sections that match the turn's words go in, best first, up to half the knowledge
+  budget (a word every section shares, like the page title in each breadcrumb, sets
+  none apart and does not count); when nothing matches, the page's first section goes
+  in alone.
 - On a miss, only the browser's title goes in, folded to one line, cut to 120
   characters, quoted, and labelled as unverified.
 - A catalog item whose `url` is that page is named too, so "how much is this?" on a
