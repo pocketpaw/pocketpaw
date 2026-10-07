@@ -1,3 +1,6 @@
-# Paw Partners (PH-1, 2026-10-01): partner profile read + client records.
-# 4-file shape (domain / dto / service / router). Updated 2026-10-02: the operator
-# set/clear switch lives in ``cloud/platform/partners.py``.
+# Paw Partners: a workspace that resells sites to its own clients. Partner-side
+# reads/writes (profile, clients, offers, sales, earnings, tiers) in ``service``;
+# public cross-tenant reads (directory, ``/partners/{slug}``), the public
+# application and the operator's application queue in ``service_admin``; the
+# operator set/clear switch and the review routes live in
+# ``cloud/platform/partners.py``.

@@ -48,6 +48,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:pockets",
     "surface:sites",
     "surface:discover",
+    "surface:partners-directory",
     "surface:belt",
     "surface:decisions",
     "surface:decisions-graph",

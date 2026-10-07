@@ -1,39 +1,48 @@
 # ee/pocketpaw_ee/cloud/partners/router.py — thin HTTP layer for Paw Partners.
 #
-# Created 2026-10-01 (feat/partners-foundation, PH-1).
-#   /partners/me, /partners/clients[/{client_id}]  — tenant routes, guarded with
-#   ``require_action_any_workspace("fabric.read" | "fabric.write")`` exactly like
-#   ``cloud/leads/router.py``. The operator switch is ``cloud/platform/partners.py``.
-# Updated 2026-10-02 (feat/partners-sell, PH-2): GET /partners/offers and
-#   GET /partners/sites (fabric.read), POST /partners/sell — guarded by
-#   ``sites.buy_plan`` (ADMIN) because a sale spends the workspace wallet.
-# Updated 2026-10-02 (feat/partners-earnings, PH-11): GET /partners/summary and
-#   GET /partners/earnings?months= (fabric.read, active partner).
-# Updated 2026-10-02 (feat/partners-commissions, PH-13): POST /partners/pay-link
-#   (``sites.buy_plan``, like /sell: a paid link changes the site's plan and rail)
-#   — a one-time link the partner's client pays for a site's year.
-# Updated 2026-10-02 (feat/partners-tiers, PH-15): GET /partners/me returns
-#   ``PartnerMeOut`` (tier standing + benefits); GET /partners/rewards (fabric.read,
-#   active partner) lists the milestone ladder.
+# Tenant routes (guarded with ``require_action_any_workspace`` exactly like
+# ``cloud/leads/router.py``): /partners/me, /partners/me/profile (PATCH),
+# /partners/clients[/{client_id}], /offers, /sites, /summary, /earnings,
+# /rewards (fabric.read / fabric.write); POST /sell and /pay-link need
+# ``sites.buy_plan`` because they spend the workspace wallet. The operator
+# switch is ``cloud/platform/partners.py``.
+#
+# Public routes, no sign-in, per-IP rate limited (``_core.rate_limit``):
+# GET /partners/directory, POST /partners/apply, GET /partners/{slug}. The slug
+# catch-all is registered LAST so every fixed segment wins; the reserved-slug
+# list in ``partners.domain`` keeps a partner from claiming one. Public responses
+# go only through ``PartnerPublicOut``. The dashboard auth middleware lets
+# /api/v1/* through and the EE auth bridge stamps a user only when a token is
+# present, so no exemption entry is needed (same as /discover).
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
-from pocketpaw_ee.cloud.partners import service
+from pocketpaw_ee.cloud._core.rate_limit import (
+    client_ip,
+    rate_limit_partner_apply,
+    rate_limit_partner_public,
+)
+from pocketpaw_ee.cloud.partners import service, service_admin
+from pocketpaw_ee.cloud.partners.domain import PartnerService
 from pocketpaw_ee.cloud.partners.dto import (
+    PartnerApplyIn,
     PartnerClientCreateRequest,
     PartnerClientOut,
     PartnerClientUpdateRequest,
+    PartnerDirectoryPage,
     PartnerEarningsMonthOut,
     PartnerMeOut,
     PartnerOfferOut,
     PartnerPayLinkOut,
     PartnerPayLinkRequest,
+    PartnerPublicOut,
+    PartnerPublicProfileIn,
     PartnerRewardOut,
     PartnerSaleOut,
     PartnerSellRequest,
@@ -48,11 +57,18 @@ _READ = [Depends(require_action_any_workspace("fabric.read"))]
 _WRITE = [Depends(require_action_any_workspace("fabric.write"))]
 # Selling spends the workspace wallet — the same admin action a paid publish needs.
 _BUY = [Depends(require_action_any_workspace("sites.buy_plan"))]
+_PUBLIC = [Depends(rate_limit_partner_public)]
 
 
 @router.get("/me", response_model=PartnerMeOut, dependencies=_READ)
 async def get_me(ctx: Ctx) -> PartnerMeOut:
     return await service.get_profile(ctx)
+
+
+@router.patch("/me/profile", response_model=PartnerMeOut, dependencies=_WRITE)
+async def update_profile(body: PartnerPublicProfileIn, ctx: Ctx) -> PartnerMeOut:
+    """Edit the caller's public partner profile; only the fields sent change."""
+    return await service.update_public_profile(ctx, body)
 
 
 @router.get("/clients", response_model=list[PartnerClientOut], dependencies=_READ)
@@ -117,3 +133,36 @@ async def get_earnings(
 @router.get("/rewards", response_model=list[PartnerRewardOut], dependencies=_READ)
 async def get_rewards(ctx: Ctx) -> list[PartnerRewardOut]:
     return await service.rewards(ctx)
+
+
+# ---------------------------------------------------------------- public (no sign-in)
+
+
+@router.get("/directory", response_model=PartnerDirectoryPage, dependencies=_PUBLIC)
+async def directory(
+    city: Annotated[str | None, Query(max_length=80)] = None,
+    service_: Annotated[PartnerService | None, Query(alias="service")] = None,
+    cursor: Annotated[str | None, Query(max_length=160)] = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 24,
+) -> PartnerDirectoryPage:
+    """PUBLIC. Active partners who opted in, newest first; ``cursor`` is the opaque
+    ``next_cursor`` of the previous page; 429 ``partners.rate_limited`` past 60
+    reads a minute per IP."""
+    return await service_admin.list_directory(
+        city=city, service=service_, cursor=cursor, limit=limit
+    )
+
+
+@router.post("/apply", status_code=204, dependencies=[Depends(rate_limit_partner_apply)])
+async def apply(body: PartnerApplyIn, request: Request) -> Response:
+    """PUBLIC. Apply to become a partner: one proposal for the platform. 400
+    ``partners.turnstile_failed``; 429 ``partners.apply_rate_limited`` past 5 an hour."""
+    await service_admin.apply(body, remote_ip=client_ip(request, trusted_header_ok=True))
+    return Response(status_code=204)
+
+
+# Registered LAST: every fixed /partners/<segment> above wins over the slug.
+@router.get("/{slug}", response_model=PartnerPublicOut, dependencies=_PUBLIC)
+async def get_public(slug: str) -> PartnerPublicOut:
+    """PUBLIC. One active, opted-in partner by slug; 404 otherwise."""
+    return await service_admin.get_public(slug)

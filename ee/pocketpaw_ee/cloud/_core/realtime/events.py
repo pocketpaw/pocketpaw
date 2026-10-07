@@ -1227,3 +1227,18 @@ class ShipDeployStatusChanged(Event):
 @dataclass
 class ShipDestroyProposed(Event):
     EVENT_TYPE: ClassVar[str] = "ship.destroy.proposed"
+
+
+# Paw Partners public profile. ``updated`` carries ``workspace_id``, ``slug`` and
+# ``public`` after a partner edits its directory profile; ``applied`` carries the
+# ``application_id`` and ``country`` of a new partner application (never the
+# applicant's contact details). No audience: in-process listeners and the audit
+# trail only.
+@dataclass
+class PartnerProfileUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.profile.updated"
+
+
+@dataclass
+class PartnerApplied(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.applied"
