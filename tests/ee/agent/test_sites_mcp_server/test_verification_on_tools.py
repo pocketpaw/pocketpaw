@@ -374,6 +374,32 @@ class TestPreviousVerification:
         assert "previous_verification" in out["content"][-1]["text"]
         assert '"status":"failed"' in out["content"][-1]["text"]
 
+    async def test_a_pocket_the_caller_cannot_read_reports_nothing(self, beanie_test_db) -> None:
+        """The verify store is keyed by pocket id alone; the read is gated on the
+        caller's access, so another tenant's build diagnostics never leak."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+        from pocketpaw_ee.sites import verify, verify_store
+
+        owner_ws, owner = str(ObjectId()), str(ObjectId())
+        a, b = _as(owner_ws, owner)
+        with a, b:
+            react = _body(
+                await mcp._create_react_site_handler(
+                    {"source": {"src/App.tsx": "export default () => <p>hi</p>"}}
+                )
+            )
+        self._settle(react["pocket_id"])
+
+        a, b = _as(str(ObjectId()), str(ObjectId()))
+        with a, b:
+            assert await mcp._settled_previous(react["pocket_id"]) is None
+        # Untouched: still there for the owner.
+        latest = verify_store.default_verify_store().read(
+            react["pocket_id"], verify_store.LATEST_KEY
+        )
+        assert latest["surfaced"] is False
+        assert verify.settled_verdict(react["pocket_id"]) is not None
+
     async def test_nothing_is_attached_while_the_build_runs(self, beanie_test_db) -> None:
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 

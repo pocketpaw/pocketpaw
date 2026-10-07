@@ -741,12 +741,29 @@ async def _edit_verification(workspace_id: str, user_id: str, pocket_id: str) ->
         return verify.unverifiable("verify_unavailable")
 
 
-def _settled_previous(pocket_id: Any) -> dict[str, Any] | None:
-    """The finished background verdict of this pocket's last edit, once. Never raises."""
+async def _settled_previous(pocket_id: Any) -> dict[str, Any] | None:
+    """The finished background verdict of this pocket's last edit, once. Never raises.
+
+    Read only for a pocket the CALLER can read, in the caller's workspace: the verify
+    store is keyed by pocket id alone, and a build verdict is still that pocket's
+    diagnostics, so an id from another tenant answers nothing.
+    """
     if not isinstance(pocket_id, str) or not pocket_id:
         return None
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return None
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites import verify
 
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except Exception:  # noqa: BLE001 — missing or foreign: nothing to report
+        return None
+    # ``get`` gates by owner / sharing / visibility, not by workspace, so the chat's
+    # workspace must match too (the same rule ``handlers/sites._refine_engine`` keeps).
+    if str(pocket.get("workspace") or "") != str(workspace_id):
+        return None
     try:
         return verify.settled_verdict(pocket_id)
     except Exception:  # noqa: BLE001
@@ -810,7 +827,7 @@ def _with_previous_verification(tool_name: str, *, timed: bool = True) -> Any:
         async def run(args: dict) -> dict:
             started = time.monotonic()
             pocket_id = args.get("pocket_id") if isinstance(args, dict) else None
-            previous = _settled_previous(pocket_id)
+            previous = await _settled_previous(pocket_id)
             out = await handler(args)
             if previous is not None:
                 out = _attach_previous(out, previous)

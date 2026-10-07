@@ -112,6 +112,12 @@ async def test_it_carries_the_previous_edits_verdict(ctx) -> None:
             "pocketpaw_ee.sites.verify.settled_verdict",
             return_value={"status": "failed", "build": "failed"},
         ),
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.get",
+            new=AsyncMock(
+                return_value={"id": "p1", "engine": "html", "source": {}, "workspace": "w"}
+            ),
+        ),
     ):
         out = await mcp._preview_site_handler({"pocket_id": "p1"})
 
