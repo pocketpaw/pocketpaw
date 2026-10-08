@@ -178,3 +178,49 @@ def test_smoke_gate_failed_response_keeps_cors_headers() -> None:
     resp = client.get("/arm", headers={"Origin": "https://paw.example.com"})
     assert resp.status_code == 500
     assert resp.headers.get("access-control-allow-origin") == "https://paw.example.com"
+
+
+# ---------------------------------------------------------------- details
+
+
+def _details_app() -> FastAPI:
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    app = FastAPI()
+    add_error_handler(app)
+
+    @app.get("/plain")
+    def _plain() -> dict:
+        raise ValidationError("sites.bundle_invalid", "nope")
+
+    @app.get("/details")
+    def _details() -> dict:
+        raise ValidationError(
+            "sites.do_data_loss_unconfirmed", "confirm it", details={"classes": ["A", "B"]}
+        )
+
+    return app
+
+
+def test_envelopes_without_details_are_byte_identical() -> None:
+    client = TestClient(_build_app())
+    nf = client.get("/notfound")
+    assert nf.content == (
+        b'{"error":{"code":"workspace.not_found","message":"workspace \'abc\' not found"}}'
+    )
+    plain = TestClient(_details_app()).get("/plain")
+    assert plain.status_code == 422
+    assert plain.content == b'{"error":{"code":"sites.bundle_invalid","message":"nope"}}'
+
+
+def test_details_appear_in_the_envelope_only_when_set() -> None:
+    resp = TestClient(_details_app()).get("/details")
+    assert resp.status_code == 422
+    assert resp.json() == {
+        "error": {
+            "code": "sites.do_data_loss_unconfirmed",
+            "message": "confirm it",
+            "details": {"classes": ["A", "B"]},
+        }
+    }
+    assert CloudError(400, "x", "y").details is None

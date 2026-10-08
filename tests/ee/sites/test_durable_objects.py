@@ -469,3 +469,12 @@ async def test_provisioner_skips_do_with_the_flag_on():
         _Site(), [{"type": "do", "name": "ROOM"}], cloudflare=_CF().client(), save=_save, paid=True
     )
     assert res.d1_database_id == ""
+
+
+def test_the_data_loss_refusal_carries_the_classes_as_details():
+    declared = _decl(V1, V2, {"tag": "v3", "deleted_classes": ["Room", "Chat"]})
+    with pytest.raises(ValidationError) as exc:
+        dobj.plan_migration(declared, "v2", live_classes=["Room", "Chat"])
+    assert exc.value.code == "sites.do_data_loss_unconfirmed"
+    assert exc.value.details == {"classes": ["Chat", "Room"]}  # sorted, stable
+    assert exc.value.to_dict()["error"]["details"] == {"classes": ["Chat", "Room"]}
