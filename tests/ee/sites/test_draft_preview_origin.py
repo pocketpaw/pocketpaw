@@ -5,7 +5,7 @@
 # Reproduction tests for the pocketpaw <-> paw-enterprise contract:
 #
 #   * ``GET /api/v1/sites/by-pocket/{id}/native-artifact`` answers, for EVERY engine
-#     including html, a ``preview_url``: the absolute URL of the draft's index.html on
+#     including html, a ``preview_url``: the absolute URL of the draft's site root on
 #     a separate preview host, carrying a capability token. ``None`` while the build is
 #     pending.
 #   * That URL serves the FULL draft: index.html with its <head> intact (module script),
@@ -21,7 +21,7 @@
 #   * ``PAW_SITES_PREVIEW_BASE_URL`` — the preview host base URL setting;
 #   * ``pocketpaw_ee.sites.preview_origin.preview_app`` — the ASGI app the preview host
 #     runs. It is requested with the ABSOLUTE ``preview_url`` and no auth overrides. The
-#     token lives in the SUBDOMAIN (``https://<token>.<base host>/index.html``), so
+#     token lives in the SUBDOMAIN (``https://<token>.<base host>/``), so
 #     root-absolute refs resolve exactly as they do once published;
 #   * the worker's ``build_job._store_preview_artifact`` + the default artifact store
 #     (pointed at tmp by the conftest) — the draft is seeded exactly as the preview
@@ -231,7 +231,34 @@ async def test_react_draft_has_an_absolute_preview_url_on_the_preview_host(beani
     parts, base = urlsplit(url), urlsplit(PREVIEW_BASE)
     assert parts.scheme == base.scheme
     assert parts.hostname and parts.hostname.endswith(base.hostname)
-    assert parts.path.endswith("index.html")
+    assert parts.path == "/"
+
+
+def test_preview_url_targets_the_site_root():
+    """The handed-out URL is the site root, never ``/index.html``: client routers
+    (TanStack, React Router) treat ``/index.html`` as an unmatched route."""
+    from pocketpaw_ee.sites.preview_origin import preview_url_for
+
+    url = preview_url_for("0123456789abcdef0123456789abcdef")
+    assert url is not None
+    assert urlsplit(url).path == "/"
+
+
+@pytest.mark.asyncio
+async def test_the_site_root_serves_index_html_and_its_edit_variant(beanie_test_db):
+    page = "<!DOCTYPE html><html><head></head><body><h1>hi</h1></body></html>"
+    pocket_id = await _make_pocket("html", {"index.html": page})
+    url = (await _artifact(pocket_id, arm=_no_arm)).get("preview_url")
+    root = urljoin(url, "/")
+
+    plain = await _fetch(root)
+    armed = await _fetch(root + "?paw_edit=1")
+
+    _assert_public_asset(plain, "text/html")
+    _assert_public_asset(armed, "text/html")
+    assert "<h1>hi</h1>" in plain.text
+    assert 'id="paw-edit-bridge"' not in plain.text
+    assert 'id="paw-edit-bridge"' in armed.text
 
 
 @pytest.mark.asyncio
@@ -254,7 +281,7 @@ async def test_html_draft_has_a_preview_url_without_any_build(beanie_test_db):
 
     assert result.get("build_status") == "none"
     url = result.get("preview_url")
-    assert isinstance(url, str) and url.endswith("index.html")
+    assert isinstance(url, str) and urlsplit(url).path == "/"
 
 
 @pytest.mark.asyncio
@@ -465,7 +492,7 @@ async def test_the_token_is_a_subdomain_label_not_a_path_segment(beanie_test_db)
     label = parts.hostname.split(".")[0]
     assert re.fullmatch(r"[a-f0-9]{32}", label), url
     assert parts.hostname == f"{label}.preview.paw-sites.test"
-    assert parts.path == "/index.html"
+    assert parts.path == "/"
 
 
 @pytest.mark.asyncio
