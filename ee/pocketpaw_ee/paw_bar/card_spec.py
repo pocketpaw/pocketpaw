@@ -118,10 +118,13 @@ RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(enco
 # Kept out of ripple cards: ``ripple-frame`` mounts a whole nested spec the bounds
 # don't see, ``embed`` frames any third-party URL, ``richtext`` renders trusted HTML.
 RIPPLE_DEFERRED: frozenset[str] = frozenset({"ripple-frame", "embed", "richtext"})
+# A ripple card's actions: paw-bar's, plus the client-side flow ones (no network,
+# no navigation). Every step inside a flow or branch is held to the same set.
+RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {"flow", "branch", "validate", "toast"}
 RIPPLE_PROFILE = CardProfile(
     name="ripple",
     widget_types=frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"]) - RIPPLE_DEFERRED,
-    actions=SPEC_ACTIONS,
+    actions=RIPPLE_ACTIONS,
     max_nodes=400,
     max_depth=16,
     max_chars=64_000,
@@ -170,16 +173,60 @@ _NODE_PROPS: dict[str, frozenset[str]] = {
 }
 # Lists whose rows carry their own ``action`` field as data, not as a handler.
 _DATA_ACTION_ROWS: frozenset[tuple[str, str]] = frozenset({("audit-log", "entries")})
-# Keys whose string value is a URL a browser loads or follows.
-_URL_KEYS: frozenset[str] = frozenset(
-    {"src", "href", "url", "image", "avatar", "favicon", "poster", "cover", "link", "logo"}
+# Keys whose string value is a URL a browser loads or follows: these, and any key
+# ending in one of the suffixes (``ctaHref``, ``environmentImage``). Held to the
+# URL policy, so an expression there is refused too.
+_URL_KEYS: frozenset[str] = frozenset({"cover", "link"})
+_URL_SUFFIXES: tuple[str, ...] = (
+    "href",
+    "src",
+    "srcset",
+    "url",
+    "uri",
+    "image",
+    "img",
+    "avatar",
+    "favicon",
+    "poster",
+    "logo",
+)
+# Link keys, where a mailto: or tel: link is fine too.
+_LINK_SUFFIXES: tuple[str, ...] = ("href", "link", "url")
+# Keys a renderer may read a URL from: an expression ("{...}") under one is
+# refused, since what it resolves to is never seen here. ``target`` is not one:
+# in an action it is a state path ("rows.{index}.done").
+_URL_ISH_KEY = re.compile(
+    r"(href|url|uri|src|srcset|link|image|img|avatar|icon|favicon|poster|cover|background|action)$",
+    re.IGNORECASE,
 )
 _TILE_PRESETS: frozenset[str] = frozenset(
     {"osm", "carto-voyager", "carto-light", "carto-dark", "osm-hot"}
 )
 # A form's own submission target (a ripple form posts natively when it has one).
 _FORM_SUBMIT_PROPS: frozenset[str] = frozenset({"action", "method", "target", "enctype"})
-_BAD_SCHEME_TEXT = re.compile(r"(?:javascript|vbscript):|(?:\]\(|<)(?:data|file|blob):")
+# A script link anywhere, or a data/file/blob target of a markdown link, a
+# reference definition or an autolink. Run on ``_normalized`` text (no spaces).
+_BAD_SCHEME_TEXT = re.compile(r"(?:javascript|vbscript):|(?:\]\(|\]:|<)(?:data|file|blob):")
+_ABSOLUTE = ("http:", "https:", "data:", "blob:", "file:")
+# The keys inside a flow or branch whose lists are more actions (``on_*`` are
+# handler keys already).
+_STEP_KEYS: frozenset[str] = frozenset({"steps", "then", "else"})
+# CSS that loads something or runs script. Run on ``_css_text``.
+_CSS_LOADS: tuple[str, ...] = (
+    "url(",
+    "image-set(",
+    "src(",
+    "element(",
+    "//",
+    "expression(",
+    "@import",
+    "-moz-binding",
+    "behavior:",
+)
+_CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_CSS_SCHEME = re.compile(r"[a-z][a-z0-9+.\-]*:")
+_CSS_DECL_SCHEME = re.compile(r"(?:javascript|vbscript|data|file|blob|https?):")
 # How deep the strict walk follows plain JSON nesting (a 16-deep node tree with
 # props is well under it).
 _MAX_SCAN_LEVELS = 96
@@ -292,10 +339,22 @@ def _normalized(text: str) -> str:
     return "".join(ch for ch in out if ch > " " and ch != "\x7f").lower().replace("\\", "/")
 
 
+def _https_allowed(url: str, hosts: frozenset[str]) -> bool:
+    if not url.startswith("https://"):
+        return False
+    head = re.split(r"[)\]>\"',;]", url, maxsplit=1)[0]
+    return urlsplit(head).hostname in hosts
+
+
+def _is_url_key(key: str) -> bool:
+    low = key.lower()
+    return key in _URL_KEYS or low.endswith(_URL_SUFFIXES)
+
+
 def _check_url(key: str, value: str, hosts: frozenset[str]) -> None:
-    """A URL-valued key's string: "", a same-site path ("/x", not "//x") or "#x",
-    or an https URL on ``hosts``. A map's tiles must be a preset; a tile URL
-    template is never taken; a colour key only refuses what could load."""
+    """A URL key's string: "", a same-site path ("/x", not "//x") or "#x", an
+    https URL on ``hosts``, or under a link key a mailto: or tel: link. A map's
+    tiles must be a preset; a tile URL template is never taken."""
     url = _normalized(value)
     if key == "tiles":
         if url not in _TILE_PRESETS:
@@ -303,15 +362,53 @@ def _check_url(key: str, value: str, hosts: frozenset[str]) -> None:
         return
     if key in ("tile", "tileUrl"):
         raise _Reject("a custom tile template")
-    if key == "background":
-        if ":" in url or "url(" in url or "//" in url:
-            raise _Reject("a background that loads something")
-        return
     if not url or url[0] == "#" or (url[0] == "/" and url[1:2] != "/"):
         return
-    if url.startswith("https://") and urlsplit(url).hostname in hosts:
+    if _https_allowed(url, hosts):
+        return
+    if key.lower().endswith(_LINK_SUFFIXES) and url.startswith(("mailto:", "tel:")):
         return
     raise _Reject(f"a {key} that is not a same-site path or an allowed host")
+
+
+def _check_text(value: str, hosts: frozenset[str]) -> None:
+    """Any string in a strict card, and the string literals an expression in it
+    concatenates (``{'java'+'script:'}``): no script or data link, an absolute
+    URL only on ``hosts``, and every ``//`` only as https on ``hosts``."""
+    text = _normalized(value)
+    forms = [text]
+    if "{" in text:
+        forms.append(re.sub(r"[{}'\"`+]", "", text))
+    for form in forms:
+        if _BAD_SCHEME_TEXT.search(form):
+            raise _Reject("text holding a script or data link")
+        if form.startswith(_ABSOLUTE) and not _https_allowed(form, hosts):
+            raise _Reject("a URL off the allowed hosts")
+        at = form.find("//")
+        while at != -1:
+            if form[max(0, at - 6) : at] != "https:" or not _https_allowed(form[at - 6 :], hosts):
+                raise _Reject("a link off the allowed hosts")
+            at = form.find("//", at + 2)
+
+
+def _css_char(match: re.Match[str]) -> str:
+    if match.group(2) is not None:
+        return match.group(2)
+    point = int(match.group(1), 16)
+    return chr(point) if 0 < point <= 0x10FFFF and not 0xD800 <= point <= 0xDFFF else "�"
+
+
+def _check_css(value: str, *, declarations: bool) -> None:
+    """A style string may not load anything: no ``url(`` and friends, no ``//``,
+    no ``@import`` or ``expression(``, and no scheme (a declaration list may use
+    ``:`` between property and value, so there only the known schemes count).
+    CSS escapes (``\75 rl(``), comments, entities and case are undone first."""
+    css = _CSS_ESCAPE.sub(_css_char, _CSS_COMMENT.sub("", html.unescape(value)))
+    css = "".join(ch for ch in css if ch > " ").lower()
+    if any(token in css for token in _CSS_LOADS):
+        raise _Reject("a style that loads something")
+    if (_CSS_DECL_SCHEME if declarations else _CSS_SCHEME).search(css):
+        raise _Reject("a style naming a scheme")
 
 
 def _check_strict(
@@ -323,28 +420,31 @@ def _check_strict(
     allowed, hosts = profile.actions, profile.url_hosts
     nodes = 0
     # (value, json level, node depth, key it sits under, under a handler, is a
-    # node, is a data row whose "action" is its own)
-    stack: list[tuple[Any, int, int, str, bool, bool, bool]] = [
-        (spec["ui"], 1, 1, "", False, True, False),
-        (spec.get("state"), 1, 0, "", False, False, False),
+    # node, is a data row whose "action" is its own, inside a style)
+    stack: list[tuple[Any, int, int, str, bool, bool, bool, bool]] = [
+        (spec["ui"], 1, 1, "", False, True, False, False),
+        (spec.get("state"), 1, 0, "", False, False, False, False),
     ]
     while stack:
-        value, level, depth, key, handler, is_node, data_row = stack.pop()
+        value, level, depth, key, handler, is_node, data_row, css = stack.pop()
         if level > _MAX_SCAN_LEVELS:
             raise _Reject("nested too deeply")
         if isinstance(value, str):
-            if key in _URL_KEYS or key in ("tiles", "tile", "tileUrl", "background"):
+            if css or key == "background":
+                _check_css(value, declarations=key == "style")
+            elif key in ("tiles", "tile", "tileUrl") or _is_url_key(key):
                 _check_url(key, value, hosts)
-            if _BAD_SCHEME_TEXT.search(_normalized(value)):
-                raise _Reject("text holding a script or data link")
+            if "{" in value and _URL_ISH_KEY.search(key):
+                raise _Reject(f"an expression in {key}, where a URL is read")
+            _check_text(value, hosts)
             continue
         if isinstance(value, list):
-            stack.extend((v, level + 1, depth, key, handler, False, data_row) for v in value)
+            stack.extend((v, level + 1, depth, key, handler, False, data_row, css) for v in value)
             continue
         if not isinstance(value, dict):
             continue
         kind = value.get("type")
-        if not is_node and isinstance(kind, str):
+        if not is_node and not css and isinstance(kind, str):
             # A node kept in a prop or in state: a widget's name, or node-shaped.
             is_node = kind in _RIPPLE_TYPES or any(
                 k in value for k in ("props", "children", "else_children", "bind")
@@ -372,12 +472,13 @@ def _check_strict(
                         continue
                     if not isinstance(v, list):
                         raise _Reject(f"{k} is not a list")
-                    stack.extend((kid, level + 2, depth + 1, k, False, True, False) for kid in v)
+                    stack.extend(
+                        (kid, level + 2, depth + 1, k, False, True, False, False) for kid in v
+                    )
                 elif k == "props" and isinstance(v, dict):
                     node_props = _NODE_PROPS.get(kind, frozenset())
                     for pk, pv in v.items():
                         sub_node = pk in node_props and isinstance(pv, dict)
-                        rows = (kind, pk) in _DATA_ACTION_ROWS
                         stack.append(
                             (
                                 pv,
@@ -386,19 +487,32 @@ def _check_strict(
                                 pk,
                                 _is_handler_key(pk),
                                 sub_node,
-                                rows,
+                                (kind, pk) in _DATA_ACTION_ROWS,
+                                pk == "style",
                             )
                         )
                 elif k != "type":
-                    stack.append((v, level + 1, depth, k, _is_handler_key(k), False, False))
+                    stack.append(
+                        (v, level + 1, depth, k, _is_handler_key(k), False, False, k == "style")
+                    )
             continue
         named = value.get("action")
-        if (handler and "action" in value) or (
-            isinstance(named, str) and named in _RIPPLE_ACTIONS and not data_row
-        ):
+        is_action = (handler and "action" in value) or (
+            isinstance(named, str) and named in _RIPPLE_ACTIONS and not data_row and not css
+        )
+        if is_action:
             _check_actions(value, events, allowed)
         stack.extend(
-            (v, level + 1, depth, k, handler or _is_handler_key(k), False, False)
+            (
+                v,
+                level + 1,
+                depth,
+                k,
+                handler or _is_handler_key(k) or (is_action and k in _STEP_KEYS),
+                False,
+                False,
+                css or k == "style",
+            )
             for k, v in value.items()
         )
 

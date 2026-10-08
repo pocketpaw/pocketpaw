@@ -76,7 +76,7 @@ def test_the_pawbar_profile_is_todays_rules():
     assert p.detailed is None and p.strict is False and RIPPLE_STRICT
 
     r = card_spec.RIPPLE_PROFILE
-    assert r.actions == card_spec.SPEC_ACTIONS
+    assert r.actions == card_spec.SPEC_ACTIONS | {"flow", "branch", "validate", "toast"}
     assert (r.max_nodes, r.max_depth, r.max_chars) == (400, 16, 64_000)
 
 
@@ -108,8 +108,8 @@ def test_a_recorded_full_catalog_card_passes_ripple_and_not_pawbar():
             "emit to a non-host event",
         ),
         (
-            {"ui": {"type": "button", "on_click": {"action": "toast", "message": "hi"}}},
-            "an action outside SPEC_ACTIONS",
+            {"ui": {"type": "button", "on_click": {"action": "api", "url": "/x"}}},
+            "an action outside the profile's set",
         ),
         (
             {"ui": {"type": "ripple-frame", "props": {"spec": {"ui": {"type": "text"}}}}},
@@ -414,6 +414,218 @@ def test_m2_a_ripple_form_validates_and_is_not_a_lead_card():
 
 
 # --------------------------------------------------------------------------- #
+# Adversarial re-review
+# --------------------------------------------------------------------------- #
+
+
+# R1: a URL is a URL under any key: absolute, protocol-relative and data/blob/file
+# values are held to the policy wherever they sit; a URL-named key refuses
+# expressions too.
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": {"type": "navbar", "props": {"ctaHref": "//evil.com"}}},
+        {"ui": {"type": "navbar", "props": {"ctaHref": "https://evil.com"}}},
+        {"ui": {"type": "navbar", "props": {"ctaHref": "http://evil.com"}}},
+        {"ui": {"type": "navbar", "props": {"ctaHref": "data:text/html,<b>x</b>"}}},
+        {"ui": {"type": "navbar", "props": {"ctaHref": "http:evil.com"}}},
+        {"ui": {"type": "navbar", "props": {"ctaHref": "https:\\\\evil.com"}}},
+        {"ui": {"type": "hero", "props": {"title": "x", "secondaryCtaHref": "https://evil.com"}}},
+        {"ui": {"type": "marketing-hero", "props": {"ctaHref": "{state.next}"}}},
+        {
+            "ui": {
+                "type": "model-viewer",
+                "props": {"src": "/m.glb", "environmentImage": "https://evil.com/x.hdr"},
+            }
+        },
+        {
+            "ui": {
+                "type": "comparison-layout",
+                "props": {
+                    "features": [{"key": "pic", "type": "image"}],
+                    "items": [{"id": "a", "pic": "https://evil.com/x.png"}],
+                },
+            }
+        },
+        {"ui": {"type": "text"}, "state": {"tail": "ps://evil.com/x"}},
+        {"ui": {"type": "markdown", "props": {"content": "see [here](https://evil.com)"}}},
+        {"ui": {"type": "image", "props": {"src": "mailto:x@y.test"}}},
+    ],
+)
+def test_r1_urls_are_checked_under_any_key(spec):
+    assert _ripple(spec) is None
+
+
+def test_r1_mail_and_phone_links_only_under_link_keys():
+    assert _ripple({"ui": {"type": "cta", "props": {"label": "Mail", "href": "mailto:a@b.test"}}})
+    assert _ripple({"ui": {"type": "cta", "props": {"label": "Call", "href": "tel:+15550100"}}})
+    assert _ripple({"ui": {"type": "navbar", "props": {"ctaHref": "tel:+15550100"}}})
+    assert _ripple({"ui": {"type": "text", "props": {"text": "Call tel:5550100, 10/12"}}})
+    assert _ripple({"ui": {"type": "navbar", "props": {"ctaHref": "/contact"}}})
+
+
+# R5: an expression can build a URL at render time. A URL-ish key refuses
+# expressions outright; anywhere else, string literals concatenated inside an
+# expression may not spell a script or data link.
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": {"type": "cta", "props": {"label": "x", "href": "{'java'+'script:alert(1)'}"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "href": "{state.a}:alert(1)"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "href": "javascript{state.c}"}}},
+        {"ui": {"type": "navbar", "props": {"ctaHref": "{state.a}:alert(1)"}}},
+        {
+            "ui": {
+                "type": "model-viewer",
+                "props": {"src": "/m.glb", "environmentImage": "{state.e}"},
+            }
+        },
+        {"ui": {"type": "entity-detail", "props": {"title": "x", "icon": "{state.i}"}}},
+        {"ui": {"type": "text", "props": {"text": "{'java' + 'script:' + 'alert(1)'}"}}},
+        {"ui": {"type": "text"}, "state": {"go": '{"data"+":text/html,x"}'}},
+    ],
+)
+def test_r5_expressions_cannot_build_a_url(spec):
+    assert _ripple(spec) is None
+
+
+def test_r5_concatenated_literals_cannot_spell_an_off_site_link():
+    assert _ripple({"ui": {"type": "text"}, "state": {"go": "{'ht'+'tps:/'+'/evil.com'}"}}) is None
+
+
+def test_r4_a_recorded_scenario_with_flow_steps_passes():
+    # ripple origin/main 09a56a6, live/fixtures/bill-splitter.json: two flows of set steps.
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    path = Path(__file__).parents[1] / "fixtures" / "ripple_bill_splitter_card.json"
+    card = json.loads(path.read_text(encoding="utf-8"))
+    assert '"action": "flow"' in json.dumps(card)
+    assert render_card(_body(card), [], profile=RIPPLE_PROFILE) is not None
+
+
+def test_r5_expressions_stay_usable_where_no_url_is_read():
+    spec = {
+        "ui": {
+            "type": "flex",
+            "children": [
+                {"type": "text", "props": {"text": "Each pays {state.total / state.people}"}},
+                {
+                    "type": "button",
+                    "props": {"label": "{state.n} left"},
+                    "on_click": {"action": "set", "target": "rows.{index}.done", "value": "{item}"},
+                },
+            ],
+        },
+        "state": {"total": 10, "people": 2, "n": 1},
+    }
+    assert _ripple(spec) is not None
+
+
+# R2: CSS in a style object (node or props) may not load anything.
+@pytest.mark.parametrize(
+    "style",
+    [
+        {"background-image": "url(https://evil.com/b.png)"},
+        {"backgroundImage": "URL( '/x.png' )"},
+        {"mask-image": "image-set('/a.png' 1x)"},
+        {"list-style-image": "url(x)"},
+        {"cursor": "url(/c.cur), auto"},
+        {"content": "url(/x)"},
+        {"border-image": "url(/x) 30"},
+        {"background": "\\75 rl(/x)"},
+        {"background": "u\\rl(/x)"},
+        {"width": "expression(alert(1))"},
+        {"font-family": "x;@import 'https://evil.com/a.css'"},
+        {"background": "//evil.com/x.png"},
+        {"background": "javascript:alert(1)"},
+    ],
+)
+@pytest.mark.parametrize("where", ["node", "props"])
+def test_r2_style_may_not_load_anything(style, where):
+    node = {"type": "text", "props": {"text": "x"}}
+    if where == "node":
+        node["style"] = style
+    else:
+        node["props"]["style"] = style
+    assert _ripple({"ui": node}) is None
+
+
+def test_r2_a_style_string_is_checked_and_plain_styles_pass():
+    bad = {"type": "text", "props": {"text": "x", "style": "color: red; background: url(/x)"}}
+    assert _ripple({"ui": bad}) is None
+    ok = {
+        "type": "text",
+        "props": {"text": "x", "style": "color: red; padding: 4px"},
+        "style": {"color": "#333", "background": "linear-gradient(90deg, #fff, #eee)"},
+    }
+    assert _ripple({"ui": ok}) is not None
+
+
+# R3: reference-style markdown links and autolinks get the same scheme check.
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[x][1]\n\n[1]: data:text/html,<script>alert(1)</script>",
+        "[x][1]\n\n[1]:   file:///etc/passwd",
+        "<javascript:alert(1)>",
+        "[x][a]\n\n[a]: blob:https://x/y",
+    ],
+)
+def test_r3_reference_links_and_autolinks_are_checked(content):
+    assert _ripple({"ui": {"type": "markdown", "props": {"content": content}}}) is None
+
+
+# R4: flow, branch, validate and toast are allowed; every step inside them is
+# held to the same set.
+def _button(handler) -> dict:
+    return {"ui": {"type": "button", "props": {"label": "Go"}, "on_click": handler}}
+
+
+def test_r4_a_flow_of_allowed_steps_passes():
+    flow = {
+        "action": "flow",
+        "steps": [
+            {"action": "validate", "condition": "state.n > 0", "message": "Pick one"},
+            {"action": "set", "target": "n", "value": 0},
+            {"action": "toast", "message": "Done", "variant": "success"},
+        ],
+        "on_error": [{"action": "toast", "message": "Nope"}],
+    }
+    assert _ripple(_button(flow)) is not None
+    branch = {
+        "action": "branch",
+        "if": "state.n > 5",
+        "then": [{"action": "set", "target": "big", "value": True}],
+        "else": [{"action": "flow", "steps": [{"action": "toggle", "target": "small"}]}],
+    }
+    assert _ripple(_button([branch])) is not None
+
+
+@pytest.mark.parametrize("bad", ["api", "navigate", "invoke", "confirm", "delay", "made_up"])
+def test_r4_a_flow_step_outside_the_set_is_refused(bad):
+    step = {"action": bad, "url": "/x", "target": "t", "message": "m", "ms": 10}
+    assert _ripple(_button({"action": "flow", "steps": [step]})) is None
+    assert _ripple(_button({"action": "flow", "steps": [], "on_error": [step]})) is None
+
+
+def test_r4_a_nested_branch_with_a_bad_step_is_refused():
+    inner = {
+        "action": "flow",
+        "steps": [{"action": "set", "target": "a"}, {"action": "api", "url": "/x"}],
+    }
+    for key in ("then", "else"):
+        branch = {"action": "branch", "if": "state.x", key: [inner]}
+        assert _ripple(_button({"action": "flow", "steps": [branch]})) is None
+    emit = {"action": "branch", "if": "1", "then": [{"action": "emit", "target": "steal"}]}
+    assert _ripple(_button(emit)) is None
+
+
+def test_r4_a_toast_message_gets_the_text_checks():
+    toast = {"action": "toast", "message": "[go](javascript:alert(1))"}
+    assert _ripple(_button(toast)) is None
+
+
+# --------------------------------------------------------------------------- #
 # The runtime
 # --------------------------------------------------------------------------- #
 
@@ -439,7 +651,8 @@ def test_the_ripple_cards_paragraph_needs_no_catalog_or_lead_capture():
     assert "<catalog>" in prompt
     assert "- slider {" in prompt
     assert "no exponent operator" in prompt
-    assert "There is no flow, branch, toast" in prompt
+    assert "flow (steps run in order)" in prompt
+    assert "There is no api, navigate" in prompt
     assert "product-card" not in prompt
     assert "Do not offer a send_to_team form" in prompt
 

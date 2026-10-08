@@ -1128,9 +1128,12 @@ _RIPPLE_RULES = (
     'switch, checkbox) to state with "bind": "{state.path}" and derive every output from '
     'state with expressions, e.g. "{state.total / state.people}". Never hardcode a '
     "copy of a state value: write state.items.length, not 4.",
-    "   - The only actions are set, toggle, push, remove, open, and emit of add_to_cart "
-    "or checkout. There is no flow, branch, toast, api or navigate: a card using one "
-    "is dropped. A handler may be a list of actions, run in order.",
+    "   - The only actions are set, toggle, push, remove, open, toast, validate, flow "
+    "(steps run in order) and branch (if, then, else), and emit of add_to_cart or "
+    "checkout. There is no api, navigate, confirm, delay or any other action: a card "
+    "using one is dropped, even as a step. A handler may be a list of actions.",
+    "   - Links and images use same-site paths only (/page, #section); never a full "
+    "URL, an expression or a CSS url().",
     '   - "each" takes items ("{state.list}"), item_as and index_as on the node, and '
     '"if" takes condition on the node, not in props. Inside each, the row is '
     '{item.field} and the index {index}; bind a row field as "list.{index}.field" '

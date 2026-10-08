@@ -1,0 +1,233 @@
+{
+ "ui": {
+  "type": "card",
+  "props": {
+   "title": "Dinner split",
+   "description": "Food is shared evenly. Drinks go only to the people who had them."
+  },
+  "children": [
+   {
+    "type": "flex",
+    "props": {
+     "direction": "column",
+     "gap": "14px"
+    },
+    "children": [
+     {
+      "type": "grid",
+      "props": {
+       "columns": 2,
+       "gap": "12px"
+      },
+      "children": [
+       {
+        "type": "number-input",
+        "bind": "{state.bill}",
+        "props": {
+         "label": "Bill total ($)",
+         "min": 0,
+         "step": 0.5
+        }
+       },
+       {
+        "type": "number-input",
+        "bind": "{state.drinksTotal}",
+        "props": {
+         "label": "Drinks part of bill ($)",
+         "min": 0,
+         "step": 0.5
+        }
+       }
+      ]
+     },
+     {
+      "type": "slider",
+      "bind": "{state.tipPercent}",
+      "props": {
+       "label": "Tip %",
+       "min": 0,
+       "max": 40,
+       "step": 1,
+       "showValue": true
+      }
+     },
+     {
+      "type": "grid",
+      "props": {
+       "columns": 3,
+       "gap": "12px"
+      },
+      "children": [
+       {
+        "type": "stat",
+        "props": {
+         "label": "Tip",
+         "value": "{state.bill * state.tipPercent / 100}",
+         "format": "currency"
+        }
+       },
+       {
+        "type": "stat",
+        "props": {
+         "label": "Grand total",
+         "value": "{state.bill * (1 + state.tipPercent / 100)}",
+         "format": "currency"
+        }
+       },
+       {
+        "type": "stat",
+        "props": {
+         "label": "Drinkers",
+         "value": "{state.drinkers}",
+         "format": "number"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator",
+      "props": {}
+     },
+     {
+      "type": "text",
+      "props": {
+       "text": "Who had drinks?",
+       "weight": "semibold"
+      }
+     },
+     {
+      "type": "each",
+      "items": "{state.people}",
+      "children": [
+       {
+        "type": "flex",
+        "props": {
+         "direction": "row",
+         "gap": "12px",
+         "align": "center",
+         "justify": "between"
+        },
+        "children": [
+         {
+          "type": "input",
+          "bind": "people.{index}.name",
+          "props": {
+           "placeholder": "Name"
+          }
+         },
+         {
+          "type": "checkbox",
+          "bind": "people.{index}.drinks",
+          "props": {
+           "label": "Drinks"
+          },
+          "on_change": {
+           "action": "set",
+           "target": "drinkers",
+           "value": "{state.people.where('drinks', true).count()}"
+          }
+         },
+         {
+          "type": "stat",
+          "props": {
+           "label": "Pays",
+           "size": "sm",
+           "format": "currency",
+           "value": "{item.drinks * state.drinksTotal / state.drinkers * (1 + state.tipPercent / 100) + state.bill / state.people.length * (1 + state.tipPercent / 100) - state.drinksTotal / state.people.length * (1 + state.tipPercent / 100)}"
+          }
+         },
+         {
+          "type": "button",
+          "props": {
+           "label": "Remove",
+           "variant": "ghost",
+           "size": "sm"
+          },
+          "on_click": {
+           "action": "flow",
+           "steps": [
+            {
+             "action": "remove",
+             "target": "people",
+             "value": "{item}"
+            },
+            {
+             "action": "set",
+             "target": "drinkers",
+             "value": "{state.people.where('drinks', true).count()}"
+            }
+           ]
+          }
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "button",
+      "props": {
+       "label": "Add person",
+       "variant": "outline"
+      },
+      "on_click": {
+       "action": "flow",
+       "steps": [
+        {
+         "action": "push",
+         "target": "people",
+         "value": {
+          "name": "Guest",
+          "drinks": false
+         }
+        },
+        {
+         "action": "set",
+         "target": "drinkers",
+         "value": "{state.people.where('drinks', true).count()}"
+        }
+       ]
+      }
+     },
+     {
+      "type": "if",
+      "condition": "{state.drinkers == 0}",
+      "children": [
+       {
+        "type": "alert",
+        "props": {
+         "variant": "warning",
+         "title": "No drinkers selected",
+         "description": "Check at least one person so the drinks cost is assigned."
+        }
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "state": {
+  "bill": 186.4,
+  "drinksTotal": 48,
+  "tipPercent": 18,
+  "drinkers": 3,
+  "people": [
+   {
+    "name": "Alex",
+    "drinks": true
+   },
+   {
+    "name": "Sam",
+    "drinks": true
+   },
+   {
+    "name": "Jo",
+    "drinks": false
+   },
+   {
+    "name": "Pat",
+    "drinks": true
+   }
+  ]
+ }
+}
