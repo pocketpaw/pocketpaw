@@ -191,11 +191,12 @@ without it draft Workers stay off.
   `Set-Cookie` is mapped like any other). Every other preview host refuses them
   before accept: an unknown, static or superseded token closes with 4404 (an HTTP
   404 when the server supports `websocket.http.response`), a target without a
-  leading `/` with 1008. The browser `Origin` must be the draft's own preview
-  origin or the builder origin (`PAW_SITES_BUILDER_ORIGIN`, or the origin the
-  editor was last opened from); anything else closes with 4403 before the draft
-  is dialed. Nothing is accepted until the draft Worker accepts, and its
-  subprotocol is mirrored. Close codes and reasons pass both ways. Caps:
+  leading `/` with 1008. The browser `Origin` must be exactly the draft's own
+  preview origin (pages inside the draft always send it, and the draft's
+  `PAW_SITE_ORIGINS` allows nothing else); anything else, the builder origin
+  included, closes with 4403 before the draft is dialed. Nothing is accepted
+  until the draft Worker accepts, and its subprotocol is mirrored. Close codes
+  and reasons pass both ways. Caps:
   - `PAW_SITES_DRAFT_WS_MAX_MSG`: largest message either way, default 64 KiB
     (close 1009);
   - `PAW_SITES_DRAFT_WS_PER_TOKEN`: open connections per preview token, default
@@ -203,8 +204,17 @@ without it draft Workers stay off.
     can hold up to N times this;
   - `PAW_SITES_DRAFT_WS_RATE`: browser messages per second per connection,
     default 50 (close 1008);
-  - `PAW_SITES_DRAFT_WS_IDLE_SECONDS` (default 300) and
-    `PAW_SITES_DRAFT_WS_LIFETIME_SECONDS` (default 3600) close with 1001.
+  - `PAW_SITES_DRAFT_WS_DOWN_BYTES_PER_SEC` (default 256 KiB) and
+    `PAW_SITES_DRAFT_WS_DOWN_BURST` (default 1 MiB, never below the max message
+    size): a byte budget on draft-to-browser traffic (close 1008);
+  - `PAW_SITES_DRAFT_WS_IDLE_SECONDS` (default 300): only browser messages count
+    as activity, so a draft that keeps talking cannot keep a socket open;
+    `PAW_SITES_DRAFT_WS_LIFETIME_SECONDS` (default 3600). Both close with 1001.
+
+  The ASGI server reads a whole frame before these caps see it (uvicorn's
+  `ws_max_size`, 16 MiB by default). It is not lowered globally, because the
+  app's own sockets (websandbox `file.write`, chat media) send large frames; the
+  per-token cap bounds the exposure.
 
   The ingress in front of the preview host must pass `Upgrade` (the nginx
   example above does) and keep idle connections open at least as long as the

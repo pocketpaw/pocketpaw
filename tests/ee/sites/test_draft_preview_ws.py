@@ -102,11 +102,26 @@ async def _echo(conn) -> None:
         await conn.send(message)
 
 
+async def _pusher(conn, outq: asyncio.Queue) -> None:
+    """A draft that talks on its own: sends whatever the test queues."""
+
+    async def pump() -> None:
+        while True:
+            await conn.send(await outq.get())
+
+    task = asyncio.create_task(pump())
+    try:
+        await conn.wait_closed()
+    finally:
+        task.cancel()
+
+
 @pytest.fixture
 async def worker(upstream):  # noqa: F811
     """A live fake draft Worker; ``worker.dialed`` records what the proxy dialed."""
     state = SimpleNamespace(requests=[], closes=[], dialed=[], handler=_echo, closed=None)
     state.closed = asyncio.Event()
+    state.outq = asyncio.Queue()
 
     async def handler(conn) -> None:
         state.requests.append(conn.request)
@@ -218,11 +233,17 @@ async def test_upstream_set_cookie_comes_back_host_only(worker):
     await browser.done()
 
 
-async def test_the_builder_origin_may_connect(worker):
-    browser, accept = await _open(_scope(origin=BUILDER))
-    assert accept["type"] == "websocket.accept"
-    await browser.inbox.put({"type": "websocket.disconnect", "code": 1000})
-    await browser.done()
+async def test_only_the_drafts_own_preview_origin_may_connect(worker, monkeypatch):
+    # Pages in the draft iframe always send the preview origin. The builder origin
+    # is refused too: the recipe's PAW_SITE_ORIGINS would 403 it anyway, and a
+    # recorded view origin is whatever a non-browser client claimed.
+    monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", BUILDER)
+    monkeypatch.setattr(preview_proxy, "builder_origin_for", lambda pocket_id: BUILDER)
+    for origin in (BUILDER, "http://localhost:1420"):
+        browser, close = await _open(_scope(origin=origin))
+        assert close == {"type": "websocket.close", "code": 4403}
+        await browser.done()
+    assert worker.dialed == []
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +383,42 @@ async def test_an_idle_connection_is_closed(worker, clock):
     await browser.done()
     await asyncio.wait_for(worker.closed.wait(), WAIT)
     assert worker.closes[0][0] == 1001
+
+
+async def test_draft_traffic_alone_does_not_keep_a_connection_alive(worker, clock):
+    worker.handler = lambda conn: _pusher(conn, worker.outq)
+    browser, _accept = await _open(_scope())
+    for _ in range(3):
+        clock[0] += 120
+        await worker.outq.put("tick")
+        message = await browser.next()
+        if message["type"] == "websocket.close":
+            break
+        assert message == {"type": "websocket.send", "text": "tick"}
+    else:
+        message = await browser.next()
+    # 360 s with only the draft talking: the browser has been idle past 300 s.
+    assert message["type"] == "websocket.close" and message["code"] == 1001
+    await browser.done()
+
+
+async def test_the_draft_byte_budget_refills_and_then_closes_a_flood(worker, clock, monkeypatch):
+    monkeypatch.setenv("PAW_SITES_DRAFT_WS_MAX_MSG", "100")
+    monkeypatch.setenv("PAW_SITES_DRAFT_WS_DOWN_BYTES_PER_SEC", "100")
+    monkeypatch.setenv("PAW_SITES_DRAFT_WS_DOWN_BURST", "150")
+    worker.handler = lambda conn: _pusher(conn, worker.outq)
+    browser, _accept = await _open(_scope())
+    await worker.outq.put("a" * 100)
+    assert (await browser.next())["text"] == "a" * 100
+    clock[0] += 1  # 50 left + 100 refilled
+    await worker.outq.put("b" * 100)
+    assert (await browser.next())["text"] == "b" * 100
+    await worker.outq.put("c" * 100)  # 50 left: over budget
+    close = await browser.next()
+    assert close == {"type": "websocket.close", "code": 1008, "reason": "draft rate limit"}
+    await browser.done()
+    await asyncio.wait_for(worker.closed.wait(), WAIT)
+    assert worker.closes[0][0] == 1008
 
 
 async def test_a_busy_connection_still_ends_at_its_lifetime(worker, clock, monkeypatch):

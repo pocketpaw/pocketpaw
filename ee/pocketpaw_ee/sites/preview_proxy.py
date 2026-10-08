@@ -26,11 +26,14 @@
 #     the first ``<head>`` and, under ``?paw_edit=1`` (never forwarded), the edit
 #     bridge appended. Everything else streams raw with its own encoding.
 # ``forward_ws`` proxies a WebSocket under the same target, header and cookie rules,
-# plus: the browser ``Origin`` must be the draft's own preview origin or the builder
-# origin (else close 4403); nothing is accepted downstream until the upstream
-# handshake works; caps on message size, connections per token, message rate, idle
-# time and lifetime close with 1009 / 1013 / 1008 / 1001. The per-token count is
+# plus: the browser ``Origin`` must be exactly the draft's own preview origin (else
+# close 4403); nothing is accepted downstream until the upstream handshake works;
+# caps on message size, connections per token, browser message rate, draft byte
+# rate, browser idle time and lifetime close with 1009 / 1013 / 1008 / 1008 / 1001 /
+# 1001. Draft messages never reset the idle timer. The per-token count is
 # in-process, so the real ceiling is that cap times the number of API replicas.
+# The ASGI server buffers a whole frame (uvicorn ``ws_max_size``, 16 MiB) before the
+# size cap here sees it; the per-token cap bounds that exposure.
 from __future__ import annotations
 
 import asyncio
@@ -390,6 +393,12 @@ DEFAULT_WS_PER_TOKEN = 60
 DEFAULT_WS_RATE = 50  # browser -> draft messages per second, per connection
 DEFAULT_WS_IDLE = 5 * 60
 DEFAULT_WS_LIFETIME = 60 * 60
+#: Draft -> browser byte budget: a token bucket refilled at this rate, holding up to
+#: the burst (never less than one max-size message).
+WS_DOWN_RATE_ENV = "PAW_SITES_DRAFT_WS_DOWN_BYTES_PER_SEC"
+WS_DOWN_BURST_ENV = "PAW_SITES_DRAFT_WS_DOWN_BURST"
+DEFAULT_WS_DOWN_RATE = 256 * 1024
+DEFAULT_WS_DOWN_BURST = 1024 * 1024
 
 CLOSE_GOING_AWAY = 1001  # idle or lifetime reached
 CLOSE_POLICY = 1008  # bad request target, message rate
@@ -492,16 +501,6 @@ def _reason(text: Any) -> str:
     return (text or "").encode("utf-8")[:123].decode("utf-8", "ignore")
 
 
-def _allowed_origins(scheme: str, preview_host: str, pocket_id: str) -> set[str]:
-    from pocketpaw_ee.sites import service as sites_service
-
-    out = {f"{scheme}://{preview_host}".lower()}
-    for origin in (builder_origin_for(pocket_id), sites_service._builder_origin()):
-        if origin:
-            out.add(origin.strip().rstrip("/").lower())
-    return out
-
-
 async def forward_ws(
     scope: dict[str, Any], receive: Any, send: Any, *, target: Any, preview_host: str
 ) -> None:
@@ -543,8 +542,10 @@ async def forward_ws(
         if name in _DROP_IN_WS or name.startswith(_DROP_IN_PREFIXES):
             continue
         headers.append((name, value))
-    allowed = await asyncio.to_thread(_allowed_origins, scheme, preview_host, target.pocket_id)
-    if not origin or origin.rstrip("/").lower() not in allowed:
+    # Only the draft's own origin: pages in the draft iframe always send it, and the
+    # draft's PAW_SITE_ORIGINS holds nothing else, so the draft would refuse any
+    # other Origin anyway (and a recorded view origin is whatever a client claimed).
+    if origin.rstrip("/").lower() != f"{scheme}://{preview_host}".lower():
         await deny_ws(scope, send, CLOSE_FORBIDDEN)
         return
     cookie = request_cookies("; ".join(cookies))
@@ -605,8 +606,11 @@ async def forward_ws(
 
 async def _relay(receive: Any, send: Any, upstream: Any, *, max_msg: int, label: str) -> None:
     """Pump messages both ways until one side closes or a cap trips, then close the
-    other side with the matching code. The rate cap counts browser messages only."""
+    other side with the matching code. The message-rate cap counts browser messages,
+    the byte budget draft messages; only browser messages count as activity."""
     rate = _env_int(WS_RATE_ENV, DEFAULT_WS_RATE)
+    down_rate = _env_int(WS_DOWN_RATE_ENV, DEFAULT_WS_DOWN_RATE)
+    burst = max(_env_int(WS_DOWN_BURST_ENV, DEFAULT_WS_DOWN_BURST), max_msg)
     idle = _env_int(WS_IDLE_ENV, DEFAULT_WS_IDLE)
     lifetime = _env_int(WS_LIFETIME_ENV, DEFAULT_WS_LIFETIME)
     started = _now()
@@ -640,12 +644,18 @@ async def _relay(receive: Any, send: Any, upstream: Any, *, max_msg: int, label:
                 return _closed(exc)
 
     async def draft_to_browser() -> tuple[str, int, str]:
+        budget, refilled = float(burst), _now()
         while True:
             try:
                 data = await upstream.recv()
             except ConnectionClosed as exc:
                 return _closed(exc)
-            last[0] = _now()
+            now = _now()
+            budget = min(float(burst), budget + (now - refilled) * down_rate)
+            refilled = now
+            budget -= len(data.encode("utf-8")) if isinstance(data, str) else len(data)
+            if budget < 0:
+                return "cap", CLOSE_POLICY, "draft rate limit"
             key = "text" if isinstance(data, str) else "bytes"
             await send({"type": "websocket.send", key: data})
 
