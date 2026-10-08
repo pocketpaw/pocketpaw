@@ -1018,14 +1018,16 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
     (
         "sites-craft",
         "both",
-        "When you want the full construction method: a modular type scale, a "
+        "Before you write the tokens on create, and before a new section or a "
+        "restyle on refine: the full construction method, a modular type scale, a "
         "colour ramp where every step has a job, spacing and radius rules.",
     ),
     (
         "pocketpaw-design-taste",
-        "create",
-        "When research came back empty and you want a catalogue of aesthetic "
-        "directions, type pairings and motion vocabulary to start from.",
+        "both",
+        "Before the first UI file on create, and before any new section or "
+        "restyle on refine: aesthetic directions, type pairings, palette "
+        "calibration and motion vocabulary. Not needed for a copy tweak or a bug fix.",
     ),
     (
         "sites-theme-system",
@@ -1175,7 +1177,10 @@ def _refero_configured() -> bool:
 
 
 def _design_research_step() -> str:
-    """The PHASE 1b grounding step. Always on.
+    """The PHASE 1b grounding step. Always on, and a REQUIRED gate: no UI file and
+    no tokens/theme file before the searches, the opened references, the fetched
+    style and a one-line locked direction. Only an erroring or empty result (after
+    the fallback) exempts it, and even then the direction is still stated.
 
     UNCONDITIONAL. This first shipped (#2204) gated on ``POCKETPAW_SITES_MCP_SERVERS``
     because the archive was an EXTERNAL server, and the first deploy therefore
@@ -1220,18 +1225,21 @@ def _refero_research_intro() -> str:
         f"You have `{_REFERO_STYLES_TOOL}` — Refero's library of real shipped "
         "design systems, not a generator — plus "
         f"`{_REFERO_SCREENS_TOOL}` for real screens and `{_REFERO_VIEW_TOOL}` to "
-        "SEE a screen or a style preview as images. Run it like this:\n"
-        "1. Search styles from two or three angles (the overall look, products "
-        "like this one, a named product the brief evokes) and search screens once "
-        "per section you are unsure of, describing what is ON the screen "
+        "SEE a screen or a style preview as images. This is a REQUIRED GATE: no "
+        "UI file and no tokens or theme file gets written until it is done. Run "
+        "it like this:\n"
+        "1. Search styles at least TWICE, from different angles (the overall look, "
+        "products like this one, a named product the brief evokes), and search "
+        "screens at least ONCE, more for each section you are unsure of, "
+        "describing what is ON the screen "
         "(the section and the kind of business, e.g. 'pricing table for a "
         "dental clinic').\n"
-        f"2. OPEN the 3-5 strongest with `{_REFERO_VIEW_TOOL}`. This is the step "
+        f"2. OPEN about 3 of the strongest with `{_REFERO_VIEW_TOOL}`. This is the step "
         "that matters: the pattern the good references share (how the fold is "
         "built, whether the product is shown, how light the page is, where colour "
         "is spent) is usually visible in the pictures and missing from the text.\n"
         f"3. `{_REFERO_STYLE_TOOL}` on the style you lock, for its real type scale, "
-        "radius and colour roles.\n"
+        "radius and colour roles. Always fetch it: a search hit is only a summary.\n"
         "FALLBACK: if a Refero call errors, or comes back empty (`count` 0, no "
         "`results`, or no `style`), call "
         f"`{_RESEARCH_TOOL}` ONCE with the same brief and use that instead — an "
@@ -1246,23 +1254,27 @@ def _inspo_research_intro() -> str:
         "RESEARCH REAL SITES, AND LOOK AT THEM (before you choose the look).\n"
         f"You have `{_RESEARCH_TOOL}` — an archive of real shipped pages, "
         f"not a generator — plus `{_REFERENCE_SCREENSHOT_TOOL}` to SEE an exemplar "
-        "as images. Run it like this:\n"
-        "1. Call it with the brief in plain words, then again for any section "
-        "whose shape is the open question (the section and the kind of business).\n"
-        f"2. OPEN the 3-5 strongest exemplars with `{_REFERENCE_SCREENSHOT_TOOL}`. "
+        "as images. This is a REQUIRED GATE: no UI file and no tokens or theme "
+        "file gets written until it is done. Run it like this:\n"
+        "1. Call it at least TWICE: once with the brief in plain words, then again "
+        "for the section whose shape is most open (the section and the kind of "
+        "business), and once more for any other section you are unsure of.\n"
+        f"2. OPEN about 3 of the strongest exemplars with `{_REFERENCE_SCREENSHOT_TOOL}`. "
         "This is the step that matters: the pattern the good references share "
         "(how the fold is built, whether the product is shown, how light the page "
         "is, where colour is spent) is usually visible in the pictures and missing "
         "from the text.\n"
         f"3. `{_REFERENCE_SYSTEM_TOOL}` on the exemplar you lock, for its real type "
-        "ramp, radius and colour roles.\n"
+        "ramp, radius and colour roles. Always fetch it: a search hit is only a "
+        "summary.\n"
     )
 
 
 def _research_rails() -> str:
     return (
-        "THEN LOCK ONE DIRECTION before any tokens: one line naming the primary "
-        "reference and the few traits that must survive, plus anything narrow you "
+        "THEN LOCK ONE DIRECTION and SAY IT before any tokens or UI file: one line "
+        "to the user naming the primary reference, the palette (each colour by its "
+        "role), the type pairing and the layout idea, plus anything narrow you "
         "borrow from a second one. The locked reference SETS the look: its "
         "palette with each colour kept in its role, its type character, its "
         "composition.\n"
@@ -1275,10 +1287,40 @@ def _research_rails() -> str:
         "named) outranks every reference.\n"
         "- Take their design, not their compliance: contrast floors and honest copy "
         "still bind.\n"
-        "- Keep it proportionate: a handful of searches and 3-5 opened references "
-        "for a new site, less for a small change. If the tools error or return "
-        "nothing, say nothing about it and proceed on your own judgement — the "
-        "ROBUSTNESS rule below covers these tools too.\n"
+        "- The ONE exemption from the gate: the research tools, fallback included, "
+        "error or come back empty. Then say so in one line, load "
+        "`pocketpaw-design-taste` for a direction, and still state the locked "
+        "direction before the first UI file. A short brief, or a look you already "
+        "feel sure of, is not an exemption.\n"
+    )
+
+
+def _refine_research_step() -> str:
+    """The short research pass a refine runs when the edit changes the LOOK.
+
+    Refine has no intent signal (``meta`` carries no message), so the gate is a
+    conditional instruction: a new section, a new page or a restyle researches
+    first; a copy tweak, a fact change or a bug fix skips it and stays fast. The
+    tools follow the same Refero-or-Inspo switch as the create step, and the
+    site's existing direction stays the base rather than being replaced.
+    """
+    if _refero_configured():
+        tools = (
+            f"`{_REFERO_STYLES_TOOL}` or `{_REFERO_SCREENS_TOOL}` (falling back to "
+            f"`{_RESEARCH_TOOL}` if they error or come back empty), open 2-3 with "
+            f"`{_REFERO_VIEW_TOOL}`"
+        )
+    else:
+        tools = f"`{_RESEARCH_TOOL}`, open 2-3 with `{_REFERENCE_SCREENSHOT_TOOL}`"
+    return (
+        "RESEARCH BEFORE A NEW SECTION, PAGE OR RESTYLE. If the edit ADDS a section "
+        "or a page, or RESTYLES (palette, type, layout, 'make it feel more X'), "
+        f"research before writing it: one or two searches with {tools}, then say in "
+        "one line the direction you are keeping or moving to (palette, type "
+        "pairing, layout idea), and load `pocketpaw-design-taste` before you write "
+        "it. The site's current look stays the base unless the user asked to "
+        "change it. A copy tweak, a fact change or a bug fix skips this: just make "
+        "the edit. Only an erroring or empty result skips it otherwise.\n"
     )
 
 
@@ -1391,13 +1433,21 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         text = _create_preamble(meta)
     else:
         text = _create_preamble(meta)
-    # The five inputs the two meta-only sub-preambles read, all off ``meta``.
+    # The five inputs the two meta-only sub-preambles read, all off ``meta``, plus
+    # whether Refero is configured: the create research step names different tools
+    # with and without its token, so setting the token has to move the key.
     # ``mode`` and ``engine`` are in there because they pick which preamble was
     # rendered at all — toggling Build/Chat on the same site is a different prompt.
     return SurfacePreamble(
         text=text,
         cache_key=meta_key(
-            "sites", meta.route_path, meta.pocket_id, meta.site_id, meta.engine, meta.mode
+            "sites",
+            meta.route_path,
+            meta.pocket_id,
+            meta.site_id,
+            meta.engine,
+            meta.mode,
+            "refero" if _refero_configured() else "inspo",
         ),
     )
 
@@ -2445,6 +2495,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "`sites-restraint`. After any edit that moves layout, run "
         "`sites-ship-fixes` over what you changed and look at it with "
         "`mcp__pocketpaw_sites_manager__preview_site`.\n"
+        f"{_refine_research_step()}"
         f"{edit_step}"
         f"{rules}"
         f"{publish_step}"

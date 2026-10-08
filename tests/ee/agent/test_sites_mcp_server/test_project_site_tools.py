@@ -299,6 +299,13 @@ class TestTemplates:
             "project": {"template": "astro", "framework": "astro", "recipes": []}
         }
         assert builds.calls == [body["pocket_id"]]
+        # The design step comes before the first edit, so the agent rethemes the
+        # starter tokens instead of shipping the neutral template look.
+        steps = body["next_steps"]
+        design = next(i for i, s in enumerate(steps) if s.startswith("Design before"))
+        edit = next(i for i, s in enumerate(steps) if s.startswith("Edit with"))
+        assert design < edit
+        assert "tokens.css" in steps[design] and "pocketpaw-design-taste" in steps[design]
 
     async def test_start_refuses_an_unknown_template(self, cli, identity) -> None:
         out = await _call("start_site_from_template", {"slug": "rails", "brief": "x"})
