@@ -348,6 +348,15 @@ def test_i1_an_allowed_host_passes_and_presets_and_colours_stay_usable():
     assert _ripple({"ui": {"type": "qr", "props": {"value": "x", "background": "#fff"}}})
 
 
+def test_c1_node_props_are_derived_from_the_manifest():
+    from pocketpaw_ee.paw_bar.card_spec import _NODE_PROPS
+
+    assert _NODE_PROPS["popover"] == {"trigger", "content"}
+    assert _NODE_PROPS["hover-card"] == {"trigger", "content"}
+    assert _NODE_PROPS["tooltip"] == {"trigger"}
+    assert _NODE_PROPS["context-menu"] == {"trigger"}
+
+
 # I2: richtext renders trusted HTML.
 def test_i2_richtext_is_not_a_ripple_widget():
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
