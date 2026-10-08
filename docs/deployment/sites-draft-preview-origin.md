@@ -79,8 +79,15 @@ draft.
            proxy_pass http://pocketpaw_api;   # same upstream as the API host
            proxy_set_header Host $host;       # the token lives in the Host
            proxy_set_header X-Forwarded-Proto $scheme;
+           # WebSockets to project drafts (see "Draft Workers" below)
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection $connection_upgrade;
+           proxy_read_timeout 3600s;
        }
    }
+   # in the http block:
+   map $http_upgrade $connection_upgrade { default upgrade; '' close; }
    ```
 
    Caddy (forwards the original Host by default):
@@ -178,8 +185,30 @@ without it draft Workers stay off.
 - **Proxy.** Every method is forwarded, the request body up to
   `PAW_SITES_DRAFT_MAX_BODY` (10 MiB). A request target that does not start with
   `/` is a 400. HTML gets the runtime-error reporter, and the edit bridge under
-  `?paw_edit=1`. A URL of an older build of a proxied draft is a 404. WebSockets
-  are not proxied.
+  `?paw_edit=1`. A URL of an older build of a proxied draft is a 404.
+- **WebSockets.** Proxied for a draft with a live draft Worker, under the same
+  target, header, draft-key and cookie rules (the upstream's handshake
+  `Set-Cookie` is mapped like any other). Every other preview host refuses them
+  before accept: an unknown, static or superseded token closes with 4404 (an HTTP
+  404 when the server supports `websocket.http.response`), a target without a
+  leading `/` with 1008. The browser `Origin` must be the draft's own preview
+  origin or the builder origin (`PAW_SITES_BUILDER_ORIGIN`, or the origin the
+  editor was last opened from); anything else closes with 4403 before the draft
+  is dialed. Nothing is accepted until the draft Worker accepts, and its
+  subprotocol is mirrored. Close codes and reasons pass both ways. Caps:
+  - `PAW_SITES_DRAFT_WS_MAX_MSG`: largest message either way, default 64 KiB
+    (close 1009);
+  - `PAW_SITES_DRAFT_WS_PER_TOKEN`: open connections per preview token, default
+    60 (refused with 1013). Counted per API process, so with N replicas a token
+    can hold up to N times this;
+  - `PAW_SITES_DRAFT_WS_RATE`: browser messages per second per connection,
+    default 50 (close 1008);
+  - `PAW_SITES_DRAFT_WS_IDLE_SECONDS` (default 300) and
+    `PAW_SITES_DRAFT_WS_LIFETIME_SECONDS` (default 3600) close with 1001.
+
+  The ingress in front of the preview host must pass `Upgrade` (the nginx
+  example above does) and keep idle connections open at least as long as the
+  idle cap.
 - **Cookies.** Every cookie a draft sets reaches the browser as a host-only
   `__Host-` cookie (`Path=/; Secure; SameSite=None; Partitioned`, so sign-in works
   inside the builder iframe): an app's own `__Host-` names stay, any other name `n`
