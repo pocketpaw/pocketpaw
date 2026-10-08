@@ -1,81 +1,21 @@
 """Canonical error hierarchy for ee/cloud.
 
-Routers must never raise `HTTPException`; services raise these
-`CloudError` subclasses and `_core.http.cloud_error_handler` maps them
-to JSON responses.
+Routers must never raise `HTTPException`; services raise these `CloudError`
+subclasses and `_core.http.cloud_error_handler` maps them to the JSON envelope
+`{"error": {"code", "message"}}` (plus `"details"` only when an error sets it, so
+every envelope without details is byte-identical). `code` is the machine-readable
+contract clients key on; `details` carries structured data a client would otherwise
+parse out of `message` (e.g. the classes in `sites.do_data_loss_unconfirmed`).
 
-Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
-the transition period; new code should import from this module.
-
-Changed 2026-09-23 (feat/sites-badge-switch, VS-3): added
-`BadgeRemovalNotEntitled` (402, `billing.badge_removal_not_entitled`) for the
-per-site "hide the PocketPaw badge" switch. A copy of `ProjectDownloadNotEntitled`
-in shape: a capability the site's plan grants or withholds, two remedies in the
-message (upgrade vs renew), no ceiling to report.
-
-Changed 2026-09-21 (feat/site-project-download-endpoint): added
-`ProjectDownloadNotEntitled` (402, `billing.project_download_not_entitled`) for
-the project-download seam. Modelled on `CustomDomainNotEntitled` rather than on
-the `*LimitError` classes, because this is a capability a per-site plan grants or
-withholds and there is no ceiling to report. It answers off the same per-site
-predicate as the builder's Code tab (`entitlements.service.site_code_entitled`).
-
-Changed 2026-09-14 (feat/uploads-multipart-endpoints): added `PayloadTooLarge`
-(413). The multipart upload contract refuses an over-ceiling file at init with
-413 `multipart.too_large`, and this hierarchy had no 413 at all — the nearest
-fits were `ValidationError` (422) and `BadRequest` (400), and neither is what a
-client retry logic keys on for "this file is too big". 413 is also what
-`security/body_limit.py` already answers for the same class of refusal one layer
-out, so a client sees one status for "too many bytes" whether the ceiling was
-hit at the ASGI boundary or at the upload session.
-
-Changed 2026-09-01 (feat/byok-guest-backend): added ``GuestLimitError`` (402,
-``guest_limit_reached``, carries ``kind`` = sessions|turns as a TOP-LEVEL wire
-key beside the standard envelope), ``GuestUploadForbidden`` (403,
-``guest_upload_forbidden``) and ``GuestKeyRequired`` (402,
-``guest_key_required``) — the BYOK-first guest-onboarding family. The
-top-level ``code``/``kind`` keys are a frozen frontend contract (the signup
-prompt keys on them); the standard ``{"error": {...}}`` envelope is kept
-beside them so generic clients are unaffected.
-
-Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added
-`QuotaExceeded` (402, `credits.quota_exceeded`) — the monthly-credit-cap
-sibling of `InsufficientCredits`. Same 402 status (the client can't spend
-right now) but a distinct code so the UI can prompt a plan upgrade / top-up
-rather than a balance refill; it carries the effective `ceiling` and the
-`spent` figure that crossed it.
-
-FL-2 (file-version spine, port of dewani12's #1193) added
-``PreconditionFailed`` (412) for stale ``If-Match`` optimistic-concurrency
-failures on the file-version write path.
-
-Changed 2026-07-08 (feat/billing-cancel-downgrade): added
-``NoActiveSubscription`` (402, ``billing.no_active_subscription``) — raised by
-the subscription-cancel path when a workspace has no ``active`` subscription to
-cancel (only historical / already-cancelled rows, or never subscribed). 402 (the
-same money-error family as ``InsufficientCredits`` / ``QuotaExceeded``) so the
-client renders a "not subscribed" state rather than a 404-style missing resource.
-
-Changed 2026-07-08 (feat/billing-smb-caps): added ``PocketLimitError`` (402,
-``billing.pocket_limit``) and ``ConnectorLimitError`` (402,
-``billing.connector_limit``) — the pocket-create and connector-enable siblings of
-``SeatLimitError``. Same 402 money-adjacent family; distinct codes so the UI can
-prompt a plan upgrade. Both enforce at create/enable time only (never retroactive)
-and only when ``billing_enforced`` is on.
-
-Changed 2026-08-26 (feat/site-plans-as-addons): ``NoActiveSubscription`` now takes
-an optional ``message``. It gained a SECOND caller — the site add-on rail, where a
-workspace with no subscription cannot be sold a paid site because an add-on has
-nothing to attach to — and the hardcoded "no active subscription to cancel"
-described an action that buyer never attempted. Status, code and default message
-are unchanged, so the cancel path and any client keyed on the code are untouched.
-
-Changed 2026-08-15 (fix/sites-custom-domain-entitlement): added
-``CustomDomainNotEntitled`` (402, ``billing.custom_domain_not_entitled``) — the
-domain-attach sibling of the two above, and the first of this family keyed to a
-PER-SITE plan rather than the workspace one. Not a count limit: it reports a
-capability the site's tier does not resell, or a paid tier whose subscription is
-not paying. Attach-time only, gated on ``billing_enforced``.
+Status families: 400 `BadRequest`, 402 for money/plan refusals (the `*LimitError`
+caps, `InsufficientCredits`, `QuotaExceeded`, `NoActiveSubscription`, and the
+per-site capability gates `CustomDomainNotEntitled`, `ProjectDownloadNotEntitled`,
+`BadgeRemovalNotEntitled`), 403 `Forbidden`, 404 `NotFound`, 409 `ConflictError`,
+412 `PreconditionFailed` (stale If-Match), 413 `PayloadTooLarge`, 422
+`ValidationError`, 429 `RateLimited`, 500 `Internal`. The guest/BYOK family
+(`GuestLimitError` and siblings) adds top-level `code`/`kind` keys beside the
+envelope: a frozen frontend contract. Re-exported via `ee.cloud.shared.errors`
+(a shim); new code imports from here.
 """
 
 from __future__ import annotations
@@ -85,15 +25,22 @@ class CloudError(Exception):
     """Base cloud error with status_code, code (machine-readable),
     message (human-readable)."""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self, status_code: int, code: str, message: str, details: dict | None = None
+    ) -> None:
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.details = details
         super().__init__(f"{code}: {message}")
 
     def to_dict(self) -> dict:
-        """Return a JSON-serializable error envelope."""
-        return {"error": {"code": self.code, "message": self.message}}
+        """Return a JSON-serializable error envelope. ``details`` is included only
+        when set, so an error without it serializes exactly as before."""
+        error: dict = {"code": self.code, "message": self.message}
+        if self.details is not None:
+            error["details"] = self.details
+        return {"error": error}
 
 
 class NotFound(CloudError):
@@ -159,8 +106,8 @@ class PayloadTooLarge(CloudError):
 class ValidationError(CloudError):
     """Validation failure (422)."""
 
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(422, code, message)
+    def __init__(self, code: str, message: str, details: dict | None = None) -> None:
+        super().__init__(422, code, message, details)
 
 
 class GuestLimitError(CloudError):

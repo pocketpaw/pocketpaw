@@ -344,6 +344,7 @@ def plan_migration(
             f"for good: {_names(unconfirmed)}. The site owner has to confirm that before it "
             "can go live (publish again with confirm_do_data_loss: "
             f"{sorted(unconfirmed)!r}, from the owner's publish dialog only).",
+            details={"classes": sorted(unconfirmed)},
         )
     migrations: dict[str, Any] = {"new_tag": tags[-1], "steps": [m.step() for m in pending]}
     if applied_tag is not None:
