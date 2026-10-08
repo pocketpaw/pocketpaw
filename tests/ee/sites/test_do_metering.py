@@ -70,7 +70,9 @@ async def test_a_do_deploy_carries_the_platform_vars(do_build, paid, throttled, 
         do_throttled=throttled,
     )
     meta = _metadata(next(r for r in cf.requests if r.method == "PUT"))
-    assert _plain(meta) == {"ROOM_MAX_PEERS": cap, "PAW_DO_THROTTLED": flag, "PAW_SITE_ORIGINS": ""}
+    plain = _plain(meta)
+    assert plain["ROOM_MAX_PEERS"] == cap and plain["PAW_DO_THROTTLED"] == flag
+    assert plain["PAW_SITE_ORIGINS"] == "" and plain["PAW_DO_SUSPENDED"] == "0"
 
 
 @pytest.mark.asyncio

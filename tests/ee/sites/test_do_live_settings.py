@@ -82,15 +82,16 @@ async def test_live_push_keeps_every_binding_and_only_changes_the_var():
     (settings,) = cf.patches()
     assert set(settings) == {"bindings"}  # nothing else is patched
     sent = settings["bindings"]
+    # Every binding not replaced is inherited from the live version, secrets included:
+    # nothing read is echoed back.
     assert sent == [
-        {"type": "d1", "name": "DB", "id": "db-1"},
-        {"type": "durable_object_namespace", "name": "ROOM", "class_name": "Room"},
-        # Secrets are never re-sent: inherited from the live version, untouched.
+        {"type": "inherit", "name": "DB"},
+        {"type": "inherit", "name": "ROOM"},
         {"type": "inherit", "name": "API_KEY"},
         {"type": "inherit", "name": "STRIPE"},
         {"type": "inherit", "name": "SIGNING"},
-        {"type": "plain_text", "name": "OTHER", "text": "x"},
-        {"type": "assets", "name": "ASSETS"},
+        {"type": "inherit", "name": "OTHER"},
+        {"type": "inherit", "name": "ASSETS"},
         {"type": "plain_text", "name": "PAW_DO_THROTTLED", "text": "1"},
     ]
     assert not any("redacted" in json.dumps(b) for b in sent)
@@ -191,11 +192,16 @@ async def test_a_throttle_flip_reaches_the_live_script_at_once(beanie_test_db):
 
 
 @pytest.mark.asyncio
-async def test_no_settings_call_when_the_flag_does_not_change(beanie_test_db):
-    await _seed_site("site-a")
+async def test_an_unchanged_flag_is_still_pushed_and_nothing_is_stored(beanie_test_db):
+    # Every run re-pushes (a publish may have uploaded a stale value); the stored
+    # flag stays as it was.
+    from pocketpaw_ee.cloud.models.site import Site
+
+    site = await _seed_site("site-a")
     cf = _SweepCF(requests={"ns-a": 1})
     await do_metering.sweep_do_usage(cf=cf, now=DAY)
-    assert cf.calls == []
+    assert [c[0] for c in cf.calls] == ["get", "patch"]
+    assert (await Site.get(site.id)).do_throttled is False
 
 
 @pytest.mark.asyncio

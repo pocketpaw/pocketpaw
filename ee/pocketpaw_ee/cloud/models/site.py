@@ -322,6 +322,9 @@ class Site(TimestampedDocument):
     # on the next deploy.
     do_usage: dict[str, dict[str, int]] = Field(default_factory=dict)
     do_throttled: bool = False
+    # Today's requests passed PAW_SITES_DO_SUSPEND_FACTOR x the ceiling: the platform
+    # wrapper answers 503 (``PAW_DO_SUSPENDED``) until a day under it.
+    do_suspended: bool = False
     # DP0-1: where a dynamic site sits in the durable D1 provision job
     # (none | provisioning | provisioned | failed). Contract: the job persists
     # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still

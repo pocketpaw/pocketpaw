@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
-from pocketpaw_ee.sites import durable_objects
+from pocketpaw_ee.sites import durable_objects, platform_guard
 from pocketpaw_ee.sites.cloudflare_client import (
     ACCOUNT_TARGET,
     DISPATCH_TARGET,
@@ -741,12 +741,15 @@ async def deploy_bundle(
     target: str = DISPATCH_TARGET,
     paid: bool = False,
     draft: bool = False,
-    main_wrapper: Callable[[str], WorkerModule] | None = None,
-    do_state: durable_objects.DurableObjectState | None = None,
+    main_wrapper: Callable[..., WorkerModule] | None = None,
+    do_state: durable_objects.DurableObjectState
+    | Callable[[], Awaitable[durable_objects.DurableObjectState]]
+    | None = None,
     confirm_do_data_loss: Sequence[str] = (),
     allow_do_data_loss: bool = False,
     do_quota_used: Callable[[], Awaitable[int]] | None = None,
     do_throttled: bool = False,
+    do_suspended: bool = False,
     site_origins: Sequence[str] | Callable[[], Awaitable[Sequence[str]]] = (),
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
@@ -773,7 +776,11 @@ async def deploy_bundle(
     is added after every check, so the wrapper itself is never author-controlled.
 
     ``do_state`` is what the script already has applied (Durable Object migration
-    tag, live classes); unknown means a fresh script. ``confirm_do_data_loss`` names
+    tag, live classes), or an async callable for it that is only awaited when the
+    build declares DOs (the service reconciles with Cloudflare there); unknown means
+    a fresh script. A DO bundle always enters through a platform-owned wrapper
+    (``platform_guard``): ``main_wrapper`` gets ``do_limits=True`` for one, else
+    ``platform_guard.wrapper_module`` is used. ``confirm_do_data_loss`` names
     the classes the owner agreed to delete or rename; ``allow_do_data_loss`` (drafts)
     skips that confirmation. ``do_quota_used`` returns how many DO classes the
     workspace's other scripts hold; it is asked only when this deploy creates a
@@ -786,6 +793,8 @@ async def deploy_bundle(
     if target not in SCRIPT_TARGETS:
         raise _refuse(f"unknown deploy target {target!r}")
     bundle, manifest = _read_bundle(build_dir)
+    if callable(do_state):
+        do_state = await do_state() if durable_objects.declares_durable_objects(manifest) else None
     vetted = durable_objects.vet_durable_objects(
         manifest,
         paid=paid,
@@ -810,6 +819,7 @@ async def deploy_bundle(
                 **durable_objects.platform_vars(
                     paid=paid,
                     throttled=do_throttled,
+                    suspended=do_suspended,
                     origins=await site_origins() if callable(site_origins) else site_origins,
                 ),
             },
@@ -817,8 +827,14 @@ async def deploy_bundle(
     _map_into(bundle, manifest, provisioned)
     for warning in bundle.warnings:
         logger.warning("sites.bundle_deploy %s: %s", script_name, warning)
-    if main_wrapper is not None and bundle.main_module:
-        wrapper = main_wrapper(bundle.main_module)
+    if bundle.main_module and (main_wrapper is not None or vetted is not None):
+        # A DO bundle's caps live in a platform-owned wrapper the author cannot edit.
+        if main_wrapper is None:
+            wrapper = platform_guard.wrapper_module(bundle.main_module, do_limits=True)
+        elif vetted is not None:
+            wrapper = main_wrapper(bundle.main_module, do_limits=True)
+        else:
+            wrapper = main_wrapper(bundle.main_module)
         if any(m.name == wrapper.name for m in bundle.modules):
             raise _refuse(f"the build already has a module named {wrapper.name}")
         bundle.modules.append(wrapper)

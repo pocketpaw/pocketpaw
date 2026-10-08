@@ -290,12 +290,35 @@ the steps after the last applied tag, with `old_tag`, so Cloudflare rejects a st
 concurrent publish. A history that does not start with what was applied is refused
 (`sites.do_history_diverged`); an older bundle is accepted as a rollback only when its
 tags are a prefix of the history and it still exports every live class.
+Before planning, a publish reconciles that state with Cloudflare (the script's
+`migration_tag` and its DO bindings, `durable_objects.reconcile_state`): if they
+disagree, Cloudflare wins and every class it binds counts as live, so a lost save can
+never let a delete step skip confirmation. An unreadable answer refuses the publish
+(`sites.do_state_unknown`) before anything changes. Saving the state after an upload
+retries three times, then leaves it to the next reconcile.
 
 **Destructive steps.** A pending `deleted_classes` / `renamed_classes` step on a live
 class is refused with `sites.do_data_loss_unconfirmed` naming the classes, until the
 publish carries `confirm_do_data_loss: ["Class", ...]` (`POST /sites/publish`, from
-the owner's dialog only). Drafts allow them without confirmation, and a draft whose
-history diverged tears its script down and rotates to a fresh `paw-draft-*` name.
+the owner's dialog only). The refusal carries `details: {"classes": [...]}`. A
+non-empty confirmation needs the `sites.confirm_data_loss` action (workspace admin or
+owner); a member gets 403 `sites.data_loss_confirm_forbidden`. Drafts allow destructive
+steps without confirmation, and a draft whose history diverged tears its script down
+and rotates to a fresh `paw-draft-*` name, at most
+`PAW_SITES_DO_DRAFT_ROTATIONS_PER_HOUR` times per pocket per hour; past that the
+preview falls back with the `draft_worker:do_rotation_limit` rung.
+
+**Platform wrapper (enforcement).** The recipe's caps live in code the site author
+can rewrite, so every DO bundle enters through a platform-owned module
+(`sites/platform_guard.py`, `__paw_platform_guard.mjs`; on a draft the draft guard is
+the same module, key check first). It re-exports the site's entry (DO classes stay
+exported) and reads the platform vars, which the author cannot override:
+`PAW_DO_SUSPENDED=1` answers 503 to every request the Worker handles and skips
+`scheduled` / `queue` handlers; `PAW_DO_THROTTLED=1` answers 429 to every WebSocket
+upgrade. Residuals: Durable Object alarms already scheduled inside an object keep
+firing (a fetch wrapper cannot reach them); with `run_worker_first` an asset path
+reaches the Worker and gets the 503 while suspended; `ROOM_MAX_PEERS`,
+`ROOM_MAX_ROOMS` and `ROOM_MAX_SITE_PEERS` are still enforced by the recipe's code.
 
 **Platform vars** (plain_text, they win over owner values), set on every deploy of a
 DO bundle, drafts included:
@@ -303,7 +326,10 @@ DO bundle, drafts included:
 | Var | Value |
 |---|---|
 | `ROOM_MAX_PEERS` | 10 on free; `PAW_SITES_DO_ROOM_MAX_PAID` on paid (default 50, clamped to 1..50). Drafts use the pocket's plan. |
-| `PAW_DO_THROTTLED` | `"1"` while the usage sweep has the site over its daily ceiling, else `"0"`. Drafts are never throttled. A flip is pushed to the live script at once (see "Live var updates"). |
+| `ROOM_MAX_ROOMS` | Rooms a site may hold open: 5 on free; `PAW_SITES_DO_ROOM_MAX_ROOMS_PAID` on paid (default 20, clamped to 1..200). Drafts too. |
+| `ROOM_MAX_SITE_PEERS` | Peers across all of a site's rooms: 30 on free; `PAW_SITES_DO_SITE_MAX_PEERS_PAID` on paid (default 200, clamped to 1..1000). Drafts too. |
+| `PAW_DO_THROTTLED` | `"1"` while the usage sweep has the site over its daily ceiling, else `"0"`. The platform wrapper refuses WebSocket upgrades with 429. Drafts are never throttled. Pushed to the live script every sweep run. |
+| `PAW_DO_SUSPENDED` | `"1"` past `PAW_SITES_DO_SUSPEND_FACTOR` x the ceiling: the platform wrapper answers 503 and skips scheduled / queue handlers. Pushed every sweep run. |
 | `PAW_SITE_ORIGINS` | Comma-separated origins the recipe accepts a WebSocket from, besides the Worker's own host. Published: the public URL (workers.dev host on the account target, `https://<site id>.<PAW_CF_SITES_DOMAIN>` on dispatch) plus every `live` custom domain, all https. Draft: that build's preview origin `https://<token>.<preview base host>` (the token rotates per build; the draft redeploys per build). Never the builder origin; the preview proxy checks that. Refreshed live when a custom domain goes live or is removed. |
 
 **Env.**
@@ -312,8 +338,15 @@ DO bundle, drafts included:
 |---|---|---|
 | `PAW_SITES_DURABLE_OBJECTS` | off | The feature flag. |
 | `PAW_SITES_DO_MAX_CLASSES` | 3 (max 5) | Classes per paid site. Free sites get 1. |
-| `PAW_SITES_DO_ACCOUNT_BUDGET` | 300 | On the `account` target, a NEW class is refused once the account's DO namespaces reach this. Fails closed when the count cannot be read. Drafts count too. |
+| `PAW_SITES_DO_ACCOUNT_BUDGET` | 300 | On the `account` target, a NEW class is refused once the account's DO namespaces of published scripts reach this. Fails closed when the count cannot be read. |
+| `PAW_SITES_DO_DRAFT_BUDGET` | 100 | The same, for `paw-draft-*` scripts only, so drafts cannot starve published sites. |
+| `PAW_SITES_DO_WORKSPACE_QUOTA` | 5 | Live DO classes one workspace may hold (sites and drafts counted separately); checked when a deploy creates a class. |
+| `PAW_SITES_DO_DRAFT_ROTATIONS_PER_HOUR` | 3 | Draft script rotations on a diverged history, per pocket per hour. |
 | `PAW_SITES_DO_ROOM_MAX_PAID` | 50 | `ROOM_MAX_PEERS` on paid sites (1..50). |
+| `PAW_SITES_DO_ROOM_MAX_ROOMS_PAID` | 20 | `ROOM_MAX_ROOMS` on paid sites (1..200). |
+| `PAW_SITES_DO_SITE_MAX_PEERS_PAID` | 200 | `ROOM_MAX_SITE_PEERS` on paid sites (1..1000). |
+| `PAW_SITES_DO_SUSPEND_FACTOR` | 3 | Suspend at this many times the daily ceiling. |
+| `PAW_SITES_DO_METERING_FAILURES_ALERT` | 6 | Consecutive failed analytics reads before an ERROR and a red sweep monitor. |
 | `PAW_SITES_DO_DAILY_REQUESTS_FREE` | 100000 | Daily DO requests before a free site is throttled; 0 disables. |
 | `PAW_SITES_DO_DAILY_REQUESTS_PAID` | 3000000 | Same for paid sites. |
 | `PAW_SITES_DO_METERING_MINUTES` | 60 | How often the usage sweep reads analytics. |
@@ -328,10 +361,15 @@ requests (`durableObjectsInvocationsAdaptiveGroups.sum.requests`), active time
 (`durableObjectsPeriodicGroups.sum.activeTime`) and stored bytes
 (`durableObjectsStorageGroups.max.storedBytes`) per namespace from
 `POST /client/v4/graphql`, maps namespaces to scripts through the namespaces list,
-stores the day on `Site.do_usage` (35 days kept) and sets `Site.do_throttled` while
-today's requests are past the plan's ceiling; a flip is pushed to the live script
-right away and only stored once the push worked, so a failed push is retried on the
-next sweep. It fails open: if the namespaces list or
+stores the day on `Site.do_usage` (35 days kept), sets `Site.do_throttled` while
+today's requests are past the plan's ceiling and `Site.do_suspended` past
+`PAW_SITES_DO_SUSPEND_FACTOR` times it. Every run pushes both current values to the
+live script (not only on a change, so a publish that uploaded a stale value is fixed
+within a run); they are stored only once the push worked. After
+`PAW_SITES_DO_METERING_FAILURES_ALERT` failed reads in a row it logs an ERROR naming
+the likely cause (the token lacks `Account Analytics: Read`) and raises, so the
+`sweep:sweep_do_usage` monitor goes red; `do_metering.metering_status()` has the count
+and last error (per process, reset on restart). It fails open: if the namespaces list or
 the request counts cannot be read, nothing changes and the error is logged; a failed
 duration or storage read only leaves those numbers at 0. The flag clears by itself on
 a new day under the ceiling. To lift a throttle early, raise the ceiling; the next
@@ -342,11 +380,17 @@ and `PAW_SITE_ORIGINS` change without re-uploading code, through the script sett
 API: `GET` then `PATCH .../workers/scripts/<name>/settings` (the dispatch path on
 WfP), the `settings` part carrying `bindings`
 ([docs](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/edit/)).
-The PATCH sends the whole binding list as read, with only the platform var replaced
-(added when missing). Secrets (`secret_text`, `secret_key`) are sent as
-`{"type": "inherit", "name": ...}` so the live value is kept; the GET does not hand
-it back and nothing is omitted, since the docs do not say an omitted binding
-survives. Every caller fails open: an error is logged and the site keeps serving.
+The PATCH lists every binding the script has: the platform vars being set as
+`plain_text`, every other one as `{"type": "inherit", "name": ...}` (secrets
+included), so nothing read is echoed back and nothing changed since the GET is
+reverted. The settings API documents `inherit` as a type-agnostic binding with no
+per-type list, so it is limited to the types our deploys create (ai, assets, d1,
+durable_object_namespace, kv_namespace, plain_text, queue, r2_bucket, secret_key,
+secret_text); a script with any other type is not PATCHed
+(`sites.do_settings_unsupported`, logged, set on the next deploy). Deploys and live
+PATCHes of one script run under one lock (`sites/do_lock.py`: an in-process lock,
+plus the Redis lease `sites-do-script:<script>` when the multi-worker switch is on).
+Every caller fails open: an error is logged and the site keeps serving.
 
 **Delete.** The cascade's `do` step (before `script`) runs the teardown: a stub upload
 with `{old_tag, new_tag: "paw-tombstone", deleted_classes}` (deletes every object and
@@ -402,8 +446,9 @@ delete alone; (D) the durableObjects* GraphQL datasets and their fields, and
 with a `secret_text` binding and a plain_text var gets the var changed through
 `set_platform_vars_live`, then it prints, as booleans only, whether the secret is
 still listed in the settings (by name), whether the Worker still reads it
-(`env.SECRET === <expected>`, compared inside the Worker), and whether the var changed
-in the settings and in the Worker. Every script is force-deleted in a `finally`.
+(`env.SECRET === <expected>`, compared inside the Worker), whether the var changed
+in the settings and in the Worker, and whether a `durable_object_namespace` and a
+`d1` binding survived (listed in the settings, and usable from the Worker). Every script is force-deleted in a `finally`.
 
 **Scenario E must print all `True` before `PAW_SITES_DURABLE_OBJECTS` goes on.** The
 throttle and origins pushes rewrite a live script's bindings; if `inherit` does not

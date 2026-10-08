@@ -255,6 +255,8 @@ class _DOFake(_KVFake):
         super().__init__()
         self.metadata: list[dict] = []
         self.put_status = 200
+        self.applied_tag: str | None = None
+        self.do_bindings: list[dict] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.method == "PUT" and "/scripts/" in request.url.path:
@@ -267,7 +269,21 @@ class _DOFake(_KVFake):
             if self.put_status != 200:
                 return httpx.Response(self.put_status, json={"success": False, "errors": []})
             tag = (meta.get("migrations") or {}).get("new_tag")
+            if tag:
+                self.applied_tag = tag
+            self.do_bindings = [
+                b for b in meta.get("bindings", []) if b["type"] == "durable_object_namespace"
+            ]
             result = {"id": SITE_ID, **({"migration_tag": tag} if tag else {})}
+            return httpx.Response(200, json={"success": True, "result": result})
+        if request.method == "GET" and "/scripts/" in request.url.path:
+            # What reconcile reads: the script (its migration tag) and its settings.
+            request.read()
+            self.requests.append(request)
+            if request.url.path.endswith("/settings"):
+                result = {"bindings": list(self.do_bindings)}
+            else:
+                result = {"script": {"id": SITE_ID, "migration_tag": self.applied_tag}}
             return httpx.Response(200, json={"success": True, "result": result})
         return super().handler(request)
 

@@ -1118,6 +1118,30 @@ class CloudflareClient:
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
 
+    async def get_script_migration_tag(self, script_name: str, *, target: str) -> str | None:
+        """The Durable Object migration tag last applied to the script, or None (no
+        script, or no migration). Account target: the script's row in
+        ``GET /workers/scripts`` (``migration_tag``,
+        https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/list/).
+        Dispatch target: ``GET .../dispatch/namespaces/{ns}/scripts/{name}`` and its
+        ``script.migration_tag``. Fails closed on anything but a 2xx or a 404."""
+        if target == ACCOUNT_TARGET:
+            async with self._client() as client:
+                resp = await client.get(f"{_CF_API}/accounts/{self._account_id}/workers/scripts")
+            rows = self._unwrap(resp)
+            for row in rows if isinstance(rows, list) else []:
+                if isinstance(row, dict) and row.get("id") == script_name:
+                    return str(row.get("migration_tag") or "") or None
+            return None
+        async with self._client() as client:
+            resp = await client.get(self._script_url(script_name, target))
+        if resp.status_code == 404:
+            return None
+        result = self._unwrap(resp)
+        script = result.get("script") if isinstance(result, dict) else None
+        info = script if isinstance(script, dict) else result
+        return str((info or {}).get("migration_tag") or "") or None
+
     async def get_script_settings(self, script_name: str, *, target: str) -> dict:
         """The live script's settings (bindings, compat, ...):
         ``GET .../scripts/{name}/settings`` on ``target``

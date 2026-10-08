@@ -1057,7 +1057,11 @@ never does. It is replayed with the rest of a paid-tier pending publish.
 | `sites.do_class_missing` | A bound or live class is not exported by the main module. |
 | `sites.do_class_cap` | More classes than the plan allows (free 1, paid `PAW_SITES_DO_MAX_CLASSES`). |
 | `sites.do_history_diverged` | The build's migrations do not start with what is applied, or an older bundle no longer exports a live class. |
-| `sites.do_data_loss_unconfirmed` | A pending step deletes or renames a live class and `confirm_do_data_loss` does not name it. The message lists the classes. |
+| `sites.do_data_loss_unconfirmed` | A pending step deletes or renames a live class and `confirm_do_data_loss` does not name it. `error.details.classes` lists them (sorted). |
+| `sites.data_loss_confirm_forbidden` (403) | A non-empty `confirm_do_data_loss` from someone who is not a workspace admin or owner. |
+| `sites.do_workspace_quota` | The workspace would pass `PAW_SITES_DO_WORKSPACE_QUOTA` live classes. |
+| `sites.do_state_unknown` | Cloudflare's DO state for the site could not be read before planning. |
+| `sites.do_busy` | Another change to the site's Worker is in progress; try again. |
 | `sites.do_account_budget` / `sites.do_budget_unknown` | The account target has no room for a new class, or the count could not be read. |
 
 ### Site fields
@@ -1068,7 +1072,10 @@ never does. It is replayed with the rest of a paid-tier pending publish.
 `PAW_DO_THROTTLED=1` right away, pushed through the script settings API). A DO
 site's Worker also gets `PAW_SITE_ORIGINS` (its public origin and live custom
 domains, or a draft's preview origin) and
-`ROOM_MAX_PEERS` (10 free, `PAW_SITES_DO_ROOM_MAX_PAID` up to 50 paid).
+`ROOM_MAX_PEERS` (10 free, `PAW_SITES_DO_ROOM_MAX_PAID` up to 50 paid),
+`ROOM_MAX_ROOMS` (5 free, up to 200 paid), `ROOM_MAX_SITE_PEERS` (30 free, up to 1000
+paid) and `PAW_DO_SUSPENDED` (`do_suspended`), all read by a platform-owned entry
+wrapper or the recipe.
 
 ## Paw Partners — profile and clients
 

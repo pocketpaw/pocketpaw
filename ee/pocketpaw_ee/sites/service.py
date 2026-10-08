@@ -3523,21 +3523,21 @@ async def _deploy_paw_bundle(
         before_upload = _project_migrator(
             cf, site_id=site_id, source=source, confirm_destructive=confirm_destructive
         )
-    from pocketpaw_ee.sites import durable_objects
+    from pocketpaw_ee.sites import do_lock, durable_objects
 
-    do_state = (
-        durable_objects.DurableObjectState.from_history(
-            getattr(bundle_doc, "do_migration_tags", None) or [],
-            getattr(bundle_doc, "do_classes", None) or [],
-        )
-        if bundle_doc is not None
-        else None
+    stored = durable_objects.DurableObjectState.from_history(
+        getattr(bundle_doc, "do_migration_tags", None) or [],
+        getattr(bundle_doc, "do_classes", None) or [],
     )
-    # Only passed when there is something to say, so a site without DOs deploys
-    # exactly as before.
+
+    async def _reconciled() -> durable_objects.DurableObjectState:
+        # Cloudflare wins over a stored state that a failed save left behind.
+        return await durable_objects.reconcile_state(cf, script_name, target=target, stored=stored)
+
     do_kw: dict[str, Any] = {}
-    if do_state is not None and (do_state.applied_tags or do_state.live_classes):
-        do_kw["do_state"] = do_state
+    if bundle_doc is not None:
+        # Awaited by deploy_bundle only for a build that declares Durable Objects.
+        do_kw["do_state"] = _reconciled
     if confirm_do_data_loss:
         do_kw["confirm_do_data_loss"] = list(confirm_do_data_loss)
 
@@ -3552,6 +3552,8 @@ async def _deploy_paw_bundle(
     if getattr(bundle_doc, "do_throttled", False):
         # The usage sweep's verdict reaches the Worker as PAW_DO_THROTTLED=1.
         do_kw["do_throttled"] = True
+    if getattr(bundle_doc, "do_suspended", False):
+        do_kw["do_suspended"] = True
     if bundle_doc is not None:
 
         async def _origins() -> list[str]:
@@ -3559,7 +3561,67 @@ async def _deploy_paw_bundle(
 
         # Awaited only for a bundle that declares Durable Objects.
         do_kw["site_origins"] = _origins
-    result = await bundle_deploy.deploy_bundle(
+    if bundle_doc is not None and (stored.applied_tags or stored.live_classes):
+        # A site that has DOs reconciles even when this build dropped them.
+        do_kw["do_state"] = await _reconciled()
+    # One lock per script: a live settings PATCH must not interleave with the upload.
+    async with do_lock.script_lock(script_name):
+        result = await _deploy_bundle_call(
+            cf,
+            script_name=script_name,
+            project_dir=project_dir,
+            workspace_id=workspace_id,
+            d1_database_id=d1_database_id,
+            bundle_doc=bundle_doc,
+            is_dynamic=is_dynamic,
+            before_upload=before_upload,
+            target=target,
+            do_kw=do_kw,
+        )
+    tags = tuple(getattr(result, "migration_tags", ()) or ())
+    if bundle_doc is not None and (tags or bundle_doc.do_classes):
+        # Only now: the upload succeeded, so this is what Cloudflare has applied.
+        await _persist_do_state(bundle_doc, tags, tuple(getattr(result, "do_classes", ()) or ()))
+
+
+async def _persist_do_state(
+    doc: Any, tags: tuple[str, ...], classes: tuple[str, ...], *, delay: float = 0.5
+) -> None:
+    """Save the applied DO tag history and classes, retrying a failed write. Never
+    raises: if every try fails, the next publish reconciles from Cloudflare
+    (``durable_objects.reconcile_state``), so live classes still need confirming."""
+    import asyncio
+
+    for attempt in range(3):
+        try:
+            await doc.set({"do_migration_tags": list(tags), "do_classes": list(classes)})
+            return
+        except Exception:  # noqa: BLE001 - retried, then left to reconcile
+            if attempt == 2:
+                logger.error(
+                    "sites: could not save the DO state of site %s; the next publish "
+                    "reconciles it from Cloudflare",
+                    getattr(doc, "id", "?"),
+                    exc_info=True,
+                )
+                return
+            await asyncio.sleep(delay)
+
+
+async def _deploy_bundle_call(
+    cf: Any,
+    *,
+    script_name: str,
+    project_dir: str,
+    workspace_id: str,
+    d1_database_id: str,
+    bundle_doc: Any,
+    is_dynamic: bool,
+    before_upload: Any,
+    target: str,
+    do_kw: dict[str, Any],
+) -> Any:
+    return await bundle_deploy.deploy_bundle(
         cf,
         script_name=script_name,
         build_dir=project_dir,
@@ -3581,15 +3643,6 @@ async def _deploy_paw_bundle(
         target=target,
         paid=_site_paid(bundle_doc) if bundle_doc is not None else False,
     )
-    tags = tuple(getattr(result, "migration_tags", ()) or ())
-    if bundle_doc is not None and (tags or bundle_doc.do_classes):
-        # Only now: the upload succeeded, so this is what Cloudflare has applied.
-        await bundle_doc.set(
-            {
-                "do_migration_tags": list(tags),
-                "do_classes": list(getattr(result, "do_classes", ()) or ()),
-            }
-        )
 
 
 async def _do_site_origins(cf: Any, site: Any, *, script_name: str, target: str) -> list[str]:

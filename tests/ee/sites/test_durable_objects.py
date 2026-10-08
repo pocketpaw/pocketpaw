@@ -258,6 +258,17 @@ def do_build(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _parts_of(request: httpx.Request) -> list[dict]:
+    """The multipart parts of an upload, by part name."""
+    boundary = re.search(r"boundary=(.+)$", request.headers["content-type"]).group(1)
+    out = []
+    for chunk in request.content.split(b"--" + boundary.strip('"').encode())[1:-1]:
+        head, _, _body = chunk[2:].partition(b"\r\n\r\n")
+        name = re.search(rb'name="([^"]+)"', head)
+        out.append({"name": name.group(1).decode() if name else None})
+    return out
+
+
 def _metadata(request: httpx.Request) -> dict:
     boundary = re.search(r"boundary=(.+)$", request.headers["content-type"]).group(1)
     for chunk in request.content.split(b"--" + boundary.strip('"').encode())[1:-1]:

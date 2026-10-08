@@ -11,10 +11,12 @@
 #      fields (introspection), then ``do_metering.read_usage`` for a live spike
 #      script, so a renamed field shows up here before the usage sweep fails open.
 #   E. ``durable_objects.set_platform_vars_live`` on a live script with a
-#      ``secret_text`` binding and a plain_text var: after the settings PATCH, is the
-#      secret still listed (by name; its value is never read back), can the Worker
-#      still read it, and did the var change (in settings and in the Worker)? Prints
-#      booleans only. MUST print all True before PAW_SITES_DURABLE_OBJECTS goes on.
+#      ``secret_text`` binding, a plain_text var, a Durable Object class and a D1
+#      database: after the settings PATCH (every other binding sent as ``inherit``),
+#      is the secret still listed (by name; its value is never read back) and
+#      readable by the Worker, did the var change, and do the DO namespace and D1
+#      bindings survive (listed, and usable from the Worker)? Prints booleans only.
+#      MUST print all True before PAW_SITES_DURABLE_OBJECTS goes on.
 #
 # How to run (staging account only, from the pocketpaw repo root):
 #   PAW_CF_ACCOUNT_ID=<staging account id> PAW_CF_API_TOKEN=<token with Workers
@@ -219,16 +221,34 @@ async def scenario_live_vars(cf: CloudflareClient) -> None:
     # A throwaway value made here, compared inside the Worker; never printed.
     expected = secrets.token_hex(16)
     code = (
-        "export default { fetch(request, env) { return Response.json({"
-        f'secret_ok: env.SECRET === "{expected}", var_is_one: env.{_E_VAR} === "1"'
-        "}); } };\n"
+        'import { DurableObject } from "cloudflare:workers";\n'
+        f"export class {CLASS} extends DurableObject "
+        '{ async fetch() { return new Response("ok"); } }\n'
+        "export default { async fetch(request, env) {\n"
+        "  let doOk = false, d1Ok = false;\n"
+        '  try { const r = await env.ROOM.getByName("e").fetch("https://do/");'
+        ' doOk = (await r.text()) === "ok"; } catch (e) {}\n'
+        '  try { d1Ok = (await env.DB.prepare("SELECT 1 AS one").first()).one === 1;'
+        " } catch (e) {}\n"
+        "  return Response.json({"
+        f'secret_ok: env.SECRET === "{expected}", var_is_one: env.{_E_VAR} === "1", '
+        "do_ok: doOk, d1_ok: d1Ok});\n"
+        "} };\n"
     )
+    db_id = ""
+    try:
+        db_id = await cf.create_database(f"paw-spike-db-{secrets.token_hex(3)}")
+    except ValidationError:
+        _say("E d1 created", False)
     bindings = [
         {"type": "secret_text", "name": "SECRET", "text": expected},
         {"type": "plain_text", "name": _E_VAR, "text": "0"},
+        {"type": "durable_object_namespace", "name": "ROOM", "class_name": CLASS},
+        *([{"type": "d1", "name": "DB", "id": db_id}] if db_id else []),
     ]
+    v1 = {"new_tag": "v1", "steps": [{"new_sqlite_classes": [CLASS]}]}
     try:
-        uploaded = (await _put(cf, name, code, bindings, None)).startswith("accepted")
+        uploaded = (await _put(cf, name, code, bindings, v1)).startswith("accepted")
         _say("E upload ok", uploaded)
         if not uploaded:
             return
@@ -249,11 +269,22 @@ async def scenario_live_vars(cf: CloudflareClient) -> None:
         by_name = {b.get("name"): b for b in listed if isinstance(b, dict)}
         _say("E secret still listed", by_name.get("SECRET", {}).get("type") == "secret_text")
         _say("E var changed in settings", by_name.get(_E_VAR, {}).get("text") == "1")
+        room = by_name.get("ROOM", {})
+        _say(
+            "E DO binding still listed",
+            room.get("type") == "durable_object_namespace" and room.get("class_name") == CLASS,
+        )
+        db = by_name.get("DB", {})
+        _say("E d1 binding still listed", bool(db_id) and db.get("type") == "d1")
         view = await _worker_view(cf, name)
         _say("E worker reads the secret", view.get("secret_ok") is True)
         _say("E worker sees the new var", view.get("var_is_one") is True)
+        _say("E worker reaches the DO", view.get("do_ok") is True)
+        _say("E worker reaches the d1", view.get("d1_ok") is True)
     finally:
         await cf.delete_account_script(name, force=True)
+        if db_id:
+            await cf.delete_database(db_id)
 
 
 async def main() -> int:
