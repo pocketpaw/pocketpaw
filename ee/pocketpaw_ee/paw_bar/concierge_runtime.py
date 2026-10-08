@@ -53,13 +53,14 @@
 # model failed. A transient failure before any text is retried once; a turn that
 # still cannot be answered (spend cap, quota, provider error) ends with
 # ``degrade_reply`` (one ``unavailable`` frame, then ``stream_end``). The owner
-# hears about the daily cap once per site per UTC day. The cap is the site's
-# ``concierge_daily_spend_cap`` when set (0 pauses it), else the global one.
+# hears about the daily cap once per site per UTC day. The cap is the global one;
+# a site's ``concierge_daily_spend_cap`` only lowers it (0 pauses the site), except
+# on an ops site (``is_ops_site``: ``pawbar_ops_site_ids``), where it replaces it.
 #
 # Card profile (``ui_profile``, read once per turn from
 # ``Site.concierge_ui_profile``): "pawbar" (every site by default) is all of the
-# above. "ripple" lets cards use the full Ripple catalog under
-# ``card_spec.RIPPLE_PROFILE``'s bounds, raises the reply cap to
+# above. "ripple", honoured only on an ops site, lets cards use the full Ripple
+# catalog under ``card_spec.RIPPLE_PROFILE``'s bounds, raises the reply cap to
 # ``_RIPPLE_MAX_TOKENS`` and always writes the <catalog> block with the Ripple
 # cards paragraph (the catalog, compact, plus the authoring rules), even on a
 # site with no catalog, actions or lead capture. The frame is the same.
