@@ -193,6 +193,14 @@ class WorkerModule:
     content_type: str
 
 
+@dataclass(frozen=True)
+class WorkerUpload:
+    """What a bundle-form ``put_worker`` reports back. ``migration_tag`` is the
+    script's Durable Object migration tag after the upload, None when it has none."""
+
+    migration_tag: str | None = None
+
+
 def asset_hash(content: bytes, path: str, salt: str) -> str:
     """The 32-hex asset hash Cloudflare keys uploads on, salted per tenant.
 
@@ -337,7 +345,8 @@ class CloudflareClient:
         placement: Mapping[str, Any] | None = None,
         observability: Mapping[str, Any] | None = None,
         limits: Mapping[str, Any] | None = None,
-    ) -> bool:
+        migrations: Mapping[str, Any] | None = None,
+    ) -> bool | WorkerUpload:
         """Upload a user Worker into the dispatch namespace. Live on 200.
 
         ``target="account"`` sends the same upload to a regular account-level script
@@ -367,7 +376,10 @@ class CloudflareClient:
         ``assets`` (``{"jwt": <completion jwt>, "config": {...}}``), followed by one
         part per module named by its path. An empty ``modules`` with ``assets`` is an
         assets-only Worker (no ``main_module``). ``placement``, ``observability`` and
-        ``limits`` (bundle form only) go into the metadata as given. Callers vet every value
+        ``limits`` (bundle form only) go into the metadata as given, and so does
+        ``migrations`` (Durable Object tagged migrations, ``{old_tag?, new_tag, steps}``).
+        The bundle form returns a ``WorkerUpload`` carrying the response's
+        ``migration_tag``; the single-module form returns True. Callers vet every value
         first; this method only checks the shape is self-consistent."""
         if modules is not None:
             return await self._put_worker_bundle(
@@ -384,11 +396,13 @@ class CloudflareClient:
                     "placement": placement,
                     "observability": observability,
                     "limits": limits,
+                    "migrations": migrations,
                 },
             )
-        if placement or observability or limits:
+        if placement or observability or limits or migrations:
             raise ValidationError(
-                "sites.bundle_shape", "placement, observability and limits need the bundle form"
+                "sites.bundle_shape",
+                "placement, observability, limits and migrations need the bundle form",
             )
         url = self._script_url(script_name, target)
         async with self._client() as client:
@@ -446,7 +460,7 @@ class CloudflareClient:
         assets: dict | None,
         target: str = DISPATCH_TARGET,
         settings: Mapping[str, Mapping[str, Any] | None] | None = None,
-    ) -> bool:
+    ) -> WorkerUpload:
         if bundle:
             raise ValidationError(
                 "sites.bundle_shape", "put_worker takes either bundle or modules, not both"
@@ -482,8 +496,9 @@ class CloudflareClient:
         files.extend((m.name, (m.name, m.content, m.content_type)) for m in modules)
         async with self._client() as client:
             resp = await client.put(self._script_url(script_name, target), files=files)
-        self._unwrap(resp)
-        return True
+        result = self._unwrap(resp)
+        tag = result.get("migration_tag") if isinstance(result, dict) else None
+        return WorkerUpload(migration_tag=str(tag) if tag else None)
 
     async def upload_assets(
         self,
@@ -564,7 +579,7 @@ class CloudflareClient:
             )
         return completion
 
-    async def delete_worker(self, script_name: str) -> None:
+    async def delete_worker(self, script_name: str, *, force: bool = False) -> None:
         """Remove a user Worker from the dispatch namespace. Idempotent on a 404.
 
         The inverse of ``put_worker``, and the step in a site teardown that actually
@@ -578,18 +593,21 @@ class CloudflareClient:
         the goal is "this script is not in the namespace", and something already gone
         satisfies it. Raising there would make a resumed teardown fail on the step it
         had already completed — turning a recoverable partial teardown into a
-        permanent orphan, which is precisely what this method exists to prevent."""
+        permanent orphan, which is precisely what this method exists to prevent.
+
+        ``force`` deletes a script that has Durable Object namespaces, and the
+        namespaces with it (``?force=true``)."""
         url = (
             f"{_CF_API}/accounts/{self._account_id}"
             f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
         )
         async with self._client() as client:
-            resp = await client.delete(url)
+            resp = await client.delete(url, params={"force": "true"} if force else None)
         if resp.status_code == 404:
             return
         self._unwrap(resp)
 
-    async def delete_account_script(self, script_name: str) -> None:
+    async def delete_account_script(self, script_name: str, *, force: bool = False) -> None:
         """Remove an ACCOUNT-LEVEL Worker script (the ``workers`` deploy mode).
 
         Sibling of ``delete_worker``, and the difference is the deploy mode, not the
@@ -605,13 +623,33 @@ class CloudflareClient:
         purged), and a subprocess seam can only be honestly proven against the real
         binary. One HTTP call has neither problem.
 
-        Idempotent on a 404, same reasoning as every other delete here."""
+        Idempotent on a 404, same reasoning as every other delete here. ``force`` as in
+        ``delete_worker``."""
         url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}"
         async with self._client() as client:
-            resp = await client.delete(url)
+            resp = await client.delete(url, params={"force": "true"} if force else None)
         if resp.status_code == 404:
             return
         self._unwrap(resp)
+
+    async def list_durable_object_namespaces(self) -> list[dict]:
+        """Every Durable Object namespace on the account (``id``, ``name``, ``script``,
+        ``class``, ``use_sqlite``).
+
+        ``GET /accounts/{id}/workers/durable_objects/namespaces``
+        (https://developers.cloudflare.com/api/resources/durable_objects/subresources/namespaces/methods/list/).
+        Fails closed like every other call here; pages are bounded."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/durable_objects/namespaces"
+        out: list[dict] = []
+        async with self._client() as client:
+            for page in range(1, 51):
+                resp = await client.get(url, params={"page": page, "per_page": 1000})
+                rows = self._unwrap(resp)
+                rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+                out.extend(rows)
+                if len(rows) < 1000:
+                    break
+        return out
 
     async def enable_workers_dev(self, script_name: str) -> None:
         """Serve an ACCOUNT-LEVEL script on ``<script>.<sub>.workers.dev``.
