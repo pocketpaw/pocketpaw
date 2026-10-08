@@ -268,7 +268,8 @@ scope the deploy already uses.
 
 ## Durable Objects
 
-Behind `PAW_SITES_DURABLE_OBJECTS=1`. With it off, a build that declares Durable
+Behind `PAW_SITES_DURABLE_OBJECTS=1`; turn it on only after the staging spike's
+scenario E passes (see "The staging spike" below). With it off, a build that declares Durable
 Objects (a `durableObjects` block in `paw-build.json` or a `do` binding request) is
 refused with `sites.do_disabled`, and so is a site that already has live DOs; nothing
 deploys without them. Code: `ee/pocketpaw_ee/sites/durable_objects.py` (vetting,
@@ -397,8 +398,16 @@ The token needs Workers Scripts: Edit and Account Analytics: Read. It deploys
 (A) whether an upload without `migrations` is accepted once a tag exists; (B) the
 namespaces after a tombstone then a forced delete; (C) the namespaces after a forced
 delete alone; (D) the durableObjects* GraphQL datasets and their fields, and
-`do_metering.read_usage` for a spike script. Every script is force-deleted in a
-`finally`.
+`do_metering.read_usage` for a spike script; (E) the live settings push: a script
+with a `secret_text` binding and a plain_text var gets the var changed through
+`set_platform_vars_live`, then it prints, as booleans only, whether the secret is
+still listed in the settings (by name), whether the Worker still reads it
+(`env.SECRET === <expected>`, compared inside the Worker), and whether the var changed
+in the settings and in the Worker. Every script is force-deleted in a `finally`.
+
+**Scenario E must print all `True` before `PAW_SITES_DURABLE_OBJECTS` goes on.** The
+throttle and origins pushes rewrite a live script's bindings; if `inherit` does not
+keep secrets on this account, they would strip a site's secrets.
 
 ## Project D1 migrations
 
