@@ -29,8 +29,8 @@
   {
     "label": "the sweep loop never calls the backfill",
     "file": "ee/pocketpaw_ee/extensions.py",
-    "find": "        sweep_subscription_grace,\n        backfill_tenant_keys,\n",
-    "replace": "        sweep_subscription_grace,\n",
+    "find": "        sweep_draft_workers,\n        backfill_tenant_keys,\n",
+    "replace": "        sweep_draft_workers,\n",
     "tests": [
       "tests/cloud/llm_provisioning/test_tenant_key_backfill.py"
     ]
