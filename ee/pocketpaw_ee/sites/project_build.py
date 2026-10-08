@@ -11,7 +11,8 @@
 # What a finished build leaves, all keyed by ``(pocket_id, content_hash)``:
 #   * the whole bundle (manifest + assets + worker modules) in the artifact store under
 #     ``<hash>.bundle`` — what publish deploys through ``bundle_deploy``;
-#   * the assets alone as the draft's preview files + token (``preview_origin``);
+#   * the assets alone as the draft's preview files + token (``preview_origin``),
+#     unless they have no root index.html (see ``preview_mode`` below);
 #   * a build record in ``verify_store`` (``build-<job id>``): status, rung, the
 #     redacted and capped build log, ``preview_mode`` and the framework; plus the
 #     pocket's ``latest-build`` pointer.
@@ -19,7 +20,9 @@
 # Invariants: nothing here runs author code on this host; the build log is scrubbed
 # (``verify_diagnostics.scrub_log_text``) before it is stored; ``preview_mode`` is
 # ``"static"`` when the manifest has a worker (drafts serve assets only until the
-# drafts dispatch worker lands) and ``"full"`` otherwise. No realtime event exists for
+# drafts dispatch worker lands), ``"full"`` otherwise, and ``"server_only"`` when a
+# worker build's assets have no root index.html (next, sveltekit): no preview files
+# or token are stored then, because the URL would only 404. No realtime event exists for
 # site builds, so build progress is polled (latest-build / native-artifact).
 from __future__ import annotations
 
@@ -253,9 +256,19 @@ def bundle_key(content_hash: str) -> str:
     return f"{content_hash}.bundle"
 
 
-def preview_mode(manifest: Mapping[str, Any]) -> str:
+#: ``preview_mode`` of a draft whose worker renders every page: its assets have no
+#: root index.html, so the static preview origin has nothing to open.
+PREVIEW_SERVER_ONLY = "server_only"
+
+
+def preview_mode(manifest: Mapping[str, Any], preview: Mapping[str, bytes] | None = None) -> str:
     """``"static"`` when the draft has server routes the preview cannot run yet (a
-    worker), ``"full"`` when the assets are the whole site."""
+    worker), ``"full"`` when the assets are the whole site, ``"server_only"`` when
+    ``preview`` (the files :func:`preview_files` packs) has no root index.html."""
+    from pocketpaw_ee.sites.preview_origin import ENTRY
+
+    if preview is not None and ENTRY not in preview:
+        return PREVIEW_SERVER_ONLY
     return "static" if manifest_has_worker(dict(manifest)) else "full"
 
 
@@ -523,12 +536,12 @@ async def run_project_preview_build(
         manifest, bundle_files = read_bundle(result.artifact or b"")
         if not store.write_dist(pocket_id, bundle_key(content_hash), result.artifact):
             raise RuntimeError("the artifact store refused the bundle")
-        if preview_origin.store_supports_preview(store):
+        preview = preview_files(manifest, bundle_files)
+        mode = preview_mode(manifest, preview)
+        # A server-only draft gets no preview files or token: its URL would 404.
+        if mode != PREVIEW_SERVER_ONLY and preview_origin.store_supports_preview(store):
             preview_origin.publish_draft(
-                store,
-                pocket_id,
-                content_hash,
-                preview_origin.pack_files(preview_files(manifest, bundle_files)),
+                store, pocket_id, content_hash, preview_origin.pack_files(preview)
             )
     except Exception:
         logger.exception("sites.project: pocket %s built but the bundle was unusable", pocket_id)
@@ -538,7 +551,7 @@ async def run_project_preview_build(
     return _finish(
         STATUS_BUILT,
         settlement.reason,
-        preview_mode=preview_mode(manifest),
+        preview_mode=mode,
         framework=framework,
         **logged,
     )
@@ -629,6 +642,7 @@ __all__ = [
     "ENGINE",
     "FREE_WORKER_BINDINGS",
     "LOG_CAP_BYTES",
+    "PREVIEW_SERVER_ONLY",
     "STAGE_SCRIPT",
     "build_record_key",
     "build_script",

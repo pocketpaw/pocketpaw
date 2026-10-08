@@ -1064,14 +1064,19 @@ class NativeArtifactResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
-    # Absolute URL of the draft's index.html on the cookieless preview origin
-    # (``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/index.html``), the full
-    # draft with its <head> and JS. Every engine including html. ``None`` while the
-    # build is pending or failed. Append ``?paw_edit=1`` to arm the edit bridge.
+    # Absolute URL of the draft's site root on the cookieless preview origin
+    # (``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/``, which serves index.html),
+    # the full draft with its <head> and JS. Every engine including html. ``None``
+    # while the build is pending or failed, and for a project draft whose
+    # ``preview_mode`` is ``"server_only"``. Append ``?paw_edit=1`` to arm the edit
+    # bridge.
     preview_url: str | None = None
     # project engine only (None elsewhere): "static" when the draft has server routes
     # the preview cannot run yet (its assets are served, its worker is not), "full"
-    # when the assets are the whole site. None until a build finished.
+    # when the assets are the whole site, "server_only" when the worker renders every
+    # page and the assets have no root index.html, so there is nothing to preview
+    # until drafts can run the worker (``preview_url`` is None). None until a build
+    # finished.
     preview_mode: str | None = None
     # The engine's edit/build capability flags (``engines.engine_capabilities``):
     # {select, text, code, build_log}. Set for project pockets; None elsewhere for now.

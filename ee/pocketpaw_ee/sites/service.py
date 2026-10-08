@@ -10114,7 +10114,7 @@ async def get_native_artifact(
     preview_url}``.
 
     ``preview_url`` (draft preview origin, ``preview_origin.py``) is the absolute URL of
-    the draft's index.html on the cookieless preview host — the FULL draft, head and
+    the draft's site root on the cookieless preview host — the FULL draft, head and
     JS intact. ``None`` while a build is pending or failed. html drafts never build:
     their source files are served directly (import map injected), so an html pocket
     answers ``build_status="none"`` with a ``preview_url`` and empty body/css.
@@ -10314,8 +10314,9 @@ async def _project_draft_artifact(
     current source, else a build is queued in the preview lane (``project_build``).
 
     The same response shape as every other engine plus ``preview_mode`` (``"static"``
-    while server routes cannot run in drafts, ``"full"`` otherwise; ``None`` until a
-    build finished) and the engine's ``capabilities``. No arming: a project has no
+    while server routes cannot run in drafts, ``"full"`` otherwise, ``"server_only"``
+    with a null ``preview_url`` when the build has no static entry page to open;
+    ``None`` until a build finished) and the engine's ``capabilities``. No arming: a project has no
     generator-owned anchors, so there is no builder origin in the hash."""
     from pocketpaw_ee.sites import build_job, project_build, verify_store
     from pocketpaw_ee.sites.engines import engine_capabilities
@@ -10328,9 +10329,15 @@ async def _project_draft_artifact(
     records = _records if _records is not None else verify_store.default_verify_store()
     record = project_build.read_build_record(records, pocket_id, job_id)
     if record is not None and record.get("status") == project_build.STATUS_BUILT:
-        preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+        server_only = record.get("preview_mode") == project_build.PREVIEW_SERVER_ONLY
+        preview_url = (
+            None
+            if server_only
+            else preview_origin.existing_preview_url(store, pocket_id, content_hash)
+        )
         evicted = (
-            preview_url is None
+            not server_only
+            and preview_url is None
             and preview_origin.store_supports_preview(store)
             and preview_origin.preview_base_problem() is None
         )

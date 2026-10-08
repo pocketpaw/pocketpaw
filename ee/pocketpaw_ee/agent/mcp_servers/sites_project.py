@@ -88,6 +88,12 @@ STATIC_PREVIEW_NOTE = (
     "Say so when you show the preview."
 )
 
+SERVER_ONLY_PREVIEW_NOTE = (
+    "preview_mode is server_only: every page is rendered by the site's server code and "
+    "the build has no static entry page, so there is no draft preview (preview_url is "
+    "null). The pages run after publish. Tell the user instead of showing a preview."
+)
+
 SECRETS_RULE = (
     "Never write a secret value into any file. For each secret name, call "
     "`request_site_secret` (pocket_id, name, description) so the owner fills it in; "
@@ -773,8 +779,9 @@ async def _run_site_build_handler(args: dict) -> dict:
     }
     blocks: list[str] = []
     if status == "built":
+        note = {"static": STATIC_PREVIEW_NOTE, "server_only": SERVER_ONLY_PREVIEW_NOTE}
         body["message"] = "The draft built." + (
-            " " + STATIC_PREVIEW_NOTE if preview_mode == "static" else ""
+            " " + note[preview_mode] if preview_mode in note else ""
         )
     elif status == "failed" and reason_message(
         reason := (record or {}).get("reason") or art.get("build_reason")

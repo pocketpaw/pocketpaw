@@ -408,7 +408,7 @@ async def native_artifact_by_pocket(
     raises it inside the service).
 
     DRAFT PREVIEW ORIGIN: every engine, html included, also answers ``preview_url`` —
-    the draft's index.html on the cookieless preview host (``preview_origin.py``),
+    the draft's site root on the cookieless preview host (``preview_origin.py``),
     ``None`` while a build is pending or failed. html never builds, so it is always
     ``build_status="none"`` with a URL and empty body/css. Ripple still 422s."""
     # Mirror /editable + /dev-preview origin resolution: the request Origin header

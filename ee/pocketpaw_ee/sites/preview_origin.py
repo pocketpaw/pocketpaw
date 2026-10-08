@@ -1,7 +1,8 @@
 # ee/pocketpaw_ee/sites/preview_origin.py — the draft preview origin.
 #
 # A Paw Site draft is previewed from a real, cookieless origin instead of a srcdoc:
-# ``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/index.html``. The token is an
+# ``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/`` (the site root, which serves
+# ``index.html``; client routers treat ``/index.html`` as an unknown route). The token is an
 # unguessable capability (random, 128 bits) minted per (pocket, content hash), so an
 # edit gets a new URL and an old URL keeps serving its own immutable build until the
 # artifact store evicts it (then it is a 404).
@@ -184,14 +185,16 @@ def preview_base_host() -> str:
 
 
 def preview_url_for(token: str) -> str | None:
-    """The absolute URL of a draft's index.html on the preview origin, or ``None``
-    when the configured base is refused (see :func:`preview_base_problem`)."""
+    """The absolute URL of a draft's site root on the preview origin, or ``None``
+    when the configured base is refused (see :func:`preview_base_problem`). The root,
+    not ``/index.html``: client routers (TanStack, React Router) treat that path as an
+    unmatched route, and the root resolves to the same ``index.html`` file."""
     parts = _base_parts()
     if parts is None:
         return None
     scheme, host, port = parts
     netloc = f"{token}.{host}" + (f":{port}" if port else "")
-    return f"{scheme}://{netloc}/{ENTRY}"
+    return f"{scheme}://{netloc}/"
 
 
 def _host_without_port(host: str) -> str:

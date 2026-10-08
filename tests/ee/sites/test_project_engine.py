@@ -67,13 +67,18 @@ def _tar(files: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-def _bundle(manifest: dict) -> bytes:
-    assets = manifest["assetsDir"]
+def _bundle(manifest: dict, *, index: bool = True, assets: dict | None = None) -> bytes:
+    """A staged bundle. ``index=False`` leaves out the root index.html, as a worker
+    template (next, sveltekit) that renders every page on the server stages it."""
+    root = manifest["assetsDir"]
     files = {
         "paw-build.json": json.dumps(manifest).encode(),
-        f"{assets}/index.html": b"<h1>Hi</h1>",
-        f"{assets}/_headers": b"/*\n  X-Test: 1\n",
+        f"{root}/_headers": b"/*\n  X-Test: 1\n",
     }
+    if index:
+        files[f"{root}/index.html"] = b"<h1>Hi</h1>"
+    for rel, data in (assets or {}).items():
+        files[f"{root}/{rel}"] = data
     for module in manifest.get("workerModules") or []:
         files[module] = b"export default { fetch() { return new Response('ok') } }"
     return _tar(files)
@@ -495,6 +500,35 @@ async def test_native_artifact_queues_then_serves_the_project_draft(beanie_test_
         workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _store=store, _pool=pool
     )
     assert via_route["capabilities"]["build_log"] is True
+
+
+@pytest.mark.asyncio
+async def test_worker_project_draft_without_root_index_reports_unpreviewable(beanie_test_db):
+    """A worker template that renders every page on the server (next, sveltekit)
+    stages no root index.html. Its draft has nothing static to open, so no preview
+    URL is handed out (it would 404) and the reason is said, not a bare 404."""
+    pocket_id = await _make_project_pocket()
+    store, records, pool = _Store(), _Records(), _Pool()
+    content_hash = project_build.project_content_hash(SOURCE)
+
+    out = await project_build.run_project_preview_build(
+        {}, pocket_id, content_hash, {"source": SOURCE}, 600,
+        _runner=_Runner(_result(artifact=_bundle(
+            WORKER_MANIFEST, index=False, assets={"_build/app.js": b"export {}"}
+        ))),
+        _store=store, _verify_store=records, _gen_uploads=GEN,
+    )  # fmt: skip
+    assert out["status"] == "built"
+    assert out["preview_mode"] == project_build.PREVIEW_SERVER_ONLY
+    assert (pocket_id, content_hash) not in store.tokens
+
+    art = await sites_service._project_draft_artifact(
+        pocket_id=pocket_id, source=dict(SOURCE), store=store, _pool=pool, _records=records
+    )
+    assert art["build_status"] == "none"
+    assert art["preview_url"] is None
+    assert art["preview_mode"] == project_build.PREVIEW_SERVER_ONLY
+    assert pool.calls == [], "an unpreviewable draft is not an evicted one: no rebuild"
 
 
 @pytest.mark.asyncio
