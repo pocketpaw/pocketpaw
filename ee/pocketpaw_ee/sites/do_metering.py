@@ -8,7 +8,9 @@
 #     id, mapped back to scripts through the namespaces list), stores it on the Site
 #     (``do_usage``, 35 days) and sets ``do_throttled`` while today's requests are past
 #     ``PAW_SITES_DO_DAILY_REQUESTS_FREE`` / ``_PAID``. The flag reaches the Worker as
-#     ``PAW_DO_THROTTLED`` on the next deploy. FAILS OPEN: a request-count read that
+#     ``PAW_DO_THROTTLED`` at once: a flip is pushed to the live script through the
+#     settings API (``durable_objects.set_platform_vars_live``) and only stored once
+#     that worked, so a failed push is retried next sweep. FAILS OPEN: a request-count read that
 #     fails changes nothing (never throttles on missing data); a duration or storage
 #     read that fails only leaves those numbers at 0.
 #   * ``sweep_do_teardowns``: retries the ``SiteDoTeardown`` rows the delete cascade
@@ -178,9 +180,9 @@ async def sweep_do_usage(*, cf: Any = None, now: datetime | None = None) -> dict
     for site in sites:
         if (getattr(site, "delete_status", "none") or "none") != "none":
             continue
-        script, _target = _script_ref(site)
+        script, target = _script_ref(site)
         if script:
-            scripts[script] = site
+            scripts[script] = (site, target)
     if not scripts:
         return out
     day = now.date()
@@ -193,7 +195,7 @@ async def sweep_do_usage(*, cf: Any = None, now: datetime | None = None) -> dict
 
     key = day.isoformat()
     cutoff = (day - timedelta(days=USAGE_DAYS_KEPT)).isoformat()
-    for script, site in scripts.items():
+    for script, (site, target) in scripts.items():
         used = usage.get(script, ScriptUsage())
         history = {d: v for d, v in (site.do_usage or {}).items() if d > cutoff}
         history[key] = {
@@ -203,11 +205,27 @@ async def sweep_do_usage(*, cf: Any = None, now: datetime | None = None) -> dict
         }
         ceiling = daily_request_ceiling(paid=sites_service._site_paid(site))
         throttled = ceiling > 0 and used.requests > ceiling
+        if throttled != site.do_throttled:
+            try:
+                await durable_objects.set_platform_vars_live(
+                    cf,
+                    script,
+                    target=target,
+                    values={durable_objects.THROTTLED_VAR: "1" if throttled else "0"},
+                )
+            except Exception as exc:  # noqa: BLE001 - fail open, retried next sweep
+                logger.warning(
+                    "sites.do: could not push PAW_DO_THROTTLED to %s (%s); will retry",
+                    script,
+                    exc,
+                )
+                await site.set({"do_usage": history})
+                out["sites"] += 1
+                continue
         if throttled and not site.do_throttled:
             out["throttled"] += 1
             logger.warning(
-                "sites.do: site %s passed %d DO requests today (ceiling %d); throttled "
-                "from its next deploy",
+                "sites.do: site %s passed %d DO requests today (ceiling %d); throttled",
                 site.id,
                 used.requests,
                 ceiling,

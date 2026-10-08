@@ -3552,6 +3552,13 @@ async def _deploy_paw_bundle(
     if getattr(bundle_doc, "do_throttled", False):
         # The usage sweep's verdict reaches the Worker as PAW_DO_THROTTLED=1.
         do_kw["do_throttled"] = True
+    if bundle_doc is not None:
+
+        async def _origins() -> list[str]:
+            return await _do_site_origins(cf, bundle_doc, script_name=script_name, target=target)
+
+        # Awaited only for a bundle that declares Durable Objects.
+        do_kw["site_origins"] = _origins
     result = await bundle_deploy.deploy_bundle(
         cf,
         script_name=script_name,
@@ -3583,6 +3590,53 @@ async def _deploy_paw_bundle(
                 "do_classes": list(getattr(result, "do_classes", ()) or ()),
             }
         )
+
+
+async def _do_site_origins(cf: Any, site: Any, *, script_name: str, target: str) -> list[str]:
+    """``PAW_SITE_ORIGINS`` of a published DO site: its public URL (the account
+    Worker's workers.dev host, or ``provision_site_url`` on the dispatch target) plus
+    every live custom domain, all https. Never the builder origin: the preview proxy
+    checks that one itself."""
+    if target == bundle_deploy.ACCOUNT_TARGET:
+        from pocketpaw_ee.sites.workers_deploy import _workers_dev_host
+
+        host = _workers_dev_host(script_name)
+        if not host:
+            subdomain = await cf.workers_dev_subdomain()
+            host = f"{script_name}.{subdomain}.workers.dev" if subdomain else ""
+        base = f"https://{host}" if host else ""
+    else:
+        base = provision_site_url(str(site.id))
+    domains = [
+        f"https://{_normalize_hostname(d.hostname)}"
+        for d in getattr(site, "domains", None) or []
+        if getattr(d, "status", "") == "live"
+    ]
+    return [o for o in dict.fromkeys([base, *domains]) if o]
+
+
+async def _refresh_do_origins(site: Any, cf: Any) -> None:
+    """Push the site's current ``PAW_SITE_ORIGINS`` to its LIVE script (no redeploy)
+    after a custom domain went live or was removed. Best effort: logged, never
+    raised, and the next publish sets it anyway."""
+    from pocketpaw_ee.sites import durable_objects
+    from pocketpaw_ee.sites.delete_cascade import _script_ref
+
+    if not durable_objects.enabled() or not getattr(site, "do_classes", None):
+        return
+    script, target = _script_ref(site)
+    if not script:
+        return
+    try:
+        origins = await _do_site_origins(cf, site, script_name=script, target=target)
+        await durable_objects.set_platform_vars_live(
+            cf,
+            script,
+            target=target,
+            values={durable_objects.SITE_ORIGINS_VAR: ",".join(origins)},
+        )
+    except Exception as exc:  # noqa: BLE001 - the domain call must not fail on this
+        logger.warning("sites: could not refresh PAW_SITE_ORIGINS on %s: %s", script, exc)
 
 
 async def _account_worker_url(cf: Any, name: str) -> str:
@@ -6552,6 +6606,9 @@ async def remove_domain(
             "allowed_origins": list(site.allowed_origins),
         }
     )
+    # A DO site's Worker accepts WebSockets from its origins; drop this one live.
+    if dom.status == "live":
+        await _refresh_do_origins(site, cf)
     # no-event: no SiteDomain event type exists — add_domain does not emit one either,
     # and inventing a half of the pair here would leave connects silent and
     # disconnects loud. Both belong in the reconciler work the design defers.
@@ -6572,8 +6629,12 @@ async def domain_status(
     if dom is None:
         raise NotFound("domain", hostname)
     status: HostnameStatus = await cf.get_hostname_status(dom.cf_hostname_id)
+    was_live = dom.status == "live"
     dom.status = status.value
     await site.save()
+    if was_live != (dom.status == "live"):
+        # Into or out of ``live``: a DO site's allowed WebSocket origins changed.
+        await _refresh_do_origins(site, cf)
     return DomainStatusResponse(
         hostname=dom.hostname, cname_target=dom.cname_target, status=status.value
     )

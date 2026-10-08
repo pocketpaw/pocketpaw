@@ -869,6 +869,9 @@ async def deploy_for_build(
                 do_state=do_state,
                 allow_do_data_loss=True,
                 do_quota_used=_workspace_draft_classes,
+                # The recipe accepts WebSockets only from this draft's preview origin
+                # (the builder origin is checked by the preview proxy, not here).
+                site_origins=[_origin_of(url)],
             )
         if result.migration_tags or rec.do_classes:
             # Right after the upload, so a later failure cannot lose the applied tag.
@@ -926,6 +929,13 @@ async def deploy_for_build(
         except _Superseded:
             await _discard(rec, await registry.get(pocket_id), cf)
     return _skip(reason)
+
+
+def _origin_of(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
 
 
 async def _rotate_script(rec: DraftRecord, cf: Any, state: Any) -> None:

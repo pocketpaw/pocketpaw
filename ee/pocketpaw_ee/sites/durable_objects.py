@@ -31,6 +31,8 @@
 #     classes, written only after a successful upload (``migration_tags_after``).
 #   * ``teardown_script``: tombstone upload (``deleted_classes``), forced delete, then
 #     a namespace-list check. Best effort, never raises; the caller retries.
+#   * ``set_platform_vars_live``: change a platform var on a LIVE script through the
+#     script settings API (no code upload), keeping every other binding and secret.
 from __future__ import annotations
 
 import logging
@@ -53,6 +55,10 @@ ACCOUNT_BUDGET_ENV = "PAW_SITES_DO_ACCOUNT_BUDGET"
 # Platform vars a DO site's Worker gets (plain_text, they win over owner values).
 ROOM_MAX_PEERS_VAR = "ROOM_MAX_PEERS"
 THROTTLED_VAR = "PAW_DO_THROTTLED"
+SITE_ORIGINS_VAR = "PAW_SITE_ORIGINS"
+# Binding types whose value a settings GET does not hand back usably: re-sent as
+# ``inherit`` so the live value is kept, never rewritten or dropped.
+_SECRET_BINDING_TYPES = frozenset({"secret_text", "secret_key"})
 FREE_ROOM_MAX_PEERS = 10
 ROOM_MAX_PAID_ENV = "PAW_SITES_DO_ROOM_MAX_PAID"
 ROOM_MAX_PEERS_CEILING = 50
@@ -306,13 +312,54 @@ def room_max_peers(*, paid: bool) -> int:
     return min(max(value, 1), ROOM_MAX_PEERS_CEILING)
 
 
-def platform_vars(*, paid: bool, throttled: bool) -> dict[str, str]:
-    """``ROOM_MAX_PEERS`` and ``PAW_DO_THROTTLED`` ("1" when the daily usage sweep
-    found the site over its ceiling: the recipe refuses new joins and says why)."""
+def platform_vars(*, paid: bool, throttled: bool, origins: Iterable[str] = ()) -> dict[str, str]:
+    """``ROOM_MAX_PEERS``, ``PAW_DO_THROTTLED`` ("1" when the daily usage sweep found
+    the site over its ceiling: the recipe refuses new joins and says why) and
+    ``PAW_SITE_ORIGINS`` (comma-separated origins the recipe accepts a WebSocket
+    from, on top of the Worker's own: the public URL and live custom domains of a
+    published site, the preview origin of a draft)."""
     return {
         ROOM_MAX_PEERS_VAR: str(room_max_peers(paid=paid)),
         THROTTLED_VAR: "1" if throttled else "0",
+        SITE_ORIGINS_VAR: ",".join(dict.fromkeys(o for o in origins if o)),
     }
+
+
+async def set_platform_vars_live(
+    cf: Any, script: str, *, target: str, values: Mapping[str, str]
+) -> None:
+    """Set ``values`` as plain_text vars on the LIVE ``script`` without re-uploading
+    its code, via the script settings API:
+    GET then PATCH ``.../workers/scripts/{name}/settings`` (multipart ``settings``
+    part), https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/edit/
+    (the dispatch-namespace script has the same pair under
+    ``.../dispatch/namespaces/{ns}/scripts/{name}/settings``).
+
+    ``bindings`` in a PATCH is the script's whole list, so the current list is read
+    first and sent back with only ``values`` replaced (appended when missing). The
+    docs do not say a binding left out is kept, so nothing is left out. Secrets
+    (``secret_text`` / ``secret_key``) are sent as ``{"type": "inherit", "name"}``,
+    the documented way to carry a binding over from the latest version, because the
+    GET does not return a value we could (or should) send back. Every other binding
+    goes back exactly as read. Raises on any Cloudflare error; callers fail open."""
+    settings = await cf.get_script_settings(script, target=target)
+    current = settings.get("bindings") if isinstance(settings, dict) else None
+    if not isinstance(current, list):
+        raise ValidationError("sites.cloudflare_error", f"no bindings in {script}'s settings")
+    bindings: list[dict] = []
+    for binding in current:
+        if not isinstance(binding, dict) or not binding.get("name"):
+            raise ValidationError("sites.cloudflare_error", f"unreadable binding on {script}")
+        if binding["name"] in values:
+            continue
+        if binding.get("type") in _SECRET_BINDING_TYPES:
+            bindings.append({"type": "inherit", "name": binding["name"]})
+        else:
+            bindings.append(binding)
+    bindings.extend(
+        {"type": "plain_text", "name": name, "text": text} for name, text in values.items()
+    )
+    await cf.patch_script_settings(script, {"bindings": bindings}, target=target)
 
 
 # ------------------------------------------------------------------ planner
@@ -645,6 +692,7 @@ __all__ = [
     "check_workspace_quota",
     "platform_vars",
     "room_max_peers",
+    "set_platform_vars_live",
     "class_cap",
     "declares_durable_objects",
     "enabled",

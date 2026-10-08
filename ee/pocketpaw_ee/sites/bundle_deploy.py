@@ -747,6 +747,7 @@ async def deploy_bundle(
     allow_do_data_loss: bool = False,
     do_quota_used: Callable[[], Awaitable[int]] | None = None,
     do_throttled: bool = False,
+    site_origins: Sequence[str] | Callable[[], Awaitable[Sequence[str]]] = (),
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -777,8 +778,9 @@ async def deploy_bundle(
     skips that confirmation. ``do_quota_used`` returns how many DO classes the
     workspace's other scripts hold; it is asked only when this deploy creates a
     class (``durable_objects.check_workspace_quota``). A DO bundle also gets the
-    platform vars (``durable_objects.platform_vars``: the plan's room cap, and
-    ``do_throttled`` from the usage sweep). The DO block is vetted, its
+    platform vars (``durable_objects.platform_vars``: the plan's room cap,
+    ``do_throttled`` from the usage sweep, and ``site_origins``, a list or an async
+    callable only awaited for a DO bundle). The DO block is vetted, its
     migration planned and the account budget checked before ``provision``, so a
     refused bundle creates nothing. The result carries the tag Cloudflare reports."""
     if target not in SCRIPT_TARGETS:
@@ -805,7 +807,11 @@ async def deploy_bundle(
             durable_objects=dict(vetted.bindings),
             plain_text={
                 **provisioned.plain_text,
-                **durable_objects.platform_vars(paid=paid, throttled=do_throttled),
+                **durable_objects.platform_vars(
+                    paid=paid,
+                    throttled=do_throttled,
+                    origins=await site_origins() if callable(site_origins) else site_origins,
+                ),
             },
         )
     _map_into(bundle, manifest, provisioned)

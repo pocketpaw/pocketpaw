@@ -302,7 +302,8 @@ DO bundle, drafts included:
 | Var | Value |
 |---|---|
 | `ROOM_MAX_PEERS` | 10 on free; `PAW_SITES_DO_ROOM_MAX_PAID` on paid (default 50, clamped to 1..50). Drafts use the pocket's plan. |
-| `PAW_DO_THROTTLED` | `"1"` while the usage sweep has the site over its daily ceiling, else `"0"`. Drafts are never throttled. Takes effect on the site's next deploy. |
+| `PAW_DO_THROTTLED` | `"1"` while the usage sweep has the site over its daily ceiling, else `"0"`. Drafts are never throttled. A flip is pushed to the live script at once (see "Live var updates"). |
+| `PAW_SITE_ORIGINS` | Comma-separated origins the recipe accepts a WebSocket from, besides the Worker's own host. Published: the public URL (workers.dev host on the account target, `https://<site id>.<PAW_CF_SITES_DOMAIN>` on dispatch) plus every `live` custom domain, all https. Draft: that build's preview origin `https://<token>.<preview base host>` (the token rotates per build; the draft redeploys per build). Never the builder origin; the preview proxy checks that. Refreshed live when a custom domain goes live or is removed. |
 
 **Env.**
 
@@ -327,11 +328,24 @@ requests (`durableObjectsInvocationsAdaptiveGroups.sum.requests`), active time
 (`durableObjectsStorageGroups.max.storedBytes`) per namespace from
 `POST /client/v4/graphql`, maps namespaces to scripts through the namespaces list,
 stores the day on `Site.do_usage` (35 days kept) and sets `Site.do_throttled` while
-today's requests are past the plan's ceiling. It fails open: if the namespaces list or
+today's requests are past the plan's ceiling; a flip is pushed to the live script
+right away and only stored once the push worked, so a failed push is retried on the
+next sweep. It fails open: if the namespaces list or
 the request counts cannot be read, nothing changes and the error is logged; a failed
 duration or storage read only leaves those numbers at 0. The flag clears by itself on
-a new day under the ceiling. To lift a throttle early, raise the ceiling or set
-`do_throttled: false` on the Site and republish.
+a new day under the ceiling. To lift a throttle early, raise the ceiling; the next
+sweep lifts it on the live script.
+
+**Live var updates** (`durable_objects.set_platform_vars_live`). `PAW_DO_THROTTLED`
+and `PAW_SITE_ORIGINS` change without re-uploading code, through the script settings
+API: `GET` then `PATCH .../workers/scripts/<name>/settings` (the dispatch path on
+WfP), the `settings` part carrying `bindings`
+([docs](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/edit/)).
+The PATCH sends the whole binding list as read, with only the platform var replaced
+(added when missing). Secrets (`secret_text`, `secret_key`) are sent as
+`{"type": "inherit", "name": ...}` so the live value is kept; the GET does not hand
+it back and nothing is omitted, since the docs do not say an omitted binding
+survives. Every caller fails open: an error is logged and the site keeps serving.
 
 **Delete.** The cascade's `do` step (before `script`) runs the teardown: a stub upload
 with `{old_tag, new_tag: "paw-tombstone", deleted_classes}` (deletes every object and
@@ -355,8 +369,9 @@ the same teardown and the draft sweeper retries them.
    `target: dispatch`). Once no namespace row remains, delete the teardown row.
 2. *A site is throttled.* Check `Site.do_usage` for today's numbers. Either it is real
    traffic (leave it; it lifts tomorrow, or move the site to a paid plan), or the
-   ceiling is too low for the plan (raise `PAW_SITES_DO_DAILY_REQUESTS_*`). The
-   Worker only sees the change on its next deploy.
+   ceiling is too low for the plan (raise `PAW_SITES_DO_DAILY_REQUESTS_*`). If the
+   log shows `could not push PAW_DO_THROTTLED`, the stored flag did not change and
+   the next sweep retries; check the token's Workers Scripts: Edit scope.
 3. *Usage stays at zero or the sweep logs `usage read failed`.* Analytics lag by a
    few minutes; a persistent failure usually means the token lacks
    `Account Analytics: Read` or a GraphQL field was renamed. Run the spike's

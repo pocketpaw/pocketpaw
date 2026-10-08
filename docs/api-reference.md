@@ -1065,7 +1065,9 @@ never does. It is replayed with the rest of a paid-tier pending publish.
 `do_migration_tags` (applied tag history), `do_classes` (live classes), `do_usage`
 (`{"YYYY-MM-DD": {requests, active_time, stored_bytes}}`, 35 days) and `do_throttled`
 (today's requests are past the plan's daily ceiling; the Worker sees
-`PAW_DO_THROTTLED=1` from its next deploy). A DO site's Worker also gets
+`PAW_DO_THROTTLED=1` right away, pushed through the script settings API). A DO
+site's Worker also gets `PAW_SITE_ORIGINS` (its public origin and live custom
+domains, or a draft's preview origin) and
 `ROOM_MAX_PEERS` (10 free, `PAW_SITES_DO_ROOM_MAX_PAID` up to 50 paid).
 
 ## Paw Partners — profile and clients

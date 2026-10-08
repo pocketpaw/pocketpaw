@@ -1118,6 +1118,30 @@ class CloudflareClient:
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
 
+    async def get_script_settings(self, script_name: str, *, target: str) -> dict:
+        """The live script's settings (bindings, compat, ...):
+        ``GET .../scripts/{name}/settings`` on ``target``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/get/)."""
+        async with self._client() as client:
+            resp = await client.get(f"{self._script_url(script_name, target)}/settings")
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def patch_script_settings(
+        self, script_name: str, settings: Mapping[str, Any], *, target: str
+    ) -> dict:
+        """``PATCH .../scripts/{name}/settings`` with ``settings`` as the multipart
+        ``settings`` part. No code upload, so the running version keeps its code
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/edit/).
+        Callers send the FULL bindings list (``durable_objects.set_platform_vars_live``)."""
+        files = {"settings": (None, json.dumps(dict(settings)), "application/json")}
+        async with self._client() as client:
+            resp = await client.patch(
+                f"{self._script_url(script_name, target)}/settings", files=files
+            )
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
     async def query_graphql(self, query: str, variables: Mapping[str, Any]) -> dict:
         """Run one GraphQL Analytics query and return its ``data``.
 

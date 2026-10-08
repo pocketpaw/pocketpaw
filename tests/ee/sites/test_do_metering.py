@@ -70,7 +70,7 @@ async def test_a_do_deploy_carries_the_platform_vars(do_build, paid, throttled, 
         do_throttled=throttled,
     )
     meta = _metadata(next(r for r in cf.requests if r.method == "PUT"))
-    assert _plain(meta) == {"ROOM_MAX_PEERS": cap, "PAW_DO_THROTTLED": flag}
+    assert _plain(meta) == {"ROOM_MAX_PEERS": cap, "PAW_DO_THROTTLED": flag, "PAW_SITE_ORIGINS": ""}
 
 
 @pytest.mark.asyncio
@@ -146,6 +146,12 @@ class _UsageCF:
             {"id": "ns-b", "script": "site-b", "class": "Room"},
             {"id": "ns-x", "script": "someone-else", "class": "X"},
         ]
+
+    async def get_script_settings(self, script_name, *, target):
+        return {"bindings": []}
+
+    async def patch_script_settings(self, script_name, settings, *, target):
+        return settings
 
     async def query_graphql(self, query: str, variables: dict) -> dict:
         self.queries.append(variables)
