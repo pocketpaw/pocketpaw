@@ -2,8 +2,8 @@
   {
     "label": "ignore the Refero token, so a deploy that pays for Refero never calls it",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "    if _refero_configured():",
-    "replace": "    if False:",
+    "find": "    token Refero answers nothing, so the step does not name it.\r\n    \"\"\"\r\n    if _refero_configured():",
+    "replace": "    token Refero answers nothing, so the step does not name it.\r\n    \"\"\"\r\n    if False:",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_refero_leads_the_research_step_when_its_token_is_set",
       "tests/cloud/surface/test_sites_handler.py::test_a_create_preamble_carries_refero_when_configured"
