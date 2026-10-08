@@ -162,6 +162,33 @@ def test_an_emit_outside_the_host_events_is_rejected_at_close():
     assert events[-1] == ("card.rejected", {"card_id": "c2", "reason": "invalid"})
 
 
+def _deep(depth: int) -> dict:
+    node: dict = {"type": "text", "props": {"text": "x"}}
+    for _ in range(depth - 1):
+        node = {"type": "flex", "children": [node]}
+    return {"ui": node}
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        # A node kept in a prop is checked as a node (embed is deferred).
+        {"ui": {"type": "popover", "props": {"trigger": "o", "content": {"type": "embed"}}}},
+        # An action sitting in state is checked like one in ui.
+        {"ui": {"type": "text"}, "state": {"go": {"action": "navigate", "url": "/x"}}},
+        # Far past the depth bound: dropped, never raised.
+        _deep(200),
+    ],
+)
+def test_the_hardened_ripple_refusals_are_card_rejected_invalid(spec):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    body = json.dumps(spec) + "\n"
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is None
+    events = _events([_fence(body)])
+    assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "invalid"})
+
+
 def test_only_card_fences_stream_other_fences_keep_todays_rules():
     events = _events(["x ```py\nprint(1)\n``` y"])
     assert events == [("chunk", f"x {_CODE_LINE} y")]
