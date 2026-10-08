@@ -556,8 +556,9 @@ async def run_project_preview_build(
         return _finish("failed", f"{build_job.RUNG_PREVIEW_UNREADABLE}:bundle_unreadable", **logged)
 
     draft_reason: str | None = None
+    draft_extra: dict[str, Any] = {}
     if manifest_has_worker(dict(manifest)):
-        mode, draft_reason = await _draft_worker_mode(
+        mode, draft_reason, missing = await _draft_worker_mode(
             pocket_id,
             content_hash,
             result.artifact or b"",
@@ -567,6 +568,8 @@ async def run_project_preview_build(
             mode,
             _draft or {},
         )
+        if missing:
+            draft_extra["draft_secrets_missing"] = list(missing)
 
     framework = manifest.get("framework") if isinstance(manifest.get("framework"), str) else None
     return _finish(
@@ -575,6 +578,7 @@ async def run_project_preview_build(
         preview_mode=mode,
         framework=framework,
         draft_worker_reason=draft_reason,
+        **draft_extra,
         **logged,
     )
 
@@ -588,10 +592,11 @@ async def _draft_worker_mode(
     store: Any,
     mode: str,
     deps: dict[str, Any],
-) -> tuple[str, str | None]:
-    """``(preview_mode, draft_worker_reason)`` once the draft Worker had its try
-    (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``): ``"full"`` when it serves,
-    else the static mode already computed plus the rung. Never raises."""
+) -> tuple[str, str | None, tuple[str, ...]]:
+    """``(preview_mode, draft_worker_reason, missing secret names)`` once the draft
+    Worker had its try (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``):
+    ``"full"`` when it serves, else the static mode already computed plus the rung.
+    Never raises."""
     from pocketpaw_ee.sites import draft_worker
 
     try:
@@ -606,8 +611,8 @@ async def _draft_worker_mode(
         )
     except Exception:  # noqa: BLE001 - a draft Worker never fails the build
         logger.exception("sites.project: draft worker for pocket %s failed", pocket_id)
-        return mode, "draft_worker:deploy_failed"
-    return outcome.mode or mode, outcome.reason
+        return mode, "draft_worker:deploy_failed", ()
+    return outcome.mode or mode, outcome.reason, outcome.missing_secrets
 
 
 async def _capacity_outcome(

@@ -14,7 +14,9 @@ from typing import Any
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.sites import draft_worker, preview_origin, preview_proxy
 from pocketpaw_ee.sites import service as sites_service
 
@@ -27,6 +29,7 @@ STATIC_TOKEN = "c" * 32
 HOST = f"{TOKEN}.preview.paw.test"
 UPSTREAM = "paw-draft-x-0123456789abcdef.acct.workers.dev"
 BUILDER = "https://dash.paw.example"
+DRAFT_KEY = "k" * 43
 
 
 class _Stream(httpx.AsyncByteStream):
@@ -64,6 +67,7 @@ class Upstream:
 def upstream(monkeypatch):
     monkeypatch.setenv("PAW_SITES_PREVIEW_BASE_URL", PREVIEW_BASE)
     monkeypatch.setenv("PAW_SITES_DRAFT_WORKERS", "1")
+    monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
     preview_origin._clear_caches()
     draft_worker._reset_caches()
     store = Store()
@@ -78,7 +82,12 @@ def upstream(monkeypatch):
 
     registry = draft_worker.MemoryRegistry()
     registry.rows[POCKET] = draft_worker.DraftRecord(
-        pocket_id=POCKET, workspace="ws1", script="paw-draft-x", host=UPSTREAM, deployed_hash="h1"
+        pocket_id=POCKET,
+        workspace="ws1",
+        script="paw-draft-x",
+        host=UPSTREAM,
+        deployed_hash="h1",
+        draft_key_enc=crypto.encrypt(DRAFT_KEY),
     )
     monkeypatch.setattr(draft_worker, "default_registry", lambda: registry)
     monkeypatch.setattr(preview_proxy, "builder_origin_for", lambda pocket_id: BUILDER)
@@ -111,9 +120,10 @@ async def test_post_reaches_the_draft_worker_with_its_body_and_cookies(upstream)
         f"https://{HOST}/api/auth/sign-up/email?x=1",
         content=b'{"email":"a@b.c"}',
         headers={
-            "cookie": "s=0",
+            "cookie": "__Host-paw~s=0",
             "content-type": "application/json",
             "cf-connecting-ip": "1.2.3.4",
+            "x-paw-draft-key": "guessed",
         },
     )
     assert resp.status_code == 201
@@ -122,10 +132,14 @@ async def test_post_reaches_the_draft_worker_with_its_body_and_cookies(upstream)
     assert req.url.query == b"x=1"
     assert req.method == "POST" and upstream.bodies == [b'{"email":"a@b.c"}']
     assert req.headers["cookie"] == "s=0"
+    # The proxy, and only the proxy, proves to the draft Worker it is the caller.
+    assert req.headers["x-paw-draft-key"] == DRAFT_KEY
     assert req.headers["x-forwarded-host"] == HOST
     assert req.headers["x-forwarded-proto"] == "https"
     assert "cf-connecting-ip" not in req.headers
     cookie = resp.headers["set-cookie"]
+    assert cookie.startswith("__Host-paw~s=1;")
+    assert "Path=/" in cookie and "path=/" not in cookie.replace("Path=/", "")
     assert "domain" not in cookie.lower()
     assert "Secure" in cookie and "SameSite=None" in cookie and "Partitioned" in cookie
     assert "HttpOnly" in cookie
@@ -233,3 +247,90 @@ async def test_an_unreachable_worker_is_a_502(upstream):
     resp = await _call("GET", f"https://{HOST}/")
     assert resp.status_code == 502
     assert UPSTREAM not in resp.text
+
+
+# ---------------------------------------------------------------- cookies (__Host-)
+
+
+async def test_a_cookie_tossed_by_a_sibling_draft_is_never_forwarded(upstream):
+    # A sibling draft can set ``Domain=preview.paw.test`` cookies on every draft host;
+    # they arrive here without the ``__Host-`` prefix only a host-only cookie can carry.
+    await _call("GET", f"https://{HOST}/me", headers={"cookie": "session=evil; theme=dark"})
+    (req,) = upstream.requests
+    assert "cookie" not in req.headers
+
+
+async def test_cookies_round_trip_for_plain_and_host_prefixed_names(upstream):
+    upstream.respond = lambda r: _resp(
+        200,
+        b"ok",
+        [
+            ("content-type", "text/plain"),
+            ("set-cookie", "sid=abc; Path=/api; HttpOnly"),
+            ("set-cookie", "__Host-better-auth.session_token=t1; Path=/; Secure; HttpOnly"),
+            ("set-cookie", "__Host-paw~forged=1; Path=/; Secure"),
+        ],
+    )
+    resp = await _call("GET", f"https://{HOST}/login")
+    cookies = resp.headers.get_list("set-cookie")
+    names = [c.split("=", 1)[0] for c in cookies]
+    # Plain names get the proxy's prefix; the app's own __Host- names stay as they are;
+    # a native name inside the proxy's namespace is dropped so the mapping stays 1:1.
+    assert names == ["__Host-paw~sid", "__Host-better-auth.session_token"]
+    assert all("Path=/;" in c or c.endswith("Path=/") for c in cookies)
+    assert all("Secure" in c for c in cookies)
+
+    upstream.requests.clear()
+    await _call(
+        "GET",
+        f"https://{HOST}/me",
+        headers={"cookie": "__Host-paw~sid=abc; __Host-better-auth.session_token=t1; x=1"},
+    )
+    (req,) = upstream.requests
+    assert req.headers["cookie"] == "sid=abc; __Host-better-auth.session_token=t1"
+
+
+def test_set_cookie_rewrite_is_reversible():
+    out = preview_proxy.rewrite_set_cookie("a.b=1; Domain=x.test; SameSite=Lax", secure=True)
+    assert out is not None and out.startswith("__Host-paw~a.b=1")
+    assert preview_proxy.request_cookies("__Host-paw~a.b=1") == "a.b=1"
+    assert preview_proxy.rewrite_set_cookie("__Host-paw~a=1", secure=True) is None
+
+
+# ---------------------------------------------------------------- SSRF
+
+
+async def _raw(raw_path: bytes) -> list[dict]:
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "scheme": "https",
+        "path": raw_path.decode(),
+        "raw_path": raw_path,
+        "query_string": b"",
+        "headers": [(b"host", HOST.encode())],
+    }
+    await preview_origin.preview_app(scope, receive, send)
+    return sent
+
+
+@pytest.mark.parametrize("raw_path", [b"@evil.com/x", b":x@10.0.0.1/", b"evil.com/x"])
+async def test_a_request_target_without_a_leading_slash_is_refused(upstream, raw_path):
+    sent = await _raw(raw_path)
+    assert sent[0]["status"] == 400
+    assert upstream.requests == []
+
+
+async def test_a_double_slash_path_stays_on_the_draft_host(upstream):
+    sent = await _raw(b"//evil.com/x")
+    assert sent[0]["status"] == 200
+    (req,) = upstream.requests
+    assert req.url.host == UPSTREAM and req.url.path == "//evil.com/x"

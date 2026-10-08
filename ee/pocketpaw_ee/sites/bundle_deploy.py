@@ -746,6 +746,7 @@ async def deploy_bundle(
     target: str = DISPATCH_TARGET,
     paid: bool = False,
     draft: bool = False,
+    main_wrapper: Callable[[str], WorkerModule] | None = None,
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -766,7 +767,9 @@ async def deploy_bundle(
     ``paid`` is the site's ``entitlements.site_paid_backends_entitled`` answer; it
     picks the per-request CPU and subrequest caps (``limits_for``). Unknown means
     free, the tighter cap. ``draft`` (a ``draft_worker`` deploy) uses the draft
-    limit / observability knobs and no placement."""
+    limit / observability knobs and no placement. ``main_wrapper``, given the main
+    module's name, returns a module that becomes the new entry (the draft guard); it
+    is added after every check, so the wrapper itself is never author-controlled."""
     if target not in SCRIPT_TARGETS:
         raise _refuse(f"unknown deploy target {target!r}")
     bundle, manifest = _read_bundle(build_dir)
@@ -775,6 +778,12 @@ async def deploy_bundle(
     _map_into(bundle, manifest, provisioned or ProvisionedResources())
     for warning in bundle.warnings:
         logger.warning("sites.bundle_deploy %s: %s", script_name, warning)
+    if main_wrapper is not None and bundle.main_module:
+        wrapper = main_wrapper(bundle.main_module)
+        if any(m.name == wrapper.name for m in bundle.modules):
+            raise _refuse(f"the build already has a module named {wrapper.name}")
+        bundle.modules.append(wrapper)
+        bundle.main_module = wrapper.name
     if before_upload is not None:
         await before_upload(bundle.bindings)
 

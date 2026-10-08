@@ -155,31 +155,57 @@ draft.
 Off by default. With `PAW_SITES_DRAFT_WORKERS=1` and the account project deploy
 target (`PAW_SITES_PROJECT_DEPLOY_TARGET=account`, or `PAW_CF_DEPLOY_MODE=workers`),
 a `project` build with server code also deploys as an account-level **draft
-Worker**, `paw-draft-<pocket id>-<random>`, and its preview URL is reverse-proxied
-to it. API routes, SSR pages and auth then run in the draft, and next / sveltekit
-drafts get a preview at all. The workers.dev address is never handed out.
+Worker**, `paw-draft-[<env tag>-]<pocket id>-<random>`, and its preview URL is
+reverse-proxied to it. API routes, SSR pages and auth then run in the draft, and
+next / sveltekit drafts get a preview at all. The workers.dev address is never
+handed out. Needs `CLOUD_ENCRYPTION_KEY` (the per-draft keys are stored encrypted);
+without it draft Workers stay off.
 
 - **Data.** The draft binds its own D1 (`paw-draft-<pocket id>`), KV and R2,
   never the published site's. Migrations apply with destructive changes allowed; a
   changed applied migration recreates the draft database. Top-level `seed/*.sql`
   runs once on a fresh draft database.
-- **Secrets.** The owner's secrets bind as on publish, except
-  `BETTER_AUTH_SECRET`, `AUTH_SECRET` and `SESSION_SECRET`, which get a
-  per-draft value (encrypted with `CLOUD_ENCRYPTION_KEY`; without it they are
-  re-minted every deploy). An owner secret `NAME__DRAFT` binds as `NAME` in the
-  draft. `BETTER_AUTH_URL` and `PAW_SITE_URL` are set to the draft's preview URL.
+- **Secrets.** Production secret values are never bound to a draft. A draft gets
+  only the owner's `NAME__DRAFT` secrets (bound as `NAME`), its own
+  `BETTER_AUTH_SECRET` / `AUTH_SECRET` / `SESSION_SECRET`, and `BETTER_AUTH_URL` /
+  `PAW_SITE_URL` set to its preview URL. A build that requires a secret with no
+  `NAME__DRAFT` value falls back (`draft_worker:secrets_missing`), and the agent
+  is told which `NAME__DRAFT` names to ask the owner for.
+- **Guard.** The draft's entry module is a small wrapper that answers 404 unless
+  the request carries `X-Paw-Draft-Key` equal to the draft's own random key, which
+  only the preview proxy sends, so the workers.dev address is useless on its own.
+  Static assets the platform serves before the Worker runs are not covered by it.
 - **Proxy.** Every method is forwarded, the request body up to
-  `PAW_SITES_DRAFT_MAX_BODY` (10 MiB). Cookies pass through for this draft's host
-  only: `Domain` is stripped, and on https `Secure; SameSite=None; Partitioned` is
-  added so sign-in works inside the builder iframe. HTML gets the runtime-error
-  reporter, and the edit bridge under `?paw_edit=1`. A URL of an older build of a
-  proxied draft is a 404. WebSockets are not proxied.
+  `PAW_SITES_DRAFT_MAX_BODY` (10 MiB). A request target that does not start with
+  `/` is a 400. HTML gets the runtime-error reporter, and the edit bridge under
+  `?paw_edit=1`. A URL of an older build of a proxied draft is a 404. WebSockets
+  are not proxied.
+- **Cookies.** Every cookie a draft sets reaches the browser as a host-only
+  `__Host-` cookie (`Path=/; Secure; SameSite=None; Partitioned`, so sign-in works
+  inside the builder iframe): an app's own `__Host-` names stay, any other name `n`
+  becomes `__Host-paw~n`. Only `__Host-` cookies are sent back to the draft
+  (`__Host-paw~n` as `n`). The preview base host is not on the Public Suffix List,
+  so any draft can set `Domain=<preview host>` cookies on every other draft; those
+  can never carry the `__Host-` prefix, so they are never forwarded. Recommended
+  later: serve previews from their own registrable domain (on the PSL, or one domain
+  per draft) so the browser isolates drafts itself.
 - **Limits.** The site's plan caps (`PAW_SITES_DRAFT_CPU_MS`,
   `PAW_SITES_DRAFT_SUBREQUESTS` override them), Workers Logs at
   `PAW_SITES_DRAFT_OBSERVABILITY_SAMPLE` (default 1.0), no Smart Placement.
-- **Script cap.** A new draft script is refused when the account already has
-  `PAW_SITES_DRAFT_SCRIPT_CAP` (default 450) Worker scripts, or when the count
-  cannot be read. Cloudflare allows 500 per Paid account.
+- **Script cap.** A new draft reserves a slot under `PAW_SITES_DRAFT_SCRIPT_CAP`
+  (default 450) account Worker scripts and gives it back if its deploy fails; it is
+  refused when the cap is reached or the count cannot be read. Cloudflare allows
+  500 per Paid account. Each API process caches the count for a minute, so several
+  replicas can still overshoot by what they create inside that window.
+- **Shared accounts.** Set `PAW_SITES_DRAFT_ENV_TAG` (up to 8 of `a-z0-9`) when
+  more than one deployment (staging, production) uses the same Cloudflare account.
+  It goes into every draft script and database name, and the orphan sweep only
+  deletes `paw-draft-*` scripts carrying this deployment's tag (no tag: only
+  untagged ones).
+- **Races.** A publish or delete that lands while a draft is deploying wins: the
+  deploy writes its registry row only by compare-and-set, re-checks that the
+  pocket and site still exist before uploading, and deletes what it uploaded if
+  it lost.
 - **Fallback.** A draft Worker failure never fails the build: the preview falls
   back to `static` (or `server_only`) and the build record's `draft_worker_reason`
   says why (`draft_worker:cap`, `secrets_missing`, `deploy_failed`, ...).

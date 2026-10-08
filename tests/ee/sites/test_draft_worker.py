@@ -197,14 +197,30 @@ SECRETS = {
 }
 
 
-def _deps(cf: FakeCF, registry: Any, *, paid: bool = False, secrets: dict | None = None):
+def _deps(
+    cf: FakeCF,
+    registry: Any,
+    *,
+    paid: bool = False,
+    secrets: dict | None = None,
+    alive: bool = True,
+):
     async def _context(pocket_id):
         return "ws1", paid
 
     async def _secrets(workspace_id, pocket_id):
         return dict(SECRETS if secrets is None else secrets)
 
-    return {"cf": cf, "registry": registry, "context": _context, "secrets_reader": _secrets}
+    async def _alive(pocket_id, workspace_id):
+        return alive
+
+    return {
+        "cf": cf,
+        "registry": registry,
+        "context": _context,
+        "secrets_reader": _secrets,
+        "alive": _alive,
+    }
 
 
 MIGRATING_SOURCE = {
@@ -260,11 +276,12 @@ def test_script_names_are_reserved_unguessable_and_rotate():
     assert draft_worker.pocket_of_script(f"paw-site-{POCKET}") is None
 
 
-def test_draft_secrets_take_draft_overrides_and_replace_signing_secrets():
+def test_drafts_bind_only_draft_values_never_production_secrets():
     out = draft_worker.draft_secrets(SECRETS, signing_value="draft-signing")
-    assert out["STRIPE_KEY"] == "sk_test_x"  # NAME__DRAFT wins in a draft
+    assert out["STRIPE_KEY"] == "sk_test_x"  # NAME__DRAFT binds as NAME
     assert "STRIPE_KEY__DRAFT" not in out
-    assert out["RESEND_KEY"] == "re_x"
+    assert "RESEND_KEY" not in out  # a production value never reaches a draft
+    assert "sk_live_x" not in out.values() and "re_x" not in out.values()
     assert out["BETTER_AUTH_SECRET"] == "draft-signing"
     for name in draft_worker.SIGNING_SECRETS:
         assert out[name] == "draft-signing"
@@ -311,7 +328,16 @@ async def test_worker_build_deploys_a_draft_worker_and_previews_full():
     assert bindings["PAW_SITE_URL"]["text"] == url
     assert bindings["STRIPE_KEY"]["text"] == "sk_test_x"
     assert "STRIPE_KEY__DRAFT" not in bindings
+    assert "RESEND_KEY" not in bindings
     assert bindings["BETTER_AUTH_SECRET"]["text"] not in ("prod-signing", "")
+    # The guard wrapper is the entry; only a caller with the per-draft key gets in.
+    assert put["main_module"] == draft_worker.GUARD_MODULE
+    guard = next(m for m in put["modules"] if m.name == draft_worker.GUARD_MODULE)
+    assert b'from "./index.js"' in guard.content and b"x-paw-draft-key" in guard.content
+    assert {m.name for m in put["modules"]} >= {"index.js", draft_worker.GUARD_MODULE}
+    key = bindings["PAW_DRAFT_KEY"]
+    assert key["type"] == "secret_text" and len(key["text"]) >= 32
+    assert rec.draft_key_enc and key["text"] not in rec.draft_key_enc
     # Draft limits + full-rate observability.
     assert put["observability"]["head_sampling_rate"] == 1.0
     assert put["limits"]["cpu_ms"] == 50
@@ -411,10 +437,14 @@ async def test_a_changed_applied_migration_recreates_the_draft_database():
 
 async def test_missing_required_secrets_fall_back():
     store, records, cf, registry = Store(), _Records(), FakeCF(), draft_worker.MemoryRegistry()
-    manifest = {**WORKER_MANIFEST, "requiredSecrets": ["OPENAI_KEY"]}
+    # RESEND_KEY is set for production but has no RESEND_KEY__DRAFT: still missing.
+    required = ["OPENAI_KEY", "RESEND_KEY", "STRIPE_KEY"]
+    manifest = {**WORKER_MANIFEST, "requiredSecrets": required}
     out = await _build(store, records, cf, registry, manifest=manifest)
     assert out["preview_mode"] == "static"
     assert _record(records)["draft_worker_reason"] == "draft_worker:secrets_missing"
+    assert _record(records)["draft_secrets_missing"] == ["OPENAI_KEY", "RESEND_KEY"]
+    assert cf.named("put_worker") == []
 
 
 async def test_paid_bindings_on_free_fall_back_not_entitled():
@@ -585,3 +615,116 @@ async def test_proxy_target_only_for_the_deployed_hash():
 def test_record_round_trips_through_json():
     rec = draft_worker.DraftRecord(pocket_id=POCKET, script="s", kv_namespaces={"A": "1"})
     assert draft_worker.DraftRecord(**json.loads(json.dumps(rec.to_dict()))) == rec
+
+
+# ---------------------------------------------------------------- deploy / purge race
+
+
+async def test_a_purge_during_the_deploy_wins_and_the_upload_is_removed():
+    store, records, cf, registry = Store(), _Records(), FakeCF(), draft_worker.MemoryRegistry()
+    real_put = cf.put_worker
+
+    async def _put_then_publish(**kw):
+        # The site is published while this draft is uploading.
+        await draft_worker.purge_pocket_drafts(
+            POCKET, reason="published", published_hash="hp", cf=cf, registry=registry, store=store
+        )
+        return await real_put(**kw)
+
+    cf.put_worker = _put_then_publish
+    out = await _build(store, records, cf, registry)
+    assert out["preview_mode"] == "static"
+    assert _record(records)["draft_worker_reason"] == "draft_worker:superseded"
+    rec = await registry.get(POCKET)
+    assert rec.state == "purged" and rec.published_hash == "hp" and rec.deployed_hash == ""
+    uploaded = cf.named("put_worker")[0]["script_name"]
+    assert uploaded not in cf.scripts  # the late upload was deleted again
+    assert not cf.databases  # and so was the draft database it bound
+    assert await draft_worker.proxy_target(POCKET, "h1", registry=registry) is None
+
+
+async def test_a_row_deleted_mid_deploy_is_not_resurrected():
+    store, records, cf, registry = Store(), _Records(), FakeCF(), draft_worker.MemoryRegistry()
+    real_put = cf.put_worker
+
+    async def _put_then_delete_pocket(**kw):
+        await draft_worker.purge_pocket_drafts(
+            POCKET, reason="pocket_deleted", forget=True, cf=cf, registry=registry, store=store
+        )
+        return await real_put(**kw)
+
+    cf.put_worker = _put_then_delete_pocket
+    await _build(store, records, cf, registry)
+    assert await registry.get(POCKET) is None
+    assert not [s for s in cf.scripts if s.startswith("paw-draft-")]
+
+
+async def test_a_deleted_pocket_is_never_uploaded():
+    store, records, cf, registry = Store(), _Records(), FakeCF(), draft_worker.MemoryRegistry()
+    out = await _build(store, records, cf, registry, alive=False)
+    assert out["preview_mode"] == "static"
+    assert _record(records)["draft_worker_reason"] == "draft_worker:gone"
+    assert cf.named("put_worker") == [] and cf.named("upload_assets") == []
+    assert not cf.databases
+
+
+async def test_cas_refuses_a_stale_version():
+    registry = draft_worker.MemoryRegistry()
+    rec = draft_worker.DraftRecord(pocket_id=POCKET)
+    assert await registry.cas(rec, None) is True and rec.version == 1
+    stale = draft_worker.DraftRecord(pocket_id=POCKET, version=0)
+    assert await registry.cas(stale, 0) is False
+    assert await registry.cas(rec, 1) is True and rec.version == 2
+
+
+# ---------------------------------------------------------------- cap reservation
+
+
+async def test_a_new_draft_reserves_its_slot_and_a_failure_releases_it(monkeypatch):
+    monkeypatch.setenv("PAW_SITES_DRAFT_SCRIPT_CAP", "4")
+    cf = FakeCF(scripts=3)
+    assert await draft_worker._reserve_slot(cf) is True
+    # A second deploy in the same window sees the reserved slot.
+    assert await draft_worker._reserve_slot(cf) is False
+    draft_worker._release_slot()
+    assert await draft_worker._reserve_slot(cf) is True
+
+
+async def test_a_failed_new_deploy_gives_its_slot_back(monkeypatch):
+    monkeypatch.setenv("PAW_SITES_DRAFT_SCRIPT_CAP", "4")
+    store, records, registry = Store(), _Records(), draft_worker.MemoryRegistry()
+    cf = FakeCF(scripts=3)
+    cf.fail.add("put_worker")
+    await _build(store, records, cf, registry)
+    assert await draft_worker._reserve_slot(cf) is True
+
+
+# ---------------------------------------------------------------- environment tag
+
+
+def test_the_env_tag_scopes_names_and_the_orphan_match(monkeypatch):
+    untagged = draft_worker.new_script_name(POCKET)
+    monkeypatch.setenv("PAW_SITES_DRAFT_ENV_TAG", "Stg_1")
+    tagged = draft_worker.new_script_name(POCKET)
+    assert tagged.startswith(f"paw-draft-stg1-{POCKET}-") and len(tagged) <= 63
+    assert draft_worker.draft_database_name(POCKET) == f"paw-draft-stg1-{POCKET}"
+    assert draft_worker.pocket_of_script(tagged) == POCKET
+    assert draft_worker.pocket_of_script(untagged) is None
+    monkeypatch.setenv("PAW_SITES_DRAFT_ENV_TAG", "prod")
+    assert draft_worker.pocket_of_script(tagged) is None
+    monkeypatch.delenv("PAW_SITES_DRAFT_ENV_TAG")
+    assert draft_worker.pocket_of_script(untagged) == POCKET
+    assert draft_worker.pocket_of_script(tagged) is None
+
+
+async def test_the_orphan_sweep_leaves_other_deployments_scripts_alone(monkeypatch):
+    monkeypatch.setenv("PAW_SITES_DRAFT_ENV_TAG", "stg")
+    other = f"paw-draft-{POCKET}-0123456789abcdef"  # an untagged deployment's draft
+    mine = draft_worker.new_script_name("64b7f0c2a1b2c3d4e5f60799")
+    cf = FakeCF()
+    cf.scripts += [other, mine]
+    out = await draft_worker.sweep_draft_workers(
+        cf=cf, registry=draft_worker.MemoryRegistry(), store=Store()
+    )
+    assert out["orphans"] == 1
+    assert cf.named("delete_account_script") == [mine]

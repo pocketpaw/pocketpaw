@@ -8,13 +8,20 @@
 # an error).
 #
 # Rules a reader must not break:
-#   * the upstream host comes from the registry only, never from the request;
+#   * the upstream host comes from the registry only, never from the request: a
+#     request target that does not start with ``/`` is a 400, the URL is built from
+#     parts, and its host is checked before anything is sent;
+#   * the proxy sends the draft's ``X-Paw-Draft-Key`` (the Worker's guard refuses
+#     anyone else) and never forwards one a client sent;
 #   * every method is forwarded (OPTIONS too: the Worker owns its CORS); the request
 #     body streams through under ``PAW_SITES_DRAFT_MAX_BODY`` (413 past it);
-#   * Cookie goes up and Set-Cookie comes back, rewritten host-only (Domain dropped)
-#     and, on https, ``Secure; SameSite=None; Partitioned`` so auth works in the
-#     builder's cross-site iframe. This is the ONLY place the preview origin passes
-#     cookies; static drafts never do;
+#   * cookies: every Set-Cookie comes back as a host-only ``__Host-`` cookie (``Path=/;
+#     Secure; SameSite=None; Partitioned``, Domain dropped): an app's own ``__Host-``
+#     names stay, any other name ``n`` becomes ``__Host-paw~n``, and a native name in
+#     the ``__Host-paw~`` space is dropped so the mapping stays one-to-one. Only
+#     ``__Host-`` cookies go up (``__Host-paw~n`` as ``n``), so a cookie a sibling draft
+#     tossed with ``Domain=<preview base>`` never reaches this draft. This is the ONLY
+#     place the preview origin passes cookies; static drafts never do;
 #   * HTML responses are decoded and streamed with the runtime reporter injected at
 #     the first ``<head>`` and, under ``?paw_edit=1`` (never forwarded), the edit
 #     bridge appended. Everything else streams raw with its own encoding.
@@ -50,9 +57,21 @@ _HOP = frozenset(
         "upgrade",
     }
 )
-_DROP_IN = _HOP | {"host", "x-real-ip", "forwarded", "true-client-ip", "accept-encoding"}
+_DROP_IN = _HOP | {
+    "host",
+    "x-real-ip",
+    "forwarded",
+    "true-client-ip",
+    "accept-encoding",
+    "cookie",
+    "x-paw-draft-key",
+}
 _DROP_IN_PREFIXES = ("cf-", "x-forwarded-")
-_COOKIE_FLAGS = {"domain", "samesite", "secure", "partitioned"}
+_COOKIE_FLAGS = {"domain", "samesite", "secure", "partitioned", "path"}
+
+HOST_PREFIX = "__Host-"
+#: Plain upstream cookie names travel to the browser under this prefix.
+PROXY_PREFIX = "__Host-paw~"
 
 _HEAD_RE = re.compile(rb"<head(?:\s[^>]*)?>", re.IGNORECASE)
 _DOCTYPE_RE = re.compile(rb"<!doctype[^>]*>", re.IGNORECASE)
@@ -97,16 +116,41 @@ def builder_origin_for(pocket_id: str) -> str:
     return sites_service._recorded_view_origin(pocket_id) or sites_service._builder_origin()
 
 
-def rewrite_set_cookie(value: str, *, secure: bool) -> str:
-    """Host-only always; on https also ``Secure; SameSite=None; Partitioned``."""
+def rewrite_set_cookie(value: str, *, secure: bool = True) -> str | None:
+    """An upstream Set-Cookie as the host-only ``__Host-`` cookie the browser gets,
+    or ``None`` to drop it (malformed, or a native name inside ``__Host-paw~``).
+    ``__Host-`` cookies are always ``Secure``; browsers accept that on https and on
+    ``*.localhost``, so ``secure`` is informational."""
     parts = [p.strip() for p in value.split(";")]
+    name, sep, val = parts[0].partition("=")
+    name = name.strip()
+    if not sep or not name or name.startswith(PROXY_PREFIX):
+        return None
+    if not name.startswith(HOST_PREFIX):
+        name = PROXY_PREFIX + name
     attrs = [a for a in parts[1:] if a]
-    if secure:
-        kept = [a for a in attrs if a.split("=", 1)[0].strip().lower() not in _COOKIE_FLAGS]
-        kept += ["Secure", "SameSite=None", "Partitioned"]
-    else:
-        kept = [a for a in attrs if a.split("=", 1)[0].strip().lower() != "domain"]
-    return "; ".join([parts[0], *kept])
+    kept = [a for a in attrs if a.split("=", 1)[0].strip().lower() not in _COOKIE_FLAGS]
+    return "; ".join([f"{name}={val}", "Path=/", *kept, "Secure", "SameSite=None", "Partitioned"])
+
+
+def request_cookies(header: str) -> str:
+    """The Cookie header the draft Worker gets: ``__Host-`` cookies only, the proxy's
+    ``__Host-paw~n`` sent back as ``n``. Anything else (a cookie another draft tossed
+    with a Domain attribute) is dropped."""
+    out: list[str] = []
+    for part in header.split(";"):
+        name, sep, val = part.strip().partition("=")
+        name = name.strip()
+        if not sep or not name:
+            continue
+        if name.startswith(PROXY_PREFIX):
+            name = name[len(PROXY_PREFIX) :]
+            if not name:
+                continue
+        elif not name.startswith(HOST_PREFIX):
+            continue
+        out.append(f"{name}={val}")
+    return "; ".join(out)
 
 
 class _TooLarge(Exception):
@@ -166,7 +210,6 @@ async def forward(
     method = scope.get("method", "GET").upper()
     head = method == "HEAD"
     scheme = urlsplit(preview_origin.preview_base_url()).scheme or "https"
-    secure = scheme == "https"
     label = preview_host[:6]
 
     query = scope.get("query_string", b"").decode("latin-1")
@@ -175,9 +218,22 @@ async def forward(
     raw_path = scope.get("raw_path") or scope.get("path", "/").encode()
     path = raw_path.decode("latin-1") if isinstance(raw_path, bytes) else str(raw_path)
     path = path.split("?", 1)[0]  # some servers put the query in raw_path
-    url = f"https://{target.host}{path or '/'}" + (f"?{'&'.join(pairs)}" if pairs else "")
+    # Only an origin-form target ("/..."). Anything else ("@evil.com/x", ":x@10.0.0.1/")
+    # could turn the registry host into userinfo of a URL pointing elsewhere.
+    if not path.startswith("/"):
+        await _plain(send, 400, "Bad request", head)
+        return
+    target_raw = path + (f"?{'&'.join(pairs)}" if pairs else "")
+    try:
+        url = httpx.URL(scheme="https", host=target.host, raw_path=target_raw.encode("latin-1"))
+    except Exception:  # noqa: BLE001 - an unparsable target is the client's error
+        url = None
+    if url is None or url.host != target.host:
+        await _plain(send, 400, "Bad request", head)
+        return
 
     headers: list[tuple[str, str]] = []
+    cookies: list[str] = []
     accepts_gzip = False
     length = None
     for k, v in scope.get("headers") or []:
@@ -187,13 +243,19 @@ async def forward(
             accepts_gzip = "gzip" in value.lower()
         if name == "content-length":
             length = value
+        if name == "cookie":
+            cookies.append(value)
         if name in _DROP_IN or name.startswith(_DROP_IN_PREFIXES):
             continue
         headers.append((name, value))
+    cookie = request_cookies("; ".join(cookies))
+    if cookie:
+        headers.append(("cookie", cookie))
     headers += [
         ("x-forwarded-host", preview_host),
         ("x-forwarded-proto", scheme),
         ("accept-encoding", "gzip" if accepts_gzip else "identity"),
+        ("x-paw-draft-key", target.key),
     ]
 
     cap = _max_body()
@@ -244,7 +306,10 @@ async def forward(
             if html and name in ("content-length", "content-encoding"):
                 continue
             if name == "set-cookie":
-                v = rewrite_set_cookie(v, secure=secure)
+                rewritten = rewrite_set_cookie(v, secure=scheme == "https")
+                if rewritten is None:
+                    continue
+                v = rewritten
             elif name == "location":
                 loc = urlsplit(v)
                 if loc.hostname and loc.hostname.lower() == target.host.lower():

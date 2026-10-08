@@ -213,3 +213,33 @@ async def test_the_mongo_registry_round_trips_a_row(beanie_test_db):
     assert [r.pocket_id for r in await registry.all()] == ["pk-mongo"]
     await registry.delete("pk-mongo")
     assert await registry.get("pk-mongo") is None
+
+
+def test_the_agent_is_told_to_add_draft_values_for_missing_secrets():
+    from pocketpaw_ee.agent.mcp_servers import sites_project
+
+    note = sites_project._draft_worker_note(
+        {
+            "draft_worker_reason": "draft_worker:secrets_missing",
+            "draft_secrets_missing": ["RESEND_KEY", "OPENAI_KEY"],
+        }
+    )
+    assert "RESEND_KEY__DRAFT" in note and "OPENAI_KEY__DRAFT" in note
+    assert "request_site_secret" in note
+    assert sites_project._draft_worker_note({"draft_worker_reason": None}) == ""
+
+
+async def test_the_mongo_registry_compare_and_set(beanie_test_db):
+    registry = draft_worker.MongoRegistry()
+    rec = draft_worker.DraftRecord(pocket_id="pk-cas", script="paw-draft-y")
+    assert await registry.cas(rec, None) is True and rec.version == 1
+    assert await registry.cas(draft_worker.DraftRecord(pocket_id="pk-cas"), None) is False
+    rec.deployed_hash = "h1"
+    assert await registry.cas(rec, 1) is True and rec.version == 2
+    # A purge (unconditional put) bumps the version: the deploy's next CAS loses.
+    purge = await registry.get("pk-cas")
+    purge.state = "deleting"
+    await registry.put(purge)
+    rec.state = "live"
+    assert await registry.cas(rec, 2) is False
+    assert (await registry.get("pk-cas")).state == "deleting"
