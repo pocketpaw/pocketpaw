@@ -945,6 +945,7 @@ class CloudflareClient:
         viewport: dict | None = None,
         goto_options: dict | None = None,
         screenshot_options: dict | None = None,
+        wait_for_timeout: int = 0,
     ) -> bytes:
         """Screenshot a page and return the raw image bytes (SC-1, SC-2).
 
@@ -962,6 +963,8 @@ class CloudflareClient:
         (waitUntil / timeout) and ``screenshotOptions`` (fullPage / type / ...).
         Omitted options are left off the body entirely so Cloudflare's own
         defaults apply (a 1920x1080 viewport, a full-quality png).
+        ``wait_for_timeout`` (ms) becomes ``waitForTimeout``, the pause after the
+        page loads and before the shutter; 0 leaves it off.
 
         ``screenshot_options`` is passed through rather than assembled here on
         purpose — but note the one combination Cloudflare rejects: ``quality`` is
@@ -988,6 +991,8 @@ class CloudflareClient:
             payload["viewport"] = viewport
         if goto_options:
             payload["gotoOptions"] = goto_options
+        if wait_for_timeout > 0:
+            payload["waitForTimeout"] = wait_for_timeout
         async with self._client() as client:
             resp = await client.post(api_url, json=payload)
         content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()

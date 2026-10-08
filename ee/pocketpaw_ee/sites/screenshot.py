@@ -164,6 +164,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -196,6 +197,26 @@ _SCREENSHOT_OPTIONS = {"fullPage": False}
 # timeout comfortably inside the client's own 30s HTTP timeout so a slow page
 # fails as a clean render timeout rather than a severed connection.
 _GOTO_OPTIONS = {"waitUntil": "networkidle0", "timeout": 20_000}
+
+# Network idle is not "finished": a hero that fades or slides in is photographed
+# blank or half-drawn at that moment. So the shutter waits a settle delay after the
+# load, ``PAW_SITES_SCREENSHOT_DELAY_MS`` (default 2.5s). Capped so the goto timeout
+# plus the pause stays inside the client's 30s HTTP timeout.
+_SETTLE_ENV = "PAW_SITES_SCREENSHOT_DELAY_MS"
+_SETTLE_DEFAULT_MS = 2_500
+_SETTLE_MAX_MS = 8_000
+
+
+def _settle_ms() -> int:
+    """The settle delay in ms: the env value clamped to [0, max]; junk reads as the
+    default rather than turning the pause off."""
+    raw = os.environ.get(_SETTLE_ENV, "").strip()
+    try:
+        value = int(raw) if raw else _SETTLE_DEFAULT_MS
+    except ValueError:
+        return _SETTLE_DEFAULT_MS
+    return max(0, min(value, _SETTLE_MAX_MS))
+
 
 # Where the screenshot lands in the owner's Files panel. Its own folder so a
 # workspace that republishes often does not bury the owner's real files.
@@ -487,6 +508,7 @@ async def take_site_screenshot(
         viewport=dict(_VIEWPORT),
         goto_options=dict(_GOTO_OPTIONS),
         screenshot_options=dict(_SCREENSHOT_OPTIONS),
+        wait_for_timeout=_settle_ms(),
     )
     if not image:
         return ""
@@ -629,6 +651,7 @@ async def take_draft_screenshot(site: Any, *, cloudflare: Any | None = None) -> 
         viewport=dict(_VIEWPORT),
         goto_options=dict(_GOTO_OPTIONS),
         screenshot_options=dict(_SCREENSHOT_OPTIONS),
+        wait_for_timeout=_settle_ms(),
     )
     if not image:
         return ""
