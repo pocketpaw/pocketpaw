@@ -34,7 +34,8 @@
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar's
 # app/pawbar-manifest.json; ripple-manifest.json from @ripple-ui/svelte's
-# dist/manifest.json (see the ``.source`` file beside it). The drift tests in
+# dist/manifest.json minus each widget's example (the ``.source`` file beside
+# it says how). The drift tests in
 # tests/cloud/test_paw_bar_concierge_v2_output.py and
 # tests/cloud/test_paw_bar_ripple_profile.py pin both hashes and say how to
 # refresh them. The shared parity fixtures live in tests/fixtures/card_parity/.
