@@ -21,6 +21,12 @@
 # never written by any tool here — recipes return secret NAMES and the agent asks
 # the owner through ``request_site_secret`` (another lane; absent tools are named in
 # text only, never called from here).
+#
+# Agent text for Durable Objects (the realtime-room recipe): ``recipe_next_steps`` adds
+# the per-template entry wiring after an apply, and ``agent_error_text`` turns every
+# DO refusal (the build's ``do_config``, the deploy's ``sites.do_*``) into a plain next
+# step. A data-loss refusal is the owner's call in the publish dialog: the agent is
+# told never to pass ``confirm_do_data_loss`` itself.
 from __future__ import annotations
 
 import asyncio
@@ -124,6 +130,91 @@ SECRETS_RULE = (
     "settings."
 )
 
+#: The worker entry each template wires the realtime room into (export ``Room``,
+#: call ``routeRoom`` before the framework). sveltekit has none: the recipe refuses it.
+REALTIME_ROOM_ENTRIES = {
+    "astro": "src/worker.ts",
+    "next": "worker.ts",
+    "tanstack-start": "src/server.ts",
+    "vite-react-hono": "src/server/index.ts",
+}
+
+
+def recipe_next_steps(recipe_id: str, template: str | None) -> list[str]:
+    """Steps a recipe needs on top of its glue tasks, for this template."""
+    entry = REALTIME_ROOM_ENTRIES.get(template or "")
+    if recipe_id != "realtime-room" or entry is None:
+        return []
+    return [
+        f"Wire the room into the worker entry `{entry}`: add `export {{ Room }}` from the "
+        "recipe's src/server/realtime/room.ts and call `routeRoom(request, env)` before the "
+        "framework handles the request (frameworks cannot pass a WebSocket upgrade "
+        "through). The exact lines for this template are in AGENTS.md, section "
+        "realtime-room. Then run_site_build: the build refuses a Room it cannot see exported."
+    ]
+
+
+_DO_CONFIG_NEXT = (
+    "Next: the Durable Objects config in wrangler.jsonc is one the platform will not "
+    "deploy; the message names each problem. Never hand-write Durable Object config: "
+    "it comes from the realtime-room recipe, and you only ever append a new migration "
+    "step with a new tag (new_sqlite_classes). Never edit, reorder or delete a step, and "
+    "never use new_classes, transferred_classes or script_name. Fix wrangler.jsonc or the "
+    "worker entry's exports, then run_site_build again."
+)
+
+#: What the agent does next after each Durable Objects refusal.
+DO_ERROR_GUIDANCE = {
+    "do_config": _DO_CONFIG_NEXT,
+    "sites.do_config": _DO_CONFIG_NEXT,
+    "sites.do_disabled": (
+        "Next: Durable Objects (realtime rooms) are not enabled on Paw Sites yet, so this "
+        "site cannot deploy with them. Tell the user. Do not work around it; remove the "
+        "realtime-room recipe's durable_objects and migrations from wrangler.jsonc only if "
+        "the user decides to drop the realtime feature."
+    ),
+    "sites.do_class_missing": (
+        "Next: the worker entry does not export the Durable Object class. Add the "
+        "`export { Room }` line to the entry AGENTS.md (section realtime-room) names, "
+        "run_site_build, then publish again."
+    ),
+    "sites.do_class_cap": (
+        "Next: the site declares more Durable Object classes than its plan allows. Keep "
+        "one class (the realtime-room recipe's Room), or tell the user to upgrade the "
+        "site's plan."
+    ),
+    "sites.do_history_diverged": (
+        "Next: the migrations in wrangler.jsonc no longer start with what is live. "
+        "Migrations are append-only: restore every published step exactly as it was, in "
+        "order, and append new ones with new tags. Never rewrite or remove a published step."
+    ),
+    "sites.do_data_loss_unconfirmed": (
+        "Next: this publish would permanently delete or rename stored room data for the "
+        "classes named above. Only the site owner can approve that, in the publish dialog: "
+        "tell the user what will be lost and ask them to publish from the dialog and "
+        "confirm there. Never pass confirm_do_data_loss yourself and never try to get "
+        "around this check. If they want to keep the data, restore the class and its "
+        "migrations instead."
+    ),
+    "sites.do_account_budget": (
+        "Next: the platform has no room for a new Durable Object class right now. Nothing "
+        "is wrong with the site; tell the user to try again later and do not change the "
+        "code to get around it."
+    ),
+    "sites.do_budget_unknown": (
+        "Next: the platform could not check its Durable Object capacity just now. Nothing "
+        "is wrong with the site; tell the user to try again later and do not change the "
+        "code to get around it."
+    ),
+}
+
+
+def agent_error_text(code: str, message: str) -> str:
+    """``code: message``, plus the next step for a Durable Objects refusal."""
+    guidance = DO_ERROR_GUIDANCE.get(code)
+    return f"{code}: {message}" + (f" {guidance}" if guidance else "")
+
+
 NOT_PROJECT = (
     "{tool} works on project sites only (engine=project). For an html, svelte or "
     "react site use read_site_source and that engine's edit tool."
@@ -185,7 +276,7 @@ async def _project(
     except CloudError as exc:
         if exc.code == "sites.not_a_project":
             return None, _error_response(NOT_PROJECT.format(tool=tool))
-        return None, _error_response(f"{exc.code}: {exc.message}")
+        return None, _error_response(agent_error_text(exc.code, exc.message))
     return pocket, None
 
 
@@ -217,7 +308,7 @@ def _cli_error(exc: Exception) -> dict[str, Any]:
     from pocketpaw_ee.sites.project_tools import ProjectCliError
 
     if isinstance(exc, (CloudError, ProjectCliError)):
-        return _error_response(f"{exc.code}: {exc.message}")
+        return _error_response(agent_error_text(exc.code, exc.message))
     logger.warning("sites.project: tool failed", exc_info=exc)
     return _error_response(f"failed: {exc}")
 
@@ -403,19 +494,18 @@ async def _list_site_recipes_handler(args: dict) -> dict:
         recipes = await project_tools.list_recipes()
     except Exception as exc:  # noqa: BLE001
         return _cli_error(exc)
+    message = (
+        "plan is the lowest site plan a recipe needs. Apply `requires` first; "
+        "never apply two recipes that list each other in `conflicts`."
+    )
     template = args.get("template")
     if isinstance(template, str) and template.strip():
-        recipes = [r for r in recipes if template.strip() in r["applies_to"]]
-    return _success_response(
-        {
-            "ok": True,
-            "recipes": recipes,
-            "message": (
-                "plan is the lowest site plan a recipe needs. Apply `requires` first; "
-                "never apply two recipes that list each other in `conflicts`."
-            ),
-        }
-    )
+        slug = template.strip()
+        refused = [r for r in recipes if slug in (r.get("unsupported") or {})]
+        recipes = [r for r in recipes if slug in r["applies_to"]]
+        for r in refused:
+            message += f" {r['id']} is not available on {slug}: {r['unsupported'][slug]}"
+    return _success_response({"ok": True, "recipes": recipes, "message": message})
 
 
 async def _apply_site_recipe_handler(args: dict) -> dict:
@@ -443,9 +533,11 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
     template = _project_meta(pocket).get("template")
     template = template if isinstance(template, str) and template else None
     if template and template not in recipe["applies_to"]:
+        why = (recipe.get("unsupported") or {}).get(template)
         return _error_response(
             f"sites.recipe_not_applicable: {recipe_id} does not apply to the {template} "
             f"template (it applies to {', '.join(recipe['applies_to'])})."
+            + (f" Why: {why}" if why else "")
         )
     plan_tier, status = await sites_service.project_site_plan(
         workspace_id=workspace_id, pocket_id=pocket_id
@@ -528,6 +620,7 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
                 "recipe": recipe_id,
                 "written": [],
                 **requests,
+                "next_steps": recipe_next_steps(recipe_id, template),
                 "message": f"{recipe_id} is already applied; nothing changed. {SECRETS_RULE}",
             }
         )
@@ -558,6 +651,7 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
             "lockfile_removed": dropped,
             **requests,
             "verification": verification,
+            "next_steps": recipe_next_steps(recipe_id, template),
             "message": (
                 f"{recipe_id} is applied to the draft. Now do every glue task in order "
                 f"(read AGENTS.md again: the recipe added a section). {SECRETS_RULE}"
@@ -780,7 +874,7 @@ async def _run_site_build_handler(args: dict) -> dict:
             workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
         )
     except CloudError as exc:
-        return _error_response(f"{exc.code}: {exc.message}")
+        return _error_response(agent_error_text(exc.code, exc.message))
     except Exception as exc:  # noqa: BLE001
         return _cli_error(exc)
     job_id = art.get("build_job_id")
@@ -836,6 +930,12 @@ async def _run_site_build_handler(args: dict) -> dict:
             "The build failed. The log tail follows; the error is usually near the end. "
             "Fix the files it names and run_site_build again."
         )
+        _rung, _, code = str(body["reason"] or "").partition(":")
+        if code in DO_ERROR_GUIDANCE:
+            body["message"] = (
+                "The build refused the site's Durable Objects config (the log tail names "
+                f"each problem). {DO_ERROR_GUIDANCE[code]}"
+            )
         blocks.append(f"=== BUILD LOG ({job_id}) ===\n{tail}")
     else:
         waiting = reason_message((record or {}).get("reason") or art.get("build_reason"))

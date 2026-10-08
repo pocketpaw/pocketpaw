@@ -55,7 +55,7 @@ import logging
 from typing import Any
 
 from ._audit import record_tool_call
-from .sites_project import SITES_PROJECT_TOOL_IDS
+from .sites_project import SITES_PROJECT_TOOL_IDS, agent_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -236,8 +236,9 @@ async def _publish_handler(args: dict) -> dict:
     except CloudError as exc:
         # NotFound / Forbidden from the pockets service surface here — relay the
         # code + message so the agent can tell the user the pocket is missing or
-        # not theirs, instead of reporting a phantom publish.
-        return _error_response(f"{exc.code}: {exc.message}")
+        # not theirs, instead of reporting a phantom publish. A Durable Objects
+        # refusal also carries its next step (data loss is the owner's call).
+        return _error_response(agent_error_text(exc.code, exc.message))
     except Exception as exc:  # noqa: BLE001
         logger.warning("sites publish failed", exc_info=True)
         return _error_response(f"publish failed: {exc}")
