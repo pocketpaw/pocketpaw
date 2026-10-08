@@ -50,6 +50,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -227,6 +228,18 @@ _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
 _CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 _CSS_SCHEME = re.compile(r"[a-z][a-z0-9+.\-]*:")
 _CSS_DECL_SCHEME = re.compile(r"(?:javascript|vbscript|data|file|blob|https?):")
+# Props rendered as markdown (the manifest says so, plus the two text props a
+# markdown renderer reads) and the toast-shown messages: their expressions may
+# only be plain paths, never operators, calls or concatenation.
+_MARKDOWN_PROPS: frozenset[tuple[str, str]] = frozenset(
+    (w["type"], name)
+    for w in RIPPLE_MANIFEST["widgets"]
+    for name, spec in (w.get("props") or {}).items()
+    if "markdown" in str(spec.get("description", "")).lower()
+) | {("markdown", "text"), ("stream-text", "text")}
+_TOAST_ACTIONS: frozenset[str] = frozenset({"toast", "validate"})
+_EXPRESSION = re.compile(r"\{([^{}]*)\}")
+_PLAIN_PATH = re.compile(r"\s*[A-Za-z_$][\w$]*(?:\.[\w$]+|\[\d+\])*\s*")
 # How deep the strict walk follows plain JSON nesting (a 16-deep node tree with
 # props is well under it).
 _MAX_SCAN_LEVELS = 96
@@ -327,16 +340,29 @@ def _is_handler_key(key: Any) -> bool:
 
 
 def _normalized(text: str) -> str:
-    """``text`` as a browser would resolve it: entities and %-escapes undone
-    (three rounds), whitespace and control characters dropped, lowercased,
-    backslashes read as slashes."""
+    """``text`` as a browser would resolve it: entities and %-escapes undone and
+    NFKC-folded (three rounds, so fullwidth letters read as ASCII), whitespace,
+    control and invisible format characters (zero-width, soft hyphen, BOM: Cf)
+    dropped, lowercased, backslashes read as slashes."""
     out = text
     for _ in range(3):
-        nxt = unquote(html.unescape(out))
+        nxt = unicodedata.normalize("NFKC", unquote(html.unescape(out)))
         if nxt == out:
             break
         out = nxt
-    return "".join(ch for ch in out if ch > " " and ch != "\x7f").lower().replace("\\", "/")
+    return "".join(_visible(out)).lower().replace("\\", "/")
+
+
+def _visible(text: str) -> Iterable[str]:
+    return (ch for ch in text if ch > " " and ch != "\x7f" and unicodedata.category(ch) != "Cf")
+
+
+def _check_plain_expressions(text: str) -> None:
+    """Markdown and toast text: every ``{...}`` is a plain path (``state.a.b``,
+    ``item.x``, ``list[0]``), and no brace is left over."""
+    rest = _EXPRESSION.sub(lambda m: "" if _PLAIN_PATH.fullmatch(m.group(1)) else "{", text)
+    if "{" in rest or "}" in rest:
+        raise _Reject("markdown or toast text with more than a plain path in braces")
 
 
 def _https_allowed(url: str, hosts: frozenset[str]) -> bool:
@@ -403,8 +429,9 @@ def _check_css(value: str, *, declarations: bool) -> None:
     no ``@import`` or ``expression(``, and no scheme (a declaration list may use
     ``:`` between property and value, so there only the known schemes count).
     CSS escapes (``\75 rl(``), comments, entities and case are undone first."""
-    css = _CSS_ESCAPE.sub(_css_char, _CSS_COMMENT.sub("", html.unescape(value)))
-    css = "".join(ch for ch in css if ch > " ").lower()
+    css = unicodedata.normalize("NFKC", html.unescape(value))
+    css = _CSS_ESCAPE.sub(_css_char, _CSS_COMMENT.sub("", css))
+    css = "".join(_visible(unicodedata.normalize("NFKC", css))).lower()
     if any(token in css for token in _CSS_LOADS):
         raise _Reject("a style that loads something")
     if (_CSS_DECL_SCHEME if declarations else _CSS_SCHEME).search(css):
@@ -478,6 +505,8 @@ def _check_strict(
                 elif k == "props" and isinstance(v, dict):
                     node_props = _NODE_PROPS.get(kind, frozenset())
                     for pk, pv in v.items():
+                        if (kind, pk) in _MARKDOWN_PROPS and isinstance(pv, str):
+                            _check_plain_expressions(pv)
                         sub_node = pk in node_props and isinstance(pv, dict)
                         stack.append(
                             (
@@ -502,6 +531,8 @@ def _check_strict(
         )
         if is_action:
             _check_actions(value, events, allowed)
+            if named in _TOAST_ACTIONS and isinstance(value.get("message"), str):
+                _check_plain_expressions(value["message"])
         stack.extend(
             (
                 v,

@@ -2144,6 +2144,20 @@ async def update_site_concierge_settings(
 
         if not await badge_removal_entitled(site):
             raise HTTPException(status_code=402, detail="branding_not_entitled")
+    # The ripple profile and a daily cap above the global one are for the sites
+    # the platform runs itself; any other site may only lower the cap. Nothing in
+    # the PATCH is written. The runtime holds stored values to the same rule.
+    if {"concierge_ui_profile", "concierge_daily_spend_cap"} & req.model_fields_set:
+        from pocketpaw_ee.paw_bar import concierge_runtime
+
+        settings = concierge_runtime._settings()
+        if not concierge_runtime.is_ops_site(site, settings):
+            ceiling = float(settings.pawbar_concierge_daily_spend_cap)
+            cap = req.concierge_daily_spend_cap
+            if req.concierge_ui_profile == "ripple" or (
+                cap is not None and ceiling > 0 and cap > ceiling
+            ):
+                raise HTTPException(status_code=403, detail="ops_only_setting")
     # Writes the switch and nothing else (CR-12). This PATCH used to provision an
     # agent whenever it set concierge_enabled=true; turning a switch on is not
     # creating a concierge, and on a site with none the switch stays inert

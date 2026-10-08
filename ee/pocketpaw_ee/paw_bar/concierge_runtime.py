@@ -203,16 +203,25 @@ def lead_capture_on(site: Any) -> bool:
     return getattr(site, "concierge_lead_capture", True) is not False
 
 
-def ui_profile(site: Any) -> Any:
+def is_ops_site(site: Any, settings: Any = None) -> bool:
+    """Whether ``site`` is one the platform runs itself (its id is on the
+    comma-separated ``pawbar_ops_site_ids``). Only those may use the ripple
+    profile or a daily cap above the global one."""
+    settings = settings if settings is not None else _settings()
+    raw = str(getattr(settings, "pawbar_ops_site_ids", "") or "")
+    site_id = str(getattr(site, "id", "") or "")
+    return bool(site_id) and site_id in {s.strip() for s in raw.split(",") if s.strip()}
+
+
+def ui_profile(site: Any, settings: Any = None) -> Any:
     """The site's ``card_spec.CardProfile``: RIPPLE_PROFILE only for an explicit
-    "ripple"; anything else (an old row, None, junk) is PAWBAR_PROFILE."""
+    "ripple" on an ops site (``is_ops_site``), read every turn so a stored value
+    off the list never counts; anything else is PAWBAR_PROFILE."""
     from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, RIPPLE_PROFILE
 
-    return (
-        RIPPLE_PROFILE
-        if getattr(site, "concierge_ui_profile", None) == "ripple"
-        else PAWBAR_PROFILE
-    )
+    if getattr(site, "concierge_ui_profile", None) == "ripple" and is_ops_site(site, settings):
+        return RIPPLE_PROFILE
+    return PAWBAR_PROFILE
 
 
 def frame_for(site: Any) -> str:
@@ -2071,19 +2080,20 @@ async def site_spend_today_usd(
 async def _over_spend_cap(
     settings: Any, workspace_id: str, pocket_id: str, site: Any = None
 ) -> bool:
-    """Whether the site is at or past today's cap: the site's own
-    ``concierge_daily_spend_cap`` when set (0 pauses the concierge), else the
-    global one, where 0 means no cap.
+    """Whether the site is at or past today's cap. The global cap, where 0 means
+    no cap; a site's own ``concierge_daily_spend_cap`` (0 pauses it) can only
+    lower it, unless the site is an ops site (``is_ops_site``), whose own cap
+    replaces it.
 
     Fails OPEN, as the conversation quota does: a lost read must not silence a
     site that has paid for its concierge. The next turn reads again."""
     own = getattr(site, "concierge_daily_spend_cap", None)
+    cap = float(settings.pawbar_concierge_daily_spend_cap)
     if isinstance(own, int | float) and not isinstance(own, bool):
         if own <= 0:
             return True
-        cap = float(own)
-    else:
-        cap = float(settings.pawbar_concierge_daily_spend_cap)
+        lowers = cap > 0 and not is_ops_site(site, settings)
+        cap = min(float(own), cap) if lowers else float(own)
     if cap <= 0:
         return False
     try:
@@ -2224,7 +2234,7 @@ async def run_concierge_v2(
     from pocketpaw_ee.paw_bar.router import _sse
 
     settings = _settings()
-    profile = ui_profile(site)
+    profile = ui_profile(site, settings)
     if await _over_spend_cap(settings, workspace_id, pocket_id, site):
         from pocketpaw_ee.paw_bar.notify import notify_spend_cap_reached
 

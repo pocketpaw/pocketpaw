@@ -28,12 +28,27 @@ from tests.cloud.test_paw_bar_concierge_settings import (  # noqa: F401 — fixt
 from tests.cloud.test_paw_bar_concierge_settings import (  # noqa: F401 — fixture
     client,
 )
+from tests.cloud.test_paw_bar_concierge_v2 import (  # noqa: F401 — fixtures
+    concierge_client,
+    model,
+)
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
 # (download the release asset, drop the widget examples, update both hashes).
 _RIPPLE_MANIFEST_SHA256 = "451f17b6ef0afbc8196cb3a3095bcf531704bab2d16e39baae419cab8986d200"
+
+
+def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
+    """Put ``site_ids`` on ``pawbar_ops_site_ids`` (and pin the global cap)."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    update: dict = {"pawbar_ops_site_ids": ",".join(site_ids)}
+    if cap is not None:
+        update["pawbar_concierge_daily_spend_cap"] = cap
+    pinned = concierge_runtime._settings().model_copy(update=update)
+    monkeypatch.setattr(concierge_runtime, "_settings", lambda: pinned)
 
 
 def _card() -> dict:
@@ -626,6 +641,150 @@ def test_r4_a_toast_message_gets_the_text_checks():
 
 
 # --------------------------------------------------------------------------- #
+# Final pass: ops-only settings, markdown expressions, Unicode folding
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": {"type": "markdown", "props": {"content": "Total {state.a + state.b}"}}},
+        {"ui": {"type": "markdown", "props": {"content": "{state.items.map(x)}"}}},
+        {"ui": {"type": "markdown", "props": {"content": "{'[x](' + state.u + ')'}"}}},
+        {"ui": {"type": "markdown", "props": {"text": "{state.ok ? 'a' : 'b'}"}}},
+        {"ui": {"type": "approval-gate", "props": {"body": "{state.a.concat(state.b)}"}}},
+        {"ui": {"type": "stream-text", "props": {"text": "{state.a + 1}", "markdown": True}}},
+        {"ui": {"type": "button", "on_click": {"action": "toast", "message": "{state.a + 'x'}"}}},
+        {
+            "ui": {
+                "type": "button",
+                "on_click": {
+                    "action": "validate",
+                    "condition": "state.a",
+                    "message": "{f(state.a)}",
+                },
+            }
+        },
+    ],
+)
+def test_markdown_and_toast_text_take_only_plain_paths(spec):
+    assert _ripple(spec) is None
+
+
+def test_markdown_and_toast_text_keep_plain_paths():
+    spec = {
+        "ui": {
+            "type": "flex",
+            "children": [
+                {
+                    "type": "markdown",
+                    "props": {"content": "**{item.name}** has {state.a.b} left, row {index}"},
+                },
+                {
+                    "type": "button",
+                    "on_click": {"action": "toast", "message": "Saved {state.list[0].name}"},
+                },
+                # Not markdown: an ordinary text keeps full expressions.
+                {"type": "text", "props": {"text": "Each pays {state.total / state.people}"}},
+            ],
+        },
+        "state": {"a": {"b": 1}, "total": 4, "people": 2, "list": [{"name": "x"}]},
+    }
+    assert _ripple(spec) is not None
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {
+            "ui": {
+                "type": "text",
+                "props": {
+                    "text": "\uff4a\uff41\uff56\uff41\uff53\uff43\uff52\uff49\uff50\uff54"
+                    "\uff1aalert(1)"
+                },
+            }
+        },
+        {"ui": {"type": "text", "props": {"text": "java\u200bscript:alert(1)"}}},
+        {"ui": {"type": "text", "props": {"text": "java\u00adscript:alert(1)"}}},
+        {"ui": {"type": "text", "props": {"text": "java\u2060script:alert(1)"}}},
+        {"ui": {"type": "text", "props": {"text": "java\ufeffscript:alert(1)"}}},
+        {"ui": {"type": "image", "props": {"src": "\uff0f\uff0fevil.com/x.png"}}},
+        {"ui": {"type": "image", "props": {"src": "https\u200b://evil.com/x.png"}}},
+        {"ui": {"type": "markdown", "props": {"content": "[x](d\u200bata:text/html,x)"}}},
+        {"ui": {"type": "text", "style": {"background": "u\u200brl(/x)"}}},
+        {"ui": {"type": "text", "style": {"background": "\uff55\uff52\uff4c(/x)"}}},
+    ],
+)
+def test_fullwidth_and_invisible_characters_cannot_hide_a_scheme(spec):
+    assert _ripple(spec) is None
+
+
+@pytest.mark.asyncio
+async def test_settings_patch_refuses_ripple_off_the_ops_list(client, monkeypatch):
+    c, _store = client
+    site = await _settings_site()
+    _pin_ops(monkeypatch, "some-other-site", cap=5.0)
+    url = f"/paw-bar/admin/site/{site.id}/settings"
+
+    res = await c.patch(url, json={"concierge_ui_profile": "ripple", "concierge_greeting": "Yo"})
+
+    assert res.status_code == 403
+    assert res.json()["detail"] == "ops_only_setting"
+    body = (await c.get(url)).json()
+    assert body["concierge_ui_profile"] == "pawbar"
+    assert body["concierge_greeting"] != "Yo"  # nothing in the PATCH was written
+    # pawbar is always fine.
+    assert (await c.patch(url, json={"concierge_ui_profile": "pawbar"})).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_settings_patch_lets_owners_lower_the_cap_but_not_raise_it(client, monkeypatch):
+    c, _store = client
+    site = await _settings_site()
+    _pin_ops(monkeypatch, cap=5.0)
+    url = f"/paw-bar/admin/site/{site.id}/settings"
+
+    res = await c.patch(url, json={"concierge_daily_spend_cap": 25})
+    assert res.status_code == 403
+    assert res.json()["detail"] == "ops_only_setting"
+    assert (await c.get(url)).json()["concierge_daily_spend_cap"] is None
+    for lower in (5, 3, 0):
+        res = await c.patch(url, json={"concierge_daily_spend_cap": lower})
+        assert res.status_code == 200, res.text
+        assert res.json()["concierge_daily_spend_cap"] == lower
+    assert (await c.patch(url, json={"concierge_daily_spend_cap": None})).status_code == 200
+
+    # On the list, up to 100.
+    _pin_ops(monkeypatch, str(site.id), cap=5.0)
+    res = await c.patch(url, json={"concierge_daily_spend_cap": 25})
+    assert res.status_code == 200, res.text
+
+
+@pytest.mark.asyncio
+async def test_settings_patch_any_cap_lowers_when_there_is_no_global_cap(client, monkeypatch):
+    c, _store = client
+    site = await _settings_site()
+    _pin_ops(monkeypatch, cap=0.0)
+    url = f"/paw-bar/admin/site/{site.id}/settings"
+
+    assert (await c.patch(url, json={"concierge_daily_spend_cap": 40})).status_code == 200
+
+
+def test_the_ops_list_is_a_comma_separated_setting():
+    from pocketpaw_ee.paw_bar.concierge_runtime import is_ops_site
+
+    from pocketpaw.config import Settings
+
+    assert Settings.model_fields["pawbar_ops_site_ids"].default == ""
+    settings = SimpleNamespace(pawbar_ops_site_ids=" a1 , b2,,")
+    assert is_ops_site(SimpleNamespace(id="b2"), settings)
+    assert not is_ops_site(SimpleNamespace(id="c3"), settings)
+    assert not is_ops_site(SimpleNamespace(id=""), SimpleNamespace(pawbar_ops_site_ids=""))
+    assert not is_ops_site(None, settings)
+
+
+# --------------------------------------------------------------------------- #
 # The runtime
 # --------------------------------------------------------------------------- #
 
@@ -634,19 +793,27 @@ def _widget(actions=()):
     return SimpleNamespace(id="w1", spec=SimpleNamespace(actions=list(actions)))
 
 
-def test_the_profile_comes_from_the_site():
+def test_the_profile_comes_from_the_site_and_ripple_needs_the_ops_list(monkeypatch):
     from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, RIPPLE_PROFILE
     from pocketpaw_ee.paw_bar.concierge_runtime import ui_profile
 
-    assert ui_profile(SimpleNamespace(concierge_ui_profile="ripple")) is RIPPLE_PROFILE
-    for site in (SimpleNamespace(), SimpleNamespace(concierge_ui_profile="RIPPLE"), None):
+    _pin_ops(monkeypatch, "s1", "s3")
+    assert ui_profile(SimpleNamespace(id="s1", concierge_ui_profile="ripple")) is RIPPLE_PROFILE
+    # A stored "ripple" off the list (set before, or written behind the PATCH) is pawbar.
+    assert ui_profile(SimpleNamespace(id="s2", concierge_ui_profile="ripple")) is PAWBAR_PROFILE
+    for site in (
+        SimpleNamespace(id="s1"),
+        SimpleNamespace(id="s1", concierge_ui_profile="RIPPLE"),
+        None,
+    ):
         assert ui_profile(site) is PAWBAR_PROFILE
 
 
-def test_the_ripple_cards_paragraph_needs_no_catalog_or_lead_capture():
+def test_the_ripple_cards_paragraph_needs_no_catalog_or_lead_capture(monkeypatch):
     from pocketpaw_ee.paw_bar.concierge_runtime import build_prompt
 
-    site = SimpleNamespace(concierge_ui_profile="ripple", concierge_lead_capture=False)
+    _pin_ops(monkeypatch, "s1")
+    site = SimpleNamespace(id="s1", concierge_ui_profile="ripple", concierge_lead_capture=False)
     prompt = build_prompt([], _widget(), [], "split a bill", site=site)
     assert "<catalog>" in prompt
     assert "- slider {" in prompt
@@ -686,19 +853,23 @@ def test_the_fence_filter_checks_cards_against_the_profile():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("own", "global_cap", "spent", "over"),
+    ("ops", "own", "global_cap", "spent", "over"),
     [
-        (None, 5.0, 4.0, False),  # no site cap: the global one
-        (None, 5.0, 6.0, True),
-        (50.0, 5.0, 6.0, False),  # the site's cap replaces the global one
-        (50.0, 5.0, 50.0, True),
-        (2.0, 5.0, 3.0, True),
-        (0.0, 5.0, 0.0, True),  # 0 pauses the site
-        (10.0, 0.0, 11.0, True),  # a site cap holds with no global cap
+        (False, None, 5.0, 4.0, False),  # no site cap: the global one
+        (False, None, 5.0, 6.0, True),
+        (False, 50.0, 5.0, 6.0, True),  # off the list a site cap only lowers
+        (False, 2.0, 5.0, 3.0, True),
+        (False, 2.0, 5.0, 1.0, False),
+        (False, 0.0, 5.0, 0.0, True),  # 0 pauses the site
+        (False, 10.0, 0.0, 11.0, True),  # a site cap holds with no global cap
+        (False, 10.0, 0.0, 9.0, False),
+        (True, 50.0, 5.0, 6.0, False),  # an ops site may go past the global cap
+        (True, 50.0, 5.0, 50.0, True),
+        (True, None, 5.0, 6.0, True),
     ],
 )
-async def test_the_sites_own_spend_cap_wins_over_the_global_one(
-    monkeypatch, own, global_cap, spent, over
+async def test_the_site_cap_lowers_and_only_ops_sites_raise_it(
+    monkeypatch, ops, own, global_cap, spent, over
 ):
     from pocketpaw_ee.paw_bar import concierge_runtime
 
@@ -706,8 +877,10 @@ async def test_the_sites_own_spend_cap_wins_over_the_global_one(
         return spent
 
     monkeypatch.setattr(concierge_runtime, "site_spend_today_usd", _spent)
-    settings = SimpleNamespace(pawbar_concierge_daily_spend_cap=global_cap)
-    site = SimpleNamespace(concierge_daily_spend_cap=own)
+    settings = SimpleNamespace(
+        pawbar_concierge_daily_spend_cap=global_cap, pawbar_ops_site_ids="s1" if ops else ""
+    )
+    site = SimpleNamespace(id="s1", concierge_daily_spend_cap=own)
     assert await concierge_runtime._over_spend_cap(settings, "ws", "p", site) is over
 
 
@@ -728,11 +901,12 @@ async def test_settings_default_to_pawbar_and_the_global_cap(client):
 
 
 @pytest.mark.asyncio
-async def test_settings_patch_round_trips_the_profile_and_the_cap(client):
+async def test_settings_patch_round_trips_the_profile_and_the_cap(client, monkeypatch):
     from pocketpaw_ee.cloud.models.site import Site
 
     c, _store = client
     site = await _settings_site()
+    _pin_ops(monkeypatch, str(site.id), cap=5.0)
     url = f"/paw-bar/admin/site/{site.id}/settings"
 
     res = await c.patch(
@@ -783,3 +957,56 @@ async def test_settings_patch_rejects_a_bad_profile_or_cap(client, patch):
     assert res.status_code == 422
     body = (await c.get(url)).json()
     assert (body["concierge_ui_profile"], body["concierge_daily_spend_cap"]) == ("pawbar", None)
+
+
+# --------------------------------------------------------------------------- #
+# Ops-only rules on a real turn (a stale stored value can't get past them)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_turn_ignores_a_stored_ripple_profile_off_the_ops_list(
+    concierge_client, model, monkeypatch
+):
+    from tests.cloud.test_paw_bar_concierge_v2 import _HOURS_KB, _chat, _seed_kb
+    from tests.cloud.test_paw_bar_concierge_v2 import _site as _v2_site
+    from tests.cloud.test_paw_bar_concierge_v2 import _widget as _v2_widget
+
+    client, store = concierge_client
+    _seed_kb(monkeypatch, _HOURS_KB)
+    site = await _v2_site(concierge_ui_profile="ripple")
+    widget = await store.create_widget(_v2_widget())
+
+    _pin_ops(monkeypatch, "another-site")
+    await _chat(client, widget.id)
+    assert "Authoring rules:" not in model.user_prompt()
+
+    _pin_ops(monkeypatch, str(site.id))
+    await _chat(client, widget.id)
+    assert "Authoring rules:" in model.user_prompt()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_holds_a_stored_high_cap_to_the_global_one_off_the_ops_list(
+    concierge_client, model, monkeypatch
+):
+    from tests.cloud.test_paw_bar_concierge_v2 import _HOURS_KB, _chat, _frames, _seed_kb
+    from tests.cloud.test_paw_bar_concierge_v2 import _site as _v2_site
+    from tests.cloud.test_paw_bar_concierge_v2 import _widget as _v2_widget
+    from tests.cloud.test_paw_bar_concierge_v2_degrade import _LIMIT, _seed_spend
+
+    client, store = concierge_client
+    _seed_kb(monkeypatch, _HOURS_KB)
+    site = await _v2_site(concierge_daily_spend_cap=50.0)
+    widget = await store.create_widget(_v2_widget())
+    await _seed_spend(0.6)
+
+    _pin_ops(monkeypatch, cap=0.5)
+    res = await _chat(client, widget.id)
+    assert _LIMIT in _frames(res.text)
+    assert model.calls == []
+
+    _pin_ops(monkeypatch, str(site.id), cap=0.5)
+    res = await _chat(client, widget.id)
+    assert _LIMIT not in _frames(res.text)
+    assert len(model.calls) == 1
