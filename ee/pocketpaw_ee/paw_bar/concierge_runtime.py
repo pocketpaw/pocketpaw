@@ -62,11 +62,12 @@
 # ``Site.concierge_ui_profile``): "pawbar" (every site by default) is all of the
 # above. "ripple", honoured only on an ops site, lets cards use the full Ripple
 # catalog under ``card_spec.RIPPLE_PROFILE``'s bounds, raises the reply cap to
-# ``_RIPPLE_MAX_TOKENS`` and always writes the <catalog> block with the Ripple
-# cards paragraph (the catalog, compact, plus the authoring rules), even on a
-# site with no catalog, actions or lead capture. Its frame is ``FRAME_DEMO``
-# whatever the site's switches: the Ripple landing's demo assistant builds a card
-# for any everyday ask instead of answering only from the site's facts.
+# ``_RIPPLE_MAX_TOKENS``, always writes the Ripple cards paragraph in <catalog>
+# (even with no catalog, actions or lead capture) and streams each card as
+# ``card.*`` frames (``FenceFilter(stream_cards=True)``), never inside a chunk.
+# Its frame is ``FRAME_DEMO`` whatever the site's switches: the Ripple landing's
+# demo assistant builds a card for any everyday ask instead of answering only
+# from the site's facts.
 
 from __future__ import annotations
 
@@ -2043,6 +2044,31 @@ def is_grounded_code(body: str, knowledge: Sequence[KnowledgeItem]) -> bool:
     return found * 100 >= _GROUNDED_PERCENT * len(lines)
 
 
+@dataclass(frozen=True)
+class CardEvent:
+    """A ``card.*`` SSE frame from a ``stream_cards`` filter. ``text`` is what the
+    transcript keeps for it: the validated fence on ``card.final``, else ""."""
+
+    event: str
+    data: dict[str, Any]
+    text: str = ""
+
+
+_CARD_HEAD = f"{_TICKS}{_CARD_LANG}\n"
+
+
+def _card_object(fence: str | None) -> dict[str, Any] | None:
+    """The card object inside a fence ``render_card`` passed, or None when it is
+    not a JSON object (a legacy passthrough that is not JSON)."""
+    if not fence:
+        return None
+    try:
+        card = json.loads(fence[len(_CARD_HEAD) : -len(_TICKS)])
+    except ValueError:
+        return None
+    return card if isinstance(card, dict) else None
+
+
 class FenceFilter:
     """Holds every ``` fence in a streamed reply until it closes, then decides.
 
@@ -2068,6 +2094,12 @@ class FenceFilter:
     next ``` closes it. A ``` that closes on its own line is a code span and gets
     the fixed line too. Text outside fences streams straight through; only up to
     two trailing backticks are held, in case the next chunk completes a marker.
+
+    With ``stream_cards`` (the "ripple" profile) a card fence is not held: its
+    opening line yields ``CardEvent("card.start")``, its body ``card.delta``s as it
+    arrives (the same backtick hold), and its close ``card.final`` with the
+    rendered card as an object, or ``card.rejected`` ("invalid"; "truncated" from
+    ``close()`` for a fence still open). Card ids run c1, c2... per filter.
     """
 
     def __init__(
@@ -2082,8 +2114,14 @@ class FenceFilter:
         lead_capture: bool = False,
         action: Any = None,
         profile: Any = None,
+        stream_cards: bool = False,
     ) -> None:
         from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE
+
+        self._stream_cards = stream_cards is True
+        self._cards = 0
+        self._card_id = ""  # the open streamed card, "" when none
+        self._sent = 0  # how much of its body went out as card.delta
 
         # The site's card_spec.CardProfile; every card is checked against it.
         self._profile = profile or PAWBAR_PROFILE
@@ -2103,20 +2141,22 @@ class FenceFilter:
         self._buf = ""
         self._tag = ""
 
-    def feed(self, chunk: str) -> list[str]:
-        """The text to emit for ``chunk``, cards hydrated from ``catalog``."""
-        out = [p if isinstance(p, str) else self._finish(*p) for p in self._scan(chunk)]
+    def feed(self, chunk: str) -> list[Any]:
+        """The text (and, streaming cards, ``CardEvent``s) to emit for ``chunk``,
+        cards hydrated from ``catalog``."""
+        out = [self._finish(*p) if isinstance(p, tuple) else p for p in self._scan(chunk)]
         return [piece for piece in out if piece]
 
-    async def afeed(self, chunk: str) -> list[str]:
+    async def afeed(self, chunk: str) -> list[Any]:
         """``feed``, with each card hydrated through ``lookup`` when one is set."""
-        out: list[str] = []
+        out: list[Any] = []
         for piece in self._scan(chunk):
-            out.append(piece if isinstance(piece, str) else await self._afinish(*piece))
+            out.append(await self._afinish(*piece) if isinstance(piece, tuple) else piece)
         return [piece for piece in out if piece]
 
     def _scan(self, chunk: str) -> list[Any]:
-        """Text pieces and closed fences (``(tag, body)``), in order."""
+        """Text pieces, ``CardEvent``s and closed fences (``(tag, body)``, plus the
+        card id for a streamed card), in order."""
         out: list[Any] = []
         data = chunk or ""
         while True:
@@ -2144,23 +2184,42 @@ class FenceFilter:
                 else:
                     self._tag = text[:newline].strip()
                     self._mode, data = "body", text[newline + 1 :]
+                    if self._stream_cards and self._tag == _CARD_LANG:
+                        self._cards += 1
+                        self._card_id, self._sent = f"c{self._cards}", 0
+                        out.append(CardEvent("card.start", {"card_id": self._card_id}))
             else:
                 j = text.find(_TICKS, start)
+                # A streamed card's body goes out as it comes, bar trailing backticks.
+                end = len(text.rstrip("`")) if j == -1 else j
+                if self._card_id and end > self._sent:
+                    delta = {"card_id": self._card_id, "text": text[self._sent : end]}
+                    out.append(CardEvent("card.delta", delta))
+                    self._sent = end
                 if j == -1:
                     self._buf = text
                     break
-                out.append((self._tag, text[:j]))
+                if self._card_id:
+                    out.append((self._tag, text[:j], self._card_id))
+                    self._card_id = ""
+                else:
+                    out.append((self._tag, text[:j]))
                 self._mode, data = "text", text[j + len(_TICKS) :]
         return out
 
-    def close(self) -> list[str]:
+    def close(self) -> list[Any]:
         held = self._buf if self._mode == "text" else ""
-        self._mode, self._buf, self._tag = "text", "", ""
-        return [held] if held else []
+        out: list[Any] = [held] if held else []
+        if self._card_id:
+            out.append(
+                CardEvent("card.rejected", {"card_id": self._card_id, "reason": "truncated"})
+            )
+        self._mode, self._buf, self._tag, self._card_id = "text", "", "", ""
+        return out
 
-    async def _afinish(self, tag: str, body: str) -> str:
+    async def _afinish(self, tag: str, body: str, card_id: str = "") -> Any:
         if tag != _CARD_LANG or self._lookup is None:
-            return self._finish(tag, body)
+            return self._finish(tag, body, card_id)
         from pocketpaw_ee.paw_bar.card_spec import card_ids, render_card
 
         ids = card_ids(body, self._profile)
@@ -2168,8 +2227,8 @@ class FenceFilter:
             items = list(await self._lookup(ids)) if ids else []
         except Exception:  # noqa: BLE001 — an unreadable catalog drops the card
             logger.warning("concierge: catalog lookup for a card failed", exc_info=True)
-            return ""
-        return self._noted(
+            return self._carded(body, None, card_id)
+        return self._carded(
             body,
             render_card(
                 body,
@@ -2178,7 +2237,19 @@ class FenceFilter:
                 lead_capture=self._lead_capture,
                 profile=self._profile,
             ),
+            card_id,
         )
+
+    def _carded(self, body: str, card: str | None, card_id: str) -> Any:
+        """``_noted``, or for a streamed card (``card_id``) its closing CardEvent:
+        ``card.final`` with the card object, else ``card.rejected`` "invalid"."""
+        if not card_id:
+            return self._noted(body, card)
+        obj = _card_object(card)
+        if obj is None:
+            return CardEvent("card.rejected", {"card_id": card_id, "reason": "invalid"})
+        fence = self._noted(body, card)
+        return CardEvent("card.final", {"card_id": card_id, "card": obj}, fence)
 
     def _noted(self, body: str, card: str | None) -> str:
         """The rendered card ("" when dropped), noting a lead card that passed."""
@@ -2201,13 +2272,13 @@ class FenceFilter:
                 logger.warning("concierge: pawbar-action validation failed", exc_info=True)
         return ""
 
-    def _finish(self, tag: str, body: str) -> str:
+    def _finish(self, tag: str, body: str, card_id: str = "") -> Any:
         if tag == _ACTION_LANG:
             return self._take_action(body)
         if tag == _CARD_LANG:
             from pocketpaw_ee.paw_bar.card_spec import render_card
 
-            return self._noted(
+            return self._carded(
                 body,
                 render_card(
                     body,
@@ -2216,6 +2287,7 @@ class FenceFilter:
                     lead_capture=self._lead_capture,
                     profile=self._profile,
                 ),
+                card_id,
             )
         if (
             self._allow_doc_code
@@ -2277,6 +2349,7 @@ def _fence_filter_for(
     lead_capture: bool = False,
     action: Any = None,
     profile: Any = None,
+    stream_cards: bool = False,
 ) -> FenceFilter:
     """A filter hydrating cards from this widget's catalog in ``store`` and its
     declared verbs, and grounding code in ``knowledge`` when the site allows
@@ -2299,6 +2372,7 @@ def _fence_filter_for(
         lead_capture=lead_capture,
         action=action,
         profile=profile,
+        stream_cards=stream_cards,
     )
 
 
@@ -2421,6 +2495,16 @@ def _hit_output_cap(exc: BaseException) -> bool:
     return isinstance(exc, UnexpectedModelBehavior) and "token limit" in str(exc).lower()
 
 
+def _piece_frame(piece: Any) -> tuple[str, bytes]:
+    """(what the transcript keeps, the SSE frame) for one ``FenceFilter`` piece:
+    text is a ``chunk``, a ``CardEvent`` its own ``card.*`` frame."""
+    from pocketpaw_ee.paw_bar.router import _sse
+
+    if isinstance(piece, CardEvent):
+        return piece.text, _sse(piece.event, piece.data)
+    return piece, _sse("chunk", {"content": piece, "type": "text"})
+
+
 async def degrade_reply(widget: Any, reason: str) -> AsyncIterator[bytes]:
     """The SSE frames for a turn the concierge cannot answer: one ``unavailable``
     frame, then ``stream_end``.
@@ -2481,7 +2565,9 @@ async def run_concierge_v2(
     check; anything malformed is no tools, never a failed turn.
 
     Frames, in order: ``message.persisted`` {run_id, client_message_id}; one
-    ``chunk`` {content, type:"text"} per streamed delta; at most one ``sources``;
+    ``chunk`` {content, type:"text"} per streamed delta (on a "ripple" site each
+    card is its own ``card.*`` frames instead, in stream order: see
+    ``FenceFilter``); at most one ``sources``;
     then ``stream_end`` {assistant_message_id: None, cancelled: False}. A
     transient provider failure before any text is retried once; a failure that
     stands ends with ``degrade_reply`` (the ``unavailable`` frame, reason
@@ -2559,6 +2645,9 @@ async def run_concierge_v2(
     yield _sse("message.persisted", {"run_id": run_id, "client_message_id": client_message_id})
 
     full_text = ""
+    # Whether the visitor has seen anything (text or a card frame): no retry after.
+    shown = False
+    fences: FenceFilter | None = None
     # The site and widget ride the usage the meter prices, whatever the outcome.
     spend_tags = {"site_id": site_id, "widget_id": widget_id}
     usage: dict[str, Any] = {"backend": _BACKEND, **spend_tags}
@@ -2623,6 +2712,7 @@ async def run_concierge_v2(
                 lead_capture=lead_capture_on(site),
                 action=_action_renderer(site, page_ctx, catalog, declared),
                 profile=profile,
+                stream_cards=profile.name == "ripple",
             )
 
         # Spend attribution: the proxy's spend row names the site and the widget.
@@ -2646,12 +2736,13 @@ async def run_concierge_v2(
                 async with agent.run_stream(prompt, model_settings=model_settings) as result:
                     async for delta in result.stream_text(delta=True, debounce_by=None):
                         for piece in await fences.afeed(delta or ""):
-                            full_text += piece
-                            yield _sse("chunk", {"content": piece, "type": "text"})
+                            text, frame = _piece_frame(piece)
+                            full_text, shown = full_text + text, True
+                            yield frame
                     usage = {**_usage(settings, result, model_spec), **spend_tags}
                 break
             except Exception as exc:
-                if attempt > 1 or full_text or not _is_transient(exc):
+                if attempt > 1 or shown or not _is_transient(exc):
                     if not contact:
                         if _hit_output_cap(exc):
                             logger.warning(
@@ -2673,8 +2764,9 @@ async def run_concierge_v2(
                 )
                 await asyncio.sleep(_RETRY_BACKOFF_S)
         for piece in fences.close():
-            full_text += piece
-            yield _sse("chunk", {"content": piece, "type": "text"})
+            text, frame = _piece_frame(piece)
+            full_text += text
+            yield frame
         if contact and not fences.lead_card:
             for piece in contact_reply(
                 lead_capture=lead_capture_on(site), said_something=bool(full_text.strip())
@@ -2713,7 +2805,11 @@ async def run_concierge_v2(
             usage=usage,
         )
         # The ``unavailable`` frame, never an error frame and never a handoff.
-        # What already streamed stays on screen; the frame follows it.
+        # What already streamed stays on screen; the frame follows it, after the
+        # rejection of a card still streaming (never its held text).
+        for piece in fences.close() if fences is not None else ():
+            if isinstance(piece, CardEvent):
+                yield _sse(piece.event, piece.data)
         async for frame in degrade_reply(widget, reason):
             yield frame
     finally:
@@ -2731,6 +2827,7 @@ async def run_concierge_v2(
 
 __all__ = [
     "CODE_REPLACEMENT",
+    "CardEvent",
     "DEGRADE_REASONS",
     "FRAME",
     "FRAME_ACTIONS",
