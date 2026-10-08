@@ -801,7 +801,6 @@ _BAD_SHAPES = [
     '{"ui": 1}',
     '{"ui": {"type": "text"}, "state": "x"}',
     '{"ui": {"type": "text"}, "state": [1]}',
-    '{"ui": {"type": "text"}, "state": null}',
     '{"kind": "product", "items": 5}',
     '{"items": [1, "a", null]}',
     '{"kind": "form", "fields": 7, "verb": 3}',
@@ -818,6 +817,18 @@ def test_a_card_of_the_wrong_shape_is_dropped_not_raised(body, profile_name):
     if body.startswith('{"ui"'):
         assert out is None
     assert card_spec.validate_and_hydrate(json.loads(body), [], profile=profile) is None
+
+
+def test_a_null_state_is_absent_on_pawbar_and_refused_on_ripple():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    plain = render_card('{"ui": {"type": "text"}}', [])
+    assert plain is not None
+    # paw-bar has always read a null state as no state; that does not change.
+    assert render_card('{"ui": {"type": "text"}, "state": null}', []) == plain
+    assert (
+        render_card('{"ui": {"type": "text"}, "state": null}', [], profile=RIPPLE_PROFILE) is None
+    )
 
 
 def test_an_unexpected_error_in_the_checks_drops_the_card_and_logs_no_contents(monkeypatch, caplog):

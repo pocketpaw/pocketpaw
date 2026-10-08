@@ -659,7 +659,12 @@ def validate_and_hydrate(
             raise _Reject("not a spec")
         if not isinstance(spec["ui"], dict):
             raise _Reject("ui is not an object")
-        if "state" in spec and not isinstance(spec["state"], dict):
+        # A non-object state is refused; paw-bar has always read a null one as
+        # no state, so only a strict profile refuses null.
+        state = spec.get("state")
+        if not isinstance(state, dict) and (
+            state is not None or (profile.strict and "state" in spec)
+        ):
             raise _Reject("state is not an object")
         if len(_serialize(spec)) > profile.max_chars:
             raise _Reject(f"longer than {profile.max_chars} characters")
