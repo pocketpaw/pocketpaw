@@ -117,8 +117,9 @@ PAWBAR_PROFILE = CardProfile(
 RIPPLE_MANIFEST_PATH = Path(__file__).with_name("ripple-manifest.json")
 RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(encoding="utf-8"))
 # Kept out of ripple cards: ``ripple-frame`` mounts a whole nested spec the bounds
-# don't see, ``embed`` frames any third-party URL, ``richtext`` renders trusted HTML.
-RIPPLE_DEFERRED: frozenset[str] = frozenset({"ripple-frame", "embed", "richtext"})
+# don't see, ``embed`` frames any third-party URL, ``richtext`` renders trusted HTML
+# and ``rich-text`` (a Tiptap editor) seeds its ``value`` into the editor as HTML.
+RIPPLE_DEFERRED: frozenset[str] = frozenset({"ripple-frame", "embed", "richtext", "rich-text"})
 # A ripple card's actions: paw-bar's, plus the client-side flow ones (no network,
 # no navigation). Every step inside a flow or branch is held to the same set.
 RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {"flow", "branch", "validate", "toast"}

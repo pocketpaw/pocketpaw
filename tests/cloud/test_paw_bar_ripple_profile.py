@@ -380,6 +380,15 @@ def test_i2_richtext_is_not_a_ripple_widget():
     assert _ripple({"ui": {"type": "richtext", "props": {"html": "<b>x</b>"}}}) is None
 
 
+def test_i2_the_rich_text_editor_is_not_a_ripple_widget():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+
+    # Its value seeds HTML into a Tiptap editor.
+    assert "rich-text" not in RIPPLE_PROFILE.widget_types
+    spec = {"ui": {"type": "rich-text", "props": {"value": "<img src=x onerror=alert(1)>"}}}
+    assert _ripple(spec) is None
+
+
 # I3: card_ids reads as many nodes as the profile allows.
 def test_i3_card_ids_reads_the_profiles_node_budget():
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, card_ids
