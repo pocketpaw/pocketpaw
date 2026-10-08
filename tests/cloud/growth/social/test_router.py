@@ -763,3 +763,14 @@ async def test_characters_and_memes(w1, w2):
 
     gone = await w1.delete(f"{BASE}/characters/{chars[0]['id']}")
     assert gone.json()["characters"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_picks_which_media_goes_with_the_post(w1):
+    set_production_ideas_fn(_FakeIdeas())
+    await _complete(w1)
+    idea = (await w1.post(f"{IDEAS}/generate", json={"count": 1})).json()["items"][0]
+    assert idea["media_choice"] == ""
+    url = f"{IDEAS}/{idea['id']}"
+    assert (await w1.patch(url, json={"media_choice": "reel"})).json()["media_choice"] == "reel"
+    assert (await w1.patch(url, json={"media_choice": "gif"})).status_code == 422
