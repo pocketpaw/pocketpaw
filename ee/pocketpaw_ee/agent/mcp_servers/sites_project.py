@@ -350,6 +350,11 @@ async def _start_site_from_template_handler(args: dict) -> dict:
             "Need a database, accounts or storage? list_site_recipes, then "
             "apply_site_recipe for each, before writing the features that use them.",
             "Request each secret a recipe returns with request_site_secret.",
+            "Design before the first UI file: research real sites (the gate in your "
+            "instructions), state the locked palette, type pairing and layout idea in "
+            "one line, load pocketpaw-design-taste, then retheme the tokens file "
+            "(src/styles/tokens.css) with a real palette and replace the starter font "
+            "(Geist) with the locked pairing.",
             "Edit with read_site_file / patch_site_file / write_site_files "
             "(list_site_files for the tree).",
             "run_site_build, and on failure get_site_build_log; fix and build again.",

@@ -59,18 +59,27 @@ When two fit, the user's named framework wins, then `when_to_use`.
    shows which are set. If those tools are missing, tell the user which secrets
    the site needs. Never write a secret value into any file, `.env` or
    `.dev.vars`; only names go in `.dev.vars.example`.
-5. Edit. Do the recipe's `glue_tasks` in order, then build the features:
+5. Design, before the first UI file. Run the research gate from the site
+   preamble: search real sites, open about 3 references, fetch the one you lock,
+   and state the locked direction (palette, type pairing, layout idea) in one
+   line. Load `pocketpaw-design-taste`. Then RETHEME the tokens file AGENTS.md
+   names (usually `src/styles/tokens.css`): a real palette with chroma, not the
+   neutral starter greys, and swap the starter font (Geist) for the locked
+   pairing. Only an erroring or empty research result skips the search, and the
+   direction is still stated.
+6. Edit. Do the recipe's `glue_tasks` in order, then build the features:
    `list_site_files`, `read_site_files` before you change anything, `patch_site_file` with
    exact-once `{old, new}` blocks for edits, `write_site_files` for new or rewritten
    files, `delete_site_files` to remove. Paths are relative to the repo root. Keep
-   to the template's structure and its shadcn tokens. Changing package.json
+   the template's structure and use its token classes, but with the tokens you
+   rethemed in step 5, never the starter values. Changing package.json
    dependencies drops the stale lockfile on its own.
-6. `run_site_build`. It waits about 30 seconds. Still building: keep working and
+7. `run_site_build`. It waits about 30 seconds. Still building: keep working and
    call it again.
-7. On `failed`, read the log tail in the result (or `get_site_build_log`), fix what
+8. On `failed`, read the log tail in the result (or `get_site_build_log`), fix what
    it names, build again. Three rounds at most, then tell the user what still
    fails.
-8. On `built`, show the preview. If `preview_mode` is `static`, say that the
+9. On `built`, show the preview. If `preview_mode` is `static`, say that the
    preview shows the static pages and the server routes (API, actions, server
    pages) run after publish.
 
