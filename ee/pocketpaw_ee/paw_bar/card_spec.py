@@ -28,9 +28,14 @@
 # set and bounds above. ``RIPPLE_PROFILE`` (a site whose ``concierge_ui_profile``
 # is "ripple") takes the full Ripple catalog from ripple-manifest.json (minus
 # ``RIPPLE_DEFERRED``), the same actions and host events, and 400 nodes / depth 16
-# / 64,000 chars. Its ``strict_actions`` also checks every handler a widget keeps
-# outside ``on_*`` (``submitActions``, ``actions[].actions``, a node inside a
-# popover's ``content``), since the full catalog has such props.
+# / 64,000 chars. The full catalog keeps nodes, handlers and links in props, so
+# a ``strict`` profile (``_check_strict``) walks the whole ``ui`` AND ``state``,
+# iteratively and depth-capped: any node found in a prop (a popover's
+# ``content``) is a node, held to every node rule; any action, under a handler
+# key or named as a manifest action anywhere, must be an allowed one (audit-log
+# entries' own ``action`` field is data); a form may not carry a native submit
+# target; every URL-valued key must be a same-site path or an https URL on
+# ``url_hosts`` (empty: none); and no text may hold a javascript: link.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar's
 # app/pawbar-manifest.json; ripple-manifest.json from @ripple-ui/svelte's
@@ -42,11 +47,14 @@
 
 from __future__ import annotations
 
+import html
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import unquote, urlsplit
 
 MAX_SPEC_CHARS = 32_000
 MAX_SPEC_NODES = 80
@@ -79,7 +87,9 @@ SPEC_ACTIONS: frozenset[str] = frozenset(MANIFEST["actions"])
 class CardProfile:
     """What one site's cards may hold. ``detailed`` names the widgets the prompt
     lists with their props (None: all of them; the rest get a one-line summary);
-    ``strict_actions`` checks handlers kept outside ``on_*`` too."""
+    ``strict`` runs ``_check_strict`` (nodes in props, actions anywhere, URLs)
+    instead of the children-only walk; ``url_hosts`` are the https hosts its
+    URLs may name."""
 
     name: str
     widget_types: frozenset[str]
@@ -89,7 +99,8 @@ class CardProfile:
     max_chars: int
     manifest: dict[str, Any]
     detailed: frozenset[str] | None = None
-    strict_actions: bool = False
+    strict: bool = False
+    url_hosts: frozenset[str] = frozenset()
 
 
 PAWBAR_PROFILE = CardProfile(
@@ -105,8 +116,8 @@ PAWBAR_PROFILE = CardProfile(
 RIPPLE_MANIFEST_PATH = Path(__file__).with_name("ripple-manifest.json")
 RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(encoding="utf-8"))
 # Kept out of ripple cards: ``ripple-frame`` mounts a whole nested spec the bounds
-# don't see, ``embed`` frames any third-party URL.
-RIPPLE_DEFERRED: frozenset[str] = frozenset({"ripple-frame", "embed"})
+# don't see, ``embed`` frames any third-party URL, ``richtext`` renders trusted HTML.
+RIPPLE_DEFERRED: frozenset[str] = frozenset({"ripple-frame", "embed", "richtext"})
 RIPPLE_PROFILE = CardProfile(
     name="ripple",
     widget_types=frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"]) - RIPPLE_DEFERRED,
@@ -142,8 +153,36 @@ RIPPLE_PROFILE = CardProfile(
             "tabs",
         }
     ),
-    strict_actions=True,
+    strict=True,
 )
+
+# Every widget name and action name the Ripple manifest knows (deferred ones too).
+_RIPPLE_TYPES: frozenset[str] = frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"])
+_RIPPLE_ACTIONS: frozenset[str] = frozenset(RIPPLE_MANIFEST["actions"])
+# Props whose value is itself a node (``string | UISpec``), by widget.
+_NODE_PROPS: dict[str, frozenset[str]] = {
+    w["type"]: frozenset(
+        name
+        for name, spec in (w.get("props") or {}).items()
+        if "UISpec" in str(spec.get("type", "")) and not str(spec["type"]).startswith("Array")
+    )
+    for w in RIPPLE_MANIFEST["widgets"]
+}
+# Lists whose rows carry their own ``action`` field as data, not as a handler.
+_DATA_ACTION_ROWS: frozenset[tuple[str, str]] = frozenset({("audit-log", "entries")})
+# Keys whose string value is a URL a browser loads or follows.
+_URL_KEYS: frozenset[str] = frozenset(
+    {"src", "href", "url", "image", "avatar", "favicon", "poster", "cover", "link", "logo"}
+)
+_TILE_PRESETS: frozenset[str] = frozenset(
+    {"osm", "carto-voyager", "carto-light", "carto-dark", "osm-hot"}
+)
+# A form's own submission target (a ripple form posts natively when it has one).
+_FORM_SUBMIT_PROPS: frozenset[str] = frozenset({"action", "method", "target", "enctype"})
+_BAD_SCHEME_TEXT = re.compile(r"(?:javascript|vbscript):|(?:\]\(|<)(?:data|file|blob):")
+# How deep the strict walk follows plain JSON nesting (a 16-deep node tree with
+# props is well under it).
+_MAX_SCAN_LEVELS = 96
 
 _PRODUCT_CARD = "product-card"
 _FENCE = "```"
@@ -240,22 +279,128 @@ def _is_handler_key(key: Any) -> bool:
     )
 
 
-def _check_nested_handlers(
-    value: Any, events: list[str], allowed: frozenset[str], handler: bool = False
+def _normalized(text: str) -> str:
+    """``text`` as a browser would resolve it: entities and %-escapes undone
+    (three rounds), whitespace and control characters dropped, lowercased,
+    backslashes read as slashes."""
+    out = text
+    for _ in range(3):
+        nxt = unquote(html.unescape(out))
+        if nxt == out:
+            break
+        out = nxt
+    return "".join(ch for ch in out if ch > " " and ch != "\x7f").lower().replace("\\", "/")
+
+
+def _check_url(key: str, value: str, hosts: frozenset[str]) -> None:
+    """A URL-valued key's string: "", a same-site path ("/x", not "//x") or "#x",
+    or an https URL on ``hosts``. A map's tiles must be a preset; a tile URL
+    template is never taken; a colour key only refuses what could load."""
+    url = _normalized(value)
+    if key == "tiles":
+        if url not in _TILE_PRESETS:
+            raise _Reject("map tiles must be a preset")
+        return
+    if key in ("tile", "tileUrl"):
+        raise _Reject("a custom tile template")
+    if key == "background":
+        if ":" in url or "url(" in url or "//" in url:
+            raise _Reject("a background that loads something")
+        return
+    if not url or url[0] == "#" or (url[0] == "/" and url[1:2] != "/"):
+        return
+    if url.startswith("https://") and urlsplit(url).hostname in hosts:
+        return
+    raise _Reject(f"a {key} that is not a same-site path or an allowed host")
+
+
+def _check_strict(
+    spec: dict[str, Any], events: list[str], lead_capture: bool, profile: CardProfile
 ) -> None:
-    """``strict_actions``: every dict with an ``action`` under a handler key
-    (``on_*``, ``actions``, ``*Actions``), however deep, is an action and must
-    pass ``_check_actions``. Keyed on the handler, so a data row's own
-    ``"action"`` field (an audit log's) is left alone."""
-    if isinstance(value, list):
-        for item in value:
-            _check_nested_handlers(item, events, allowed, handler)
-    elif isinstance(value, dict):
-        if handler and "action" in value:
+    """The ``strict`` profile's walk over ``ui`` and ``state`` (see the header).
+    Iterative, so no card can exhaust the stack; past ``_MAX_SCAN_LEVELS`` of
+    nesting the card is refused."""
+    allowed, hosts = profile.actions, profile.url_hosts
+    nodes = 0
+    # (value, json level, node depth, key it sits under, under a handler, is a
+    # node, is a data row whose "action" is its own)
+    stack: list[tuple[Any, int, int, str, bool, bool, bool]] = [
+        (spec["ui"], 1, 1, "", False, True, False),
+        (spec.get("state"), 1, 0, "", False, False, False),
+    ]
+    while stack:
+        value, level, depth, key, handler, is_node, data_row = stack.pop()
+        if level > _MAX_SCAN_LEVELS:
+            raise _Reject("nested too deeply")
+        if isinstance(value, str):
+            if key in _URL_KEYS or key in ("tiles", "tile", "tileUrl", "background"):
+                _check_url(key, value, hosts)
+            if _BAD_SCHEME_TEXT.search(_normalized(value)):
+                raise _Reject("text holding a script or data link")
+            continue
+        if isinstance(value, list):
+            stack.extend((v, level + 1, depth, key, handler, False, data_row) for v in value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        kind = value.get("type")
+        if not is_node and isinstance(kind, str):
+            # A node kept in a prop or in state: a widget's name, or node-shaped.
+            is_node = kind in _RIPPLE_TYPES or any(
+                k in value for k in ("props", "children", "else_children", "bind")
+            )
+            depth += 1
+        if is_node:
+            if not isinstance(kind, str):
+                raise _Reject("a node has no type")
+            nodes += 1
+            if nodes > profile.max_nodes:
+                raise _Reject(f"more than {profile.max_nodes} nodes")
+            if profile.max_depth < depth:
+                raise _Reject(f"nested deeper than {profile.max_depth}")
+            if kind not in profile.widget_types:
+                raise _Reject(f"unknown widget type {kind!r}")
+            _check_events(value, events, allowed)
+            props = value.get("props")
+            if kind == "form":
+                if isinstance(props, dict) and _FORM_SUBMIT_PROPS & props.keys():
+                    raise _Reject("a form with its own submit target")
+                _check_form(props, lead_capture)
+            for k, v in value.items():
+                if k in ("children", "else_children"):
+                    if v is None:
+                        continue
+                    if not isinstance(v, list):
+                        raise _Reject(f"{k} is not a list")
+                    stack.extend((kid, level + 2, depth + 1, k, False, True, False) for kid in v)
+                elif k == "props" and isinstance(v, dict):
+                    node_props = _NODE_PROPS.get(kind, frozenset())
+                    for pk, pv in v.items():
+                        sub_node = pk in node_props and isinstance(pv, dict)
+                        rows = (kind, pk) in _DATA_ACTION_ROWS
+                        stack.append(
+                            (
+                                pv,
+                                level + 2,
+                                depth + 1 if sub_node else depth,
+                                pk,
+                                _is_handler_key(pk),
+                                sub_node,
+                                rows,
+                            )
+                        )
+                elif k != "type":
+                    stack.append((v, level + 1, depth, k, _is_handler_key(k), False, False))
+            continue
+        named = value.get("action")
+        if (handler and "action" in value) or (
+            isinstance(named, str) and named in _RIPPLE_ACTIONS and not data_row
+        ):
             _check_actions(value, events, allowed)
-            return
-        for key, item in value.items():
-            _check_nested_handlers(item, events, allowed, handler or _is_handler_key(key))
+        stack.extend(
+            (v, level + 1, depth, k, handler or _is_handler_key(k), False, False)
+            for k, v in value.items()
+        )
 
 
 def _check_form(props: Any, lead_capture: bool) -> None:
@@ -309,10 +454,6 @@ def _check_tree(
         if node["type"] not in profile.widget_types:
             raise _Reject(f"unknown widget type {node['type']!r}")
         _check_events(node, events, profile.actions)
-        if profile.strict_actions:
-            for key, value in node.items():
-                if key not in ("type", "children", "else_children"):
-                    _check_nested_handlers(value, events, profile.actions, _is_handler_key(key))
         if node["type"] == "form":
             _check_form(node.get("props"), lead_capture)
         for key in ("children", "else_children"):
@@ -370,7 +511,10 @@ def validate_and_hydrate(
         if len(_serialize(spec)) > profile.max_chars:
             raise _Reject(f"longer than {profile.max_chars} characters")
         events = _card_verbs(verbs)
-        _check_tree(spec["ui"], events, lead_capture, profile)
+        if profile.strict:
+            _check_strict(spec, events, lead_capture, profile)
+        else:
+            _check_tree(spec["ui"], events, lead_capture, profile)
         state = spec.get("state")
         if state is not None and not isinstance(state, dict):
             raise _Reject("state is not an object")
@@ -384,7 +528,7 @@ def validate_and_hydrate(
         if len(body) > profile.max_chars or _FENCE in body:
             return None
         return out
-    except _Reject:
+    except (_Reject, RecursionError):
         return None
 
 
@@ -393,11 +537,18 @@ def validate_and_hydrate(
 # --------------------------------------------------------------------------- #
 
 
+# A body too deeply nested to parse here. Never passed through as a legacy
+# card: the client's parser might read it, and nothing here checked it.
+_TOO_DEEP = object()
+
+
 def _parse(body: str) -> Any:
     try:
         return json.loads(body)
     except ValueError:
         return None
+    except RecursionError:
+        return _TOO_DEEP
 
 
 def _is_spec(raw: Any) -> bool:
@@ -423,6 +574,8 @@ def render_card(
     legacy product card is repriced from the catalog; a legacy form card is held
     to the form rules; any other legacy card passes through verbatim."""
     raw = _parse(body)
+    if raw is _TOO_DEEP:
+        return None
     if _is_spec(raw):
         # Measured as paw-bar measures it: CRLF folded, trailing whitespace trimmed.
         if len(body.replace("\r\n", "\n").rstrip()) > profile.max_chars:
@@ -487,14 +640,15 @@ def _ids_in(node: Any, out: dict[str, None], budget: list[int]) -> None:
             _ids_in(kid, out, budget)
 
 
-def card_ids(body: str) -> list[str]:
+def card_ids(body: str, profile: CardProfile = PAWBAR_PROFILE) -> list[str]:
     """The catalog ids a fence body names: a Ripple spec's product-card ``ids``,
     or a legacy product card's item ids. What a lookup must fetch before
-    ``render_card`` can hydrate it; at most ``MAX_CARD_IDS``, first seen first."""
+    ``render_card`` can hydrate it; at most ``MAX_CARD_IDS``, first seen first,
+    reading at most ``profile.max_nodes`` nodes."""
     raw = _parse(body)
     out: dict[str, None] = {}
     if _is_spec(raw):
-        _ids_in(raw["ui"], out, [MAX_SPEC_NODES])
+        _ids_in(raw["ui"], out, [profile.max_nodes])
     elif isinstance(raw, dict):
         for item in raw.get("items") if isinstance(raw.get("items"), list) else []:
             pid = item.get("id") if isinstance(item, dict) else None

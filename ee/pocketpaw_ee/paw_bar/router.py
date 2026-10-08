@@ -1718,7 +1718,7 @@ ConciergeKnowledgeChars = Annotated[
 
 
 # The most a site's own daily concierge spend cap may be, in USD.
-CONCIERGE_DAILY_SPEND_CAP_MAX = 500.0
+CONCIERGE_DAILY_SPEND_CAP_MAX = 100.0
 ConciergeDailySpendCap = Annotated[
     float, Field(ge=0, le=CONCIERGE_DAILY_SPEND_CAP_MAX, allow_inf_nan=False)
 ]
@@ -1764,7 +1764,7 @@ class ConciergeSettingsUpdate(BaseModel):
     # Which cards the v2 concierge may write: "pawbar" or "ripple" (anything else
     # is a 422). null means "not sent".
     concierge_ui_profile: Literal["pawbar", "ripple"] | None = None
-    # The site's daily spend cap in USD, 0..500 (out of range is a 422; 0 pauses
+    # The site's daily spend cap in USD, 0..100 (out of range is a 422; 0 pauses
     # the concierge). Like the knowledge budget, an explicit null is a write: it
     # clears the cap back to the global one.
     concierge_daily_spend_cap: ConciergeDailySpendCap | None = None

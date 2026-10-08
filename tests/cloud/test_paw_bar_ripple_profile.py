@@ -69,10 +69,12 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
 def test_the_pawbar_profile_is_todays_rules():
     from pocketpaw_ee.paw_bar import card_spec
 
+    RIPPLE_STRICT = card_spec.RIPPLE_PROFILE.strict
     p = card_spec.PAWBAR_PROFILE
     assert (p.widget_types, p.actions) == (card_spec.WIDGET_TYPES, card_spec.SPEC_ACTIONS)
     assert (p.max_nodes, p.max_depth, p.max_chars) == (80, 8, 32_000)
-    assert p.detailed is None and p.strict_actions is False
+    assert p.detailed is None and p.strict is False and RIPPLE_STRICT
+
     r = card_spec.RIPPLE_PROFILE
     assert r.actions == card_spec.SPEC_ACTIONS
     assert (r.max_nodes, r.max_depth, r.max_chars) == (400, 16, 64_000)
@@ -206,6 +208,203 @@ def test_the_ripple_listing_is_bounded_and_covers_every_widget():
 
 
 # --------------------------------------------------------------------------- #
+# Security review (C = critical, I = important, M = minor)
+# --------------------------------------------------------------------------- #
+
+
+def _ripple(spec: dict, **kw):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    return render_card(_body(spec), [], profile=RIPPLE_PROFILE, **kw)
+
+
+def _popover(content) -> dict:
+    return {"ui": {"type": "popover", "props": {"trigger": "Open", "content": content}}}
+
+
+# C1: a node kept in a prop is a node: its type, the bounds and the form rules apply.
+@pytest.mark.parametrize(
+    "spec",
+    [
+        _popover({"type": "embed", "props": {"url": "/x"}}),
+        _popover({"type": "flex", "children": [{"type": "ripple-frame"}]}),
+        {
+            "ui": {
+                "type": "settings-list",
+                "props": {"items": [{"label": "x", "control": {"type": "richtext"}}]},
+            }
+        },
+        _popover({"type": "made-up", "props": {}}),
+        _popover({"type": "flex", "children": [{"type": "text"}] * 400}),
+        _popover({"type": "product-card", "props": {"ids": ["p1"]}}),
+        _popover(
+            {
+                "type": "form",
+                "props": {"verb": "send_to_team", "fields": [{"name": "email", "type": "email"}]},
+            }
+        ),
+    ],
+)
+def test_c1_nodes_inside_props_are_checked_as_nodes(spec):
+    assert _ripple(spec) is None
+
+
+def test_c1_an_allowed_node_inside_a_prop_passes():
+    assert _ripple(_popover({"type": "text", "props": {"text": "hi"}})) is not None
+
+
+# C2: an action is an action wherever it sits, in ui or in state.
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {
+            "ui": {
+                "type": "comparison-layout",
+                "props": {"items": [{"id": "a", "learn_more": {"action": "api", "url": "/x"}}]},
+            }
+        },
+        {"ui": {"type": "text"}, "state": {"go": {"action": "navigate", "url": "/x"}}},
+        {"ui": {"type": "text"}, "state": {"h": [{"action": "emit", "target": "steal"}]}},
+        {"ui": {"type": "text", "props": {"meta": {"x": {"action": "invoke_tool"}}}}},
+    ],
+)
+def test_c2_actions_are_checked_anywhere_in_ui_and_state(spec):
+    assert _ripple(spec) is None
+
+
+def test_c2_an_audit_logs_own_action_field_is_data():
+    spec = {
+        "ui": {
+            "type": "audit-log",
+            "props": {"entries": [{"id": 1, "actor": "Sam", "action": "navigate"}]},
+        }
+    }
+    assert _ripple(spec) is not None
+
+
+# C3: a ripple form never submits anywhere itself.
+@pytest.mark.parametrize(
+    "props",
+    [
+        {"fields": {"email": {"required": True}}, "action": "https://evil.test/collect"},
+        {"fields": {"email": {"required": True}}, "action": "/signup", "method": "post"},
+        {"fields": {"email": {"required": True}}, "method": "get"},
+    ],
+)
+def test_c3_a_form_with_a_submit_target_is_refused(props):
+    assert _ripple({"ui": {"type": "form", "props": props}}) is None
+
+
+# I1: links and media point at this site or an allowed host only.
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": {"type": "image", "props": {"src": "javascript:alert(1)"}}},
+        {"ui": {"type": "image", "props": {"src": " JaVa\tScRiPt:alert(1)"}}},
+        {"ui": {"type": "image", "props": {"src": "%6A%61vascript:alert(1)"}}},
+        {"ui": {"type": "image", "props": {"src": "&#106;avascript:alert(1)"}}},
+        {"ui": {"type": "image", "props": {"src": "data:image/png;base64,AAAA"}}},
+        {"ui": {"type": "image", "props": {"src": "https://evil.test/x.png"}}},
+        {"ui": {"type": "image", "props": {"src": "//evil.test/x.png"}}},
+        {"ui": {"type": "image", "props": {"src": "/\\evil.test/x.png"}}},
+        {"ui": {"type": "cta", "props": {"label": "Go", "href": "vbscript:x"}}},
+        {"ui": {"type": "cta", "props": {"label": "Go", "href": "{state.next}"}}},
+        {"ui": {"type": "navbar", "props": {"links": [{"label": "x", "href": "file:///etc"}]}}},
+        {"ui": {"type": "markdown", "props": {"content": "[win](javascript:alert(1))"}}},
+        {"ui": {"type": "text", "props": {"text": "click <javascript:alert(1)>"}}},
+        {"ui": {"type": "map", "props": {"tiles": "custom"}}},
+        {"ui": {"type": "map", "props": {"tileUrl": "https://evil.test/{z}/{x}/{y}.png"}}},
+        {"ui": {"type": "qr", "props": {"value": "x", "background": "url(javascript:x)"}}},
+        {"ui": {"type": "image", "props": {"src": "{state.pic}"}}, "state": {"pic": "blob:x"}},
+        {"ui": {"type": "text"}, "state": {"link": {"href": "https://evil.test"}}},
+    ],
+)
+def test_i1_urls_must_be_relative_or_on_an_allowed_host(spec):
+    assert _ripple(spec) is None
+
+
+@pytest.mark.parametrize(
+    "props",
+    [
+        {"src": "/img/a.png"},
+        {"src": "#top"},
+        {"src": ""},
+    ],
+)
+def test_i1_relative_urls_pass(props):
+    assert _ripple({"ui": {"type": "image", "props": props}}) is not None
+
+
+def test_i1_an_allowed_host_passes_and_presets_and_colours_stay_usable():
+    import dataclasses
+
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    spec = {"ui": {"type": "image", "props": {"src": "https://cdn.example.com/a.png"}}}
+    assert _ripple(spec) is None
+    allowed = dataclasses.replace(RIPPLE_PROFILE, url_hosts=frozenset({"cdn.example.com"}))
+    assert render_card(_body(spec), [], profile=allowed) is not None
+    assert _ripple({"ui": {"type": "map", "props": {"tiles": "carto-light"}}}) is not None
+    assert _ripple({"ui": {"type": "qr", "props": {"value": "x", "background": "#fff"}}})
+
+
+# I2: richtext renders trusted HTML.
+def test_i2_richtext_is_not_a_ripple_widget():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+
+    assert "richtext" not in RIPPLE_PROFILE.widget_types
+    assert _ripple({"ui": {"type": "richtext", "props": {"html": "<b>x</b>"}}}) is None
+
+
+# I3: card_ids reads as many nodes as the profile allows.
+def test_i3_card_ids_reads_the_profiles_node_budget():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, card_ids
+
+    kids = [{"type": "text"}] * 90 + [{"type": "product-card", "props": {"ids": ["p1"]}}]
+    body = _body({"ui": {"type": "flex", "children": kids}})
+    assert card_ids(body) == []
+    assert card_ids(body, profile=RIPPLE_PROFILE) == ["p1"]
+
+
+# M1: a pathologically deep card is dropped, never raised.
+@pytest.mark.parametrize("depth", [200, 5_000])
+def test_m1_a_very_deep_card_is_dropped_not_raised(depth):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    deep = "[" * depth + "]" * depth
+    body = '{"ui": {"type": "text"}, "state": {"x": ' + deep + "}}"
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is None
+
+
+def test_m1_a_body_too_deep_to_parse_is_dropped_not_passed_through():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    deep = "[" * 100_000 + "]" * 100_000
+    with pytest.raises(RecursionError):
+        json.loads(deep)
+    body = '{"ui": {"type": "text"}, "state": {"x": ' + deep + "}}"
+    # Before: the parse failure made it a "legacy" card, sent on verbatim.
+    assert render_card(body, []) is None
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is None
+
+
+# M2: a ripple form (keyed validation rules) is checked without crashing and is
+# never mistaken for the lead card.
+def test_m2_a_ripple_form_validates_and_is_not_a_lead_card():
+    from pocketpaw_ee.paw_bar.card_spec import has_lead_form
+
+    spec = {
+        "ui": {
+            "type": "form",
+            "props": {"fields": {"email": {"required": True, "pattern": ".+@.+"}}},
+            "children": [{"type": "input", "bind": "email"}],
+        }
+    }
+    assert _ripple(spec) is not None
+    assert has_lead_form(_body(spec)) is False
+
+
+# --------------------------------------------------------------------------- #
 # The runtime
 # --------------------------------------------------------------------------- #
 
@@ -330,6 +529,8 @@ async def test_settings_patch_round_trips_the_profile_and_the_cap(client):
     res = await c.patch(url, json={"concierge_daily_spend_cap": None, "concierge_ui_profile": None})
     assert res.json()["concierge_daily_spend_cap"] is None
     assert res.json()["concierge_ui_profile"] == "ripple"
+    res = await c.patch(url, json={"concierge_daily_spend_cap": 100})
+    assert res.status_code == 200, res.text
     res = await c.patch(
         url, json={"concierge_ui_profile": "pawbar", "concierge_daily_spend_cap": 0}
     )
@@ -346,7 +547,7 @@ async def test_settings_patch_round_trips_the_profile_and_the_cap(client):
         {"concierge_ui_profile": "react"},
         {"concierge_ui_profile": ""},
         {"concierge_daily_spend_cap": -1},
-        {"concierge_daily_spend_cap": 500.01},
+        {"concierge_daily_spend_cap": 100.01},
         {"concierge_daily_spend_cap": "lots"},
     ],
 )

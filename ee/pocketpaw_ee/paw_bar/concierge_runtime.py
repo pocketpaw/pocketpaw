@@ -1883,7 +1883,7 @@ class FenceFilter:
             return self._finish(tag, body)
         from pocketpaw_ee.paw_bar.card_spec import card_ids, render_card
 
-        ids = card_ids(body)
+        ids = card_ids(body, self._profile)
         try:
             items = list(await self._lookup(ids)) if ids else []
         except Exception:  # noqa: BLE001 — an unreadable catalog drops the card
