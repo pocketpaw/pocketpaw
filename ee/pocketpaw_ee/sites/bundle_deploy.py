@@ -1,62 +1,30 @@
 # ee/pocketpaw_ee/sites/bundle_deploy.py: deploy a ``paw-build.json`` build (the
-# ``project`` engine / base app templates) through the Cloudflare HTTP API, to one
-# of two TARGETS (``project_deploy_target``):
-#   * ``dispatch``: our Workers for Platforms namespace (the intended home).
-#   * ``account``: a regular account-level Worker script. INTERIM, for an account
-#     without WfP: no dispatch isolation, so a tenant's Worker shares the account's
-#     script namespace and limits. Picked by ``PAW_CF_DEPLOY_MODE=workers`` or the
-#     ``PAW_SITES_PROJECT_DEPLOY_TARGET`` override; see
-#     docs/deployment/sites-bundle-deploys.md for the risks and the switch to WfP.
-# Everything below applies to BOTH targets; only the API URLs differ.
+# ``project`` engine / base app templates) through the Cloudflare HTTP API, either into
+# our Workers for Platforms namespace (``dispatch``) or, as an interim for an account
+# without WfP, to a regular account-level script (``account``; picked by
+# ``project_deploy_target``, risks in docs/deployment/sites-bundle-deploys.md). Only
+# the API URLs differ between the two.
 #
-# The build ran in a sandbox from author-owned config. This module is the trust
-# boundary on the API host: it reads ONLY ``paw-build.json`` and the files it names,
-# never a wrangler config, and never runs anything. What crosses into the upload:
-#   * modules: the files under the worker module dir, part-named by their path
-#     relative to it, typed by extension; ``*.map`` and README.md are skipped.
-#   * assets: every file under ``assetsDir`` except ``_headers`` / ``_redirects``
-#     (they travel as ``assets.config`` strings, next to the routing options
-#     html_handling / not_found_handling / run_worker_first) and ``.assetsignore``
-#     and what it matches. Assets upload whether or not an ``assets`` binding is
-#     requested; the binding only exposes them to the worker.
-#   * compat: the author's date (bumped to 2024-09-23 for nodejs_compat, clamped to
-#     today, defaulted when missing) and only allow-listed flags.
-#   * bindings: requests are mapped by TYPE and NAME onto resources WE provisioned
-#     for this site. Author-supplied ids are never read. ``deploy_bundle`` takes an
-#     optional ``provision`` callback (``binding_provisioner.ensure_bindings``) that
-#     runs after every other check and before the first upload, creating the site's
-#     KV namespaces / R2 buckets; KV and R2 map per binding name, D1 / queues / ai
-#     are one per site. services, dispatch namespaces, tail consumers, images and
-#     anything unknown are dropped with a warning; an unprovisioned d1/kv/r2/do/ai/
-#     queues request refuses the deploy. An optional ``before_upload`` hook gets the
-#     mapped bindings after every check and before the first upload (the project
-#     engine applies its D1 migrations there).
-#   * secrets: every secret the owner SET for the site (``site_secrets``) binds as
-#     ``secret_text``, requested or not. A ``secret`` request with ``required`` or a
-#     name in the manifest's ``requiredSecrets`` that is not set refuses the deploy
-#     with ``sites.secrets_missing`` naming what to set in the builder. Values only
-#     ever live in the binding: never in a warning, an error, a log or a repr.
-#   * Durable Objects (``durable_objects``, behind ``PAW_SITES_DURABLE_OBJECTS``): the
-#     ``durableObjects`` block is vetted before ``provision``; its bindings upload as
-#     ``durable_object_namespace`` and its planned ``migrations`` ride the metadata.
-#   * platform env: ``ProvisionedResources.plain_text`` binds as ``plain_text`` and
-#     replaces a secret of the same name (a draft's ``BETTER_AUTH_URL``).
-#   * limits: 64 MiB of modules, our own module-count cap (Cloudflare documents
-#     none), and the static-asset caps. Over any of them refuses before upload.
-#   * worker settings (``worker_settings``), only for a bundle with worker modules:
-#     ``observability`` (Workers Logs + traces, sampled; ``PAW_SITES_OBSERVABILITY=0``
-#     turns it off), ``limits`` (per-request CPU and subrequest caps by the site's
-#     plan, ``paid``) and, OPT-IN via ``PAW_SITES_SMART_PLACEMENT=1``, Smart Placement
-#     for a worker that binds a regional backend (D1, R2). Off by default: quiet sites
-#     never get placed, placement moves the whole script (bad with
-#     ``run_worker_first``), and it works against D1 read replicas. A ``draft``
-#     deploy (``draft_worker``) never gets placement and reads the
-#     ``PAW_SITES_DRAFT_*`` limit / observability knobs.
-#
-# The manifest shape is paw-sites' ``buildPawManifest`` (src/starters.ts). The
-# parser also accepts the earlier shape (no ``workerModuleDir`` / ``mainModule``,
-# no ``assetsConfig``, wrangler key names in ``compat``) and ignores unknown fields
-# such as ``sizes`` and ``startup``. Everything the deploy drops is a warning.
+# This module is the trust boundary for an author-built bundle: it reads ONLY
+# ``paw-build.json`` and the files it names, never a wrangler config, and runs nothing.
+#   * modules and assets: path-contained, typed by extension, size and count capped;
+#     ``_headers`` / ``_redirects`` travel as ``assets.config`` strings.
+#   * compat: the author's date (bumped for nodejs_compat, clamped to today) and only
+#     allow-listed flags.
+#   * bindings: requests map by TYPE and NAME onto resources WE provisioned
+#     (``provision`` callback, ``binding_provisioner``); author ids are never read,
+#     unsupported kinds are dropped with a warning, an unprovisioned backend refuses.
+#   * secrets bind as ``secret_text`` (a missing required one refuses with
+#     ``sites.secrets_missing``; values never reach a log or repr); platform env
+#     (``plain_text``) wins over a secret of the same name.
+#   * Durable Objects (``durable_objects``, behind ``PAW_SITES_DURABLE_OBJECTS``):
+#     vetted and migration-planned before ``provision``, bound as
+#     ``durable_object_namespace``; the result carries Cloudflare's ``migration_tag``.
+#   * worker settings: sampled observability, plan-tiered ``limits`` and opt-in Smart
+#     Placement (``worker_settings``); drafts use the ``PAW_SITES_DRAFT_*`` knobs.
+# Every refusal happens before the first upload, so the live site is untouched.
+# The manifest is paw-sites' ``buildPawManifest`` (an earlier shape is still accepted);
+# unknown fields are ignored and everything dropped is a warning.
 from __future__ import annotations
 
 import json
