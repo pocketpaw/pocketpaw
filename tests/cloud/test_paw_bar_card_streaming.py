@@ -255,10 +255,8 @@ def test_scan_partial_only_judges_complete_strings_under_ui_and_state():
     assert scan_partial(bad, RIPPLE_PROFILE)
     assert not scan_partial(bad[:-1], RIPPLE_PROFILE)  # the string is still open
     assert not scan_partial(bad, PAWBAR_PROFILE)  # not a strict profile
-    # Under state it counts once a root "ui" key shows the body is a spec.
-    early = '{"state":{"a":"javascript:x"},'
-    assert not scan_partial(early, RIPPLE_PROFILE)
-    assert scan_partial(early + '"ui"', RIPPLE_PROFILE)
+    # Under state it counts at once, before any "ui" (a card without one fails anyway).
+    assert scan_partial('{"state":{"a":"javascript:x"}', RIPPLE_PROFILE)
     # Dropped or never-spec text is not judged; keys are not values.
     assert not scan_partial('{"theme":{"a":"javascript:x"},"ui":{', RIPPLE_PROFILE)
     assert not scan_partial('{"kind":"note","href":"javascript:x"}', RIPPLE_PROFILE)
@@ -287,6 +285,28 @@ def test_a_card_past_max_chars_is_rejected_and_no_longer_buffered():
     assert len(f._buf) <= 2  # swallowed, not held
     # The reply ends inside the swallowed fence: no second (truncated) rejection.
     assert f.close() == []
+
+
+@pytest.mark.parametrize("pad", [" ", "\r\n"])
+def test_a_padded_card_is_rejected_on_its_raw_size_with_a_bounded_buffer(pad):
+    # Trailing blanks or CRLF would fold under the cap at render_card's close; a
+    # streaming card is refused on its raw size instead, and never re-measured or
+    # held whole (each piece costs O(piece)).
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+
+    body = '{"ui":{"type":"text","props":{"text":"hi"}}}' + pad * RIPPLE_PROFILE.max_chars
+    f = _ripple_filter()
+    f.feed("```pawbar-card\n")
+    events, fed = [], 0
+    for k in range(0, len(body), 32):
+        events += f.feed(body[k : k + 32])
+        fed += len(body[k : k + 32])
+        assert len(f._buf) <= 2
+        if events and events[-1].event == "card.rejected":
+            break
+    assert events[-1].data == {"card_id": "c1", "reason": "invalid"}
+    assert RIPPLE_PROFILE.max_chars < fed <= RIPPLE_PROFILE.max_chars + 32
+    assert f.feed(pad * 1000) == [] and len(f._buf) <= 2
 
 
 def test_an_oversized_card_then_closed_resumes_text():

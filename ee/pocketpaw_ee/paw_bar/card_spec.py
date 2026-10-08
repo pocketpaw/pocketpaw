@@ -1026,9 +1026,9 @@ def _string_fails(value: str, key: str, styled: bool, hosts: frozenset[str]) -> 
 class PartialScan:
     """The strict string checks over a card body as it streams. ``feed`` takes
     the next text and returns True once the body holds a DEFINITE violation: a
-    COMPLETE string value under the root's ``ui`` / ``state`` (with a root
-    ``ui`` key seen, so it will be read as a spec) that ``_check_strict`` would
-    refuse in any finished card. A string still open is never judged, so a
+    COMPLETE string value under the root's ``ui`` / ``state`` that
+    ``_check_strict`` would refuse in any finished card (a body with no ``ui``
+    at all is refused at the close anyway). A string still open is never judged, so a
     half-written ``"/pa`` or ``"java`` passes. Never True for a non-strict
     profile. A body that stops being a JSON object stops being scanned (the
     close refuses it anyway).
@@ -1043,8 +1043,6 @@ class PartialScan:
         self._stack: list[list[Any]] = []
         self._raw: list[str] | None = None  # the open string's raw text
         self._escape = False
-        self._ui = False  # the root has a "ui" key
-        self._pending = False  # a violation seen before "ui" was
         self.hit = False
 
     def feed(self, text: str) -> bool:
@@ -1107,17 +1105,13 @@ class PartialScan:
             return
         if top[0] and top[2]:
             top[1], top[2] = value, False
-            if len(self._stack) == 1 and value == "ui":
-                self._ui, self.hit = True, self._pending
             return
         if self._stack[0][1] not in ("ui", "state"):
             return
         root = len(self._stack) == 1
         key = "" if root else top[1]
         styled = not root and (top[3] or (top[0] and key == "style"))
-        if _string_fails(value, key, styled, self._hosts):
-            self.hit = self._ui
-            self._pending = True
+        self.hit = _string_fails(value, key, styled, self._hosts)
 
 
 def scan_partial(body: str, profile: CardProfile) -> bool:

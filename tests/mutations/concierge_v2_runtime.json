@@ -705,8 +705,8 @@
   {
     "label": "card streaming: trailing backticks in a card body are not held, a closing marker leaks into a delta",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                end = len(text.rstrip(\"`\")) if j == -1 else j\n",
-    "replace": "                end = len(text) if j == -1 else j\n",
+    "find": "                held = 0 if j != -1 else 2 if text.endswith(\"``\") else int(text.endswith(\"`\"))\n",
+    "replace": "                held = 0\n",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_card_frames_do_not_depend_on_where_the_chunks_split"
     ]
@@ -741,8 +741,8 @@
   {
     "label": "card streaming: the partial scan is never consulted, a bad link streams to the fence close",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        return self._partial.feed(text[self._sent : end])\n",
-    "replace": "        return False\n",
+    "find": "        if self._size > self._profile.max_chars or self._partial.feed(piece):\n",
+    "replace": "        if self._size > self._profile.max_chars:\n",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_bad_link_is_rejected_mid_stream_before_the_fence_closes"
     ]
@@ -750,28 +750,21 @@
   {
     "label": "card streaming: no size bound while streaming, an oversized card is buffered whole",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        if end > cap and len(text[:end].replace(\"\\r\\n\", \"\\n\").rstrip()) > cap:\n",
-    "replace": "        if False:\n",
+    "find": "        if self._size > self._profile.max_chars or self._partial.feed(piece):\n",
+    "replace": "        if self._partial.feed(piece):\n",
     "tests": [
-      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_past_max_chars_is_rejected_and_no_longer_buffered"
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_past_max_chars_is_rejected_and_no_longer_buffered",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_padded_card_is_rejected_on_its_raw_size_with_a_bounded_buffer"
     ]
   },
   {
     "label": "card streaming: a rejected card is still buffered to its close",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                    self._buf = text[-2:] if self._swallow else text\n",
-    "replace": "                    self._buf = text\n",
+    "find": "                    self._buf = text[end:] if self._card_id else text[-2:]\n",
+    "replace": "                    self._buf = text[end:] if self._card_id else text\n",
     "tests": [
-      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_past_max_chars_is_rejected_and_no_longer_buffered"
-    ]
-  },
-  {
-    "label": "partial scan: a violation under state counts before the body is known to be a spec",
-    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            self.hit = self._ui\n",
-    "replace": "            self.hit = True\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_past_max_chars_is_rejected_and_no_longer_buffered",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_padded_card_is_rejected_on_its_raw_size_with_a_bounded_buffer"
     ]
   },
   {
@@ -800,6 +793,15 @@
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state",
       "tests/cloud/test_paw_bar_card_streaming.py::test_no_prefix_of_a_card_ripple_accepts_is_flagged"
+    ]
+  },
+  {
+    "label": "partial scan: a state string is judged only once a ui key shows up",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if self._stack[0][1] not in (\"ui\", \"state\"):\n",
+    "replace": "        if self._stack[0][1] != \"ui\":\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
     ]
   }
 ]

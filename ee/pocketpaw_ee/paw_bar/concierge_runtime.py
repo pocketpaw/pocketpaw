@@ -2124,7 +2124,8 @@ class FenceFilter:
         self._stream_cards = stream_cards is True
         self._cards = 0
         self._card_id = ""  # the open streamed card, "" when none
-        self._sent = 0  # how much of its body went out as card.delta
+        self._parts: list[str] = []  # its body so far, as sent in card.delta
+        self._size = 0  # their total length
         self._partial: Any = None  # its card_spec.PartialScan
         self._swallow = False  # a rejected card's fence is still open
 
@@ -2193,46 +2194,50 @@ class FenceFilter:
                         from pocketpaw_ee.paw_bar.card_spec import PartialScan
 
                         self._cards += 1
-                        self._card_id, self._sent = f"c{self._cards}", 0
+                        self._card_id = f"c{self._cards}"
+                        self._parts, self._size = [], 0
                         self._partial = PartialScan(self._profile)
                         out.append(CardEvent("card.start", {"card_id": self._card_id}))
+            elif self._card_id or self._swallow:
+                # A streamed card: _buf holds at most two trailing backticks (the
+                # sent body is in _parts), so a piece costs O(piece). The piece
+                # goes out as it comes, checked first; a card sure to fail is
+                # rejected at once and swallowed to its close.
+                j = text.find(_TICKS)
+                held = 0 if j != -1 else 2 if text.endswith("``") else int(text.endswith("`"))
+                end = j if j != -1 else len(text) - held
+                if self._card_id and end:
+                    out.append(self._card_piece(text[:end]))
+                if j == -1:
+                    self._buf = text[end:] if self._card_id else text[-2:]
+                    break
+                if self._card_id:
+                    out.append((self._tag, "".join(self._parts), self._card_id))
+                self._card_id, self._swallow, self._parts = "", False, []
+                self._mode, data = "text", text[j + len(_TICKS) :]
             else:
                 j = text.find(_TICKS, start)
-                # A streamed card's body goes out as it comes, bar trailing
-                # backticks, each piece checked first; a card sure to fail is
-                # rejected at once and swallowed to its close.
-                end = len(text.rstrip("`")) if j == -1 else j
-                if self._card_id and end > self._sent:
-                    if self._refused(text, end):
-                        rejected = {"card_id": self._card_id, "reason": "invalid"}
-                        out.append(CardEvent("card.rejected", rejected))
-                        self._card_id, self._swallow = "", True
-                    else:
-                        delta = {"card_id": self._card_id, "text": text[self._sent : end]}
-                        out.append(CardEvent("card.delta", delta))
-                        self._sent = end
                 if j == -1:
-                    # A swallowed card keeps only what may open the closing marker.
-                    self._buf = text[-2:] if self._swallow else text
+                    self._buf = text
                     break
-                if self._swallow:
-                    self._swallow = False
-                elif self._card_id:
-                    out.append((self._tag, text[:j], self._card_id))
-                    self._card_id = ""
-                else:
-                    out.append((self._tag, text[:j]))
+                out.append((self._tag, text[:j]))
                 self._mode, data = "text", text[j + len(_TICKS) :]
         return out
 
-    def _refused(self, text: str, end: int) -> bool:
-        """Whether the streaming card is already sure to fail: its body past the
-        profile's ``max_chars`` (as ``render_card`` measures it), or a definite
-        string violation in ``text[_sent:end]`` (``card_spec.PartialScan``)."""
-        cap = self._profile.max_chars
-        if end > cap and len(text[:end].replace("\r\n", "\n").rstrip()) > cap:
-            return True
-        return self._partial.feed(text[self._sent : end])
+    def _card_piece(self, piece: str) -> CardEvent:
+        """The streaming card's next body piece as a ``card.delta``, or
+        ``card.rejected`` "invalid" once the card is sure to fail: its raw body
+        past the profile's ``max_chars`` (``render_card`` folds CRLF and trailing
+        blanks before measuring; a model sends neither) or a definite string
+        violation (``card_spec.PartialScan``). A rejected card's fence is then
+        swallowed, unbuffered."""
+        card_id = self._card_id
+        self._size += len(piece)
+        if self._size > self._profile.max_chars or self._partial.feed(piece):
+            self._card_id, self._swallow, self._parts = "", True, []
+            return CardEvent("card.rejected", {"card_id": card_id, "reason": "invalid"})
+        self._parts.append(piece)
+        return CardEvent("card.delta", {"card_id": card_id, "text": piece})
 
     def close(self) -> list[Any]:
         held = self._buf if self._mode == "text" else ""
@@ -2242,7 +2247,7 @@ class FenceFilter:
                 CardEvent("card.rejected", {"card_id": self._card_id, "reason": "truncated"})
             )
         self._mode, self._buf, self._tag, self._card_id = "text", "", "", ""
-        self._swallow = False
+        self._swallow, self._parts = False, []
         return out
 
     async def _afinish(self, tag: str, body: str, card_id: str = "") -> Any:
