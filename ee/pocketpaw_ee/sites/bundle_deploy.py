@@ -36,6 +36,9 @@
 #     name in the manifest's ``requiredSecrets`` that is not set refuses the deploy
 #     with ``sites.secrets_missing`` naming what to set in the builder. Values only
 #     ever live in the binding: never in a warning, an error, a log or a repr.
+#   * Durable Objects (``durable_objects``, behind ``PAW_SITES_DURABLE_OBJECTS``): the
+#     ``durableObjects`` block is vetted before ``provision``; its bindings upload as
+#     ``durable_object_namespace`` and its planned ``migrations`` ride the metadata.
 #   * platform env: ``ProvisionedResources.plain_text`` binds as ``plain_text`` and
 #     replaces a secret of the same name (a draft's ``BETTER_AUTH_URL``).
 #   * limits: 64 MiB of modules, our own module-count cap (Cloudflare documents
@@ -61,13 +64,14 @@ import logging
 import os
 import posixpath
 import re
-from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites import durable_objects
 from pocketpaw_ee.sites.cloudflare_client import (
     ACCOUNT_TARGET,
     DISPATCH_TARGET,
@@ -183,6 +187,9 @@ class ProvisionedResources:
     # Platform env (``plain_text``), e.g. a draft's ``BETTER_AUTH_URL``. Wins over a
     # secret of the same name.
     plain_text: dict[str, str] = field(default_factory=dict)
+    # Vetted Durable Object bindings, ``{name: class_name}`` (``durable_objects``).
+    # Nothing to create: Cloudflare makes the namespace when the migration applies.
+    durable_objects: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -207,6 +214,10 @@ class BundleDeployResult:
     modules: int
     assets: int
     warnings: list[str]
+    # The script's Durable Object migration tag after the upload (Cloudflare's
+    # ``migration_tag``) and the classes live on it; None / () without DOs.
+    migration_tag: str | None = None
+    do_classes: tuple[str, ...] = ()
 
 
 def _refuse(message: str) -> ValidationError:
@@ -468,7 +479,7 @@ def map_bindings(
                 continue
             binding = {"type": "secret_text", "name": name, "text": value}
         else:
-            if kind in used and kind not in ("kv", "r2"):
+            if kind in used and kind not in ("kv", "r2", "do"):
                 raise _refuse(f"binding {label}: only one {kind} resource is provisioned per site")
             binding = _provisioned_binding(kind, name, provisioned)
             if binding is None:
@@ -479,6 +490,15 @@ def map_bindings(
         names.add(name)
         bindings.append(binding)
 
+    # The durableObjects block is authoritative: a DO binding with no matching request
+    # still binds, but never over another binding's name.
+    for name, cls in provisioned.durable_objects.items():
+        if any(b["name"] == name and b["type"] == "durable_object_namespace" for b in bindings):
+            continue
+        if name in names:
+            raise _refuse(f"Durable Object binding {name!r} has the same name as another binding")
+        bindings.append({"type": "durable_object_namespace", "name": name, "class_name": cls})
+        names.add(name)
     if missing:
         raise _secrets_missing(missing)
     requested = {b["name"] for b in bindings if b["type"] == "secret_text"}
@@ -513,7 +533,12 @@ def _provisioned_binding(kind: str, name: str, res: ProvisionedResources) -> dic
         return {"type": "queue", "name": name, "queue_name": res.queue_name}
     if kind == "ai" and res.ai:
         return {"type": "ai", "name": name}
-    # Durable Objects need a class + migrations we do not provision yet.
+    if kind == "do" and res.durable_objects.get(name):
+        return {
+            "type": "durable_object_namespace",
+            "name": name,
+            "class_name": res.durable_objects[name],
+        }
     return None
 
 
@@ -747,6 +772,8 @@ async def deploy_bundle(
     paid: bool = False,
     draft: bool = False,
     main_wrapper: Callable[[str], WorkerModule] | None = None,
+    do_state: durable_objects.DurableObjectState | None = None,
+    confirm_do_data_loss: Sequence[str] = (),
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -769,13 +796,28 @@ async def deploy_bundle(
     free, the tighter cap. ``draft`` (a ``draft_worker`` deploy) uses the draft
     limit / observability knobs and no placement. ``main_wrapper``, given the main
     module's name, returns a module that becomes the new entry (the draft guard); it
-    is added after every check, so the wrapper itself is never author-controlled."""
+    is added after every check, so the wrapper itself is never author-controlled.
+
+    ``do_state`` is what the script already has applied (Durable Object migration
+    tag, live classes); unknown means a fresh script. ``confirm_do_data_loss`` names
+    the classes the owner agreed to delete or rename. The DO block is vetted, its
+    migration planned and the account budget checked before ``provision``, so a
+    refused bundle creates nothing. The result carries the tag Cloudflare reports."""
     if target not in SCRIPT_TARGETS:
         raise _refuse(f"unknown deploy target {target!r}")
     bundle, manifest = _read_bundle(build_dir)
+    vetted = durable_objects.vet_durable_objects(
+        manifest, paid=paid, state=do_state, confirm=confirm_do_data_loss
+    )
+    if vetted is not None and not bundle.modules:
+        raise _refuse("Durable Objects need a worker module; the build has only assets")
+    await durable_objects.check_account_budget(cf, vetted, target=target)
     if provision is not None:
         provisioned = await provision(manifest.get("bindingRequests"))
-    _map_into(bundle, manifest, provisioned or ProvisionedResources())
+    provisioned = provisioned or ProvisionedResources()
+    if vetted is not None:
+        provisioned = replace(provisioned, durable_objects=dict(vetted.bindings))
+    _map_into(bundle, manifest, provisioned)
     for warning in bundle.warnings:
         logger.warning("sites.bundle_deploy %s: %s", script_name, warning)
     if main_wrapper is not None and bundle.main_module:
@@ -799,7 +841,9 @@ async def deploy_bundle(
             script_name=script_name, assets=bundle.assets, salt=salt, target=target
         )
         assets_meta = {"jwt": jwt, "config": bundle.assets_config}
-    await cf.put_worker(
+    # Sent only when the plan has steps, so a deploy without DOs is unchanged.
+    migrations = vetted.plan.migrations if vetted is not None else None
+    upload = await cf.put_worker(
         script_name=script_name,
         modules=bundle.modules,
         main_module=bundle.main_module,
@@ -809,10 +853,26 @@ async def deploy_bundle(
         assets=assets_meta,
         target=target,
         **worker_settings(bundle, paid=paid, draft=draft),
+        **({"migrations": migrations} if migrations else {}),
     )
+    tag: str | None = None
+    if vetted is not None:
+        # Cloudflare's answer wins; ours is the cross-check (and the fallback when the
+        # response omits it, since a 2xx upload applied the migration).
+        reported = getattr(upload, "migration_tag", None)
+        if reported and reported != vetted.plan.tag:
+            logger.warning(
+                "sites.bundle_deploy %s: Cloudflare reports migration tag %r, we planned %r",
+                script_name,
+                reported,
+                vetted.plan.tag,
+            )
+        tag = reported or vetted.plan.tag
     return BundleDeployResult(
         script_name=script_name,
         modules=len(bundle.modules),
         assets=len(bundle.assets),
         warnings=list(bundle.warnings),
+        migration_tag=tag,
+        do_classes=vetted.classes if vetted is not None else (),
     )
