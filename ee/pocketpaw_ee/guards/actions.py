@@ -246,6 +246,10 @@ ACTIONS: dict[str, ActionRule] = {
     # it is adding to. If that trade is wrong for a given deployment, this is one
     # word.
     "sites.buy_plan": ActionRule(WorkspaceRole.ADMIN, "sites.plan_purchase_forbidden"),
+    # Confirming that a publish may DELETE a site's Durable Object data for good
+    # (``confirm_do_data_loss``). Publishing is MEMBER; destroying stored data is the
+    # irreversible half, so it needs the same tier as buying a plan.
+    "sites.confirm_data_loss": ActionRule(WorkspaceRole.ADMIN, "sites.data_loss_confirm_forbidden"),
     # /ship — managed deploys onto real infrastructure.
     # Reading boxes / apps / logs is MEMBER. ``ship.manage`` (ADMIN) gates the
     # DESTRUCTIVE verbs — destroy, rollback, prod deploy — which never execute

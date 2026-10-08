@@ -41,6 +41,7 @@ class SiteDraftWorker(TimestampedDocument):
     # Durable Object tag history and live classes of ``script`` (see Site).
     do_migration_tags: list[str] = Field(default_factory=list)
     do_classes: list[str] = Field(default_factory=list)
+    do_rotations: list[datetime] = Field(default_factory=list)
     seeded: bool = False
     auth_secret_enc: str = ""
     draft_key_enc: str = ""
