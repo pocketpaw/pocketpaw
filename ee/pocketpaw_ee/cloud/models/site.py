@@ -316,6 +316,12 @@ class Site(TimestampedDocument):
     # ``migration_tag``; read to plan the next publish and by the delete cascade.
     do_migration_tags: list[str] = Field(default_factory=list)
     do_classes: list[str] = Field(default_factory=list)
+    # Daily DO usage from ``sites.do_metering`` (``{"YYYY-MM-DD": {"requests",
+    # "active_time", "stored_bytes"}}``, last 35 days), and whether today's requests
+    # passed the plan's ceiling. The flag reaches the Worker as ``PAW_DO_THROTTLED``
+    # on the next deploy.
+    do_usage: dict[str, dict[str, int]] = Field(default_factory=dict)
+    do_throttled: bool = False
     # DP0-1: where a dynamic site sits in the durable D1 provision job
     # (none | provisioning | provisioned | failed). Contract: the job persists
     # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still

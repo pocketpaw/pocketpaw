@@ -16,7 +16,8 @@
 #     refused, not dropped. Every bound and live class must be exported by the main
 #     module (``exportedClasses``; a textual check, Cloudflare's upload is final).
 #   * Class cap: 1 on a free site, ``PAW_SITES_DO_MAX_CLASSES`` (default 3, max 5)
-#     on a paid one. Per-room participant caps belong to the recipe, not here.
+#     on a paid one. The recipe enforces per-room caps; we hand it the plan's value
+#     and the metering verdict as platform vars (``platform_vars``).
 #   * Migrations use Cloudflare's tagged form (old_tag / new_tag / steps), not the
 #     declarative ``exports`` map. Tags are append-only; ``plan_migration`` decides
 #     what to send from the tag last applied to the script. Destructive steps
@@ -49,6 +50,12 @@ DEFAULT_MAX_CLASSES = 3
 MAX_CLASSES_CEILING = 5
 FREE_MAX_CLASSES = 1
 ACCOUNT_BUDGET_ENV = "PAW_SITES_DO_ACCOUNT_BUDGET"
+# Platform vars a DO site's Worker gets (plain_text, they win over owner values).
+ROOM_MAX_PEERS_VAR = "ROOM_MAX_PEERS"
+THROTTLED_VAR = "PAW_DO_THROTTLED"
+FREE_ROOM_MAX_PEERS = 10
+ROOM_MAX_PAID_ENV = "PAW_SITES_DO_ROOM_MAX_PAID"
+ROOM_MAX_PEERS_CEILING = 50
 DEFAULT_ACCOUNT_BUDGET = 300
 DRAFT_BUDGET_ENV = "PAW_SITES_DO_DRAFT_BUDGET"
 DEFAULT_DRAFT_BUDGET = 100
@@ -283,6 +290,29 @@ def class_cap(*, paid: bool) -> int:
         logger.warning("%s=%r is not an int; using %d", MAX_CLASSES_ENV, raw, DEFAULT_MAX_CLASSES)
         value = DEFAULT_MAX_CLASSES
     return min(max(value, 0), MAX_CLASSES_CEILING)
+
+
+def room_max_peers(*, paid: bool) -> int:
+    """Peers per room the recipe allows: 10 free, ``PAW_SITES_DO_ROOM_MAX_PAID``
+    (default and ceiling 50) paid. A bad value falls back to the ceiling."""
+    if not paid:
+        return FREE_ROOM_MAX_PEERS
+    raw = (os.environ.get(ROOM_MAX_PAID_ENV) or "").strip()
+    try:
+        value = int(raw) if raw else ROOM_MAX_PEERS_CEILING
+    except ValueError:
+        logger.warning("%s=%r is not an int; using %d", ROOM_MAX_PAID_ENV, raw, 50)
+        value = ROOM_MAX_PEERS_CEILING
+    return min(max(value, 1), ROOM_MAX_PEERS_CEILING)
+
+
+def platform_vars(*, paid: bool, throttled: bool) -> dict[str, str]:
+    """``ROOM_MAX_PEERS`` and ``PAW_DO_THROTTLED`` ("1" when the daily usage sweep
+    found the site over its ceiling: the recipe refuses new joins and says why)."""
+    return {
+        ROOM_MAX_PEERS_VAR: str(room_max_peers(paid=paid)),
+        THROTTLED_VAR: "1" if throttled else "0",
+    }
 
 
 # ------------------------------------------------------------------ planner
@@ -538,6 +568,7 @@ async def teardown_script(
     classes: Iterable[str],
     migration_tag: str | None,
     delete: bool = True,
+    tombstone: bool = True,
 ) -> TeardownResult:
     """Delete every Durable Object of ``script`` and, with ``delete``, the script.
 
@@ -547,12 +578,14 @@ async def teardown_script(
     2. ``DELETE ...?force=true`` on ``target`` (a 404 is success), which also
        removes the script's namespaces.
     3. The account's namespace list must show no row for ``script``.
-    ``delete=False`` only runs step 3 (a resumed teardown whose script is gone).
+    ``delete=False`` only runs step 3 (a resumed teardown whose script is gone);
+    ``tombstone=False`` skips step 1 (a retry after the script was already deleted,
+    where an upload would recreate it).
     Never raises: ``ok`` is False with a short reason, and the caller leaves the
     work for its retry path (the draft sweeper, the cascade ledger)."""
     names = list(dict.fromkeys(classes))
     errors: list[str] = []
-    if delete and names and migration_tag and migration_tag != TOMBSTONE_TAG:
+    if tombstone and delete and names and migration_tag and migration_tag != TOMBSTONE_TAG:
         try:
             await cf.put_worker(
                 script_name=script,
@@ -610,6 +643,8 @@ __all__ = [
     "VettedDurableObjects",
     "check_account_budget",
     "check_workspace_quota",
+    "platform_vars",
+    "room_max_peers",
     "class_cap",
     "declares_durable_objects",
     "enabled",

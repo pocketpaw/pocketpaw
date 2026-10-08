@@ -6,10 +6,14 @@
 #   B. Tombstone (``deleted_classes``) then ``DELETE ?force=true``: are the script's
 #      DO namespaces gone afterwards?
 #   C. ``DELETE ?force=true`` alone, no tombstone: are the namespaces gone?
+#   D. The GraphQL analytics schema ``sites.do_metering`` relies on: the
+#      durableObjects* datasets on ``account`` and their dimensions / sum / max
+#      fields (introspection), then ``do_metering.read_usage`` for a live spike
+#      script, so a renamed field shows up here before the usage sweep fails open.
 #
 # How to run (staging account only, from the pocketpaw repo root):
 #   PAW_CF_ACCOUNT_ID=<staging account id> PAW_CF_API_TOKEN=<token with Workers
-#   Scripts:Edit> uv run --group ee python scripts/sites_do_spike.py
+#   Scripts:Edit and Account Analytics:Read> uv run --group ee python scripts/sites_do_spike.py
 # Optional: PAW_SPIKE_WRITE=1 also enables workers.dev on each spike script and
 # writes one row into the DO before teardown, so storage really exists.
 #
@@ -23,9 +27,11 @@ import asyncio
 import os
 import secrets
 import sys
+from datetime import UTC, datetime
 
 import httpx
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites import do_metering
 from pocketpaw_ee.sites.cloudflare_client import ACCOUNT_TARGET, CloudflareClient, WorkerModule
 
 CLASS = "SpikeRoom"
@@ -136,6 +142,48 @@ async def scenario_force_only(cf: CloudflareClient) -> None:
         await cf.delete_account_script(name, force=True)
 
 
+_TYPE_FIELDS = """query T($name: String!) { __type(name: $name) { fields { name
+  type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } }"""
+
+
+def _leaf(t: dict | None) -> str:
+    while t and not t.get("name"):
+        t = t.get("ofType")
+    return (t or {}).get("name") or "?"
+
+
+async def _fields(cf: CloudflareClient, type_name: str) -> dict[str, str]:
+    data = await cf.query_graphql(_TYPE_FIELDS, {"name": type_name})
+    rows = ((data.get("__type") or {}).get("fields")) or []
+    return {f["name"]: _leaf(f.get("type")) for f in rows}
+
+
+async def scenario_analytics(cf: CloudflareClient) -> None:
+    try:
+        account = await _fields(cf, "account")
+        datasets = {k: v for k, v in account.items() if k.startswith("durableObjects")}
+        _say("D1 datasets", sorted(datasets))
+        for name, type_name in sorted(datasets.items()):
+            group = await _fields(cf, type_name)
+            for part in ("dimensions", "sum", "max"):
+                if part in group:
+                    _say(f"D2 {name}.{part}", sorted(await _fields(cf, group[part])))
+    except ValidationError as exc:
+        _say("D introspection", f"REFUSED: {exc.message}")
+    name = f"paw-spike-do-{secrets.token_hex(3)}"
+    try:
+        v1 = {"new_tag": "v1", "steps": [{"new_sqlite_classes": [CLASS]}]}
+        _say("D3 upload v1", await _put(cf, name, WITH_DO, BINDINGS, v1))
+        await _write_row(cf, name)
+        try:
+            usage = await do_metering.read_usage(cf, [name], datetime.now(UTC).date())
+            _say("D3 read_usage (analytics lag: zeros are normal right away)", usage)
+        except ValidationError as exc:
+            _say("D3 read_usage", f"REFUSED: {exc.message}")
+    finally:
+        await cf.delete_account_script(name, force=True)
+
+
 async def main() -> int:
     account = os.environ.get("PAW_CF_ACCOUNT_ID", "")
     token = os.environ.get("PAW_CF_API_TOKEN", "")
@@ -145,6 +193,7 @@ async def main() -> int:
     cf = CloudflareClient(account_id=account, api_token=token, zone_id="", dispatch_namespace="")
     await scenario_tombstone(cf)
     await scenario_force_only(cf)
+    await scenario_analytics(cf)
     return 0
 
 

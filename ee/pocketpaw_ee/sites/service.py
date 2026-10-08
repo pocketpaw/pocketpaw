@@ -3549,6 +3549,9 @@ async def _deploy_paw_bundle(
         return sum(len(s.do_classes) for s in others if str(s.id) != str(site_id))
 
     do_kw["do_quota_used"] = _workspace_do_classes
+    if getattr(bundle_doc, "do_throttled", False):
+        # The usage sweep's verdict reaches the Worker as PAW_DO_THROTTLED=1.
+        do_kw["do_throttled"] = True
     result = await bundle_deploy.deploy_bundle(
         cf,
         script_name=script_name,

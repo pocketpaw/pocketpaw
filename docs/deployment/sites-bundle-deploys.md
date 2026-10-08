@@ -219,7 +219,8 @@ bucket the author wrote is ignored.
 | `d1` | `{type: "d1", name, id}` | The site's own D1 (`Site.d1_database_id`), named `paw-site-<siteid>`. Created on the first publish that binds it, or by the dynamic-site provision job. One per site. | Free and up |
 | `kv` | `{type: "kv_namespace", name, namespace_id}` | One namespace per binding name (`Site.kv_namespaces`). | Free: 1 per site. Site tier and up: 3. |
 | `r2` | `{type: "r2_bucket", name, bucket_name}` | One bucket per binding name (`Site.r2_buckets`). | Site tier and up: 3 per site. Refused on free. |
-| `do`, `queues`, `ai` | none | Refused: "not supported on Paw Sites yet". | |
+| `do` | `{type: "durable_object_namespace", name, class_name}` | Nothing created: Cloudflare makes the namespace when the migration applies. See "Durable Objects". Behind `PAW_SITES_DURABLE_OBJECTS`; refused while it is off. | Free: 1 class. Paid: `PAW_SITES_DO_MAX_CLASSES`. |
+| `queues`, `ai` | none | Refused: "not supported on Paw Sites yet". | |
 
 **Plan gating.** Free gets D1 and KV under tight limits; R2 (and later Durable
 Objects and bring-your-own backends) needs the `site` tier or above with an active
@@ -264,6 +265,125 @@ object after a day, and an operator deletes it after that.
 `Workers R2 Storage Write` (and `D1 Edit` for project databases) on
 `PAW_CF_API_TOKEN`, in addition to the Workers scripts
 scope the deploy already uses.
+
+## Durable Objects
+
+Behind `PAW_SITES_DURABLE_OBJECTS=1`. With it off, a build that declares Durable
+Objects (a `durableObjects` block in `paw-build.json` or a `do` binding request) is
+refused with `sites.do_disabled`, and so is a site that already has live DOs; nothing
+deploys without them. Code: `ee/pocketpaw_ee/sites/durable_objects.py` (vetting,
+migration plan, teardown) and `ee/pocketpaw_ee/sites/do_metering.py` (sweeps). Design:
+paw-workspace `docs/design/drafts/2026-10-08-sites-durable-objects.md`.
+
+**What a build may declare.** SQLite-backed classes in the site's own script only:
+migration steps carry `new_sqlite_classes`, `renamed_classes` and `deleted_classes`,
+nothing else (`new_classes`, `transferred_classes` and any `script_name` /
+`environment` / `namespace_id` / `dispatch_namespace` on a binding are refused). Every
+bound and live class must be exported by the main module. Migrations use Cloudflare's
+tagged form (`old_tag` / `new_tag` / `steps`) and are append-only.
+
+**State.** `Site.do_migration_tags` (applied tag history, oldest first) and
+`Site.do_classes`, the same two on the draft registry row. Written only after a
+successful upload, from the `migration_tag` Cloudflare returns. A publish sends only
+the steps after the last applied tag, with `old_tag`, so Cloudflare rejects a stale or
+concurrent publish. A history that does not start with what was applied is refused
+(`sites.do_history_diverged`); an older bundle is accepted as a rollback only when its
+tags are a prefix of the history and it still exports every live class.
+
+**Destructive steps.** A pending `deleted_classes` / `renamed_classes` step on a live
+class is refused with `sites.do_data_loss_unconfirmed` naming the classes, until the
+publish carries `confirm_do_data_loss: ["Class", ...]` (`POST /sites/publish`, from
+the owner's dialog only). Drafts allow them without confirmation, and a draft whose
+history diverged tears its script down and rotates to a fresh `paw-draft-*` name.
+
+**Platform vars** (plain_text, they win over owner values), set on every deploy of a
+DO bundle, drafts included:
+
+| Var | Value |
+|---|---|
+| `ROOM_MAX_PEERS` | 10 on free; `PAW_SITES_DO_ROOM_MAX_PAID` on paid (default 50, clamped to 1..50). Drafts use the pocket's plan. |
+| `PAW_DO_THROTTLED` | `"1"` while the usage sweep has the site over its daily ceiling, else `"0"`. Drafts are never throttled. Takes effect on the site's next deploy. |
+
+**Env.**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PAW_SITES_DURABLE_OBJECTS` | off | The feature flag. |
+| `PAW_SITES_DO_MAX_CLASSES` | 3 (max 5) | Classes per paid site. Free sites get 1. |
+| `PAW_SITES_DO_ACCOUNT_BUDGET` | 300 | On the `account` target, a NEW class is refused once the account's DO namespaces reach this. Fails closed when the count cannot be read. Drafts count too. |
+| `PAW_SITES_DO_ROOM_MAX_PAID` | 50 | `ROOM_MAX_PEERS` on paid sites (1..50). |
+| `PAW_SITES_DO_DAILY_REQUESTS_FREE` | 100000 | Daily DO requests before a free site is throttled; 0 disables. |
+| `PAW_SITES_DO_DAILY_REQUESTS_PAID` | 3000000 | Same for paid sites. |
+| `PAW_SITES_DO_METERING_MINUTES` | 60 | How often the usage sweep reads analytics. |
+| `PAW_SITES_DO_TEARDOWN_MAX_ATTEMPTS` | 6 | Teardown retries before a row goes to an operator. |
+
+**Token scopes.** On top of the Workers scripts scope: `Account Analytics: Read` for
+the usage sweep (GraphQL analytics).
+
+**Usage metering** (`sweep_do_usage`, in the cluster sweep loop). At most once per
+`PAW_SITES_DO_METERING_MINUTES`, for every live site with DO classes: reads today's
+requests (`durableObjectsInvocationsAdaptiveGroups.sum.requests`), active time
+(`durableObjectsPeriodicGroups.sum.activeTime`) and stored bytes
+(`durableObjectsStorageGroups.max.storedBytes`) per namespace from
+`POST /client/v4/graphql`, maps namespaces to scripts through the namespaces list,
+stores the day on `Site.do_usage` (35 days kept) and sets `Site.do_throttled` while
+today's requests are past the plan's ceiling. It fails open: if the namespaces list or
+the request counts cannot be read, nothing changes and the error is logged; a failed
+duration or storage read only leaves those numbers at 0. The flag clears by itself on
+a new day under the ceiling. To lift a throttle early, raise the ceiling or set
+`do_throttled: false` on the Site and republish.
+
+**Delete.** The cascade's `do` step (before `script`) runs the teardown: a stub upload
+with `{old_tag, new_tag: "paw-tombstone", deleted_classes}` (deletes every object and
+its data), `DELETE ...?force=true`, then a check that the namespaces list has no row
+for the script. The `script` step then deletes with `force` (a 404 is success). If the
+teardown cannot finish, the ledger records `partial-needs-operator` and a
+`site_do_teardowns` row is queued (the Site doc is deleted when the cascade ends).
+`sweep_do_teardowns` retries it with a forced delete and the namespace check (never a
+stub upload, which would recreate the deleted script), backing off from 10 minutes to
+a day; after `PAW_SITES_DO_TEARDOWN_MAX_ATTEMPTS` the row's `state` becomes `operator`
+and an ERROR log names the script, target, classes and last error. Draft purges use
+the same teardown and the draft sweeper retries them.
+
+**Operator runbook.**
+
+1. *A teardown handed to an operator.* Find the ERROR log `needs an operator`, or
+   query `site_do_teardowns` with `state: "operator"`. List the account's namespaces
+   (`GET /accounts/{id}/workers/durable_objects/namespaces`) and look for rows whose
+   `script` is the logged one. If the script still exists, delete it with
+   `DELETE .../workers/scripts/<name>?force=true` (or the dispatch-namespace path for
+   `target: dispatch`). Once no namespace row remains, delete the teardown row.
+2. *A site is throttled.* Check `Site.do_usage` for today's numbers. Either it is real
+   traffic (leave it; it lifts tomorrow, or move the site to a paid plan), or the
+   ceiling is too low for the plan (raise `PAW_SITES_DO_DAILY_REQUESTS_*`). The
+   Worker only sees the change on its next deploy.
+3. *Usage stays at zero or the sweep logs `usage read failed`.* Analytics lag by a
+   few minutes; a persistent failure usually means the token lacks
+   `Account Analytics: Read` or a GraphQL field was renamed. Run the spike's
+   scenario D (below) to print the live schema.
+4. *A publish is refused with `sites.do_history_diverged`.* The build's migrations do
+   not start with what is applied. Restore the earlier entries unchanged and append;
+   never edit or reorder applied migrations.
+5. *`sites.do_account_budget` / `sites.do_budget_unknown`.* The account target is near
+   its DO namespace budget, or the list could not be read. Clean up with step 1, or
+   move project sites to Workers for Platforms.
+
+**The staging spike** (`scripts/sites_do_spike.py`). Never against production, never
+via wrangler. It uses our own client against a staging account:
+
+```bash
+PAW_CF_ACCOUNT_ID=<staging account id> PAW_CF_API_TOKEN=<token> \
+  uv run --group ee python scripts/sites_do_spike.py
+# optional: PAW_SPIKE_WRITE=1 writes a row into each DO over workers.dev first
+```
+
+The token needs Workers Scripts: Edit and Account Analytics: Read. It deploys
+`paw-spike-do-<hex>` scripts with one SQLite class and prints, without secrets:
+(A) whether an upload without `migrations` is accepted once a tag exists; (B) the
+namespaces after a tombstone then a forced delete; (C) the namespaces after a forced
+delete alone; (D) the durableObjects* GraphQL datasets and their fields, and
+`do_metering.read_usage` for a spike script. Every script is force-deleted in a
+`finally`.
 
 ## Project D1 migrations
 

@@ -310,6 +310,10 @@ class CloudflareClient:
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(headers=self._headers, transport=self._transport, timeout=30.0)
 
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
     @staticmethod
     def _unwrap(resp: httpx.Response) -> dict:
         if resp.status_code // 100 != 2:
@@ -1113,6 +1117,36 @@ class CloudflareClient:
             found = found if isinstance(found, list) else []
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
+
+    async def query_graphql(self, query: str, variables: Mapping[str, Any]) -> dict:
+        """Run one GraphQL Analytics query and return its ``data``.
+
+        ``POST /client/v4/graphql`` with ``{query, variables}``
+        (https://developers.cloudflare.com/analytics/graphql-api/). Values travel as
+        variables, never interpolated. The body is ``{data, errors}``, not the
+        success envelope. Fails closed: a non-2xx, a non-JSON body, any ``errors`` or
+        a missing ``data`` raises ``sites.cloudflare_error``."""
+        async with self._client() as client:
+            resp = await client.post(
+                f"{_CF_API}/graphql", json={"query": query, "variables": dict(variables)}
+            )
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Cloudflare GraphQL {resp.status_code}: {_error_detail(resp)}",
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ValidationError("sites.cloudflare_error", "GraphQL answered non-JSON") from exc
+        errors = body.get("errors") if isinstance(body, dict) else None
+        data = body.get("data") if isinstance(body, dict) else None
+        if errors or not isinstance(data, dict):
+            first = errors[0].get("message", "") if errors and isinstance(errors[0], dict) else ""
+            raise ValidationError(
+                "sites.cloudflare_error", f"Cloudflare GraphQL error: {first or 'no data'}"[:300]
+            )
+        return data
 
     async def query_analytics_sql(self, sql: str) -> list[dict]:
         """Run ONE SQL query against Workers Analytics Engine and return its rows
