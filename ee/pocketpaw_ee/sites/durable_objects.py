@@ -1,6 +1,6 @@
 # ee/pocketpaw_ee/sites/durable_objects.py: vet the Durable Objects a project
-# build declares and plan the migration its upload carries. Pure except for
-# ``check_account_budget``, which reads one Cloudflare list.
+# build declares, plan the migration its upload carries, and tear a script's DOs
+# down. Pure except ``check_account_budget`` and ``teardown_script`` (Cloudflare).
 #
 # A build declares DOs in paw-build.json's ``durableObjects`` block (written by
 # paw-sites' buildPawManifest from the site's wrangler.jsonc):
@@ -24,6 +24,10 @@
 #   * On the ``account`` target DO namespaces share the account's limits, so a NEW
 #     class is refused past ``PAW_SITES_DO_ACCOUNT_BUDGET`` namespaces, and the
 #     check fails closed when the count cannot be read.
+#   * State per script (Site / draft registry): the applied tag HISTORY and the live
+#     classes, written only after a successful upload (``migration_tags_after``).
+#   * ``teardown_script``: tombstone upload (``deleted_classes``), forced delete, then
+#     a namespace-list check. Best effort, never raises; the caller retries.
 from __future__ import annotations
 
 import logging
@@ -45,6 +49,11 @@ FREE_MAX_CLASSES = 1
 ACCOUNT_BUDGET_ENV = "PAW_SITES_DO_ACCOUNT_BUDGET"
 DEFAULT_ACCOUNT_BUDGET = 300
 ACCOUNT_TARGET = "account"  # cloudflare_client.ACCOUNT_TARGET; kept import-free
+DISPATCH_TARGET = "dispatch"
+#: The tag of the stub upload that deletes every class before a script goes.
+TOMBSTONE_TAG = "paw-tombstone"
+_TOMBSTONE_MODULE = 'export default { fetch() { return new Response("gone", { status: 410 }) } };'
+_TOMBSTONE_COMPAT = "2026-09-01"
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _TAG = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -108,6 +117,12 @@ class DurableObjectState:
     live_classes: tuple[str, ...] = ()
     applied_tags: tuple[str, ...] | None = None
 
+    @classmethod
+    def from_history(cls, tags: Iterable[str], classes: Iterable[str]) -> DurableObjectState:
+        """The state a Site / draft row stores: tag history oldest first, live classes."""
+        history = tuple(t for t in tags if t)
+        return cls(history[-1] if history else None, tuple(classes), history)
+
 
 @dataclass(frozen=True)
 class MigrationPlan:
@@ -122,6 +137,8 @@ class VettedDurableObjects:
     bindings: dict[str, str]
     plan: MigrationPlan
     classes: tuple[str, ...]  # live after this deploy
+    tags: tuple[str, ...] = ()  # the declared history
+    previous: tuple[str, ...] = ()  # the applied history before this deploy
 
     def upload_bindings(self) -> list[dict]:
         return [
@@ -325,7 +342,8 @@ def plan_migration(
             "sites.do_data_loss_unconfirmed",
             f"This publish deletes or renames Durable Object classes and their stored data "
             f"for good: {_names(unconfirmed)}. The site owner has to confirm that before it "
-            "can go live.",
+            "can go live (publish again with confirm_do_data_loss: "
+            f"{sorted(unconfirmed)!r}, from the owner's publish dialog only).",
         )
     migrations: dict[str, Any] = {"new_tag": tags[-1], "steps": [m.step() for m in pending]}
     if applied_tag is not None:
@@ -360,6 +378,12 @@ def vet_durable_objects(
                 if isinstance(b, dict)
             ]
             named = f" ({_names(classes)})" if classes else ""
+        if not declares_durable_objects(manifest):
+            raise ValidationError(
+                "sites.do_disabled",
+                f"This site has live Durable Objects ({_names(state.live_classes)}), which "
+                "are turned off on Paw Sites right now, so it cannot be redeployed yet.",
+            )
         raise ValidationError(
             "sites.do_disabled",
             f"This build declares Durable Objects{named}, which are not enabled on Paw "
@@ -402,7 +426,27 @@ def vet_durable_objects(
         allow_data_loss=allow_data_loss,
     )
     classes = tuple(state.live_classes) if plan.rollback else cfg.live_classes
-    return VettedDurableObjects(dict(cfg.bindings), plan, classes)
+    return VettedDurableObjects(
+        dict(cfg.bindings),
+        plan,
+        classes,
+        tags=tuple(m.tag for m in cfg.migrations),
+        previous=tuple(state.applied_tags or ()),
+    )
+
+
+def migration_tags_after(vetted: VettedDurableObjects, reported: str | None) -> tuple[str, ...]:
+    """The applied tag history once the upload succeeded. Cloudflare's reported tag
+    wins: a tag outside the declared history is appended as-is, so the next plan sees
+    a history it does not recognise and refuses rather than guesses."""
+    plan = vetted.plan
+    if plan.migrations is None:
+        return vetted.previous or ((plan.tag,) if plan.tag else ())
+    tag = reported or plan.tag
+    if tag in vetted.tags:
+        return vetted.tags[: vetted.tags.index(tag) + 1]
+    logger.warning("sites: Cloudflare reports migration tag %r outside the declared history", tag)
+    return (*vetted.tags, tag) if tag else vetted.tags
 
 
 async def check_account_budget(
@@ -435,6 +479,84 @@ async def check_account_budget(
         )
 
 
+@dataclass(frozen=True)
+class TeardownResult:
+    ok: bool
+    error: str = ""
+
+
+async def _namespaces_of(cf: Any, script: str) -> list[dict]:
+    rows = await cf.list_durable_object_namespaces()
+    return [r for r in rows if isinstance(r, dict) and r.get("script") == script]
+
+
+async def teardown_script(
+    cf: Any,
+    script: str,
+    *,
+    target: str,
+    classes: Iterable[str],
+    migration_tag: str | None,
+    delete: bool = True,
+) -> TeardownResult:
+    """Delete every Durable Object of ``script`` and, with ``delete``, the script.
+
+    1. Upload a stub with ``{old_tag, new_tag: paw-tombstone, deleted_classes}``,
+       which deletes every object and its storage (skipped once tombstoned, or with
+       no tag or classes). A failure here is logged and the next steps still run.
+    2. ``DELETE ...?force=true`` on ``target`` (a 404 is success), which also
+       removes the script's namespaces.
+    3. The account's namespace list must show no row for ``script``.
+    ``delete=False`` only runs step 3 (a resumed teardown whose script is gone).
+    Never raises: ``ok`` is False with a short reason, and the caller leaves the
+    work for its retry path (the draft sweeper, the cascade ledger)."""
+    names = list(dict.fromkeys(classes))
+    errors: list[str] = []
+    if delete and names and migration_tag and migration_tag != TOMBSTONE_TAG:
+        try:
+            await cf.put_worker(
+                script_name=script,
+                modules=[_tombstone_module()],
+                main_module="index.js",
+                bindings=[],
+                compatibility_date=_TOMBSTONE_COMPAT,
+                target=target,
+                migrations={
+                    "old_tag": migration_tag,
+                    "new_tag": TOMBSTONE_TAG,
+                    "steps": [{"deleted_classes": names}],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - the forced delete still runs
+            logger.warning("sites: tombstone upload for %s failed: %s", script, exc)
+            errors.append(f"tombstone: {exc}")
+    if delete:
+        try:
+            if target == DISPATCH_TARGET:
+                await cf.delete_worker(script, force=True)
+            else:
+                await cf.delete_account_script(script, force=True)
+        except Exception as exc:  # noqa: BLE001 - reported, retried by the caller
+            logger.warning("sites: forced delete of %s failed: %s", script, exc)
+            return TeardownResult(False, f"delete: {exc}"[:300])
+    try:
+        left = await _namespaces_of(cf, script)
+    except Exception as exc:  # noqa: BLE001 - unverified is not done
+        return TeardownResult(False, f"verify: {exc}"[:300])
+    if left:
+        ids = ", ".join(str(r.get("id")) for r in left)
+        return TeardownResult(False, f"verify: namespaces still listed for {script}: {ids}"[:300])
+    if errors:
+        logger.info("sites: %s is gone despite: %s", script, "; ".join(errors))
+    return TeardownResult(True)
+
+
+def _tombstone_module() -> Any:
+    from pocketpaw_ee.sites.cloudflare_client import WorkerModule
+
+    return WorkerModule("index.js", _TOMBSTONE_MODULE.encode(), "application/javascript+module")
+
+
 __all__ = [
     "ACCOUNT_BUDGET_ENV",
     "FLAG_ENV",
@@ -443,12 +565,16 @@ __all__ = [
     "DurableObjectsConfig",
     "Migration",
     "MigrationPlan",
+    "TOMBSTONE_TAG",
+    "TeardownResult",
     "VettedDurableObjects",
     "check_account_budget",
     "class_cap",
     "declares_durable_objects",
     "enabled",
+    "migration_tags_after",
     "parse_durable_objects",
     "plan_migration",
+    "teardown_script",
     "vet_durable_objects",
 ]

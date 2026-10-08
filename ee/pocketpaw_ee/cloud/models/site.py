@@ -310,6 +310,12 @@ class Site(TimestampedDocument):
     # duplicates, and torn down by the delete cascade's ``bindings`` step.
     kv_namespaces: dict[str, str] = Field(default_factory=dict)
     r2_buckets: dict[str, str] = Field(default_factory=dict)
+    # Durable Objects on the site's script (``sites.durable_objects``): the migration
+    # tags applied to it, oldest first (the last is the live tag), and the classes
+    # live on it. Written only after a successful upload, from Cloudflare's
+    # ``migration_tag``; read to plan the next publish and by the delete cascade.
+    do_migration_tags: list[str] = Field(default_factory=list)
+    do_classes: list[str] = Field(default_factory=list)
     # DP0-1: where a dynamic site sits in the durable D1 provision job
     # (none | provisioning | provisioned | failed). Contract: the job persists
     # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still

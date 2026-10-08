@@ -162,7 +162,7 @@ async def test_a_failure_stops_the_cascade_and_keeps_what_finished() -> None:
 
     assert err.value.step == "script"
     assert err.value.reason.startswith("script:")
-    assert set(site.delete_ledger) == {"billing", "revoke", "routes", "hostnames"}
+    assert set(site.delete_ledger) == {"billing", "revoke", "routes", "hostnames", "do"}
     # The reclaim steps must not have run behind a site that is still serving.
     assert "delete_database" not in deps.cloudflare.calls
     assert deps.records == []

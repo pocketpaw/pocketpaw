@@ -56,6 +56,9 @@ class FakeCF:
         self.batches: list[tuple[str, list]] = []
         self.fail: set[str] = set()
         self.list_fails = False
+        self.do_scripts: set[str] = set()  # scripts holding Durable Object namespaces
+        self.namespaces_fail = False
+        self.namespaces_left = False  # a delete that leaves the namespaces behind
         self._ids = 0
 
     def _maybe_fail(self, name: str) -> None:
@@ -130,6 +133,9 @@ class FakeCF:
         self.calls.append(("put_worker", kw))
         if kw["script_name"] not in self.scripts:
             self.scripts.append(kw["script_name"])
+        steps = (kw.get("migrations") or {}).get("steps") or []
+        if any(s.get("new_sqlite_classes") for s in steps):
+            self.do_scripts.add(kw["script_name"])
         return True
 
     async def enable_workers_dev(self, script_name):
@@ -138,11 +144,20 @@ class FakeCF:
     async def workers_dev_subdomain(self):
         return "acct"
 
-    async def delete_account_script(self, script_name):
+    async def delete_account_script(self, script_name, *, force=False):
         self._maybe_fail("delete_account_script")
         self.calls.append(("delete_account_script", script_name))
+        if force:
+            self.calls.append(("delete_account_script_forced", (script_name, True)))
         if script_name in self.scripts:
             self.scripts.remove(script_name)
+        if not self.namespaces_left:
+            self.do_scripts.discard(script_name)
+
+    async def list_durable_object_namespaces(self):
+        if self.namespaces_fail:
+            raise ValidationError("sites.cloudflare_error", "Cloudflare API 500")
+        return [{"id": f"ns-{s}", "script": s, "class": "Room"} for s in sorted(self.do_scripts)]
 
     def named(self, name: str) -> list[Any]:
         return [arg for call, arg in self.calls if call == name]
