@@ -129,8 +129,10 @@ def test_an_invalid_card_is_rejected_and_never_reaches_the_text():
     assert not any(e == "card.final" for e, _ in events)
 
 
-def test_a_card_that_is_not_json_is_rejected_on_a_streaming_filter():
-    events = _events([_fence("not json\n")])
+@pytest.mark.parametrize("body", ["not json\n", "[1, 2]\n", '"a string"\n'])
+def test_a_card_that_is_not_a_json_object_is_rejected_on_a_streaming_filter(body):
+    # Legacy passthrough lets these through as text; a card.final must be an object.
+    events = _events([_fence(body)])
     assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "invalid"})
 
 
