@@ -53,7 +53,16 @@
 # model failed. A transient failure before any text is retried once; a turn that
 # still cannot be answered (spend cap, quota, provider error) ends with
 # ``degrade_reply`` (one ``unavailable`` frame, then ``stream_end``). The owner
-# hears about the daily cap once per site per UTC day.
+# hears about the daily cap once per site per UTC day. The cap is the site's
+# ``concierge_daily_spend_cap`` when set (0 pauses it), else the global one.
+#
+# Card profile (``ui_profile``, read once per turn from
+# ``Site.concierge_ui_profile``): "pawbar" (every site by default) is all of the
+# above. "ripple" lets cards use the full Ripple catalog under
+# ``card_spec.RIPPLE_PROFILE``'s bounds, raises the reply cap to
+# ``_RIPPLE_MAX_TOKENS`` and always writes the <catalog> block with the Ripple
+# cards paragraph (the catalog, compact, plus the authoring rules), even on a
+# site with no catalog, actions or lead capture. The frame is the same.
 
 from __future__ import annotations
 
@@ -194,6 +203,18 @@ def lead_capture_on(site: Any) -> bool:
     return getattr(site, "concierge_lead_capture", True) is not False
 
 
+def ui_profile(site: Any) -> Any:
+    """The site's ``card_spec.CardProfile``: RIPPLE_PROFILE only for an explicit
+    "ripple"; anything else (an old row, None, junk) is PAWBAR_PROFILE."""
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, RIPPLE_PROFILE
+
+    return (
+        RIPPLE_PROFILE
+        if getattr(site, "concierge_ui_profile", None) == "ripple"
+        else PAWBAR_PROFILE
+    )
+
+
 def frame_for(site: Any) -> str:
     """The frame constant for this site's doc-code, lead-capture and page-action
     switches."""
@@ -242,6 +263,9 @@ _BACKEND = "pawbar_concierge_v2"
 # The reply's output-token cap when settings give none. A reasoning model's
 # thinking counts against it, so it has to fit thinking plus a card.
 _MAX_TOKENS = 2_000
+# The output cap for a site on the "ripple" card profile: a full-catalog spec
+# runs to thousands of tokens.
+_RIPPLE_MAX_TOKENS = 8_000
 # The provider's per-request timeout (ModelSettings ``timeout``). A stalled
 # provider becomes the ``unavailable`` frame instead of a widget spinning forever.
 _PROVIDER_TIMEOUT_S = 30.0
@@ -1037,7 +1061,11 @@ def _knowledge_block(items: Sequence[KnowledgeItem], budget: int = _KNOWLEDGE_CH
 
 
 def _catalog_and_actions_block(
-    widget: Any, catalog_items: Sequence[Any] = (), *, lead_capture: bool = False
+    widget: Any,
+    catalog_items: Sequence[Any] = (),
+    *,
+    lead_capture: bool = False,
+    profile: Any = None,
 ) -> str:
     """This turn's catalog items (``catalog_for_turn``) and the widget's declared
     actions, as data.
@@ -1049,7 +1077,8 @@ def _catalog_and_actions_block(
     as plain data instead; the widget's own buttons and forms trigger them. Cards
     are taught by ``_cards_paragraph`` (the vendored paw-bar manifest). With
     ``lead_capture`` the block is written even with no catalog and no actions,
-    since the lead card is a card every such site can offer.
+    since the lead card is a card every such site can offer, and on the ripple
+    ``profile``, whose cards need no catalog.
     """
     from pocketpaw_ee.cloud.surface.handlers.concierge import _catalog_block
 
@@ -1059,7 +1088,8 @@ def _catalog_and_actions_block(
         {"verb": a.verb, "policy": a.policy, "args": dict(a.args), "label": a.label}
         for a in (getattr(spec, "actions", None) or [])
     ]
-    if not catalog and not declared and not lead_capture:
+    ripple = getattr(profile, "name", "") == "ripple"
+    if not catalog and not declared and not lead_capture and not ripple:
         return ""
     parts = ["<catalog>"]
     products = _catalog_block(catalog)
@@ -1078,13 +1108,62 @@ def _catalog_and_actions_block(
                 else "sent to the business for a person to approve"
             )
             parts.append(f"   - {a['verb']} ({label}): {behavior}.")
-    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog), lead_capture=lead_capture))
+    parts.append(
+        _cards_paragraph(
+            declared, has_catalog=bool(catalog), lead_capture=lead_capture, profile=profile
+        )
+    )
     parts.append("</catalog>")
     return _data_block(parts)
 
 
+# How to write a good Ripple card, ported from ripple's record-scenario system
+# prompt (the rules that hold for an answer in a chat card). No flow, branch or
+# toast: the card's actions are card_spec.SPEC_ACTIONS.
+_RIPPLE_RULES = (
+    "   Authoring rules:",
+    "   - Write every node's keys in this order: type, props, then bind and handlers, "
+    "then children. Seed state with the visitor's own numbers; keep numbers as numbers.",
+    "   - Make it really interactive: bind inputs (number-input, slider, segmented, "
+    'switch, checkbox) to state with "bind": "{state.path}" and derive every output from '
+    'state with expressions, e.g. "{state.total / state.people}". Never hardcode a '
+    "copy of a state value: write state.items.length, not 4.",
+    "   - The only actions are set, toggle, push, remove, open, and emit of add_to_cart "
+    "or checkout. There is no flow, branch, toast, api or navigate: a card using one "
+    "is dropped. A handler may be a list of actions, run in order.",
+    '   - "each" takes items ("{state.list}"), item_as and index_as on the node, and '
+    '"if" takes condition on the node, not in props. Inside each, the row is '
+    '{item.field} and the index {index}; bind a row field as "list.{index}.field" '
+    'and remove a row with {"action":"remove","target":"list","value":"{item}"}.',
+    "   - When a number depends on a list (its count or sum), keep it in state and "
+    "refresh it with a set whose value is the expression, e.g. "
+    "\"{state.items.sum('price')}\", after every push or remove and in the on_change "
+    "of any input that edits a row; refresh every number an edit feeds. Seed each "
+    "kept number with exactly what its expression gives for the seeded list.",
+    "   - Expressions: state paths, + - * / % with parentheses, comparisons, || and ??, "
+    "and a ternary only as the whole expression. There is no exponent operator (no ** "
+    "or ^) and no Math functions: write compound growth as repeated multiplication. "
+    "Division by zero gives 0.",
+    "   - Show a number that can have decimals (a division, a rate, money) with a "
+    'stat (format "number", "currency" or "percent"), never inside a text template.',
+    "   - It must work in a card about 300px wide: grid columns of 2 at most, number "
+    'inputs and sliders on a full-width row or a 2-column grid, "wrap": true on a '
+    "flex row with more than two children. Aim for 15 to 35 nodes.",
+    "   - A 1-based position or counter never runs past its total, and every seeded "
+    "total equals what its expression gives.",
+    "   - Never attach a price, rating, opening hours or any other claim to a real "
+    "named business, venue or brand; a named real place costs 0 and any cost goes on "
+    "a separate unnamed item with a round estimate. Placeholders use generic words, "
+    "never brands. No lorem ipsum.",
+)
+
+
 def _cards_paragraph(
-    declared: Sequence[dict[str, Any]], *, has_catalog: bool = False, lead_capture: bool = False
+    declared: Sequence[dict[str, Any]],
+    *,
+    has_catalog: bool = False,
+    lead_capture: bool = False,
+    profile: Any = None,
 ) -> str:
     """How to write a ```pawbar-card: the compact manifest (one line per widget),
     the host events a button may emit, and each gated verb's form fields. With a
@@ -1096,12 +1175,30 @@ def _cards_paragraph(
     prefilled from the conversation); without it, it says not to offer one.
 
     This replaces the legacy ``_form_block``, which teaches the old
-    ``{"kind": "form"}`` card and tells the model to call an action tool."""
+    ``{"kind": "form"}`` card and tells the model to call an action tool.
+
+    On the ripple ``profile`` the head is the Ripple catalog (compact) and
+    ``_RIPPLE_RULES`` instead, with no product-card line; the lead and gated
+    form lines are the same."""
     from pocketpaw_ee.paw_bar.card_spec import (
         MAX_SPEC_DEPTH,
         MAX_SPEC_NODES,
         compact_manifest,
     )
+
+    if getattr(profile, "name", "") == "ripple":
+        lines = [
+            "   Cards: when a small interactive tool (a calculator, a planner, a "
+            "comparison, a checklist) answers the visitor better than prose, write ONE "
+            "```pawbar-card block after a sentence or two of text, holding "
+            '{"ui": <node>, "state": {...}}. A node is {"type": ..., "props": {...}, '
+            '"bind"?: ..., "on_*"?: ..., "children"?: [...]}, at most '
+            f"{profile.max_nodes} nodes and {profile.max_depth} levels deep, built only "
+            "from these widgets:",
+            *(f"   {line}" for line in compact_manifest(profile).splitlines()),
+            *_RIPPLE_RULES,
+        ]
+        return "\n".join(lines + _form_lines(declared, lead_capture))
 
     lines = [
         "   Cards: to show products, a form or a short layout, write ONE ```pawbar-card "
@@ -1123,6 +1220,13 @@ def _cards_paragraph(
             "When the <page> block names this page's product and the visitor asks "
             'about "this", answer about that product; a card for it is fine.'
         )
+    return "\n".join(lines + _form_lines(declared, lead_capture))
+
+
+def _form_lines(declared: Sequence[dict[str, Any]], lead_capture: bool) -> list[str]:
+    """The cards paragraph's form lines: the lead card (or that there is none)
+    and each gated verb's fields."""
+    lines: list[str] = []
     gated = [
         a
         for a in declared
@@ -1147,7 +1251,7 @@ def _cards_paragraph(
         for a in gated:
             args = ", ".join(f"{name} ({typ})" for name, typ in a["args"].items())
             lines.append(f"     - {a['verb']}: {args}")
-    return "\n".join(lines)
+    return lines
 
 
 def _data_block(parts: list[str]) -> str:
@@ -1333,6 +1437,7 @@ def build_prompt(
     page: PageContext | None = None,
     catalog: Sequence[Any] = (),
     tools: Sequence[Any] = (),
+    profile: Any = None,
 ) -> str:
     """The user half of the request: the owner's guided fields (when any are set),
     then tagged data blocks in the PRD's fixed order (page, knowledge, catalog and
@@ -1342,7 +1447,7 @@ def build_prompt(
     the turn's ``catalog_for_turn`` items. A site with page actions on also gets
     the <site-pages> block, after the catalog, and, when ``tools`` (the request's
     ``page.tools``) has a tool ``action_spec.valid_tools`` keeps, <page-tools>
-    after it."""
+    after it. ``profile`` is the turn's ``ui_profile`` (else read from ``site``)."""
     from pocketpaw_ee.paw_bar.concierge_prompt import render_owner_block
 
     owner = render_owner_block(site) if site is not None else ""
@@ -1353,7 +1458,10 @@ def build_prompt(
         _knowledge_block(items, knowledge_chars(site) if site is not None else _KNOWLEDGE_CHARS)
     )
     catalog_block = _catalog_and_actions_block(
-        widget, catalog, lead_capture=site is not None and lead_capture_on(site)
+        widget,
+        catalog,
+        lead_capture=site is not None and lead_capture_on(site),
+        profile=profile or ui_profile(site),
     )
     if catalog_block:
         blocks.append(catalog_block)
@@ -1546,7 +1654,12 @@ def _build_model(settings: Any, spec: str | None) -> Any:
 
 
 def _model_settings(
-    settings: Any, spec: str | None, workspace_id: str, *, tags: Sequence[str] = ()
+    settings: Any,
+    spec: str | None,
+    workspace_id: str,
+    *,
+    tags: Sequence[str] = (),
+    profile: Any = None,
 ) -> dict[str, Any]:
     """Fixed output cap, temperature and timeout, the optional reasoning effort,
     plus spend attribution on the proxy.
@@ -1558,11 +1671,15 @@ def _model_settings(
     ``tags`` (the site and the widget) ride LiteLLM's ``metadata.tags``, which the
     proxy stores on the spend row as ``request_tags``. Proxy providers only: a
     direct provider rejects a body field it does not know. The provider is the
-    one ``spec`` (this turn's resolved model) names."""
+    one ``spec`` (this turn's resolved model) names. The ripple ``profile`` sets
+    the output cap to ``_RIPPLE_MAX_TOKENS``."""
     from pocketpaw.agents.spend_attribution import is_proxy_provider
 
+    max_tokens = int(getattr(settings, "pawbar_concierge_max_tokens", 0) or _MAX_TOKENS)
+    if getattr(profile, "name", "") == "ripple":
+        max_tokens = _RIPPLE_MAX_TOKENS
     out: dict[str, Any] = {
-        "max_tokens": int(getattr(settings, "pawbar_concierge_max_tokens", 0) or _MAX_TOKENS),
+        "max_tokens": max_tokens,
         "temperature": _TEMPERATURE,
         "timeout": _PROVIDER_TIMEOUT_S,
     }
@@ -1684,7 +1801,12 @@ class FenceFilter:
         lookup: Any = None,
         lead_capture: bool = False,
         action: Any = None,
+        profile: Any = None,
     ) -> None:
+        from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE
+
+        # The site's card_spec.CardProfile; every card is checked against it.
+        self._profile = profile or PAWBAR_PROFILE
         self._catalog = list(catalog or ())
         self._render_action = action
         self._action_seen = False
@@ -1768,7 +1890,14 @@ class FenceFilter:
             logger.warning("concierge: catalog lookup for a card failed", exc_info=True)
             return ""
         return self._noted(
-            body, render_card(body, items, verbs=self._verbs, lead_capture=self._lead_capture)
+            body,
+            render_card(
+                body,
+                items,
+                verbs=self._verbs,
+                lead_capture=self._lead_capture,
+                profile=self._profile,
+            ),
         )
 
     def _noted(self, body: str, card: str | None) -> str:
@@ -1801,7 +1930,11 @@ class FenceFilter:
             return self._noted(
                 body,
                 render_card(
-                    body, self._catalog, verbs=self._verbs, lead_capture=self._lead_capture
+                    body,
+                    self._catalog,
+                    verbs=self._verbs,
+                    lead_capture=self._lead_capture,
+                    profile=self._profile,
                 ),
             )
         if (
@@ -1863,6 +1996,7 @@ def _fence_filter_for(
     doc_code_chars: int = _DOC_CODE_CHARS,
     lead_capture: bool = False,
     action: Any = None,
+    profile: Any = None,
 ) -> FenceFilter:
     """A filter hydrating cards from this widget's catalog in ``store`` and its
     declared verbs, and grounding code in ``knowledge`` when the site allows
@@ -1884,6 +2018,7 @@ def _fence_filter_for(
         lookup=lookup,
         lead_capture=lead_capture,
         action=action,
+        profile=profile,
     )
 
 
@@ -1930,12 +2065,22 @@ async def site_spend_today_usd(
     return sum(resolve_cost(usage, at=at).cost_usd for usage, at in rows)
 
 
-async def _over_spend_cap(settings: Any, workspace_id: str, pocket_id: str) -> bool:
-    """Whether the site is at or past today's cap. 0 means no cap.
+async def _over_spend_cap(
+    settings: Any, workspace_id: str, pocket_id: str, site: Any = None
+) -> bool:
+    """Whether the site is at or past today's cap: the site's own
+    ``concierge_daily_spend_cap`` when set (0 pauses the concierge), else the
+    global one, where 0 means no cap.
 
     Fails OPEN, as the conversation quota does: a lost read must not silence a
     site that has paid for its concierge. The next turn reads again."""
-    cap = float(settings.pawbar_concierge_daily_spend_cap)
+    own = getattr(site, "concierge_daily_spend_cap", None)
+    if isinstance(own, int | float) and not isinstance(own, bool):
+        if own <= 0:
+            return True
+        cap = float(own)
+    else:
+        cap = float(settings.pawbar_concierge_daily_spend_cap)
     if cap <= 0:
         return False
     try:
@@ -2076,7 +2221,8 @@ async def run_concierge_v2(
     from pocketpaw_ee.paw_bar.router import _sse
 
     settings = _settings()
-    if await _over_spend_cap(settings, workspace_id, pocket_id):
+    profile = ui_profile(site)
+    if await _over_spend_cap(settings, workspace_id, pocket_id, site):
         from pocketpaw_ee.paw_bar.notify import notify_spend_cap_reached
 
         await notify_spend_cap_reached(
@@ -2169,6 +2315,7 @@ async def run_concierge_v2(
             page=page_ctx,
             catalog=catalog,
             tools=declared,
+            profile=profile,
         )
         model = _build_model(settings, model_spec)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
@@ -2194,11 +2341,14 @@ async def run_concierge_v2(
                 ),
                 lead_capture=lead_capture_on(site),
                 action=_action_renderer(site, page_ctx, catalog, declared),
+                profile=profile,
             )
 
         # Spend attribution: the proxy's spend row names the site and the widget.
         tags = [f"pawbar_site:{site_id}", f"pawbar_widget:{widget_id}"]
-        model_settings = _model_settings(settings, model_spec, workspace_id, tags=tags)
+        model_settings = _model_settings(
+            settings, model_spec, workspace_id, tags=tags, profile=profile
+        )
         # A visitor asking for a person always leaves with a route to the team,
         # whatever the model does (``contact_route``).
         contact = is_contact_request(message)

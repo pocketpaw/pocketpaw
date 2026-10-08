@@ -31,8 +31,8 @@
   {
     "label": "the fixed output cap is dropped — reply length falls back to the model default",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        \"max_tokens\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 0) or _MAX_TOKENS),",
-    "replace": "        \"max_tokenz\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 0) or _MAX_TOKENS),",
+    "find": "        \"max_tokens\": max_tokens,",
+    "replace": "        \"max_tokenz\": max_tokens,",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
@@ -186,7 +186,7 @@
   {
     "label": "any widget type is accepted — the server stops matching the manifest",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if node[\"type\"] not in WIDGET_TYPES:",
+    "find": "        if node[\"type\"] not in profile.widget_types:",
     "replace": "        if False:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_unknown_widget_type_rejects_the_card",
@@ -196,8 +196,8 @@
   {
     "label": "the node bound drifts by one from paw-bar's",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if count > MAX_SPEC_NODES:",
-    "replace": "        if count > MAX_SPEC_NODES + 1:",
+    "find": "        if count > profile.max_nodes:",
+    "replace": "        if count > profile.max_nodes + 1:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts"
     ]
@@ -205,8 +205,8 @@
   {
     "label": "the depth bound drifts by one from paw-bar's",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if depth > MAX_SPEC_DEPTH:",
-    "replace": "        if depth > MAX_SPEC_DEPTH + 1:",
+    "find": "        if depth > profile.max_depth:",
+    "replace": "        if depth > profile.max_depth + 1:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts"
     ]
@@ -214,7 +214,7 @@
   {
     "label": "the card is not re-measured after hydration — the client refuses a card the server sent",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if len(body) > MAX_SPEC_CHARS or _FENCE in body:",
+    "find": "        if len(body) > profile.max_chars or _FENCE in body:",
     "replace": "        if _FENCE in body:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_that_hydrates_past_the_char_bound_is_dropped"
@@ -223,7 +223,7 @@
   {
     "label": "the compact manifest leaves the prompt — the model is never told how to write a card",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog), lead_capture=lead_capture))",
+    "find": "    parts.append(\n        _cards_paragraph(\n            declared, has_catalog=bool(catalog), lead_capture=lead_capture, profile=profile\n        )\n    )",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_prompt_carries_the_compact_manifest_and_no_tool_advice"
@@ -431,7 +431,7 @@
   {
     "label": "CR-5 cap arm: the spend cap is never checked — an over-cap site keeps calling the model",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    if await _over_spend_cap(settings, workspace_id, pocket_id):\n",
+    "find": "    if await _over_spend_cap(settings, workspace_id, pocket_id, site):\n",
     "replace": "    if False:\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_is_unavailable_with_no_model_call"

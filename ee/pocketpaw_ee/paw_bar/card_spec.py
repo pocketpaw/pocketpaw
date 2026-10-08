@@ -23,15 +23,27 @@
 #     pass through untouched. ``card_ids`` says which catalog items to fetch;
 #     ``has_lead_form`` says whether a card is the lead card.
 #
+# Every rule above reads a ``CardProfile``: the widget set, the action set and
+# the bounds. ``PAWBAR_PROFILE`` (the default everywhere) is the paw-bar widget's
+# set and bounds above. ``RIPPLE_PROFILE`` (a site whose ``concierge_ui_profile``
+# is "ripple") takes the full Ripple catalog from ripple-manifest.json (minus
+# ``RIPPLE_DEFERRED``), the same actions and host events, and 400 nodes / depth 16
+# / 64,000 chars. Its ``strict_actions`` also checks every handler a widget keeps
+# outside ``on_*`` (``submitActions``, ``actions[].actions``, a node inside a
+# popover's ``content``), since the full catalog has such props.
+#
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar's
-# app/pawbar-manifest.json. The drift test in
-# tests/cloud/test_paw_bar_concierge_v2_output.py pins its hash and says how to
-# refresh it. The shared parity fixtures live in tests/fixtures/card_parity/.
+# app/pawbar-manifest.json; ripple-manifest.json from @ripple-ui/svelte's
+# dist/manifest.json (see the ``.source`` file beside it). The drift tests in
+# tests/cloud/test_paw_bar_concierge_v2_output.py and
+# tests/cloud/test_paw_bar_ripple_profile.py pin both hashes and say how to
+# refresh them. The shared parity fixtures live in tests/fixtures/card_parity/.
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -60,6 +72,77 @@ MANIFEST_PATH = Path(__file__).with_name("pawbar-manifest.json")
 MANIFEST: dict[str, Any] = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 WIDGET_TYPES: frozenset[str] = frozenset(w["type"] for w in MANIFEST["widgets"]) - DEFERRED_WIDGETS
 SPEC_ACTIONS: frozenset[str] = frozenset(MANIFEST["actions"])
+
+
+@dataclass(frozen=True)
+class CardProfile:
+    """What one site's cards may hold. ``detailed`` names the widgets the prompt
+    lists with their props (None: all of them; the rest get a one-line summary);
+    ``strict_actions`` checks handlers kept outside ``on_*`` too."""
+
+    name: str
+    widget_types: frozenset[str]
+    actions: frozenset[str]
+    max_nodes: int
+    max_depth: int
+    max_chars: int
+    manifest: dict[str, Any]
+    detailed: frozenset[str] | None = None
+    strict_actions: bool = False
+
+
+PAWBAR_PROFILE = CardProfile(
+    name="pawbar",
+    widget_types=WIDGET_TYPES,
+    actions=SPEC_ACTIONS,
+    max_nodes=MAX_SPEC_NODES,
+    max_depth=MAX_SPEC_DEPTH,
+    max_chars=MAX_SPEC_CHARS,
+    manifest=MANIFEST,
+)
+
+RIPPLE_MANIFEST_PATH = Path(__file__).with_name("ripple-manifest.json")
+RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(encoding="utf-8"))
+# Kept out of ripple cards: ``ripple-frame`` mounts a whole nested spec the bounds
+# don't see, ``embed`` frames any third-party URL.
+RIPPLE_DEFERRED: frozenset[str] = frozenset({"ripple-frame", "embed"})
+RIPPLE_PROFILE = CardProfile(
+    name="ripple",
+    widget_types=frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"]) - RIPPLE_DEFERRED,
+    actions=SPEC_ACTIONS,
+    max_nodes=400,
+    max_depth=16,
+    max_chars=64_000,
+    manifest=RIPPLE_MANIFEST,
+    # The widgets the authoring rules lean on, listed with their props.
+    detailed=frozenset(
+        {
+            "flex",
+            "grid",
+            "card",
+            "each",
+            "if",
+            "text",
+            "heading",
+            "stat",
+            "chart",
+            "button",
+            "number-input",
+            "slider",
+            "segmented",
+            "switch",
+            "checkbox",
+            "select",
+            "input",
+            "progress",
+            "table",
+            "badge",
+            "separator",
+            "tabs",
+        }
+    ),
+    strict_actions=True,
+)
 
 _PRODUCT_CARD = "product-card"
 _FENCE = "```"
@@ -132,20 +215,46 @@ def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, 
 # --------------------------------------------------------------------------- #
 
 
-def _check_actions(value: Any, events: list[str]) -> None:
+def _check_actions(value: Any, events: list[str], allowed: frozenset[str] = SPEC_ACTIONS) -> None:
     for action in value if isinstance(value, list) else [value]:
-        if not isinstance(action, dict) or action.get("action") not in SPEC_ACTIONS:
+        if not isinstance(action, dict) or action.get("action") not in allowed:
             raise _Reject("an event runs an action the bar does not honour")
         if action["action"] == "emit" and action.get("target") not in events:
             raise _Reject("an emit names a host event this widget does not declare")
 
 
-def _check_events(node: dict[str, Any], events: list[str]) -> None:
+def _check_events(
+    node: dict[str, Any], events: list[str], allowed: frozenset[str] = SPEC_ACTIONS
+) -> None:
     props = node.get("props")
     for holder in (node, props if isinstance(props, dict) else {}):
         for key, value in holder.items():
             if isinstance(key, str) and key.startswith("on_"):
-                _check_actions(value, events)
+                _check_actions(value, events, allowed)
+
+
+def _is_handler_key(key: Any) -> bool:
+    return isinstance(key, str) and (
+        key.startswith("on_") or key == "actions" or key.endswith("Actions")
+    )
+
+
+def _check_nested_handlers(
+    value: Any, events: list[str], allowed: frozenset[str], handler: bool = False
+) -> None:
+    """``strict_actions``: every dict with an ``action`` under a handler key
+    (``on_*``, ``actions``, ``*Actions``), however deep, is an action and must
+    pass ``_check_actions``. Keyed on the handler, so a data row's own
+    ``"action"`` field (an audit log's) is left alone."""
+    if isinstance(value, list):
+        for item in value:
+            _check_nested_handlers(item, events, allowed, handler)
+    elif isinstance(value, dict):
+        if handler and "action" in value:
+            _check_actions(value, events, allowed)
+            return
+        for key, item in value.items():
+            _check_nested_handlers(item, events, allowed, handler or _is_handler_key(key))
 
 
 def _check_form(props: Any, lead_capture: bool) -> None:
@@ -173,10 +282,16 @@ def _check_form(props: Any, lead_capture: bool) -> None:
         raise _Reject("a lead card needs an email or phone field")
 
 
-def _check_tree(root: Any, events: list[str], lead_capture: bool = False) -> None:
+def _check_tree(
+    root: Any,
+    events: list[str],
+    lead_capture: bool = False,
+    profile: CardProfile = PAWBAR_PROFILE,
+) -> None:
     """paw-bar's checkTree, plus the widget set, the event rules and the form
     rules. ``events`` are the host events this widget declares (a subset of
-    ``HOST_EVENTS``); ``lead_capture`` allows the lead card."""
+    ``HOST_EVENTS``); ``lead_capture`` allows the lead card; ``profile`` gives
+    the widget set, actions and bounds."""
     count = 0
 
     def walk(node: Any, depth: int) -> None:
@@ -186,13 +301,17 @@ def _check_tree(root: Any, events: list[str], lead_capture: bool = False) -> Non
         if not isinstance(node.get("type"), str):
             raise _Reject("a node has no type")
         count += 1
-        if count > MAX_SPEC_NODES:
-            raise _Reject(f"more than {MAX_SPEC_NODES} nodes")
-        if depth > MAX_SPEC_DEPTH:
-            raise _Reject(f"nested deeper than {MAX_SPEC_DEPTH}")
-        if node["type"] not in WIDGET_TYPES:
+        if count > profile.max_nodes:
+            raise _Reject(f"more than {profile.max_nodes} nodes")
+        if depth > profile.max_depth:
+            raise _Reject(f"nested deeper than {profile.max_depth}")
+        if node["type"] not in profile.widget_types:
             raise _Reject(f"unknown widget type {node['type']!r}")
-        _check_events(node, events)
+        _check_events(node, events, profile.actions)
+        if profile.strict_actions:
+            for key, value in node.items():
+                if key not in ("type", "children", "else_children"):
+                    _check_nested_handlers(value, events, profile.actions, _is_handler_key(key))
         if node["type"] == "form":
             _check_form(node.get("props"), lead_capture)
         for key in ("children", "else_children"):
@@ -231,6 +350,7 @@ def validate_and_hydrate(
     *,
     verbs: Iterable[str] | None = HOST_EVENTS,
     lead_capture: bool = False,
+    profile: CardProfile = PAWBAR_PROFILE,
 ) -> dict | None:
     """The card to send, or None to drop it.
 
@@ -241,14 +361,15 @@ def validate_and_hydrate(
     holds only ``ui`` and ``state``: a spec's ``theme`` is dropped, as paw-bar
     drops it. It is re-checked after hydration, since filling ids in makes it
     longer and paw-bar measures what it receives. ``lead_capture`` (the site's
-    ``concierge_lead_capture``) allows a ``send_to_team`` form; off by default."""
+    ``concierge_lead_capture``) allows a ``send_to_team`` form; off by default.
+    ``profile`` (the site's ``CardProfile``) gives the widget set and bounds."""
     try:
         if not isinstance(spec, dict) or "ui" not in spec:
             raise _Reject("not a spec")
-        if len(_serialize(spec)) > MAX_SPEC_CHARS:
-            raise _Reject(f"longer than {MAX_SPEC_CHARS} characters")
+        if len(_serialize(spec)) > profile.max_chars:
+            raise _Reject(f"longer than {profile.max_chars} characters")
         events = _card_verbs(verbs)
-        _check_tree(spec["ui"], events, lead_capture)
+        _check_tree(spec["ui"], events, lead_capture, profile)
         state = spec.get("state")
         if state is not None and not isinstance(state, dict):
             raise _Reject("state is not an object")
@@ -259,7 +380,7 @@ def validate_and_hydrate(
         if state is not None:
             out["state"] = state
         body = _serialize(out)
-        if len(body) > MAX_SPEC_CHARS or _FENCE in body:
+        if len(body) > profile.max_chars or _FENCE in body:
             return None
         return out
     except _Reject:
@@ -294,17 +415,20 @@ def render_card(
     *,
     verbs: Iterable[str] | None = HOST_EVENTS,
     lead_capture: bool = False,
+    profile: CardProfile = PAWBAR_PROFILE,
 ) -> str | None:
     """The complete ```pawbar-card fence to emit for a fence ``body``, or None to
-    drop it. A Ripple spec is validated and hydrated; a legacy product card is
-    repriced from the catalog; a legacy form card is held to the form rules; any
-    other legacy card passes through verbatim."""
+    drop it. A Ripple spec is validated (against ``profile``) and hydrated; a
+    legacy product card is repriced from the catalog; a legacy form card is held
+    to the form rules; any other legacy card passes through verbatim."""
     raw = _parse(body)
     if _is_spec(raw):
         # Measured as paw-bar measures it: CRLF folded, trailing whitespace trimmed.
-        if len(body.replace("\r\n", "\n").rstrip()) > MAX_SPEC_CHARS:
+        if len(body.replace("\r\n", "\n").rstrip()) > profile.max_chars:
             return None
-        spec = validate_and_hydrate(raw, catalog, verbs=verbs, lead_capture=lead_capture)
+        spec = validate_and_hydrate(
+            raw, catalog, verbs=verbs, lead_capture=lead_capture, profile=profile
+        )
         return None if spec is None else f"{_FENCE}pawbar-card\n{_serialize(spec)}\n{_FENCE}"
     kind = raw.get("kind") if isinstance(raw, dict) else None
     if isinstance(raw, dict) and (not isinstance(kind, str) or kind in ("", "product")):
@@ -404,16 +528,44 @@ def _widget_line(widget: dict[str, Any]) -> str:
         for name, spec in (widget.get("props") or {}).items()
     ]
     props += list((widget.get("events") or {}).keys())
+    props += [
+        name + ("" if spec.get("required") else "?")
+        for name, spec in (widget.get("nodeFields") or {}).items()
+    ]
     return f"- {widget['type']} {{{', '.join(props)}}}: {widget.get('description', '')}"
 
 
-def compact_manifest() -> str:
-    """One line per widget: its type, its props (``?`` = optional) and events,
-    and what it is for."""
-    return "\n".join(_widget_line(w) for w in MANIFEST["widgets"] if w["type"] in WIDGET_TYPES)
+# A summary line's description: its first sentence, at most this long.
+_BRIEF_CHARS = 90
+
+
+def _brief_line(widget: dict[str, Any]) -> str:
+    text = " ".join(str(widget.get("description", "")).split())
+    first = text.split(". ", 1)[0]
+    if len(first) > _BRIEF_CHARS:
+        first = first[: _BRIEF_CHARS - 1].rstrip() + "…"
+    return f"- {widget['type']}: {first}"
+
+
+def compact_manifest(profile: CardProfile = PAWBAR_PROFILE) -> str:
+    """One line per widget: its type, its props (``?`` = optional), events and
+    node fields, and what it is for; a widget outside ``profile.detailed`` gets
+    only its type and the first sentence of what it is for."""
+    return "\n".join(
+        _widget_line(w)
+        if profile.detailed is None or w["type"] in profile.detailed
+        else _brief_line(w)
+        for w in profile.manifest["widgets"]
+        if w["type"] in profile.widget_types
+    )
 
 
 __all__ = [
+    "PAWBAR_PROFILE",
+    "RIPPLE_DEFERRED",
+    "RIPPLE_MANIFEST_PATH",
+    "RIPPLE_PROFILE",
+    "CardProfile",
     "DEFERRED_WIDGETS",
     "FORM_PREFILL_MAX",
     "HOST_EVENTS",

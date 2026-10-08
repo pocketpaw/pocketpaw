@@ -1,0 +1,16 @@
+ripple-manifest.json: @ripple-ui/svelte 0.8.0 dist/manifest.json, the qbtrix/ripple-iui v0.8.0
+release asset manifest.json (2026-09-27, upstream sha256
+59f9ca9f5191170e3653470d3e64a26fef769758f87f450dd70270e1e2032bc6), with every widget's
+"example" removed. The server never reads the examples, and one carries a sample
+Stripe-style key that GitHub push protection refuses.
+
+Refresh:
+  gh release download -R qbtrix/ripple-iui --pattern manifest.json -D <dir>
+  python -I - <dir>/manifest.json ee/pocketpaw_ee/paw_bar/ripple-manifest.json <<'PY'
+  import json, sys
+  m = json.load(open(sys.argv[1], encoding="utf-8"))
+  for w in m["widgets"]:
+      w.pop("example", None)
+  open(sys.argv[2], "w", encoding="utf-8").write(json.dumps(m, indent=2, ensure_ascii=False) + "\n")
+  PY
+then update this file and _RIPPLE_MANIFEST_SHA256 in tests/cloud/test_paw_bar_ripple_profile.py.

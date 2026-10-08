@@ -757,6 +757,16 @@ class Site(TimestampedDocument):
     # the field): the model is never told about actions and any it writes is
     # dropped.
     concierge_page_actions: bool = False
+    # Which cards the v2 concierge may write (``concierge_runtime.ui_profile``).
+    # "pawbar" (the default, and rows older than the field): the paw-bar widget's
+    # small card set. "ripple": the full Ripple catalog with bigger bounds and a
+    # bigger reply cap (``card_spec.RIPPLE_PROFILE``), for a demo site.
+    concierge_ui_profile: Literal["pawbar", "ripple"] = "pawbar"
+    # This site's daily concierge spend cap in USD. None (the default, and rows
+    # older than the field) uses the global ``pawbar_concierge_daily_spend_cap``;
+    # a number replaces it for this site, and 0 pauses the concierge. The settings
+    # PATCH accepts 0..``CONCIERGE_DAILY_SPEND_CAP_MAX``.
+    concierge_daily_spend_cap: float | None = None
     # The v2 concierge's per-turn knowledge budget, in characters of the
     # <knowledge> block (``concierge_runtime.knowledge_chars``). None (the
     # default, and rows older than the field) means

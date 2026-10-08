@@ -1717,6 +1717,13 @@ ConciergeKnowledgeChars = Annotated[
 ]
 
 
+# The most a site's own daily concierge spend cap may be, in USD.
+CONCIERGE_DAILY_SPEND_CAP_MAX = 500.0
+ConciergeDailySpendCap = Annotated[
+    float, Field(ge=0, le=CONCIERGE_DAILY_SPEND_CAP_MAX, allow_inf_nan=False)
+]
+
+
 class ConciergeSettingsUpdate(BaseModel):
     """Partial update of a Site's concierge settings (D1).
 
@@ -1754,6 +1761,13 @@ class ConciergeSettingsUpdate(BaseModel):
     # (out of range is a 422). Unlike the other fields an explicit null is a
     # write: it clears the value back to the default (12,000).
     concierge_knowledge_chars: ConciergeKnowledgeChars | None = None
+    # Which cards the v2 concierge may write: "pawbar" or "ripple" (anything else
+    # is a 422). null means "not sent".
+    concierge_ui_profile: Literal["pawbar", "ripple"] | None = None
+    # The site's daily spend cap in USD, 0..500 (out of range is a 422; 0 pauses
+    # the concierge). Like the knowledge budget, an explicit null is a write: it
+    # clears the cap back to the global one.
+    concierge_daily_spend_cap: ConciergeDailySpendCap | None = None
     # CR-4 (2026-09-28): the guided fields. Caps and shapes are in
     # ``pocketpaw.paw_bar.concierge_fields``; each value is normalized (one line,
     # no control characters) and refused with a 422 past its cap. Clear a text
@@ -1857,6 +1871,9 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_page_actions: bool = False
     # None means the default budget (12,000 characters).
     concierge_knowledge_chars: int | None = None
+    concierge_ui_profile: Literal["pawbar", "ripple"] = "pawbar"
+    # None means the global daily cap.
+    concierge_daily_spend_cap: float | None = None
     # CR-4 guided fields. "", None and [] mean unset (nothing is rendered).
     concierge_name: str = ""
     concierge_tone: ConciergeTone | None = None
@@ -2024,6 +2041,11 @@ async def _concierge_settings_response(
         # Only an explicit True turns it on (a row older than the field reads off).
         concierge_page_actions=getattr(site, "concierge_page_actions", False) is True,
         concierge_knowledge_chars=_stored_knowledge_chars(site),
+        # Only an explicit "ripple" is ripple (a row older than the field is pawbar).
+        concierge_ui_profile="ripple"
+        if getattr(site, "concierge_ui_profile", "pawbar") == "ripple"
+        else "pawbar",
+        concierge_daily_spend_cap=getattr(site, "concierge_daily_spend_cap", None),
         # getattr again: rows older than the guided fields read as unset.
         concierge_name=getattr(site, "concierge_name", "") or "",
         concierge_tone=getattr(site, "concierge_tone", None),
@@ -2129,7 +2151,7 @@ async def update_site_concierge_settings(
     previous_name = getattr(site, "concierge_name", "") or ""
     for name in req.model_fields_set:
         value = getattr(req, name)
-        if value is not None or name == "concierge_knowledge_chars":
+        if value is not None or name in ("concierge_knowledge_chars", "concierge_daily_spend_cap"):
             setattr(site, name, value)
     await site.save()
     # A legacy concierge answers through its dedicated agent: carry a new name

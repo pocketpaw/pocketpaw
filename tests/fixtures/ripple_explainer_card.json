@@ -1,0 +1,396 @@
+{
+ "ui": {
+  "type": "flex",
+  "props": {
+   "direction": "column",
+   "gap": "12px"
+  },
+  "children": [
+   {
+    "type": "heading",
+    "props": {
+     "text": "How bicycle gears work",
+     "level": 3
+    }
+   },
+   {
+    "type": "text",
+    "props": {
+     "text": "Tap a part of the drivetrain to see what it does.",
+     "size": "sm"
+    }
+   },
+   {
+    "type": "grid",
+    "props": {
+     "columns": 2,
+     "gap": "8px"
+    },
+    "children": [
+     {
+      "type": "button",
+      "props": {
+       "label": "1 Pedals + crank",
+       "size": "sm",
+       "variant": "{state.part == 'crank' ? 'default' : 'outline'}"
+      },
+      "on_click": {
+       "action": "set",
+       "target": "part",
+       "value": "crank"
+      }
+     },
+     {
+      "type": "button",
+      "props": {
+       "label": "2 Chainring (front)",
+       "size": "sm",
+       "variant": "{state.part == 'chainring' ? 'default' : 'outline'}"
+      },
+      "on_click": {
+       "action": "set",
+       "target": "part",
+       "value": "chainring"
+      }
+     },
+     {
+      "type": "button",
+      "props": {
+       "label": "3 Chain",
+       "size": "sm",
+       "variant": "{state.part == 'chain' ? 'default' : 'outline'}"
+      },
+      "on_click": {
+       "action": "set",
+       "target": "part",
+       "value": "chain"
+      }
+     },
+     {
+      "type": "button",
+      "props": {
+       "label": "4 Cog (rear)",
+       "size": "sm",
+       "variant": "{state.part == 'cog' ? 'default' : 'outline'}"
+      },
+      "on_click": {
+       "action": "set",
+       "target": "part",
+       "value": "cog"
+      }
+     },
+     {
+      "type": "button",
+      "props": {
+       "label": "5 Derailleur",
+       "size": "sm",
+       "variant": "{state.part == 'derailleur' ? 'default' : 'outline'}"
+      },
+      "on_click": {
+       "action": "set",
+       "target": "part",
+       "value": "derailleur"
+      }
+     },
+     {
+      "type": "button",
+      "props": {
+       "label": "6 Rear wheel",
+       "size": "sm",
+       "variant": "{state.part == 'wheel' ? 'default' : 'outline'}"
+      },
+      "on_click": {
+       "action": "set",
+       "target": "part",
+       "value": "wheel"
+      }
+     }
+    ]
+   },
+   {
+    "type": "text",
+    "props": {
+     "text": "Pedals \u2192 Chainring \u2192 Chain \u2192 Cog \u2192 Wheel",
+     "size": "xs"
+    }
+   },
+   {
+    "type": "card",
+    "props": {
+     "variant": "muted",
+     "density": "compact"
+    },
+    "children": [
+     {
+      "type": "if",
+      "condition": "{state.part == 'crank'}",
+      "children": [
+       {
+        "type": "text",
+        "props": {
+         "text": "Pedals + crank: your legs turn the crank arms, which spin the chainring. This is where all the power enters.",
+         "size": "sm"
+        }
+       }
+      ]
+     },
+     {
+      "type": "if",
+      "condition": "{state.part == 'chainring'}",
+      "children": [
+       {
+        "type": "text",
+        "props": {
+         "text": "Chainring: the big toothed ring at the pedals. More teeth means each pedal turn pulls more chain, so you go farther but push harder.",
+         "size": "sm"
+        }
+       }
+      ]
+     },
+     {
+      "type": "if",
+      "condition": "{state.part == 'chain'}",
+      "children": [
+       {
+        "type": "text",
+        "props": {
+         "text": "Chain: links the chainring to the cog and carries your force. Each tooth that passes moves the chain by one link.",
+         "size": "sm"
+        }
+       }
+      ]
+     },
+     {
+      "type": "if",
+      "condition": "{state.part == 'cog'}",
+      "children": [
+       {
+        "type": "text",
+        "props": {
+         "text": "Cog: the toothed gear on the rear wheel. Fewer teeth means the wheel spins more per chain pull, a harder gear. More teeth is easier for climbing.",
+         "size": "sm"
+        }
+       }
+      ]
+     },
+     {
+      "type": "if",
+      "condition": "{state.part == 'derailleur'}",
+      "children": [
+       {
+        "type": "text",
+        "props": {
+         "text": "Derailleur: pushes the chain sideways onto a different cog or chainring, which is how you shift gears.",
+         "size": "sm"
+        }
+       }
+      ]
+     },
+     {
+      "type": "if",
+      "condition": "{state.part == 'wheel'}",
+      "children": [
+       {
+        "type": "text",
+        "props": {
+         "text": "Rear wheel: turns with the cog. One wheel turn rolls you forward by its circumference.",
+         "size": "sm"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "type": "separator"
+   },
+   {
+    "type": "grid",
+    "props": {
+     "columns": 2,
+     "gap": "8px"
+    },
+    "children": [
+     {
+      "type": "number-input",
+      "props": {
+       "label": "Chainring teeth",
+       "min": 20,
+       "max": 60,
+       "step": 1
+      },
+      "bind": "{state.chainring}"
+     },
+     {
+      "type": "number-input",
+      "props": {
+       "label": "Cog teeth",
+       "min": 9,
+       "max": 50,
+       "step": 1
+      },
+      "bind": "{state.cog}"
+     }
+    ]
+   },
+   {
+    "type": "flex",
+    "props": {
+     "wrap": true,
+     "gap": "8px"
+    },
+    "children": [
+     {
+      "type": "button",
+      "props": {
+       "label": "Climb 34/32",
+       "size": "sm",
+       "variant": "secondary"
+      },
+      "on_click": [
+       {
+        "action": "set",
+        "target": "chainring",
+        "value": 34
+       },
+       {
+        "action": "set",
+        "target": "cog",
+        "value": 32
+       }
+      ]
+     },
+     {
+      "type": "button",
+      "props": {
+       "label": "Cruise 50/17",
+       "size": "sm",
+       "variant": "secondary"
+      },
+      "on_click": [
+       {
+        "action": "set",
+        "target": "chainring",
+        "value": 50
+       },
+       {
+        "action": "set",
+        "target": "cog",
+        "value": 17
+       }
+      ]
+     },
+     {
+      "type": "button",
+      "props": {
+       "label": "Sprint 53/11",
+       "size": "sm",
+       "variant": "secondary"
+      },
+      "on_click": [
+       {
+        "action": "set",
+        "target": "chainring",
+        "value": 53
+       },
+       {
+        "action": "set",
+        "target": "cog",
+        "value": 11
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "type": "grid",
+    "props": {
+     "columns": 2,
+     "gap": "8px"
+    },
+    "children": [
+     {
+      "type": "stat",
+      "props": {
+       "label": "Gear ratio",
+       "value": "{state.chainring / state.cog}",
+       "format": "number",
+       "size": "md"
+      }
+     },
+     {
+      "type": "stat",
+      "props": {
+       "label": "Metres per pedal turn",
+       "value": "{state.chainring / state.cog * state.wheel / 1000}",
+       "format": "number",
+       "size": "md"
+      }
+     }
+    ]
+   },
+   {
+    "type": "progress",
+    "props": {
+     "value": "{state.chainring / state.cog}",
+     "max": 6,
+     "variant": "thick"
+    }
+   },
+   {
+    "type": "text",
+    "props": {
+     "text": "Bar: easy (left) to hard (right) gear",
+     "size": "xs"
+    }
+   },
+   {
+    "type": "text",
+    "props": {
+     "text": "Wheel turns per pedal turn = chainring \u00f7 cog.",
+     "size": "sm"
+    }
+   },
+   {
+    "type": "separator"
+   },
+   {
+    "type": "slider",
+    "props": {
+     "label": "Pedalling speed (rpm)",
+     "min": 30,
+     "max": 120,
+     "step": 1,
+     "showValue": true
+    },
+    "bind": "{state.cadence}"
+   },
+   {
+    "type": "number-input",
+    "props": {
+     "label": "Wheel circumference (mm)",
+     "min": 1500,
+     "max": 2300,
+     "step": 10
+    },
+    "bind": "{state.wheel}"
+   },
+   {
+    "type": "stat",
+    "props": {
+     "label": "Speed (km/h)",
+     "value": "{state.chainring / state.cog * state.wheel * state.cadence * 60 / 1000000}",
+     "format": "number",
+     "size": "lg"
+    }
+   }
+  ]
+ },
+ "state": {
+  "part": "chainring",
+  "chainring": 50,
+  "cog": 17,
+  "wheel": 2100,
+  "cadence": 80
+ }
+}
