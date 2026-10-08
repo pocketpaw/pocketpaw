@@ -793,6 +793,51 @@ def test_the_ops_list_is_a_comma_separated_setting():
     assert not is_ops_site(None, settings)
 
 
+# A card of the wrong shape is dropped, never raised into the turn.
+_BAD_SHAPES = [
+    '{"ui": "x"}',
+    '{"ui": null}',
+    '{"ui": [1]}',
+    '{"ui": 1}',
+    '{"ui": {"type": "text"}, "state": "x"}',
+    '{"ui": {"type": "text"}, "state": [1]}',
+    '{"ui": {"type": "text"}, "state": null}',
+    '{"kind": "product", "items": 5}',
+    '{"items": [1, "a", null]}',
+    '{"kind": "form", "fields": 7, "verb": 3}',
+]
+
+
+@pytest.mark.parametrize("body", _BAD_SHAPES)
+@pytest.mark.parametrize("profile_name", ["PAWBAR_PROFILE", "RIPPLE_PROFILE"])
+def test_a_card_of_the_wrong_shape_is_dropped_not_raised(body, profile_name):
+    from pocketpaw_ee.paw_bar import card_spec
+
+    profile = getattr(card_spec, profile_name)
+    out = card_spec.render_card(body, [], profile=profile)
+    if body.startswith('{"ui"'):
+        assert out is None
+    assert card_spec.validate_and_hydrate(json.loads(body), [], profile=profile) is None
+
+
+def test_an_unexpected_error_in_the_checks_drops_the_card_and_logs_no_contents(monkeypatch, caplog):
+    import logging
+
+    from pocketpaw_ee.paw_bar import card_spec
+
+    def _boom(*_a, **_kw):
+        raise KeyError("boom")
+
+    monkeypatch.setattr(card_spec, "_check_strict", _boom)
+    monkeypatch.setattr(card_spec, "_check_tree", _boom)
+    body = _body({"ui": {"type": "text", "props": {"text": "secret-visitor-words"}}})
+    with caplog.at_level(logging.WARNING):
+        assert card_spec.render_card(body, [], profile=card_spec.RIPPLE_PROFILE) is None
+        assert card_spec.render_card(body, []) is None
+    assert "card" in caplog.text
+    assert "secret-visitor-words" not in caplog.text
+
+
 # --------------------------------------------------------------------------- #
 # The runtime
 # --------------------------------------------------------------------------- #

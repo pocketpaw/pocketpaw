@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 import unicodedata
 from collections.abc import Iterable
@@ -56,6 +57,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
+
+logger = logging.getLogger(__name__)
 
 MAX_SPEC_CHARS = 32_000
 MAX_SPEC_NODES = 80
@@ -654,6 +657,10 @@ def validate_and_hydrate(
     try:
         if not isinstance(spec, dict) or "ui" not in spec:
             raise _Reject("not a spec")
+        if not isinstance(spec["ui"], dict):
+            raise _Reject("ui is not an object")
+        if "state" in spec and not isinstance(spec["state"], dict):
+            raise _Reject("state is not an object")
         if len(_serialize(spec)) > profile.max_chars:
             raise _Reject(f"longer than {profile.max_chars} characters")
         events = _card_verbs(verbs)
@@ -662,8 +669,6 @@ def validate_and_hydrate(
         else:
             _check_tree(spec["ui"], events, lead_capture, profile)
         state = spec.get("state")
-        if state is not None and not isinstance(state, dict):
-            raise _Reject("state is not an object")
         ui = _hydrate(spec["ui"], _catalog_index(catalog), events)
         if ui is None:
             return None
@@ -676,6 +681,14 @@ def validate_and_hydrate(
         return out
     except (_Reject, RecursionError):
         return None
+    except Exception as exc:  # noqa: BLE001 — a card the checks can't read is dropped
+        _log_dropped(exc)
+        return None
+
+
+def _log_dropped(exc: Exception) -> None:
+    # The type only: the message or a traceback could quote the card.
+    logger.warning("card_spec: dropped a card the checks could not read (%s)", type(exc).__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -718,7 +731,22 @@ def render_card(
     """The complete ```pawbar-card fence to emit for a fence ``body``, or None to
     drop it. A Ripple spec is validated (against ``profile``) and hydrated; a
     legacy product card is repriced from the catalog; a legacy form card is held
-    to the form rules; any other legacy card passes through verbatim."""
+    to the form rules; any other legacy card passes through verbatim. Never
+    raises: a card no check can read is dropped and logged by error type only."""
+    try:
+        return _render_card(body, catalog, verbs, lead_capture, profile)
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        _log_dropped(exc)
+        return None
+
+
+def _render_card(
+    body: str,
+    catalog: Iterable[Any] | None,
+    verbs: Iterable[str] | None,
+    lead_capture: bool,
+    profile: CardProfile,
+) -> str | None:
     raw = _parse(body)
     if raw is _TOO_DEEP:
         return None
