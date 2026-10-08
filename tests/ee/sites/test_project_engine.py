@@ -626,12 +626,14 @@ async def test_publish_deploys_the_stored_manifest(beanie_test_db, monkeypatch, 
         provision=None,
         before_upload=None,
         target="dispatch",
+        paid=False,
     ):
         root = Path(build_dir)
         calls.append(
             {
                 "script_name": script_name,
                 "target": target,
+                "paid": paid,
                 "salt": salt,
                 "manifest": json.loads((root / "paw-build.json").read_text()),
                 "has_module": (root / ".paw/worker/index.js").is_file(),
@@ -683,6 +685,8 @@ async def test_publish_deploys_the_stored_manifest(beanie_test_db, monkeypatch, 
         assert enabled == [name] and doc.deploy_target == "workers"
         assert doc.url == f"https://{name}.acct-sub.workers.dev"
     assert calls[0]["salt"] == "ws1"
+    # A site with no paid plan deploys under the free-tier CPU / subrequest caps.
+    assert calls[0]["paid"] is False
     assert calls[0]["manifest"]["workerEntry"] == ".paw/worker/index.js"
     assert calls[0]["has_module"] and calls[0]["headers_kept"]
     assert doc.deployed is True

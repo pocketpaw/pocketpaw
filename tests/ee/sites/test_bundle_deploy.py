@@ -6,7 +6,8 @@
 # deploy in the 2026-10-07 next-on-wfp spike (session -> base64 bucket upload ->
 # multipart PUT) and asserts the exact parts, metadata and auth headers. The rest
 # pins the trust boundary: the compat-flag allow-list, binding mapping onto OUR
-# resources only, the size/count refusals, path containment, and that the legacy
+# resources only, the size/count refusals, path containment, the worker settings
+# (observability, plan-tiered limits, opt-in Smart Placement) and that the legacy
 # single-module path is unchanged.
 from __future__ import annotations
 
@@ -25,6 +26,31 @@ from pocketpaw_ee.sites.cloudflare_client import CloudflareClient, asset_hash
 
 ACCT = "acct_1"
 NS_URL = f"https://api.cloudflare.com/client/v4/accounts/{ACCT}/workers/dispatch/namespaces/paw-sites/scripts"
+_SETTINGS_ENV = (
+    "PAW_SITES_SMART_PLACEMENT",
+    "PAW_SITES_OBSERVABILITY",
+    "PAW_SITES_OBSERVABILITY_SAMPLE",
+    "PAW_SITES_CPU_MS_FREE",
+    "PAW_SITES_CPU_MS_PAID",
+    "PAW_SITES_SUBREQUESTS_FREE",
+    "PAW_SITES_SUBREQUESTS_PAID",
+)
+
+
+@pytest.fixture(autouse=True)
+def _default_worker_settings(monkeypatch):
+    """Every test sees the shipped defaults unless it sets an env itself."""
+    for key in _SETTINGS_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+OBSERVABILITY_DEFAULT = {
+    "enabled": True,
+    "head_sampling_rate": 0.1,
+    "logs": {"enabled": True, "invocation_logs": True},
+    "traces": {"enabled": True, "head_sampling_rate": 0.1},
+}
+FREE_LIMITS = {"cpu_ms": 50, "subrequests": 50}
 UPLOAD_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/{ACCT}/workers/assets/upload?base64=true"
 )
@@ -181,6 +207,8 @@ async def test_next_bundle_replays_the_spike_request_sequence(next_build: Path):
         "compatibility_date": "2026-09-01",
         "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
         "assets": {"jwt": "completion-jwt", "config": {"_headers": HEADERS}},
+        "observability": OBSERVABILITY_DEFAULT,
+        "limits": FREE_LIMITS,
     }
     assert module["name"] == "worker.js" and module["filename"] == "worker.js"
     assert module["content_type"] == "application/javascript+module"
@@ -227,6 +255,8 @@ async def test_multi_module_parts_are_named_by_path_and_typed_by_extension(tmp_p
         "bindings": [],
         "compatibility_date": "2026-09-01",
         "compatibility_flags": [],
+        "observability": OBSERVABILITY_DEFAULT,
+        "limits": FREE_LIMITS,
     }
     got = {p["name"]: (p["filename"], p["content_type"]) for p in parts[1:]}
     assert got == {
@@ -316,6 +346,8 @@ async def test_astro_shaped_multi_module_bundle_with_routing_options(tmp_path: P
                 "run_worker_first": ["/api/*"],
             },
         },
+        "observability": OBSERVABILITY_DEFAULT,
+        "limits": FREE_LIMITS,
     }
     assert {p["name"]: p["content_type"] for p in parts[1:]} == {
         "chunks/a.mjs": "application/javascript+module",
@@ -669,6 +701,203 @@ def test_empty_or_broken_manifest_is_refused(tmp_path: Path):
     _write(tmp_path, "paw-build.json", "{}")
     with pytest.raises(ValidationError, match="neither"):
         bundle_deploy.load_bundle(tmp_path, ProvisionedResources())
+
+
+# ------------------------------------------------------- worker settings
+
+
+def _with_requests(build: Path, requests: list[dict]) -> Path:
+    manifest = json.loads((build / "paw-build.json").read_text())
+    manifest["bindingRequests"] = [{"type": "assets", "name": "ASSETS"}, *requests]
+    (build / "paw-build.json").write_text(json.dumps(manifest))
+    return build
+
+
+async def _put_metadata(
+    build: Path, provisioned: ProvisionedResources, target: str, *, paid: bool = False
+) -> dict:
+    fake = _FakeCloudflare()
+    await bundle_deploy.deploy_bundle(
+        fake.client(),
+        script_name="site_1",
+        build_dir=build,
+        salt="ws_1",
+        provisioned=provisioned,
+        target=target,
+        paid=paid,
+    )
+    put = fake.requests[-1]
+    assert put.method == "PUT"
+    return json.loads(_parts(put)[0]["content"])
+
+
+def _assets_only_build(root: Path) -> Path:
+    _write(root, "dist/index.html", "<h1>hi</h1>")
+    _write(
+        root,
+        "paw-build.json",
+        json.dumps(
+            {
+                "assetsDir": "dist",
+                "workerModules": [],
+                "compat": {"date": "2026-09-01", "flags": []},
+                "bindingRequests": [{"type": "d1", "name": "DB"}],
+            }
+        ),
+    )
+    return root
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["account", "dispatch"])
+async def test_smart_placement_is_off_by_default_even_with_d1(next_build: Path, target: str):
+    build = _with_requests(next_build, [{"type": "d1", "name": "DB"}])
+    meta = await _put_metadata(build, ProvisionedResources(d1_database_id="our-d1"), target)
+    assert "placement" not in meta
+    assert {"type": "d1", "name": "DB", "id": "our-d1"} in meta["bindings"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["account", "dispatch"])
+@pytest.mark.parametrize(
+    ("requests", "provisioned"),
+    [
+        ([{"type": "d1", "name": "DB"}], ProvisionedResources(d1_database_id="our-d1")),
+        ([{"type": "r2", "name": "FILES"}], ProvisionedResources(r2_buckets={"FILES": "paw-b"})),
+    ],
+)
+async def test_opted_in_smart_placement_covers_regional_backends_on_both_targets(
+    next_build: Path, monkeypatch, target: str, requests, provisioned
+):
+    monkeypatch.setenv("PAW_SITES_SMART_PLACEMENT", "1")
+    meta = await _put_metadata(_with_requests(next_build, requests), provisioned, target)
+    assert meta["placement"] == {"mode": "smart"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requests", "provisioned"),
+    [
+        ([], ProvisionedResources()),  # assets binding only
+        ([{"type": "kv", "name": "CACHE"}], ProvisionedResources(kv_namespaces={"CACHE": "k"})),
+    ],
+)
+async def test_opted_in_placement_skips_workers_without_a_regional_backend(
+    next_build: Path, monkeypatch, requests, provisioned
+):
+    monkeypatch.setenv("PAW_SITES_SMART_PLACEMENT", "true")
+    meta = await _put_metadata(_with_requests(next_build, requests), provisioned, "account")
+    assert "placement" not in meta
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "false", "", "maybe"])
+async def test_only_a_truthy_value_opts_into_placement(next_build: Path, monkeypatch, value):
+    monkeypatch.setenv("PAW_SITES_SMART_PLACEMENT", value)
+    build = _with_requests(next_build, [{"type": "d1", "name": "DB"}])
+    meta = await _put_metadata(build, ProvisionedResources(d1_database_id="our-d1"), "account")
+    assert "placement" not in meta
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["account", "dispatch"])
+async def test_observability_is_on_by_default_at_ten_percent(next_build: Path, target: str):
+    meta = await _put_metadata(next_build, ProvisionedResources(), target)
+    assert meta["observability"] == OBSERVABILITY_DEFAULT
+
+
+@pytest.mark.asyncio
+async def test_observability_sample_rate_comes_from_env(next_build: Path, monkeypatch):
+    monkeypatch.setenv("PAW_SITES_OBSERVABILITY_SAMPLE", "0.25")
+    obs = (await _put_metadata(next_build, ProvisionedResources(), "account"))["observability"]
+    assert obs["head_sampling_rate"] == 0.25
+    assert obs["traces"] == {"enabled": True, "head_sampling_rate": 0.25}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["2", "-0.1", "lots"])
+async def test_an_invalid_sample_rate_falls_back_to_the_default(
+    next_build: Path, monkeypatch, value: str
+):
+    monkeypatch.setenv("PAW_SITES_OBSERVABILITY_SAMPLE", value)
+    obs = (await _put_metadata(next_build, ProvisionedResources(), "account"))["observability"]
+    assert obs == OBSERVABILITY_DEFAULT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "off", "FALSE"])
+async def test_observability_opt_out(next_build: Path, monkeypatch, value: str):
+    monkeypatch.setenv("PAW_SITES_OBSERVABILITY", value)
+    meta = await _put_metadata(next_build, ProvisionedResources(), "dispatch")
+    assert "observability" not in meta
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["account", "dispatch"])
+@pytest.mark.parametrize(
+    ("paid", "limits"),
+    [
+        (False, {"cpu_ms": 50, "subrequests": 50}),
+        (True, {"cpu_ms": 300, "subrequests": 10_000}),
+    ],
+)
+async def test_limits_follow_the_site_plan(next_build: Path, target: str, paid: bool, limits):
+    meta = await _put_metadata(next_build, ProvisionedResources(), target, paid=paid)
+    assert meta["limits"] == limits
+
+
+@pytest.mark.asyncio
+async def test_limits_env_overrides_and_zero_leaves_a_field_out(next_build: Path, monkeypatch):
+    monkeypatch.setenv("PAW_SITES_CPU_MS_FREE", "20")
+    monkeypatch.setenv("PAW_SITES_SUBREQUESTS_FREE", "0")
+    monkeypatch.setenv("PAW_SITES_CPU_MS_PAID", "1000")
+    free_meta = await _put_metadata(next_build, ProvisionedResources(), "account")
+    assert free_meta["limits"] == {"cpu_ms": 20}
+    paid_meta = await _put_metadata(next_build, ProvisionedResources(), "account", paid=True)
+    assert paid_meta["limits"] == {"cpu_ms": 1000, "subrequests": 10_000}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["-5", "300001", "fast"])
+async def test_an_invalid_cpu_limit_falls_back_to_the_plan_default(
+    next_build: Path, monkeypatch, value: str
+):
+    monkeypatch.setenv("PAW_SITES_CPU_MS_PAID", value)
+    meta = await _put_metadata(next_build, ProvisionedResources(), "account", paid=True)
+    assert meta["limits"]["cpu_ms"] == 300
+
+
+@pytest.mark.asyncio
+async def test_all_limits_zero_sends_no_limits_block(next_build: Path, monkeypatch):
+    monkeypatch.setenv("PAW_SITES_CPU_MS_FREE", "0")
+    monkeypatch.setenv("PAW_SITES_SUBREQUESTS_FREE", "0")
+    assert "limits" not in await _put_metadata(next_build, ProvisionedResources(), "account")
+
+
+@pytest.mark.asyncio
+async def test_an_assets_only_worker_gets_no_worker_settings(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PAW_SITES_SMART_PLACEMENT", "1")
+    meta = await _put_metadata(
+        _assets_only_build(tmp_path), ProvisionedResources(d1_database_id="our-d1"), "account"
+    )
+    assert "main_module" not in meta
+    assert not {"placement", "observability", "limits"} & set(meta)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"placement": {"mode": "smart"}},
+        {"observability": {"enabled": True}},
+        {"limits": {"cpu_ms": 50}},
+    ],
+)
+async def test_worker_settings_are_refused_on_the_legacy_put_worker_shapes(setting):
+    fake = _FakeCloudflare()
+    with pytest.raises(ValidationError):
+        await fake.client().put_worker(script_name="s", bundle=b"export default {}", **setting)
+    assert fake.requests == []
 
 
 # ---------------------------------------------------- legacy unchanged

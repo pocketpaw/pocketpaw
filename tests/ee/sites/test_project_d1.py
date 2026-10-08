@@ -243,6 +243,18 @@ async def test_d1_is_created_once_then_reused_without_cloudflare_calls():
 
 
 @pytest.mark.asyncio
+async def test_a_new_site_d1_is_created_with_the_configured_location_hint(monkeypatch):
+    monkeypatch.setenv("PAW_SITES_D1_LOCATION_HINT", "apac")
+    monkeypatch.delenv("PAW_SITES_D1_READ_REPLICATION", raising=False)
+    fake, site = _FakeCF(), _Site()
+
+    await bp.ensure_bindings(site, [D1_REQ], cloudflare=fake.client(), save=_save, paid=False)
+
+    (create,) = fake.calls("create")
+    assert json.loads(create.content) == {"name": DB_NAME, "primary_location_hint": "apac"}
+
+
+@pytest.mark.asyncio
 async def test_a_database_created_before_a_crash_is_found_by_name_not_duplicated():
     fake = _FakeCF()
     existing = fake.add_db(DB_NAME)
