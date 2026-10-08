@@ -189,6 +189,20 @@ def test_the_hardened_ripple_refusals_are_card_rejected_invalid(spec):
     assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "invalid"})
 
 
+def test_an_expression_built_javascript_url_streams_then_is_rejected_invalid():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    spec = {"ui": {"type": "cta", "props": {"label": "Go", "href": "{'java'+'script:alert(1)'}"}}}
+    body = json.dumps(spec) + "\n"
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is None
+    fence = _fence(body)
+    events = _events([fence[i : i + 5] for i in range(0, len(fence), 5)])
+    # The raw body still streams (deltas are untransformed); the close refuses it.
+    assert "".join(d["text"] for e, d in events if e == "card.delta") == body
+    assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "invalid"})
+    assert "card.final" not in [e for e, _ in events]
+
+
 def test_only_card_fences_stream_other_fences_keep_todays_rules():
     events = _events(["x ```py\nprint(1)\n``` y"])
     assert events == [("chunk", f"x {_CODE_LINE} y")]
