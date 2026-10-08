@@ -2058,15 +2058,15 @@ _CARD_HEAD = f"{_TICKS}{_CARD_LANG}\n"
 
 
 def _card_object(fence: str | None) -> dict[str, Any] | None:
-    """The card object inside a fence ``render_card`` passed, or None when it is
-    not a JSON object (a legacy passthrough that is not JSON)."""
+    """The ``{ui, state?}`` object inside a fence ``render_card`` passed, or None
+    when it is not one (a legacy card, passed through or repriced)."""
     if not fence:
         return None
     try:
         card = json.loads(fence[len(_CARD_HEAD) : -len(_TICKS)])
     except ValueError:
         return None
-    return card if isinstance(card, dict) else None
+    return card if isinstance(card, dict) and "ui" in card else None
 
 
 class FenceFilter:
@@ -2098,8 +2098,11 @@ class FenceFilter:
     With ``stream_cards`` (the "ripple" profile) a card fence is not held: its
     opening line yields ``CardEvent("card.start")``, its body ``card.delta``s as it
     arrives (the same backtick hold), and its close ``card.final`` with the
-    rendered card as an object, or ``card.rejected`` ("invalid"; "truncated" from
-    ``close()`` for a fence still open). Card ids run c1, c2... per filter.
+    rendered ``{ui, state?}`` object, or ``card.rejected`` ("invalid"; "truncated"
+    from ``close()`` for a fence still open). Before each delta the body is
+    checked: past ``max_chars``, or with a string ``card_spec.PartialScan`` says
+    the card cannot pass, it is rejected ("invalid") at once and the rest of its
+    fence swallowed, unbuffered. Card ids run c1, c2... per filter.
     """
 
     def __init__(
@@ -2122,6 +2125,8 @@ class FenceFilter:
         self._cards = 0
         self._card_id = ""  # the open streamed card, "" when none
         self._sent = 0  # how much of its body went out as card.delta
+        self._partial: Any = None  # its card_spec.PartialScan
+        self._swallow = False  # a rejected card's fence is still open
 
         # The site's card_spec.CardProfile; every card is checked against it.
         self._profile = profile or PAWBAR_PROFILE
@@ -2185,27 +2190,49 @@ class FenceFilter:
                     self._tag = text[:newline].strip()
                     self._mode, data = "body", text[newline + 1 :]
                     if self._stream_cards and self._tag == _CARD_LANG:
+                        from pocketpaw_ee.paw_bar.card_spec import PartialScan
+
                         self._cards += 1
                         self._card_id, self._sent = f"c{self._cards}", 0
+                        self._partial = PartialScan(self._profile)
                         out.append(CardEvent("card.start", {"card_id": self._card_id}))
             else:
                 j = text.find(_TICKS, start)
-                # A streamed card's body goes out as it comes, bar trailing backticks.
+                # A streamed card's body goes out as it comes, bar trailing
+                # backticks, each piece checked first; a card sure to fail is
+                # rejected at once and swallowed to its close.
                 end = len(text.rstrip("`")) if j == -1 else j
                 if self._card_id and end > self._sent:
-                    delta = {"card_id": self._card_id, "text": text[self._sent : end]}
-                    out.append(CardEvent("card.delta", delta))
-                    self._sent = end
+                    if self._refused(text, end):
+                        rejected = {"card_id": self._card_id, "reason": "invalid"}
+                        out.append(CardEvent("card.rejected", rejected))
+                        self._card_id, self._swallow = "", True
+                    else:
+                        delta = {"card_id": self._card_id, "text": text[self._sent : end]}
+                        out.append(CardEvent("card.delta", delta))
+                        self._sent = end
                 if j == -1:
-                    self._buf = text
+                    # A swallowed card keeps only what may open the closing marker.
+                    self._buf = text[-2:] if self._swallow else text
                     break
-                if self._card_id:
+                if self._swallow:
+                    self._swallow = False
+                elif self._card_id:
                     out.append((self._tag, text[:j], self._card_id))
                     self._card_id = ""
                 else:
                     out.append((self._tag, text[:j]))
                 self._mode, data = "text", text[j + len(_TICKS) :]
         return out
+
+    def _refused(self, text: str, end: int) -> bool:
+        """Whether the streaming card is already sure to fail: its body past the
+        profile's ``max_chars`` (as ``render_card`` measures it), or a definite
+        string violation in ``text[_sent:end]`` (``card_spec.PartialScan``)."""
+        cap = self._profile.max_chars
+        if end > cap and len(text[:end].replace("\r\n", "\n").rstrip()) > cap:
+            return True
+        return self._partial.feed(text[self._sent : end])
 
     def close(self) -> list[Any]:
         held = self._buf if self._mode == "text" else ""
@@ -2215,6 +2242,7 @@ class FenceFilter:
                 CardEvent("card.rejected", {"card_id": self._card_id, "reason": "truncated"})
             )
         self._mode, self._buf, self._tag, self._card_id = "text", "", "", ""
+        self._swallow = False
         return out
 
     async def _afinish(self, tag: str, body: str, card_id: str = "") -> Any:

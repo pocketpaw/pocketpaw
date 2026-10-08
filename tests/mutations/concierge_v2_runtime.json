@@ -723,10 +723,83 @@
   {
     "label": "card streaming: a rendered card that is not an object goes out as card.final",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    return card if isinstance(card, dict) else None\n",
+    "find": "    return card if isinstance(card, dict) and \"ui\" in card else None\n",
     "replace": "    return card\n",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_that_is_not_a_json_object_is_rejected_on_a_streaming_filter"
+    ]
+  },
+  {
+    "label": "card streaming: a legacy card (no ui) goes out as card.final, unchecked by the strict walk",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return card if isinstance(card, dict) and \"ui\" in card else None\n",
+    "replace": "    return card if isinstance(card, dict) else None\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_that_is_not_a_json_object_is_rejected_on_a_streaming_filter"
+    ]
+  },
+  {
+    "label": "card streaming: the partial scan is never consulted, a bad link streams to the fence close",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        return self._partial.feed(text[self._sent : end])\n",
+    "replace": "        return False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_bad_link_is_rejected_mid_stream_before_the_fence_closes"
+    ]
+  },
+  {
+    "label": "card streaming: no size bound while streaming, an oversized card is buffered whole",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if end > cap and len(text[:end].replace(\"\\r\\n\", \"\\n\").rstrip()) > cap:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_past_max_chars_is_rejected_and_no_longer_buffered"
+    ]
+  },
+  {
+    "label": "card streaming: a rejected card is still buffered to its close",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                    self._buf = text[-2:] if self._swallow else text\n",
+    "replace": "                    self._buf = text\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_past_max_chars_is_rejected_and_no_longer_buffered"
+    ]
+  },
+  {
+    "label": "partial scan: a violation under state counts before the body is known to be a spec",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            self.hit = self._ui\n",
+    "replace": "            self.hit = True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
+    ]
+  },
+  {
+    "label": "partial scan: strings outside ui and state (dropped by render_card) are judged",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if self._stack[0][1] not in (\"ui\", \"state\"):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
+    ]
+  },
+  {
+    "label": "partial scan: the URL rule is guessed under a style key, where render_card reads CSS",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        elif not styled and (key in _TILE_KEYS or _is_url_key(key)):\n",
+    "replace": "        elif key in _TILE_KEYS or _is_url_key(key):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
+    ]
+  },
+  {
+    "label": "partial scan: object keys are judged as values",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if top[0] and top[2]:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_no_prefix_of_a_card_ripple_accepts_is_flagged"
     ]
   }
 ]

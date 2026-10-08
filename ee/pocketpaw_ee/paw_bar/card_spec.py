@@ -34,14 +34,13 @@
 # ``content``) is a node, held to every node rule; any action, under a handler
 # key or named as a manifest action anywhere, must be an allowed one (audit-log
 # entries' own ``action`` field is data, in ``ui`` only; ``state`` holds no
-# action at all); a handler slot (``_is_handler_key``) holds action objects,
-# never a string the engine could resolve into one, and neither may a prop that
-# carries handlers, a slot drawn as a node or a node's props be an expression; a
-# ``follow-up``'s ``event`` is a declared host event; a form may not carry a
-# native submit target; every URL-valued key must be a same-site path or an
-# https URL on ``url_hosts`` (empty: none); and no text may hold a javascript:
-# link. A strict body with a repeated JSON key is refused (``JSON.parse`` keeps
-# the last value, so an earlier one would go unchecked).
+# action at all); a slot a widget resolves before it fires (``_check_resolved_prop``)
+# holds literal action objects, or a literal node where the engine draws one; a
+# ``follow-up``'s ``event`` is a declared host event; a form has no native submit
+# target; a URL key holds a same-site path or an https URL on ``url_hosts``
+# (none); no text holds a javascript: link; a repeated JSON key is refused.
+# ``PartialScan`` / ``scan_partial`` run the string checks on a body still
+# streaming, flagging only what the finished card is sure to fail.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar; ripple-manifest.json
 # from @ripple-ui/svelte's dist/manifest.json minus examples (the ``.source`` file
@@ -1003,6 +1002,130 @@ def card_ids(body: str, profile: CardProfile = PAWBAR_PROFILE) -> list[str]:
     return list(out)[:MAX_CARD_IDS]
 
 
+_STRING_STOP = re.compile(r'["\\]')
+_TILE_KEYS = ("tiles", "tile", "tileUrl")
+
+
+def _string_fails(value: str, key: str, styled: bool, hosts: frozenset[str]) -> bool:
+    """Whether ``_check_strict`` would refuse this string value under ``key``.
+    ``styled``: some key on its path is "style", so it may be CSS context; the
+    checks that depend on that are skipped rather than guessed."""
+    try:
+        if key in ("style", "background"):
+            _check_css(value, declarations=key == "style")
+        elif not styled and (key in _TILE_KEYS or _is_url_key(key)):
+            _check_url(key, value, hosts)
+        if "{" in value and _URL_ISH_KEY.search(key):
+            raise _Reject("an expression where a URL is read")
+        _check_text(value, hosts)
+    except _Reject:
+        return True
+    return False
+
+
+class PartialScan:
+    """The strict string checks over a card body as it streams. ``feed`` takes
+    the next text and returns True once the body holds a DEFINITE violation: a
+    COMPLETE string value under the root's ``ui`` / ``state`` (with a root
+    ``ui`` key seen, so it will be read as a spec) that ``_check_strict`` would
+    refuse in any finished card. A string still open is never judged, so a
+    half-written ``"/pa`` or ``"java`` passes. Never True for a non-strict
+    profile. A body that stops being a JSON object stops being scanned (the
+    close refuses it anyway).
+    ponytail: a key written twice keeps the LAST value in json.loads; a
+    violation in an earlier, overridden value is still flagged here."""
+
+    def __init__(self, profile: CardProfile) -> None:
+        self._hosts = profile.url_hosts
+        self._done = not profile.strict
+        # Open containers: [is object, key (object: current; array: inherited),
+        # expecting a key, a "style" key on the path].
+        self._stack: list[list[Any]] = []
+        self._raw: list[str] | None = None  # the open string's raw text
+        self._escape = False
+        self._ui = False  # the root has a "ui" key
+        self._pending = False  # a violation seen before "ui" was
+        self.hit = False
+
+    def feed(self, text: str) -> bool:
+        i, n = 0, len(text)
+        while i < n and not (self._done or self.hit):
+            if self._raw is not None:
+                if self._escape:
+                    self._raw.append(text[i])
+                    self._escape, i = False, i + 1
+                    continue
+                m = _STRING_STOP.search(text, i)
+                if m is None:
+                    self._raw.append(text[i:])
+                    break
+                k = m.start()
+                self._raw.append(text[i : k + 1])
+                i = k + 1
+                if text[k] == "\\":
+                    self._escape = True
+                    continue
+                raw, self._raw = "".join(self._raw)[:-1], None
+                self._string(raw)
+                continue
+            ch, i = text[i], i + 1
+            if ch == '"':
+                self._raw = []
+            elif ch in "{[":
+                self._open(ch == "{")
+            elif ch in "}]":
+                if self._stack:
+                    self._stack.pop()
+                self._done = not self._stack
+            elif ch == "," and self._stack and self._stack[-1][0]:
+                self._stack[-1][2] = True
+            elif not self._stack and not ch.isspace():
+                self._done = True  # the root is not an object
+        return self.hit
+
+    def _open(self, is_obj: bool) -> None:
+        if not self._stack:
+            self._done = not is_obj
+            self._stack.append([True, "", True, False])
+            return
+        top = self._stack[-1]
+        top[2] = False
+        # Directly under the root, the walk starts with key "" (as _check_strict).
+        key = top[1] if len(self._stack) > 1 else ""
+        styled = top[3] or key == "style"
+        self._stack.append([is_obj, "" if is_obj else key, is_obj, styled])
+
+    def _string(self, raw: str) -> None:
+        try:
+            value = json.loads(f'"{raw}"')
+        except ValueError:
+            self._done = True  # not JSON: the close refuses it
+            return
+        top = self._stack[-1] if self._stack else None
+        if top is None:
+            self._done = True
+            return
+        if top[0] and top[2]:
+            top[1], top[2] = value, False
+            if len(self._stack) == 1 and value == "ui":
+                self._ui, self.hit = True, self._pending
+            return
+        if self._stack[0][1] not in ("ui", "state"):
+            return
+        root = len(self._stack) == 1
+        key = "" if root else top[1]
+        styled = not root and (top[3] or (top[0] and key == "style"))
+        if _string_fails(value, key, styled, self._hosts):
+            self.hit = self._ui
+            self._pending = True
+
+
+def scan_partial(body: str, profile: CardProfile) -> bool:
+    """``PartialScan(profile).feed(body)``: whether a partial card body already
+    holds a violation the finished card cannot escape."""
+    return PartialScan(profile).feed(body)
+
+
 def card_verdict(
     body: str,
     catalog: Iterable[Any] | None,
@@ -1063,6 +1186,7 @@ def compact_manifest(profile: CardProfile = PAWBAR_PROFILE) -> str:
 
 __all__ = [
     "PAWBAR_PROFILE",
+    "PartialScan",
     "RIPPLE_DEFERRED",
     "RIPPLE_MANIFEST_PATH",
     "RIPPLE_PROFILE",
@@ -1085,5 +1209,6 @@ __all__ = [
     "compact_manifest",
     "has_lead_form",
     "render_card",
+    "scan_partial",
     "validate_and_hydrate",
 ]

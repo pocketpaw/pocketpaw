@@ -129,7 +129,16 @@ def test_an_invalid_card_is_rejected_and_never_reaches_the_text():
     assert not any(e == "card.final" for e, _ in events)
 
 
-@pytest.mark.parametrize("body", ["not json\n", "[1, 2]\n", '"a string"\n'])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "not json\n",
+        "[1, 2]\n",
+        '"a string"\n',
+        # A legacy card passes render_card verbatim; it is not a {ui, state?} card.
+        '{"kind":"note","href":"javascript:alert(1)"}\n',
+    ],
+)
 def test_a_card_that_is_not_a_json_object_is_rejected_on_a_streaming_filter(body):
     # Legacy passthrough lets these through as text; a card.final must be an object.
     events = _events([_fence(body)])
@@ -189,18 +198,106 @@ def test_the_hardened_ripple_refusals_are_card_rejected_invalid(spec):
     assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "invalid"})
 
 
-def test_an_expression_built_javascript_url_streams_then_is_rejected_invalid():
-    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+def _feed_until(f, chunks: list[str]) -> list[Any]:
+    return [p for c in chunks for p in f.feed(c)]
 
-    spec = {"ui": {"type": "cta", "props": {"label": "Go", "href": "{'java'+'script:alert(1)'}"}}}
-    body = json.dumps(spec) + "\n"
-    assert render_card(body, [], profile=RIPPLE_PROFILE) is None
-    fence = _fence(body)
-    events = _events([fence[i : i + 5] for i in range(0, len(fence), 5)])
-    # The raw body still streams (deltas are untransformed); the close refuses it.
-    assert "".join(d["text"] for e, d in events if e == "card.delta") == body
-    assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "invalid"})
-    assert "card.final" not in [e for e, _ in events]
+
+@pytest.mark.parametrize(
+    "href",
+    ["javascript:alert(1)", "{'java'+'script:alert(1)'}", "https://evil.example/x"],
+)
+def test_a_bad_link_is_rejected_mid_stream_before_the_fence_closes(href):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+    from pocketpaw_ee.paw_bar.concierge_runtime import CardEvent
+
+    head = '{"ui":{"type":"flex","children":[{"type":"cta","props":{"label":"Go","href":'
+    rest = json.dumps(href) + '}},{"type":"text","props":{"text":"more"}}]}}\n'
+    assert render_card(head + rest, [], profile=RIPPLE_PROFILE) is None
+    f = _ripple_filter()
+    pieces = _feed_until(f, ["Look:\n```pawbar-card\n", head])
+    pieces += _feed_until(f, [rest[i : i + 4] for i in range(0, len(rest), 4)])
+    # Rejected before the fence closes. Only a complete string is judged, so the
+    # delta that would have finished the link (its closing quote) never went out.
+    assert pieces[-1] == CardEvent("card.rejected", {"card_id": "c1", "reason": "invalid"})
+    sent = "".join(p.data["text"] for p in pieces if getattr(p, "event", "") == "card.delta")
+    assert (head + rest).startswith(sent)
+    assert json.dumps(href) not in sent
+    # The rest of the fence is swallowed, then text resumes; no second rejection.
+    tail = _feed_until(f, ["```\nAfter."]) + f.close()
+    assert tail == ["\nAfter."]
+
+
+def test_a_url_split_mid_token_is_not_a_false_positive():
+    events = _events(
+        ['```pawbar-card\n{"ui":{"type":"cta","props":{"label":"Go","href":"/pa', 'th#top"}}}\n```']
+    )
+    final = {"ui": {"type": "cta", "props": {"label": "Go", "href": "/path#top"}}}
+    assert events[-1] == ("card.final", {"card_id": "c1", "card": final})
+
+
+@pytest.mark.parametrize("name", ["ripple_explainer_card", "ripple_bill_splitter_card"])
+def test_no_prefix_of_a_card_ripple_accepts_is_flagged(name):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, PartialScan, render_card
+
+    spec = json.loads((_FIXTURE.parent / f"{name}.json").read_text(encoding="utf-8"))
+    for body in (json.dumps(spec), json.dumps(spec, indent=1)):
+        assert render_card(body, [], profile=RIPPLE_PROFILE) is not None
+        scan = PartialScan(RIPPLE_PROFILE)
+        assert not any(scan.feed(ch) for ch in body)
+        events = _events(list(_fence(body + "\n")))
+        assert events[-1] == ("card.final", {"card_id": "c1", "card": spec})
+
+
+def test_scan_partial_only_judges_complete_strings_under_ui_and_state():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, RIPPLE_PROFILE, scan_partial
+
+    bad = '{"ui":{"type":"cta","props":{"href":"javascript:x"'
+    assert scan_partial(bad, RIPPLE_PROFILE)
+    assert not scan_partial(bad[:-1], RIPPLE_PROFILE)  # the string is still open
+    assert not scan_partial(bad, PAWBAR_PROFILE)  # not a strict profile
+    # Under state it counts once a root "ui" key shows the body is a spec.
+    early = '{"state":{"a":"javascript:x"},'
+    assert not scan_partial(early, RIPPLE_PROFILE)
+    assert scan_partial(early + '"ui"', RIPPLE_PROFILE)
+    # Dropped or never-spec text is not judged; keys are not values.
+    assert not scan_partial('{"theme":{"a":"javascript:x"},"ui":{', RIPPLE_PROFILE)
+    assert not scan_partial('{"kind":"note","href":"javascript:x"}', RIPPLE_PROFILE)
+    assert not scan_partial('{"ui":{"javascript:x":1', RIPPLE_PROFILE)
+    # Under a style key it may be CSS, so the URL rule is not guessed.
+    assert not scan_partial('{"ui":{"type":"text","style":{"href":"x.png"', RIPPLE_PROFILE)
+    assert scan_partial('{"ui":{"type":"text","props":{"style":"background:url(x)"', RIPPLE_PROFILE)
+    # An escape is decoded before the check.
+    assert scan_partial('{"ui":{"type":"text","props":{"text":"java\\u0073cript:1"', RIPPLE_PROFILE)
+
+
+def test_a_card_past_max_chars_is_rejected_and_no_longer_buffered():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+
+    f = _ripple_filter()
+    head = '{"ui":{"type":"text","props":{"text":"'
+    pieces = _feed_until(f, ["Hi\n```pawbar-card\n", head])
+    filler = "x" * 1000
+    for _ in range(RIPPLE_PROFILE.max_chars // 1000 + 1):
+        pieces += f.feed(filler)
+    assert pieces[-1].data == {"card_id": "c1", "reason": "invalid"}
+    sent = sum(len(p.data["text"]) for p in pieces if getattr(p, "event", "") == "card.delta")
+    assert sent <= RIPPLE_PROFILE.max_chars
+    for _ in range(20):
+        assert f.feed(filler) == []
+    assert len(f._buf) <= 2  # swallowed, not held
+    # The reply ends inside the swallowed fence: no second (truncated) rejection.
+    assert f.close() == []
+
+
+def test_an_oversized_card_then_closed_resumes_text():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+
+    body = '{"ui":{"type":"text","props":{"text":"' + "x" * RIPPLE_PROFILE.max_chars + '"}}}\n'
+    events = _events([f"A {_fence(body)} B"])
+    assert events[-2:] == [
+        ("card.rejected", {"card_id": "c1", "reason": "invalid"}),
+        ("chunk", " B"),
+    ]
 
 
 def test_only_card_fences_stream_other_fences_keep_todays_rules():
@@ -230,9 +327,19 @@ def test_a_failed_catalog_lookup_rejects_the_streamed_card():
 # --------------------------------------------------------------------------- #
 
 
-async def _ripple_turn(client, store, monkeypatch, **site_kw: Any):
+def _pin_ops(monkeypatch, site_id: str) -> None:
+    """The ripple profile holds only on an ops site (``pawbar_ops_site_ids``)."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    pinned = concierge_runtime._settings().model_copy(update={"pawbar_ops_site_ids": site_id})
+    monkeypatch.setattr(concierge_runtime, "_settings", lambda: pinned)
+
+
+async def _ripple_turn(client, store, monkeypatch, *, ops: bool = True, **site_kw: Any):
     _seed_kb(monkeypatch, {})
-    await _site(concierge_ui_profile="ripple", **site_kw)
+    site = await _site(concierge_ui_profile="ripple", **site_kw)
+    if ops:
+        _pin_ops(monkeypatch, str(site.id))
     widget = await store.create_widget(_widget())
     res = await _chat(client, widget.id, message="how do gears work?")
     assert res.status_code == 200, res.text
@@ -328,6 +435,19 @@ async def test_a_ripple_turn_that_fails_mid_card_rejects_it_before_unavailable(
         ("unavailable", {"type": "unavailable", "reason": "temporary"}),
         ("stream_end", {"assistant_message_id": None, "cancelled": False}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_ripple_off_the_ops_list_streams_no_card_frames(concierge_client, model, monkeypatch):
+    client, store = concierge_client
+    card = '{"ui":{"type":"text","props":{"text":"x"}}}'
+    model.reply = [f"Hi ```pawbar-card\n{card}\n``` bye"]
+
+    frames = await _ripple_turn(client, store, monkeypatch, ops=False)
+
+    assert not any(e.startswith("card.") for e, _ in frames)
+    text = "".join(d["content"] for e, d in frames if e == "chunk")
+    assert text == f"Hi ```pawbar-card\n{card}\n``` bye"
 
 
 @pytest.mark.asyncio
