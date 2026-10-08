@@ -3371,6 +3371,17 @@ async def delete(pocket_id: str, user_id: str) -> None:
         delete_payload["workspace_id"] = doc.workspace
     await doc.delete()
     await emit(PocketDeleted(data=delete_payload))
+    # Its drafts (draft Worker, draft data, preview tokens) go with it. Best effort:
+    # the draft sweeper retries whatever this cannot finish.
+    try:
+        from pocketpaw_ee.sites import draft_worker
+
+        if draft_worker.enabled():
+            draft_worker.schedule_purge(
+                pocket_id, workspace_id=doc.workspace, reason="pocket_deleted", forget=True
+            )
+    except Exception:  # noqa: BLE001 - never fail a delete that already happened
+        logger.warning("pocket %s: could not schedule draft cleanup", pocket_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

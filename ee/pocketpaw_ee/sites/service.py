@@ -620,6 +620,34 @@ class _FilesystemArtifactStore:
             return None
         return pocket_id, content_hash
 
+    def purge_previews(self, pocket_id: str) -> bool:
+        """Delete every preview token (forward file and reverse pointer) and every
+        draft file set of one pocket, so its preview URLs stop serving. Bundles
+        (``<hash>.bundle.dist.tgz``) stay: publish deploys from them. True when done."""
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        pocket_dir = artifact_home() / pocket_id
+        ok = True
+        try:
+            entries = list(pocket_dir.iterdir())
+        except OSError:
+            return True
+        for path in entries:
+            name = path.name
+            try:
+                if name.endswith(".token"):
+                    token = path.read_text("utf-8").strip()
+                    path.unlink(missing_ok=True)
+                    if token:
+                        (pocket_dir.parent / self._TOKEN_DIR / f"{token}.json").unlink(
+                            missing_ok=True
+                        )
+                elif name.endswith(".dist.tgz") and not name.endswith(".bundle.dist.tgz"):
+                    path.unlink(missing_ok=True)
+            except OSError:
+                ok = False
+        return ok
+
     def _evict(self, pocket_dir: Path) -> None:
         """Keep only the newest ``_artifact_keep()`` content hashes (current + previous
         by default) in the pocket dir — their ``.json``, ``.dist.tgz`` and ``.token``
@@ -3440,6 +3468,9 @@ async def _deploy_site_doc(
     # the concierge catches up a moment later. A preview publish never reaches here
     # (it returns earlier), so a draft never rewrites the live KB.
     _schedule_site_knowledge_sync(doc)
+    # The site is live, so every draft of its pocket goes (draft Worker, draft-only
+    # data, preview tokens). Same never-fail placement as the sync above.
+    _schedule_draft_cleanup(doc, engine=engine, source=source)
     # SC-1: the page the gallery card shows is now a different page, so re-shoot
     # it. Same placement and the same rule as the sync above — the site is
     # already live, so a screenshot may never fail or delay the publish. A
@@ -4489,6 +4520,37 @@ def _schedule_site_knowledge_sync(site: _SiteDoc) -> None:
     except Exception:  # noqa: BLE001 — never fail a live publish over a KB sync
         logger.warning(
             "sites.kb: could not schedule knowledge sync for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_draft_cleanup(site: _SiteDoc, *, engine: str, source: Any) -> None:
+    """Purge every draft of a freshly-published site's pocket (``draft_worker``,
+    behind ``PAW_SITES_DRAFT_WORKERS``). Non-async, never raises: a cleanup that
+    cannot start is left to the draft sweeper, never a failed publish. A project
+    publish records its content hash so the builder shows the live site for it
+    instead of building a new draft."""
+    try:
+        from pocketpaw_ee.sites import draft_worker
+
+        if not draft_worker.enabled():
+            return
+        published_hash = ""
+        if normalize_engine(engine) == "project" and isinstance(source, dict):
+            from pocketpaw_ee.sites import project_build
+
+            published_hash = project_build.project_content_hash(source)
+        draft_worker.schedule_purge(
+            str(site.pocket_id),
+            workspace_id=str(site.workspace),
+            reason="published",
+            published_hash=published_hash,
+            published_url=getattr(site, "url", "") or "",
+        )
+    except Exception:  # noqa: BLE001 - never fail a live publish over draft cleanup
+        logger.warning(
+            "sites.draft: could not schedule draft cleanup for site %s",
             getattr(site, "id", "?"),
             exc_info=True,
         )
@@ -10313,10 +10375,12 @@ async def _project_draft_artifact(
     """A ``project`` draft: served from its sandbox build when one finished for the
     current source, else a build is queued in the preview lane (``project_build``).
 
-    The same response shape as every other engine plus ``preview_mode`` (``"static"``
-    while server routes cannot run in drafts, ``"full"`` otherwise, ``"server_only"``
-    with a null ``preview_url`` when the build has no static entry page to open;
-    ``None`` until a build finished) and the engine's ``capabilities``. No arming: a project has no
+    The same response shape as every other engine plus ``preview_mode`` (``"full"``
+    when the preview is the whole site, a draft Worker included; ``"static"`` when
+    server routes do not run; ``"server_only"`` with a null ``preview_url`` when
+    nothing can open; ``"published"`` with the live URL (or null) for the published
+    content once its drafts were purged, without a rebuild; ``None`` until a build
+    finished) and the engine's ``capabilities``. No arming: a project has no
     generator-owned anchors, so there is no builder origin in the hash."""
     from pocketpaw_ee.sites import build_job, project_build, verify_store
     from pocketpaw_ee.sites.engines import engine_capabilities
@@ -10326,6 +10390,21 @@ async def _project_draft_artifact(
     project_build.project_files(files_source)  # 422 on a tree that cannot build
     content_hash = project_build.project_content_hash(files_source or {})
     job_id = build_job._preview_job_id(pocket_id, content_hash)
+    published = await _project_published_view(pocket_id, content_hash)
+    if published is not None:
+        # The live site IS this content and its drafts were purged on publish: show
+        # the site, never rebuild a draft of it. An edit (a new hash) builds again.
+        return {
+            "pocket_id": pocket_id,
+            "body_html": "",
+            "css": "",
+            "build_status": "none",
+            "build_reason": None,
+            "build_job_id": job_id,
+            "preview_url": published or None,
+            "preview_mode": project_build.PREVIEW_PUBLISHED,
+            "capabilities": capabilities,
+        }
     records = _records if _records is not None else verify_store.default_verify_store()
     record = project_build.read_build_record(records, pocket_id, job_id)
     if record is not None and record.get("status") == project_build.STATUS_BUILT:
@@ -10389,6 +10468,22 @@ async def _project_draft_artifact(
         "preview_mode": None,
         "capabilities": capabilities,
     }
+
+
+async def _project_published_view(pocket_id: str, content_hash: str) -> str | None:
+    """The published URL ("" when unknown) when ``content_hash`` is the pocket's
+    published content and its drafts were purged; ``None`` otherwise (and always
+    with ``PAW_SITES_DRAFT_WORKERS`` off). Never raises."""
+    from pocketpaw_ee.sites import draft_worker
+
+    if not draft_worker.enabled():
+        return None
+    try:
+        is_published, url = await draft_worker.published_view(pocket_id, content_hash)
+    except Exception:  # noqa: BLE001 - an unreadable registry builds a draft as before
+        logger.warning("sites.draft: published view of %s unavailable", pocket_id, exc_info=True)
+        return None
+    return (url or "") if is_published else None
 
 
 async def project_latest_build(

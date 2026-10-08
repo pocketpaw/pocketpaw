@@ -19,11 +19,15 @@
 #
 # Invariants: nothing here runs author code on this host; the build log is scrubbed
 # (``verify_diagnostics.scrub_log_text``) before it is stored; ``preview_mode`` is
-# ``"static"`` when the manifest has a worker (drafts serve assets only until the
-# drafts dispatch worker lands), ``"full"`` otherwise, and ``"server_only"`` when a
-# worker build's assets have no root index.html (next, sveltekit): no preview files
-# or token are stored then, because the URL would only 404. No realtime event exists for
-# site builds, so build progress is polled (latest-build / native-artifact).
+# ``"full"`` when the assets are the whole site or a draft Worker serves the build
+# (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``; its fallback rung is the
+# record's ``draft_worker_reason``), else ``"static"`` for a worker build, and
+# ``"server_only"`` when a worker build's assets have no root index.html (next,
+# sveltekit): no preview files are stored then, because the URL would only 404.
+# ``"published"`` is never a build's mode: ``service._project_draft_artifact`` answers
+# it for the pocket's published content once its drafts were purged. No realtime
+# event exists for site builds, so build progress is polled (latest-build /
+# native-artifact).
 from __future__ import annotations
 
 import hashlib
@@ -259,6 +263,9 @@ def bundle_key(content_hash: str) -> str:
 #: ``preview_mode`` of a draft whose worker renders every page: its assets have no
 #: root index.html, so the static preview origin has nothing to open.
 PREVIEW_SERVER_ONLY = "server_only"
+#: ``preview_mode`` of the pocket's PUBLISHED content once its drafts were purged:
+#: the builder shows the live site (``preview_url`` is its URL, or null).
+PREVIEW_PUBLISHED = "published"
 
 
 def preview_mode(manifest: Mapping[str, Any], preview: Mapping[str, bytes] | None = None) -> str:
@@ -456,6 +463,7 @@ async def run_project_preview_build(
     _store: Any = None,
     _verify_store: Any = None,
     _gen_uploads: list[tuple[bytes, str]] | None = None,
+    _draft: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """arq job body for a project draft (dispatched by ``build_job.run_site_preview_build``).
 
@@ -547,14 +555,59 @@ async def run_project_preview_build(
         logger.exception("sites.project: pocket %s built but the bundle was unusable", pocket_id)
         return _finish("failed", f"{build_job.RUNG_PREVIEW_UNREADABLE}:bundle_unreadable", **logged)
 
+    draft_reason: str | None = None
+    if manifest_has_worker(dict(manifest)):
+        mode, draft_reason = await _draft_worker_mode(
+            pocket_id,
+            content_hash,
+            result.artifact or b"",
+            manifest,
+            generator_input,
+            store,
+            mode,
+            _draft or {},
+        )
+
     framework = manifest.get("framework") if isinstance(manifest.get("framework"), str) else None
     return _finish(
         STATUS_BUILT,
         settlement.reason,
         preview_mode=mode,
         framework=framework,
+        draft_worker_reason=draft_reason,
         **logged,
     )
+
+
+async def _draft_worker_mode(
+    pocket_id: str,
+    content_hash: str,
+    artifact: bytes,
+    manifest: Mapping[str, Any],
+    generator_input: Mapping[str, Any],
+    store: Any,
+    mode: str,
+    deps: dict[str, Any],
+) -> tuple[str, str | None]:
+    """``(preview_mode, draft_worker_reason)`` once the draft Worker had its try
+    (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``): ``"full"`` when it serves,
+    else the static mode already computed plus the rung. Never raises."""
+    from pocketpaw_ee.sites import draft_worker
+
+    try:
+        outcome = await draft_worker.deploy_for_build(
+            pocket_id=pocket_id,
+            content_hash=content_hash,
+            artifact=artifact,
+            manifest=manifest,
+            source=generator_input.get("source"),
+            store=store,
+            **deps,
+        )
+    except Exception:  # noqa: BLE001 - a draft Worker never fails the build
+        logger.exception("sites.project: draft worker for pocket %s failed", pocket_id)
+        return mode, "draft_worker:deploy_failed"
+    return outcome.mode or mode, outcome.reason
 
 
 async def _capacity_outcome(
@@ -642,6 +695,7 @@ __all__ = [
     "ENGINE",
     "FREE_WORKER_BINDINGS",
     "LOG_CAP_BYTES",
+    "PREVIEW_PUBLISHED",
     "PREVIEW_SERVER_ONLY",
     "STAGE_SCRIPT",
     "build_record_key",

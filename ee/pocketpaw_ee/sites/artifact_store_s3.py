@@ -346,6 +346,43 @@ class S3ArtifactStore:
             return None
         return pocket_id, content_hash
 
+    def purge_previews(self, pocket_id: str) -> bool:
+        """Delete every preview token (forward key first, so the URL dies even if the
+        pointer delete fails) and draft file set of one pocket. Bundles stay. False
+        when the adapter cannot list or a delete failed (the sweeper retries)."""
+        browse = getattr(self._adapter, "browse", None)
+        if not callable(browse):
+            logger.warning(
+                "sites.artifact_store_s3: adapter cannot list; previews of %s kept", pocket_id
+            )
+            return False
+        prefix = f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/"
+        try:
+            items = _run_coro(browse(prefix), self._timeout)
+        except Exception:
+            logger.warning("sites.artifact_store_s3: could not list %s", prefix, exc_info=True)
+            return False
+        ok = True
+        for item in items:
+            name = getattr(item, "name", "")
+            if getattr(item, "is_dir", False) or "/" in name:
+                continue
+            try:
+                if name.endswith(".token"):
+                    raw = self._get(f"{prefix}{name}")
+                    _run_coro(self._adapter.delete(f"{prefix}{name}"), self._timeout)
+                    token = raw.decode("utf-8", "replace").strip() if raw else ""
+                    if token:
+                        _run_coro(self._adapter.delete(token_pointer_key(token)), self._timeout)
+                elif name.endswith(".dist.tgz") and not name.endswith(".bundle.dist.tgz"):
+                    _run_coro(self._adapter.delete(f"{prefix}{name}"), self._timeout)
+            except Exception:
+                logger.warning(
+                    "sites.artifact_store_s3: delete failed for %s%s", prefix, name, exc_info=True
+                )
+                ok = False
+        return ok
+
 
 def dist_key(pocket_id: str, content_hash: str) -> str:
     return f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.dist.tgz"

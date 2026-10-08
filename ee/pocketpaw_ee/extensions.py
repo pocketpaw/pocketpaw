@@ -107,6 +107,9 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
       tier the active sold sites no longer earn); acts once per partner per month.
       After the renewals, so a site that just lapsed no longer counts.
     - ``sweep_subscription_grace``: M5 dunning, revoke plans held past grace.
+    - ``sweep_draft_workers``: retry pending site-draft cleanups, reap draft Workers
+      idle past their TTL, delete unregistered ``paw-draft-*`` scripts (no-op unless
+      PAW_SITES_DRAFT_WORKERS is on).
     - ``backfill_tenant_keys`` (tick only): mint LiteLLM tenant keys for up to 50
       live workspaces with none, since workspace create never retries a failed
       mint. Skipped on the boot pass, where a down proxy would hold startup.
@@ -120,6 +123,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     from pocketpaw_ee.cloud.llm_provisioning.service import backfill_tenant_keys
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.cloud.partners.service import sweep_partner_tiers
+    from pocketpaw_ee.sites.draft_worker import sweep_draft_workers
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
     from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
@@ -131,6 +135,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
         sweep_site_renewals,
         sweep_partner_tiers,
         sweep_subscription_grace,
+        sweep_draft_workers,
         backfill_tenant_keys,
     ]
     return cluster, [sweep_agent_jails]

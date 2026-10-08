@@ -19,7 +19,8 @@
 #     namespaces per ACCOUNT, so KV per site is the scarce one.
 #   * d1 is ONE database per site, whatever the binding is called: the site's own
 #     ``d1_database_id``, named ``paw-site-<id>`` like the dynamic lane's, so either
-#     lane finds the other's database instead of making a second one. A stored id
+#     lane finds the other's database instead of making a second one. ``d1_name``
+#     overrides the name (a draft's ``paw-draft-<pocket>``, ``draft_worker``). A stored id
 #     equal to the legacy derived placeholder (``derived_d1_id``) was never created
 #     on Cloudflare and is replaced by a real one. Its migrations are not run here
 #     (``project_d1`` does that after this returns).
@@ -156,11 +157,12 @@ async def _ensure_d1(
     cloudflare: Any,
     save: Callable[[Any], Awaitable[None]],
     derived_d1_id: str,
+    name: str = "",
 ) -> str:
     stored = (getattr(site, "d1_database_id", "") or "").strip()
     if stored and stored != derived_d1_id:
         return stored
-    name = database_name(str(site.id))
+    name = name or database_name(str(site.id))
     db_id = await cloudflare.find_database(name)
     if not db_id:
         try:
@@ -185,6 +187,7 @@ async def ensure_bindings(
     paid: bool,
     derived_d1_id: str = "",
     provision_d1: bool = True,
+    d1_name: str = "",
 ) -> ProvisionedResources:
     """Create the site's missing D1 database / KV namespaces / R2 buckets and return
     everything ``map_bindings`` needs. ``paid`` is the site's
@@ -192,12 +195,16 @@ async def ensure_bindings(
     ``d1_database_id`` and the two resource maps; it runs after each create.
     ``derived_d1_id`` is the placeholder id older publishes stored without creating
     a database; a stored id equal to it is treated as no database. ``provision_d1``
-    False leaves D1 to the caller (a dynamic site's database is pinned upstream)."""
+    False leaves D1 to the caller (a dynamic site's database is pinned upstream).
+    ``d1_name`` names a new database (a draft's ``paw-draft-<pocket>``) instead of the
+    site's ``paw-site-<id>``."""
     wanted = _requested(binding_requests)
     _check_gates(site, wanted, paid)
 
     if wanted[D1] and provision_d1:
-        await _ensure_d1(site, cloudflare=cloudflare, save=save, derived_d1_id=derived_d1_id)
+        await _ensure_d1(
+            site, cloudflare=cloudflare, save=save, derived_d1_id=derived_d1_id, name=d1_name
+        )
     kv = dict(getattr(site, "kv_namespaces", None) or {})
     r2 = dict(getattr(site, "r2_buckets", None) or {})
     for name in wanted[KV]:

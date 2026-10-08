@@ -25,8 +25,9 @@
 #                      even if every later step fails;
 #   3. serving off   — routes, hostnames, then the Worker script itself;
 #   4. reclaim       — D1, the bundle-deploy KV namespaces and R2 buckets, the
-#                      public-asset R2 prefix, artifacts: the things that cost money
-#                      once nothing serves;
+#                      pocket's draft Worker and draft data, the public-asset R2
+#                      prefix, artifacts: the things that cost money once nothing
+#                      serves;
 #   5. records       — the dependent rows, then the site's secrets (best effort);
 #   6. the Site doc  — LAST, and not by convention.
 #
@@ -61,6 +62,7 @@ STEP_HOSTNAMES = "hostnames"
 STEP_SCRIPT = "script"
 STEP_D1 = "d1"
 STEP_BINDINGS = "bindings"
+STEP_DRAFTS = "drafts"
 STEP_R2 = "r2"
 STEP_RECORDS = "records"
 
@@ -72,6 +74,7 @@ CASCADE_STEPS: tuple[str, ...] = (
     STEP_SCRIPT,
     STEP_D1,
     STEP_BINDINGS,
+    STEP_DRAFTS,
     STEP_R2,
     STEP_RECORDS,
 )
@@ -189,6 +192,8 @@ async def _run_step(step: str, *, site: Any, deps: Any) -> str:
         return await _delete_d1(site=site, deps=deps)
     if step == STEP_BINDINGS:
         return await _delete_bindings(site=site, deps=deps)
+    if step == STEP_DRAFTS:
+        return await _delete_drafts(site=site, deps=deps)
     if step == STEP_R2:
         return await _purge_assets(site=site, deps=deps)
     if step == STEP_RECORDS:
@@ -324,6 +329,32 @@ async def _delete_bindings(*, site: Any, deps: Any) -> str:
         )
         return OUTCOME_PARTIAL
     return OUTCOME_DONE
+
+
+async def _delete_drafts(*, site: Any, deps: Any) -> str:
+    """The pocket's draft Worker, its draft-only D1 / KV / R2 and its preview tokens
+    (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``). Best effort and never
+    raises: what is left stays on the draft registry, which the draft sweeper retries,
+    so a stuck draft never traps a site delete."""
+    from pocketpaw_ee.sites import draft_worker
+
+    pocket_id = getattr(site, "pocket_id", "") or ""
+    if not pocket_id or not draft_worker.enabled():
+        return OUTCOME_SKIPPED
+    try:
+        done = await draft_worker.purge_pocket_drafts(
+            pocket_id,
+            workspace_id=str(getattr(site, "workspace", "") or ""),
+            reason="site_deleted",
+            forget=True,
+            cf=deps.cloudflare,
+        )
+    except Exception as exc:  # noqa: BLE001 - best effort, logged
+        logger.warning(
+            "sites.delete: site %s draft cleanup failed: %s", getattr(site, "id", "?"), exc
+        )
+        return OUTCOME_PARTIAL
+    return OUTCOME_DONE if done else OUTCOME_PARTIAL
 
 
 async def _purge_assets(*, site: Any, deps: Any) -> str:

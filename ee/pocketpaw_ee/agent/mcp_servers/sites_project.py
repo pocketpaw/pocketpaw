@@ -94,6 +94,12 @@ SERVER_ONLY_PREVIEW_NOTE = (
     "null). The pages run after publish. Tell the user instead of showing a preview."
 )
 
+PUBLISHED_PREVIEW_NOTE = (
+    "preview_mode is published: these files are exactly what is live, so preview_url "
+    "is the published site (null when its address is not known). Edit the files to "
+    "get a new draft."
+)
+
 SECRETS_RULE = (
     "Never write a secret value into any file. For each secret name, call "
     "`request_site_secret` (pocket_id, name, description) so the owner fills it in; "
@@ -779,7 +785,11 @@ async def _run_site_build_handler(args: dict) -> dict:
     }
     blocks: list[str] = []
     if status == "built":
-        note = {"static": STATIC_PREVIEW_NOTE, "server_only": SERVER_ONLY_PREVIEW_NOTE}
+        note = {
+            "static": STATIC_PREVIEW_NOTE,
+            "server_only": SERVER_ONLY_PREVIEW_NOTE,
+            "published": PUBLISHED_PREVIEW_NOTE,
+        }
         body["message"] = "The draft built." + (
             " " + note[preview_mode] if preview_mode in note else ""
         )
