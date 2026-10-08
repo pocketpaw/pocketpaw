@@ -355,6 +355,7 @@ CLI_FAILURE_CODES = frozenset(
         "output_missing",
         "wrangler_failed",
         "size_limit",
+        "do_config",
         "internal_error",
     }
 )

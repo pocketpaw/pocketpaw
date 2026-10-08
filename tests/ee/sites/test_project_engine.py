@@ -416,6 +416,8 @@ def test_generator_uploads_ship_dist_and_package_json(monkeypatch, tmp_path):
 def test_cli_failure_code_reads_only_known_codes():
     output = 'step log\n{"error":"e","code":"wrangler_failed"}\n'
     assert project_build.cli_failure_code(output) == "wrangler_failed"
+    # paw-sites refuses a Durable Objects config it will not deploy with ``do_config``.
+    assert project_build.cli_failure_code('{"error":"e","code":"do_config"}') == "do_config"
     assert project_build.cli_failure_code('{"error":"e","code":"made_up"}') is None
     assert project_build.cli_failure_code("no json here") is None
 

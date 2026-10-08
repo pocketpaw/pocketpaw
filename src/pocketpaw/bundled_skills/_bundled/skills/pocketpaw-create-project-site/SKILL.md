@@ -40,6 +40,18 @@ routing:
 
 When two fit, the user's named framework wins, then `when_to_use`.
 
+## Realtime (`realtime-room`)
+
+Live cursors, whiteboards, chat, presence, small multiplayer games: apply
+`realtime-room`. Site plan only, off until the platform enables Durable
+Objects, and not on `sveltekit` (pick another template). Then wire the entry
+yourself, as `next_steps` says: export `Room` and call `routeRoom` before the
+framework (AGENTS.md, section realtime-room). The platform sets
+`ROOM_MAX_PEERS` (10 free, up to 50 paid) and `PAW_DO_THROTTLED`; never set or
+work around them. Never author Durable Object config by hand: it lives in
+wrangler.jsonc, written by the recipe; only append migrations. A data-loss
+refusal is the owner's call in the publish dialog.
+
 ## The loop
 
 1. `start_site_from_template(slug, brief, name?)`, ONCE. It creates the draft
