@@ -3297,10 +3297,17 @@ framework config, wrangler config) is also served here, with two extra fields:
 - It is never armed: `body_html` / `css` are always empty and the draft is only
   `preview_url`. A cold read queues a Daytona build (`paw-sites-gen project-build`)
   with the same `queued` / `building` / `failed` handle as above.
-- `preview_mode` is `"static"` when the build has a worker (server routes): the
-  preview origin serves its static assets, and the routes wait for the drafts
-  dispatch worker. `"full"` when the assets are the whole site. `null` until a build
-  finished.
+- `preview_mode`:
+  - `"full"`: the preview is the whole site. Either the assets are the whole site,
+    or (with `PAW_SITES_DRAFT_WORKERS=1`) a draft Worker runs the build's server
+    code behind the preview URL.
+  - `"static"`: the build has a worker, but the preview serves its static assets
+    only.
+  - `"server_only"`: nothing can be previewed and `preview_url` is `null`.
+  - `"published"`: the files are exactly what is live and the pocket's drafts were
+    deleted on publish. `preview_url` is the live site's URL (`null` when unknown).
+    No draft is rebuilt; the next edit builds one.
+  - `null` until a build finished.
 - `capabilities` are the engine's edit/build flags. A project has no Select or Text
   tool yet (no generator-owned anchors); edits go through files and the agent, and
   every build keeps a log. Other engines answer `capabilities: null` for now.

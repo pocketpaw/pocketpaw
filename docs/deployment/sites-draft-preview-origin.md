@@ -120,6 +120,7 @@ draft.
 ## What the preview origin does and does not do
 
 - Serves `GET`/`HEAD` only. `OPTIONS` answers `204`; anything else is `405`.
+  (A draft proxied to its draft Worker is the exception; see below.)
 - Never reads cookies or `Authorization`, never sets a cookie. The token is the
   only credential, so treat a preview URL like a share link. There is no
   revocation: unsharing or deleting the pocket does not invalidate a URL that was
@@ -137,7 +138,7 @@ draft.
   `Cache-Control: public, max-age=31536000, immutable`; everything else, including
   un-hashed files under `assets/`, is `private, no-cache`; errors are `no-store`.
 - One draft unpacks to at most 64 MB and 20,000 files. Each process keeps up to 8
-  unpacked drafts (128 MB) and its token lookups (hits for 5 minutes, unknown
+  unpacked drafts (128 MB) and its token lookups (hits for 60 seconds, unknown
   tokens for 30 seconds) in memory, and concurrent requests for one draft share a
   single store read.
 - Path resolution matches the published site: `path`, then `path/index.html`, then
@@ -148,3 +149,43 @@ draft.
   declared packages' import map injected into each page. The `?paw_edit=1` variant
   carries the edit bridge and, when the paw-sites toolchain is available on the API
   host, the same `data-uid` stamping `/html-armed-source` uses.
+
+## Draft Workers (server code in drafts)
+
+Off by default. With `PAW_SITES_DRAFT_WORKERS=1` and the account project deploy
+target (`PAW_SITES_PROJECT_DEPLOY_TARGET=account`, or `PAW_CF_DEPLOY_MODE=workers`),
+a `project` build with server code also deploys as an account-level **draft
+Worker**, `paw-draft-<pocket id>-<random>`, and its preview URL is reverse-proxied
+to it. API routes, SSR pages and auth then run in the draft, and next / sveltekit
+drafts get a preview at all. The workers.dev address is never handed out.
+
+- **Data.** The draft binds its own D1 (`paw-draft-<pocket id>`), KV and R2,
+  never the published site's. Migrations apply with destructive changes allowed; a
+  changed applied migration recreates the draft database. Top-level `seed/*.sql`
+  runs once on a fresh draft database.
+- **Secrets.** The owner's secrets bind as on publish, except
+  `BETTER_AUTH_SECRET`, `AUTH_SECRET` and `SESSION_SECRET`, which get a
+  per-draft value (encrypted with `CLOUD_ENCRYPTION_KEY`; without it they are
+  re-minted every deploy). An owner secret `NAME__DRAFT` binds as `NAME` in the
+  draft. `BETTER_AUTH_URL` and `PAW_SITE_URL` are set to the draft's preview URL.
+- **Proxy.** Every method is forwarded, the request body up to
+  `PAW_SITES_DRAFT_MAX_BODY` (10 MiB). Cookies pass through for this draft's host
+  only: `Domain` is stripped, and on https `Secure; SameSite=None; Partitioned` is
+  added so sign-in works inside the builder iframe. HTML gets the runtime-error
+  reporter, and the edit bridge under `?paw_edit=1`. A URL of an older build of a
+  proxied draft is a 404. WebSockets are not proxied.
+- **Limits.** The site's plan caps (`PAW_SITES_DRAFT_CPU_MS`,
+  `PAW_SITES_DRAFT_SUBREQUESTS` override them), Workers Logs at
+  `PAW_SITES_DRAFT_OBSERVABILITY_SAMPLE` (default 1.0), no Smart Placement.
+- **Script cap.** A new draft script is refused when the account already has
+  `PAW_SITES_DRAFT_SCRIPT_CAP` (default 450) Worker scripts, or when the count
+  cannot be read. Cloudflare allows 500 per Paid account.
+- **Fallback.** A draft Worker failure never fails the build: the preview falls
+  back to `static` (or `server_only`) and the build record's `draft_worker_reason`
+  says why (`draft_worker:cap`, `secrets_missing`, `deploy_failed`, ...).
+- **Cleanup.** A successful publish deletes every draft of the pocket: the draft
+  Worker, its D1 / KV / R2, and every preview token and draft file set, so old
+  preview URLs stop serving within a minute. Site delete and pocket delete do the
+  same. Cloudflare 404s count as done; anything that fails is retried by the
+  `sweep_draft_workers` sweep, which also removes drafts idle for
+  `PAW_SITES_DRAFT_TTL_DAYS` (default 7) and unregistered `paw-draft-*` scripts.
