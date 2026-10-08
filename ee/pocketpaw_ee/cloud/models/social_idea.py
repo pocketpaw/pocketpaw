@@ -37,6 +37,7 @@ class SocialIdea(TimestampedDocument):
     calendar_event_id: str = ""
     poster_svg: str = ""
     reel_html: str = ""
+    media_choice: str = ""
 
     class Settings:
         name = "growth_social_ideas"

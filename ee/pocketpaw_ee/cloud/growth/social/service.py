@@ -196,6 +196,7 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         calendar_event_id=doc.calendar_event_id,
         poster_svg=doc.poster_svg,
         reel_html=doc.reel_html,
+        media_choice=doc.media_choice,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -219,6 +220,7 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         calendar_event_id=i.calendar_event_id,
         poster_svg=i.poster_svg,
         reel_html=i.reel_html,
+        media_choice=i.media_choice,
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -515,7 +517,8 @@ async def list_ideas(
 async def update_idea(
     ctx: RequestContext, idea_id: str, body: UpdateIdeaRequest
 ) -> SocialIdeaResponse:
-    """Move an idea's review status, edit its copy, and/or replace its poster with
+    """Move an idea's review status, edit its copy, pick which media goes with the
+    post (``media_choice``: poster or reel), and/or replace its poster with
     an edited one (from /studio/vector), sanitised like a generated poster."""
     from pocketpaw_ee.cloud.growth.social.ideas import MAX_EDITED_POSTER_CHARS, clean_svg
 
@@ -527,7 +530,8 @@ async def update_idea(
         if not poster:
             raise ValidationError("social.poster_invalid", "That poster is not a usable SVG")
         doc.poster_svg = poster
-    for name in ("status", "hook", "on_screen_text", "caption", "script", "hashtags"):
+    fields = ("status", "hook", "on_screen_text", "caption", "script", "hashtags", "media_choice")
+    for name in fields:
         value = getattr(body, name)
         if value is not None:
             setattr(doc, name, value)

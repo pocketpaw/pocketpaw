@@ -7574,7 +7574,7 @@ other route `growth.write` (both MEMBER).
 | `POST /api/v1/growth/social/profile/complete` | Finish onboarding: stamps `onboarding_completed_at`. |
 | `POST /api/v1/growth/social/ideas/generate` | Generate new post ideas (below). |
 | `GET /api/v1/growth/social/ideas` | `{items}`, newest first. Optional `status=new\|approved\|skipped`; omitted returns every idea. Any other value is a 422. |
-| `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). |
+| `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). `media_choice` (`poster` or `reel`) picks which media goes with the post when it has both. |
 | `POST /api/v1/growth/social/ideas/schedule` | `{items: [{idea_id, scheduled_at}], timezone?, duration_minutes?}`: date approved ideas and give each a `/calendar` event (calendar `growth-social`); rescheduling moves the same event. `409 social.idea_not_approved` if any is not approved. Nothing is posted. |
 | `POST /api/v1/growth/social/ideas/{idea_id}/unschedule` | Clear the date and delete the idea's calendar event. |
 | `GET /api/v1/growth/social/meme-formats` | The meme format templates Create offers: `{items: [{id, name, layout}]}`. Our own layouts; no third-party media. |

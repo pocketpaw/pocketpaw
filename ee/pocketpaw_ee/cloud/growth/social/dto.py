@@ -204,6 +204,7 @@ class UpdateIdeaRequest(BaseModel):
     script: list[str] | None = Field(default=None, max_length=50)
     hashtags: list[str] | None = Field(default=None, max_length=50)
     poster_svg: str | None = Field(default=None, min_length=1, max_length=2_000_000)
+    media_choice: Literal["poster", "reel"] | None = None
 
     @field_validator("hook")
     @classmethod
@@ -251,6 +252,7 @@ class SocialIdeaResponse(BaseModel):
     calendar_event_id: str
     poster_svg: str
     reel_html: str
+    media_choice: Literal["", "poster", "reel"]
     created_at: str | None
     updated_at: str | None
 

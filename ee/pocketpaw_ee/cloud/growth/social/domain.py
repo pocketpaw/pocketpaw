@@ -151,6 +151,7 @@ class SocialIdea:
     calendar_event_id: str = ""
     poster_svg: str = ""
     reel_html: str = ""
+    media_choice: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
