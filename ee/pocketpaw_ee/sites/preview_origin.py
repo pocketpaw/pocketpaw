@@ -21,7 +21,8 @@
 #     ``html_uid_stamp`` port) carrying the vendored edit-bridge (``edit_bridge.js``).
 #     Both scripts are pinned to a paw-sites commit (paw-sites-edit-bridge.pin.json).
 #   * ``preview_app`` — the ASGI app that serves a draft (a full-mode project draft
-#     with a live draft Worker is reverse-proxied to it by ``preview_proxy``) — and
+#     with a live draft Worker is reverse-proxied to it by ``preview_proxy``, its
+#     WebSockets too; any other token's WebSocket is refused before accept) — and
 #     ``PreviewHostDispatch``, the middleware that routes preview-host requests to it
 #     inside the main API process. It must be the OUTERMOST layer (``install_cors``
 #     adds it last via ``app.state.outermost_middleware``), or auth and rate limits
@@ -726,8 +727,11 @@ async def preview_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
             elif message["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
                 return
+    if scope["type"] == "websocket":
+        await _serve_websocket(scope, receive, send)
+        return
     if scope["type"] != "http":
-        return  # websockets have nothing to talk to here
+        return
 
     if await _maybe_proxy(scope, receive, send):
         return
@@ -782,29 +786,52 @@ def _resolve_ref(token: str) -> tuple[str, str] | None:
     return _resolve_token(store, token)
 
 
-async def _maybe_proxy(scope: dict[str, Any], receive: Any, send: Any) -> bool:
-    """Answer the request from the token's draft Worker when it has one (True), or
-    404 a superseded proxied draft (True). False: serve the static draft."""
+async def _proxy_target(scope: dict[str, Any]) -> tuple[str, Any]:
+    """(Host header, what ``draft_worker.proxy_target`` says for its token): a
+    ``ProxyTarget``, ``SUPERSEDED``, or ``None`` (not proxied: static, unknown, flag
+    off, registry down)."""
     from pocketpaw_ee.sites import draft_worker
 
-    if not draft_worker.enabled():
-        return False
     host = ""
     for k, v in scope.get("headers") or []:
         if k == b"host":
             host = v.decode("latin-1")
             break
+    if not draft_worker.enabled():
+        return host, None
     token = token_from_host(host)
     if not token:
-        return False
+        return host, None
     ref = await asyncio.to_thread(_resolve_ref, token)
     if ref is None:
-        return False
+        return host, None
     try:
-        target = await draft_worker.proxy_target(*ref)
+        return host, await draft_worker.proxy_target(*ref)
     except Exception:  # noqa: BLE001 - a registry outage serves the static draft
         logger.warning("sites.preview_origin: draft registry unavailable", exc_info=True)
-        return False
+        return host, None
+
+
+async def _serve_websocket(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    """Only a live full-mode draft Worker has anything to talk to; every other token
+    (static, unknown, superseded, drafts off) is refused with 4404 before accept."""
+    from pocketpaw_ee.sites import draft_worker, preview_proxy
+
+    if (await receive())["type"] != "websocket.connect":
+        return
+    host, target = await _proxy_target(scope)
+    if not isinstance(target, draft_worker.ProxyTarget):
+        await preview_proxy.deny_ws(scope, send, preview_proxy.CLOSE_NOT_FOUND)
+        return
+    await preview_proxy.forward_ws(scope, receive, send, target=target, preview_host=host)
+
+
+async def _maybe_proxy(scope: dict[str, Any], receive: Any, send: Any) -> bool:
+    """Answer the request from the token's draft Worker when it has one (True), or
+    404 a superseded proxied draft (True). False: serve the static draft."""
+    from pocketpaw_ee.sites import draft_worker
+
+    host, target = await _proxy_target(scope)
     if target is None:
         return False
     head = scope.get("method", "GET").upper() == "HEAD"
