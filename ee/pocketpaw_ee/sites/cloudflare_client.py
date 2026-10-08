@@ -310,6 +310,10 @@ class CloudflareClient:
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(headers=self._headers, transport=self._transport, timeout=30.0)
 
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
     @staticmethod
     def _unwrap(resp: httpx.Response) -> dict:
         if resp.status_code // 100 != 2:
@@ -1113,6 +1117,84 @@ class CloudflareClient:
             found = found if isinstance(found, list) else []
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
+
+    async def get_script_migration_tag(self, script_name: str, *, target: str) -> str | None:
+        """The Durable Object migration tag last applied to the script, or None (no
+        script, or no migration). Account target: the script's row in
+        ``GET /workers/scripts`` (``migration_tag``,
+        https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/list/).
+        Dispatch target: ``GET .../dispatch/namespaces/{ns}/scripts/{name}`` and its
+        ``script.migration_tag``. Fails closed on anything but a 2xx or a 404."""
+        if target == ACCOUNT_TARGET:
+            async with self._client() as client:
+                resp = await client.get(f"{_CF_API}/accounts/{self._account_id}/workers/scripts")
+            rows = self._unwrap(resp)
+            for row in rows if isinstance(rows, list) else []:
+                if isinstance(row, dict) and row.get("id") == script_name:
+                    return str(row.get("migration_tag") or "") or None
+            return None
+        async with self._client() as client:
+            resp = await client.get(self._script_url(script_name, target))
+        if resp.status_code == 404:
+            return None
+        result = self._unwrap(resp)
+        script = result.get("script") if isinstance(result, dict) else None
+        info = script if isinstance(script, dict) else result
+        return str((info or {}).get("migration_tag") or "") or None
+
+    async def get_script_settings(self, script_name: str, *, target: str) -> dict:
+        """The live script's settings (bindings, compat, ...):
+        ``GET .../scripts/{name}/settings`` on ``target``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/get/)."""
+        async with self._client() as client:
+            resp = await client.get(f"{self._script_url(script_name, target)}/settings")
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def patch_script_settings(
+        self, script_name: str, settings: Mapping[str, Any], *, target: str
+    ) -> dict:
+        """``PATCH .../scripts/{name}/settings`` with ``settings`` as the multipart
+        ``settings`` part. No code upload, so the running version keeps its code
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/edit/).
+        Callers send the FULL bindings list (``durable_objects.set_platform_vars_live``)."""
+        files = {"settings": (None, json.dumps(dict(settings)), "application/json")}
+        async with self._client() as client:
+            resp = await client.patch(
+                f"{self._script_url(script_name, target)}/settings", files=files
+            )
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def query_graphql(self, query: str, variables: Mapping[str, Any]) -> dict:
+        """Run one GraphQL Analytics query and return its ``data``.
+
+        ``POST /client/v4/graphql`` with ``{query, variables}``
+        (https://developers.cloudflare.com/analytics/graphql-api/). Values travel as
+        variables, never interpolated. The body is ``{data, errors}``, not the
+        success envelope. Fails closed: a non-2xx, a non-JSON body, any ``errors`` or
+        a missing ``data`` raises ``sites.cloudflare_error``."""
+        async with self._client() as client:
+            resp = await client.post(
+                f"{_CF_API}/graphql", json={"query": query, "variables": dict(variables)}
+            )
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Cloudflare GraphQL {resp.status_code}: {_error_detail(resp)}",
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ValidationError("sites.cloudflare_error", "GraphQL answered non-JSON") from exc
+        errors = body.get("errors") if isinstance(body, dict) else None
+        data = body.get("data") if isinstance(body, dict) else None
+        if errors or not isinstance(data, dict):
+            first = errors[0].get("message", "") if errors and isinstance(errors[0], dict) else ""
+            raise ValidationError(
+                "sites.cloudflare_error", f"Cloudflare GraphQL error: {first or 'no data'}"[:300]
+            )
+        return data
 
     async def query_analytics_sql(self, sql: str) -> list[dict]:
         """Run ONE SQL query against Workers Analytics Engine and return its rows

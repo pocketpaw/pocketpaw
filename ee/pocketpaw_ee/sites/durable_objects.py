@@ -16,7 +16,8 @@
 #     refused, not dropped. Every bound and live class must be exported by the main
 #     module (``exportedClasses``; a textual check, Cloudflare's upload is final).
 #   * Class cap: 1 on a free site, ``PAW_SITES_DO_MAX_CLASSES`` (default 3, max 5)
-#     on a paid one. Per-room participant caps belong to the recipe, not here.
+#     on a paid one. The recipe enforces per-room caps; we hand it the plan's value
+#     and the metering verdict as platform vars (``platform_vars``).
 #   * Migrations use Cloudflare's tagged form (old_tag / new_tag / steps), not the
 #     declarative ``exports`` map. Tags are append-only; ``plan_migration`` decides
 #     what to send from the tag last applied to the script. Destructive steps
@@ -30,6 +31,12 @@
 #     classes, written only after a successful upload (``migration_tags_after``).
 #   * ``teardown_script``: tombstone upload (``deleted_classes``), forced delete, then
 #     a namespace-list check. Best effort, never raises; the caller retries.
+#   * ``set_platform_vars_live``: change a platform var on a LIVE script through the
+#     script settings API (no code upload): every other binding is sent as
+#     ``inherit``, unknown binding types block the PATCH, and it runs under the
+#     script's lock (``do_lock``) so a deploy cannot interleave.
+#   * ``reconcile_state``: before planning, the stored tag history / classes are
+#     checked against Cloudflare's migration tag and DO bindings; Cloudflare wins.
 from __future__ import annotations
 
 import logging
@@ -49,6 +56,42 @@ DEFAULT_MAX_CLASSES = 3
 MAX_CLASSES_CEILING = 5
 FREE_MAX_CLASSES = 1
 ACCOUNT_BUDGET_ENV = "PAW_SITES_DO_ACCOUNT_BUDGET"
+# Platform vars a DO site's Worker gets (plain_text, they win over owner values).
+ROOM_MAX_PEERS_VAR = "ROOM_MAX_PEERS"
+THROTTLED_VAR = "PAW_DO_THROTTLED"
+SUSPENDED_VAR = "PAW_DO_SUSPENDED"
+SITE_ORIGINS_VAR = "PAW_SITE_ORIGINS"
+# Binding types a live settings PATCH carries over as ``{"type": "inherit", "name"}``.
+# The settings API documents ``inherit`` as a type-agnostic binding (name, optional
+# old_name / version_id, "Defaults to inheriting the binding from the latest
+# version") and lists no per-type support, so we limit it to the types our own
+# deploys create; a script with anything else is not PATCHed (logged, retried).
+_INHERITABLE_TYPES = frozenset(
+    {
+        "ai",
+        "assets",
+        "d1",
+        "durable_object_namespace",
+        "kv_namespace",
+        "plain_text",
+        "queue",
+        "r2_bucket",
+        "secret_key",
+        "secret_text",
+    }
+)
+FREE_ROOM_MAX_PEERS = 10
+ROOM_MAX_PAID_ENV = "PAW_SITES_DO_ROOM_MAX_PAID"
+ROOM_MAX_PEERS_CEILING = 50
+# Rooms a site may hold open, and peers across all of them (the recipe reads both).
+ROOM_MAX_ROOMS_VAR = "ROOM_MAX_ROOMS"
+ROOM_MAX_ROOMS_PAID_ENV = "PAW_SITES_DO_ROOM_MAX_ROOMS_PAID"
+_ROOM_MAX_ROOMS = {False: 5, True: 20}
+ROOM_MAX_ROOMS_CEILING = 200
+SITE_MAX_PEERS_VAR = "ROOM_MAX_SITE_PEERS"
+SITE_MAX_PEERS_PAID_ENV = "PAW_SITES_DO_SITE_MAX_PEERS_PAID"
+_SITE_MAX_PEERS = {False: 30, True: 200}
+SITE_MAX_PEERS_CEILING = 1000
 DEFAULT_ACCOUNT_BUDGET = 300
 DRAFT_BUDGET_ENV = "PAW_SITES_DO_DRAFT_BUDGET"
 DEFAULT_DRAFT_BUDGET = 100
@@ -283,6 +326,165 @@ def class_cap(*, paid: bool) -> int:
         logger.warning("%s=%r is not an int; using %d", MAX_CLASSES_ENV, raw, DEFAULT_MAX_CLASSES)
         value = DEFAULT_MAX_CLASSES
     return min(max(value, 0), MAX_CLASSES_CEILING)
+
+
+def room_max_peers(*, paid: bool) -> int:
+    """Peers per room the recipe allows: 10 free, ``PAW_SITES_DO_ROOM_MAX_PAID``
+    (default and ceiling 50) paid. A bad value falls back to the ceiling."""
+    if not paid:
+        return FREE_ROOM_MAX_PEERS
+    raw = (os.environ.get(ROOM_MAX_PAID_ENV) or "").strip()
+    try:
+        value = int(raw) if raw else ROOM_MAX_PEERS_CEILING
+    except ValueError:
+        logger.warning("%s=%r is not an int; using %d", ROOM_MAX_PAID_ENV, raw, 50)
+        value = ROOM_MAX_PEERS_CEILING
+    return min(max(value, 1), ROOM_MAX_PEERS_CEILING)
+
+
+def _paid_cap(env: str, default: int, ceiling: int) -> int:
+    raw = (os.environ.get(env) or "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        logger.warning("%s=%r is not an int; using %d", env, raw, default)
+        value = default
+    return min(max(value, 1), ceiling)
+
+
+def room_max_rooms(*, paid: bool) -> int:
+    """Rooms a site may hold open: 5 free, ``PAW_SITES_DO_ROOM_MAX_ROOMS_PAID`` paid
+    (default 20, clamped to 1..200)."""
+    if not paid:
+        return _ROOM_MAX_ROOMS[False]
+    return _paid_cap(ROOM_MAX_ROOMS_PAID_ENV, _ROOM_MAX_ROOMS[True], ROOM_MAX_ROOMS_CEILING)
+
+
+def site_max_peers(*, paid: bool) -> int:
+    """Peers across all of a site's rooms: 30 free, ``PAW_SITES_DO_SITE_MAX_PEERS_PAID``
+    paid (default 200, clamped to 1..1000)."""
+    if not paid:
+        return _SITE_MAX_PEERS[False]
+    return _paid_cap(SITE_MAX_PEERS_PAID_ENV, _SITE_MAX_PEERS[True], SITE_MAX_PEERS_CEILING)
+
+
+def platform_vars(
+    *, paid: bool, throttled: bool, origins: Iterable[str] = (), suspended: bool = False
+) -> dict[str, str]:
+    """``ROOM_MAX_PEERS``, ``PAW_DO_THROTTLED`` ("1" when the daily usage sweep found
+    the site over its ceiling: the recipe refuses new joins and says why) and
+    ``PAW_SITE_ORIGINS`` (comma-separated origins the recipe accepts a WebSocket
+    from, on top of the Worker's own: the public URL and live custom domains of a
+    published site, the preview origin of a draft)."""
+    return {
+        ROOM_MAX_PEERS_VAR: str(room_max_peers(paid=paid)),
+        ROOM_MAX_ROOMS_VAR: str(room_max_rooms(paid=paid)),
+        SITE_MAX_PEERS_VAR: str(site_max_peers(paid=paid)),
+        THROTTLED_VAR: "1" if throttled else "0",
+        SUSPENDED_VAR: "1" if suspended else "0",
+        SITE_ORIGINS_VAR: ",".join(dict.fromkeys(o for o in origins if o)),
+    }
+
+
+async def set_platform_vars_live(
+    cf: Any, script: str, *, target: str, values: Mapping[str, str]
+) -> None:
+    """Set ``values`` as plain_text vars on the LIVE ``script`` without re-uploading
+    its code, via the script settings API:
+    GET then PATCH ``.../workers/scripts/{name}/settings`` (multipart ``settings``
+    part), https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/edit/
+    (the dispatch-namespace script has the same pair under
+    ``.../dispatch/namespaces/{ns}/scripts/{name}/settings``).
+
+    ``bindings`` in a PATCH is the script's whole list, so the current list is read
+    first and sent back with only ``values`` replaced (appended when missing). The
+    docs do not say a binding left out is kept, so nothing is left out. Secrets
+    (``secret_text`` / ``secret_key``) are sent as ``{"type": "inherit", "name"}``,
+    the documented way to carry a binding over from the latest version, because the
+    GET does not return a value we could (or should) send back. Every other binding
+    goes back as ``inherit`` too, so nothing read is echoed (an id, a namespace) and a
+    value changed since the GET is not reverted. Runs under the script's lock. Raises
+    on any Cloudflare error or a binding type outside ``_INHERITABLE_TYPES``
+    (``sites.do_settings_unsupported``); callers fail open."""
+    from pocketpaw_ee.sites import do_lock
+
+    async with do_lock.script_lock(script):
+        settings = await cf.get_script_settings(script, target=target)
+        current = settings.get("bindings") if isinstance(settings, dict) else None
+        if not isinstance(current, list):
+            raise ValidationError("sites.cloudflare_error", f"no bindings in {script}'s settings")
+        bindings: list[dict] = []
+        unknown: list[str] = []
+        for binding in current:
+            if not isinstance(binding, dict) or not binding.get("name"):
+                raise ValidationError("sites.cloudflare_error", f"unreadable binding on {script}")
+            if binding["name"] in values:
+                continue
+            if binding.get("type") not in _INHERITABLE_TYPES:
+                unknown.append(f"{binding['name']} ({binding.get('type')})")
+                continue
+            bindings.append({"type": "inherit", "name": binding["name"]})
+        if unknown:
+            raise ValidationError(
+                "sites.do_settings_unsupported",
+                f"{script} has bindings a live settings update does not carry over: "
+                f"{', '.join(unknown)}. Not changed; it is set on the next deploy.",
+            )
+        bindings.extend(
+            {"type": "plain_text", "name": name, "text": text} for name, text in values.items()
+        )
+        await cf.patch_script_settings(script, {"bindings": bindings}, target=target)
+
+
+async def reconcile_state(
+    cf: Any, script: str, *, target: str, stored: DurableObjectState
+) -> DurableObjectState:
+    """The state to plan from: ``stored`` when Cloudflare agrees, else Cloudflare's.
+
+    Reads the script's last applied migration tag
+    (``CloudflareClient.get_script_migration_tag``) and, when there is one, its
+    ``durable_object_namespace`` bindings. Agreement means the same tag and no bound
+    class the stored state does not know. Otherwise Cloudflare wins: the history is
+    cut at its tag (or is just that tag), and the live classes are the stored ones
+    PLUS every bound class, so a delete step still needs the owner's confirmation.
+    No tag on Cloudflare (no script, or no migration) is a fresh state. Fails closed:
+    an unreadable answer raises ``sites.do_state_unknown`` before anything changes."""
+    try:
+        tag = await cf.get_script_migration_tag(script, target=target)
+        bound: list[str] = []
+        if tag:
+            settings = await cf.get_script_settings(script, target=target)
+            bound = [
+                str(b["class_name"])
+                for b in (settings or {}).get("bindings") or []
+                if isinstance(b, dict)
+                and b.get("type") == "durable_object_namespace"
+                and b.get("class_name")
+            ]
+    except Exception as exc:  # noqa: BLE001 - unknown state must not be guessed
+        logger.warning("sites: could not read %s's Durable Object state: %s", script, exc)
+        raise ValidationError(
+            "sites.do_state_unknown",
+            "Could not confirm this site's Durable Object state with Cloudflare, so the "
+            "publish was stopped before anything changed. Try again in a minute.",
+        ) from exc
+    if not tag:
+        if stored.migration_tag or stored.live_classes:
+            logger.warning("sites: %s has no DO migration on Cloudflare; planning fresh", script)
+        return DurableObjectState()
+    if tag == stored.migration_tag and set(bound) <= set(stored.live_classes):
+        return stored
+    history = tuple(stored.applied_tags or ())
+    history = history[: history.index(tag) + 1] if tag in history else (tag,)
+    live = tuple(dict.fromkeys([*stored.live_classes, *bound]))
+    logger.warning(
+        "sites: %s DO state disagreed with Cloudflare (stored %r, Cloudflare %r); using "
+        "Cloudflare's",
+        script,
+        stored.migration_tag,
+        tag,
+    )
+    return DurableObjectState(tag, live, history)
 
 
 # ------------------------------------------------------------------ planner
@@ -538,6 +740,7 @@ async def teardown_script(
     classes: Iterable[str],
     migration_tag: str | None,
     delete: bool = True,
+    tombstone: bool = True,
 ) -> TeardownResult:
     """Delete every Durable Object of ``script`` and, with ``delete``, the script.
 
@@ -547,12 +750,14 @@ async def teardown_script(
     2. ``DELETE ...?force=true`` on ``target`` (a 404 is success), which also
        removes the script's namespaces.
     3. The account's namespace list must show no row for ``script``.
-    ``delete=False`` only runs step 3 (a resumed teardown whose script is gone).
+    ``delete=False`` only runs step 3 (a resumed teardown whose script is gone);
+    ``tombstone=False`` skips step 1 (a retry after the script was already deleted,
+    where an upload would recreate it).
     Never raises: ``ok`` is False with a short reason, and the caller leaves the
     work for its retry path (the draft sweeper, the cascade ledger)."""
     names = list(dict.fromkeys(classes))
     errors: list[str] = []
-    if delete and names and migration_tag and migration_tag != TOMBSTONE_TAG:
+    if tombstone and delete and names and migration_tag and migration_tag != TOMBSTONE_TAG:
         try:
             await cf.put_worker(
                 script_name=script,
@@ -610,12 +815,18 @@ __all__ = [
     "VettedDurableObjects",
     "check_account_budget",
     "check_workspace_quota",
+    "platform_vars",
+    "room_max_peers",
+    "room_max_rooms",
+    "site_max_peers",
+    "set_platform_vars_live",
     "class_cap",
     "declares_durable_objects",
     "enabled",
     "migration_tags_after",
     "parse_durable_objects",
     "plan_migration",
+    "reconcile_state",
     "teardown_script",
     "vet_durable_objects",
 ]

@@ -282,9 +282,10 @@ def _script_ref(site: Any) -> tuple[str, str]:
 async def _delete_durable_objects(*, site: Any, deps: Any) -> str:
     """The script's Durable Objects and their data (``durable_objects.teardown_script``:
     tombstone upload, forced delete, namespace-list check). Best effort and never
-    raises: a teardown that cannot finish is recorded as partial for an operator, and
-    the script step still runs (forced). A cascade resumed past the script step only
-    re-checks the namespace list; it never uploads a stub to a deleted script."""
+    raises: a teardown that cannot finish is recorded as partial, queued for
+    ``do_metering.sweep_do_teardowns``, and the script step still runs (forced). A
+    cascade resumed past the script step only re-checks the namespace list; it never
+    uploads a stub to a deleted script."""
     classes = list(getattr(site, "do_classes", None) or [])
     script, target = _script_ref(site)
     if not classes or not script:
@@ -302,10 +303,27 @@ async def _delete_durable_objects(*, site: Any, deps: Any) -> str:
     )
     if not out.ok:
         logger.warning(
-            "sites.delete: site %s Durable Objects left for an operator: %s",
+            "sites.delete: site %s Durable Objects not torn down yet (%s); queued a retry",
             getattr(site, "id", "?"),
             out.error,
         )
+        # The Site doc goes at the end of the cascade, so the retry needs its own row
+        # (``do_metering.sweep_do_teardowns``). Best effort: never fails the delete.
+        record = getattr(deps, "record_do_teardown", None)
+        if record is None:
+            from pocketpaw_ee.sites.do_metering import record_do_teardown as record
+        try:
+            await record(
+                site_id=str(getattr(site, "id", "")),
+                workspace=str(getattr(site, "workspace", "") or ""),
+                script=script,
+                target=target,
+                classes=classes,
+                migration_tag=tags[-1] if tags else None,
+                error=out.error,
+            )
+        except Exception:  # noqa: BLE001 - logged; the ledger still says partial
+            logger.warning("sites.delete: could not queue the DO teardown retry", exc_info=True)
         return OUTCOME_PARTIAL
     return OUTCOME_DONE
 

@@ -47,7 +47,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
@@ -199,42 +198,21 @@ def required_secrets(manifest: Mapping[str, Any]) -> list[str]:
     return names
 
 
-def guard_module(main_module: str) -> Any:
+def guard_module(main_module: str, *, do_limits: bool = False) -> Any:
     """The draft's entry module: re-exports the real entry, and answers 404 unless
     the request carries ``X-Paw-Draft-Key`` equal to the ``PAW_DRAFT_KEY`` binding,
     which it strips before calling the real ``fetch``. A class default export
     (``WorkerEntrypoint``) is instantiated per request. Static assets the platform
-    serves before the Worker runs are not covered."""
-    from pocketpaw_ee.sites.cloudflare_client import WorkerModule, module_content_type
+    serves before the Worker runs are not covered. For a DO bundle (``do_limits``)
+    the same module also enforces the platform's DO tiers (``platform_guard``), after
+    the key check."""
+    from pocketpaw_ee.sites import platform_guard
 
-    spec = json.dumps("./" + main_module)
-    code = f"""// Paw draft guard: only the preview origin (it holds PAW_DRAFT_KEY) may call.
-import * as app from {spec};
-export * from {spec};
-const HEADER = "{DRAFT_KEY_HEADER}";
-const enc = new TextEncoder();
-function allowed(got, want) {{
-  if (typeof got !== "string" || typeof want !== "string" || !want) return false;
-  const a = enc.encode(got);
-  const b = enc.encode(want);
-  return a.byteLength === b.byteLength && crypto.subtle.timingSafeEqual(a, b);
-}}
-const inner = app.default;
-const isClass = typeof inner === "function";
-const guarded = isClass ? {{}} : {{ ...inner }};
-guarded.fetch = async (request, env, ctx) => {{
-  if (!allowed(request.headers.get(HEADER), env.{DRAFT_KEY_BINDING})) {{
-    return new Response("Not found", {{ status: 404 }});
-  }}
-  const headers = new Headers(request.headers);
-  headers.delete(HEADER);
-  const clean = new Request(request, {{ headers }});
-  return isClass ? new inner(ctx, env).fetch(clean) : inner.fetch(clean, env, ctx);
-}};
-export default guarded;
-"""
-    return WorkerModule(
-        name=GUARD_MODULE, content=code.encode(), content_type=module_content_type(GUARD_MODULE)
+    return platform_guard.wrapper_module(
+        main_module,
+        do_limits=do_limits,
+        draft_key=(DRAFT_KEY_HEADER, DRAFT_KEY_BINDING),
+        name=GUARD_MODULE,
     )
 
 
@@ -869,6 +847,9 @@ async def deploy_for_build(
                 do_state=do_state,
                 allow_do_data_loss=True,
                 do_quota_used=_workspace_draft_classes,
+                # The recipe accepts WebSockets only from this draft's preview origin
+                # (the builder origin is checked by the preview proxy, not here).
+                site_origins=[_origin_of(url)],
             )
         if result.migration_tags or rec.do_classes:
             # Right after the upload, so a later failure cannot lose the applied tag.
@@ -926,6 +907,13 @@ async def deploy_for_build(
         except _Superseded:
             await _discard(rec, await registry.get(pocket_id), cf)
     return _skip(reason)
+
+
+def _origin_of(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
 
 
 async def _rotate_script(rec: DraftRecord, cf: Any, state: Any) -> None:

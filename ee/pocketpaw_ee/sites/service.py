@@ -3523,21 +3523,21 @@ async def _deploy_paw_bundle(
         before_upload = _project_migrator(
             cf, site_id=site_id, source=source, confirm_destructive=confirm_destructive
         )
-    from pocketpaw_ee.sites import durable_objects
+    from pocketpaw_ee.sites import do_lock, durable_objects
 
-    do_state = (
-        durable_objects.DurableObjectState.from_history(
-            getattr(bundle_doc, "do_migration_tags", None) or [],
-            getattr(bundle_doc, "do_classes", None) or [],
-        )
-        if bundle_doc is not None
-        else None
+    stored = durable_objects.DurableObjectState.from_history(
+        getattr(bundle_doc, "do_migration_tags", None) or [],
+        getattr(bundle_doc, "do_classes", None) or [],
     )
-    # Only passed when there is something to say, so a site without DOs deploys
-    # exactly as before.
+
+    async def _reconciled() -> durable_objects.DurableObjectState:
+        # Cloudflare wins over a stored state that a failed save left behind.
+        return await durable_objects.reconcile_state(cf, script_name, target=target, stored=stored)
+
     do_kw: dict[str, Any] = {}
-    if do_state is not None and (do_state.applied_tags or do_state.live_classes):
-        do_kw["do_state"] = do_state
+    if bundle_doc is not None:
+        # Awaited by deploy_bundle only for a build that declares Durable Objects.
+        do_kw["do_state"] = _reconciled
     if confirm_do_data_loss:
         do_kw["confirm_do_data_loss"] = list(confirm_do_data_loss)
 
@@ -3549,7 +3549,79 @@ async def _deploy_paw_bundle(
         return sum(len(s.do_classes) for s in others if str(s.id) != str(site_id))
 
     do_kw["do_quota_used"] = _workspace_do_classes
-    result = await bundle_deploy.deploy_bundle(
+    if getattr(bundle_doc, "do_throttled", False):
+        # The usage sweep's verdict reaches the Worker as PAW_DO_THROTTLED=1.
+        do_kw["do_throttled"] = True
+    if getattr(bundle_doc, "do_suspended", False):
+        do_kw["do_suspended"] = True
+    if bundle_doc is not None:
+
+        async def _origins() -> list[str]:
+            return await _do_site_origins(cf, bundle_doc, script_name=script_name, target=target)
+
+        # Awaited only for a bundle that declares Durable Objects.
+        do_kw["site_origins"] = _origins
+    if bundle_doc is not None and (stored.applied_tags or stored.live_classes):
+        # A site that has DOs reconciles even when this build dropped them.
+        do_kw["do_state"] = await _reconciled()
+    # One lock per script: a live settings PATCH must not interleave with the upload.
+    async with do_lock.script_lock(script_name):
+        result = await _deploy_bundle_call(
+            cf,
+            script_name=script_name,
+            project_dir=project_dir,
+            workspace_id=workspace_id,
+            d1_database_id=d1_database_id,
+            bundle_doc=bundle_doc,
+            is_dynamic=is_dynamic,
+            before_upload=before_upload,
+            target=target,
+            do_kw=do_kw,
+        )
+    tags = tuple(getattr(result, "migration_tags", ()) or ())
+    if bundle_doc is not None and (tags or bundle_doc.do_classes):
+        # Only now: the upload succeeded, so this is what Cloudflare has applied.
+        await _persist_do_state(bundle_doc, tags, tuple(getattr(result, "do_classes", ()) or ()))
+
+
+async def _persist_do_state(
+    doc: Any, tags: tuple[str, ...], classes: tuple[str, ...], *, delay: float = 0.5
+) -> None:
+    """Save the applied DO tag history and classes, retrying a failed write. Never
+    raises: if every try fails, the next publish reconciles from Cloudflare
+    (``durable_objects.reconcile_state``), so live classes still need confirming."""
+    import asyncio
+
+    for attempt in range(3):
+        try:
+            await doc.set({"do_migration_tags": list(tags), "do_classes": list(classes)})
+            return
+        except Exception:  # noqa: BLE001 - retried, then left to reconcile
+            if attempt == 2:
+                logger.error(
+                    "sites: could not save the DO state of site %s; the next publish "
+                    "reconciles it from Cloudflare",
+                    getattr(doc, "id", "?"),
+                    exc_info=True,
+                )
+                return
+            await asyncio.sleep(delay)
+
+
+async def _deploy_bundle_call(
+    cf: Any,
+    *,
+    script_name: str,
+    project_dir: str,
+    workspace_id: str,
+    d1_database_id: str,
+    bundle_doc: Any,
+    is_dynamic: bool,
+    before_upload: Any,
+    target: str,
+    do_kw: dict[str, Any],
+) -> Any:
+    return await bundle_deploy.deploy_bundle(
         cf,
         script_name=script_name,
         build_dir=project_dir,
@@ -3571,15 +3643,53 @@ async def _deploy_paw_bundle(
         target=target,
         paid=_site_paid(bundle_doc) if bundle_doc is not None else False,
     )
-    tags = tuple(getattr(result, "migration_tags", ()) or ())
-    if bundle_doc is not None and (tags or bundle_doc.do_classes):
-        # Only now: the upload succeeded, so this is what Cloudflare has applied.
-        await bundle_doc.set(
-            {
-                "do_migration_tags": list(tags),
-                "do_classes": list(getattr(result, "do_classes", ()) or ()),
-            }
+
+
+async def _do_site_origins(cf: Any, site: Any, *, script_name: str, target: str) -> list[str]:
+    """``PAW_SITE_ORIGINS`` of a published DO site: its public URL (the account
+    Worker's workers.dev host, or ``provision_site_url`` on the dispatch target) plus
+    every live custom domain, all https. Never the builder origin: the preview proxy
+    checks that one itself."""
+    if target == bundle_deploy.ACCOUNT_TARGET:
+        from pocketpaw_ee.sites.workers_deploy import _workers_dev_host
+
+        host = _workers_dev_host(script_name)
+        if not host:
+            subdomain = await cf.workers_dev_subdomain()
+            host = f"{script_name}.{subdomain}.workers.dev" if subdomain else ""
+        base = f"https://{host}" if host else ""
+    else:
+        base = provision_site_url(str(site.id))
+    domains = [
+        f"https://{_normalize_hostname(d.hostname)}"
+        for d in getattr(site, "domains", None) or []
+        if getattr(d, "status", "") == "live"
+    ]
+    return [o for o in dict.fromkeys([base, *domains]) if o]
+
+
+async def _refresh_do_origins(site: Any, cf: Any) -> None:
+    """Push the site's current ``PAW_SITE_ORIGINS`` to its LIVE script (no redeploy)
+    after a custom domain went live or was removed. Best effort: logged, never
+    raised, and the next publish sets it anyway."""
+    from pocketpaw_ee.sites import durable_objects
+    from pocketpaw_ee.sites.delete_cascade import _script_ref
+
+    if not durable_objects.enabled() or not getattr(site, "do_classes", None):
+        return
+    script, target = _script_ref(site)
+    if not script:
+        return
+    try:
+        origins = await _do_site_origins(cf, site, script_name=script, target=target)
+        await durable_objects.set_platform_vars_live(
+            cf,
+            script,
+            target=target,
+            values={durable_objects.SITE_ORIGINS_VAR: ",".join(origins)},
         )
+    except Exception as exc:  # noqa: BLE001 - the domain call must not fail on this
+        logger.warning("sites: could not refresh PAW_SITE_ORIGINS on %s: %s", script, exc)
 
 
 async def _account_worker_url(cf: Any, name: str) -> str:
@@ -6549,6 +6659,9 @@ async def remove_domain(
             "allowed_origins": list(site.allowed_origins),
         }
     )
+    # A DO site's Worker accepts WebSockets from its origins; drop this one live.
+    if dom.status == "live":
+        await _refresh_do_origins(site, cf)
     # no-event: no SiteDomain event type exists — add_domain does not emit one either,
     # and inventing a half of the pair here would leave connects silent and
     # disconnects loud. Both belong in the reconciler work the design defers.
@@ -6569,8 +6682,12 @@ async def domain_status(
     if dom is None:
         raise NotFound("domain", hostname)
     status: HostnameStatus = await cf.get_hostname_status(dom.cf_hostname_id)
+    was_live = dom.status == "live"
     dom.status = status.value
     await site.save()
+    if was_live != (dom.status == "live"):
+        # Into or out of ``live``: a DO site's allowed WebSocket origins changed.
+        await _refresh_do_origins(site, cf)
     return DomainStatusResponse(
         hostname=dom.hostname, cname_target=dom.cname_target, status=status.value
     )

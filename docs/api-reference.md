@@ -1037,6 +1037,46 @@ read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site
 and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
 Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
 
+## Sites — Durable Objects
+
+Project sites may declare SQLite-backed Durable Objects, behind
+`PAW_SITES_DURABLE_OBJECTS`. Operator details, env and runbook:
+`docs/deployment/sites-bundle-deploys.md` ("Durable Objects").
+
+### `POST /sites/publish`: `confirm_do_data_loss`
+
+`confirm_do_data_loss: string[]` (default `[]`) names the Durable Object classes whose
+stored data the owner agreed to delete (a pending `deleted_classes` or
+`renamed_classes` migration step). Only the owner's publish dialog sends it; an agent
+never does. It is replayed with the rest of a paid-tier pending publish.
+
+| Error code (422) | When |
+|---|---|
+| `sites.do_disabled` | The build declares DOs, or the site has live DOs, and the flag is off. |
+| `sites.do_config` | A malformed or unsupported `durableObjects` block (KV-backed or transferred classes, cross-script bindings, bad or duplicate tags, a bound class no migration creates). |
+| `sites.do_class_missing` | A bound or live class is not exported by the main module. |
+| `sites.do_class_cap` | More classes than the plan allows (free 1, paid `PAW_SITES_DO_MAX_CLASSES`). |
+| `sites.do_history_diverged` | The build's migrations do not start with what is applied, or an older bundle no longer exports a live class. |
+| `sites.do_data_loss_unconfirmed` | A pending step deletes or renames a live class and `confirm_do_data_loss` does not name it. `error.details.classes` lists them (sorted). |
+| `sites.data_loss_confirm_forbidden` (403) | A non-empty `confirm_do_data_loss` from someone who is not a workspace admin or owner. |
+| `sites.do_workspace_quota` | The workspace would pass `PAW_SITES_DO_WORKSPACE_QUOTA` live classes. |
+| `sites.do_state_unknown` | Cloudflare's DO state for the site could not be read before planning. |
+| `sites.do_busy` | Another change to the site's Worker is in progress; try again. |
+| `sites.do_account_budget` / `sites.do_budget_unknown` | The account target has no room for a new class, or the count could not be read. |
+
+### Site fields
+
+`do_migration_tags` (applied tag history), `do_classes` (live classes), `do_usage`
+(`{"YYYY-MM-DD": {requests, active_time, stored_bytes}}`, 35 days) and `do_throttled`
+(today's requests are past the plan's daily ceiling; the Worker sees
+`PAW_DO_THROTTLED=1` right away, pushed through the script settings API). A DO
+site's Worker also gets `PAW_SITE_ORIGINS` (its public origin and live custom
+domains, or a draft's preview origin) and
+`ROOM_MAX_PEERS` (10 free, `PAW_SITES_DO_ROOM_MAX_PAID` up to 50 paid),
+`ROOM_MAX_ROOMS` (5 free, up to 200 paid), `ROOM_MAX_SITE_PEERS` (30 free, up to 1000
+paid) and `PAW_DO_SUSPENDED` (`do_suspended`), all read by a platform-owned entry
+wrapper or the recipe.
+
 ## Paw Partners — profile and clients
 
 A partner is a workspace that resells sites to local shops. A **client** is a
