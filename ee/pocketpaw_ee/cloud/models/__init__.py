@@ -309,6 +309,7 @@ from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
 from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+from pocketpaw_ee.cloud.models.site_draft_worker import SiteDraftWorker
 from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
@@ -497,6 +498,7 @@ __all__ = [
     "AgentSessionRuntimeDoc",
     "Site",
     "SiteDesignBrief",
+    "SiteDraftWorker",
     "SiteExport",
     "SiteDomain",
     "SiteOriginClaim",
@@ -675,6 +677,8 @@ def get_all_documents():
         SiteRateCounter,
         # Per-site secrets (encrypted at rest). Only ``sites.site_secrets`` touches it.
         SiteSecret,
+        # Draft Workers of site pockets. Only ``sites.draft_worker`` touches it.
+        SiteDraftWorker,
         # VS-4 — an address a renamed site gave up, held 30 days for its old
         # workspace. Only ``pocketpaw_ee.sites.service`` reads/writes it.
         ReleasedSlug,

@@ -94,6 +94,28 @@ SERVER_ONLY_PREVIEW_NOTE = (
     "null). The pages run after publish. Tell the user instead of showing a preview."
 )
 
+PUBLISHED_PREVIEW_NOTE = (
+    "preview_mode is published: these files are exactly what is live, so preview_url "
+    "is the published site (null when its address is not known). Edit the files to "
+    "get a new draft."
+)
+
+
+def _draft_worker_note(record: dict[str, Any] | None) -> str:
+    """Why the draft did not run its server code, when the owner can fix it: drafts
+    bind only ``NAME__DRAFT`` secrets, never production values."""
+    record = record or {}
+    if record.get("draft_worker_reason") != "draft_worker:secrets_missing":
+        return ""
+    names = [n for n in record.get("draft_secrets_missing") or [] if isinstance(n, str)]
+    listed = ", ".join(f"{n}__DRAFT" for n in names) or "NAME__DRAFT secrets"
+    return (
+        "The draft did not run its server code: drafts never get production secrets, "
+        f"and this build needs draft values for {listed}. Call `request_site_secret` "
+        "for each of those names so the owner sets a test value, then build again."
+    )
+
+
 SECRETS_RULE = (
     "Never write a secret value into any file. For each secret name, call "
     "`request_site_secret` (pocket_id, name, description) so the owner fills it in; "
@@ -784,10 +806,22 @@ async def _run_site_build_handler(args: dict) -> dict:
     }
     blocks: list[str] = []
     if status == "built":
-        note = {"static": STATIC_PREVIEW_NOTE, "server_only": SERVER_ONLY_PREVIEW_NOTE}
+        note = {
+            "static": STATIC_PREVIEW_NOTE,
+            "server_only": SERVER_ONLY_PREVIEW_NOTE,
+            "published": PUBLISHED_PREVIEW_NOTE,
+        }
         body["message"] = "The draft built." + (
             " " + note[preview_mode] if preview_mode in note else ""
         )
+        if record is None and job_id:
+            from pocketpaw_ee.sites import project_build, verify_store
+
+            record = project_build.read_build_record(
+                verify_store.default_verify_store(), pocket_id, job_id
+            )
+        if draft_note := _draft_worker_note(record):
+            body["message"] += " " + draft_note
     elif status == "failed" and reason_message(
         reason := (record or {}).get("reason") or art.get("build_reason")
     ):

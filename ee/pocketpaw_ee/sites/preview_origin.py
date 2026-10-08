@@ -20,16 +20,21 @@
 #     ``?paw_edit=1`` variant stamped with data-uid (paw-sites ``arm-html``, else the
 #     ``html_uid_stamp`` port) carrying the vendored edit-bridge (``edit_bridge.js``).
 #     Both scripts are pinned to a paw-sites commit (paw-sites-edit-bridge.pin.json).
-#   * ``preview_app`` — the ASGI app that serves a draft — and
+#   * ``preview_app`` — the ASGI app that serves a draft (a full-mode project draft
+#     with a live draft Worker is reverse-proxied to it by ``preview_proxy``) — and
 #     ``PreviewHostDispatch``, the middleware that routes preview-host requests to it
 #     inside the main API process. It must be the OUTERMOST layer (``install_cors``
 #     adds it last via ``app.state.outermost_middleware``), or auth and rate limits
 #     answer preview requests.
 #
-# Invariants: ``preview_app`` never reads cookies or auth, never sets a cookie, and
-# answers an unknown token with a bare 404. It serves bytes only from the artifact
-# store; nothing in a request can name a path outside a draft's own file set. A
-# preview URL is handed out only when the draft's files AND token are both stored.
+# Invariants: ``preview_app`` never reads cookies or auth for its OWN decisions, never
+# mints a cookie, and answers an unknown token with a bare 404. Only a proxied
+# full-mode draft (``preview_proxy``) passes its own host's Cookie / Set-Cookie
+# through, host-only; static drafts and every other response strip Cookie and never
+# send Set-Cookie. Static bytes come only from the artifact store; nothing in a
+# request can name a path outside a draft's own file set or choose a proxy upstream.
+# A preview URL is handed out only when the draft's files (or its draft Worker) AND
+# token are both stored.
 # Per-process caches (token lookups, unpacked drafts, single-flight loads) keep an
 # asset request off the store; every servable draft fits the draft cache.
 
@@ -82,7 +87,7 @@ _CACHE_BYTES = 128 * 1024 * 1024
 #: would otherwise cost a store read each. A hit expires so an evicted draft stops
 #: serving within ``_TOKEN_HIT_TTL``.
 _TOKEN_CACHE_ENTRIES = 4096
-_TOKEN_HIT_TTL = 300.0
+_TOKEN_HIT_TTL = 60.0
 _TOKEN_MISS_TTL = 30.0
 
 _JS = "application/javascript; charset=utf-8"
@@ -590,6 +595,16 @@ def _clear_caches() -> None:
         _token_cache.clear()
 
 
+def forget_pocket(pocket_id: str) -> None:
+    """Drop this process's cached tokens and unpacked drafts of one pocket (its drafts
+    were purged). Other processes stop serving them within ``_TOKEN_HIT_TTL``."""
+    with _draft_cache_lock:
+        for key in [k for k in _draft_cache if k[0] == pocket_id]:
+            del _draft_cache[key]
+        for token in [t for t, (_e, ref) in _token_cache.items() if ref and ref[0] == pocket_id]:
+            del _token_cache[token]
+
+
 def _resolve_token(store: Any, token: str) -> tuple[str, str] | None:
     now = time.monotonic()
     with _draft_cache_lock:
@@ -714,6 +729,8 @@ async def preview_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
     if scope["type"] != "http":
         return  # websockets have nothing to talk to here
 
+    if await _maybe_proxy(scope, receive, send):
+        return
     method = scope.get("method", "GET").upper()
     base = list(_BASE_HEADERS)
     if method == "OPTIONS":
@@ -756,6 +773,54 @@ async def preview_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
     await _send(send, status, files[rel], headers, head)
 
 
+def _resolve_ref(token: str) -> tuple[str, str] | None:
+    from pocketpaw_ee.sites import service as sites_service
+
+    store = sites_service._default_artifact_store()
+    if not store_supports_preview(store):
+        return None
+    return _resolve_token(store, token)
+
+
+async def _maybe_proxy(scope: dict[str, Any], receive: Any, send: Any) -> bool:
+    """Answer the request from the token's draft Worker when it has one (True), or
+    404 a superseded proxied draft (True). False: serve the static draft."""
+    from pocketpaw_ee.sites import draft_worker
+
+    if not draft_worker.enabled():
+        return False
+    host = ""
+    for k, v in scope.get("headers") or []:
+        if k == b"host":
+            host = v.decode("latin-1")
+            break
+    token = token_from_host(host)
+    if not token:
+        return False
+    ref = await asyncio.to_thread(_resolve_ref, token)
+    if ref is None:
+        return False
+    try:
+        target = await draft_worker.proxy_target(*ref)
+    except Exception:  # noqa: BLE001 - a registry outage serves the static draft
+        logger.warning("sites.preview_origin: draft registry unavailable", exc_info=True)
+        return False
+    if target is None:
+        return False
+    head = scope.get("method", "GET").upper() == "HEAD"
+    if target is draft_worker.SUPERSEDED:
+        plain = list(_BASE_HEADERS) + [
+            ("content-type", "text/plain; charset=utf-8"),
+            ("cache-control", "no-store"),
+        ]
+        await _send(send, 404, b"Not found", plain, head)
+        return True
+    from pocketpaw_ee.sites import preview_proxy
+
+    await preview_proxy.forward(scope, receive, send, target=target, preview_host=host)
+    return True
+
+
 class PreviewHostDispatch:
     """ASGI middleware: a request whose Host is ``<token>.<preview base host>`` goes
     to :func:`preview_app`; everything else to the wrapped app. Lets one self-hosted
@@ -780,6 +845,7 @@ __all__ = [
     "PREVIEW_BASE_ENV",
     "PreviewHostDispatch",
     "existing_preview_url",
+    "forget_pocket",
     "inject_edit_bridge",
     "inject_import_map",
     "inject_runtime_reporter",

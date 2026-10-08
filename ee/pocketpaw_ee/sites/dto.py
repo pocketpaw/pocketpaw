@@ -1071,12 +1071,12 @@ class NativeArtifactResponse(BaseModel):
     # ``preview_mode`` is ``"server_only"``. Append ``?paw_edit=1`` to arm the edit
     # bridge.
     preview_url: str | None = None
-    # project engine only (None elsewhere): "static" when the draft has server routes
-    # the preview cannot run yet (its assets are served, its worker is not), "full"
-    # when the assets are the whole site, "server_only" when the worker renders every
-    # page and the assets have no root index.html, so there is nothing to preview
-    # until drafts can run the worker (``preview_url`` is None). None until a build
-    # finished.
+    # project engine only (None elsewhere): "full" when the preview is the whole site
+    # (static assets, or a draft Worker running its server code), "static" when it has
+    # server routes the preview does not run (assets only), "server_only" when nothing
+    # can be previewed (``preview_url`` is None), "published" when the source is
+    # exactly what is live and its drafts were purged (``preview_url`` is the live
+    # site's URL, or None). None until a build finished.
     preview_mode: str | None = None
     # The engine's edit/build capability flags (``engines.engine_capabilities``):
     # {select, text, code, build_log}. Set for project pockets; None elsewhere for now.

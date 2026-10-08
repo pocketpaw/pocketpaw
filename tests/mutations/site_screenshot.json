@@ -38,8 +38,8 @@
   {
     "label": "screenshot: a draft publish photographs the unapproved page",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    _schedule_site_knowledge_sync(doc)\n    # SC-1: the page the gallery card shows is now a different page, so re-shoot\n    # it. Same placement and the same rule as the sync above — the site is\n    # already live, so a screenshot may never fail or delay the publish. A\n    # preview publish never reaches here, so a draft is never photographed.\n    _schedule_site_screenshot(doc)",
-    "replace": "    _schedule_site_knowledge_sync(doc)",
+    "find": "    _schedule_draft_cleanup(doc, engine=engine, source=source)\n    # SC-1: the page the gallery card shows is now a different page, so re-shoot\n    # it. Same placement and the same rule as the sync above — the site is\n    # already live, so a screenshot may never fail or delay the publish. A\n    # preview publish never reaches here, so a draft is never photographed.\n    _schedule_site_screenshot(doc)",
+    "replace": "    _schedule_draft_cleanup(doc, engine=engine, source=source)",
     "tests": [
       "tests/ee/sites/test_screenshot_capture.py"
     ]

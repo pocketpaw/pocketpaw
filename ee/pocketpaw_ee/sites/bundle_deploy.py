@@ -36,6 +36,8 @@
 #     name in the manifest's ``requiredSecrets`` that is not set refuses the deploy
 #     with ``sites.secrets_missing`` naming what to set in the builder. Values only
 #     ever live in the binding: never in a warning, an error, a log or a repr.
+#   * platform env: ``ProvisionedResources.plain_text`` binds as ``plain_text`` and
+#     replaces a secret of the same name (a draft's ``BETTER_AUTH_URL``).
 #   * limits: 64 MiB of modules, our own module-count cap (Cloudflare documents
 #     none), and the static-asset caps. Over any of them refuses before upload.
 #   * worker settings (``worker_settings``), only for a bundle with worker modules:
@@ -44,7 +46,9 @@
 #     plan, ``paid``) and, OPT-IN via ``PAW_SITES_SMART_PLACEMENT=1``, Smart Placement
 #     for a worker that binds a regional backend (D1, R2). Off by default: quiet sites
 #     never get placed, placement moves the whole script (bad with
-#     ``run_worker_first``), and it works against D1 read replicas.
+#     ``run_worker_first``), and it works against D1 read replicas. A ``draft``
+#     deploy (``draft_worker``) never gets placement and reads the
+#     ``PAW_SITES_DRAFT_*`` limit / observability knobs.
 #
 # The manifest shape is paw-sites' ``buildPawManifest`` (src/starters.ts). The
 # parser also accepts the earlier shape (no ``workerModuleDir`` / ``mainModule``,
@@ -97,6 +101,12 @@ CPU_MS_ENV = {False: "PAW_SITES_CPU_MS_FREE", True: "PAW_SITES_CPU_MS_PAID"}
 DEFAULT_CPU_MS = {False: 50, True: 300}
 SUBREQUESTS_ENV = {False: "PAW_SITES_SUBREQUESTS_FREE", True: "PAW_SITES_SUBREQUESTS_PAID"}
 DEFAULT_SUBREQUESTS = {False: 50, True: 10_000}
+# Draft Workers (``draft_worker``): the plan's caps unless these override them, and
+# observability at its own sample rate (drafts are low traffic and exist to debug).
+DRAFT_CPU_MS_ENV = "PAW_SITES_DRAFT_CPU_MS"
+DRAFT_SUBREQUESTS_ENV = "PAW_SITES_DRAFT_SUBREQUESTS"
+DRAFT_OBSERVABILITY_SAMPLE_ENV = "PAW_SITES_DRAFT_OBSERVABILITY_SAMPLE"
+DEFAULT_DRAFT_OBSERVABILITY_SAMPLE = 1.0
 # Cloudflare caps cpu_ms at 300,000 and subrequests at 10,000,000 (Paid).
 _MAX_CPU_MS = 300_000
 _MAX_SUBREQUESTS = 10_000_000
@@ -170,6 +180,9 @@ class ProvisionedResources:
     queue_name: str = ""
     ai: bool = False
     secrets: dict[str, str] = field(default_factory=dict, repr=False)
+    # Platform env (``plain_text``), e.g. a draft's ``BETTER_AUTH_URL``. Wins over a
+    # secret of the same name.
+    plain_text: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -250,32 +263,29 @@ def placement_for(bundle: PawBundle) -> dict | None:
     return {"mode": "smart"}
 
 
-def _sample_rate() -> float:
-    raw = _env_flag(OBSERVABILITY_SAMPLE_ENV)
+def _sample_rate(draft: bool = False) -> float:
+    env = DRAFT_OBSERVABILITY_SAMPLE_ENV if draft else OBSERVABILITY_SAMPLE_ENV
+    default = DEFAULT_DRAFT_OBSERVABILITY_SAMPLE if draft else DEFAULT_OBSERVABILITY_SAMPLE
+    raw = _env_flag(env)
     if not raw:
-        return DEFAULT_OBSERVABILITY_SAMPLE
+        return default
     try:
         rate = float(raw)
     except ValueError:
         rate = -1.0
     if not 0.0 <= rate <= 1.0:
-        logger.warning(
-            "sites: %s=%r is not between 0 and 1; using %s",
-            OBSERVABILITY_SAMPLE_ENV,
-            raw,
-            DEFAULT_OBSERVABILITY_SAMPLE,
-        )
-        return DEFAULT_OBSERVABILITY_SAMPLE
+        logger.warning("sites: %s=%r is not between 0 and 1; using %s", env, raw, default)
+        return default
     return rate
 
 
-def observability_for(bundle: PawBundle) -> dict | None:
+def observability_for(bundle: PawBundle, *, draft: bool = False) -> dict | None:
     """Workers Logs (invocation logs) and traces for a worker with code, sampled at
     ``PAW_SITES_OBSERVABILITY_SAMPLE`` (default 0.1). None for an assets-only bundle
     or when ``PAW_SITES_OBSERVABILITY`` is falsy."""
     if not bundle.modules or _env_flag(OBSERVABILITY_ENV) in _FALSY:
         return None
-    rate = _sample_rate()
+    rate = _sample_rate(draft)
     return {
         "enabled": True,
         "head_sampling_rate": rate,
@@ -298,7 +308,7 @@ def _int_env(name: str, default: int, maximum: int) -> int:
     return value
 
 
-def limits_for(bundle: PawBundle, *, paid: bool) -> dict | None:
+def limits_for(bundle: PawBundle, *, paid: bool, draft: bool = False) -> dict | None:
     """``{"cpu_ms": N, "subrequests": M}`` per request for a worker with code, by the
     site's plan (``paid`` is the provisioner's entitlement answer). A value of 0 in
     the env leaves that field out (Cloudflare's account default applies). None for
@@ -307,21 +317,25 @@ def limits_for(bundle: PawBundle, *, paid: bool) -> dict | None:
         return None
     out: dict[str, int] = {}
     cpu = _int_env(CPU_MS_ENV[paid], DEFAULT_CPU_MS[paid], _MAX_CPU_MS)
+    sub = _int_env(SUBREQUESTS_ENV[paid], DEFAULT_SUBREQUESTS[paid], _MAX_SUBREQUESTS)
+    if draft:
+        cpu = _int_env(DRAFT_CPU_MS_ENV, cpu, _MAX_CPU_MS)
+        sub = _int_env(DRAFT_SUBREQUESTS_ENV, sub, _MAX_SUBREQUESTS)
     if cpu:
         out["cpu_ms"] = cpu
-    sub = _int_env(SUBREQUESTS_ENV[paid], DEFAULT_SUBREQUESTS[paid], _MAX_SUBREQUESTS)
     if sub:
         out["subrequests"] = sub
     return out or None
 
 
-def worker_settings(bundle: PawBundle, *, paid: bool) -> dict[str, dict]:
+def worker_settings(bundle: PawBundle, *, paid: bool, draft: bool = False) -> dict[str, dict]:
     """The optional upload-metadata blocks for this bundle, keyed by the
-    ``put_worker`` keyword they travel as. Empty blocks are left out."""
+    ``put_worker`` keyword they travel as. Empty blocks are left out. A draft never
+    gets Smart Placement."""
     settings = {
-        "placement": placement_for(bundle),
-        "observability": observability_for(bundle),
-        "limits": limits_for(bundle, paid=paid),
+        "placement": None if draft else placement_for(bundle),
+        "observability": observability_for(bundle, draft=draft),
+        "limits": limits_for(bundle, paid=paid, draft=draft),
     }
     return {k: v for k, v in settings.items() if v}
 
@@ -476,6 +490,14 @@ def map_bindings(
         if not _BINDING_NAME.match(name):
             raise _refuse(f"secret name {name!r} is not a valid identifier")
         bindings.append({"type": "secret_text", "name": name, "text": provisioned.secrets[name]})
+        names.add(name)
+    for name in sorted(provisioned.plain_text):
+        if not _BINDING_NAME.match(name):
+            raise _refuse(f"platform variable {name!r} is not a valid identifier")
+        if any(b["name"] == name and b["type"] != "secret_text" for b in bindings):
+            raise _refuse(f"platform variable {name!r} has the same name as a binding; rename it")
+        bindings = [b for b in bindings if b["name"] != name]
+        bindings.append({"type": "plain_text", "name": name, "text": provisioned.plain_text[name]})
         names.add(name)
     return bindings, warnings
 
@@ -723,6 +745,8 @@ async def deploy_bundle(
     before_upload: Callable[[list[dict]], Awaitable[None]] | None = None,
     target: str = DISPATCH_TARGET,
     paid: bool = False,
+    draft: bool = False,
+    main_wrapper: Callable[[str], WorkerModule] | None = None,
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -742,7 +766,10 @@ async def deploy_bundle(
 
     ``paid`` is the site's ``entitlements.site_paid_backends_entitled`` answer; it
     picks the per-request CPU and subrequest caps (``limits_for``). Unknown means
-    free, the tighter cap."""
+    free, the tighter cap. ``draft`` (a ``draft_worker`` deploy) uses the draft
+    limit / observability knobs and no placement. ``main_wrapper``, given the main
+    module's name, returns a module that becomes the new entry (the draft guard); it
+    is added after every check, so the wrapper itself is never author-controlled."""
     if target not in SCRIPT_TARGETS:
         raise _refuse(f"unknown deploy target {target!r}")
     bundle, manifest = _read_bundle(build_dir)
@@ -751,6 +778,12 @@ async def deploy_bundle(
     _map_into(bundle, manifest, provisioned or ProvisionedResources())
     for warning in bundle.warnings:
         logger.warning("sites.bundle_deploy %s: %s", script_name, warning)
+    if main_wrapper is not None and bundle.main_module:
+        wrapper = main_wrapper(bundle.main_module)
+        if any(m.name == wrapper.name for m in bundle.modules):
+            raise _refuse(f"the build already has a module named {wrapper.name}")
+        bundle.modules.append(wrapper)
+        bundle.main_module = wrapper.name
     if before_upload is not None:
         await before_upload(bundle.bindings)
 
@@ -775,7 +808,7 @@ async def deploy_bundle(
         compatibility_flags=bundle.compatibility_flags,
         assets=assets_meta,
         target=target,
-        **worker_settings(bundle, paid=paid),
+        **worker_settings(bundle, paid=paid, draft=draft),
     )
     return BundleDeployResult(
         script_name=script_name,
