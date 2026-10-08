@@ -183,9 +183,11 @@ class BundleDeployResult:
     assets: int
     warnings: list[str]
     # The script's Durable Object migration tag after the upload (Cloudflare's
-    # ``migration_tag``) and the classes live on it; None / () without DOs.
+    # ``migration_tag``), the applied tag history ending in it, and the classes live
+    # on it; None / () without DOs. Callers store the history and classes.
     migration_tag: str | None = None
     do_classes: tuple[str, ...] = ()
+    migration_tags: tuple[str, ...] = ()
 
 
 def _refuse(message: str) -> ValidationError:
@@ -742,6 +744,7 @@ async def deploy_bundle(
     main_wrapper: Callable[[str], WorkerModule] | None = None,
     do_state: durable_objects.DurableObjectState | None = None,
     confirm_do_data_loss: Sequence[str] = (),
+    allow_do_data_loss: bool = False,
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -768,14 +771,19 @@ async def deploy_bundle(
 
     ``do_state`` is what the script already has applied (Durable Object migration
     tag, live classes); unknown means a fresh script. ``confirm_do_data_loss`` names
-    the classes the owner agreed to delete or rename. The DO block is vetted, its
+    the classes the owner agreed to delete or rename; ``allow_do_data_loss`` (drafts)
+    skips that confirmation. The DO block is vetted, its
     migration planned and the account budget checked before ``provision``, so a
     refused bundle creates nothing. The result carries the tag Cloudflare reports."""
     if target not in SCRIPT_TARGETS:
         raise _refuse(f"unknown deploy target {target!r}")
     bundle, manifest = _read_bundle(build_dir)
     vetted = durable_objects.vet_durable_objects(
-        manifest, paid=paid, state=do_state, confirm=confirm_do_data_loss
+        manifest,
+        paid=paid,
+        state=do_state,
+        confirm=confirm_do_data_loss,
+        allow_data_loss=allow_do_data_loss,
     )
     if vetted is not None and not bundle.modules:
         raise _refuse("Durable Objects need a worker module; the build has only assets")
@@ -824,6 +832,7 @@ async def deploy_bundle(
         **({"migrations": migrations} if migrations else {}),
     )
     tag: str | None = None
+    history: tuple[str, ...] = ()
     if vetted is not None:
         # Cloudflare's answer wins; ours is the cross-check (and the fallback when the
         # response omits it, since a 2xx upload applied the migration).
@@ -836,6 +845,7 @@ async def deploy_bundle(
                 vetted.plan.tag,
             )
         tag = reported or vetted.plan.tag
+        history = durable_objects.migration_tags_after(vetted, reported)
     return BundleDeployResult(
         script_name=script_name,
         modules=len(bundle.modules),
@@ -843,4 +853,5 @@ async def deploy_bundle(
         warnings=list(bundle.warnings),
         migration_tag=tag,
         do_classes=vetted.classes if vetted is not None else (),
+        migration_tags=history,
     )

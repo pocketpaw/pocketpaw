@@ -1,19 +1,8 @@
 # ee/pocketpaw_ee/sites/delete_cascade.py — the ordered, idempotent teardown of one
-# published site.
-#
-# Created 2026-09-09 (sites lifecycle wave 1 chunk 3, feat/sites-delete-cascade).
-#
-# Updated 2026-10-02 (feat/partners-commissions, PH-13): the client-paid partner
-# rail (``"client"``, a one-time payment) stops cleanly like credits and plan,
-# instead of being reported as a legacy gateway rail an operator must close.
-#
-# Updated 2026-09-23 (VS-1, feat/sites-worker-name-decouple): the ``workers``-target
-# script delete now names the Worker through ``workers_deploy.site_worker_name``. It
-# used to pass ``script_name``, which is the site id, while the Worker a ``workers``
-# deploy creates is ``paw-site-<id>`` -- so the account-level delete asked for a script
-# that never existed, got the 404 this module counts as success, and recorded a
-# teardown over a Worker that kept serving. The ``wfp`` delete is unchanged: a
-# dispatch-namespace script IS named by the site id.
+# published site. Billing rails that stop locally: credits, plan and the one-time
+# client rail. The script delete names the Worker the deploy target actually created
+# (a dispatch script is the site id, an account Worker ``site_worker_name``), since a
+# delete aimed at the wrong name 404s, and a 404 counts as success here.
 #
 # THE ORDER IS THE DESIGN. Every step here can fail, and the sequence is chosen so
 # that a failure at ANY point leaves the site LESS live than before and never still
@@ -23,7 +12,8 @@
 #   2. auth off      — the signed key dies next, at near-zero cost and before
 #                      anything irreversible, so lead ingest and the concierge stop
 #                      even if every later step fails;
-#   3. serving off   — routes, hostnames, then the Worker script itself;
+#   3. serving off   — routes, hostnames, the script's Durable Objects (tombstone,
+#                      forced delete, verify; best effort), then the Worker script;
 #   4. reclaim       — D1, the bundle-deploy KV namespaces and R2 buckets, the
 #                      pocket's draft Worker and draft data, the public-asset R2
 #                      prefix, artifacts: the things that cost money once nothing
@@ -59,6 +49,7 @@ STEP_BILLING = "billing"
 STEP_REVOKE = "revoke"
 STEP_ROUTES = "routes"
 STEP_HOSTNAMES = "hostnames"
+STEP_DO = "do"
 STEP_SCRIPT = "script"
 STEP_D1 = "d1"
 STEP_BINDINGS = "bindings"
@@ -71,6 +62,7 @@ CASCADE_STEPS: tuple[str, ...] = (
     STEP_REVOKE,
     STEP_ROUTES,
     STEP_HOSTNAMES,
+    STEP_DO,
     STEP_SCRIPT,
     STEP_D1,
     STEP_BINDINGS,
@@ -186,6 +178,8 @@ async def _run_step(step: str, *, site: Any, deps: Any) -> str:
         return await _delete_routes(site=site, deps=deps)
     if step == STEP_HOSTNAMES:
         return await _delete_hostnames(site=site, deps=deps)
+    if step == STEP_DO:
+        return await _delete_durable_objects(site=site, deps=deps)
     if step == STEP_SCRIPT:
         return await _delete_script(site=site, deps=deps)
     if step == STEP_D1:
@@ -272,6 +266,50 @@ async def _delete_hostnames(*, site: Any, deps: Any) -> str:
     return OUTCOME_DONE
 
 
+def _script_ref(site: Any) -> tuple[str, str]:
+    """``(script name, durable_objects target)`` of the site's Worker, "" when none."""
+    script = (getattr(site, "script_name", "") or "").strip()
+    target = (getattr(site, "deploy_target", "") or "").strip()
+    if not script or target in ("", "local"):
+        return "", ""
+    if target == "wfp":
+        return script, "dispatch"
+    from pocketpaw_ee.sites.workers_deploy import site_worker_name
+
+    return site_worker_name(site), "account"
+
+
+async def _delete_durable_objects(*, site: Any, deps: Any) -> str:
+    """The script's Durable Objects and their data (``durable_objects.teardown_script``:
+    tombstone upload, forced delete, namespace-list check). Best effort and never
+    raises: a teardown that cannot finish is recorded as partial for an operator, and
+    the script step still runs (forced). A cascade resumed past the script step only
+    re-checks the namespace list; it never uploads a stub to a deleted script."""
+    classes = list(getattr(site, "do_classes", None) or [])
+    script, target = _script_ref(site)
+    if not classes or not script:
+        return OUTCOME_SKIPPED
+    from pocketpaw_ee.sites import durable_objects
+
+    tags = list(getattr(site, "do_migration_tags", None) or [])
+    out = await durable_objects.teardown_script(
+        deps.cloudflare,
+        script,
+        target=target,
+        classes=classes,
+        migration_tag=tags[-1] if tags else None,
+        delete=STEP_SCRIPT not in (site.delete_ledger or {}),
+    )
+    if not out.ok:
+        logger.warning(
+            "sites.delete: site %s Durable Objects left for an operator: %s",
+            getattr(site, "id", "?"),
+            out.error,
+        )
+        return OUTCOME_PARTIAL
+    return OUTCOME_DONE
+
+
 async def _delete_script(*, site: Any, deps: Any) -> str:
     """THE STEP THAT ACTUALLY STOPS THE PAGE BEING SERVED.
 
@@ -287,14 +325,16 @@ async def _delete_script(*, site: Any, deps: Any) -> str:
         # Never deployed, or deployed to the local static server, which owns no
         # Cloudflare Worker to remove.
         return OUTCOME_SKIPPED
+    # A script that held Durable Objects only deletes with force.
+    force = {"force": True} if getattr(site, "do_classes", None) else {}
     if target == "wfp":
-        await deps.cloudflare.delete_worker(script)
+        await deps.cloudflare.delete_worker(script, **force)
     else:
         # The account-level Worker a ``workers`` deploy created, by the name it was
-        # deployed under -- not ``script_name``, which is the site id (VS-1).
+        # deployed under -- not ``script_name``, which is the site id.
         from pocketpaw_ee.sites.workers_deploy import site_worker_name
 
-        await deps.cloudflare.delete_account_script(site_worker_name(site))
+        await deps.cloudflare.delete_account_script(site_worker_name(site), **force)
     return OUTCOME_DONE
 
 

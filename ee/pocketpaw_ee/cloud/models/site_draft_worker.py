@@ -38,6 +38,9 @@ class SiteDraftWorker(TimestampedDocument):
     d1_database_id: str = ""
     kv_namespaces: dict[str, str] = Field(default_factory=dict)
     r2_buckets: dict[str, str] = Field(default_factory=dict)
+    # Durable Object tag history and live classes of ``script`` (see Site).
+    do_migration_tags: list[str] = Field(default_factory=list)
+    do_classes: list[str] = Field(default_factory=list)
     seeded: bool = False
     auth_secret_enc: str = ""
     draft_key_enc: str = ""

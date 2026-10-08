@@ -2543,6 +2543,7 @@ async def publish(
     keeps_client_bundle: bool = False,
     preview: bool = False,
     confirm_destructive_migrations: bool = False,
+    confirm_do_data_loss: list[str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -2781,6 +2782,7 @@ async def publish(
         local_deploy=_local_deploy,
         workers_deploy=_workers_deploy,
         confirm_destructive_migrations=confirm_destructive_migrations,
+        confirm_do_data_loss=confirm_do_data_loss,
     )
 
 
@@ -2797,6 +2799,7 @@ async def _deploy_project_site(
     cloudflare: Any | None,
     local_deploy: Callable[[str, str], str] | None,
     confirm_destructive_migrations: bool = False,
+    confirm_do_data_loss: list[str] | None = None,
     _store: Any | None = None,
 ) -> _SiteDoc:
     """Publish a ``project`` pocket from its stored draft build.
@@ -2877,6 +2880,7 @@ async def _deploy_project_site(
             local_deploy=local_deploy,
             prebuilt_project_dir=work,
             confirm_destructive_migrations=confirm_destructive_migrations,
+            confirm_do_data_loss=confirm_do_data_loss,
         )
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -2958,6 +2962,7 @@ async def _deploy_site_doc(
     # A project publish may run migrations that delete data the site holds only when
     # the owner confirmed it (``project_d1``). Ignored by every other engine.
     confirm_destructive_migrations: bool = False,
+    confirm_do_data_loss: list[str] | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -3015,6 +3020,7 @@ async def _deploy_site_doc(
             cloudflare=cloudflare,
             local_deploy=local_deploy,
             confirm_destructive_migrations=confirm_destructive_migrations,
+            confirm_do_data_loss=confirm_do_data_loss,
         )
 
     if _is_dynamic(pattern, ripple_spec):
@@ -3268,6 +3274,7 @@ async def _deploy_site_doc(
                     d1_database_id=d1_database_id,
                     source=source,
                     confirm_destructive=confirm_destructive_migrations,
+                    confirm_do_data_loss=confirm_do_data_loss,
                 )
                 url = await _account_worker_url(cf, deploy_name)
             else:
@@ -3339,6 +3346,7 @@ async def _deploy_site_doc(
                 d1_database_id=d1_database_id,
                 source=source,
                 confirm_destructive=confirm_destructive_migrations,
+                confirm_do_data_loss=confirm_do_data_loss,
             )
         else:
             bundle = bundle_reader(build.project_dir)
@@ -3498,6 +3506,7 @@ async def _deploy_paw_bundle(
     d1_database_id: str,
     source: dict[str, str] | None,
     confirm_destructive: bool,
+    confirm_do_data_loss: list[str] | None = None,
 ) -> None:
     """Deploy a ``paw-build.json`` build through ``bundle_deploy`` to ``target``.
 
@@ -3505,18 +3514,38 @@ async def _deploy_paw_bundle(
     and migrations cannot drift between them. D1 / KV / R2 are created by the
     provisioner and recorded on the Site doc, which a project publish has ensured
     exists by now. A project's migrations are applied to its D1 after every check,
-    before the upload."""
+    before the upload. Durable Objects plan from the doc's applied tag history; the
+    history and live classes Cloudflare reports are saved only after the upload
+    succeeds (``confirm_do_data_loss`` names classes the owner agreed to lose)."""
     bundle_doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
     before_upload = None
     if normalize_engine(engine) == "project" and not is_dynamic:
         before_upload = _project_migrator(
             cf, site_id=site_id, source=source, confirm_destructive=confirm_destructive
         )
-    await bundle_deploy.deploy_bundle(
+    from pocketpaw_ee.sites import durable_objects
+
+    do_state = (
+        durable_objects.DurableObjectState.from_history(
+            getattr(bundle_doc, "do_migration_tags", None) or [],
+            getattr(bundle_doc, "do_classes", None) or [],
+        )
+        if bundle_doc is not None
+        else None
+    )
+    # Only passed when there is something to say, so a site without DOs deploys
+    # exactly as before.
+    do_kw: dict[str, Any] = {}
+    if do_state is not None and (do_state.applied_tags or do_state.live_classes):
+        do_kw["do_state"] = do_state
+    if confirm_do_data_loss:
+        do_kw["confirm_do_data_loss"] = list(confirm_do_data_loss)
+    result = await bundle_deploy.deploy_bundle(
         cf,
         script_name=script_name,
         build_dir=project_dir,
         salt=workspace_id,
+        **do_kw,
         provisioned=bundle_deploy.ProvisionedResources(d1_database_id=d1_database_id),
         provision=(
             _bundle_provisioner(
@@ -3533,6 +3562,15 @@ async def _deploy_paw_bundle(
         target=target,
         paid=_site_paid(bundle_doc) if bundle_doc is not None else False,
     )
+    tags = tuple(getattr(result, "migration_tags", ()) or ())
+    if bundle_doc is not None and (tags or bundle_doc.do_classes):
+        # Only now: the upload succeeded, so this is what Cloudflare has applied.
+        await bundle_doc.set(
+            {
+                "do_migration_tags": list(tags),
+                "do_classes": list(getattr(result, "do_classes", ()) or ()),
+            }
+        )
 
 
 async def _account_worker_url(cf: Any, name: str) -> str:
@@ -7634,6 +7672,7 @@ async def publish_pocket(
     preview: bool = False,
     # Owner confirmed a project migration that deletes data (``project_d1``).
     confirm_destructive_migrations: bool = False,
+    confirm_do_data_loss: list[str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -8224,6 +8263,7 @@ async def publish_pocket(
             tier=_carried_tier,
             covered_by_plan=_plan_carries,
             confirm_destructive_migrations=confirm_destructive_migrations,
+            confirm_do_data_loss=confirm_do_data_loss,
             _generator=_generator,
             _cloudflare=_cloudflare,
             _bundle_reader=_bundle_reader,
@@ -8246,6 +8286,7 @@ async def publish_pocket(
         keeps_client_bundle=keeps_client_bundle,
         preview=False,
         confirm_destructive_migrations=confirm_destructive_migrations,
+        confirm_do_data_loss=confirm_do_data_loss,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
@@ -9167,6 +9208,7 @@ async def _publish_credits_site(
     tier: Any,
     covered_by_plan: bool = False,
     confirm_destructive_migrations: bool = False,
+    confirm_do_data_loss: list[str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -9239,6 +9281,7 @@ async def _publish_credits_site(
         tier=tier,
         rail=_PLAN_RAIL if covered_by_plan else _CREDITS_RAIL,
         confirm_destructive_migrations=confirm_destructive_migrations,
+        confirm_do_data_loss=confirm_do_data_loss,
     )
 
     site_id = str(doc.id)
@@ -9346,6 +9389,7 @@ async def _publish_pending_site(
     tier: Any,
     rail: str = _CREDITS_RAIL,
     confirm_destructive_migrations: bool = False,
+    confirm_do_data_loss: list[str] | None = None,
 ) -> tuple[_SiteDoc, dict[str, Any] | None]:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
     WITHOUT deploying it live.
@@ -9420,6 +9464,7 @@ async def _publish_pending_site(
         "name": site_name,
         # Replayed so a confirmed destructive project migration stays confirmed.
         "confirm_destructive_migrations": confirm_destructive_migrations,
+        "confirm_do_data_loss": list(confirm_do_data_loss or []),
     }
 
     # Review fix A — cap the serialized deploy-input size BEFORE any persist or
@@ -9666,6 +9711,7 @@ async def activate_site(
         # this field existed has no key and reads False (the prior behaviour).
         keeps_client_bundle=bool(inputs.get("keeps_client_bundle")),
         confirm_destructive_migrations=bool(inputs.get("confirm_destructive_migrations")),
+        confirm_do_data_loss=[str(c) for c in inputs.get("confirm_do_data_loss") or []],
         generator=_generator,
         cloudflare=_cloudflare,
         bundle_reader=_bundle_reader,
