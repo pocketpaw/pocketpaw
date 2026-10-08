@@ -661,6 +661,7 @@ async def test_publish_deploys_the_stored_manifest(beanie_test_db, monkeypatch, 
         before_upload=None,
         target="dispatch",
         paid=False,
+        **_do_kw,
     ):
         root = Path(build_dir)
         calls.append(

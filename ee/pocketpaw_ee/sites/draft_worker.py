@@ -28,8 +28,10 @@
 #   * Durable Objects (``durable_objects``): the row keeps the draft script's tag
 #     history and live classes, written right after a successful upload. Draft data
 #     is throwaway, so destructive migrations need no confirmation, and a history the
-#     row does not recognise tears the old script down and rotates to a fresh name.
-#     A new class counts against the account DO budget like a published one.
+#     row does not recognise tears the old script down and rotates to a fresh name,
+#     at most ``PAW_SITES_DO_DRAFT_ROTATIONS_PER_HOUR`` times per pocket (then the
+#     ``do_rotation_limit`` rung). A new class counts against the draft DO budget and
+#     the workspace's DO quota (the workspace's other drafts).
 #   * cleanup: ``purge_pocket_drafts`` (publish, site / pocket delete, sweeper).
 #     Idempotent; a Cloudflare 404 is success; a script with DOs goes through
 #     ``durable_objects.teardown_script``. A failure leaves the row ``deleting``
@@ -64,6 +66,8 @@ from pocketpaw_ee.cloud._core.errors import ValidationError
 logger = logging.getLogger(__name__)
 
 ENABLE_ENV = "PAW_SITES_DRAFT_WORKERS"
+DO_ROTATIONS_ENV = "PAW_SITES_DO_DRAFT_ROTATIONS_PER_HOUR"
+DEFAULT_DO_ROTATIONS = 3
 SCRIPT_CAP_ENV = "PAW_SITES_DRAFT_SCRIPT_CAP"
 DEFAULT_SCRIPT_CAP = 450
 TTL_DAYS_ENV = "PAW_SITES_DRAFT_TTL_DAYS"
@@ -100,6 +104,7 @@ REASONS = frozenset(
         "deploy_failed",
         "superseded",
         "gone",
+        "do_rotation_limit",
     }
 )
 
@@ -249,6 +254,8 @@ class DraftRecord:
     r2_buckets: dict[str, str] = field(default_factory=dict)
     do_migration_tags: list[str] = field(default_factory=list)
     do_classes: list[str] = field(default_factory=list)
+    # When this pocket's draft last rotated on a DO history change (rate limit).
+    do_rotations: list[datetime] = field(default_factory=list)
     seeded: bool = False
     auth_secret_enc: str = field(default="", repr=False)
     draft_key_enc: str = field(default="", repr=False)
@@ -274,6 +281,7 @@ def _copy(rec: DraftRecord) -> DraftRecord:
         r2_buckets=dict(rec.r2_buckets),
         do_migration_tags=list(rec.do_migration_tags),
         do_classes=list(rec.do_classes),
+        do_rotations=list(rec.do_rotations),
     )
 
 
@@ -628,7 +636,9 @@ def _reason_for(exc: Exception, phase: str) -> str:
         "sites.binding_cap",
     }:
         return "not_entitled"
-    if code in {"sites.do_account_budget", "sites.do_budget_unknown"}:
+    if code == "sites.do_rotation_limit":
+        return "do_rotation_limit"
+    if code in {"sites.do_account_budget", "sites.do_budget_unknown", "sites.do_workspace_quota"}:
         return "cap"
     if code in {"sites.do_disabled", "sites.do_class_cap"}:
         return "not_entitled"
@@ -807,6 +817,15 @@ async def deploy_for_build(
         do_state = durable_objects.DurableObjectState.from_history(
             rec.do_migration_tags, rec.do_classes
         )
+
+        async def _workspace_draft_classes() -> int:
+            # DO classes the workspace's OTHER drafts hold (the per-workspace quota).
+            return sum(
+                len(r.do_classes)
+                for r in await registry.all()
+                if r.workspace == workspace_id and r.pocket_id != pocket_id
+            )
+
         if durable_objects.declares_durable_objects(manifest) or rec.do_classes:
             try:
                 durable_objects.vet_durable_objects(
@@ -815,6 +834,19 @@ async def deploy_for_build(
             except ValidationError as exc:
                 if exc.code != "sites.do_history_diverged":
                     raise
+                now = datetime.now(UTC)
+                recent = [
+                    t
+                    for t in rec.do_rotations
+                    if (t if t.tzinfo else t.replace(tzinfo=UTC)) > now - timedelta(hours=1)
+                ]
+                if len(recent) >= _int_env(DO_ROTATIONS_ENV, DEFAULT_DO_ROTATIONS):
+                    raise ValidationError(
+                        "sites.do_rotation_limit",
+                        "This draft's Durable Object history changed too often in the "
+                        "last hour; the preview falls back until it settles.",
+                    ) from exc
+                rec.do_rotations = [*recent, now]
                 # Draft data is throwaway: start a fresh script (fresh namespaces)
                 # instead of refusing, like a changed D1 migration resets the draft DB.
                 await _rotate_script(rec, cf, do_state)
@@ -836,6 +868,7 @@ async def deploy_for_build(
                 main_wrapper=guard_module,
                 do_state=do_state,
                 allow_do_data_loss=True,
+                do_quota_used=_workspace_draft_classes,
             )
         if result.migration_tags or rec.do_classes:
             # Right after the upload, so a later failure cannot lose the applied tag.

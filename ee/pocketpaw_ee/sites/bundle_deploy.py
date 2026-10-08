@@ -745,6 +745,7 @@ async def deploy_bundle(
     do_state: durable_objects.DurableObjectState | None = None,
     confirm_do_data_loss: Sequence[str] = (),
     allow_do_data_loss: bool = False,
+    do_quota_used: Callable[[], Awaitable[int]] | None = None,
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -772,7 +773,9 @@ async def deploy_bundle(
     ``do_state`` is what the script already has applied (Durable Object migration
     tag, live classes); unknown means a fresh script. ``confirm_do_data_loss`` names
     the classes the owner agreed to delete or rename; ``allow_do_data_loss`` (drafts)
-    skips that confirmation. The DO block is vetted, its
+    skips that confirmation. ``do_quota_used`` returns how many DO classes the
+    workspace's other scripts hold; it is asked only when this deploy creates a
+    class (``durable_objects.check_workspace_quota``). The DO block is vetted, its
     migration planned and the account budget checked before ``provision``, so a
     refused bundle creates nothing. The result carries the tag Cloudflare reports."""
     if target not in SCRIPT_TARGETS:
@@ -787,7 +790,9 @@ async def deploy_bundle(
     )
     if vetted is not None and not bundle.modules:
         raise _refuse("Durable Objects need a worker module; the build has only assets")
-    await durable_objects.check_account_budget(cf, vetted, target=target)
+    if vetted is not None and vetted.plan.new_classes and do_quota_used is not None:
+        durable_objects.check_workspace_quota(await do_quota_used(), vetted)
+    await durable_objects.check_account_budget(cf, vetted, target=target, draft=draft)
     if provision is not None:
         provisioned = await provision(manifest.get("bindingRequests"))
     provisioned = provisioned or ProvisionedResources()

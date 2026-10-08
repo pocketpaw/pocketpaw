@@ -3540,6 +3540,15 @@ async def _deploy_paw_bundle(
         do_kw["do_state"] = do_state
     if confirm_do_data_loss:
         do_kw["confirm_do_data_loss"] = list(confirm_do_data_loss)
+
+    async def _workspace_do_classes() -> int:
+        # DO classes the workspace's OTHER sites hold (the per-workspace quota).
+        others = await _SiteDoc.find(
+            {"workspace": workspace_id, "do_classes.0": {"$exists": True}}
+        ).to_list()
+        return sum(len(s.do_classes) for s in others if str(s.id) != str(site_id))
+
+    do_kw["do_quota_used"] = _workspace_do_classes
     result = await bundle_deploy.deploy_bundle(
         cf,
         script_name=script_name,

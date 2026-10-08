@@ -22,8 +22,10 @@
 #     what to send from the tag last applied to the script. Destructive steps
 #     (delete, rename) need an explicit per-class confirmation.
 #   * On the ``account`` target DO namespaces share the account's limits, so a NEW
-#     class is refused past ``PAW_SITES_DO_ACCOUNT_BUDGET`` namespaces, and the
-#     check fails closed when the count cannot be read.
+#     class is refused past ``PAW_SITES_DO_ACCOUNT_BUDGET`` namespaces of published
+#     scripts, or ``PAW_SITES_DO_DRAFT_BUDGET`` of ``paw-draft-*`` ones (separate, so
+#     drafts cannot starve sites); fails closed when the count cannot be read. One
+#     workspace holds at most ``PAW_SITES_DO_WORKSPACE_QUOTA`` live classes.
 #   * State per script (Site / draft registry): the applied tag HISTORY and the live
 #     classes, written only after a successful upload (``migration_tags_after``).
 #   * ``teardown_script``: tombstone upload (``deleted_classes``), forced delete, then
@@ -48,6 +50,12 @@ MAX_CLASSES_CEILING = 5
 FREE_MAX_CLASSES = 1
 ACCOUNT_BUDGET_ENV = "PAW_SITES_DO_ACCOUNT_BUDGET"
 DEFAULT_ACCOUNT_BUDGET = 300
+DRAFT_BUDGET_ENV = "PAW_SITES_DO_DRAFT_BUDGET"
+DEFAULT_DRAFT_BUDGET = 100
+WORKSPACE_QUOTA_ENV = "PAW_SITES_DO_WORKSPACE_QUOTA"
+DEFAULT_WORKSPACE_QUOTA = 5
+#: Draft Worker scripts (``draft_worker.SCRIPT_PREFIX``); kept import-free.
+DRAFT_SCRIPT_PREFIX = "paw-draft-"
 ACCOUNT_TARGET = "account"  # cloudflare_client.ACCOUNT_TARGET; kept import-free
 DISPATCH_TARGET = "dispatch"
 #: The tag of the stub upload that deletes every class before a script goes.
@@ -450,21 +458,52 @@ def migration_tags_after(vetted: VettedDurableObjects, reported: str | None) -> 
     return (*vetted.tags, tag) if tag else vetted.tags
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        logger.warning("%s=%r is not an int; using %d", name, raw, default)
+        return default
+
+
+def check_workspace_quota(used: int, vetted: VettedDurableObjects) -> None:
+    """Refuse a deploy whose classes would take its workspace past
+    ``PAW_SITES_DO_WORKSPACE_QUOTA`` live classes. ``used`` counts the workspace's
+    OTHER scripts (sites or drafts); callers ask only when a class is new."""
+    quota = _env_int(WORKSPACE_QUOTA_ENV, DEFAULT_WORKSPACE_QUOTA)
+    if used + len(vetted.classes) > quota:
+        raise ValidationError(
+            "sites.do_workspace_quota",
+            f"This workspace already uses {used} of its {quota} Durable Object classes, "
+            f"and this build needs {len(vetted.classes)} more. Remove Durable Objects "
+            "from another site first, or contact support for a higher limit.",
+        )
+
+
 async def check_account_budget(
-    cf: Any, vetted: VettedDurableObjects | None, *, target: str
+    cf: Any, vetted: VettedDurableObjects | None, *, target: str, draft: bool = False
 ) -> None:
-    """Refuse NEW classes on the account target past ``PAW_SITES_DO_ACCOUNT_BUDGET``
-    namespaces. Fails closed: an unreadable count refuses. WfP has no namespace
-    limit, and a deploy that creates no class never reads the list."""
+    """Refuse NEW classes on the account target past the budget: published
+    scripts count against ``PAW_SITES_DO_ACCOUNT_BUDGET``, ``paw-draft-*`` scripts
+    against ``PAW_SITES_DO_DRAFT_BUDGET``, each only its own namespaces. Fails
+    closed: an unreadable count refuses. WfP has no namespace limit, and a deploy
+    that creates no class never reads the list."""
     if target != ACCOUNT_TARGET or vetted is None or not vetted.plan.new_classes:
         return
-    raw = (os.environ.get(ACCOUNT_BUDGET_ENV) or "").strip()
+    budget = (
+        _env_int(DRAFT_BUDGET_ENV, DEFAULT_DRAFT_BUDGET)
+        if draft
+        else _env_int(ACCOUNT_BUDGET_ENV, DEFAULT_ACCOUNT_BUDGET)
+    )
     try:
-        budget = int(raw) if raw else DEFAULT_ACCOUNT_BUDGET
-    except ValueError:
-        budget = DEFAULT_ACCOUNT_BUDGET
-    try:
-        count = len(await cf.list_durable_object_namespaces())
+        rows = await cf.list_durable_object_namespaces()
+        count = sum(
+            1
+            for r in rows
+            if isinstance(r, dict)
+            and str(r.get("script") or "").startswith(DRAFT_SCRIPT_PREFIX) == draft
+        )
     except Exception as exc:  # noqa: BLE001 - any failure means "unknown", refuse
         logger.warning("sites: could not count Durable Object namespaces: %s", exc)
         raise ValidationError(
@@ -570,6 +609,7 @@ __all__ = [
     "TeardownResult",
     "VettedDurableObjects",
     "check_account_budget",
+    "check_workspace_quota",
     "class_cap",
     "declares_durable_objects",
     "enabled",
