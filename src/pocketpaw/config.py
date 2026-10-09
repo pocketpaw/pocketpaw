@@ -1355,6 +1355,15 @@ class Settings(BaseSettings):
             "notified once that day. 0 turns the cap off."
         ),
     )
+    pawbar_ops_site_ids: str = Field(
+        default="",
+        description=(
+            "Comma-separated ids of sites the platform runs itself (a demo site). "
+            "Only these may use the ripple concierge card profile or a site daily "
+            "spend cap above pawbar_concierge_daily_spend_cap; any other site's own "
+            "cap can only lower the global one."
+        ),
+    )
     # The concierge product catalog (``pocketpaw.paw_bar.catalog_store``). A plan
     # split can come later the way the knowledge-source caps do it.
     pawbar_catalog_max_items: int = Field(

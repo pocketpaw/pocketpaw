@@ -31,8 +31,8 @@
   {
     "label": "the fixed output cap is dropped — reply length falls back to the model default",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        \"max_tokens\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 0) or _MAX_TOKENS),",
-    "replace": "        \"max_tokenz\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 0) or _MAX_TOKENS),",
+    "find": "        \"max_tokens\": max_tokens,",
+    "replace": "        \"max_tokenz\": max_tokens,",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
@@ -186,7 +186,7 @@
   {
     "label": "any widget type is accepted — the server stops matching the manifest",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if node[\"type\"] not in WIDGET_TYPES:",
+    "find": "        if node[\"type\"] not in profile.widget_types:",
     "replace": "        if False:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_unknown_widget_type_rejects_the_card",
@@ -196,8 +196,8 @@
   {
     "label": "the node bound drifts by one from paw-bar's",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if count > MAX_SPEC_NODES:",
-    "replace": "        if count > MAX_SPEC_NODES + 1:",
+    "find": "        if count > profile.max_nodes:",
+    "replace": "        if count > profile.max_nodes + 1:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts"
     ]
@@ -205,8 +205,8 @@
   {
     "label": "the depth bound drifts by one from paw-bar's",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if depth > MAX_SPEC_DEPTH:",
-    "replace": "        if depth > MAX_SPEC_DEPTH + 1:",
+    "find": "        if depth > profile.max_depth:",
+    "replace": "        if depth > profile.max_depth + 1:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts"
     ]
@@ -214,7 +214,7 @@
   {
     "label": "the card is not re-measured after hydration — the client refuses a card the server sent",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if len(body) > MAX_SPEC_CHARS or _FENCE in body:",
+    "find": "        if len(body) > profile.max_chars or _FENCE in body:",
     "replace": "        if _FENCE in body:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_that_hydrates_past_the_char_bound_is_dropped"
@@ -223,7 +223,7 @@
   {
     "label": "the compact manifest leaves the prompt — the model is never told how to write a card",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog), lead_capture=lead_capture))",
+    "find": "    parts.append(\n        _cards_paragraph(\n            declared, has_catalog=bool(catalog), lead_capture=lead_capture, profile=profile\n        )\n    )",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_prompt_carries_the_compact_manifest_and_no_tool_advice"
@@ -385,8 +385,8 @@
   {
     "label": "CR-3: knowledge can open or close the <page> block (page left the neutralized tags)",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    r\"page-tools|page)\\b\",",
-    "replace": "    r\"page-tools)\\b\",",
+    "find": "    r\"page-tools|store-menu|page)\\b\",",
+    "replace": "    r\"page-tools|store-menu)\\b\",",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_page.py::test_knowledge_cannot_close_the_page_block"
     ]
@@ -431,7 +431,7 @@
   {
     "label": "CR-5 cap arm: the spend cap is never checked — an over-cap site keeps calling the model",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    if await _over_spend_cap(settings, workspace_id, pocket_id):\n",
+    "find": "    if await _over_spend_cap(settings, workspace_id, pocket_id, site):\n",
     "replace": "    if False:\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_is_unavailable_with_no_model_call"
@@ -575,7 +575,7 @@
   {
     "label": "CR-5 retry: a transient provider blip is never retried — visitors see random failures",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                if attempt > 1 or full_text or not _is_transient(exc):\n",
+    "find": "                if attempt > 1 or shown or not _is_transient(exc):\n",
     "replace": "                if True:\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_transient_failure_is_retried_once_and_answered"
@@ -584,10 +584,11 @@
   {
     "label": "CR-5 retry: a failure after text is retried — the visitor reads the answer twice",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                if attempt > 1 or full_text or not _is_transient(exc):\n",
+    "find": "                if attempt > 1 or shown or not _is_transient(exc):\n",
     "replace": "                if attempt > 1 or not _is_transient(exc):\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_transient_failure_mid_stream_is_not_retried"
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_transient_failure_mid_stream_is_not_retried",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_ripple_turn_that_fails_mid_card_rejects_it_before_unavailable"
     ]
   },
   {
@@ -657,8 +658,8 @@
   {
     "label": "a card body is parsed untrimmed — a trailing BOM or NBSP the client trims sends a spec through as a legacy card",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        return json.loads(body.strip(_JS_SPACE))",
-    "replace": "        return json.loads(body)",
+    "find": "            body.strip(_JS_SPACE),\n",
+    "replace": "            body,\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_ending_in_what_the_client_trims_is_still_checked"
     ]
@@ -666,8 +667,8 @@
   {
     "label": "the server strips Python's whitespace set, not the client's — a trailing \\x1c it forgives the client cannot parse, a BOM it keeps",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        return json.loads(body.strip(_JS_SPACE))",
-    "replace": "        return json.loads(body.strip())",
+    "find": "            body.strip(_JS_SPACE),\n",
+    "replace": "            body.strip(),\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_ending_in_what_the_client_trims_is_still_checked",
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_ending_in_what_the_client_does_not_trim_is_dropped"
@@ -676,11 +677,190 @@
   {
     "label": "a card body that is not JSON passes through unchecked again",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "    raw = _parse(body)\n    if raw is None:\n        return None\n",
-    "replace": "    raw = _parse(body)\n",
+    "find": "    if raw is None or raw is _TOO_DEEP:\n",
+    "replace": "    if raw is _TOO_DEEP:\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_that_is_not_json_is_dropped",
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_ending_in_what_the_client_does_not_trim_is_dropped"
+    ]
+  },
+  {
+    "label": "card streaming: the ripple flag is ignored, cards are held whole and ride a chunk again",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                stream_cards=profile.name == \"ripple\",\n",
+    "replace": "                stream_cards=False,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_ripple_site_streams_the_card_and_keeps_it_in_the_transcript"
+    ]
+  },
+  {
+    "label": "card streaming: every site streams cards, the pawbar byte stream changes",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                stream_cards=profile.name == \"ripple\",\n",
+    "replace": "                stream_cards=True,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_pawbar_sites_event_stream_is_byte_for_byte_unchanged"
+    ]
+  },
+  {
+    "label": "card streaming: trailing backticks in a card body are not held, a closing marker leaks into a delta",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                held = 0 if j != -1 else 2 if text.endswith(\"``\") else int(text.endswith(\"`\"))\n",
+    "replace": "                held = 0\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_card_frames_do_not_depend_on_where_the_chunks_split"
+    ]
+  },
+  {
+    "label": "card streaming: a fence left open at the end is not rejected, the client waits on it forever",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if self._card_id:\n            out.append(\n",
+    "replace": "        if False:\n            out.append(\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_reply_that_ends_mid_card_is_truncated"
+    ]
+  },
+  {
+    "label": "card streaming: a rendered card that is not an object goes out as card.final",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return card if isinstance(card, dict) and \"ui\" in card else None\n",
+    "replace": "    return card\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_that_is_not_a_json_object_is_rejected_on_a_streaming_filter"
+    ]
+  },
+  {
+    "label": "card streaming: a legacy card (no ui) goes out as card.final, unchecked by the strict walk",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return card if isinstance(card, dict) and \"ui\" in card else None\n",
+    "replace": "    return card if isinstance(card, dict) else None\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_that_is_not_a_json_object_is_rejected_on_a_streaming_filter"
+    ]
+  },
+  {
+    "label": "card streaming: the partial scan is never consulted, a bad link streams to the fence close",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if self._size > self._profile.max_chars or self._partial.feed(piece):\n",
+    "replace": "        if self._size > self._profile.max_chars:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_bad_link_is_rejected_mid_stream_before_the_fence_closes"
+    ]
+  },
+  {
+    "label": "card streaming: no size bound while streaming, an oversized card is buffered whole",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if self._size > self._profile.max_chars or self._partial.feed(piece):\n",
+    "replace": "        if self._partial.feed(piece):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_past_max_chars_is_rejected_and_no_longer_buffered",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_padded_card_is_rejected_on_its_raw_size_with_a_bounded_buffer"
+    ]
+  },
+  {
+    "label": "card streaming: a rejected card is still buffered to its close",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                    self._buf = text[end:] if self._card_id else text[-2:]\n",
+    "replace": "                    self._buf = text[end:] if self._card_id else text\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_past_max_chars_is_rejected_and_no_longer_buffered",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_padded_card_is_rejected_on_its_raw_size_with_a_bounded_buffer"
+    ]
+  },
+  {
+    "label": "partial scan: strings outside ui and state (dropped by render_card) are judged",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if self._stack[0][1] not in (\"ui\", \"state\"):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
+    ]
+  },
+  {
+    "label": "partial scan: the URL rule is guessed under a style key, where render_card reads CSS",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        elif not styled and (key in _TILE_KEYS or _is_url_key(key)):\n",
+    "replace": "        elif key in _TILE_KEYS or _is_url_key(key):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
+    ]
+  },
+  {
+    "label": "partial scan: object keys are judged as values",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if top[0] and top[2]:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_no_prefix_of_a_card_ripple_accepts_is_flagged"
+    ]
+  },
+  {
+    "label": "partial scan: a state string is judged only once a ui key shows up",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if self._stack[0][1] not in (\"ui\", \"state\"):\n",
+    "replace": "        if self._stack[0][1] != \"ui\":\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
+    ]
+  },
+  {
+    "label": "card streaming: a repeated key is not flagged mid-stream",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if value in top[4]:\n                self.hit = True\n                return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_repeated_key_stops_the_stream_at_the_repeat_and_rejects",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_key_used_once_per_object_is_not_a_repeat"
+    ]
+  },
+  {
+    "label": "card streaming: the scan never records an object's keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            top[4].add(value)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_repeated_key_stops_the_stream_at_the_repeat_and_rejects",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_key_used_once_per_object_is_not_a_repeat"
+    ]
+  },
+  {
+    "label": "card streaming: every object shares the root's seen keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        self._stack.append([is_obj, \"\" if is_obj else key, is_obj, styled, set()])",
+    "replace": "        self._stack.append([is_obj, \"\" if is_obj else key, is_obj, styled, self._stack[0][4]])",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_key_used_once_per_object_is_not_a_repeat",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_no_prefix_of_a_card_ripple_accepts_is_flagged"
+    ]
+  },
+  {
+    "label": "card streaming: a body that cannot start an object only stops the scan, and its deltas stream out",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                self.hit = ch not in _JS_SPACE  # before the root: trimmed, or not a card\n",
+    "replace": "                self._done = ch not in _JS_SPACE  # before the root: trimmed, or not a card\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_body_that_cannot_start_an_object_is_rejected_before_any_delta"
+    ]
+  },
+  {
+    "label": "card streaming: before the root, Python's isspace() is skipped, not what JS trim() strips (a BOM flags a good card, \\x1c is skipped)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                self.hit = ch not in _JS_SPACE  # before the root: trimmed, or not a card\n",
+    "replace": "                self.hit = not ch.isspace()  # before the root: trimmed, or not a card\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_what_the_client_trims_before_a_card_keeps_the_stream_checks_on",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_body_that_cannot_start_an_object_is_rejected_before_any_delta"
+    ]
+  },
+  {
+    "label": "card streaming: the old root rule (anything not isspace() stops the scan), so a leading BOM switches the stream checks off",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                self.hit = ch not in _JS_SPACE  # before the root: trimmed, or not a card\n",
+    "replace": "                self._done = not ch.isspace()  # before the root: trimmed, or not a card\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_what_the_client_trims_before_a_card_keeps_the_stream_checks_on",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_body_that_cannot_start_an_object_is_rejected_before_any_delta"
     ]
   }
 ]

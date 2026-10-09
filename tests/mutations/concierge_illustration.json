@@ -1,0 +1,173 @@
+[
+  {
+    "label": "ILL-1: on* attributes pass the SVG policy",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "    if low.startswith(\"on\"):",
+    "replace": "    if low.startswith(\"on-never\"):",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-2: the attributeName closed list is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "value.strip() not in ATTRIBUTE_NAMES",
+    "replace": "value.strip() in ()",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-3: the depth cap is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "        if depth > MAX_DEPTH:",
+    "replace": "        if depth > 10**9:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-4: a backslash in an attribute value passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "    if \"\\\\\" in value:\n        return \"a backslash in a value\"",
+    "replace": "    if False:\n        return \"a backslash in a value\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-5: the card never runs the SVG policy",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if reason := svg_violation(svg):",
+    "replace": "    if reason := None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-6: an expression in the svg passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if \"{\" in svg:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-7: the partial scan judges an svg by the text rules (xmlns URL refuses mid-stream)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if key == \"svg\":\n        return False",
+    "replace": "    if key == \"svg-never\":\n        return False",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-8: the svg prop is walked by the text rules too",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                        if kind == ILLUSTRATION and pk == \"svg\":\n                            continue",
+    "replace": "                        if kind == ILLUSTRATION and pk == \"svg-never\":\n                            continue",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-9: handlers on an illustration pass",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if \"bind\" in node or any(map(_is_handler_key, [*node, *props])):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-10: a use may point at a use",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "            return \"a use pointing at a use\"",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-11: the use cap is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "            if len(uses) > MAX_USES:",
+    "replace": "            if len(uses) > 10**9:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-12: a reference to a missing id passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "    if missing := next((ref for ref in refs if ref not in ids), None):",
+    "replace": "    if missing := None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-13: url() may hold whitespace or any case",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "_URL_REF = re.compile(r\"url\\(#([A-Za-z0-9_-]+)\\)\")",
+    "replace": "_URL_REF = re.compile(r\"url\\(\\s*#([A-Za-z0-9_-]+)\\s*\\)\", re.I)",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-14: a processing instruction passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "    if \"<?\" in body:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-15: a mask or clipPath cycle passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "            if ref == start:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-16: the number cap is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "            if any(abs(float(n)) > MAX_NUMBER for n in numbers):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-17: an attributeType passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "        if local == \"attributeType\":",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-18: an id outside the charset passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "        if local == \"id\" and not _ID.fullmatch(value):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-19: a blank illustration title passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not title.strip():",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  }
+]

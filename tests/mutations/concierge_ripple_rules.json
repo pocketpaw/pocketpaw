@@ -1,0 +1,1697 @@
+[
+  {
+    "label": "SEC F1: a handler slot may hold a string (an expression resolving to a handler)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if not isinstance(row, dict) or (key != \"actions\" and \"action\" not in row):",
+    "replace": "            if not isinstance(row, (dict, str)) or (isinstance(row, dict) and key != \"actions\" and \"action\" not in row):",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: a slot may hold an object that is not an action",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(key != \"actions\" and \"action\" not in row)",
+    "replace": "(key == \"_none\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: learn_more and onRowClick are not handler keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        or key in (\"learn_more\", \"onRowClick\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: the resolved-prop check is skipped",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                        _check_resolved_prop(kind, pk, pv, node_props)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: rows that carry handlers may be an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                raise _Reject(f\"{key} holds a row that is not an object\")",
+    "replace": "                continue",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: a slot inside a handler-carrying row is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                _check_resolved_prop(\"\", k, v, frozenset())",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: a node-valued prop may be a lone expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if key in node_props:\n        _check_node_slot(key, value)",
+    "replace": "    if False:\n        _check_node_slot(key, value)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: a node-valued prop refuses any brace, not just a lone expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "text.startswith(\"{\") and text.endswith(\"}\")",
+    "replace": "\"{\" in text",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_literal_handlers_and_data_rows_still_pass"
+    ]
+  },
+  {
+    "label": "SEC F1: a node's props may be an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if props is not None and not isinstance(props, dict):\n                raise _Reject(\"a node's props are not an object\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: an audit-log row in state is data again",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(kind, pk) in _DATA_ACTION_ROWS and not in_state,",
+    "replace": "(kind, pk) in _DATA_ACTION_ROWS,",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: state may hold an allowed action",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if in_state:\n                raise _Reject(\"state holds an action\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F3: a strict body may repeat a key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    raw = _parse(body, unique=profile.strict)",
+    "replace": "    raw = _parse(body)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f3_a_repeated_key_drops_a_ripple_card"
+    ]
+  },
+  {
+    "label": "SEC F7: a follow-up's event is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                if (props or {}).get(\"event\", _FOLLOW_UP_EVENT) not in host_events:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f7_a_follow_up_emits_only_a_declared_host_event"
+    ]
+  },
+  {
+    "label": "SEC F7: an unset follow-up event is taken as declared",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(props or {}).get(\"event\", _FOLLOW_UP_EVENT)",
+    "replace": "(props or {}).get(\"event\", (events or [None])[0])",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f7_a_follow_up_emits_only_a_declared_host_event"
+    ]
+  },
+  {
+    "label": "SEC F7: a follow-up with its own on_submit is still held to an event",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(\"event\" in (props or {}) or \"on_submit\" not in value)",
+    "replace": "True",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f7_a_follow_up_with_a_declared_event_or_its_own_submit_passes"
+    ]
+  },
+  {
+    "label": "entity-detail drops back to a one-line summary with no props",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            \"tabs\",\n            \"entity-detail\",\n",
+    "replace": "            \"tabs\",\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "a composite whose item shapes nothing shows is listed with props again",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            \"callout\",\n        }",
+    "replace": "            \"callout\",\n            \"analytics-dashboard\",\n        }",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "the ripple width rule goes back to a 300px card",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"   - The card is about 720px wide on a desktop and must still read on a 360px \"",
+    "replace": "    \"   - The card is about 300px wide on a desktop and must still read on a 360px \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "the example card is no longer carried in the rules",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    + json.dumps(_RIPPLE_EXAMPLE, separators=(\",\", \":\")),",
+    "replace": "    + \"{}\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "the match-the-card rule is dropped",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"   - Match the card to the answer. When a data widget fits, the card is that one \"",
+    "replace": "    \"   - When a data widget fits, the card is that one \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "the rules name a badge variant the manifest does not have",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"badge variants (success, warning, destructive, secondary, outline, default).\",",
+    "replace": "    \"badge variants (success, warning, destructive, info, outline, default).\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_name_only_real_badge_variants"
+    ]
+  },
+  {
+    "label": "the example card uses a widget the ripple profile refuses",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        \"type\": \"entity-detail\",\n        \"props\": {\n            \"eyebrow\": \"Project status\",",
+    "replace": "        \"type\": \"embed\",\n        \"props\": {\n            \"eyebrow\": \"Project status\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_example_card_passes_the_ripple_checks_whole"
+    ]
+  },
+  {
+    "label": "the example card carries a full https link",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                {\"label\": \"Team\", \"value\": \"6 people\"},",
+    "replace": "                {\"label\": \"Team\", \"value\": \"6 people\", \"href\": \"https://cdn.example.com/t\"},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_example_card_passes_the_ripple_checks_whole"
+    ]
+  },
+  {
+    "label": "the example's data rows carry a type that names a widget",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                                            \"title\": \"Mobile beta\",\n                                            \"type\": \"warning\",",
+    "replace": "                                            \"title\": \"Mobile beta\",\n                                            \"type\": \"text\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_example_card_passes_the_ripple_checks_whole"
+    ]
+  },
+  {
+    "label": "the rule against widget-named data row types is dropped",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    'color, rating, icon): call that field \"kind\".',",
+    "replace": "    'color, rating, icon).',",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "ripple cards may navigate",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {\"flow\", \"branch\", \"validate\", \"toast\"}",
+    "replace": "RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {\"flow\", \"branch\", \"validate\", \"toast\", \"navigate\"}",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_data_widgets_keep_actions_and_urls_in_check"
+    ]
+  },
+  {
+    "label": "an actions prop is no longer read as a handler",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        or key == \"actions\"\n",
+    "replace": "        or key == \"actionz\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_data_widgets_keep_actions_and_urls_in_check"
+    ]
+  },
+  {
+    "label": "card URLs may name an outside host",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    url_hosts: frozenset[str] = frozenset()\n",
+    "replace": "    url_hosts: frozenset[str] = frozenset({\"cdn.example.com\"})\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_data_widgets_keep_actions_and_urls_in_check"
+    ]
+  },
+  {
+    "label": "the ripple rules leak into the pawbar cards paragraph",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        \"nothing else.\",\n    ]\n    if has_catalog:",
+    "replace": "        \"nothing else.\",\n        *_RIPPLE_RULES[:2],\n    ]\n    if has_catalog:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
+    ]
+  },
+  {
+    "label": "frame_for forgets the demo frame, so the ripple landing refuses its own chips",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if ui_profile(site, settings) is RIPPLE_PROFILE:\n        return FRAME_DEMO\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_an_ops_site_on_the_ripple_profile_gets_the_demo_frame"
+    ]
+  },
+  {
+    "label": "the demo frame follows a stored ripple profile off the ops list",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if ui_profile(site, settings) is RIPPLE_PROFILE:\n",
+    "replace": "    if getattr(site, \"concierge_ui_profile\", None) == \"ripple\":\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_stored_ripple_profile_off_the_ops_list_gets_the_normal_frame"
+    ]
+  },
+  {
+    "label": "every ops site gets the demo frame, pawbar profile or not",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if ui_profile(site, settings) is RIPPLE_PROFILE:\n",
+    "replace": "    if is_ops_site(site, settings):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
+    ]
+  },
+  {
+    "label": "a pawbar frame changes by one character",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return f\"{frame[:end]} {_ACTION_RULE}{frame[end:]}\"",
+    "replace": "    return f\"{frame[:end]}  {_ACTION_RULE}{frame[end:]}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
+    ]
+  },
+  {
+    "label": "the turn picks the frame from the switches alone",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        frame = frame_for(site, settings)\n",
+    "replace": "        frame = _FRAMES[(allow_doc_code, lead_capture_on(site), page_actions_on(site))]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_turn_ignores_a_stored_ripple_profile_off_the_ops_list"
+    ]
+  },
+  {
+    "label": "the demo frame keeps the site frame's answer-only-about-this-site rule 1",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    (_RULE_1, _RULE_1_DEMO),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_demo_frame_swaps_the_opening_and_rules_1_2_6_and_keeps_3_to_5"
+    ]
+  },
+  {
+    "label": "the demo frame rewrites rule 5 too",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    (_RULE_6, _RULE_6_DEMO),\n",
+    "replace": "    (_RULE_6, _RULE_6_DEMO),\n    (_RULE_5, \"or to the demo.\\n\"),\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_demo_frame_swaps_the_opening_and_rules_1_2_6_and_keeps_3_to_5"
+    ]
+  },
+  {
+    "label": "the demo rule 2 drops the no-advice line",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"card, and never write long prose (essays, stories, homework). Never give \"\n    \"medical, legal or financial advice: a health or money card shows sample data \"\n",
+    "replace": "    \"card, and never write long prose (essays, stories, homework). A health \"\n    \"or money card shows sample data \"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_demo_frame_swaps_the_opening_and_rules_1_2_6_and_keeps_3_to_5"
+    ]
+  },
+  {
+    "label": "SEC-2b B: split start/end are not node slots",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"split\": frozenset({\"start\", \"end\"}),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: master-detail detail, kanban cardTemplate, virtual-list item are not node slots",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"master-detail\": frozenset({\"detail\"}),\n    \"kanban\": frozenset({\"cardTemplate\"}),\n    \"virtual-list\": frozenset({\"item\"}),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: tabs panels are not node rows",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    (\"tabs\", \"panels\"): \"\",\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: a grid column's formatter is not a node slot",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    (\"data-grid\", \"columns\"): \"formatter\",\n    (\"tree-table\", \"columns\"): \"formatter\",\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: the manifest's Array<{ key?: UISpec }> rows are not read (settings-list control)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "and (m := re.search(r\"(\\w+)\\??:\\s*UISpec\", str(spec[\"type\"])))",
+    "replace": "and (m := re.search(r\"(\\w+)\\??:\\s*NotAType\", str(spec[\"type\"])))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_built_by_set_pieces_never_reaches_a_slot"
+    ]
+  },
+  {
+    "label": "SEC-2b B: a list of node rows may be an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            raise _Reject(f\"{key} is not a literal list of rows\")\n",
+    "replace": "            value = []\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_list_of_node_rows_is_literal"
+    ]
+  },
+  {
+    "label": "SEC-2b B: a node row that is not an object is let through",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                    raise _Reject(f\"{key} holds a node row that is not an object\")\n",
+    "replace": "                    continue\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_list_of_node_rows_is_literal"
+    ]
+  },
+  {
+    "label": "SEC-2b B: the slot inside a node row is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                row = row.get(slot)\n",
+    "replace": "                row = None\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: a node slot may be a lone expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if text.startswith(\"{\") and text.endswith(\"}\"):\n        raise _Reject(f\"an expression in {key}, where a node is read\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_built_by_set_pieces_never_reaches_a_slot"
+    ]
+  },
+  {
+    "label": "SEC-2b B: an object in a node slot need not be a Ripple widget",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(kind, str) or kind not in _RIPPLE_TYPES:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b D: NaN / Infinity parse",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            parse_constant=_no_constant,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_d_a_non_finite_number_drops_the_card"
+    ]
+  },
+  {
+    "label": "SEC-2b D: a float too big to hold parses as inf",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            parse_float=_finite,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_d_a_non_finite_number_drops_the_card"
+    ]
+  },
+  {
+    "label": "SEC-2b A: a ripple body is parsed untrimmed, so a trailing BOM skips every ripple check",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            body.strip(_JS_SPACE),\n",
+    "replace": "            body,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_a_a_trailing_trimmed_character_does_not_skip_the_ripple_checks"
+    ]
+  },
+  {
+    "label": "FL-1: a ui with flow fields is no longer a step root",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    flow = any(field in ui for field in _FLOW_FIELDS)\n",
+    "replace": "    flow = False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_a_flow_card_passes_ripple_whole_and_not_pawbar"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: a ui with flow fields is no longer a step root",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    flow = any(field in ui for field in _FLOW_FIELDS)\n",
+    "replace": "    flow = False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_card_is_never_flagged_early_and_ends_final"
+    ]
+  },
+  {
+    "label": "FL-1: a step may carry any key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(step, dict) or not step.keys() <= FLOW_STEP_KEYS:\n",
+    "replace": "        if not isinstance(step, dict):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: a step may carry any key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(step, dict) or not step.keys() <= FLOW_STEP_KEYS:\n",
+    "replace": "        if not isinstance(step, dict):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: data joins the step keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        \"form_fields\",\n    }\n)",
+    "replace": "        \"form_fields\",\n        \"data\",\n    }\n)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a step needs no ui node",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(step.get(\"ui\"), dict):\n            raise _Reject(\"a flow step with no ui node\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a step's ui is walked as data, not as a root node",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False, False))",
+    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False, False))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: step values other than ui skip the walk (no text checks)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
+    "replace": "            else:\n                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: step values other than ui skip the walk",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
+    "replace": "            else:\n                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: chain is not followed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                steps.append((v, level + 1))",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: chain is not followed (step 3 goes unchecked)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                steps.append((v, level + 1))",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_full_url_in_step_3_is_rejected_before_the_fence_closes",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: chain_map values are not followed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                steps.extend((branch, level + 2) for branch in v.values())",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a card may hold 9 steps",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "MAX_FLOW_STEPS = 8\n",
+    "replace": "MAX_FLOW_STEPS = 9\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: each step gets a fresh node budget",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            nodes += 1\n",
+    "replace": "            nodes = 1 if key == \"ui\" and depth == 1 else nodes + 1\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: onComplete is never checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if \"onComplete\" in step:\n            _check_on_complete(step[\"onComplete\"])\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: onComplete may be any kind",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and value.get(\"kind\") == \"chat\"\n",
+    "replace": "        and isinstance(value.get(\"kind\"), str)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: onComplete may be any kind",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and value.get(\"kind\") == \"chat\"\n",
+    "replace": "        and isinstance(value.get(\"kind\"), str)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: a chat onComplete may carry more keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and value.keys() <= {\"kind\", \"message\"}\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a chat onComplete message is uncapped",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and len(value[\"message\"]) <= ASK_MAX\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: flow emits pass in every card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    events = [*events, *FLOW_EVENTS] if flow else events\n",
+    "replace": "    events = [*events, *FLOW_EVENTS]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: flow emits pass in every card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    events = [*events, *FLOW_EVENTS] if flow else events\n",
+    "replace": "    events = [*events, *FLOW_EVENTS]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: flow cards get no flow emits",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    events = [*events, *FLOW_EVENTS] if flow else events\n",
+    "replace": "    events = events\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_a_flow_card_passes_ripple_whole_and_not_pawbar"
+    ]
+  },
+  {
+    "label": "FL-1: _hydrate reads a flow root's missing type",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if out.get(\"type\") == _PRODUCT_CARD:",
+    "replace": "    if out[\"type\"] == _PRODUCT_CARD:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_a_flow_card_passes_ripple_whole_and_not_pawbar"
+    ]
+  },
+  {
+    "label": "FL-1: a node's own on_* handlers may not ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            _check_events(value, events, allowed, ask=True)",
+    "replace": "            _check_events(value, events, allowed, ask=False)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: the pawbar walk lets an on_* handler ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    allowed: frozenset[str] = SPEC_ACTIONS,\n    ask: bool = False,\n) -> None:",
+    "replace": "    allowed: frozenset[str] = SPEC_ACTIONS,\n    ask: bool = True,\n) -> None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: ask text may run to 5000 characters",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_MAX = 500\n",
+    "replace": "ASK_MAX = 5000\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: ask text may run to 5000 characters",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_MAX = 500\n",
+    "replace": "ASK_MAX = 5000\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: an ask value may carry more than text",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                and said.keys() == {\"text\"}\n",
+    "replace": "                and \"text\" in said\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: the ask cap is exclusive",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                and len(said[\"text\"]) <= ASK_MAX\n",
+    "replace": "                and len(said[\"text\"]) < ASK_MAX\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: the step cap is exclusive",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if count > MAX_FLOW_STEPS:\n",
+    "replace": "        if count >= MAX_FLOW_STEPS:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_the_step_and_node_bounds_are_inclusive"
+    ]
+  },
+  {
+    "label": "FL-1 ask: on_focus may ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
+    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\", \"on_focus\"})",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 ask streamed: on_focus may ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
+    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\", \"on_focus\"})",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1 ask: a composite's actions list may not ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
+    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\"})",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1 ask streamed: a composite's actions list may not ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
+    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\"})",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_ask_on_a_visitor_action_ends_final"
+    ]
+  },
+  {
+    "label": "FL-1 ask: on_select may not ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
+    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"actions\"})",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1 ask: on_submit may not ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
+    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_select\", \"actions\"})",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1 ask: any on_* handler may ask (the old rule)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return key in ASK_HANDLERS\n",
+    "replace": "    return key.startswith(\"on_\") or key == \"actions\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 ask: any handler key may ask (finishActions too)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return key in ASK_HANDLERS\n",
+    "replace": "    return True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 ask streamed: any handler key may ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return key in ASK_HANDLERS\n",
+    "replace": "    return True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1 ask: a nested handler key re-decides (actions inside on_focus)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if ask is not None or not _is_handler_key(key):\n",
+    "replace": "    if not _is_handler_key(key) or (ask is True and key not in ASK_HANDLERS):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 ask: a node in state or inside a passive handler may ask from its own handlers",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            base = None if ask is None else False\n",
+    "replace": "            base = None\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_a_node_inside_a_passive_handler_may_not_ask"
+    ]
+  },
+  {
+    "label": "FL-1 ask: step values other than ui start undecided",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
+    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False, False))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 ask: an action outside any handler may ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            _check_actions(value, events, allowed, ask=ask is True)",
+    "replace": "            _check_actions(value, events, allowed, ask=ask is not False)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 ask: no action in the walk may ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            _check_actions(value, events, allowed, ask=ask is True)",
+    "replace": "            _check_actions(value, events, allowed, ask=False)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1 ask: node props never decide",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                                _ask_from(base, pk),\n",
+    "replace": "                                base,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1 ask: node keys never decide",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                            _ask_from(base, k),\n",
+    "replace": "                            base,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1 ask: nested dicts never decide (actions[].actions)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                _ask_from(ask, k),\n",
+    "replace": "                ask,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1 ask: flow step ui starts decided-no",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False, False))",
+    "replace": "                out.append((v, level + 1, 1, k, False, False, True, False, False, False))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "SEC F2: flow.submit may come from any handler",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if action[\"action\"] == \"emit\" and action.get(\"target\") == FLOW_SUBMIT and not ask:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f2_flow_submit_only_from_an_explicit_visitor_action"
+    ]
+  },
+  {
+    "label": "SEC F2: flow.submit is refused even on a click",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "action.get(\"target\") == FLOW_SUBMIT and not ask:",
+    "replace": "action.get(\"target\") == FLOW_SUBMIT:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f2_flow_submit_passes_on_a_click_a_submit_or_a_button_list"
+    ]
+  },
+  {
+    "label": "SEC F2: every flow emit is gated, flow.next on focus included",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "action.get(\"target\") == FLOW_SUBMIT and not ask:",
+    "replace": "action.get(\"target\") in FLOW_EVENTS and not ask:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f2_flow_submit_passes_on_a_click_a_submit_or_a_button_list"
+    ]
+  },
+  {
+    "label": "SEC F4: the ask text may hold an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                and \"{\" not in said[\"text\"]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f4_the_ask_text_and_the_chat_message_are_plain_text"
+    ]
+  },
+  {
+    "label": "SEC F4: the onComplete message may hold an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and \"{\" not in value[\"message\"]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f4_the_ask_text_and_the_chat_message_are_plain_text"
+    ]
+  },
+  {
+    "label": "SEC F5: an onComplete off a step passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            raise _Reject(\"an onComplete off a flow step\")",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f5_an_on_complete_off_a_step_is_refused"
+    ]
+  },
+  {
+    "label": "SEC F5: an onComplete in a node's props passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if \"onComplete\" in value or \"onComplete\" in (",
+    "replace": "        if \"onComplete\" in value or \"_none\" in (",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f5_an_on_complete_off_a_step_is_refused"
+    ]
+  },
+  {
+    "label": "SEC F6: has_lead_form walks only the root's children",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            stack = [entry[0] for entry in _flow_steps(ui) if entry[3] == \"ui\"]",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f6_a_lead_form_in_a_flow_step_is_the_lead_card"
+    ]
+  },
+  {
+    "label": "DW-9: page chrome is offered and accepted on ripple",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    - RIPPLE_DEFERRED\n    - RIPPLE_CHROME,",
+    "replace": "    - RIPPLE_DEFERRED,",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_page_chrome_is_refused_and_unlisted_on_ripple"
+    ]
+  },
+  {
+    "label": "DW-9: comparison-layout items lose their handler rows",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if \"EventAction\" in str(spec.get(\"type\", \"\"))\n)\n# A follow-up",
+    "replace": "    if \"EventAction\" in str(spec.get(\"type\", \"\")) and w[\"type\"] != \"comparison-layout\"\n)\n# A follow-up",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "DW-9: data widget lines print no types",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        else _widget_line(w, typed=True, shown=profile.typed[w[\"type\"]])",
+    "replace": "        else _widget_line(w)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props"
+    ]
+  },
+  {
+    "label": "DW-9: every detailed line is typed (pawbar too)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        else _widget_line(w)\n        for w in profile.manifest",
+    "replace": "        else _widget_line(w, typed=True)\n        for w in profile.manifest",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
+    ]
+  },
+  {
+    "label": "DW-9: a typed line lists every prop (booking, menu-order, exec-dashboard)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if (shown is None or n in shown) and not",
+    "replace": "            if True and not",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props"
+    ]
+  },
+  {
+    "label": "DW-9: typed lines repeat the props the rules teach once",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": " and not (typed and n in _COMMON_PROPS)",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props"
+    ]
+  },
+  {
+    "label": "DW-9: types are not capped",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if len(text) > _TYPE_CHARS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_typed_line_caps_each_type"
+    ]
+  },
+  {
+    "label": "DW-9: the rules drop the menu-order mapping",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"is an itinerary. A menu or an order is a menu-order: items by product_id from the \"",
+    "replace": "\"is an itinerary. A menu or an order is a table of items by product_id from the \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_point_each_answer_at_its_data_widget"
+    ]
+  },
+  {
+    "label": "DW-9: the rules let the model write the server-wired handlers",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"number). Never write on_checkout or on_book, or an image. \"",
+    "replace": "\"number). \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_point_each_answer_at_its_data_widget"
+    ]
+  },
+  {
+    "label": "DW-10: a model-written handler on menu-order or booking passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if kind in SERVER_WIRED and any(map(_is_handler_key, [*value, *(props or ())])):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_model_written_handler_on_a_server_wired_widget_is_refused"
+    ]
+  },
+  {
+    "label": "DW-10: the ripple profile loses the book host event",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "host_events=(*HOST_EVENTS, \"book\"),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_book_only_ever_comes_from_the_server_attached_slot",
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_booking_gets_services_days_and_the_book_event"
+    ]
+  },
+  {
+    "label": "DW-10: handlers are wired with no store",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            wired\n            and store is not None\n",
+    "replace": "            wired\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_each_data_widget_card_passes_ripple_and_not_pawbar"
+    ]
+  },
+  {
+    "label": "DW-10: handlers are wired on a widget that cannot fire",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "and _usable(out[\"props\"])",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_with_no_slots_a_booking_says_times_are_unavailable",
+      "tests/cloud/test_paw_bar_store_hydration.py::test_an_item_without_a_product_id_keeps_the_menu_display_only"
+    ]
+  },
+  {
+    "label": "DW-10: the model's item fields win over the store's",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "out.append({**mine, **{k: copy.deepcopy(product[k]) for k in keys if k in product}})",
+    "replace": "out.append({**{k: copy.deepcopy(product[k]) for k in keys if k in product}, **item})",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_menu_order_is_filled_from_the_store_and_wired_to_checkout"
+    ]
+  },
+  {
+    "label": "DW-10: an unknown product id is kept",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if pid in seen or product is None:",
+    "replace": "if pid in seen:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_an_unknown_or_repeated_product_drops_that_item_not_the_card"
+    ]
+  },
+  {
+    "label": "DW-10: a repeated product id is kept",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if pid in seen or product is None:",
+    "replace": "if product is None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_an_unknown_or_repeated_product_drops_that_item_not_the_card"
+    ]
+  },
+  {
+    "label": "DW-10: with the menu down the model's price stays",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "out.append({k: v for k, v in item.items() if k not in (\"price\", \"image\", \"groups\")})",
+    "replace": "out.append(item)",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_with_the_menu_down_a_menu_order_is_display_only_without_model_prices"
+    ]
+  },
+  {
+    "label": "DW-10: checkout with an item the store did not fill",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "return out, filled and bool(out) and products is not None",
+    "replace": "return out, bool(out) and products is not None",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_an_item_without_a_product_id_keeps_the_menu_display_only"
+    ]
+  },
+  {
+    "label": "DW-10: a model-written checkout survives with no store",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "props.pop(\"checkout\", None)\n    if store is None:",
+    "replace": "if store is None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_with_no_store_a_menu_order_never_checks_out"
+    ]
+  },
+  {
+    "label": "DW-10: a model-written booking confirmation survives",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "props.pop(\"confirmed\", None)",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_booking_gets_services_days_and_the_book_event"
+    ]
+  },
+  {
+    "label": "DW-10: a booking with no slots gets no notice",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "props[\"notice\"] = dict(STORE_DOWN_NOTICE)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_with_no_slots_a_booking_says_times_are_unavailable"
+    ]
+  },
+  {
+    "label": "DW-10: comparison items take every store field",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "keys = _STORE_ITEM_KEYS if menu else (\"name\", \"price\", \"image\")",
+    "replace": "keys = _STORE_ITEM_KEYS",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_comparison_item_with_a_product_id_takes_name_price_and_photo"
+    ]
+  },
+  {
+    "label": "DW-10: store widgets are never filled",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if profile.strict:\n            ui = _fill_store(ui, storefront, profile)",
+    "replace": "if False:\n            ui = _fill_store(ui, storefront, profile)",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_menu_order_is_filled_from_the_store_and_wired_to_checkout",
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_store_widget_nested_in_a_flow_step_or_child_is_filled_too"
+    ]
+  },
+  {
+    "label": "DW-10: a photo from any host",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if \"@\" in parts.netloc or parts.hostname not in (_IMAGE_HOSTS | {host}):",
+    "replace": "if \"@\" in parts.netloc:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_photo_is_https_on_the_store_host_or_unsplash_and_text_is_plain"
+    ]
+  },
+  {
+    "label": "DW-10: a plain-http photo",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if not value.startswith(\"https://\") or _URL_BAD & set(value):",
+    "replace": "if not value.startswith((\"https://\", \"http://\")):",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_photo_is_https_on_the_store_host_or_unsplash_and_text_is_plain"
+    ]
+  },
+  {
+    "label": "DW-10: store text keeps a link",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "        _check_text(text, frozenset())\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_photo_is_https_on_the_store_host_or_unsplash_and_text_is_plain"
+    ]
+  },
+  {
+    "label": "DW-10: store text keeps a brace",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if any(c in text for c in \"{}`\"):",
+    "replace": "if any(c in text for c in \"`\"):",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_photo_is_https_on_the_store_host_or_unsplash_and_text_is_plain"
+    ]
+  },
+  {
+    "label": "DW-10: an unavailable product is listed",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if not isinstance(p, dict) or p.get(\"available\") is False:",
+    "replace": "if not isinstance(p, dict):",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_the_client_reads_the_menu_services_and_seven_days_of_slots"
+    ]
+  },
+  {
+    "label": "DW-10: the pinned fetch takes any content type",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "        allowed_content_types=(\"application/json\",),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_production_reads_go_through_the_pinned_fetch_and_refuse_loopback"
+    ]
+  },
+  {
+    "label": "DW-10: a store read has no time budget",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "return await asyncio.wait_for(fetch(base_url + path), left)",
+    "replace": "return await fetch(base_url + path)",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_slow_store_is_cut_off_at_the_budget"
+    ]
+  },
+  {
+    "label": "DW-10: the store is never cached",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if hit is not None and hit[0] > now:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_the_store_is_cached_per_site_for_a_minute"
+    ]
+  },
+  {
+    "label": "DW-10: the store is read off the ripple profile",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "if not isinstance(url, str) or not url or ui_profile(site, settings) is not RIPPLE_PROFILE:",
+    "replace": "if not isinstance(url, str) or not url:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_the_store_is_read_only_for_an_ops_site_on_the_ripple_profile"
+    ]
+  },
+  {
+    "label": "DW-10: a product name can close the store-menu block",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "page-tools|store-menu|page)",
+    "replace": "page-tools|page)",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_the_store_menu_block_lists_ids_prices_and_kinds_and_no_photos"
+    ]
+  },
+  {
+    "label": "DW-10: the rules stop pointing orders at the store menu",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"is an itinerary. A menu or an order is a menu-order: items by product_id from the \"\n    \"store-menu block (and name),",
+    "replace": "\"is an itinerary. A menu or an order is a menu-order: items by product_id \"\n    \"(and name),",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_build_prompt_puts_the_store_menu_after_the_catalog"
+    ]
+  },
+  {
+    "label": "DW-10: a turn's prompt has no store menu",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            profile=profile,\n            storefront=storefront,\n        )\n        model = _build_model",
+    "replace": "            profile=profile,\n        )\n        model = _build_model",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_ripple_turn_streams_a_menu_order_filled_from_the_store"
+    ]
+  },
+  {
+    "label": "DW-10: a turn's cards are not filled from the store",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                stream_cards=profile.name == \"ripple\",\n                storefront=storefront,\n",
+    "replace": "                stream_cards=profile.name == \"ripple\",\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_ripple_turn_streams_a_menu_order_filled_from_the_store"
+    ]
+  },
+  {
+    "label": "DW-10: a lookup-hydrated card drops the store",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                items,\n                verbs=self._verbs,\n                lead_capture=self._lead_capture,\n                profile=self._profile,\n                storefront=self._storefront,\n",
+    "replace": "                items,\n                verbs=self._verbs,\n                lead_capture=self._lead_capture,\n                profile=self._profile,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_ripple_turn_streams_a_menu_order_filled_from_the_store"
+    ]
+  },
+  {
+    "label": "DW-10: a fed card drops the store",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                    self._catalog,\n                    verbs=self._verbs,\n                    lead_capture=self._lead_capture,\n                    profile=self._profile,\n                    storefront=self._storefront,\n",
+    "replace": "                    self._catalog,\n                    verbs=self._verbs,\n                    lead_capture=self._lead_capture,\n                    profile=self._profile,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_streamed_store_card_passes_the_partial_checks_and_finishes_filled"
+    ]
+  },
+  {
+    "label": "DW-10: a store URL on a pawbar ops site",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "if not ops or profile != \"ripple\":",
+    "replace": "if not ops:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_only_an_ops_site_on_the_ripple_profile_may_set_a_store"
+    ]
+  },
+  {
+    "label": "DW-10: a store URL off the ops list",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "if not ops or profile != \"ripple\":",
+    "replace": "if profile != \"ripple\":",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_only_an_ops_site_on_the_ripple_profile_may_set_a_store"
+    ]
+  },
+  {
+    "label": "DW-10: a store URL to an internal host",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    url = validate_external_url_strict(value.strip())\n",
+    "replace": "    url = value.strip()\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_store_url_is_https_on_a_public_host"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a repair may insert 5 closers",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "MAX_REPAIR_CLOSERS = 4\n",
+    "replace": "MAX_REPAIR_CLOSERS = 5\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ui_brace_and_the_end_closers_count_together"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a repair may insert only 3 closers",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "MAX_REPAIR_CLOSERS = 4\n",
+    "replace": "MAX_REPAIR_CLOSERS = 3\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ui_brace_and_the_end_closers_count_together"
+    ]
+  },
+  {
+    "label": "JSON-FIX: the closer limit is not applied",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if 0 < added <= MAX_REPAIR_CLOSERS]",
+    "replace": "if 0 < added]",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ui_brace_and_the_end_closers_count_together"
+    ]
+  },
+  {
+    "label": "JSON-FIX: pawbar repairs too",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not profile.strict or len(body) > profile.max_chars:\n",
+    "replace": "    if len(body) > profile.max_chars:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_pawbar_never_repairs_a_body"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a body past the size bound is repaired",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not profile.strict or len(body) > profile.max_chars:\n",
+    "replace": "    if not profile.strict:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_body_past_the_size_bound_is_not_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a legacy (unchecked) card is repaired",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if fixed is not None and _is_spec(_parse(fixed)):\n",
+    "replace": "        if fixed is not None and _parse(fixed) is not None:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_legacy_card_is_never_repaired",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_one_surplus_closer_before_a_lone_state_is_dropped"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a repaired body skips the repeated-key refusal",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "body, raw = fixed, _parse(fixed, unique=profile.strict)",
+    "replace": "body, raw = fixed, _parse(fixed)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_repaired_body_still_may_not_repeat_a_key"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: brackets inside strings count",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_TOKEN = re.compile(r'[\"{}\\[\\]]')",
+    "replace": "_TOKEN = re.compile(r'[{}\\[\\]]')",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_brackets_and_escapes_inside_strings_are_not_closers",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: an escaped quote ends a string",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        j = m.end() + 1  # a backslash",
+    "replace": "        j = m.end()  # a backslash",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_brackets_and_escapes_inside_strings_are_not_closers"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: every closer is a brace",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "return \"\".join(_CLOSER[ch] for ch in reversed(opened))",
+    "replace": "return \"}\" * len(opened)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: closers in opening order",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_CLOSER[ch] for ch in reversed(opened)",
+    "replace": "_CLOSER[ch] for ch in opened",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: the ui cut drops the comma after it",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "fixed = head + text[pos:] + _closers(rest[0])",
+    "replace": "fixed = head + text[pos + 1 :] + _closers(rest[0])",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: the end closers win the tie over the ui cut",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "fixes.append((len(opened), 1, text + _closers(opened)))",
+    "replace": "fixes.append((len(opened), -1, text + _closers(opened)))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: the ui cut leaves the ui node open",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "head = text[:pos] + _closers(at[1:])",
+    "replace": "head = text[:pos] + _closers(at[2:])",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: has_lead_form reads no repaired body",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    raw = _parse(body)\n    if raw is None and (fixed := _repaired(body, profile)) is not None:\n        raw = _parse(fixed)\n",
+    "replace": "    raw = _parse(body)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_pawbar_never_repairs_a_body"
+    ]
+  },
+  {
+    "label": "JSON-FIX: the runner reads a repaired lead card as no lead card",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            self.lead_card = has_lead_form(body, self._profile)\n",
+    "replace": "            self.lead_card = has_lead_form(body)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_lead_card_missing_a_closer_is_the_lead_card"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the flow rule is dropped",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    '   - Flow cards: when the visitor wants to be guided (\"step by step\", \"ask me '\n",
+    "replace": "    '   - When the visitor wants to be guided (\"step by step\", \"ask me '\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the rule no longer says the browser appends the answers",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"{expressions}, at most 500 characters). The browser appends each answer to it as \"",
+    "replace": "\"{expressions}, at most 500 characters). Write each answer into it as \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the rule stops saying a set into state is lost",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "in the input's own props. Only what a button emits is collected (a set into \"\n    'state is lost): ",
+    "replace": "in the input's own props. Only what a button emits is collected (or what you \"\n    'set into state): ",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the rule names a step limit the validator does not have",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"most 8 steps, sharing the 400 nodes.",
+    "replace": "\"most 12 steps, sharing the 400 nodes.",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the flow example is not carried in its rule",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"(copy its shape): \" + json.dumps(_RIPPLE_FLOW_EXAMPLE, separators=(\",\", \":\")),",
+    "replace": "\"(copy its shape)\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the ask line is not carried in the rules",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "+ json.dumps(_RIPPLE_ASK, separators=(\",\", \":\"))\n",
+    "replace": "+ \"an ask\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the example's onComplete message templates the picks",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"message\": \"Plan a trip for me with these answers.\"",
+    "replace": "\"message\": \"Plan a {state.days}-day trip for me.\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the example's last step advances instead of submitting",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"target\": \"flow.submit\",\n                            \"value\": {\"selection\": {\"id\": \"3\", \"label\": \"3 days\"}},",
+    "replace": "\"target\": \"flow.next\",\n                            \"value\": {\"selection\": {\"id\": \"3\", \"label\": \"3 days\"}},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: two example steps share a flowId",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"flowId\": \"trip_days\",",
+    "replace": "\"flowId\": \"trip_style\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: an example pick emits no selection, so the runner records nothing",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"value\": {\"selection\": {\"id\": \"culture\", \"label\": \"Culture\"}},",
+    "replace": "\"value\": {},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the ask text carries an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"value\": {\"text\": \"Tell me more about the 5-day plan\"},",
+    "replace": "\"value\": {\"text\": \"Tell me more about {state.plan}\"},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ask_the_rules_show_passes_on_a_click_and_a_comparison_item"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the ask emits a host event the card does not declare",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"target\": \"ask\",\n    \"value\": {\"text\"",
+    "replace": "    \"target\": \"chat\",\n    \"value\": {\"text\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ask_the_rules_show_passes_on_a_click_and_a_comparison_item"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the allowed-actions rule forgets ask and the flow verbs",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"(steps run in order) and branch (if, then, else), and emit of add_to_cart, \"\n    \"checkout, ask or, in a flow card, flow.next, flow.back and flow.submit (both \"\n    \"below). There is no api",
+    "replace": "\"(steps run in order) and branch (if, then, else), and emit of add_to_cart or \"\n    \"checkout. There is no api",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "SPEC-CRASH: an action named by an object or list reaches the allowed-set lookup",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(named, str) or named not in allowed:",
+    "replace": "        if not isinstance(action, dict) or named not in allowed:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_labelled_comparison_action_is_judged_not_crashed",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_odd_shapes_in_handler_slots_and_rows_never_raise"
+    ]
+  },
+  {
+    "label": "SPEC-CRASH: an unforeseen error in the strict walk escapes as an exception",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    except Exception as exc:  # noqa: BLE001 — an unforeseen shape is refused\n        _log_dropped(exc)\n        raise _Reject(\"a shape the checks could not read\") from exc\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_an_unexpected_error_in_the_strict_walk_is_a_logged_refusal"
+    ]
+  },
+  {
+    "label": "SPEC-CRASH: an unforeseen error in the strict walk is refused silently",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        _log_dropped(exc)\n        raise _Reject(\"a shape the checks could not read\") from exc\n",
+    "replace": "        raise _Reject(\"a shape the checks could not read\") from exc\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_an_unexpected_error_in_the_strict_walk_is_a_logged_refusal"
+    ]
+  },
+  {
+    "label": "SURPLUS: the surplus-closer fix is never tried",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    for fixed in [*_closer_fixes(text), _surplus_closer_fix(text)]:",
+    "replace": "    for fixed in [*_closer_fixes(text)]:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_flow_with_a_surplus_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_one_surplus_closer_before_state_is_dropped"
+    ]
+  },
+  {
+    "label": "SURPLUS: anything after the state object is allowed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if text[stop:].strip(_JSON_SPACE) != \"}\":\n        return None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_one_surplus_closer_before_a_lone_state_is_dropped"
+    ]
+  },
+  {
+    "label": "SURPLUS: the rest need not start with a state key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_STATE_TAIL.match(text, end)",
+    "replace": "re.compile(r'[^{]*(?=\\{)').match(text, end)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_one_surplus_closer_before_a_lone_state_is_dropped"
+    ]
+  },
+  {
+    "label": "SURPLUS: the surplus closer is kept and one is appended",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return text[: end - 1] + text[end:]\n",
+    "replace": "    return text + \"}\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_flow_with_a_surplus_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_one_surplus_closer_before_state_is_dropped"
+    ]
+  },
+  {
+    "label": "SURPLUS: the repaired body skips the strict checks",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        body, raw = fixed, _parse(fixed, unique=profile.strict)",
+    "replace": "        body, raw = fixed, _parse(fixed, unique=profile.strict)\n        if added <= 0:\n            return f\"{_FENCE}pawbar-card\\n{fixed}\\n{_FENCE}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_surplus_closer_repair_is_still_refused_for_anything_else",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_surplus_closer_repair_still_refuses_a_repeated_key"
+    ]
+  },
+  {
+    "label": "SURPLUS: the repaired body is parsed without the repeated-key check",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        body, raw = fixed, _parse(fixed, unique=profile.strict)",
+    "replace": "        body, raw = fixed, _parse(fixed, unique=added > 0 and profile.strict)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_surplus_closer_repair_still_refuses_a_repeated_key"
+    ]
+  },
+  {
+    "label": "SURPLUS: pawbar repairs too",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not profile.strict or len(body) > profile.max_chars:\n        return None\n    text = body.strip(_JS_SPACE)\n    for fixed in [*_closer_fixes(text), _surplus_closer_fix(text)]:",
+    "replace": "    text = body.strip(_JS_SPACE)\n    if not profile.strict and (fixed := _surplus_closer_fix(text)):\n        return fixed\n    if not profile.strict or len(body) > profile.max_chars:\n        return None\n    for fixed in [*_closer_fixes(text), _surplus_closer_fix(text)]:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_pawbar_never_drops_a_surplus_closer"
+    ]
+  }
+]

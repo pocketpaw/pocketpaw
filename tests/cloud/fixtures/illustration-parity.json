@@ -1,0 +1,214 @@
+{
+ "good": {
+  "svg": "<svg viewBox='0 0 100 100'><defs><linearGradient id='g'><stop offset='0' stop-color='red'/></linearGradient></defs><rect id='a' fill='url(#g)'><animateTransform attributeName='transform' type='rotate' from='0' to='360' dur='2s' repeatCount='indefinite'/></rect><use href='#a'/></svg>",
+  "ok": true
+ },
+ "xmlns_explicit": {
+  "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><circle r='4'/></svg>",
+  "ok": true
+ },
+ "harmless_filter": {
+  "svg": "<svg viewBox='0 0 100 100'><filter id='f'/><rect filter='url(#f)'/></svg>",
+  "ok": true
+ },
+ "class_attr": {
+  "svg": "<svg viewBox='0 0 100 100'><rect class='x'/></svg>",
+  "ok": true
+ },
+ "comment": {
+  "svg": "<svg viewBox='0 0 100 100'><!-- hi --><rect/></svg>",
+  "ok": true
+ },
+ "text_data_word": {
+  "svg": "<svg viewBox='0 0 100 100'><text>data: big javascript: talk</text></svg>",
+  "ok": true
+ },
+ "leading_digit_id": {
+  "svg": "<svg viewBox='0 0 100 100'><rect id='1a'/></svg>",
+  "ok": true
+ },
+ "id_with_dot": {
+  "svg": "<svg viewBox='0 0 100 100'><rect id='a.b'/></svg>",
+  "ok": false
+ },
+ "cdata": {
+  "svg": "<svg viewBox='0 0 100 100'><text><![CDATA[x]]></text></svg>",
+  "ok": false
+ },
+ "pi": {
+  "svg": "<svg viewBox='0 0 100 100'><?foo bar?><rect/></svg>",
+  "ok": false
+ },
+ "xml_decl": {
+  "svg": "<?xml version='1.0'?><svg viewBox='0 0 100 100'><rect/></svg>",
+  "ok": true
+ },
+ "bom": {
+  "svg": "﻿<svg viewBox='0 0 100 100'><rect/></svg>",
+  "ok": true
+ },
+ "backslash": {
+  "svg": "<svg viewBox='0 0 100 100'><rect fill='\\72 ed'/></svg>",
+  "ok": false
+ },
+ "upper_URL": {
+  "svg": "<svg viewBox='0 0 100 100'><defs><linearGradient id='g'><stop offset='0' stop-color='red'/></linearGradient></defs><rect fill='URL(#g)'/></svg>",
+  "ok": false
+ },
+ "url_space": {
+  "svg": "<svg viewBox='0 0 100 100'><defs><linearGradient id='g'><stop offset='0' stop-color='red'/></linearGradient></defs><rect fill='url( #g )'/></svg>",
+  "ok": false
+ },
+ "url_fallback": {
+  "svg": "<svg viewBox='0 0 100 100'><defs><linearGradient id='g'><stop offset='0' stop-color='red'/></linearGradient></defs><rect fill='url(#g) red'/></svg>",
+  "ok": false
+ },
+ "url_missing_id": {
+  "svg": "<svg viewBox='0 0 100 100'><rect fill='url(#zz)'/></svg>",
+  "ok": false
+ },
+ "url_external": {
+  "svg": "<svg viewBox='0 0 100 100'><rect fill='url(http://x/#a)'/></svg>",
+  "ok": false
+ },
+ "numref_url": {
+  "svg": "<svg viewBox='0 0 100 100'><rect fill='&#x75;rl(http://x)'/></svg>",
+  "ok": false
+ },
+ "numref_js": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><set attributeName='fill' to='&#x6a;avascript:x' dur='1s'/></rect></svg>",
+  "ok": false
+ },
+ "svg_prefix_root": {
+  "svg": "<svg:svg xmlns:svg='http://www.w3.org/2000/svg' viewBox='0 0 1 1'><svg:rect/></svg:svg>",
+  "ok": true
+ },
+ "xlink_declared": {
+  "svg": "<svg xmlns:xlink='http://www.w3.org/1999/xlink' viewBox='0 0 1 1'><rect id='a'/><use xlink:href='#a'/></svg>",
+  "ok": true
+ },
+ "xlink_undeclared": {
+  "svg": "<svg viewBox='0 0 100 100'><rect id='a'/><use xlink:href='#a'/></svg>",
+  "ok": false
+ },
+ "href_ws": {
+  "svg": "<svg viewBox='0 0 100 100'><rect id='a'/><use href=' #a'/></svg>",
+  "ok": false
+ },
+ "href_missing": {
+  "svg": "<svg viewBox='0 0 100 100'><use href='#nope'/></svg>",
+  "ok": false
+ },
+ "href_on_animate": {
+  "svg": "<svg viewBox='0 0 100 100'><rect id='a'/><animate href='#a' attributeName='x' to='1' dur='1s'/></svg>",
+  "ok": false
+ },
+ "attributeType": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><animate attributeType='XML' attributeName='x' to='1' dur='1s'/></rect></svg>",
+  "ok": false
+ },
+ "attrname_HREF": {
+  "svg": "<svg viewBox='0 0 100 100'><rect id='a'/><use href='#a'><set attributeName='HREF' to='#a' dur='1s'/></use></svg>",
+  "ok": false
+ },
+ "attrname_href": {
+  "svg": "<svg viewBox='0 0 100 100'><rect id='a'/><use href='#a'><set attributeName='href' to='javascript:x' dur='1s'/></use></svg>",
+  "ok": false
+ },
+ "begin_missing_id": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><animate attributeName='x' to='1' dur='1s' begin='zz.click'/></rect></svg>",
+  "ok": false
+ },
+ "begin_list": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><set attributeName='fill' to='red' dur='1s' begin='0s;1s;2s'/></rect></svg>",
+  "ok": true
+ },
+ "dur_short": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><animate attributeName='x' to='1' dur='0.4s'/></rect></svg>",
+  "ok": false
+ },
+ "repeat_big": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><animate attributeName='x' to='1' dur='1s' repeatCount='1001'/></rect></svg>",
+  "ok": false
+ },
+ "big_number": {
+  "svg": "<svg viewBox='0 0 100 100'><circle r='2000000'/></svg>",
+  "ok": false
+ },
+ "long_values": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><animate attributeName='x' values='1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1' dur='1s'/></rect></svg>",
+  "ok": false
+ },
+ "long_d": {
+  "svg": "<svg viewBox='0 0 100 100'><path d='M0 0 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1 L1 1'/></svg>",
+  "ok": false
+ },
+ "mask_cycle": {
+  "svg": "<svg viewBox='0 0 100 100'><mask id='m'><rect mask='url(#m)'/></mask><rect mask='url(#m)'/></svg>",
+  "ok": false
+ },
+ "nested_use": {
+  "svg": "<svg viewBox='0 0 100 100'><g id='a'><use href='#b'/></g><g id='b'/><use href='#a'/></svg>",
+  "ok": false
+ },
+ "uses_41": {
+  "svg": "<svg viewBox='0 0 100 100'><rect id='a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/><use href='#a'/></svg>",
+  "ok": false
+ },
+ "anims_40": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect></svg>",
+  "ok": true
+ },
+ "anims_41": {
+  "svg": "<svg viewBox='0 0 100 100'><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' from='0' to='1' dur='1s'/></rect><rect><animate attributeName='x' to='1' dur='1s'/></rect></svg>",
+  "ok": false
+ },
+ "style_el": {
+  "svg": "<svg viewBox='0 0 100 100'><style>rect{}</style><rect/></svg>",
+  "ok": false
+ },
+ "style_attr": {
+  "svg": "<svg viewBox='0 0 100 100'><rect style='fill:red'/></svg>",
+  "ok": false
+ },
+ "onload": {
+  "svg": "<svg viewBox='0 0 1 1' onload='x'><rect/></svg>",
+  "ok": false
+ },
+ "script": {
+  "svg": "<svg viewBox='0 0 100 100'><script>x</script></svg>",
+  "ok": false
+ },
+ "foreign": {
+  "svg": "<svg viewBox='0 0 100 100'><foreignObject/></svg>",
+  "ok": false
+ },
+ "image": {
+  "svg": "<svg viewBox='0 0 100 100'><image href='http://x/a.png'/></svg>",
+  "ok": false
+ },
+ "a_el": {
+  "svg": "<svg viewBox='0 0 100 100'><a href='#x'><rect/></a></svg>",
+  "ok": false
+ },
+ "doctype": {
+  "svg": "<!DOCTYPE svg><svg viewBox='0 0 100 100'><rect/></svg>",
+  "ok": false
+ },
+ "brace": {
+  "svg": "<svg viewBox='0 0 100 100'><text>{state.x}</text></svg>",
+  "ok": true
+ },
+ "root_not_svg": {
+  "svg": "<g><rect/></g>",
+  "ok": false
+ },
+ "other_ns": {
+  "svg": "<svg viewBox='0 0 1 1'><h:div xmlns:h='http://www.w3.org/1999/xhtml'/></svg>",
+  "ok": false
+ },
+ "dup_attr": {
+  "svg": "<svg viewBox='0 0 100 100'><rect x='1' x='2'/></svg>",
+  "ok": false
+ }
+}
