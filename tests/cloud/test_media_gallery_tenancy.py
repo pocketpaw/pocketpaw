@@ -193,3 +193,42 @@ async def test_an_upload_is_stamped_with_the_callers_workspace(router_module, mo
         f"the stored name carries no owner token: {name!r}"
     )
     assert storage.visible_to(name, WS_B) is False
+
+
+async def test_a_replacing_upload_removes_only_its_own_workspaces_old_file(
+    router_module, monkeypatch
+):
+    """The editor's Save re-renders the same timeline into the gallery. ``replaces``
+    deletes the previous render so the gallery holds one copy, and must never reach
+    a file another workspace owns. Mutation that must fail this: dropping the owner
+    check before the delete."""
+    deleted: list[str] = []
+
+    class _Stored:
+        size = 1
+
+    mine = f"{storage.owned_name_prefix(WS_A)}timeline.mp4"
+    theirs = f"{storage.owned_name_prefix(WS_B)}timeline.mp4"
+
+    class _Adapter:
+        async def exists(self, key: str) -> bool:
+            return storage.name_from_key(key) in (mine, theirs)
+
+        async def put(self, key: str, stream, mime: str):
+            return _Stored()
+
+        async def delete(self, key: str) -> None:
+            deleted.append(storage.name_from_key(key))
+
+    monkeypatch.setattr(storage, "get_adapter", lambda: _Adapter())
+
+    class _File:
+        filename = "timeline.mp4"
+
+        async def read(self) -> bytes:
+            return b"x"
+
+    await router_module.upload_media(file=_File(), workspace_id=WS_A, replaces=mine)
+    await router_module.upload_media(file=_File(), workspace_id=WS_A, replaces=theirs)
+
+    assert deleted == [mine]
