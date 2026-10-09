@@ -33,6 +33,7 @@ from tests.cloud.test_paw_bar_concierge_v2 import (  # noqa: F401 — fixtures
 )
 from tests.cloud.test_paw_bar_concierge_v2_degrade import _FailingModel
 from tests.cloud.test_paw_bar_concierge_v2_output import _splits
+from tests.cloud.test_paw_bar_ripple_profile import _FLOW_REFUSALS, TRIP_FLOW, _flow
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 _CODE_LINE = "I can't share code here."
@@ -584,3 +585,43 @@ async def test_a_pawbar_sites_event_stream_is_byte_for_byte_unchanged(
         + [_sse("stream_end", {"assistant_message_id": None, "cancelled": False})]
     )
     assert res.content == expected
+
+
+# --------------------------------------------------------------------------- #
+# Flow cards streamed: the same verdict as the whole card
+# --------------------------------------------------------------------------- #
+
+
+def test_a_streamed_flow_card_is_never_flagged_early_and_ends_final():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, PartialScan
+
+    for card in (TRIP_FLOW, _flow(8)):
+        for body in (json.dumps(card), json.dumps(card, indent=1)):
+            scan = PartialScan(RIPPLE_PROFILE)
+            assert not any(scan.feed(ch) for ch in body)
+            events = _events(list(_fence(body + "\n")))
+            assert events[-1] == ("card.final", {"card_id": "c1", "card": card})
+
+
+@pytest.mark.parametrize(("spec", "why"), _FLOW_REFUSALS, ids=[w for _, w in _FLOW_REFUSALS])
+def test_a_streamed_flow_refusal_matches_the_whole_card(spec, why):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    body = json.dumps(spec) + "\n"
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is None, why
+    rejected = ("card.rejected", {"card_id": "c1", "reason": "invalid"})
+    for chunks in ([_fence(body)], list(_fence(body))):
+        assert _events(chunks)[-1] == rejected, why
+
+
+def test_a_full_url_in_step_3_is_rejected_before_the_fence_closes():
+    from pocketpaw_ee.paw_bar.concierge_runtime import CardEvent
+
+    bad = "https://evil.example/x.png"
+    body = json.dumps(_flow(3, s3={"ui": {"type": "image", "props": {"src": bad}}})) + "\n"
+    cut = body.index(bad) + len(bad) + 1  # just past the URL's closing quote
+    f = _ripple_filter()
+    pieces = _feed_until(f, ["Here:\n```pawbar-card\n", *body[:cut]])
+    assert pieces[-1] == CardEvent("card.rejected", {"card_id": "c1", "reason": "invalid"})
+    tail = _feed_until(f, [body[cut:], "```\nAfter."]) + f.close()
+    assert tail == ["\nAfter."]

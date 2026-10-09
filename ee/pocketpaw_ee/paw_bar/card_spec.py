@@ -8,40 +8,37 @@
 #     depth 8 (root is 1), ``children`` / ``else_children`` lists, ``state`` an
 #     object, so a card the server passes is never one the client refuses;
 #   * every node ``type`` is a widget in the vendored pawbar-manifest.json (minus
-#     ``DEFERRED_WIDGETS``, which the server doesn't back yet), and every event
-#     action is one the manifest lists, with ``emit`` limited to the add_to_cart /
-#     checkout host events the widget declares;
-#   * a ``form``'s prefill ``value``s are strings of at most ``FORM_PREFILL_MAX``.
-#     A form whose verb is ``send_to_team`` (the lead card) passes only with
-#     ``lead_capture`` on (the site's ``concierge_lead_capture``), only with
-#     fields from ``LEAD_FIELDS`` and only with an email or phone field among
-#     them. The legacy ``{"kind": "form"}`` card is held to the same form rules;
+#     ``DEFERRED_WIDGETS``), every event action one the manifest lists, ``emit``
+#     only to the add_to_cart / checkout host events the widget declares;
+#   * form prefill ``value``s are strings of at most ``FORM_PREFILL_MAX``; a
+#     ``send_to_team`` form (the lead card; the legacy ``{"kind": "form"}`` too)
+#     passes only with ``lead_capture`` on, fields from ``LEAD_FIELDS`` and an
+#     email or phone field;
 #   * product data comes only from the site catalog: a ``product-card``'s ``ids``
-#     become ``items`` (name, price, currency, image, page url, description),
-#     unknown ids are dropped, an empty product-card is dropped. A legacy
-#     ``{"kind": "product"}`` card is repriced the same way; other legacy cards
-#     pass through. A body is parsed as paw-bar parses it (``_JS_SPACE`` trimmed);
-#     one that is not JSON, or holds NaN / Infinity, is dropped, never passed.
+#     become ``items``, unknown ids dropped, an empty product-card dropped; a
+#     legacy ``{"kind": "product"}`` card is repriced the same way, other legacy
+#     cards pass through. A body is parsed as paw-bar parses it (``_JS_SPACE``
+#     trimmed); one that is not JSON, or holds NaN / Infinity, is dropped.
 #
-# Every rule above reads a ``CardProfile``: the widget set, the action set and
-# the bounds. ``PAWBAR_PROFILE`` (the default everywhere) is the paw-bar widget's
-# set and bounds above. ``RIPPLE_PROFILE`` (a site whose ``concierge_ui_profile``
-# is "ripple") takes the full Ripple catalog from ripple-manifest.json (minus
-# ``RIPPLE_DEFERRED``), the same actions and host events, and 400 nodes / depth 16
-# / 64,000 chars. The full catalog keeps nodes, handlers and links in props, so
-# a ``strict`` profile (``_check_strict``) walks the whole ``ui`` AND ``state``,
-# iteratively and depth-capped: any node found in a prop (a popover's
-# ``content``) is a node, held to every node rule; any action, under a handler
-# key or named as a manifest action anywhere, must be an allowed one (audit-log
-# entries' own ``action`` field is data, in ``ui`` only; ``state`` holds no
-# action at all); a slot a widget resolves before it fires (``_check_resolved_prop``)
-# holds literal action objects, or a literal node where the engine draws one; a
-# ``follow-up``'s ``event`` is a declared host event; a form has no native submit
-# target; a URL key holds a same-site path or an https URL on ``url_hosts``
-# (none); no text holds a javascript: link; a repeated JSON key is refused.
-# ``PartialScan`` / ``scan_partial`` run the string checks and the repeated-key
-# check on a body still streaming, flagging only what the finished card is sure
-# to fail.
+# Every rule reads a ``CardProfile``. ``PAWBAR_PROFILE`` (the default) is the
+# paw-bar set and bounds above. ``RIPPLE_PROFILE`` (``concierge_ui_profile``
+# "ripple") takes ripple-manifest.json minus ``RIPPLE_DEFERRED``, 400 nodes / depth
+# 16 / 64,000 chars, and is ``strict``: ``_check_strict`` walks all of ``ui`` and
+# ``state`` iteratively, depth-capped. A node in a prop is a node; an action under
+# a handler key, or named anywhere, must be allowed (an audit-log's own entries
+# are data in ``ui`` only; ``state`` holds no action); a slot a widget resolves
+# before it fires (``_check_resolved_prop``) holds literal action objects, or a
+# literal node where the engine draws one; a ``follow-up``'s ``event`` is a declared
+# host event; a form has no submit target;
+# a URL key holds a same-site path or an https URL on ``url_hosts`` (none); no
+# text holds a javascript: link; a repeated JSON key is refused. Two shapes are
+# ripple-only. A ``ui`` carrying a flow field (Ripple's chain) is a flow: at most
+# ``MAX_FLOW_STEPS`` steps keyed from ``FLOW_STEP_KEYS``, each step's ``ui`` a root
+# node, one node budget for the card, ``emit`` to ``FLOW_EVENTS`` allowed,
+# ``onComplete`` only a chat message. And ``emit ask`` (``{text}``, at most
+# ``ASK_MAX``) sends a visitor message, from an ``on_*`` handler only.
+# ``PartialScan`` runs the string checks and the repeated-key check on a body
+# still streaming, flagging only what the finished card is sure to fail.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar; ripple-manifest.json
 # from @ripple-ui/svelte's dist/manifest.json minus examples (the ``.source`` file
@@ -265,6 +262,32 @@ _ABSOLUTE = ("http:", "https:", "data:", "blob:", "file:")
 # The keys inside a flow or branch whose lists are more actions (``on_*`` are
 # handler keys already).
 _STEP_KEYS: frozenset[str] = frozenset({"steps", "then", "else"})
+# A flow card (Ripple's chain, ripple only): a ``ui`` holding any of these is its
+# first step. A step may hold only ``FLOW_STEP_KEYS``; a card at most
+# ``MAX_FLOW_STEPS`` steps, counting every ``chain`` and ``chain_map`` value.
+_FLOW_FIELDS: tuple[str, ...] = ("chain", "chain_map", "flowId", "onComplete")
+FLOW_STEP_KEYS: frozenset[str] = frozenset(
+    {
+        "version",
+        "id",
+        "flowId",
+        "intent",
+        "title",
+        "description",
+        "ui",
+        "chain",
+        "chain_map",
+        "onComplete",
+        "form_fields",
+    }
+)
+MAX_FLOW_STEPS = 8
+# The emit targets that move a flow (Ripple's FlowRunner takes them); flow cards only.
+FLOW_EVENTS: tuple[str, ...] = ("flow.next", "flow.back", "flow.forward", "flow.submit")
+# The host event a click sends a visitor message with (ripple only), and the most
+# text it, or a flow's chat ``onComplete``, may send.
+ASK_EVENT = "ask"
+ASK_MAX = 500
 # CSS that loads something or runs script. Run on ``_css_text``.
 _CSS_LOADS: tuple[str, ...] = (
     "url(",
@@ -368,22 +391,38 @@ def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, 
 # --------------------------------------------------------------------------- #
 
 
-def _check_actions(value: Any, events: list[str], allowed: frozenset[str] = SPEC_ACTIONS) -> None:
+def _check_actions(
+    value: Any, events: list[str], allowed: frozenset[str] = SPEC_ACTIONS, ask: bool = False
+) -> None:
+    """``ask``: an ``emit`` to ``ASK_EVENT`` may pass too (ripple, in an ``on_*``
+    handler), its value exactly ``{"text": <at most ASK_MAX chars>}``."""
     for action in value if isinstance(value, list) else [value]:
         if not isinstance(action, dict) or action.get("action") not in allowed:
             raise _Reject("an event runs an action the bar does not honour")
         if action["action"] == "emit" and action.get("target") not in events:
-            raise _Reject("an emit names a host event this widget does not declare")
+            if not (ask and action.get("target") == ASK_EVENT):
+                raise _Reject("an emit names a host event this widget does not declare")
+            said = action.get("value")
+            if not (
+                isinstance(said, dict)
+                and said.keys() == {"text"}
+                and isinstance(said["text"], str)
+                and len(said["text"]) <= ASK_MAX
+            ):
+                raise _Reject(f"an ask that is not {{text}} of at most {ASK_MAX} characters")
 
 
 def _check_events(
-    node: dict[str, Any], events: list[str], allowed: frozenset[str] = SPEC_ACTIONS
+    node: dict[str, Any],
+    events: list[str],
+    allowed: frozenset[str] = SPEC_ACTIONS,
+    ask: bool = False,
 ) -> None:
     props = node.get("props")
     for holder in (node, props if isinstance(props, dict) else {}):
         for key, value in holder.items():
             if isinstance(key, str) and key.startswith("on_"):
-                _check_actions(value, events, allowed)
+                _check_actions(value, events, allowed, ask)
 
 
 def _is_handler_key(key: Any) -> bool:
@@ -501,17 +540,23 @@ def _check_strict(
 ) -> None:
     """The ``strict`` profile's walk over ``ui`` and ``state`` (see the header).
     Iterative, so no card can exhaust the stack; past ``_MAX_SCAN_LEVELS`` of
-    nesting the card is refused."""
+    nesting the card is refused. A flow card's steps (``_flow_steps``) share one
+    node budget; ``emit ask`` passes only under an ``on_*`` key."""
     allowed, hosts = profile.actions, profile.url_hosts
     nodes = 0
-    # (value, json level, node depth, key it sits under, under a handler, is a
-    # node, is a data row whose "action" is its own, inside a style, in state)
-    stack: list[tuple[Any, int, int, str, bool, bool, bool, bool, bool]] = [
-        (spec["ui"], 1, 1, "", False, True, False, False, False),
-        (spec.get("state"), 1, 0, "", False, False, False, False, True),
-    ]
+    ui = spec["ui"]
+    flow = any(field in ui for field in _FLOW_FIELDS)
+    host_events = events
+    events = [*events, *FLOW_EVENTS] if flow else events
+    # (value, json level, node depth, key it sits under, under a handler, under an
+    # on_* key, is a node, is a data row whose "action" is its own, inside a style,
+    # in state)
+    stack: list[tuple[Any, int, int, str, bool, bool, bool, bool, bool, bool]] = (
+        _flow_steps(ui) if flow else [(ui, 1, 1, "", False, False, True, False, False, False)]
+    )
+    stack.append((spec.get("state"), 1, 0, "", False, False, False, False, False, True))
     while stack:
-        value, level, depth, key, handler, is_node, data_row, css, in_state = stack.pop()
+        value, level, depth, key, handler, on, is_node, data_row, css, in_state = stack.pop()
         if level > _MAX_SCAN_LEVELS:
             raise _Reject("nested too deeply")
         if isinstance(value, str):
@@ -525,7 +570,8 @@ def _check_strict(
             continue
         if isinstance(value, list):
             stack.extend(
-                (v, level + 1, depth, key, handler, False, data_row, css, in_state) for v in value
+                (v, level + 1, depth, key, handler, on, False, data_row, css, in_state)
+                for v in value
             )
             continue
         if not isinstance(value, dict):
@@ -547,12 +593,12 @@ def _check_strict(
                 raise _Reject(f"nested deeper than {profile.max_depth}")
             if kind not in profile.widget_types:
                 raise _Reject(f"unknown widget type {kind!r}")
-            _check_events(value, events, allowed)
+            _check_events(value, events, allowed, ask=True)
             props = value.get("props")
             if props is not None and not isinstance(props, dict):
                 raise _Reject("a node's props are not an object")
             if kind == "follow-up" and ("event" in (props or {}) or "on_submit" not in value):
-                if (props or {}).get("event", _FOLLOW_UP_EVENT) not in events:
+                if (props or {}).get("event", _FOLLOW_UP_EVENT) not in host_events:
                     raise _Reject("a follow-up emits a host event this widget does not declare")
             if kind == "form":
                 if isinstance(props, dict) and _FORM_SUBMIT_PROPS & props.keys():
@@ -565,7 +611,7 @@ def _check_strict(
                     if not isinstance(v, list):
                         raise _Reject(f"{k} is not a list")
                     stack.extend(
-                        (kid, level + 2, depth + 1, k, False, True, False, False, in_state)
+                        (kid, level + 2, depth + 1, k, False, False, True, False, False, in_state)
                         for kid in v
                     )
                 elif k == "props" and isinstance(v, dict):
@@ -582,6 +628,7 @@ def _check_strict(
                                 depth + 1 if sub_node else depth,
                                 pk,
                                 _is_handler_key(pk),
+                                pk.startswith("on_"),
                                 sub_node,
                                 (kind, pk) in _DATA_ACTION_ROWS and not in_state,
                                 pk == "style",
@@ -596,6 +643,7 @@ def _check_strict(
                             depth,
                             k,
                             _is_handler_key(k),
+                            k.startswith("on_"),
                             False,
                             False,
                             k == "style",
@@ -610,7 +658,7 @@ def _check_strict(
         if is_action:
             if in_state:
                 raise _Reject("state holds an action")
-            _check_actions(value, events, allowed)
+            _check_actions(value, events, allowed, ask=on)
             if named in _TOAST_ACTIONS and isinstance(value.get("message"), str):
                 _check_plain_expressions(value["message"])
         stack.extend(
@@ -620,6 +668,7 @@ def _check_strict(
                 depth,
                 k,
                 handler or _is_handler_key(k) or (is_action and k in _STEP_KEYS),
+                on or k.startswith("on_"),
                 False,
                 False,
                 css or k == "style",
@@ -675,6 +724,54 @@ def _check_node_slot(key: str, value: Any) -> None:
         kind = value.get("type")
         if not isinstance(kind, str) or kind not in _RIPPLE_TYPES:
             raise _Reject(f"{key} holds an object that is not a node")
+
+
+def _flow_steps(root: dict[str, Any]) -> list[tuple[Any, ...]]:
+    """A flow card's steps as ``_check_strict`` walk entries: each step's ``ui`` a
+    root node (depth 1, the card's node budget), every other step value data
+    under its key, so its text gets the string checks. Refuses a step that is not
+    an object of ``FLOW_STEP_KEYS`` with a ``ui`` node, more than
+    ``MAX_FLOW_STEPS`` steps, and any ``onComplete`` but a chat message."""
+    out: list[tuple[Any, ...]] = []
+    steps: list[tuple[Any, int]] = [(root, 1)]
+    count = 0
+    while steps:
+        step, level = steps.pop()
+        count += 1
+        if count > MAX_FLOW_STEPS:
+            raise _Reject(f"more than {MAX_FLOW_STEPS} flow steps")
+        if not isinstance(step, dict) or not step.keys() <= FLOW_STEP_KEYS:
+            raise _Reject("a flow step that is not an object of step keys")
+        if not isinstance(step.get("ui"), dict):
+            raise _Reject("a flow step with no ui node")
+        if "onComplete" in step:
+            _check_on_complete(step["onComplete"])
+        for k, v in step.items():
+            if k == "chain":
+                steps.append((v, level + 1))
+            elif k == "chain_map":
+                if not isinstance(v, dict):
+                    raise _Reject("a chain_map that is not an object")
+                steps.extend((branch, level + 2) for branch in v.values())
+            elif k == "ui":
+                out.append((v, level + 1, 1, k, False, False, True, False, False, False))
+            else:
+                out.append((v, level + 1, 0, k, False, False, False, False, False, False))
+    return out
+
+
+def _check_on_complete(value: Any) -> None:
+    """A flow's ``onComplete``: only ``{"kind": "chat", "message": <at most
+    ASK_MAX chars>}``. invoke_tool, call_binding, create_pocket, navigate, emit
+    and any other kind run something no card may."""
+    if not (
+        isinstance(value, dict)
+        and value.get("kind") == "chat"
+        and value.keys() <= {"kind", "message"}
+        and isinstance(value.get("message"), str)
+        and len(value["message"]) <= ASK_MAX
+    ):
+        raise _Reject("a flow onComplete that is not a chat message")
 
 
 def _check_form(props: Any, lead_capture: bool) -> None:
@@ -744,9 +841,10 @@ def _check_tree(
 
 def _hydrate(node: dict[str, Any], index: dict[str, Any], verbs: list[str]) -> dict | None:
     """A copy of ``node`` with product-cards filled from the catalog; None when
-    ``node`` is a product-card with nothing left to show."""
+    ``node`` is a product-card with nothing left to show. A flow card's typeless
+    root is copied as it is (no ripple widget is a product-card)."""
     out = dict(node)
-    if out["type"] == _PRODUCT_CARD:
+    if out.get("type") == _PRODUCT_CARD:
         props = out.get("props") if isinstance(out.get("props"), dict) else {}
         items = _items(props.get("ids"), index, verbs)
         if not items:
@@ -1184,6 +1282,11 @@ def compact_manifest(profile: CardProfile = PAWBAR_PROFILE) -> str:
 
 
 __all__ = [
+    "ASK_EVENT",
+    "ASK_MAX",
+    "FLOW_EVENTS",
+    "FLOW_STEP_KEYS",
+    "MAX_FLOW_STEPS",
     "PAWBAR_PROFILE",
     "PartialScan",
     "RIPPLE_DEFERRED",

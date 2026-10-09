@@ -1644,3 +1644,256 @@ async def test_a_turn_holds_a_stored_high_cap_to_the_global_one_off_the_ops_list
     res = await _chat(client, widget.id)
     assert _LIMIT not in _frames(res.text)
     assert len(model.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Flow cards (Ripple's chain) and the ask host event
+# --------------------------------------------------------------------------- #
+
+
+def _go(target: str = "flow.next", label: str = "Next") -> dict:
+    return {
+        "type": "button",
+        "props": {"label": label},
+        "on_click": {"action": "emit", "target": target},
+    }
+
+
+def _step(n: int, *kids: dict, **more) -> dict:
+    """Flow step ``n``: a question, then Back and Next."""
+    ui = {"type": "flex", "children": [{"type": "text", "props": {"text": f"Q{n}"}}, *kids]}
+    ui["children"] += [_go("flow.back", "Back"), _go()]
+    return {"flowId": f"s{n}", "title": f"Step {n}", "ui": ui, **more}
+
+
+def _flow(steps: int = 3, last: dict | None = None, **at: dict) -> dict:
+    """A linear flow card of ``steps`` steps ending in a chat ``onComplete``;
+    ``at`` (``s2={...}``) merges keys into one step, ``last`` into the last."""
+    end = {"onComplete": {"kind": "chat", "message": "Plan it"}, **(last or {})}
+    step = {**_step(steps, **end), **at.get(f"s{steps}", {})}
+    for n in range(steps - 1, 0, -1):
+        step = {**_step(n, chain=step), **at.get(f"s{n}", {})}
+    return {"ui": {"version": "2.0", "intent": "custom", **step}, "state": {}}
+
+
+def _ask(text: str = "Add a rest day", key: str = "on_click") -> dict:
+    return {
+        "type": "button",
+        "props": {"label": "Ask"},
+        key: {"action": "emit", "target": "ask", "value": {"text": text}},
+    }
+
+
+# The accepted shape: a step root (flow fields on ``ui``), each step's ``ui`` a
+# node tree, ``chain_map`` branching on the pick, ``chain`` next, and a terminal
+# ``onComplete`` that sends one chat message.
+TRIP_FLOW = {
+    "ui": {
+        "version": "2.0",
+        "id": "trip",
+        "flowId": "style",
+        "intent": "custom",
+        "title": "Plan a trip",
+        "description": "Three quick picks, then I write the plan.",
+        "ui": {
+            "type": "flex",
+            "props": {"direction": "column", "gap": "8px"},
+            "children": [
+                {"type": "segmented", "bind": "style", "props": {"options": ["calm", "busy"]}},
+                _go(),
+            ],
+        },
+        "chain_map": {
+            "calm": {
+                "flowId": "days",
+                "title": "How many days?",
+                "ui": {
+                    "type": "flex",
+                    "children": [
+                        {"type": "slider", "bind": "days", "props": {"min": 2, "max": 10}},
+                        _go("flow.back", "Back"),
+                        _go(),
+                    ],
+                },
+                "chain": {
+                    "flowId": "who",
+                    "title": "Who is going?",
+                    "form_fields": [{"name": "people", "label": "People", "required": True}],
+                    "ui": {
+                        "type": "flex",
+                        "children": [
+                            {"type": "number-input", "bind": "people"},
+                            _go("flow.submit", "Done"),
+                        ],
+                    },
+                    "onComplete": {
+                        "kind": "chat",
+                        "message": "Plan a calm trip for {state.days} days",
+                    },
+                },
+            },
+            "busy": {
+                "flowId": "busy",
+                "title": "Packed days it is",
+                "ui": {
+                    "type": "flex",
+                    "children": [_ask("Plan a packed trip instead"), _go("flow.forward", "Skip")],
+                },
+                "onComplete": {"kind": "chat", "message": "Plan a packed trip"},
+            },
+        },
+    },
+    "state": {"style": "calm", "days": 4, "people": 2},
+}
+
+
+def test_fl1_a_flow_card_passes_ripple_whole_and_not_pawbar():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    for card in (TRIP_FLOW, _flow(3), _flow(8)):
+        out = _ripple(card)
+        assert out is not None
+        assert json.loads(out.split("\n", 1)[1].rsplit("\n", 1)[0]) == card
+        # The pawbar profile is unchanged: a typeless root is no node there.
+        assert render_card(_body(card), []) is None
+    assert render_card(_body(TRIP_FLOW), [], profile=RIPPLE_PROFILE, verbs=[]) is not None
+
+
+def _fanout(branches: int) -> dict:
+    root = _step(1, chain_map={f"b{i}": _step(i + 2) for i in range(branches)})
+    return {"ui": root}
+
+
+def _wide_step(n: int, kids: int) -> dict:
+    return {"flowId": f"w{n}", "ui": {"type": "flex", "children": [{"type": "text"}] * kids}}
+
+
+_FLOW_REFUSALS = [
+    (_flow(3, s2={"data": {"items": []}}), "a step key outside the allowlist"),
+    (_flow(3, s2={"type": "flex"}), "a node's fields on a step"),
+    (
+        _flow(3, last={"onComplete": {"kind": "invoke_tool", "tool": "delete_all"}}),
+        "onComplete invoke_tool",
+    ),
+    (
+        _flow(3, last={"onComplete": {"kind": "call_binding", "binding": "x"}}),
+        "onComplete call_binding",
+    ),
+    (_flow(3, last={"onComplete": {"kind": "create_pocket"}}), "onComplete create_pocket"),
+    (_flow(3, last={"onComplete": {"kind": "navigate", "url": "/x"}}), "onComplete navigate"),
+    (_flow(3, last={"onComplete": {"kind": "emit", "event": "checkout"}}), "onComplete emit"),
+    (_flow(3, last={"onComplete": {"kind": "made_up", "message": "x"}}), "onComplete unknown kind"),
+    (
+        _flow(
+            3, last={"onComplete": {"kind": "chat", "message": "x", "then": {"kind": "navigate"}}}
+        ),
+        "a chat onComplete with a then",
+    ),
+    (
+        _flow(3, last={"onComplete": {"kind": "chat", "message": 7}}),
+        "a chat onComplete with no text",
+    ),
+    (
+        _flow(3, last={"onComplete": {"kind": "chat", "message": "x" * 501}}),
+        "a chat onComplete over 500 chars",
+    ),
+    (
+        _flow(3, last={"onComplete": {"kind": "chat", "message": "go javascript:alert(1)"}}),
+        "a script link in the message",
+    ),
+    (_flow(3, last={"onComplete": "chat"}), "onComplete not an object"),
+    ({"ui": _go()}, "a flow emit outside a flow card"),
+    ({"ui": {"type": "flex", "children": [_go("flow.submit")]}}, "flow.submit outside a flow card"),
+    (
+        {"ui": _go()} | {"state": {"next": {"action": "emit", "target": "flow.back"}}},
+        "a flow emit in a plain card's state",
+    ),
+    (
+        _flow(3, s2={"ui": {"type": "flex", "children": [_go("flow.jump")]}}),
+        "an emit to a flow verb Ripple has not got",
+    ),
+    (_flow(9), "nine steps"),
+    (_fanout(8), "nine steps through chain_map"),
+    ({"ui": {**_wide_step(1, 200), "chain": _wide_step(2, 200)}}, "402 nodes across two steps"),
+    (_flow(2, s2={"ui": _chain(17)["ui"]}), "a step nested deeper than 16"),
+    (
+        _flow(3, s3={"ui": {"type": "image", "props": {"src": "https://evil.example/x.png"}}}),
+        "a full URL in step 3",
+    ),
+    (_flow(3, s3={"title": "See https://evil.example"}), "a full URL in step 3's title"),
+    (_flow(3, s2={"ui": {"type": "embed", "props": {"url": "/x"}}}), "a deferred widget in a step"),
+    (
+        _flow(3, s2={"ui": {"type": "button", "on_click": {"action": "api", "url": "/x"}}}),
+        "an action off the set in a step",
+    ),
+    (_flow(2, s2={"ui": None}), "a step whose ui is not a node"),
+    ({"ui": {"flowId": "a", "title": "No ui"}}, "a step with no ui"),
+    ({"ui": {**_step(1), "chain": "next"}}, "a chain that is not a step"),
+    ({"ui": {**_step(1), "chain_map": [_step(2)]}}, "a chain_map that is not an object"),
+    ({"ui": {"title": "x"}}, "a typeless root with no flow fields"),
+    ({"ui": _ask("x" * 501)}, "an ask over 500 chars"),
+    ({"ui": _ask("hi javascript:alert(1)")}, "an ask with a script link"),
+    (
+        {"ui": {"type": "button", "on_click": {"action": "emit", "target": "ask", "value": "hi"}}},
+        "an ask that is not {text}",
+    ),
+    (
+        {
+            "ui": {
+                "type": "button",
+                "on_click": {"action": "emit", "target": "ask", "value": {"text": "hi", "to": "x"}},
+            }
+        },
+        "an ask with more than text",
+    ),
+    (
+        {"ui": {"type": "button", "on_click": {"action": "emit", "target": "ask"}}},
+        "an ask with no value",
+    ),
+    (
+        {"ui": {"type": "wizard-layout", "props": {"finishActions": _ask()["on_click"]}}},
+        "an ask outside an on_* handler",
+    ),
+    ({"ui": {"type": "text"}, "state": {"go": _ask()["on_click"]}}, "an ask in state"),
+]
+
+
+@pytest.mark.parametrize(("spec", "why"), _FLOW_REFUSALS, ids=[w for _, w in _FLOW_REFUSALS])
+def test_fl1_flow_and_ask_refusals(spec, why):
+    assert _ripple(spec) is None, why
+
+
+def test_fl1_the_step_and_node_bounds_are_inclusive():
+    assert _ripple(_flow(8)) is not None
+    assert _ripple(_fanout(7)) is not None
+    # 400 nodes across two steps, each alone well under the bound.
+    assert _ripple({"ui": {**_wide_step(1, 199), "chain": _wide_step(2, 199)}}) is not None
+    # Each step is its own root, so each may nest 16 deep.
+    assert _ripple(_flow(2, s1={"ui": _chain(16)["ui"]}, s2={"ui": _chain(16)["ui"]})) is not None
+    assert (
+        _ripple(_flow(3, last={"onComplete": {"kind": "chat", "message": "x" * 500}})) is not None
+    )
+
+
+def test_fl1_an_ask_passes_in_any_on_handler_and_only_on_ripple():
+    from pocketpaw_ee.paw_bar.card_spec import render_card
+
+    in_flow = {
+        "action": "flow",
+        "steps": [{"action": "set", "target": "a", "value": 1}, _ask()["on_click"]],
+    }
+    cards = [
+        {"ui": _ask("x" * 500)},
+        {"ui": {"type": "calendar", "props": {"on_select": _ask()["on_click"]}}},
+        {"ui": {"type": "button", "on_click": in_flow}},
+        {
+            "ui": {
+                "type": "button",
+                "on_click": {"action": "branch", "if": "1", "then": [_ask()["on_click"]]},
+            }
+        },
+    ]
+    for card in cards:
+        assert _ripple(card) is not None, card
+        assert render_card(_body(card), []) is None  # pawbar has no ask
+    assert render_card(_body({"ui": _ask()}), [], verbs=["checkout"]) is None
