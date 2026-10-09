@@ -172,6 +172,7 @@ class _FakeRemoteAdapter(StorageAdapter):
             "generated/1699999999000-bbbb.png": b"older-gen-bytes",
         }
         self.put_calls: list[tuple[str, bytes]] = []
+        self.modified: dict[str, int] = {}
 
     def local_path(self, key: str) -> Path | None:
         return None
@@ -190,7 +191,14 @@ class _FakeRemoteAdapter(StorageAdapter):
         for key, data in self.store.items():
             if key.startswith(prefix):
                 name = key[len(prefix) :]
-                items.append(StorageItem(name=name, is_dir=False, size=len(data)))
+                items.append(
+                    StorageItem(
+                        name=name,
+                        is_dir=False,
+                        size=len(data),
+                        modified=self.modified.get(name, 0),
+                    )
+                )
         items.sort(key=lambda i: i.name)
         return items
 
@@ -233,6 +241,19 @@ def test_remote_list_uses_browse_and_timestamp_modified(remote_client, remote_ad
     # bbbb is tracked (excluded); only aaaa remains.
     assert [m["name"] for m in media] == ["1700000000000-aaaa.png"]
     assert media[0]["modified"] == 1700000000000
+
+
+def test_remote_list_dates_an_upload_by_its_storage_time(remote_client, remote_adapter) -> None:
+    """An upload's name carries no timestamp, so S3's own LastModified dates it.
+    Without that it reported 0 and every editor save landed at the end."""
+    upload = f"{storage.owned_name_prefix('ws-1')}timeline.mp4"
+    remote_adapter.store[f"generated/{upload}"] = b"render"
+    remote_adapter.modified[upload] = 1800000000000
+
+    media = remote_client.get("/api/v1/media").json()["media"]
+
+    assert [m["name"] for m in media] == [upload, "1700000000000-aaaa.png"]
+    assert media[0]["modified"] == 1800000000000
 
 
 def test_remote_serve_streams_bytes(remote_client, remote_adapter) -> None:

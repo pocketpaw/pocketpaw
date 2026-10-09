@@ -8,7 +8,9 @@ the gallery grid, serves them over HTTP so the frontend can render ``<img>`` /
 
 Endpoints:
   GET  /api/v1/media          — list the caller's workspace's media (session required)
-  POST /api/v1/media          — upload a generated file (session required)
+  POST /api/v1/media          — upload a generated file (session required); an
+                                optional ``replaces`` deletes this workspace's
+                                previous copy, so a re-saved render stays one tile
   GET  /api/v1/media/{name}   — serve a single media file (capability-based, see below)
 
 Updated: 2026-09-07 — list and upload had NO auth and the key carried no tenant,
@@ -48,9 +50,10 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud.auth.core import fastapi_users
@@ -81,6 +84,9 @@ _MEDIA_TYPE_MAP = {
     ".webp": "image/webp",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
 }
 
 # Uploads keep their name but are force-named when no extension survives the
@@ -128,9 +134,9 @@ def _local_entries(generated: Path, sort: str, tracked: set[str], workspace_id: 
 
 
 async def _remote_entries(sort: str, tracked: set[str], workspace_id: str) -> list[dict]:
-    """List S3 keys under the media prefix as MediaFile dicts. Remote listings
-    carry no mtime, so ``modified`` comes from the timestamp baked into generated
-    filenames (``<ms>-<uuid>.png``); uploads without one report 0."""
+    """List S3 keys under the media prefix as MediaFile dicts. ``modified`` is the
+    object's storage time, falling back to the timestamp baked into generated
+    filenames (``<ms>-<uuid>.png``) when the adapter reports none."""
     entries: list[dict] = []
     for item in await storage.get_adapter().browse(storage.MEDIA_KEY_PREFIX + "/"):
         if item.is_dir:
@@ -151,7 +157,7 @@ async def _remote_entries(sort: str, tracked: set[str], workspace_id: str) -> li
                 "url": f"/api/v1/media/{item.name}",
                 "mime": mime,
                 "size": item.size,
-                "modified": storage.modified_from_name(item.name),
+                "modified": item.modified or storage.modified_from_name(item.name),
             }
         )
     entries.sort(key=lambda e: e["modified"], reverse=(sort == "newest"))
@@ -191,6 +197,7 @@ async def list_media(
 async def upload_media(
     file: UploadFile = File(...),
     workspace_id: str = Depends(current_workspace_id),
+    replaces: Annotated[str | None, Form()] = None,
 ) -> Response:
     """Upload a generated file into the gallery (used by the canvas editor's
     "save edited image"). Returns the MediaFile JSON so the frontend can select
@@ -224,6 +231,16 @@ async def upload_media(
     data = await file.read()
     mime = _MEDIA_TYPE_MAP[suffix]
     stored = await adapter.put(storage.media_key(name), storage.bytes_stream(data), mime)
+    if (
+        replaces
+        and replaces != name
+        and replaces == Path(replaces).name
+        and storage.owner_of(replaces) == storage.capture_owner_token(workspace_id)
+    ):
+        try:
+            await adapter.delete(storage.media_key(replaces))
+        except NotFound:
+            pass
     return Response(
         content=json.dumps(
             {
