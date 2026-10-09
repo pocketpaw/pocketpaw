@@ -22,7 +22,10 @@
 #     no repeated JSON key). A ``ui`` with a
 #     flow field is a flow (at most ``MAX_FLOW_STEPS`` steps, one node budget,
 #     ``FLOW_EVENTS``, a chat-only ``onComplete``), and ``emit ask`` / ``flow.submit``
-#     fire only from an explicit visitor action (``ASK_HANDLERS``).
+#     fire only from an explicit visitor action (``ASK_HANDLERS``). A spec body that
+#     is not JSON only for missing closers gets them (``_repaired``: at most
+#     ``MAX_REPAIR_CLOSERS``, a ``ui`` left open closed before the root's
+#     ``,"state":``), then is parsed and checked like any body.
 #
 # Hydration runs after the checks and is not checked again. Product data comes only
 # from the site catalog: a ``product-card``'s ``ids`` become ``items`` (unknown ids
@@ -1213,6 +1216,113 @@ def _is_spec(raw: Any) -> bool:
     return isinstance(raw, dict) and "ui" in raw
 
 
+# --------------------------------------------------------------------------- #
+# Closer repair (strict profile)
+# --------------------------------------------------------------------------- #
+
+
+# Most closing brackets a repair may insert in one body.
+MAX_REPAIR_CLOSERS = 4
+# ponytail: a body naming "state" inside its ui more often than this is not
+# rescanned past the last ones (each try reads the whole body).
+_MAX_REPAIR_CUTS = 8
+_CLOSER = {"{": "}", "[": "]"}
+_JSON_SPACE = " \t\n\r"
+_TOKEN = re.compile(r'["{}\[\]]')
+
+
+def _closers(opened: str) -> str:
+    return "".join(_CLOSER[ch] for ch in reversed(opened))
+
+
+def _string_end(text: str, i: int) -> int:
+    """The index past the string opening at ``text[i]``, -1 when it never closes."""
+    j = i + 1
+    while (m := _STRING_STOP.search(text, j)) is not None:
+        if m.group() == '"':
+            return m.end()
+        j = m.end() + 1  # a backslash: skip the escaped character
+    return -1
+
+
+def _scan_open(text: str) -> tuple[str, list[tuple[int, str]]] | None:
+    """``text`` read for its brackets, strings skipped: the containers still open
+    at its end (openers, outermost first), and for each ``,"state":`` key read
+    while the root's ``ui`` member was open, its comma's index and the containers
+    open there. None when ``text`` is not an object whose closers all match, ends
+    inside a string, or goes on after its root closes."""
+    if not text.startswith("{"):
+        return None
+    stack: list[str] = []
+    cuts: list[tuple[int, str]] = []
+    root_key = ""
+    i = 0
+    while (m := _TOKEN.search(text, i)) is not None:
+        i, ch = m.start(), m.group()
+        if ch == '"':
+            end = _string_end(text, i)
+            if end < 0:
+                return None
+            j = end
+            while j < len(text) and text[j] in _JSON_SPACE:
+                j += 1
+            if j < len(text) and text[j] == ":":
+                key = text[i + 1 : end - 1]
+                if len(stack) == 1:
+                    root_key = key
+                elif key == "state" and root_key == "ui":
+                    k = i - 1
+                    while text[k] in _JSON_SPACE:
+                        k -= 1
+                    if text[k] == ",":
+                        cuts.append((k, "".join(stack)))
+            i = end
+            continue
+        if ch in _CLOSER:
+            stack.append(ch)
+        elif not stack or _CLOSER[stack.pop()] != ch:
+            return None
+        i += 1
+        if not stack:
+            return ("", cuts) if not text[i:].strip(_JSON_SPACE) else None
+    return "".join(stack), cuts
+
+
+def _closer_fixes(text: str) -> list[str]:
+    """``text`` with only closing brackets inserted, fewest first: before a
+    ``,"state":`` read inside ``ui`` the containers of the ui subtree are closed
+    (preferred on a tie), and at the end whatever is still open. A fix needing no
+    closer, or more than ``MAX_REPAIR_CLOSERS``, is left out."""
+    scan = _scan_open(text)
+    if scan is None:
+        return []
+    opened, cuts = scan
+    fixes: list[tuple[int, int, str]] = []
+    near = [cut for cut in cuts if len(cut[1]) - 1 <= MAX_REPAIR_CLOSERS]
+    for pos, at in near[-_MAX_REPAIR_CUTS:]:
+        head = text[:pos] + _closers(at[1:])
+        rest = _scan_open(head + text[pos:])
+        if rest is not None:
+            fixed = head + text[pos:] + _closers(rest[0])
+            fixes.append((len(fixed) - len(text), 0, fixed))
+    if opened:
+        fixes.append((len(opened), 1, text + _closers(opened)))
+    fixes.sort(key=lambda fix: fix[:2])
+    return [fixed for added, _, fixed in fixes if 0 < added <= MAX_REPAIR_CLOSERS]
+
+
+def _repaired(body: str, profile: CardProfile) -> str | None:
+    """On a strict profile, a ``body`` that is not JSON with the fewest closing
+    brackets inserted (``_closer_fixes``) that make it JSON holding a spec; else
+    None. The caller parses and checks the result like any body."""
+    if not profile.strict or len(body) > profile.max_chars:
+        return None
+    for fixed in _closer_fixes(body.strip(_JS_SPACE)):
+        if _is_spec(_parse(fixed)):
+            return fixed
+    return None
+
+
 def _legacy_product(card: dict, index: dict[str, Any], verbs: list[str]) -> dict | None:
     ids = [item.get("id") for item in card.get("items") or [] if isinstance(item, dict)]
     items = _items(ids, index, verbs)
@@ -1232,7 +1342,8 @@ def render_card(
     drop it. A Ripple spec is validated (against ``profile``) and hydrated; a
     legacy product card is repriced from the catalog; a legacy form card is held
     to the form rules; any other legacy card passes through verbatim; a body
-    that is not JSON is dropped. Never raises: a card no check can read is
+    that is not JSON is dropped, unless the profile is strict and only closing
+    brackets are missing from a spec (``_repaired``). Never raises: a card no check can read is
     dropped and logged by error type only."""
     try:
         return _render_card(body, catalog, verbs, lead_capture, profile, storefront)
@@ -1250,6 +1361,14 @@ def _render_card(
     storefront: Any = None,
 ) -> str | None:
     raw = _parse(body, unique=profile.strict)
+    if raw is None and (fixed := _repaired(body, profile)) is not None:
+        # Only closers were missing: the repaired body is read and checked as
+        # any other. Logged by count only, never the card.
+        logger.info(
+            "card_spec: repaired a card missing %d closing bracket(s)",
+            len(fixed) - len(body.strip(_JS_SPACE)),
+        )
+        body, raw = fixed, _parse(fixed, unique=profile.strict)
     if raw is None or raw is _TOO_DEEP:
         return None
     if _is_spec(raw):
@@ -1281,11 +1400,14 @@ def _render_card(
     return f"{_FENCE}pawbar-card\n{body}{_FENCE}"
 
 
-def has_lead_form(body: str) -> bool:
+def has_lead_form(body: str, profile: CardProfile = PAWBAR_PROFILE) -> bool:
     """Whether a card body holds a send_to_team form, as a Ripple spec node (in
     any flow step too) or a legacy ``{"kind": "form"}`` card. Says nothing about
-    whether it is valid: ask it of a body ``render_card`` passed."""
+    whether it is valid: ask it of a body ``render_card`` passed, with the same
+    ``profile`` (a strict one reads a body missing only closers as repaired)."""
     raw = _parse(body)
+    if raw is None and (fixed := _repaired(body, profile)) is not None:
+        raw = _parse(fixed)
     if isinstance(raw, dict) and raw.get("kind") == "form":
         return raw.get("verb") == LEAD_VERB
     if not _is_spec(raw):

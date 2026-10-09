@@ -20,7 +20,9 @@
 # refuses and is reused streamed. Ripple's data widgets (``RIPPLE_DATA_WIDGETS``,
 # ripple-iui#182) are listed with typed props and the rules map answers to them;
 # each passes with its manifest example (tests/fixtures/ripple_data_widget_cards.json).
-# Page chrome (``RIPPLE_CHROME``) is refused and unlisted.
+# Page chrome (``RIPPLE_CHROME``) is refused and unlisted. A spec body missing only
+# closing brackets is repaired (a live one: tests/fixtures/ripple_itinerary_missing_brace.json),
+# never past 4, never for any other break, and is then refused for anything else.
 # Mutation plan: tests/mutations/concierge_ripple_rules.json.
 
 # ruff: noqa: F811 — pytest fixtures imported by name
@@ -2242,3 +2244,167 @@ def test_sec_f6_a_lead_form_in_a_flow_step_is_the_lead_card():
     assert render_card(body, [], profile=RIPPLE_PROFILE, lead_capture=True) is not None
     assert has_lead_form(body)
     assert not has_lead_form(_body(_flow(2)))
+
+
+# --------------------------------------------------------------------------- #
+# Closer repair: a ripple body that is not JSON only for missing closers
+# --------------------------------------------------------------------------- #
+
+_MISSING_BRACE = Path(__file__).parents[1] / "fixtures" / "ripple_itinerary_missing_brace.json"
+_REPAIR_LOG = "card_spec: repaired a card missing %d closing bracket(s)"
+
+
+def _lisbon() -> str:
+    """The live itinerary body whose ``ui`` node never closes before ``,"state":``."""
+    return json.loads(_MISSING_BRACE.read_text(encoding="utf-8"))["body"]
+
+
+def _ripple_body(body: str, **kw) -> dict | None:
+    """The card object ``render_card`` emits for ``body`` on ripple, or None."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    out = render_card(body, [], profile=RIPPLE_PROFILE, **kw)
+    return None if out is None else json.loads(out[len("```pawbar-card\n") : -len("\n```")])
+
+
+def _cut_end(body: str, n: int) -> str:
+    """``body`` without its last ``n`` characters, all closing brackets."""
+    assert set(body[-n:]) <= set("}]")
+    return body[:-n]
+
+
+def _cut_ui_brace(body: str) -> str:
+    """``body`` without the ``}`` closing its ``ui`` node, before ``, "state": ``."""
+    i = body.rindex(', "state": ')
+    assert body[i - 1] == "}"
+    return body[: i - 1] + body[i:]
+
+
+def _repairs(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "pocketpaw_ee.paw_bar.card_spec" and r.msg == _REPAIR_LOG
+    ]
+
+
+def test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked(caplog):
+    body = _lisbon()
+    with pytest.raises(ValueError):
+        json.loads(body)
+    i = body.rindex(',"state":')
+    with caplog.at_level("INFO", logger="pocketpaw_ee.paw_bar.card_spec"):
+        card = _ripple_body(body)
+    # One brace, before the root's state: not at the end, where state would
+    # land inside the ui node.
+    assert card == json.loads(body[:i] + "}" + body[i:])
+    assert card["state"] == {} and "state" not in card["ui"]
+    assert card["ui"]["type"] == "itinerary" and len(card["ui"]["props"]["days"]) == 2
+    assert _repairs(caplog) == ["card_spec: repaired a card missing 1 closing bracket(s)"]
+    assert "Lisbon" not in caplog.text
+
+
+def test_pawbar_never_repairs_a_body():
+    from pocketpaw_ee.paw_bar.card_spec import (
+        PAWBAR_PROFILE,
+        RIPPLE_PROFILE,
+        has_lead_form,
+        render_card,
+    )
+
+    body = _cut_end(_body({"ui": _TEXT_NODE}), 1)
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is not None
+    assert render_card(body, [], profile=PAWBAR_PROFILE) is None
+    assert render_card(body + "}", [], profile=PAWBAR_PROFILE) is not None
+    form = {"type": "form", "props": {"verb": "send_to_team", "fields": [{"name": "email"}]}}
+    lead = _cut_end(_body({"ui": form}), 1)
+    assert has_lead_form(lead, RIPPLE_PROFILE)
+    assert not has_lead_form(lead)
+
+
+def test_closers_cut_off_the_end_are_restored_up_to_four():
+    spec = _chain(6)
+    body = _body(spec)
+    for n in (1, 2, 3, 4):
+        assert _ripple_body(_cut_end(body, n)) == spec, n
+    assert _ripple_body(_cut_end(body, 5)) is None
+
+
+def test_the_ui_brace_and_the_end_closers_count_together():
+    spec = {"ui": _chain(2)["ui"], "state": {"a": [{"b": 1}]}}
+    body = _cut_ui_brace(_body(spec))
+    assert _ripple_body(body) == spec
+    assert _ripple_body(_cut_end(body, 3)) == spec  # 1 + 3
+    assert _ripple_body(_cut_end(body, 4)) is None  # 1 + 4
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"ui":{"type":"text" "props":{"text":"hi"}}}',  # a missing comma
+        '{"ui":{"type":"text" "props":{"text":"hi"}}',  # ...and a closer
+        '{"ui":{"type":"text","props":{"text":"hi}}}',  # a missing quote
+        '{"ui":{"type":"text","props":{"text":hi"}}}',
+        '{"ui":{"type":"text","props":{"text":"hi"}}}}',  # an extra closer stays
+        '{"ui":{"type":"text","props":{"text":"hi"]}}',  # a wrong one is not swapped
+        '{"ui":{"type":"text","props":{"text":"hi"}}} x',
+        '{"ui":{"type":"text","props":{"text":"hi"}},"state":}',
+        '{"ui":{"type":"text","props":{"text":"hi"}},"state"',
+    ],
+)
+def test_a_body_broken_other_than_by_missing_closers_stays_refused(body):
+    assert _ripple_body(body) is None
+
+
+def test_brackets_and_escapes_inside_strings_are_not_closers():
+    spec = {"ui": {"type": "text", "props": {"text": 'say "}]" then ] and \\ ok'}}}
+    body = _body(spec)
+    assert _ripple_body(body) == spec
+    assert _ripple_body(_cut_end(body, 2)) == spec
+
+
+# A legacy card passes through verbatim, unchecked, so only a spec is repaired.
+def test_a_legacy_card_is_never_repaired():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    body = '{"kind":"note","text":"hi"}'
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is not None
+    assert render_card(body[:-1], [], profile=RIPPLE_PROFILE) is None
+
+
+def test_a_body_past_the_size_bound_is_not_repaired(caplog):
+    body = _cut_end(_body({"ui": _TEXT_NODE, "state": {"pad": "x" * 64_000}}), 1)
+    with caplog.at_level("INFO", logger="pocketpaw_ee.paw_bar.card_spec"):
+        assert _ripple_body(body) is None
+    assert _repairs(caplog) == []
+
+
+# What a repair inserts is closers; every other check reads the repaired body.
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": {"type": "image", "props": {"src": "https://evil.test/x.png"}}, "state": {}},
+        {"ui": {"type": "text", "props": {"meta": {"x": {"action": "invoke_tool"}}}}, "state": {}},
+        {"ui": {"type": "button", "on_click": {"action": "emit", "target": "pay"}}, "state": {}},
+        {"ui": {"type": "button", "props": {"label": "x"}, "on_click": "{state.go}"}, "state": {}},
+        {"ui": _TEXT_NODE, "state": {"go": {"action": "navigate", "url": "/x"}}},
+        {"ui": {"type": "no-such-widget"}, "state": {}},
+    ],
+)
+def test_a_repaired_card_is_still_refused_for_anything_else(spec):
+    body = _body(spec)
+    assert _ripple_body(body) is None
+    assert _ripple_body(_cut_end(body, 1)) is None
+    assert _ripple_body(_cut_ui_brace(body)) is None
+
+
+# The repeat sits in the object left open (the root), so the parser meets it only
+# once the repair closes it; the first, refused ui would otherwise go unchecked.
+def test_a_repaired_body_still_may_not_repeat_a_key():
+    body = (
+        '{"ui":{"type":"richtext","props":{"html":"<img src=x onerror=alert(1)>"}},'
+        '"ui":{"type":"text","props":{"text":"ok"}}'
+    )
+    assert _ripple_body(body + "}") is None
+    assert _ripple_body(body) is None
+    assert _ripple_body('{"ui":{"type":"text","props":{"text":"ok"}}') is not None

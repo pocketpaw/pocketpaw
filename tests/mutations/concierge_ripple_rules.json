@@ -1329,5 +1329,157 @@
     "tests": [
       "tests/cloud/test_paw_bar_store_hydration.py::test_a_store_url_is_https_on_a_public_host"
     ]
+  },
+  {
+    "label": "JSON-FIX: a repair may insert 5 closers",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "MAX_REPAIR_CLOSERS = 4\n",
+    "replace": "MAX_REPAIR_CLOSERS = 5\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ui_brace_and_the_end_closers_count_together"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a repair may insert only 3 closers",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "MAX_REPAIR_CLOSERS = 4\n",
+    "replace": "MAX_REPAIR_CLOSERS = 3\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ui_brace_and_the_end_closers_count_together"
+    ]
+  },
+  {
+    "label": "JSON-FIX: the closer limit is not applied",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if 0 < added <= MAX_REPAIR_CLOSERS]",
+    "replace": "if 0 < added]",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ui_brace_and_the_end_closers_count_together"
+    ]
+  },
+  {
+    "label": "JSON-FIX: pawbar repairs too",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not profile.strict or len(body) > profile.max_chars:\n",
+    "replace": "    if len(body) > profile.max_chars:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_pawbar_never_repairs_a_body"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a body past the size bound is repaired",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not profile.strict or len(body) > profile.max_chars:\n",
+    "replace": "    if not profile.strict:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_body_past_the_size_bound_is_not_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a legacy (unchecked) card is repaired",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if _is_spec(_parse(fixed)):\n",
+    "replace": "        if _parse(fixed) is not None:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_legacy_card_is_never_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: a repaired body skips the repeated-key refusal",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "body, raw = fixed, _parse(fixed, unique=profile.strict)",
+    "replace": "body, raw = fixed, _parse(fixed)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_repaired_body_still_may_not_repeat_a_key"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: brackets inside strings count",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_TOKEN = re.compile(r'[\"{}\\[\\]]')",
+    "replace": "_TOKEN = re.compile(r'[{}\\[\\]]')",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_brackets_and_escapes_inside_strings_are_not_closers",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: an escaped quote ends a string",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        j = m.end() + 1  # a backslash",
+    "replace": "        j = m.end()  # a backslash",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_brackets_and_escapes_inside_strings_are_not_closers"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: every closer is a brace",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "return \"\".join(_CLOSER[ch] for ch in reversed(opened))",
+    "replace": "return \"}\" * len(opened)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: closers in opening order",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_CLOSER[ch] for ch in reversed(opened)",
+    "replace": "_CLOSER[ch] for ch in opened",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_closers_cut_off_the_end_are_restored_up_to_four"
+    ]
+  },
+  {
+    "label": "JSON-FIX: closers only: the ui cut drops the comma after it",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "fixed = head + text[pos:] + _closers(rest[0])",
+    "replace": "fixed = head + text[pos + 1 :] + _closers(rest[0])",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: the end closers win the tie over the ui cut",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "fixes.append((len(opened), 1, text + _closers(opened)))",
+    "replace": "fixes.append((len(opened), -1, text + _closers(opened)))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: the ui cut leaves the ui node open",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "head = text[:pos] + _closers(at[1:])",
+    "replace": "head = text[:pos] + _closers(at[2:])",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_itinerary_missing_its_ui_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired"
+    ]
+  },
+  {
+    "label": "JSON-FIX: has_lead_form reads no repaired body",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    raw = _parse(body)\n    if raw is None and (fixed := _repaired(body, profile)) is not None:\n        raw = _parse(fixed)\n",
+    "replace": "    raw = _parse(body)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_pawbar_never_repairs_a_body"
+    ]
+  },
+  {
+    "label": "JSON-FIX: the runner reads a repaired lead card as no lead card",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            self.lead_card = has_lead_form(body, self._profile)\n",
+    "replace": "            self.lead_card = has_lead_form(body)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_lead_card_missing_a_closer_is_the_lead_card"
+    ]
   }
 ]

@@ -10,6 +10,7 @@
 # unchanged. The realistic card is ripple's recorded explainer scenario
 # (tests/fixtures/ripple_explainer_card.json).
 # A flow card streams like any other and ends with the verdict the whole card gets.
+# A card missing only closing brackets streams raw and is repaired at its close.
 #
 # Mutations: tests/mutations/concierge_v2_runtime.json ("card streaming" entries) and
 # tests/mutations/concierge_ripple_rules.json ("FL-1 streamed" entries).
@@ -40,6 +41,7 @@ from tests.cloud.test_paw_bar_ripple_profile import (
     _FLOW_REFUSALS,
     TRIP_FLOW,
     _flow,
+    _lisbon,
 )
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
@@ -426,6 +428,35 @@ def test_a_failed_catalog_lookup_rejects_the_streamed_card():
 
     out = asyncio.run(go())
     assert out[-1] == CardEvent("card.rejected", {"card_id": "c1", "reason": "invalid"})
+
+
+def test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired():
+    body = _lisbon()
+    i = body.rindex(',"state":')
+    fixed = json.loads(body[:i] + "}" + body[i:])
+    reply = f"Plan:\n{_fence(body)}\nEnjoy."
+    expected = [
+        ("chunk", "Plan:\n"),
+        ("card.start", {"card_id": "c1"}),
+        ("card.delta", {"card_id": "c1", "text": body}),
+        ("card.final", {"card_id": "c1", "card": fixed}),
+        ("chunk", "\nEnjoy."),
+    ]
+    for chunks in ([reply[j : j + 9] for j in range(0, len(reply), 9)], [reply]):
+        assert _collapse(_events(chunks)) == expected
+
+
+def test_a_fence_that_never_closes_is_not_repaired():
+    events = _events(["```pawbar-card\n", '{"ui":{"type":"text","props":{"text":"x"}}'])
+    assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "truncated"})
+
+
+def test_a_lead_card_missing_a_closer_is_the_lead_card():
+    form = {"type": "form", "props": {"verb": "send_to_team", "fields": [{"name": "email"}]}}
+    f = _ripple_filter(lead_capture=True)
+    out = f.feed(_fence(json.dumps({"ui": form})[:-1]))
+    assert out[-1].event == "card.final" and out[-1].data["card"] == {"ui": form}
+    assert f.lead_card
 
 
 # --------------------------------------------------------------------------- #

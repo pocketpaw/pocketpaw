@@ -2330,7 +2330,7 @@ class FenceFilter:
         if card and self._lead_capture and not self.lead_card:
             from pocketpaw_ee.paw_bar.card_spec import has_lead_form
 
-            self.lead_card = has_lead_form(body)
+            self.lead_card = has_lead_form(body, self._profile)
         return card or ""
 
     def _take_action(self, body: str) -> str:
