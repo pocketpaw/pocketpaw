@@ -1453,8 +1453,9 @@ _RIPPLE_RULES = (
     'state with expressions, e.g. "{state.total / state.people}". Never hardcode a '
     "copy of a state value: write state.items.length, not 4.",
     "   - The only actions are set, toggle, push, remove, open, toast, validate, flow "
-    "(steps run in order) and branch (if, then, else), and emit of add_to_cart or "
-    "checkout. There is no api, navigate, confirm, delay or any other action: a card "
+    "(steps run in order) and branch (if, then, else), and emit of add_to_cart, "
+    "checkout, ask or, in a flow card, flow.next, flow.back and flow.submit (both "
+    "below). There is no api, navigate, confirm, delay or any other action: a card "
     "using one is dropped, even as a step. A handler may be a list of actions.",
     "   - Links and images use same-site paths only (/page, #section); never a full "
     "URL, an expression or a CSS url().",

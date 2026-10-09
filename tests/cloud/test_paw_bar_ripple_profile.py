@@ -286,7 +286,7 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     assert _RIPPLE_RULES[-1].endswith(example) and example in text
     # The whole paragraph stays bounded: 19,814 chars before the primitives' data
     # widgets, 24,327 before Ripple's data widgets (typed lines and their rules, less
-    # the page chrome), 27,849 after, 30,400 with the flow and ask rules (the flow
+    # the page chrome), 27,849 after, 30,473 with the flow and ask rules (the flow
     # example alone is 890).
     assert len(text) < 31_000
 
@@ -508,6 +508,9 @@ def test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask():
     ):
         assert phrase in rule, phrase
     assert rule.endswith(json.dumps(_RIPPLE_FLOW_EXAMPLE, separators=(",", ":")))
+    # The allowed-actions rule names these emits, so it never reads as dropping them.
+    actions = next(r for r in _RIPPLE_RULES if "The only actions are" in r)
+    assert "emit of add_to_cart, checkout, ask or, in a flow card, flow.next" in actions
     ask = json.dumps(_RIPPLE_ASK, separators=(",", ":"))
     assert f"{ask} (plain text" in text and "a comparison item's actions list" in text
     # Ripple only: the pawbar paragraph has no flow or ask.

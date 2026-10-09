@@ -1589,5 +1589,14 @@
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ask_the_rules_show_passes_on_a_click_and_a_comparison_item"
     ]
+  },
+  {
+    "label": "FLOW-PROMPT: the allowed-actions rule forgets ask and the flow verbs",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"(steps run in order) and branch (if, then, else), and emit of add_to_cart, \"\n    \"checkout, ask or, in a flow card, flow.next, flow.back and flow.submit (both \"\n    \"below). There is no api",
+    "replace": "\"(steps run in order) and branch (if, then, else), and emit of add_to_cart or \"\n    \"checkout. There is no api",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
   }
 ]
