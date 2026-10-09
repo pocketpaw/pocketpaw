@@ -59,8 +59,8 @@
   {
     "label": "the settings PATCH writes every field, sent or not — a one-field save wipes the rest",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "    for name in req.model_fields_set:\n        value = getattr(req, name)\n        if value is not None or name in (\"concierge_knowledge_chars\", \"concierge_daily_spend_cap\"):\n            setattr(site, name, value)",
-    "replace": "    for name in type(req).model_fields:\n        value = getattr(req, name)\n        if True:\n            setattr(site, name, value)",
+    "find": "    for name in req.model_fields_set:\n        value = getattr(req, name)\n        if value is not None or name in (\n",
+    "replace": "    for name in type(req).model_fields:\n        value = getattr(req, name)\n        if True or name in (\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_guided_fields_patch_is_partial"
     ]

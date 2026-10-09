@@ -1024,8 +1024,8 @@
   {
     "label": "DW-9: the rules drop the menu-order mapping",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "\"is an itinerary. A menu or an order is a menu-order: items by product_id (and \"",
-    "replace": "\"is an itinerary. A menu or an order is a table of items by product_id (and \"",
+    "find": "\"is an itinerary. A menu or an order is a menu-order: items by product_id from the \"",
+    "replace": "\"is an itinerary. A menu or an order is a table of items by product_id from the \"",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_point_each_answer_at_its_data_widget"
     ]
@@ -1037,6 +1037,297 @@
     "replace": "\"number). \"",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_point_each_answer_at_its_data_widget"
+    ]
+  },
+  {
+    "label": "DW-10: a model-written handler on menu-order or booking passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if kind in SERVER_WIRED and any(map(_is_handler_key, [*value, *(props or ())])):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_model_written_handler_on_a_server_wired_widget_is_refused"
+    ]
+  },
+  {
+    "label": "DW-10: the ripple profile loses the book host event",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "host_events=(*HOST_EVENTS, \"book\"),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_book_only_ever_comes_from_the_server_attached_slot",
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_booking_gets_services_days_and_the_book_event"
+    ]
+  },
+  {
+    "label": "DW-10: handlers are wired with no store",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            wired\n            and store is not None\n",
+    "replace": "            wired\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_each_data_widget_card_passes_ripple_and_not_pawbar"
+    ]
+  },
+  {
+    "label": "DW-10: handlers are wired on a widget that cannot fire",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "and _usable(out[\"props\"])",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_with_no_slots_a_booking_says_times_are_unavailable",
+      "tests/cloud/test_paw_bar_store_hydration.py::test_an_item_without_a_product_id_keeps_the_menu_display_only"
+    ]
+  },
+  {
+    "label": "DW-10: the model's item fields win over the store's",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "out.append({**mine, **{k: copy.deepcopy(product[k]) for k in keys if k in product}})",
+    "replace": "out.append({**{k: copy.deepcopy(product[k]) for k in keys if k in product}, **item})",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_menu_order_is_filled_from_the_store_and_wired_to_checkout"
+    ]
+  },
+  {
+    "label": "DW-10: an unknown product id is kept",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if pid in seen or product is None:",
+    "replace": "if pid in seen:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_an_unknown_or_repeated_product_drops_that_item_not_the_card"
+    ]
+  },
+  {
+    "label": "DW-10: a repeated product id is kept",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if pid in seen or product is None:",
+    "replace": "if product is None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_an_unknown_or_repeated_product_drops_that_item_not_the_card"
+    ]
+  },
+  {
+    "label": "DW-10: with the menu down the model's price stays",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "out.append({k: v for k, v in item.items() if k not in (\"price\", \"image\", \"groups\")})",
+    "replace": "out.append(item)",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_with_the_menu_down_a_menu_order_is_display_only_without_model_prices"
+    ]
+  },
+  {
+    "label": "DW-10: checkout with an item the store did not fill",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "return out, filled and bool(out) and products is not None",
+    "replace": "return out, bool(out) and products is not None",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_an_item_without_a_product_id_keeps_the_menu_display_only"
+    ]
+  },
+  {
+    "label": "DW-10: a model-written checkout survives with no store",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "props.pop(\"checkout\", None)\n    if store is None:",
+    "replace": "if store is None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_with_no_store_a_menu_order_never_checks_out"
+    ]
+  },
+  {
+    "label": "DW-10: a model-written booking confirmation survives",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "props.pop(\"confirmed\", None)",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_booking_gets_services_days_and_the_book_event"
+    ]
+  },
+  {
+    "label": "DW-10: a booking with no slots gets no notice",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "props[\"notice\"] = dict(STORE_DOWN_NOTICE)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_with_no_slots_a_booking_says_times_are_unavailable"
+    ]
+  },
+  {
+    "label": "DW-10: comparison items take every store field",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "keys = _STORE_ITEM_KEYS if menu else (\"name\", \"price\", \"image\")",
+    "replace": "keys = _STORE_ITEM_KEYS",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_comparison_item_with_a_product_id_takes_name_price_and_photo"
+    ]
+  },
+  {
+    "label": "DW-10: store widgets are never filled",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if profile.strict:\n            ui = _fill_store(ui, storefront, profile)",
+    "replace": "if False:\n            ui = _fill_store(ui, storefront, profile)",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_menu_order_is_filled_from_the_store_and_wired_to_checkout",
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_store_widget_nested_in_a_flow_step_or_child_is_filled_too"
+    ]
+  },
+  {
+    "label": "DW-10: a photo from any host",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if \"@\" in parts.netloc or parts.hostname not in (_IMAGE_HOSTS | {host}):",
+    "replace": "if \"@\" in parts.netloc:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_photo_is_https_on_the_store_host_or_unsplash_and_text_is_plain"
+    ]
+  },
+  {
+    "label": "DW-10: a plain-http photo",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if not value.startswith(\"https://\") or _URL_BAD & set(value):",
+    "replace": "if not value.startswith((\"https://\", \"http://\")):",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_photo_is_https_on_the_store_host_or_unsplash_and_text_is_plain"
+    ]
+  },
+  {
+    "label": "DW-10: store text keeps a link",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "        _check_text(text, frozenset())\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_photo_is_https_on_the_store_host_or_unsplash_and_text_is_plain"
+    ]
+  },
+  {
+    "label": "DW-10: store text keeps a brace",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if any(c in text for c in \"{}`\"):",
+    "replace": "if any(c in text for c in \"`\"):",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_photo_is_https_on_the_store_host_or_unsplash_and_text_is_plain"
+    ]
+  },
+  {
+    "label": "DW-10: an unavailable product is listed",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if not isinstance(p, dict) or p.get(\"available\") is False:",
+    "replace": "if not isinstance(p, dict):",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_the_client_reads_the_menu_services_and_seven_days_of_slots"
+    ]
+  },
+  {
+    "label": "DW-10: the pinned fetch takes any content type",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "        allowed_content_types=(\"application/json\",),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_production_reads_go_through_the_pinned_fetch_and_refuse_loopback"
+    ]
+  },
+  {
+    "label": "DW-10: a store read has no time budget",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "return await asyncio.wait_for(fetch(base_url + path), left)",
+    "replace": "return await fetch(base_url + path)",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_slow_store_is_cut_off_at_the_budget"
+    ]
+  },
+  {
+    "label": "DW-10: the store is never cached",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_store.py",
+    "find": "if hit is not None and hit[0] > now:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_the_store_is_cached_per_site_for_a_minute"
+    ]
+  },
+  {
+    "label": "DW-10: the store is read off the ripple profile",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "if not isinstance(url, str) or not url or ui_profile(site, settings) is not RIPPLE_PROFILE:",
+    "replace": "if not isinstance(url, str) or not url:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_the_store_is_read_only_for_an_ops_site_on_the_ripple_profile"
+    ]
+  },
+  {
+    "label": "DW-10: a product name can close the store-menu block",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "page-tools|store-menu|page)",
+    "replace": "page-tools|page)",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_the_store_menu_block_lists_ids_prices_and_kinds_and_no_photos"
+    ]
+  },
+  {
+    "label": "DW-10: the rules stop pointing orders at the store menu",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"is an itinerary. A menu or an order is a menu-order: items by product_id from the \"\n    \"store-menu block (and name),",
+    "replace": "\"is an itinerary. A menu or an order is a menu-order: items by product_id \"\n    \"(and name),",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_build_prompt_puts_the_store_menu_after_the_catalog"
+    ]
+  },
+  {
+    "label": "DW-10: a turn's prompt has no store menu",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            profile=profile,\n            storefront=storefront,\n        )\n        model = _build_model",
+    "replace": "            profile=profile,\n        )\n        model = _build_model",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_ripple_turn_streams_a_menu_order_filled_from_the_store"
+    ]
+  },
+  {
+    "label": "DW-10: a turn's cards are not filled from the store",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                stream_cards=profile.name == \"ripple\",\n                storefront=storefront,\n",
+    "replace": "                stream_cards=profile.name == \"ripple\",\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_ripple_turn_streams_a_menu_order_filled_from_the_store"
+    ]
+  },
+  {
+    "label": "DW-10: a lookup-hydrated card drops the store",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                items,\n                verbs=self._verbs,\n                lead_capture=self._lead_capture,\n                profile=self._profile,\n                storefront=self._storefront,\n",
+    "replace": "                items,\n                verbs=self._verbs,\n                lead_capture=self._lead_capture,\n                profile=self._profile,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_ripple_turn_streams_a_menu_order_filled_from_the_store"
+    ]
+  },
+  {
+    "label": "DW-10: a fed card drops the store",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                    self._catalog,\n                    verbs=self._verbs,\n                    lead_capture=self._lead_capture,\n                    profile=self._profile,\n                    storefront=self._storefront,\n",
+    "replace": "                    self._catalog,\n                    verbs=self._verbs,\n                    lead_capture=self._lead_capture,\n                    profile=self._profile,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_streamed_store_card_passes_the_partial_checks_and_finishes_filled"
+    ]
+  },
+  {
+    "label": "DW-10: a store URL on a pawbar ops site",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "if not ops or profile != \"ripple\":",
+    "replace": "if not ops:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_only_an_ops_site_on_the_ripple_profile_may_set_a_store"
+    ]
+  },
+  {
+    "label": "DW-10: a store URL off the ops list",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "if not ops or profile != \"ripple\":",
+    "replace": "if profile != \"ripple\":",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_only_an_ops_site_on_the_ripple_profile_may_set_a_store"
+    ]
+  },
+  {
+    "label": "DW-10: a store URL to an internal host",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    url = validate_external_url_strict(value.strip())\n",
+    "replace": "    url = value.strip()\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_store_url_is_https_on_a_public_host"
     ]
   }
 ]

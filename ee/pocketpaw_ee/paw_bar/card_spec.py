@@ -1021,7 +1021,7 @@ def _store_items(items: Any, store: Any, *, menu: bool) -> tuple[list[Any], bool
             continue
         pid = pid.strip()
         product = products.get(pid)
-        if product is None or pid in seen:
+        if pid in seen or product is None:
             continue
         seen.add(pid)
         mine = {k: v for k, v in item.items() if k not in keys}

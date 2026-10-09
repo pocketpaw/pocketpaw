@@ -667,19 +667,20 @@ async def test_the_store_is_read_only_for_an_ops_site_on_the_ripple_profile(monk
 @pytest.mark.asyncio
 async def test_only_an_ops_site_on_the_ripple_profile_may_set_a_store(client, monkeypatch):
     c, _store = client
-    site = await _settings_site()
+    # A stored ripple profile off the ops list (a stale value) counts for nothing.
+    site = await _settings_site(concierge_ui_profile="ripple")
     url = f"/paw-bar/admin/site/{site.id}/settings"
     store = {"concierge_store_url": "https://shop.example/test-store/"}
 
     _pin_ops(monkeypatch, "another")
-    res = await c.patch(url, json={**store, "concierge_ui_profile": "pawbar"})
+    res = await c.patch(url, json=store)
     assert (res.status_code, res.json()["detail"]) == (403, "ops_only_setting")
     _pin_ops(monkeypatch, str(site.id))
-    res = await c.patch(url, json=store)  # still on pawbar
+    res = await c.patch(url, json={**store, "concierge_ui_profile": "pawbar"})
     assert (res.status_code, res.json()["detail"]) == (403, "ops_only_setting")
     assert (await c.get(url)).json()["concierge_store_url"] is None
 
-    res = await c.patch(url, json={**store, "concierge_ui_profile": "ripple"})
+    res = await c.patch(url, json=store)
     assert res.status_code == 200, res.text
     assert res.json()["concierge_store_url"] == "https://shop.example/test-store"
 
