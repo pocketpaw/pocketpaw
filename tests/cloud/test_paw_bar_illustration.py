@@ -315,7 +315,8 @@ def test_the_ripple_paragraph_teaches_the_illustration():
     from pocketpaw_ee.paw_bar.concierge_runtime import _cards_paragraph
 
     text = _cards_paragraph([], profile=RIPPLE_PROFILE)
-    assert "   - illustration {svg, title, caption?, max_height?, annotations?, on_select}: " in text
+    line = "   - illustration {svg, title, caption?, max_height?, annotations?, on_select}: "
+    assert line in text
     rule = next(line for line in text.splitlines() if "add an illustration" in line)
     assert "single quotes" in rule and "viewBox" in rule and "0.5s" in rule
     assert "never xlink:href" in rule and "40 uses" in rule

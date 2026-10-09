@@ -9,8 +9,9 @@
 # ask; a game's on_complete never may (a quiz timer can end a run unattended), and
 # annotations are judged on the final card, never mid-stream. The annotation refusal
 # table is ported from ripple feat/play-wave packages/svelte/src/lib/security/
-# illustration-annotations.test.ts (ripple has no annotation parity fixture). Also pinned: the typed prompt lines, the rule that maps
-# a game and habit tracking to these widgets, and the flat-prop lift for each.
+# illustration-annotations.test.ts (ripple has no annotation parity fixture). Also
+# pinned: the typed prompt lines, the rule that maps a game and habit tracking to these
+# widgets, and the flat-prop lift for each.
 # Mutation plan: tests/mutations/concierge_play.json.
 
 from __future__ import annotations
