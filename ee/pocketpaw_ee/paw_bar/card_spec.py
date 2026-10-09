@@ -7,15 +7,18 @@
 # events limited to add_to_cart / checkout, and the ``send_to_team`` lead form only
 # with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes ripple-manifest.json
 # minus deferred widgets and page chrome (its ``illustration`` SVG is held to
-# illustration_svg's policy, ``bill-split`` to plain numbers, a button's choice-card
-# ``icon`` and ``description`` to a key and short plain text), and is ``strict``:
+# illustration_svg's policy and its annotations to ids the widget keeps, ``bill-split``
+# to plain numbers, the games and habit-tracker to literal data (``_PLAY_CHECKS``), a
+# button's choice-card ``icon`` and ``description`` to a key and short plain text), and
+# is ``strict``:
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
 # actions, URLs, CSS, expressions, flow cards and ``ask`` to the rules its docstrings
 # name. Any error the walk did not foresee is a logged refusal, never an exception.
 # A ripple body that is not JSON only for missing closers, or one surplus closer
 # before its state, is repaired once and then checked like any body; a ripple
 # node's declared props written flat on the node are moved under ``props``
-# (``_lift_flat_props``) before the checks, and the moved card is the one sent.
+# (``_lift_flat_props``, which also renames a quiz alias to quiz) before the checks,
+# and the moved card is the one sent.
 #
 # Hydration runs after the checks and is not checked again: product data comes only
 # from the site catalog, and on the ripple profile ``_fill_store`` fills menu-order,

@@ -1,0 +1,479 @@
+[
+  {
+    "label": "PLAY-1: the play checks never run",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                _PLAY_CHECKS[kind](value, props if isinstance(props, dict) else {})",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-2: a play widget may carry any handler",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if any(_is_handler_key(k) and k != handler for k in [*node, *props]):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-3: play text may hold an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return isinstance(value, str) and \"{\" not in value",
+    "replace": "    return isinstance(value, str)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-4: memory-match pair count is not bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not isinstance(pairs, list) or not low <= len(pairs) <= high:",
+    "replace": "    if not isinstance(pairs, list):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-5: the pair bounds widen by one",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "MEMORY_PAIRS = (2, 12)",
+    "replace": "MEMORY_PAIRS = (1, 13)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-6: a pair side need not be plain text",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(pair, dict) or not (_plain(pair.get(\"a\")) and _plain(pair.get(\"b\"))):",
+    "replace": "        if not isinstance(pair, dict):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-7: a pair id is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not _optional(pair, \"id\", _plain):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-8: memory-match numbers are not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        _optional(props, \"columns\", _is_number) and _optional(props, \"time_limit_s\", _is_number)",
+    "replace": "        True",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-9: a word-guess answer may be any text",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not isinstance(answer, str) or not WORD_GUESS_ANSWER.fullmatch(answer):",
+    "replace": "    if not isinstance(answer, str):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-10: the answer length widens",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "WORD_GUESS_ANSWER = re.compile(r\"[A-Za-z]{4,7}\")",
+    "replace": "WORD_GUESS_ANSWER = re.compile(r\"[A-Za-z]{3,8}\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-11: the answer may hold any letter",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "WORD_GUESS_ANSWER = re.compile(r\"[A-Za-z]{4,7}\")",
+    "replace": "WORD_GUESS_ANSWER = re.compile(r\"\\w{4,7}\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-12: max_guesses is not bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "WORD_GUESS_ROWS = (1, 10)",
+    "replace": "WORD_GUESS_ROWS = (0, 11)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-13: a whole number may be fractional",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return _is_number(value) and value == int(value) and bounds[0] <= value <= bounds[1]",
+    "replace": "    return _is_number(value) and bounds[0] <= value <= bounds[1]",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-14: a boolean flag may be text",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not _optional(props, \"allow_any_word\", lambda v: isinstance(v, bool)):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-15: the question count is not bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not isinstance(questions, list) or not low <= len(questions) <= high:",
+    "replace": "    if not isinstance(questions, list):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-16: the question bounds widen",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "QUIZ_QUESTIONS = (1, 12)",
+    "replace": "QUIZ_QUESTIONS = (0, 13)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-17: a prompt is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(q, dict) or not _plain(q.get(\"prompt\")):",
+    "replace": "        if not isinstance(q, dict):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-18: the choice count is not bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "QUIZ_CHOICES = (2, 5)",
+    "replace": "QUIZ_CHOICES = (1, 6)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-19: choices need not be plain text",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not all(map(_plain, choices)):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-20: the answer index may run past the choices",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not _is_int(q.get(\"answer\"), (0, len(choices) - 1)):",
+    "replace": "        if not _is_int(q.get(\"answer\"), (-1, len(choices))):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-21: why and id are not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not (_optional(q, \"why\", _plain) and _optional(q, \"id\", _plain)):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-22: a quiz image need not be text",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not _optional(q, \"image\", lambda v: isinstance(v, str)):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-23: the quiz timer is not bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "QUIZ_SECONDS = (3, 600)",
+    "replace": "QUIZ_SECONDS = (2, 601)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-24: shuffle_choices is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not _optional(props, \"shuffle_choices\", lambda v: isinstance(v, bool)):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-25: the habit count is not bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "HABITS = (1, 8)",
+    "replace": "HABITS = (0, 9)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-26: a habit name is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(habit, dict) or not _plain(habit.get(\"name\")):",
+    "replace": "        if not isinstance(habit, dict):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-27: habit ids may repeat",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not _plain(hid) or not hid or hid in ids:",
+    "replace": "        if not _plain(hid) or not hid:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-28: a habit icon may be anything",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not _optional(habit, \"icon\", lambda v: isinstance(v, str) and CHOICE_ICON.fullmatch(v)):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-29: the weekly target is not bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "HABIT_TARGET = (1, 7)",
+    "replace": "HABIT_TARGET = (0, 8)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-30: week_start is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not _optional(props, \"week_start\", lambda v: v in (\"mon\", \"sun\")):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-31: weeks is not bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "HABIT_WEEKS = (1, 4)",
+    "replace": "HABIT_WEEKS = (1, 5)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-32: a seed may name any habit",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and seed.keys() <= ids\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-33: a seed day reaches further back",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "HABIT_SEED_DAY = 27",
+    "replace": "HABIT_SEED_DAY = 28",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-34: a seed list is uncapped",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            and len(days) <= HABIT_SEED_DAY + 1\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-35: the quiz aliases are not renamed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            value[\"type\"] = kind = \"quiz\"",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-36: annotations are never checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        _check_annotations(props[\"annotations\"], svg)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-37: an illustration may carry any handler",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if \"bind\" in node or [k for k in handlers if k != \"on_select\" or k in props]:",
+    "replace": "    if \"bind\" in node:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-38: on_select inside props passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "[k for k in handlers if k != \"on_select\" or k in props]",
+    "replace": "[k for k in handlers if k != \"on_select\"]",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-39: more than 8 annotations",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ANNOTATIONS_MAX = 8",
+    "replace": "ANNOTATIONS_MAX = 9",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-40: annotation ids may repeat",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(nid, str) or not nid.strip() or nid in seen:",
+    "replace": "        if not isinstance(nid, str) or not nid.strip():",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-41: the label cap counts code points",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_js_len(label) > ANNOTATION_LABEL_MAX",
+    "replace": "len(label) > ANNOTATION_LABEL_MAX",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-42: a blank label passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not _plain(label) or not label.strip() or _js_len(label)",
+    "replace": "        if not _plain(label) or _js_len(label)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-43: the note cap widens",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ANNOTATION_NOTE_MAX = 280",
+    "replace": "ANNOTATION_NOTE_MAX = 281",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-44: target and at may both be given",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if (\"target\" in note) == (\"at\" in note):",
+    "replace": "        if \"target\" not in note and \"at\" not in note:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-45: a null target reads as absent",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if (\"target\" in note) == (\"at\" in note):",
+    "replace": "        if (note.get(\"target\") is not None) == (note.get(\"at\") is not None):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-46: at is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if not (isinstance(at, list) and len(at) == 2 and all(map(_is_number, at))):",
+    "replace": "            if not isinstance(at, list):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-47: a target need not be in the svg",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if note[\"target\"] not in kept:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-48: svg_ids reads ids under a dropped element",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "        if tag not in KEPT_ELEMENTS:\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-49: svg_ids keeps an animation with no attributeName",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "            and \"attributeName\" not in el.attrib",
+    "replace": "            and False",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-50: the rules drop the game mapping",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"A game is a memory-match (pairs), word-guess (a hidden word) or quiz (trivia \"\n    \"with explanations); tracking habits, a habit-tracker. A small tool (a converter) \"",
+    "replace": "    \"A small tool (a converter) \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-51: the rules drop the annotations line",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"none pointing at a use. Up to 8 annotations [{id, label (at most 40 chars), note \"",
+    "replace": "    \"none pointing at a use. Notes \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-52: the play widgets are not typed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    typed={**RIPPLE_DATA_WIDGETS, **RIPPLE_PLAY_WIDGETS},",
+    "replace": "    typed=RIPPLE_DATA_WIDGETS,",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-53: a long enum prints whole",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    text = \" \".join(_LONG_ENUM.sub(\"string\", text).split()).replace('\"', \"\")",
+    "replace": "    text = \" \".join(text.split()).replace('\"', \"\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  }
+]
