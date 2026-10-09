@@ -8,7 +8,7 @@
 # with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes ripple-manifest.json
 # minus deferred widgets and page chrome (its ``illustration`` SVG is held to
 # illustration_svg's policy and its annotations to ids the widget keeps, ``bill-split``
-# to plain numbers, the games and habit-tracker to literal data (``_PLAY_CHECKS``), a
+# to plain numbers, the games, habit-tracker and focus-timer to literal data (``_PLAY_CHECKS``), a
 # button's choice-card ``icon`` and ``description`` to a key and short plain text), and
 # is ``strict``:
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
@@ -17,7 +17,7 @@
 # A ripple body that is not JSON only for missing closers, or one surplus closer
 # before its state, is repaired once and then checked like any body; a ripple
 # node's declared props written flat on the node are moved under ``props``
-# (``_lift_flat_props``, which also renames a quiz alias to quiz) before the checks,
+# (``_lift_flat_props``, which also renames a widget alias, ``RIPPLE_ALIASES``) before the checks,
 # and the moved card is the one sent.
 #
 # Hydration runs after the checks and is not checked again: product data comes only
@@ -180,6 +180,11 @@ RIPPLE_PLAY_WIDGETS: dict[str, frozenset[str] | None] = {
     "word-guess": frozenset({"title", "answer", "hint", "max_guesses", "allow_any_word"}),
     "quiz": frozenset({"title", "topic", "questions", "seconds_per_question", "shuffle_choices"}),
     "habit-tracker": frozenset({"title", "habits", "week_start", "weeks", "seed"}),
+    "focus-timer": frozenset(
+        {"title", "focus_min", "short_break_min", "long_break_min", "rounds_before_long"}
+        | {"goal_rounds", "task", "auto_start_next"}
+    ),
+    "board-game": frozenset({"game", "title", "player", "first", "difficulty", "best_of"}),
 }
 MEMORY_PAIRS = (2, 12)
 WORD_GUESS_ANSWER = re.compile(r"[A-Za-z]{4,7}")
@@ -191,8 +196,28 @@ HABITS = (1, 8)
 HABIT_TARGET = (1, 7)
 HABIT_WEEKS = (1, 4)
 HABIT_SEED_DAY = 27  # the most days back a seed tick may sit (4 weeks)
-# Names ripple's registry also draws as a quiz; a node by them is checked and sent as one.
-QUIZ_ALIASES: frozenset[str] = frozenset({"trivia", "trivia-quiz"})
+FOCUS_MIN = (1, 120)
+BREAK_MIN = (1, 60)  # both breaks
+FOCUS_ROUNDS = (1, 12)
+FOCUS_GOAL = (1, 24)
+FOCUS_TASK_MAX = 120
+# A board-game's two marks per game: the visitor's ``player`` is one of them.
+BOARD_MARKS: dict[str, tuple[str, str]] = {
+    "tic-tac-toe": ("X", "O"),
+    "connect-four": ("red", "yellow"),
+}
+BOARD_BEST_OF = (1, 3, 5)
+# Names ripple's registry also draws as one of these widgets, which its chat allowlist
+# refuses: a node by one is checked and sent under the widget's own name, a board-game
+# alias filling a missing ``game``.
+RIPPLE_ALIASES: dict[str, str] = {
+    "trivia": "quiz",
+    "trivia-quiz": "quiz",
+    "pomodoro": "focus-timer",
+    "pomodoro-timer": "focus-timer",
+    "tic-tac-toe": "board-game",
+    "connect-four": "board-game",
+}
 # An illustration's ``annotations``: numbered notes, each pinned on an svg id or a point.
 ANNOTATIONS_MAX = 8
 ANNOTATION_LABEL_MAX = 40
@@ -1091,11 +1116,52 @@ def _check_habit_tracker(node: dict[str, Any], props: dict[str, Any]) -> None:
         raise _Reject("a habit-tracker seed that is not habit ids to days 0..27")
 
 
+def _check_focus_timer(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """No handler; the minutes and rounds whole numbers in ``FOCUS_MIN``, ``BREAK_MIN``,
+    ``FOCUS_ROUNDS`` and ``FOCUS_GOAL`` (ripple rounds and clamps them, so a fraction or
+    an outlier would not draw as written), ``task`` plain text of at most
+    ``FOCUS_TASK_MAX`` and ``auto_start_next`` a boolean."""
+    _play_basics("focus-timer", node, props, None, ("title", "task"))
+    for key, bounds in (
+        ("focus_min", FOCUS_MIN),
+        ("short_break_min", BREAK_MIN),
+        ("long_break_min", BREAK_MIN),
+        ("rounds_before_long", FOCUS_ROUNDS),
+        ("goal_rounds", FOCUS_GOAL),
+    ):
+        if props.get(key) is not None and not _is_int(props[key], bounds):
+            raise _Reject(f"a focus-timer {key} outside {bounds[0]}..{bounds[1]}")
+    if not _optional(props, "task", lambda v: _js_len(v) <= FOCUS_TASK_MAX):
+        raise _Reject(f"a focus-timer task over {FOCUS_TASK_MAX}")
+    if not _optional(props, "auto_start_next", lambda v: isinstance(v, bool)):
+        raise _Reject("a focus-timer auto_start_next that is not a boolean")
+
+
+def _check_board_game(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """``game`` a key of ``BOARD_MARKS`` (an alias fills it), ``player`` one of that
+    game's marks, ``first`` player or computer, ``difficulty`` easy, medium or hard and
+    ``best_of`` one of ``BOARD_BEST_OF``; ``on_complete`` its one handler."""
+    _play_basics("board-game", node, props, "on_complete", ("title",))
+    game = props.get("game")
+    if not isinstance(game, str) or game not in BOARD_MARKS:
+        raise _Reject("a board-game without game tic-tac-toe or connect-four")
+    if not _optional(props, "player", lambda v: v in BOARD_MARKS[game]):
+        raise _Reject(f"a board-game player that is not {' or '.join(BOARD_MARKS[game])}")
+    if not _optional(props, "first", lambda v: v in ("player", "computer")):
+        raise _Reject("a board-game first that is not player or computer")
+    if not _optional(props, "difficulty", lambda v: v in ("easy", "medium", "hard")):
+        raise _Reject("a board-game difficulty that is not easy, medium or hard")
+    if not _optional(props, "best_of", lambda v: _is_number(v) and v in BOARD_BEST_OF):
+        raise _Reject("a board-game best_of that is not 1, 3 or 5")
+
+
 _PLAY_CHECKS = {
     "memory-match": _check_memory_match,
     "word-guess": _check_word_guess,
     "quiz": _check_quiz,
     "habit-tracker": _check_habit_tracker,
+    "focus-timer": _check_focus_timer,
+    "board-game": _check_board_game,
 }
 
 
@@ -1700,11 +1766,20 @@ _LIFTABLE: dict[str, frozenset[str]] = {
 }
 
 
+def _is_alias_node(value: dict[str, Any], canonical: str) -> bool:
+    """A node written under an alias of ``canonical``, not a data row that happens to
+    share the name: every key a node key, a handler or one of the widget's props, and
+    one of them more than ``type``."""
+    known = _NODE_KEYS | _LIFTABLE.get(canonical, frozenset())
+    return len(value) > 1 and all(k in known or _is_handler_key(k) for k in value)
+
+
 def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
     """``ui`` with, in place, every widget node's top-level keys that its manifest
     entry declares as props (``_LIFTABLE``) moved into ``props`` (made when
     missing; a key ``props`` already holds stays put, the flat one beside it),
-    at any depth: children, node slots inside props, flow steps. A node's own
+    at any depth: children, node slots inside props, flow steps, a node written under
+    an alias (``RIPPLE_ALIASES``, ``_is_alias_node``) renamed first. A node's own
     ``props`` object is never read as a node. Strict profile only; the caller
     checks the result in full. Returns it and how many keys moved."""
     if not profile.strict:
@@ -1720,8 +1795,12 @@ def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
             continue
         kind = value.get("type")
         props = value.get("props", {})
-        if kind in QUIZ_ALIASES and isinstance(props, dict) and "questions" in {*value, *props}:
-            value["type"] = kind = "quiz"
+        canonical = RIPPLE_ALIASES.get(kind) if isinstance(kind, str) else None
+        if canonical and isinstance(props, dict) and _is_alias_node(value, canonical):
+            value["type"] = canonical
+            if canonical == "board-game" and "game" not in {*value, *props}:
+                value["props"] = props = {**props, "game": kind}
+            kind = canonical
         if isinstance(kind, str) and isinstance(props, dict):
             liftable = _LIFTABLE.get(kind, frozenset())
             flat = [k for k in value if k in liftable and k not in props]
@@ -2033,6 +2112,10 @@ _TYPE_CHARS = 90
 # A union of 12 or more string literals (habit-tracker's icons) prints as a string: the
 # widget's description names the ones that matter, and the row's later fields stay in view.
 _LONG_ENUM = re.compile(r'(?:"[^"]*"\s*\|\s*){11,}"[^"]*"')
+# A typed line's description recapping a row shape its field list already gives
+# (``cards[{front, back}]``) keeps just the name; a recap with a note in parentheses
+# (``answer (index)``) adds something, so it stays.
+_SHAPE_RECAP = re.compile(r"\b(\w+)\[\{[^{}()\[\]]*\}\]")
 # Props every data widget shares; the ripple rules teach them once, so a typed
 # line leaves them out.
 _COMMON_PROPS: frozenset[str] = frozenset({"title", "subtitle", "verdict", "currency"})
@@ -2082,11 +2165,14 @@ def _widget_line(
     props = [entry(name, spec) for name, spec in listed(widget.get("props"))]
     props += [name for name, _ in listed(widget.get("events"))]
     props += [entry(name, spec) for name, spec in listed(widget.get("nodeFields"))]
-    return f"- {widget['type']} {{{', '.join(props)}}}: {widget.get('description', '')}"
+    text = str(widget.get("description", ""))
+    if typed:
+        text = _SHAPE_RECAP.sub(r"\1", text)
+    return f"- {widget['type']} {{{', '.join(props)}}}: {text}"
 
 
 # A summary line's description: its first sentence, at most this long.
-_BRIEF_CHARS = 85
+_BRIEF_CHARS = 73
 
 
 def _brief_line(widget: dict[str, Any]) -> str:
@@ -2132,7 +2218,7 @@ __all__ = [
     "FORM_PREFILL_MAX",
     "HOST_EVENTS",
     "BILL_SPLIT",
-    "QUIZ_ALIASES",
+    "RIPPLE_ALIASES",
     "RIPPLE_PLAY_WIDGETS",
     "ILLUSTRATION",
     "LEAD_CONTACT_FIELDS",

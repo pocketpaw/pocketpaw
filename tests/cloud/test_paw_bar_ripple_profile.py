@@ -301,7 +301,10 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # the vendored illustration line, bill-split and the choice-button line; 32,412 with
     # the play-wave manifest, then 31,914 after a trim pass (rules that repeat a typed
     # line or the manifest dropped, the example card shortened, brief lines 85 chars)
-    # and the games, habit-tracker and annotations added.
+    # and the games, habit-tracker and annotations added; 32,618 with focus-timer and
+    # board-game typed (205 widgets), then 31,895 after a second pass (a typed line's
+    # description no longer recaps a row shape its field list gives, the game sentence
+    # drops what the typed lines say, brief lines 73 chars) with their mapping added.
     assert len(text) < 32_000
 
 
