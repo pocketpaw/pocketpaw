@@ -29,15 +29,16 @@
 # are data in ``ui`` only; ``state`` holds no action); a slot a widget resolves
 # before it fires (``_check_resolved_prop``) holds literal action objects, or a
 # literal node where the engine draws one; a ``follow-up``'s ``event`` is a declared
-# host event; a form has no submit target;
-# a URL key holds a same-site path or an https URL on ``url_hosts`` (none); no
-# text holds a javascript: link; a repeated JSON key is refused. Two shapes are
-# ripple-only. A ``ui`` carrying a flow field (Ripple's chain) is a flow: at most
+# host event; a form has no submit target; a URL key holds a same-site path or an
+# https URL on ``url_hosts`` (none); no text holds a javascript: link; a repeated
+# JSON key is refused. Two shapes are ripple-only. A ``ui`` carrying a flow field
+# (Ripple's chain) is a flow: at most
 # ``MAX_FLOW_STEPS`` steps keyed from ``FLOW_STEP_KEYS``, each step's ``ui`` a root
 # node, one node budget for the card, ``emit`` to ``FLOW_EVENTS`` allowed,
-# ``onComplete`` only a chat message. And ``emit ask`` (``{text}``, at most
-# ``ASK_MAX``) sends a visitor message, only from an explicit visitor action
-# (``ASK_HANDLERS``: the outermost handler key decides; never ``state``).
+# ``onComplete`` only a plain-text chat message, on a step only. And ``emit ask``
+# (plain ``{text}``, at most ``ASK_MAX``) sends a visitor message, as does
+# ``flow.submit``, only from an explicit visitor action (``ASK_HANDLERS``: the
+# outermost handler key decides; never ``state``).
 # ``PartialScan`` runs the string checks and the repeated-key check on a body
 # still streaming, flagging only what the finished card is sure to fail.
 #
@@ -285,14 +286,17 @@ FLOW_STEP_KEYS: frozenset[str] = frozenset(
 MAX_FLOW_STEPS = 8
 # The emit targets that move a flow (Ripple's FlowRunner takes them); flow cards only.
 FLOW_EVENTS: tuple[str, ...] = ("flow.next", "flow.back", "flow.forward", "flow.submit")
+# The flow emit that fires a terminal step's ``onComplete`` (a visitor message):
+# held to ``ASK_HANDLERS`` like ``ask``.
+FLOW_SUBMIT = "flow.submit"
 # The host event a click sends a visitor message with (ripple only), and the most
 # text it, or a flow's chat ``onComplete``, may send.
 ASK_EVENT = "ask"
 ASK_MAX = 500
-# The handler keys an ``ask`` may fire from: a click, a submit, a pick, and a
-# composite's button list (comparison ``items[].actions``, entity-detail
-# ``actions[].actions``). Focus, input, change, timers and the wizard's
-# ``*Actions`` fire without one, so they may not.
+# The handler keys an ``ask`` (or ``flow.submit``) may fire from: a click, a
+# submit, a pick, and a composite's button list (comparison ``items[].actions``,
+# entity-detail ``actions[].actions``). Focus, input, change, timers and the
+# wizard's ``*Actions`` fire without one, so they may not.
 ASK_HANDLERS: frozenset[str] = frozenset({"on_click", "on_submit", "on_select", "actions"})
 # CSS that loads something or runs script. Run on ``_css_text``.
 _CSS_LOADS: tuple[str, ...] = (
@@ -400,8 +404,9 @@ def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, 
 def _check_actions(
     value: Any, events: list[str], allowed: frozenset[str] = SPEC_ACTIONS, ask: bool = False
 ) -> None:
-    """``ask``: an ``emit`` to ``ASK_EVENT`` may pass too (ripple, from one of
-    ``ASK_HANDLERS``), its value exactly ``{"text": <at most ASK_MAX chars>}``."""
+    """``ask`` (ripple, under one of ``ASK_HANDLERS``): an ``emit`` to
+    ``ASK_EVENT`` may pass too, its value exactly ``{"text": <plain text of at
+    most ASK_MAX chars>}``, and only then may one emit ``FLOW_SUBMIT``."""
     for action in value if isinstance(value, list) else [value]:
         if not isinstance(action, dict) or action.get("action") not in allowed:
             raise _Reject("an event runs an action the bar does not honour")
@@ -414,8 +419,11 @@ def _check_actions(
                 and said.keys() == {"text"}
                 and isinstance(said["text"], str)
                 and len(said["text"]) <= ASK_MAX
+                and "{" not in said["text"]
             ):
-                raise _Reject(f"an ask that is not {{text}} of at most {ASK_MAX} characters")
+                raise _Reject(f"an ask that is not plain {{text}} of at most {ASK_MAX} characters")
+        if action["action"] == "emit" and action.get("target") == FLOW_SUBMIT and not ask:
+            raise _Reject("a flow.submit not from an explicit visitor action")
 
 
 def _check_events(
@@ -591,6 +599,11 @@ def _check_strict(
             continue
         if not isinstance(value, dict):
             continue
+        if "onComplete" in value or "onComplete" in (
+            value.get("props") if isinstance(value.get("props"), dict) else ()
+        ):
+            # A step's own onComplete never reaches the walk (``_flow_steps``).
+            raise _Reject("an onComplete off a flow step")
         kind = value.get("type")
         if not is_node and not css and isinstance(kind, str):
             # A node kept in a prop or in state: a widget's name, or node-shaped.
@@ -778,15 +791,17 @@ def _flow_steps(root: dict[str, Any]) -> list[tuple[Any, ...]]:
 
 
 def _check_on_complete(value: Any) -> None:
-    """A flow's ``onComplete``: only ``{"kind": "chat", "message": <at most
-    ASK_MAX chars>}``. invoke_tool, call_binding, create_pocket, navigate, emit
-    and any other kind run something no card may."""
+    """A flow's ``onComplete``: only ``{"kind": "chat", "message": <plain text of
+    at most ASK_MAX chars>}``. invoke_tool, call_binding, create_pocket,
+    navigate, emit and any other kind run something no card may; an expression
+    would send what it resolves to, unchecked."""
     if not (
         isinstance(value, dict)
         and value.get("kind") == "chat"
         and value.keys() <= {"kind", "message"}
         and isinstance(value.get("message"), str)
         and len(value["message"]) <= ASK_MAX
+        and "{" not in value["message"]
     ):
         raise _Reject("a flow onComplete that is not a chat message")
 
@@ -1062,15 +1077,21 @@ def _render_card(
 
 
 def has_lead_form(body: str) -> bool:
-    """Whether a card body holds a send_to_team form, as a Ripple spec node or a
-    legacy ``{"kind": "form"}`` card. Says nothing about whether it is valid:
-    ask it of a body ``render_card`` passed."""
+    """Whether a card body holds a send_to_team form, as a Ripple spec node (in
+    any flow step too) or a legacy ``{"kind": "form"}`` card. Says nothing about
+    whether it is valid: ask it of a body ``render_card`` passed."""
     raw = _parse(body)
     if isinstance(raw, dict) and raw.get("kind") == "form":
         return raw.get("verb") == LEAD_VERB
     if not _is_spec(raw):
         return False
-    stack = [raw["ui"]]
+    ui = raw["ui"]
+    stack = [ui]
+    if isinstance(ui, dict) and any(field in ui for field in _FLOW_FIELDS):
+        try:
+            stack = [entry[0] for entry in _flow_steps(ui) if entry[3] == "ui"]
+        except _Reject:
+            return False
     while stack:
         node = stack.pop()
         if not isinstance(node, dict):

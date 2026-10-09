@@ -110,7 +110,7 @@
   {
     "label": "SEC F7: a follow-up's event is not checked",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                if (props or {}).get(\"event\", _FOLLOW_UP_EVENT) not in events:",
+    "find": "                if (props or {}).get(\"event\", _FOLLOW_UP_EVENT) not in host_events:",
     "replace": "                if False:",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f7_a_follow_up_emits_only_a_declared_host_event"
@@ -508,8 +508,8 @@
   {
     "label": "FL-1: a step's ui is walked as data, not as a root node",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False))",
-    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False))",
+    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False, False))",
+    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False, False))",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
     ]
@@ -517,7 +517,7 @@
   {
     "label": "FL-1: step values other than ui skip the walk (no text checks)",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False))",
+    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
     "replace": "            else:\n                pass",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
@@ -526,7 +526,7 @@
   {
     "label": "FL-1 streamed: step values other than ui skip the walk",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False))",
+    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
     "replace": "            else:\n                pass",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
@@ -813,28 +813,20 @@
     ]
   },
   {
-    "label": "FL-1 ask: state starts undecided",
-    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "    stack.append((spec.get(\"state\"), 1, 0, \"\", False, False, False, False, False))\n",
-    "replace": "    stack.append((spec.get(\"state\"), 1, 0, \"\", False, None, False, False, False))\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
-    ]
-  },
-  {
-    "label": "FL-1 ask: a node in state may ask from its own handlers",
+    "label": "FL-1 ask: a node in state or inside a passive handler may ask from its own handlers",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
     "find": "            base = None if ask is None else False\n",
     "replace": "            base = None\n",
     "tests": [
-      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_a_node_inside_a_passive_handler_may_not_ask"
     ]
   },
   {
     "label": "FL-1 ask: step values other than ui start undecided",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                out.append((v, level + 1, 0, k, False, False, False, False, False))",
-    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False))",
+    "find": "                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
+    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False, False))",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
     ]
@@ -887,10 +879,82 @@
   {
     "label": "FL-1 ask: flow step ui starts decided-no",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False))",
-    "replace": "                out.append((v, level + 1, 1, k, False, False, True, False, False))",
+    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False, False))",
+    "replace": "                out.append((v, level + 1, 1, k, False, False, True, False, False, False))",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "SEC F2: flow.submit may come from any handler",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if action[\"action\"] == \"emit\" and action.get(\"target\") == FLOW_SUBMIT and not ask:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f2_flow_submit_only_from_an_explicit_visitor_action"
+    ]
+  },
+  {
+    "label": "SEC F2: flow.submit is refused even on a click",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "action.get(\"target\") == FLOW_SUBMIT and not ask:",
+    "replace": "action.get(\"target\") == FLOW_SUBMIT:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f2_flow_submit_passes_on_a_click_a_submit_or_a_button_list"
+    ]
+  },
+  {
+    "label": "SEC F2: every flow emit is gated, flow.next on focus included",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "action.get(\"target\") == FLOW_SUBMIT and not ask:",
+    "replace": "action.get(\"target\") in FLOW_EVENTS and not ask:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f2_flow_submit_passes_on_a_click_a_submit_or_a_button_list"
+    ]
+  },
+  {
+    "label": "SEC F4: the ask text may hold an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                and \"{\" not in said[\"text\"]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f4_the_ask_text_and_the_chat_message_are_plain_text"
+    ]
+  },
+  {
+    "label": "SEC F4: the onComplete message may hold an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and \"{\" not in value[\"message\"]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f4_the_ask_text_and_the_chat_message_are_plain_text"
+    ]
+  },
+  {
+    "label": "SEC F5: an onComplete off a step passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            raise _Reject(\"an onComplete off a flow step\")",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f5_an_on_complete_off_a_step_is_refused"
+    ]
+  },
+  {
+    "label": "SEC F5: an onComplete in a node's props passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if \"onComplete\" in value or \"onComplete\" in (",
+    "replace": "        if \"onComplete\" in value or \"_none\" in (",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f5_an_on_complete_off_a_step_is_refused"
+    ]
+  },
+  {
+    "label": "SEC F6: has_lead_form walks only the root's children",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            stack = [entry[0] for entry in _flow_steps(ui) if entry[3] == \"ui\"]",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f6_a_lead_form_in_a_flow_step_is_the_lead_card"
     ]
   }
 ]

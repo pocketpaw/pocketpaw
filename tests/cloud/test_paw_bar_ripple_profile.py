@@ -1754,7 +1754,7 @@ TRIP_FLOW = {
                     },
                     "onComplete": {
                         "kind": "chat",
-                        "message": "Plan a calm trip for {state.days} days",
+                        "message": "Plan a calm trip",
                     },
                 },
             },
@@ -1971,3 +1971,111 @@ def test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple(card
     assert _ripple(card) is not None, why
     assert render_card(_body(card), []) is None  # pawbar has no ask
     assert render_card(_body({"ui": _ask()}), [], verbs=["checkout"]) is None
+
+
+# SEC F2: flow.submit at a terminal step sends its onComplete chat message, so it
+# is held to the same explicit-visitor-action rule as ask (the findings' repro
+# first). flow.next / back / forward stay ungated.
+_SUBMIT = {"action": "emit", "target": "flow.submit"}
+
+
+def _submits_from(key: str) -> dict:
+    return _flow(1, s1={"ui": {"type": "flex", "props": {key: _SUBMIT}}})
+
+
+_SUBMIT_REFUSALS = [
+    (
+        {
+            "ui": {
+                "flowId": "s1",
+                "onComplete": {"kind": "chat", "message": "Send my plan"},
+                "ui": {
+                    "type": "input",
+                    "bind": "q",
+                    "props": {"label": "Your name"},
+                    "on_input": _SUBMIT,
+                },
+            }
+        },
+        "the findings' on_input repro",
+    ),
+    *[(_submits_from(key), f"flow.submit in {key}") for key in _NOT_ASK_HANDLERS],
+    (
+        _flow(1, s1={"ui": {"type": "input", "on_focus": {"action": "flow", "steps": [_SUBMIT]}}}),
+        "in a flow under on_focus",
+    ),
+    (_flow(1, s1={"form_fields": [{"name": "x", "actions": [_SUBMIT]}]}), "in form_fields"),
+]
+
+
+@pytest.mark.parametrize(("spec", "why"), _SUBMIT_REFUSALS, ids=[w for _, w in _SUBMIT_REFUSALS])
+def test_sec_f2_flow_submit_only_from_an_explicit_visitor_action(spec, why):
+    assert _ripple(spec) is None, why
+
+
+def test_sec_f2_flow_submit_passes_on_a_click_a_submit_or_a_button_list():
+    assert _ripple(TRIP_FLOW) is not None
+    form = {"type": "form", "props": {"fields": [{"name": "q"}]}, "on_submit": _SUBMIT}
+    assert _ripple(_flow(1, s1={"ui": form})) is not None
+    rows = {"type": "comparison-layout", "props": {"items": [{"id": "a", "actions": [_SUBMIT]}]}}
+    assert _ripple(_flow(1, s1={"ui": rows})) is not None
+    focus_next = {"type": "input", "on_focus": {"action": "emit", "target": "flow.next"}}
+    assert _ripple(_flow(1, s1={"ui": focus_next})) is not None
+
+
+# SEC F4: what an expression resolves to is never seen here (a 9-character
+# "{state.big}" sends 60,000), so the ask text and the onComplete message are
+# plain text.
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": _ask("{state.big}"), "state": {"big": "x" * 60_000}},
+        {"ui": _ask("Hi {state.name}")},
+        _flow(1, last={"onComplete": {"kind": "chat", "message": "{state.days} days"}}),
+        _flow(1, last={"onComplete": {"kind": "chat", "message": "[x]({state.a}{state.b})"}}),
+    ],
+)
+def test_sec_f4_the_ask_text_and_the_chat_message_are_plain_text(spec):
+    assert _ripple(spec) is None
+
+
+# SEC F5: only a step's onComplete is read and checked; anywhere else it is refused.
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {
+            "ui": {
+                "flowId": "a",
+                "onComplete": {"kind": "chat", "message": "x"},
+                "ui": {"type": "flex", "onComplete": {"kind": "invoke_tool", "tool": "delete_all"}},
+            }
+        },
+        _flow(
+            2,
+            s2={"ui": {"type": "flex", "props": {"onComplete": {"kind": "chat", "message": "x"}}}},
+        ),
+        {"ui": {"type": "text"}, "state": {"onComplete": {"kind": "invoke_tool"}}},
+        _flow(2, s2={"form_fields": [{"name": "x", "onComplete": {"kind": "navigate"}}]}),
+    ],
+)
+def test_sec_f5_an_on_complete_off_a_step_is_refused(spec):
+    assert _ripple(spec) is None
+
+
+# A node met inside a passive handler may not ask from its own click either.
+def test_sec_a_node_inside_a_passive_handler_may_not_ask():
+    spec = {"ui": {"type": "input", "on_focus": {"action": "set", "target": "b", "value": _ask()}}}
+    assert _ripple(spec) is None
+
+
+# SEC F6: a lead form inside a flow step is the lead card, so the runner does not
+# add a second contact reply.
+def test_sec_f6_a_lead_form_in_a_flow_step_is_the_lead_card():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, has_lead_form, render_card
+
+    form = {"type": "form", "props": {"verb": "send_to_team", "fields": [{"name": "email"}]}}
+    card = _flow(2, s2={"ui": form})
+    body = _body(card)
+    assert render_card(body, [], profile=RIPPLE_PROFILE, lead_capture=True) is not None
+    assert has_lead_form(body)
+    assert not has_lead_form(_body(_flow(2)))
