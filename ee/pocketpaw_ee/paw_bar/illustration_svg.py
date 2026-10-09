@@ -17,6 +17,8 @@
 # before the ``url(`` and script-scheme rules; text content is never held to them
 # (``Metadata: 5`` is text, never a link). A ``use`` may not point at a subtree
 # holding a ``use`` (no fan-out past the element cap).
+# Known ceiling: the flash guard reads only ``dur``, so a ``set`` with a ``begin``
+# list can still flash; the widget's reduced-motion pause and pause button are the floor.
 
 from __future__ import annotations
 

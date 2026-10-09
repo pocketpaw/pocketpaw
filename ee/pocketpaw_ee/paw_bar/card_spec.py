@@ -1,56 +1,29 @@
-# ee/pocketpaw_ee/paw_bar/card_spec.py — bound and hydrate the cards a v2 concierge writes.
+# ee/pocketpaw_ee/paw_bar/card_spec.py: bound and hydrate the cards a v2 concierge writes.
 #
-# A v2 reply can carry a ```pawbar-card fence whose JSON has a ``ui`` node tree (a
-# Ripple spec). It is drawn on a customer's page, so the server checks it first.
-# Every rule reads a ``CardProfile``:
+# A v2 reply can carry a ```pawbar-card fence whose JSON ``ui`` is a Ripple node tree,
+# drawn on a customer's page, so the server checks it first. Every rule reads a
+# ``CardProfile``. ``PAWBAR_PROFILE`` (the default) mirrors paw-bar's lib/spec-card.ts:
+# small bounds, the vendored pawbar-manifest.json widgets, the manifest's actions, host
+# events limited to add_to_cart / checkout, and the ``send_to_team`` lead form only
+# with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes ripple-manifest.json
+# minus deferred widgets and page chrome, plus ``illustration`` (an SVG held to
+# illustration_svg's policy) until that manifest carries it, and is ``strict``:
+# ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
+# actions, URLs, CSS, expressions, flow cards and ``ask`` to the rules its docstrings
+# name. Any error the walk did not foresee is a logged refusal, never an exception.
+# A ripple body that is not JSON only for missing closers, or one surplus closer
+# before its state, is repaired once and then checked like any body.
 #
-#   * ``PAWBAR_PROFILE`` (the default) mirrors paw-bar's lib/spec-card.ts: 32,000
-#     chars, 80 nodes, depth 8, widgets from the vendored pawbar-manifest.json
-#     (minus ``DEFERRED_WIDGETS``), event actions the manifest lists, ``emit`` only
-#     to the add_to_cart / checkout host events the widget declares, form prefill
-#     values of at most ``FORM_PREFILL_MAX``, and a ``send_to_team`` lead form only
-#     with ``lead_capture`` on (fields from ``LEAD_FIELDS``, an email or phone).
-#     A body is parsed as paw-bar parses it (``_JS_SPACE`` trimmed); one that is not
-#     JSON, or holds NaN / Infinity, is dropped.
-#   * ``RIPPLE_PROFILE`` (``concierge_ui_profile`` "ripple", ops sites) takes
-#     ripple-manifest.json minus ``RIPPLE_DEFERRED`` and page chrome, lists
-#     ``RIPPLE_DATA_WIDGETS`` with typed props, has 400 nodes / depth 16 / 64,000
-#     chars and is ``strict``: ``_check_strict`` walks all of ``ui`` and ``state``
-#     iteratively (nodes in props are nodes; any action anywhere must be allowed;
-#     resolved slots hold literal actions, or a literal node where the engine draws
-#     one; URLs are same-site paths or https on ``url_hosts``; no javascript: text;
-#     no repeated JSON key; an action names its verb as a string, so a
-#     ``{label, action: {...}}`` button is refused; any error the walk did not
-#     foresee is a logged refusal, never an exception). A ``ui`` with a
-#     flow field is a flow (at most ``MAX_FLOW_STEPS`` steps, one node budget,
-#     ``FLOW_EVENTS``, a chat-only ``onComplete``), and ``emit ask`` / ``flow.submit``
-#     fire only from an explicit visitor action (``ASK_HANDLERS``). A spec body that
-#     is not JSON only for missing closers gets them (``_repaired``: at most
-#     ``MAX_REPAIR_CLOSERS``, a ``ui`` left open closed before the root's
-#     ``,"state":``); one whose root closed one ``}`` early, before a lone
-#     ``,"state":<object>}``, loses that one closer (``_surplus_closer_fix``).
-#     Either is then parsed and checked like any body. ``illustration``
-#     (``ILLUSTRATION_WIDGET``, added until the manifest has it) is display only;
-#     its svg is held to illustration_svg's policy instead of the text checks.
+# Hydration runs after the checks and is not checked again: product data comes only
+# from the site catalog, and on the ripple profile ``_fill_store`` fills menu-order,
+# booking and comparison-layout nodes from the site's store and attaches the one
+# server-wired handler each may fire (a model-written one is refused). ``card_ids``
+# and ``has_lead_form`` read a body for the runner; ``PartialScan`` judges a body
+# still streaming, flagging only what the finished card is sure to fail.
 #
-# Hydration runs after the checks and is not checked again. Product data comes only
-# from the site catalog: a ``product-card``'s ``ids`` become ``items`` (unknown ids
-# dropped, an empty card dropped; a legacy ``{"kind": "product"}`` card is repriced
-# the same way, other legacy cards pass through). On the ripple profile
-# ``_fill_store`` fills menu-order, booking and comparison-layout nodes at any depth
-# from the site's store (``concierge_store.StoreData``, already cleaned): store
-# prices, photos, option groups, services and slots replace the model's, an
-# unknown product id drops its item, and the one host event each may fire
-# (``SERVER_WIRED``: checkout, ripple's ``book``) is attached only when it can
-# fire. A model-written handler on those widgets is refused, so ``book`` never
-# comes from the model. ``card_ids`` / ``has_lead_form`` read a body for the
-# runner; ``PartialScan`` runs the string and repeated-key checks on a body still
-# streaming, flagging only what the finished card is sure to fail.
-#
-# pawbar-manifest.json is vendored byte-for-byte from paw-bar; ripple-manifest.json
-# from @ripple-ui/svelte's manifest minus examples (``.source`` beside it says
-# where from and how). The drift tests in tests/cloud/test_paw_bar_concierge_v2_output.py
-# and tests/cloud/test_paw_bar_ripple_profile.py pin both hashes; the shared
+# Both manifests are vendored (``.source`` beside ripple-manifest.json says how);
+# the drift tests in tests/cloud/test_paw_bar_concierge_v2_output.py and
+# tests/cloud/test_paw_bar_ripple_profile.py pin their hashes, and the shared
 # parity fixtures live in tests/fixtures/card_parity/.
 
 from __future__ import annotations
