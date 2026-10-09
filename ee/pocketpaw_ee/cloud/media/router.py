@@ -134,9 +134,9 @@ def _local_entries(generated: Path, sort: str, tracked: set[str], workspace_id: 
 
 
 async def _remote_entries(sort: str, tracked: set[str], workspace_id: str) -> list[dict]:
-    """List S3 keys under the media prefix as MediaFile dicts. Remote listings
-    carry no mtime, so ``modified`` comes from the timestamp baked into generated
-    filenames (``<ms>-<uuid>.png``); uploads without one report 0."""
+    """List S3 keys under the media prefix as MediaFile dicts. ``modified`` is the
+    object's storage time, falling back to the timestamp baked into generated
+    filenames (``<ms>-<uuid>.png``) when the adapter reports none."""
     entries: list[dict] = []
     for item in await storage.get_adapter().browse(storage.MEDIA_KEY_PREFIX + "/"):
         if item.is_dir:
@@ -157,7 +157,7 @@ async def _remote_entries(sort: str, tracked: set[str], workspace_id: str) -> li
                 "url": f"/api/v1/media/{item.name}",
                 "mime": mime,
                 "size": item.size,
-                "modified": storage.modified_from_name(item.name),
+                "modified": item.modified or storage.modified_from_name(item.name),
             }
         )
     entries.sort(key=lambda e: e["modified"], reverse=(sort == "newest"))

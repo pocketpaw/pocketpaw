@@ -370,6 +370,9 @@ class S3StorageAdapter(StorageAdapter):
                     name=name,
                     is_dir=False,
                     size=obj.get("Size", 0),
+                    modified=int(obj["LastModified"].timestamp() * 1000)
+                    if obj.get("LastModified")
+                    else 0,
                 )
             )
 

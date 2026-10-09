@@ -52,6 +52,7 @@ class StorageItem:
     name: str
     is_dir: bool
     size: int = 0
+    modified: int = 0  # unix ms; 0 when the backend does not report it
 
 
 class StorageAdapter(Protocol):
