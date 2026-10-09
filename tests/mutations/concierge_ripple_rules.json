@@ -1381,10 +1381,11 @@
   {
     "label": "JSON-FIX: a legacy (unchecked) card is repaired",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if _is_spec(_parse(fixed)):\n",
-    "replace": "        if _parse(fixed) is not None:\n",
+    "find": "        if fixed is not None and _is_spec(_parse(fixed)):\n",
+    "replace": "        if fixed is not None and _parse(fixed) is not None:\n",
     "tests": [
-      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_legacy_card_is_never_repaired"
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_legacy_card_is_never_repaired",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_one_surplus_closer_before_a_lone_state_is_dropped"
     ]
   },
   {
@@ -1625,6 +1626,72 @@
     "replace": "        raise _Reject(\"a shape the checks could not read\") from exc\n",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_an_unexpected_error_in_the_strict_walk_is_a_logged_refusal"
+    ]
+  },
+  {
+    "label": "SURPLUS: the surplus-closer fix is never tried",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    for fixed in [*_closer_fixes(text), _surplus_closer_fix(text)]:",
+    "replace": "    for fixed in [*_closer_fixes(text)]:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_flow_with_a_surplus_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_one_surplus_closer_before_state_is_dropped"
+    ]
+  },
+  {
+    "label": "SURPLUS: anything after the state object is allowed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if text[stop:].strip(_JSON_SPACE) != \"}\":\n        return None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_one_surplus_closer_before_a_lone_state_is_dropped"
+    ]
+  },
+  {
+    "label": "SURPLUS: the rest need not start with a state key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_STATE_TAIL.match(text, end)",
+    "replace": "re.compile(r'[^{]*(?=\\{)').match(text, end)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_one_surplus_closer_before_a_lone_state_is_dropped"
+    ]
+  },
+  {
+    "label": "SURPLUS: the surplus closer is kept and one is appended",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return text[: end - 1] + text[end:]\n",
+    "replace": "    return text + \"}\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_live_flow_with_a_surplus_brace_is_repaired_then_checked",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_one_surplus_closer_before_state_is_dropped"
+    ]
+  },
+  {
+    "label": "SURPLUS: the repaired body skips the strict checks",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        body, raw = fixed, _parse(fixed, unique=profile.strict)",
+    "replace": "        body, raw = fixed, _parse(fixed, unique=profile.strict)\n        if added <= 0:\n            return f\"{_FENCE}pawbar-card\\n{fixed}\\n{_FENCE}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_surplus_closer_repair_is_still_refused_for_anything_else",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_surplus_closer_repair_still_refuses_a_repeated_key"
+    ]
+  },
+  {
+    "label": "SURPLUS: the repaired body is parsed without the repeated-key check",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        body, raw = fixed, _parse(fixed, unique=profile.strict)",
+    "replace": "        body, raw = fixed, _parse(fixed, unique=added > 0 and profile.strict)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_surplus_closer_repair_still_refuses_a_repeated_key"
+    ]
+  },
+  {
+    "label": "SURPLUS: pawbar repairs too",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not profile.strict or len(body) > profile.max_chars:\n        return None\n    text = body.strip(_JS_SPACE)\n    for fixed in [*_closer_fixes(text), _surplus_closer_fix(text)]:",
+    "replace": "    text = body.strip(_JS_SPACE)\n    if not profile.strict and (fixed := _surplus_closer_fix(text)):\n        return fixed\n    if not profile.strict or len(body) > profile.max_chars:\n        return None\n    for fixed in [*_closer_fixes(text), _surplus_closer_fix(text)]:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_pawbar_never_drops_a_surplus_closer"
     ]
   }
 ]

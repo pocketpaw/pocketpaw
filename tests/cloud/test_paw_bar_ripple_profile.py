@@ -24,7 +24,9 @@
 # each passes with its manifest example (tests/fixtures/ripple_data_widget_cards.json).
 # Page chrome (``RIPPLE_CHROME``) is refused and unlisted. A spec body missing only
 # closing brackets is repaired (a live one: tests/fixtures/ripple_itinerary_missing_brace.json),
-# never past 4, never for any other break, and is then refused for anything else.
+# never past 4, never for any other break, and is then refused for anything else;
+# one with a single surplus } before its state (tests/fixtures/ripple_flow_surplus_brace.json)
+# loses that one, never two.
 # Odd JSON shapes in handler slots and row lists (``_odd_specs``) are judged by
 # the rules, never by an exception; an unforeseen one is a logged refusal.
 # Mutation plan: tests/mutations/concierge_ripple_rules.json.
@@ -2539,6 +2541,92 @@ def test_brackets_and_escapes_inside_strings_are_not_closers():
     body = _body(spec)
     assert _ripple_body(body) == spec
     assert _ripple_body(_cut_end(body, 2)) == spec
+
+
+_SURPLUS_BRACE = Path(__file__).parents[1] / "fixtures" / "ripple_flow_surplus_brace.json"
+_SURPLUS_LOG = "card_spec: repaired a card with a surplus closer before its state"
+
+
+def _trip_surplus() -> str:
+    """The live flow body with one ``}`` too many before ``,"state":``."""
+    return json.loads(_SURPLUS_BRACE.read_text(encoding="utf-8"))["body"]
+
+
+def _add_root_brace(body: str, n: int = 1) -> str:
+    """``body`` (``_body``'s spacing) with ``n`` more ``}`` before its root's state."""
+    i = body.rindex(', "state": ')
+    return body[:i] + "}" * n + body[i:]
+
+
+def test_the_live_flow_with_a_surplus_brace_is_repaired_then_checked(caplog):
+    body = _trip_surplus()
+    with pytest.raises(json.JSONDecodeError, match="Extra data"):
+        json.loads(body)
+    i = body.rindex(',"state":')
+    assert body[i - 1] == "}"
+    with caplog.at_level("INFO", logger="pocketpaw_ee.paw_bar.card_spec"):
+        card = _ripple_body(body)
+    assert card == json.loads(body[: i - 1] + body[i:])
+    assert card["state"] == {} and card["ui"]["flowId"] == "trip_style"
+    assert [r.getMessage() for r in caplog.records if r.msg == _SURPLUS_LOG] == [_SURPLUS_LOG]
+    assert "Food" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": _TEXT_NODE, "state": {"a": [1, {"b": "}"}]}},
+        {"ui": _chain(3)["ui"], "state": {}},
+    ],
+)
+def test_one_surplus_closer_before_state_is_dropped(spec):
+    body = _add_root_brace(_body(spec))
+    assert _ripple_body(body) == spec
+    assert _ripple_body(body.replace(', "state": ', ' ,\n "state" : ')) == spec
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}}), 2),  # two surplus
+        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}})) + "}",  # and one at the end
+        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}}))[:-1],  # root never closes
+        _add_root_brace(_body({"ui": _TEXT_NODE, "state": []})),  # state not an object
+        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}, "x": 1})),  # more than state
+        '{"ui":{"type":"text","props":{"text":"hi"}}},"theme":{}}',  # not state
+        '{"ui":{"type":"text","props":{"text":"hi"}}},"state":{} x}',
+        '{"kind":"note","text":"hi"},"state":{}}',  # legacy
+    ],
+)
+def test_only_one_surplus_closer_before_a_lone_state_is_dropped(body):
+    assert _ripple_body(body) is None
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": {"type": "image", "props": {"src": "https://evil.example/x.png"}}, "state": {}},
+        {"ui": {"type": "button", "on_click": {"action": "fetch"}}, "state": {}},
+        {"ui": _TEXT_NODE, "state": {"x": {"action": "set", "target": "a"}}},
+    ],
+)
+def test_a_surplus_closer_repair_is_still_refused_for_anything_else(spec):
+    body = _add_root_brace(_body(spec))
+    assert _ripple_body(_add_root_brace(_body({"ui": _TEXT_NODE, "state": {}}))) is not None
+    assert _ripple_body(body) is None
+
+
+def test_a_surplus_closer_repair_still_refuses_a_repeated_key():
+    ok = '{"ui":{"type":"text","props":{"text":"hi"}}},"state":{"a":1,"b":2}}'
+    assert _ripple_body(ok) is not None
+    assert _ripple_body(ok.replace('"b"', '"a"')) is None
+
+
+def test_pawbar_never_drops_a_surplus_closer():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, render_card
+
+    body = _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}}))
+    assert render_card(body, [], profile=PAWBAR_PROFILE) is None
 
 
 # A legacy card passes through verbatim, unchecked, so only a spec is repaired.

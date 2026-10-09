@@ -10,7 +10,8 @@
 # unchanged. The realistic card is ripple's recorded explainer scenario
 # (tests/fixtures/ripple_explainer_card.json).
 # A flow card streams like any other and ends with the verdict the whole card gets.
-# A card missing only closing brackets streams raw and is repaired at its close.
+# A card missing only closing brackets, or with one surplus closer before its
+# state, streams raw and is repaired at its close.
 #
 # Mutations: tests/mutations/concierge_v2_runtime.json ("card streaming" entries) and
 # tests/mutations/concierge_ripple_rules.json ("FL-1 streamed" entries).
@@ -42,6 +43,7 @@ from tests.cloud.test_paw_bar_ripple_profile import (
     TRIP_FLOW,
     _flow,
     _lisbon,
+    _trip_surplus,
 )
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
@@ -434,6 +436,22 @@ def test_a_card_missing_only_its_ui_brace_streams_raw_and_ends_final_repaired():
     body = _lisbon()
     i = body.rindex(',"state":')
     fixed = json.loads(body[:i] + "}" + body[i:])
+    reply = f"Plan:\n{_fence(body)}\nEnjoy."
+    expected = [
+        ("chunk", "Plan:\n"),
+        ("card.start", {"card_id": "c1"}),
+        ("card.delta", {"card_id": "c1", "text": body}),
+        ("card.final", {"card_id": "c1", "card": fixed}),
+        ("chunk", "\nEnjoy."),
+    ]
+    for chunks in ([reply[j : j + 9] for j in range(0, len(reply), 9)], [reply]):
+        assert _collapse(_events(chunks)) == expected
+
+
+def test_a_card_with_one_surplus_brace_streams_raw_and_ends_final_repaired():
+    body = _trip_surplus()
+    i = body.rindex(',"state":')
+    fixed = json.loads(body[: i - 1] + body[i:])
     reply = f"Plan:\n{_fence(body)}\nEnjoy."
     expected = [
         ("chunk", "Plan:\n"),

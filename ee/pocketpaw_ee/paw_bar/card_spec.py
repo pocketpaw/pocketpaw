@@ -27,7 +27,9 @@
 #     fire only from an explicit visitor action (``ASK_HANDLERS``). A spec body that
 #     is not JSON only for missing closers gets them (``_repaired``: at most
 #     ``MAX_REPAIR_CLOSERS``, a ``ui`` left open closed before the root's
-#     ``,"state":``), then is parsed and checked like any body.
+#     ``,"state":``); one whose root closed one ``}`` early, before a lone
+#     ``,"state":<object>}``, loses that one closer (``_surplus_closer_fix``).
+#     Either is then parsed and checked like any body.
 #
 # Hydration runs after the checks and is not checked again. Product data comes only
 # from the site catalog: a ``product-card``'s ``ids`` become ``items`` (unknown ids
@@ -1330,14 +1332,38 @@ def _closer_fixes(text: str) -> list[str]:
     return [fixed for added, _, fixed in fixes if 0 < added <= MAX_REPAIR_CLOSERS]
 
 
+# What may follow a root that closed one ``}`` early: the root's own state.
+_STATE_TAIL = re.compile(r'[ \t\n\r]*,[ \t\n\r]*"state"[ \t\n\r]*:[ \t\n\r]*(?=\{)')
+
+
+def _surplus_closer_fix(text: str) -> str | None:
+    """``text`` whose root object closed one ``}`` early, the rest of it exactly
+    ``,"state":<object>}``, with that one surplus closer dropped; else None.
+    Two surplus closers leave a ``}`` before the comma, so they never match."""
+    decode = json.JSONDecoder().raw_decode
+    try:
+        _, end = decode(text)
+        tail = _STATE_TAIL.match(text, end)
+        if tail is None:
+            return None
+        _, stop = decode(text, tail.end())
+    except (ValueError, RecursionError):
+        return None
+    if text[stop:].strip(_JSON_SPACE) != "}":
+        return None
+    return text[: end - 1] + text[end:]
+
+
 def _repaired(body: str, profile: CardProfile) -> str | None:
     """On a strict profile, a ``body`` that is not JSON with the fewest closing
-    brackets inserted (``_closer_fixes``) that make it JSON holding a spec; else
-    None. The caller parses and checks the result like any body."""
+    brackets inserted (``_closer_fixes``), or its one surplus closer before the
+    root's state dropped (``_surplus_closer_fix``), that make it JSON holding a
+    spec; else None. The caller parses and checks the result like any body."""
     if not profile.strict or len(body) > profile.max_chars:
         return None
-    for fixed in _closer_fixes(body.strip(_JS_SPACE)):
-        if _is_spec(_parse(fixed)):
+    text = body.strip(_JS_SPACE)
+    for fixed in [*_closer_fixes(text), _surplus_closer_fix(text)]:
+        if fixed is not None and _is_spec(_parse(fixed)):
             return fixed
     return None
 
@@ -1381,12 +1407,13 @@ def _render_card(
 ) -> str | None:
     raw = _parse(body, unique=profile.strict)
     if raw is None and (fixed := _repaired(body, profile)) is not None:
-        # Only closers were missing: the repaired body is read and checked as
-        # any other. Logged by count only, never the card.
-        logger.info(
-            "card_spec: repaired a card missing %d closing bracket(s)",
-            len(fixed) - len(body.strip(_JS_SPACE)),
-        )
+        # Only closers were missing, or one too many: the repaired body is read
+        # and checked as any other. Logged by count only, never the card.
+        added = len(fixed) - len(body.strip(_JS_SPACE))
+        if added > 0:
+            logger.info("card_spec: repaired a card missing %d closing bracket(s)", added)
+        else:
+            logger.info("card_spec: repaired a card with a surplus closer before its state")
         body, raw = fixed, _parse(fixed, unique=profile.strict)
     if raw is None or raw is _TOO_DEEP:
         return None
