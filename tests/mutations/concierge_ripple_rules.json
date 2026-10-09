@@ -1598,5 +1598,33 @@
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
     ]
+  },
+  {
+    "label": "SPEC-CRASH: an action named by an object or list reaches the allowed-set lookup",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(named, str) or named not in allowed:",
+    "replace": "        if not isinstance(action, dict) or named not in allowed:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_labelled_comparison_action_is_judged_not_crashed",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_odd_shapes_in_handler_slots_and_rows_never_raise"
+    ]
+  },
+  {
+    "label": "SPEC-CRASH: an unforeseen error in the strict walk escapes as an exception",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    except Exception as exc:  # noqa: BLE001 — an unforeseen shape is refused\n        _log_dropped(exc)\n        raise _Reject(\"a shape the checks could not read\") from exc\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_an_unexpected_error_in_the_strict_walk_is_a_logged_refusal"
+    ]
+  },
+  {
+    "label": "SPEC-CRASH: an unforeseen error in the strict walk is refused silently",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        _log_dropped(exc)\n        raise _Reject(\"a shape the checks could not read\") from exc\n",
+    "replace": "        raise _Reject(\"a shape the checks could not read\") from exc\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_an_unexpected_error_in_the_strict_walk_is_a_logged_refusal"
+    ]
   }
 ]

@@ -25,6 +25,8 @@
 # Page chrome (``RIPPLE_CHROME``) is refused and unlisted. A spec body missing only
 # closing brackets is repaired (a live one: tests/fixtures/ripple_itinerary_missing_brace.json),
 # never past 4, never for any other break, and is then refused for anything else.
+# Odd JSON shapes in handler slots and row lists (``_odd_specs``) are judged by
+# the rules, never by an exception; an unforeseen one is a logged refusal.
 # Mutation plan: tests/mutations/concierge_ripple_rules.json.
 
 # ruff: noqa: F811 — pytest fixtures imported by name
@@ -612,6 +614,89 @@ def test_the_data_widgets_keep_actions_and_urls_in_check(spec, why):
 )
 def test_the_data_widgets_pass_with_allowed_actions_and_paths(spec):
     assert _ripple(spec) is not None
+
+
+def _labelled_actions(action) -> dict:
+    """A comparison whose item buttons are written ``{label, action}``, the way a
+    model writes a button list."""
+    items = [{"id": "a", "name": "A", "actions": [{"label": "Pick", "action": action}]}]
+    return {"ui": {"type": "comparison-layout", "props": {"items": [*items, {"id": "b"}]}}}
+
+
+def test_a_labelled_comparison_action_is_judged_not_crashed(caplog):
+    # The widget dispatches items[].actions as EventHandler objects, whose
+    # ``action`` is a verb name: a label beside it is ignored, an object there is
+    # nothing the engine runs.
+    caplog.set_level("WARNING", logger="pocketpaw_ee.paw_bar.card_spec")
+    assert _ripple(_labelled_actions("emit")) is None  # emit with no target
+    assert _ripple(_labelled_actions({"action": "emit", "target": "ask"})) is None
+    assert _ripple(_labelled_actions(["set"])) is None
+    ok = _labelled_actions("set")
+    ok["ui"]["props"]["items"][0]["actions"][0] |= {"target": "x", "value": 1}
+    assert _ripple(ok) is not None
+    assert "could not read" not in caplog.text
+
+
+# Odd JSON (numbers, lists, objects where strings or objects are expected) in
+# handler slots and row lists: each is judged by the rules, never by an exception.
+_ODD = (7, 1.5, True, None, [], [[1]], {}, {"a": {"b": 1}}, "x")
+
+
+def _odd_specs():
+    for odd in _ODD:
+        yield {"ui": {"type": "button", "props": {"label": "x"}, "on_click": odd}}
+        yield {"ui": {"type": "button", "props": {"label": "x"}, "on_click": {"action": odd}}}
+        yield {
+            "ui": {
+                "type": "button",
+                "props": {"label": "x"},
+                "on_click": {"action": "emit", "target": odd, "value": odd},
+            }
+        }
+        yield {"ui": {"type": "comparison-layout", "props": {"items": odd}}}
+        yield {"ui": {"type": "comparison-layout", "props": {"items": [odd, {"id": "b"}]}}}
+        yield _labelled_actions(odd)
+        yield {
+            "ui": {"type": "comparison-layout", "props": {"items": [{"id": "a", "actions": odd}]}}
+        }
+        yield {
+            "ui": {"type": "entity-detail", "props": {"actions": [{"label": odd, "actions": odd}]}}
+        }
+        yield {"ui": {"type": "flex", "children": [odd]}}
+        yield {"ui": {"type": odd, "props": odd}}
+        yield {"ui": {"type": "flex"}, "state": {"rows": [odd, {"action": odd}]}}
+
+
+def test_odd_shapes_in_handler_slots_and_rows_never_raise(caplog):
+    from pocketpaw_ee.paw_bar.card_spec import (
+        HOST_EVENTS,
+        RIPPLE_PROFILE,
+        _card_verbs,
+        _check_strict,
+        _Reject,
+    )
+
+    caplog.set_level("WARNING", logger="pocketpaw_ee.paw_bar.card_spec")
+    for spec in _odd_specs():
+        try:
+            _check_strict(spec, _card_verbs(HOST_EVENTS), False, RIPPLE_PROFILE)
+        except _Reject:
+            pass
+    assert "could not read" not in caplog.text
+
+
+def test_an_unexpected_error_in_the_strict_walk_is_a_logged_refusal(monkeypatch, caplog):
+    from pocketpaw_ee.paw_bar import card_spec
+
+    def boom(*_a, **_k):
+        raise TypeError("unhashable")
+
+    monkeypatch.setattr(card_spec, "_check_actions", boom)
+    caplog.set_level("WARNING", logger="pocketpaw_ee.paw_bar.card_spec")
+    spec = {"ui": {"type": "button", "props": {"label": "x"}, "on_click": {"action": "set"}}}
+    with pytest.raises(card_spec._Reject):
+        card_spec._check_strict(spec, [], False, card_spec.RIPPLE_PROFILE)
+    assert "could not read (TypeError)" in caplog.text
 
 
 # Pins today's pawbar cards paragraph (with the compact manifest) byte for byte:

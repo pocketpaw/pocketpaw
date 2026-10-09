@@ -19,7 +19,9 @@
 #     iteratively (nodes in props are nodes; any action anywhere must be allowed;
 #     resolved slots hold literal actions, or a literal node where the engine draws
 #     one; URLs are same-site paths or https on ``url_hosts``; no javascript: text;
-#     no repeated JSON key). A ``ui`` with a
+#     no repeated JSON key; an action names its verb as a string, so a
+#     ``{label, action: {...}}`` button is refused; any error the walk did not
+#     foresee is a logged refusal, never an exception). A ``ui`` with a
 #     flow field is a flow (at most ``MAX_FLOW_STEPS`` steps, one node budget,
 #     ``FLOW_EVENTS``, a chat-only ``onComplete``), and ``emit ask`` / ``flow.submit``
 #     fire only from an explicit visitor action (``ASK_HANDLERS``). A spec body that
@@ -469,7 +471,10 @@ def _check_actions(
     ``ASK_EVENT`` may pass too, its value exactly ``{"text": <plain text of at
     most ASK_MAX chars>}``, and only then may one emit ``FLOW_SUBMIT``."""
     for action in value if isinstance(value, list) else [value]:
-        if not isinstance(action, dict) or action.get("action") not in allowed:
+        # The engine looks an action up by its verb name; an object or list there
+        # (``{label, action: {...}}``) is nothing it runs, and is unhashable.
+        named = action.get("action") if isinstance(action, dict) else None
+        if not isinstance(named, str) or named not in allowed:
             raise _Reject("an event runs an action the bar does not honour")
         if action["action"] == "emit" and action.get("target") not in events:
             if not (ask and action.get("target") == ASK_EVENT):
@@ -620,6 +625,20 @@ def _check_css(value: str, *, declarations: bool) -> None:
 
 
 def _check_strict(
+    spec: dict[str, Any], events: list[str], lead_capture: bool, profile: CardProfile
+) -> None:
+    """``_strict_walk``, where any error the rules did not foresee (a JSON shape
+    a check assumed away) is a logged refusal, never an exception."""
+    try:
+        _strict_walk(spec, events, lead_capture, profile)
+    except _Reject:
+        raise
+    except Exception as exc:  # noqa: BLE001 — an unforeseen shape is refused
+        _log_dropped(exc)
+        raise _Reject("a shape the checks could not read") from exc
+
+
+def _strict_walk(
     spec: dict[str, Any], events: list[str], lead_capture: bool, profile: CardProfile
 ) -> None:
     """The ``strict`` profile's walk over ``ui`` and ``state`` (see the header).
