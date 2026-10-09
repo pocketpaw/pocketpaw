@@ -1369,10 +1369,81 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
     "state": {},
 }
 
+# The flow card the rules show (card_spec ``_flow_steps``): two pick steps the
+# browser runs with no model call, then one fixed chat message. Ripple's runner
+# hands the host only what each step's button emitted (``<flowId>_selection``,
+# ``<flowId>_formData``); the landing appends those answers to the message.
+_RIPPLE_FLOW_EXAMPLE: dict[str, Any] = {
+    "ui": {
+        "flowId": "trip_style",
+        "intent": "select",
+        "title": "What kind of trip?",
+        "ui": {
+            "type": "flex",
+            "children": [
+                {
+                    "type": "button",
+                    "props": {"label": "Food"},
+                    "on_click": {
+                        "action": "emit",
+                        "target": "flow.next",
+                        "value": {"selection": {"id": "food", "label": "Food"}},
+                    },
+                },
+                {
+                    "type": "button",
+                    "props": {"label": "Culture"},
+                    "on_click": {
+                        "action": "emit",
+                        "target": "flow.next",
+                        "value": {"selection": {"id": "culture", "label": "Culture"}},
+                    },
+                },
+            ],
+        },
+        "chain": {
+            "flowId": "trip_days",
+            "intent": "select",
+            "title": "How many days?",
+            "ui": {
+                "type": "flex",
+                "children": [
+                    {
+                        "type": "button",
+                        "props": {"label": "3 days"},
+                        "on_click": {
+                            "action": "emit",
+                            "target": "flow.submit",
+                            "value": {"selection": {"id": "3", "label": "3 days"}},
+                        },
+                    },
+                    {
+                        "type": "button",
+                        "props": {"label": "A week"},
+                        "on_click": {
+                            "action": "emit",
+                            "target": "flow.submit",
+                            "value": {"selection": {"id": "7", "label": "A week"}},
+                        },
+                    },
+                ],
+            },
+            "onComplete": {"kind": "chat", "message": "Plan a trip for me with these answers."},
+        },
+    },
+}
+# The ``ask`` host event the rules show: a click sends this text as the visitor.
+_RIPPLE_ASK: dict[str, Any] = {
+    "action": "emit",
+    "target": "ask",
+    "value": {"text": "Tell me more about the 5-day plan"},
+}
+
 # How to write a good Ripple card, ported from ripple's record-scenario system
 # prompt (the rules that hold for an answer in a chat card) and sized for the
 # ripple landing's chat column (about 720px, still readable at 360px). The
-# actions named are card_spec.RIPPLE_ACTIONS; the last line is _RIPPLE_EXAMPLE.
+# actions named are card_spec.RIPPLE_ACTIONS; the flow and ask rules carry
+# _RIPPLE_FLOW_EXAMPLE and _RIPPLE_ASK; the last line is _RIPPLE_EXAMPLE.
 _RIPPLE_RULES = (
     "   Authoring rules:",
     "   - Write every node's keys in this order: type, props, then bind and handlers, "
@@ -1441,6 +1512,29 @@ _RIPPLE_RULES = (
     "named business, venue or brand; a named real place costs 0 and any cost goes on "
     "a separate unnamed item with a round estimate. Placeholders use generic words, "
     "never brands. No lorem ipsum.",
+    '   - Flow cards: when the visitor wants to be guided ("step by step", "ask me '
+    'first") or you need 2 to 4 of their choices before you can answer well (never '
+    "for a one-shot answer), write a flow: steps the browser runs one at a time, with "
+    'no reply between them. The card\'s ui is step 1, {"flowId", "intent": "select", '
+    '"title", "ui": <node>, "chain": <step 2>}; "chain_map": {<option id>: <step>} '
+    "branches on the pick instead. Give every step its own snake_case flowId and a "
+    "clear title, and every input a clear label: the answers are named by them. At "
+    "most 8 steps, sharing the 400 nodes. A flow's top-level state never reaches its "
+    "steps, so inputs start empty: prefer option buttons, and put any starting value "
+    "in the input's own props. Only what a button emits is collected (a set into "
+    'state is lost): an option emits flow.next with value {"selection": {"id", '
+    '"label"}}; typed answers go out as value {"formData": {"days": "{state.days}"}}. '
+    'The last step\'s buttons emit flow.submit and it has "onComplete": {"kind": '
+    '"chat", "message": ...}: one fixed sentence saying what to do (plain text, no '
+    "{expressions}, at most 500 characters). The browser appends each answer to it as "
+    'a line ("Trip style: Food") and sends it as the visitor; answer that with the '
+    "matching data widget (an itinerary, a comparison-layout with a winner). A flow "
+    "(copy its shape): " + json.dumps(_RIPPLE_FLOW_EXAMPLE, separators=(",", ":")),
+    "   - A click can send a follow-up as the visitor: "
+    + json.dumps(_RIPPLE_ASK, separators=(",", ":"))
+    + " (plain text naming what it is about, at most 500 characters, no {expressions}) "
+    "on a button's on_click, or in a comparison item's actions list, which its Choose "
+    "button fires.",
     "   - A good summary card (copy its shape, never its data): "
     + json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":")),
 )

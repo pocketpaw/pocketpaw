@@ -1481,5 +1481,113 @@
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_lead_card_missing_a_closer_is_the_lead_card"
     ]
+  },
+  {
+    "label": "FLOW-PROMPT: the flow rule is dropped",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    '   - Flow cards: when the visitor wants to be guided (\"step by step\", \"ask me '\n",
+    "replace": "    '   - When the visitor wants to be guided (\"step by step\", \"ask me '\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the rule no longer says the browser appends the answers",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"{expressions}, at most 500 characters). The browser appends each answer to it as \"",
+    "replace": "\"{expressions}, at most 500 characters). Write each answer into it as \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the rule stops saying a set into state is lost",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "in the input's own props. Only what a button emits is collected (a set into \"\n    'state is lost): ",
+    "replace": "in the input's own props. Only what a button emits is collected (or what you \"\n    'set into state): ",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the rule names a step limit the validator does not have",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"most 8 steps, sharing the 400 nodes.",
+    "replace": "\"most 12 steps, sharing the 400 nodes.",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the flow example is not carried in its rule",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"(copy its shape): \" + json.dumps(_RIPPLE_FLOW_EXAMPLE, separators=(\",\", \":\")),",
+    "replace": "\"(copy its shape)\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the ask line is not carried in the rules",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "+ json.dumps(_RIPPLE_ASK, separators=(\",\", \":\"))\n",
+    "replace": "+ \"an ask\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the example's onComplete message templates the picks",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"message\": \"Plan a trip for me with these answers.\"",
+    "replace": "\"message\": \"Plan a {state.days}-day trip for me.\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the example's last step advances instead of submitting",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"target\": \"flow.submit\",\n                            \"value\": {\"selection\": {\"id\": \"3\", \"label\": \"3 days\"}},",
+    "replace": "\"target\": \"flow.next\",\n                            \"value\": {\"selection\": {\"id\": \"3\", \"label\": \"3 days\"}},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: two example steps share a flowId",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"flowId\": \"trip_days\",",
+    "replace": "\"flowId\": \"trip_style\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: an example pick emits no selection, so the runner records nothing",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"value\": {\"selection\": {\"id\": \"culture\", \"label\": \"Culture\"}},",
+    "replace": "\"value\": {},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the ask text carries an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"value\": {\"text\": \"Tell me more about the 5-day plan\"},",
+    "replace": "\"value\": {\"text\": \"Tell me more about {state.plan}\"},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ask_the_rules_show_passes_on_a_click_and_a_comparison_item"
+    ]
+  },
+  {
+    "label": "FLOW-PROMPT: the ask emits a host event the card does not declare",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"target\": \"ask\",\n    \"value\": {\"text\"",
+    "replace": "    \"target\": \"chat\",\n    \"value\": {\"text\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ask_the_rules_show_passes_on_a_click_and_a_comparison_item"
+    ]
   }
 ]

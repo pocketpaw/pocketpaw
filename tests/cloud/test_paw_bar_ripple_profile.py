@@ -10,8 +10,10 @@
 # paragraph lists the data widgets (entity-detail, timeline, kv-table, ...) with
 # their props, is sized for the
 # landing's ~720px chat column and ends with ``_RIPPLE_EXAMPLE``, which must pass
-# the ripple checks whole. Also covered: the per-site daily spend cap over the
-# global one, and both settings through the settings PATCH and its response.
+# the ripple checks whole; its flow rule and ``ask`` line carry
+# ``_RIPPLE_FLOW_EXAMPLE`` and ``_RIPPLE_ASK``, which must pass too. Also covered:
+# the per-site daily spend cap over the global one, and both settings through the
+# settings PATCH and its response.
 # The accepted card is ripple's recorded explainer scenario
 # (tests/fixtures/ripple_explainer_card.json, from ripple origin/main 09a56a6,
 # packages/svelte/src/routes/live/fixtures/explainer.json, its chunks joined and
@@ -284,8 +286,9 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     assert _RIPPLE_RULES[-1].endswith(example) and example in text
     # The whole paragraph stays bounded: 19,814 chars before the primitives' data
     # widgets, 24,327 before Ripple's data widgets (typed lines and their rules, less
-    # the page chrome), 27,823 after.
-    assert len(text) < 29_000
+    # the page chrome), 27,849 after, 30,400 with the flow and ask rules (the flow
+    # example alone is 890).
+    assert len(text) < 31_000
 
 
 # Ripple's data widgets (qbtrix/ripple-iui#182): one card per widget, its manifest
@@ -475,6 +478,93 @@ def test_the_example_card_passes_the_ripple_checks_whole():
     assert compact.isascii() and len(compact) < 3_000
     # Not a pawbar card: its widgets are ripple's.
     assert render_card(body, [], profile=PAWBAR_PROFILE) is None
+
+
+def test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask():
+    from pocketpaw_ee.paw_bar.card_spec import ASK_MAX, MAX_FLOW_STEPS, RIPPLE_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import (
+        _RIPPLE_ASK,
+        _RIPPLE_FLOW_EXAMPLE,
+        _RIPPLE_RULES,
+    )
+
+    text = _ripple_paragraph()
+    rule = next(r for r in _RIPPLE_RULES if "Flow cards:" in r)
+    for phrase in (
+        "never for a one-shot answer",
+        '"chain": <step 2>}',
+        '"chain_map": {<option id>: <step>} branches on the pick',
+        f"most {MAX_FLOW_STEPS} steps, sharing the {RIPPLE_PROFILE.max_nodes} nodes",
+        "its own snake_case flowId and a clear title",
+        "top-level state never reaches its steps",
+        "a set into state is lost",
+        'emits flow.next with value {"selection": {"id", "label"}}',
+        '{"formData": {"days": "{state.days}"}}',
+        "buttons emit flow.submit",
+        '"onComplete": {"kind": "chat"',
+        f"no {{expressions}}, at most {ASK_MAX} characters",
+        "The browser appends each answer to it",
+        "a comparison-layout with a winner",
+    ):
+        assert phrase in rule, phrase
+    assert rule.endswith(json.dumps(_RIPPLE_FLOW_EXAMPLE, separators=(",", ":")))
+    ask = json.dumps(_RIPPLE_ASK, separators=(",", ":"))
+    assert f"{ask} (plain text" in text and "a comparison item's actions list" in text
+    # Ripple only: the pawbar paragraph has no flow or ask.
+    pawbar = _pawbar_paragraphs()
+    assert "Flow cards:" not in pawbar and ask not in pawbar
+
+
+def _flow_steps_of(step: dict) -> list[dict]:
+    out = [step]
+    for nxt in [step.get("chain"), *(step.get("chain_map") or {}).values()]:
+        if nxt:
+            out += _flow_steps_of(nxt)
+    return out
+
+
+def test_the_flow_example_passes_the_ripple_checks_and_collects_every_pick():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, render_card
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_FLOW_EXAMPLE
+
+    out = _ripple(_RIPPLE_FLOW_EXAMPLE)
+    assert out is not None
+    assert json.loads(out.split("\n", 1)[1].rsplit("\n", 1)[0]) == _RIPPLE_FLOW_EXAMPLE
+    assert render_card(_body(_RIPPLE_FLOW_EXAMPLE), [], profile=PAWBAR_PROFILE) is None
+    steps = _flow_steps_of(_RIPPLE_FLOW_EXAMPLE["ui"])
+    assert 2 <= len(steps) <= 3
+    # Each step is named (the landing labels the answers by it) and each pick is
+    # an emit the runner records: flow.next on the way, flow.submit on the last.
+    assert len({s["flowId"] for s in steps}) == len(steps)
+    for step in steps:
+        assert step["title"] and step["flowId"].replace("_", "").isalpha()
+        last = not (step.get("chain") or step.get("chain_map"))
+        buttons = step["ui"]["children"]
+        assert len(buttons) >= 2
+        for button in buttons:
+            click = button["on_click"]
+            assert click["target"] == ("flow.submit" if last else "flow.next")
+            assert click["value"]["selection"]["label"] == button["props"]["label"]
+        assert ("onComplete" in step) == last
+    done = steps[-1]["onComplete"]
+    assert done["kind"] == "chat" and "{" not in done["message"]
+
+
+def test_the_ask_the_rules_show_passes_on_a_click_and_a_comparison_item():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, render_card
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_ASK
+
+    button = {"ui": {"type": "button", "props": {"label": "Tell me more"}, "on_click": _RIPPLE_ASK}}
+    items = [{"id": i, "name": i.upper(), "actions": [_RIPPLE_ASK]} for i in ("a", "b")]
+    compare = {
+        "ui": {
+            "type": "comparison-layout",
+            "props": {"items": items, "features": [{"key": "price", "label": "Price"}]},
+        }
+    }
+    for card in (button, compare):
+        assert _ripple(card) is not None
+    assert render_card(_body(button), [], profile=PAWBAR_PROFILE) is None
 
 
 def _entity_actions(actions) -> dict:
