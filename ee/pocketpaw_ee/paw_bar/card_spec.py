@@ -20,8 +20,8 @@
 #     become ``items`` (name, price, currency, image, page url, description),
 #     unknown ids are dropped, an empty product-card is dropped. A legacy
 #     ``{"kind": "product"}`` card is repriced the same way; other legacy cards
-#     pass through untouched. ``card_ids`` says which catalog items to fetch;
-#     ``has_lead_form`` says whether a card is the lead card.
+#     pass through. A body is parsed as paw-bar parses it (``_JS_SPACE`` trimmed);
+#     one that is not JSON, or holds NaN / Infinity, is dropped, never passed.
 #
 # Every rule above reads a ``CardProfile``: the widget set, the action set and
 # the bounds. ``PAWBAR_PROFILE`` (the default everywhere) is the paw-bar widget's
@@ -36,7 +36,7 @@
 # entries' own ``action`` field is data, in ``ui`` only; ``state`` holds no
 # action at all); a handler slot (``_is_handler_key``) holds action objects,
 # never a string the engine could resolve into one, and neither may a prop that
-# carries handlers, a node-valued prop or a node's ``props`` be an expression; a
+# carries handlers, a slot drawn as a node or a node's props be an expression; a
 # ``follow-up``'s ``event`` is a declared host event; a form may not carry a
 # native submit target; every URL-valued key must be a same-site path or an
 # https URL on ``url_hosts`` (empty: none); and no text may hold a javascript:
@@ -54,6 +54,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import re
 import unicodedata
 from collections.abc import Iterable
@@ -179,14 +180,38 @@ RIPPLE_PROFILE = CardProfile(
 # Every widget name and action name the Ripple manifest knows (deferred ones too).
 _RIPPLE_TYPES: frozenset[str] = frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"])
 _RIPPLE_ACTIONS: frozenset[str] = frozenset(RIPPLE_MANIFEST["actions"])
-# Props whose value is itself a node (``string | UISpec``), by widget.
+# Props the engine draws as a node (NodeRenderer), by widget: the manifest's
+# ``string | UISpec`` props, plus the ones only the engine reads.
+_ENGINE_NODE_PROPS: dict[str, frozenset[str]] = {
+    "split": frozenset({"start", "end"}),
+    "master-detail": frozenset({"detail"}),
+    "kanban": frozenset({"cardTemplate"}),
+    "virtual-list": frozenset({"item"}),
+}
 _NODE_PROPS: dict[str, frozenset[str]] = {
     w["type"]: frozenset(
         name
         for name, spec in (w.get("props") or {}).items()
         if "UISpec" in str(spec.get("type", "")) and not str(spec["type"]).startswith("Array")
     )
+    | _ENGINE_NODE_PROPS.get(w["type"], frozenset())
     for w in RIPPLE_MANIFEST["widgets"]
+}
+# Props whose rows the engine draws as nodes: (widget, prop) -> the row key that
+# holds the node ("" when the row is the node). The manifest's
+# ``Array<{ key?: UISpec }>`` rows, plus tabs ``panels`` and the grids' column
+# ``formatter``.
+_NODE_ROWS: dict[tuple[str, str], str] = {
+    ("tabs", "panels"): "",
+    ("data-grid", "columns"): "formatter",
+    ("tree-table", "columns"): "formatter",
+    **{
+        (w["type"], name): m.group(1)
+        for w in RIPPLE_MANIFEST["widgets"]
+        for name, spec in (w.get("props") or {}).items()
+        if str(spec.get("type", "")).startswith("Array")
+        and (m := re.search(r"(\w+)\??:\s*UISpec", str(spec["type"])))
+    },
 }
 # Props that carry event handlers (a ``*Actions`` slot, or rows such as
 # comparison ``items`` whose ``actions`` are handlers), by widget. Never an
@@ -609,9 +634,11 @@ def _check_resolved_prop(kind: str, key: str, value: Any, node_props: frozenset[
     holds then) before it dispatches or renders it, so it must be literal. A
     handler slot holds action objects (``actions``: or a composite's button
     rows), alone or in a list; a prop whose rows carry slots (comparison
-    ``items``) is a list of objects whose slots hold the same; a node-valued prop
-    is no lone expression. Slots elsewhere (state, data rows, inside an action)
-    are never resolved before they run, so a string there stays inert."""
+    ``items``) is a list of objects whose slots hold the same; a node slot
+    (``_NODE_PROPS``, or a row of ``_NODE_ROWS`` in a literal list) holds a
+    literal node or text (``_check_node_slot``). Slots elsewhere (state, data
+    rows, inside an action) are never resolved before they run, so a string
+    there stays inert."""
     rows = value if isinstance(value, list) else [value]
     if _is_handler_key(key):
         for row in rows:
@@ -623,9 +650,31 @@ def _check_resolved_prop(kind: str, key: str, value: Any, node_props: frozenset[
                 raise _Reject(f"{key} holds a row that is not an object")
             for k, v in row.items():
                 _check_resolved_prop("", k, v, frozenset())
+    slot = _NODE_ROWS.get((kind, key))
+    if slot is not None and value is not None:
+        if not isinstance(value, list):
+            raise _Reject(f"{key} is not a literal list of rows")
+        for row in value:
+            if slot:
+                if not isinstance(row, dict):
+                    raise _Reject(f"{key} holds a node row that is not an object")
+                row = row.get(slot)
+            _check_node_slot(key, row)
+    if key in node_props:
+        _check_node_slot(key, value)
+
+
+def _check_node_slot(key: str, value: Any) -> None:
+    """A value the engine draws as a node: a literal node (a Ripple widget, which
+    the walk then checks as one) or text. Never a lone expression: it would draw
+    whatever state holds by then, which ``set`` pieces can build unchecked."""
     text = value.strip() if isinstance(value, str) else ""
-    if key in node_props and text.startswith("{") and text.endswith("}"):
+    if text.startswith("{") and text.endswith("}"):
         raise _Reject(f"an expression in {key}, where a node is read")
+    if isinstance(value, dict):
+        kind = value.get("type")
+        if not isinstance(kind, str) or kind not in _RIPPLE_TYPES:
+            raise _Reject(f"{key} holds an object that is not a node")
 
 
 def _check_form(props: Any, lead_capture: bool) -> None:
@@ -794,11 +843,38 @@ def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
+# What JS ``String.prototype.trim`` strips (ECMAScript WhiteSpace and
+# LineTerminator). paw-bar trims a fence body with ``trimEnd()`` before
+# ``JSON.parse``; Python's ``json.loads`` refuses most of these.
+_JS_SPACE = (
+    "\t\n\v\f\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not JSON")
+
+
+def _finite(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text} is not a finite number")
+    return value
+
+
 def _parse(body: str, unique: bool = False) -> Any:
-    """The parsed body; None when it is not JSON; ``_TOO_DEEP`` when it is too
-    deep to read, or, with ``unique``, repeats a key in an object."""
+    """The parsed body, ``_JS_SPACE`` stripped first; None when it is not JSON
+    (NaN, Infinity or a number too big for a float included: ``card.final``
+    must be JSON); ``_TOO_DEEP`` when it is too deep to read, or, with
+    ``unique``, repeats a key in an object."""
     try:
-        return json.loads(body, object_pairs_hook=_unique if unique else None)
+        return json.loads(
+            body.strip(_JS_SPACE),
+            object_pairs_hook=_unique if unique else None,
+            parse_constant=_no_constant,
+            parse_float=_finite,
+        )
     except ValueError:
         return None
     except (RecursionError, _DuplicateKey):
@@ -826,8 +902,9 @@ def render_card(
     """The complete ```pawbar-card fence to emit for a fence ``body``, or None to
     drop it. A Ripple spec is validated (against ``profile``) and hydrated; a
     legacy product card is repriced from the catalog; a legacy form card is held
-    to the form rules; any other legacy card passes through verbatim. Never
-    raises: a card no check can read is dropped and logged by error type only."""
+    to the form rules; any other legacy card passes through verbatim; a body
+    that is not JSON is dropped. Never raises: a card no check can read is
+    dropped and logged by error type only."""
     try:
         return _render_card(body, catalog, verbs, lead_capture, profile)
     except Exception as exc:  # noqa: BLE001 — see the docstring
@@ -843,11 +920,11 @@ def _render_card(
     profile: CardProfile,
 ) -> str | None:
     raw = _parse(body, unique=profile.strict)
-    if raw is _TOO_DEEP:
+    if raw is None or raw is _TOO_DEEP:
         return None
     if _is_spec(raw):
         # Measured as paw-bar measures it: CRLF folded, trailing whitespace trimmed.
-        if len(body.replace("\r\n", "\n").rstrip()) > profile.max_chars:
+        if len(body.replace("\r\n", "\n").rstrip(_JS_SPACE)) > profile.max_chars:
             return None
         spec = validate_and_hydrate(
             raw, catalog, verbs=verbs, lead_capture=lead_capture, profile=profile

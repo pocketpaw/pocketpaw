@@ -56,8 +56,8 @@
   {
     "label": "SEC F1: a node-valued prop may be a lone expression",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "    if key in node_props and text.startswith(\"{\") and text.endswith(\"}\"):",
-    "replace": "    if False:",
+    "find": "    if key in node_props:\n        _check_node_slot(key, value)",
+    "replace": "    if False:\n        _check_node_slot(key, value)",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
     ]
@@ -103,15 +103,6 @@
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
     "find": "    raw = _parse(body, unique=profile.strict)",
     "replace": "    raw = _parse(body)",
-    "tests": [
-      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f3_a_repeated_key_drops_a_ripple_card"
-    ]
-  },
-  {
-    "label": "SEC F3: a repeated key reads as not-JSON, so the body passes through as a legacy card",
-    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        raise _DuplicateKey\n",
-    "replace": "        raise ValueError\n",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f3_a_repeated_key_drops_a_ripple_card"
     ]
@@ -339,6 +330,125 @@
     "replace": "    \"card, and never write long prose (essays, stories, homework). A health \"\n    \"or money card shows sample data \"\n",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_demo_frame_swaps_the_opening_and_rules_1_2_6_and_keeps_3_to_5"
+    ]
+  },
+  {
+    "label": "SEC-2b B: split start/end are not node slots",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"split\": frozenset({\"start\", \"end\"}),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: master-detail detail, kanban cardTemplate, virtual-list item are not node slots",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"master-detail\": frozenset({\"detail\"}),\n    \"kanban\": frozenset({\"cardTemplate\"}),\n    \"virtual-list\": frozenset({\"item\"}),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: tabs panels are not node rows",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    (\"tabs\", \"panels\"): \"\",\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: a grid column's formatter is not a node slot",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    (\"data-grid\", \"columns\"): \"formatter\",\n    (\"tree-table\", \"columns\"): \"formatter\",\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: the manifest's Array<{ key?: UISpec }> rows are not read (settings-list control)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "and (m := re.search(r\"(\\w+)\\??:\\s*UISpec\", str(spec[\"type\"])))",
+    "replace": "and (m := re.search(r\"(\\w+)\\??:\\s*NotAType\", str(spec[\"type\"])))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_built_by_set_pieces_never_reaches_a_slot"
+    ]
+  },
+  {
+    "label": "SEC-2b B: a list of node rows may be an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            raise _Reject(f\"{key} is not a literal list of rows\")\n",
+    "replace": "            value = []\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_list_of_node_rows_is_literal"
+    ]
+  },
+  {
+    "label": "SEC-2b B: a node row that is not an object is let through",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                    raise _Reject(f\"{key} holds a node row that is not an object\")\n",
+    "replace": "                    continue\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_list_of_node_rows_is_literal"
+    ]
+  },
+  {
+    "label": "SEC-2b B: the slot inside a node row is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                row = row.get(slot)\n",
+    "replace": "                row = None\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b B: a node slot may be a lone expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if text.startswith(\"{\") and text.endswith(\"}\"):\n        raise _Reject(f\"an expression in {key}, where a node is read\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_built_by_set_pieces_never_reaches_a_slot"
+    ]
+  },
+  {
+    "label": "SEC-2b B: an object in a node slot need not be a Ripple widget",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(kind, str) or kind not in _RIPPLE_TYPES:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node"
+    ]
+  },
+  {
+    "label": "SEC-2b D: NaN / Infinity parse",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            parse_constant=_no_constant,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_d_a_non_finite_number_drops_the_card"
+    ]
+  },
+  {
+    "label": "SEC-2b D: a float too big to hold parses as inf",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            parse_float=_finite,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_d_a_non_finite_number_drops_the_card"
+    ]
+  },
+  {
+    "label": "SEC-2b A: a ripple body is parsed untrimmed, so a trailing BOM skips every ripple check",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            body.strip(_JS_SPACE),\n",
+    "replace": "            body,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_a_a_trailing_trimmed_character_does_not_skip_the_ripple_checks"
     ]
   }
 ]

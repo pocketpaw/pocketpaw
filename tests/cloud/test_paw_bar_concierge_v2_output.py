@@ -6,7 +6,8 @@
 #   * ``FenceFilter`` (concierge_runtime.py) holds every ``` fence until it
 #     closes. A ```pawbar-card fence carrying a Ripple spec (``{"ui": ...}``) is
 #     validated and hydrated; a legacy ```pawbar-card passes through (a legacy
-#     product card is re-priced from the catalog); any other fence becomes one
+#     product card is re-priced from the catalog), one that is not JSON once
+#     trimmed as paw-bar trims it is dropped; any other fence becomes one
 #     fixed line; a fence still open when the stream ends is dropped. Every
 #     case runs with the reply split at every possible chunk boundary.
 #   * ``card_spec.validate_and_hydrate`` bounds a spec exactly as paw-bar does
@@ -214,9 +215,33 @@ def test_a_legacy_form_card_passes_through_verbatim():
     assert _filtered_every_way(text) == text
 
 
-def test_a_legacy_card_that_is_not_json_passes_through():
+def test_a_card_that_is_not_json_is_dropped():
+    # Never passed through unchecked: the client might parse what the server could not.
     text = "Hm:\n```pawbar-card\nnot json at all\n```\nok"
-    assert _filtered_every_way(text) == text
+    assert _filtered_every_way(text) == "Hm:\n\nok"
+
+
+# Each one JS trim()/trimEnd() strips and Python's json.loads refuses.
+_JS_TRIMMED = ["\ufeff", "\u00a0", "\u2028", "\u2029", "\u3000", "\u202f", "\x0b", "\x0c"]
+
+
+@pytest.mark.parametrize("ch", _JS_TRIMMED)
+def test_a_card_ending_in_what_the_client_trims_is_still_checked(ch):
+    # paw-bar trims the body before JSON.parse, so it would draw this spec; the
+    # server must read it the same way and refuse it, not pass it through.
+    bad = json.dumps({"ui": {"type": "iframe", "props": {"src": "https://evil.example"}}})
+    assert _filtered_every_way(f"Look:\n```pawbar-card\n{bad}{ch}\n```\nBye") == "Look:\n\nBye"
+    good = json.dumps({"ui": {"type": "product-card", "props": {"ids": ["espresso"]}}})
+    out = _filtered_every_way(f"Look:\n```pawbar-card\n{ch}{good}{ch}\n```\nBye")
+    assert _card_json(out)["ui"]["props"]["items"][0]["id"] == "espresso"
+    assert ch not in out
+
+
+@pytest.mark.parametrize("ch", ["\x1c", "\x85", "\u200b"])
+def test_a_card_ending_in_what_the_client_does_not_trim_is_dropped(ch):
+    # Python's str.strip() takes \x1c and \x85; JS trim() takes neither, nor \u200b.
+    good = json.dumps({"ui": {"type": "product-card", "props": {"ids": ["espresso"]}}})
+    assert _filtered_every_way(f"Look:\n```pawbar-card\n{good}{ch}\n```\nBye") == "Look:\n\nBye"
 
 
 def test_a_legacy_product_card_is_repriced_from_the_catalog():

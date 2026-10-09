@@ -653,5 +653,34 @@
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_agent_model.py::test_an_agent_in_another_workspace_is_never_followed"
     ]
+  },
+  {
+    "label": "a card body is parsed untrimmed — a trailing BOM or NBSP the client trims sends a spec through as a legacy card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            body.strip(_JS_SPACE),\n",
+    "replace": "            body,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_ending_in_what_the_client_trims_is_still_checked"
+    ]
+  },
+  {
+    "label": "the server strips Python's whitespace set, not the client's — a trailing \\x1c it forgives the client cannot parse, a BOM it keeps",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            body.strip(_JS_SPACE),\n",
+    "replace": "            body.strip(),\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_ending_in_what_the_client_trims_is_still_checked",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_ending_in_what_the_client_does_not_trim_is_dropped"
+    ]
+  },
+  {
+    "label": "a card body that is not JSON passes through unchecked again",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if raw is None or raw is _TOO_DEEP:\n",
+    "replace": "    if raw is _TOO_DEEP:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_that_is_not_json_is_dropped",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_ending_in_what_the_client_does_not_trim_is_dropped"
+    ]
   }
 ]

@@ -699,6 +699,144 @@ def test_sec_f3_a_repeated_key_drops_a_ripple_card(body):
     assert render_card(body, [], profile=RIPPLE_PROFILE) is None
 
 
+# SEC-2b B: a slot the engine draws as a node (NodeRenderer) holds a literal node
+# or text. A lone expression there draws whatever state holds by then, and
+# ``set`` pieces can build that node at run time, never checked. Every slot the
+# engine and the manifest have, each with the expression and with a literal node.
+_TEXT_NODE = {"type": "text", "props": {"text": "hi"}}
+
+
+def _node_slot(name: str, v) -> dict:
+    col = {"key": "a", "label": "A", "formatter": v}
+    ui = {
+        "settings-list control": ("settings-list", {"items": [{"label": "x", "control": v}]}),
+        "tabs panels": ("tabs", {"tabs": [{"value": "a", "label": "A"}], "panels": [v]}),
+        "split start": ("split", {"start": v}),
+        "split end": ("split", {"end": v}),
+        "master-detail detail": ("master-detail", {"items": [{"id": "a"}], "detail": v}),
+        "kanban cardTemplate": (
+            "kanban",
+            {"columns": [{"id": "c", "title": "C"}], "cardTemplate": v},
+        ),
+        "data-grid formatter": ("data-grid", {"columns": [col], "rows": [{"a": 1}]}),
+        "tree-table formatter": ("tree-table", {"columns": [col], "rows": [{"a": 1}]}),
+        "virtual-list item": ("virtual-list", {"items": [1], "item": v}),
+        "popover content": ("popover", {"trigger": "Open", "content": v}),
+        "hover-card trigger": ("hover-card", {"trigger": v, "content": "x"}),
+        "tooltip trigger": ("tooltip", {"trigger": v, "content": "x"}),
+        "context-menu trigger": ("context-menu", {"trigger": v, "items": []}),
+    }[name]
+    return {"ui": {"type": ui[0], "props": ui[1]}, "state": {"n": _TEXT_NODE, "x": "x"}}
+
+
+_NODE_SLOT_NAMES = [
+    "settings-list control",
+    "tabs panels",
+    "split start",
+    "split end",
+    "master-detail detail",
+    "kanban cardTemplate",
+    "data-grid formatter",
+    "tree-table formatter",
+    "virtual-list item",
+    "popover content",
+    "hover-card trigger",
+    "tooltip trigger",
+    "context-menu trigger",
+]
+
+
+@pytest.mark.parametrize("name", _NODE_SLOT_NAMES)
+@pytest.mark.parametrize(
+    "value", ["{state.n}", " {state.n} ", "{item}", "{row}", {"type": "iframe"}, {"label": "x"}]
+)
+def test_sec_b_a_node_slot_refuses_an_expression_or_a_non_node(name, value):
+    assert _ripple(_node_slot(name, value)) is None
+
+
+@pytest.mark.parametrize("name", _NODE_SLOT_NAMES)
+@pytest.mark.parametrize("value", [_TEXT_NODE, "Open", "Hi {state.x}"])
+def test_sec_b_a_node_slot_takes_a_literal_node_or_text(name, value):
+    assert _ripple(_node_slot(name, value)) is not None
+
+
+@pytest.mark.parametrize(
+    "ui",
+    [
+        {"type": "settings-list", "props": {"items": "{state.rows}"}},
+        {"type": "settings-list", "props": {"items": ["{state.row}"]}},
+        {"type": "tabs", "props": {"tabs": [{"value": "a", "label": "A"}], "panels": "{state.p}"}},
+        {"type": "data-grid", "props": {"columns": "{state.cols}", "rows": [{"a": 1}]}},
+        {"type": "tree-table", "props": {"columns": "{state.cols}", "rows": [{"a": 1}]}},
+    ],
+)
+def test_sec_b_a_list_of_node_rows_is_literal(ui):
+    # The rows would be resolved from state with their nodes inside.
+    assert _ripple({"ui": ui, "state": {"rows": [], "p": [], "cols": []}}) is None
+
+
+def test_sec_b_a_node_built_by_set_pieces_never_reaches_a_slot():
+    # The finding's repro: on_focus builds a button with an api on_click in
+    # state, and a settings row draws it.
+    pieces = [
+        {"action": "set", "target": "n.type", "value": "button"},
+        {"action": "set", "target": "n.on_click.action", "value": "api"},
+        {"action": "set", "target": "n.on_click.url", "value": "/x"},
+    ]
+    spec = {
+        "ui": {
+            "type": "flex",
+            "children": [
+                {"type": "input", "bind": "q", "props": {"label": "Name"}, "on_focus": pieces},
+                {
+                    "type": "settings-list",
+                    "props": {"items": [{"label": "More", "control": "{state.n}"}]},
+                },
+            ],
+        }
+    }
+    assert _ripple(spec) is None
+
+
+def test_sec_b_node_slots_cover_the_engine_and_the_manifest():
+    from pocketpaw_ee.paw_bar.card_spec import _NODE_PROPS, _NODE_ROWS
+
+    assert _NODE_PROPS["split"] == {"start", "end"}
+    assert _NODE_PROPS["master-detail"] == {"detail"}
+    assert _NODE_PROPS["kanban"] == {"cardTemplate"}
+    assert _NODE_PROPS["virtual-list"] == {"item"}
+    # From the manifest's Array<{ control?: UISpec }>, not listed by hand.
+    assert _NODE_ROWS[("settings-list", "items")] == "control"
+    assert _NODE_ROWS[("tabs", "panels")] == ""
+    assert _NODE_ROWS[("data-grid", "columns")] == _NODE_ROWS[("tree-table", "columns")]
+
+
+# SEC-2b D: NaN / Infinity (or a float too big to hold) would reach card.final,
+# and the SSE frame carrying it would not be JSON. Refused at parse, both profiles.
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
+def test_sec_d_a_non_finite_number_drops_the_card(number):
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, RIPPLE_PROFILE, render_card
+
+    body = '{"ui": {"type": "text", "props": {"text": "hi"}}, "state": {"v": ' + number + "}}"
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is None
+    assert render_card(body, [], profile=PAWBAR_PROFILE) is None
+    assert render_card(body.replace(number, "1.5e3"), [], profile=RIPPLE_PROFILE) is not None
+
+
+# SEC-2b A (ripple profile): a body is read as the client reads it, trimmed of
+# what JS trim() strips; one that still is not JSON is dropped, not passed on.
+@pytest.mark.parametrize("ch", ["\ufeff", "\u00a0", "\u2028", "\u3000", "\x0b", "\x0c"])
+def test_sec_a_a_trailing_trimmed_character_does_not_skip_the_ripple_checks(ch):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    ask = {"action": "emit", "target": "ask", "value": {"text": "hi"}}
+    bad = _body({"ui": {"type": "button", "props": {"label": "x"}, "on_focus": ask}})
+    assert render_card(bad + ch, [], profile=RIPPLE_PROFILE) is None
+    good = _body({"ui": _TEXT_NODE})
+    assert render_card(ch + good + ch, [], profile=RIPPLE_PROFILE) is not None
+    assert render_card(good + "\x1c", [], profile=RIPPLE_PROFILE) is None
+
+
 # SEC F7: a follow-up emits ``props.event`` (default "follow-up") with the typed
 # text, so the event is an emit target: a host event the widget declares.
 @pytest.mark.parametrize(
