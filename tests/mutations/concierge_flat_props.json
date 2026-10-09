@@ -1,0 +1,128 @@
+[
+  {
+    "label": "LIFT-1: no flat key is lifted",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            flat = [k for k in value if k in liftable and k not in props]",
+    "replace": "            flat = []",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-2: a handler-key prop is lifted",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and not _is_handler_key(k)\n        and not (k == \"value\"",
+    "replace": "        and not (k == \"value\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-3: a bound value is lifted",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and not (k == \"value\" and \"bind\" in w[\"props\"])\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-4: a flat key overwrites the one props holds",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "k in liftable and k not in props]",
+    "replace": "k in liftable]",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-5: an undeclared key is lifted",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            liftable = _LIFTABLE.get(kind, frozenset())",
+    "replace": "            liftable = {k for k in value if k not in _NODE_KEYS and not _is_handler_key(k)}",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-6: children and node slots are not walked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            stack.extend(v for k, v in value.items() if k != \"props\")\n            continue",
+    "replace": "            continue",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-7: flow steps and other non-node objects are not walked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            continue\n        stack.extend(value.values())\n    return ui, moved",
+    "replace": "            continue\n    return ui, moved",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-8: a node's props object is read as a node",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            stack.extend(props.values())\n            stack.extend(v for k, v in value.items() if k != \"props\")",
+    "replace": "            stack.extend(value.values())",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-9: the pawbar profile lifts too",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not profile.strict:\n        return ui, 0\n    moved = 0",
+    "replace": "    moved = 0",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-10: a node's own type is lifted",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    {\"type\", \"id\", \"props\", \"children\"",
+    "replace": "    {\"id\", \"props\", \"children\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-11: bind is lifted",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    | {\"item_as\", \"index_as\", \"bind\", \"state\"}",
+    "replace": "    | {\"item_as\", \"index_as\", \"state\"}",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-12: state is lifted",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    | {\"item_as\", \"index_as\", \"bind\", \"state\"}",
+    "replace": "    | {\"item_as\", \"index_as\", \"bind\"}",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-13: render_card never lifts",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        raw[\"ui\"], lifted = _lift_flat_props(raw[\"ui\"], profile)",
+    "replace": "        lifted = 0",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-14: the lift is not logged",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            logger.info(\"card_spec: lifted %d flat prop(s) into props\", lifted)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  }
+]

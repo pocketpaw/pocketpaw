@@ -13,7 +13,9 @@
 # actions, URLs, CSS, expressions, flow cards and ``ask`` to the rules its docstrings
 # name. Any error the walk did not foresee is a logged refusal, never an exception.
 # A ripple body that is not JSON only for missing closers, or one surplus closer
-# before its state, is repaired once and then checked like any body.
+# before its state, is repaired once and then checked like any body; a ripple
+# node's declared props written flat on the node are moved under ``props``
+# (``_lift_flat_props``) before the checks, and the moved card is the one sent.
 #
 # Hydration runs after the checks and is not checked again: product data comes only
 # from the site catalog, and on the ripple profile ``_fill_store`` fills menu-order,
@@ -1446,6 +1448,65 @@ def _repaired(body: str, profile: CardProfile) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Flat props repair (strict profile)
+# --------------------------------------------------------------------------- #
+
+
+# Node keys never moved into ``props``, even where a widget declares one by that
+# name (button and input declare ``type``, input ``bind``); handler keys neither.
+_NODE_KEYS: frozenset[str] = frozenset(
+    {"type", "id", "props", "children", "else_children", "show", "each"}
+    | {"item_as", "index_as", "bind", "state"}
+)
+# Each ripple widget's declared props a flat node key may be lifted into: not a
+# node key, not a handler key, and not ``value`` on a widget that binds it.
+_LIFTABLE: dict[str, frozenset[str]] = {
+    w["type"]: frozenset(
+        k
+        for k in w.get("props") or {}
+        if k not in _NODE_KEYS
+        and not _is_handler_key(k)
+        and not (k == "value" and "bind" in w["props"])
+    )
+    for w in RIPPLE_MANIFEST["widgets"]
+}
+
+
+def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
+    """``ui`` with, in place, every widget node's top-level keys that its manifest
+    entry declares as props (``_LIFTABLE``) moved into ``props`` (made when
+    missing; a key ``props`` already holds stays put, the flat one beside it),
+    at any depth: children, node slots inside props, flow steps. A node's own
+    ``props`` object is never read as a node. Strict profile only; the caller
+    checks the result in full. Returns it and how many keys moved."""
+    if not profile.strict:
+        return ui, 0
+    moved = 0
+    stack = [ui]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, list):
+            stack.extend(value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        kind = value.get("type")
+        props = value.get("props", {})
+        if isinstance(kind, str) and isinstance(props, dict):
+            liftable = _LIFTABLE.get(kind, frozenset())
+            flat = [k for k in value if k in liftable and k not in props]
+            if flat:
+                value["props"] = props = {**props, **{k: value.pop(k) for k in flat}}
+                moved += len(flat)
+            # A node: its props' values may hold nodes, never the props object.
+            stack.extend(props.values())
+            stack.extend(v for k, v in value.items() if k != "props")
+            continue
+        stack.extend(value.values())
+    return ui, moved
+
+
 def _legacy_product(card: dict, index: dict[str, Any], verbs: list[str]) -> dict | None:
     ids = [item.get("id") for item in card.get("items") or [] if isinstance(item, dict)]
     items = _items(ids, index, verbs)
@@ -1496,6 +1557,10 @@ def _render_card(
     if raw is None or raw is _TOO_DEEP:
         return None
     if _is_spec(raw):
+        # Props written flat on a node are moved under props, then checked in full.
+        raw["ui"], lifted = _lift_flat_props(raw["ui"], profile)
+        if lifted:
+            logger.info("card_spec: lifted %d flat prop(s) into props", lifted)
         # Measured as paw-bar measures it: CRLF folded, trailing whitespace trimmed.
         if len(body.replace("\r\n", "\n").rstrip(_JS_SPACE)) > profile.max_chars:
             return None
