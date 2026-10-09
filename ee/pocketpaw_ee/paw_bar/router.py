@@ -71,7 +71,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, StrictInt, field_validator
+from pydantic import AfterValidator, BaseModel, Field, StrictInt, field_validator
 
 from pocketpaw.money import (
     DEFAULT_EXPONENT,
@@ -1724,6 +1724,25 @@ ConciergeDailySpendCap = Annotated[
 ]
 
 
+def _store_url(value: str | None) -> str | None:
+    """A store base URL: https, a public host, no credentials, query or fragment
+    (``validate_external_url_strict``); "" clears it. Stored without a trailing /."""
+    from urllib.parse import urlsplit
+
+    from pocketpaw.security.url_validators import validate_external_url_strict
+
+    if value is None or not value.strip():
+        return None
+    url = validate_external_url_strict(value.strip())
+    parts = urlsplit(url)
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ValueError("a store URL takes no credentials, query or fragment")
+    return url.rstrip("/")
+
+
+ConciergeStoreUrl = Annotated[str, Field(max_length=500), AfterValidator(_store_url)]
+
+
 class ConciergeSettingsUpdate(BaseModel):
     """Partial update of a Site's concierge settings (D1).
 
@@ -1764,6 +1783,10 @@ class ConciergeSettingsUpdate(BaseModel):
     # Which cards the v2 concierge may write: "pawbar" or "ripple" (anything else
     # is a 422). null means "not sent".
     concierge_ui_profile: Literal["pawbar", "ripple"] | None = None
+    # The store a ripple concierge orders and books against (https, public host;
+    # anything else is a 422). Ops sites on the ripple profile only (403
+    # ``ops_only_setting``). An explicit null or "" clears it.
+    concierge_store_url: ConciergeStoreUrl | None = None
     # The site's daily spend cap in USD, 0..100 (out of range is a 422; 0 pauses
     # the concierge). Like the knowledge budget, an explicit null is a write: it
     # clears the cap back to the global one.
@@ -1872,6 +1895,8 @@ class ConciergeSettingsResponse(BaseModel):
     # None means the default budget (12,000 characters).
     concierge_knowledge_chars: int | None = None
     concierge_ui_profile: Literal["pawbar", "ripple"] = "pawbar"
+    # None means no store.
+    concierge_store_url: str | None = None
     # None means the global daily cap.
     concierge_daily_spend_cap: float | None = None
     # CR-4 guided fields. "", None and [] mean unset (nothing is rendered).
@@ -2045,6 +2070,7 @@ async def _concierge_settings_response(
         concierge_ui_profile="ripple"
         if getattr(site, "concierge_ui_profile", "pawbar") == "ripple"
         else "pawbar",
+        concierge_store_url=getattr(site, "concierge_store_url", None) or None,
         concierge_daily_spend_cap=getattr(site, "concierge_daily_spend_cap", None),
         # getattr again: rows older than the guided fields read as unset.
         concierge_name=getattr(site, "concierge_name", "") or "",
@@ -2144,19 +2170,30 @@ async def update_site_concierge_settings(
 
         if not await badge_removal_entitled(site):
             raise HTTPException(status_code=402, detail="branding_not_entitled")
-    # The ripple profile and a daily cap above the global one are for the sites
-    # the platform runs itself; any other site may only lower the cap. Nothing in
-    # the PATCH is written. The runtime holds stored values to the same rule.
-    if {"concierge_ui_profile", "concierge_daily_spend_cap"} & req.model_fields_set:
+    # The ripple profile, a store URL and a daily cap above the global one are
+    # for the sites the platform runs itself; a store URL also needs the ripple
+    # profile (stored or in this PATCH). Any other site may only lower the cap or
+    # clear the URL. Nothing in the PATCH is written. The runtime holds stored
+    # values to the same rule.
+    if {
+        "concierge_ui_profile",
+        "concierge_daily_spend_cap",
+        "concierge_store_url",
+    } & req.model_fields_set:
         from pocketpaw_ee.paw_bar import concierge_runtime
 
         settings = concierge_runtime._settings()
-        if not concierge_runtime.is_ops_site(site, settings):
+        ops = concierge_runtime.is_ops_site(site, settings)
+        if not ops:
             ceiling = float(settings.pawbar_concierge_daily_spend_cap)
             cap = req.concierge_daily_spend_cap
             if req.concierge_ui_profile == "ripple" or (
                 cap is not None and ceiling > 0 and cap > ceiling
             ):
+                raise HTTPException(status_code=403, detail="ops_only_setting")
+        if req.concierge_store_url is not None:
+            profile = req.concierge_ui_profile or getattr(site, "concierge_ui_profile", None)
+            if not ops or profile != "ripple":
                 raise HTTPException(status_code=403, detail="ops_only_setting")
     # Writes the switch and nothing else (CR-12). This PATCH used to provision an
     # agent whenever it set concierge_enabled=true; turning a switch on is not
@@ -2165,7 +2202,11 @@ async def update_site_concierge_settings(
     previous_name = getattr(site, "concierge_name", "") or ""
     for name in req.model_fields_set:
         value = getattr(req, name)
-        if value is not None or name in ("concierge_knowledge_chars", "concierge_daily_spend_cap"):
+        if value is not None or name in (
+            "concierge_knowledge_chars",
+            "concierge_daily_spend_cap",
+            "concierge_store_url",
+        ):
             setattr(site, name, value)
     await site.save()
     # A legacy concierge answers through its dedicated agent: carry a new name

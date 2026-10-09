@@ -762,6 +762,11 @@ class Site(TimestampedDocument):
     # small card set. "ripple": the full Ripple catalog with bigger bounds and a
     # bigger reply cap (``card_spec.RIPPLE_PROFILE``), for a demo site.
     concierge_ui_profile: Literal["pawbar", "ripple"] = "pawbar"
+    # The base URL of the store the ripple concierge orders and books against
+    # (``paw_bar.concierge_store``): its menu goes in the prompt and fills
+    # menu-order and booking cards. Site config, never model data. Used only on
+    # an ops site on the ripple profile; None (the default) means no store.
+    concierge_store_url: str | None = None
     # This site's daily concierge spend cap in USD. None (the default, and rows
     # older than the field) uses the global ``pawbar_concierge_daily_spend_cap``;
     # a number replaces it for this site, and 0 pauses the concierge. The settings
