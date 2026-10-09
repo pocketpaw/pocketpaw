@@ -21,7 +21,10 @@
 #     unknown ids are dropped, an empty product-card is dropped. A legacy
 #     ``{"kind": "product"}`` card is repriced the same way; other legacy cards
 #     pass through untouched. ``card_ids`` says which catalog items to fetch;
-#     ``has_lead_form`` says whether a card is the lead card.
+#     ``has_lead_form`` says whether a card is the lead card;
+#   * a body is read as paw-bar reads it: ``_JS_SPACE`` (what JS ``trim`` strips)
+#     is stripped before parsing, and a body that still is not JSON is dropped,
+#     never passed through, since the client might parse what the server could not.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar's
 # app/pawbar-manifest.json. The drift test in
@@ -271,9 +274,19 @@ def validate_and_hydrate(
 # --------------------------------------------------------------------------- #
 
 
+# What JS ``String.prototype.trim`` strips (ECMAScript WhiteSpace and
+# LineTerminator). paw-bar trims a fence body with ``trimEnd()`` before
+# ``JSON.parse``; Python's ``json.loads`` refuses most of these.
+_JS_SPACE = (
+    "\t\n\v\f\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
 def _parse(body: str) -> Any:
+    """The parsed body, ``_JS_SPACE`` stripped first; None when it is not JSON."""
     try:
-        return json.loads(body)
+        return json.loads(body.strip(_JS_SPACE))
     except ValueError:
         return None
 
@@ -298,11 +311,13 @@ def render_card(
     """The complete ```pawbar-card fence to emit for a fence ``body``, or None to
     drop it. A Ripple spec is validated and hydrated; a legacy product card is
     repriced from the catalog; a legacy form card is held to the form rules; any
-    other legacy card passes through verbatim."""
+    other legacy card passes through verbatim. A body that is not JSON is dropped."""
     raw = _parse(body)
+    if raw is None:
+        return None
     if _is_spec(raw):
         # Measured as paw-bar measures it: CRLF folded, trailing whitespace trimmed.
-        if len(body.replace("\r\n", "\n").rstrip()) > MAX_SPEC_CHARS:
+        if len(body.replace("\r\n", "\n").rstrip(_JS_SPACE)) > MAX_SPEC_CHARS:
             return None
         spec = validate_and_hydrate(raw, catalog, verbs=verbs, lead_capture=lead_capture)
         return None if spec is None else f"{_FENCE}pawbar-card\n{_serialize(spec)}\n{_FENCE}"
