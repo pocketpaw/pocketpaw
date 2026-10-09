@@ -797,7 +797,7 @@ def _strict_walk(
 
 
 def _check_illustration(node: dict[str, Any], props: Any) -> None:
-    """An ``illustration`` node: no handler or bind, ``svg`` and ``title`` text,
+    """An ``illustration`` node: no handler or bind, ``svg`` and non-blank ``title`` text,
     ``caption`` text if given (null is absent), ``max_height`` a number in ``ILLUSTRATION_HEIGHT``,
     and the svg passes ``svg_violation``. The svg must be literal: a ``{...}``
     there would be resolved by the engine into markup this check never saw."""
@@ -807,6 +807,8 @@ def _check_illustration(node: dict[str, Any], props: Any) -> None:
     svg, title = props.get("svg"), props.get("title")
     if not isinstance(svg, str) or not isinstance(title, str):
         raise _Reject("an illustration needs svg and title text")
+    if not title.strip():
+        raise _Reject("an illustration with an empty title")
     if props.get("caption") is not None and not isinstance(props["caption"], str):
         raise _Reject("an illustration caption that is not text")
     height = props.get("max_height")

@@ -33,7 +33,7 @@ GOOD_SVG = (
     "</linearGradient><circle id='a' r='8' fill='url(#g)'/></defs>"
     "<rect width='200' height='120' fill='#e0f2fe'/>"
     "<g transform='translate(100 60)'>"
-    "<circle r='30' fill='url( #g )'>"
+    "<circle r='30' fill='url(#g)'>"
     "<animate attributeName='r' values='28;32;28' dur='2s' repeatCount='indefinite'/>"
     "</circle>"
     "<use href='#a' x='50'><animateTransform attributeName='transform' type='rotate' "
@@ -77,7 +77,7 @@ _HOSTILE: list[tuple[str, str]] = [
     (_svg("<!ENTITY x 'y'>"), "an ENTITY"),
     (_svg("<text>&nbsp;</text>"), "the entity &nbsp;"),
     ("<?xml-stylesheet href='http://x/s.css'?>" + _svg(""), "a stylesheet"),
-    (_svg("<text><![CDATA[<script>x</script>]]></text>"), "CDATA holding markup"),
+    (_svg("<text><![CDATA[<script>x</script>]]></text>"), "a CDATA section"),
     (_svg("<foreignObject><iframe src='http://x'/></foreignObject>"), "a foreignObject element"),
     (_svg("", root=" onload='alert(1)'"), "event handler attribute (onload)"),
     (_svg("<rect OnClick='alert(1)'/>"), "event handler attribute (OnClick)"),
@@ -102,8 +102,8 @@ _HOSTILE: list[tuple[str, str]] = [
     (_svg("<rect fill='JaVa&#9;ScRiPt:alert(1)'/>"), "a script or data link"),
     (_svg("<rect fill='data:x'/>"), "a script or data link"),
     (_svg("<rect fill='expression(alert(1))'/>"), "a script or data link"),
-    # A CSS escape still spells url( for the browser.
-    (_svg("<rect fill='\\75 rl(http://x/)'/>"), "url() that is not url(#id)"),
+    # A CSS escape could still spell url( for the browser: any backslash is refused.
+    (_svg("<rect fill='\\75 rl(http://x/)'/>"), "a backslash in a value"),
     (
         _svg("<circle id='a' r='2'/><use id='b' href='#a'/><use href='#b'/>"),
         "a use pointing at a use",
@@ -148,7 +148,7 @@ def test_hostile_or_over_cap_svg_is_refused_for_its_rule(markup, reason):
         # Value rules read attribute values only, never text.
         _svg("<text>data: javascript:alert(1) url(http://x) expression(1)</text>"),
         _svg("<circle id='a' r='2'/>" + "<use href='#a'/>" * 40),
-        _svg("<g id='a'><circle r='2'/><circle r='4'/></g><use href='#a'/><use href='#zz'/>"),
+        _svg("<g id='a'><circle r='2'/><circle r='4'/></g><use href='#a'/>"),
     ],
 )
 def test_good_svg_passes(markup):
@@ -161,9 +161,10 @@ def test_plain_model_svg_with_no_xmlns_is_svg():
     assert "outside the SVG namespace" in (_violation(xhtml) or "")
 
 
-def test_url_is_matched_in_any_case():
+def test_url_is_detected_in_any_case_and_must_be_lowercase():
     assert "url() that is not url(#id)" in (_violation(_svg("<rect fill='URL(http://x)'/>")) or "")
-    assert _violation(_svg("<rect fill='URL(#g)'/>")) is None
+    refused = _violation(_svg("<linearGradient id='g'/><rect fill='URL(#g)'/>"))
+    assert "url() that is not url(#id)" in (refused or "")
 
 
 def test_deep_nesting_never_raises_recursion():

@@ -27,10 +27,10 @@
     ]
   },
   {
-    "label": "ILL-4: CSS escapes are not undone before the url( rule",
+    "label": "ILL-4: a backslash in an attribute value passes",
     "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
-    "find": "    plain = _CSS_ESCAPE.sub(_css_char, value)",
-    "replace": "    plain = value",
+    "find": "    if \"\\\\\" in value:\n        return \"a backslash in a value\"",
+    "replace": "    if False:\n        return \"a backslash in a value\"",
     "tests": [
       "tests/cloud/test_paw_bar_illustration.py"
     ]
@@ -96,6 +96,78 @@
     "replace": "            if len(uses) > 10**9:",
     "tests": [
       "tests/cloud/test_paw_bar_illustration.py"
+    ]
+  },
+  {
+    "label": "ILL-12: a reference to a missing id passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "    if missing := next((ref for ref in refs if ref not in ids), None):",
+    "replace": "    if missing := None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-13: url() may hold whitespace or any case",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "_URL_REF = re.compile(r\"url\\(#([A-Za-z0-9_-]+)\\)\")",
+    "replace": "_URL_REF = re.compile(r\"url\\(\\s*#([A-Za-z0-9_-]+)\\s*\\)\", re.I)",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-14: a processing instruction passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "    if \"<?\" in body:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-15: a mask or clipPath cycle passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "            if ref == start:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-16: the number cap is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "            if any(abs(float(n)) > MAX_NUMBER for n in numbers):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-17: an attributeType passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "        if local == \"attributeType\":",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-18: an id outside the charset passes",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "        if local == \"id\" and not _ID.fullmatch(value):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
+    ]
+  },
+  {
+    "label": "ILL-19: a blank illustration title passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not title.strip():",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_illustration_hardening.py"
     ]
   }
 ]
