@@ -15,7 +15,9 @@
 # The accepted card is ripple's recorded explainer scenario
 # (tests/fixtures/ripple_explainer_card.json, from ripple origin/main 09a56a6,
 # packages/svelte/src/routes/live/fixtures/explainer.json, its chunks joined and
-# wrapped as {ui, state}). Mutation plan: tests/mutations/concierge_ripple_rules.json.
+# wrapped as {ui, state}). Flow cards (``TRIP_FLOW`` is the accepted shape) and
+# the ``ask`` host event pass only on ripple; ``_FLOW_REFUSALS`` lists what each
+# refuses and is reused streamed. Mutation plan: tests/mutations/concierge_ripple_rules.json.
 
 # ruff: noqa: F811 — pytest fixtures imported by name
 

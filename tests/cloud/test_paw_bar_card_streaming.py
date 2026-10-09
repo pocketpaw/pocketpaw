@@ -9,8 +9,10 @@
 # validated card fence exactly as before. A "pawbar" site's byte stream is pinned
 # unchanged. The realistic card is ripple's recorded explainer scenario
 # (tests/fixtures/ripple_explainer_card.json).
+# A flow card streams like any other and ends with the verdict the whole card gets.
 #
-# Mutations: tests/mutations/concierge_v2_runtime.json ("card streaming" entries).
+# Mutations: tests/mutations/concierge_v2_runtime.json ("card streaming" entries) and
+# tests/mutations/concierge_ripple_rules.json ("FL-1 streamed" entries).
 #
 # ruff: noqa: F811 — pytest fixtures imported by name
 
