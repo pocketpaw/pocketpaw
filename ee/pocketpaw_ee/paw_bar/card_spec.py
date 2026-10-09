@@ -214,13 +214,15 @@ _NODE_ROWS: dict[tuple[str, str], str] = {
 }
 # Props that carry event handlers (a ``*Actions`` slot, or rows such as
 # comparison ``items`` whose ``actions`` are handlers), by widget. Never an
-# expression: the engine would dispatch whatever it resolves to.
+# expression: the engine would dispatch whatever it resolves to. comparison-layout
+# still dispatches its rows' legacy ``actions`` and ``learn_more`` though its
+# manifest type stopped naming them (ripple-iui#182), so it is pinned here.
 _HANDLER_PROPS: frozenset[tuple[str, str]] = frozenset(
     (w["type"], name)
     for w in RIPPLE_MANIFEST["widgets"]
     for name, spec in (w.get("props") or {}).items()
     if "EventAction" in str(spec.get("type", ""))
-)
+) | {("comparison-layout", "items")}
 # A follow-up emits ``props.event`` (this when unset) with the typed text, unless
 # its node has an ``on_submit``.
 _FOLLOW_UP_EVENT = "follow-up"
