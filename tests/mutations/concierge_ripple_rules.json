@@ -9,6 +9,15 @@
     ]
   },
   {
+    "label": "a composite whose item shapes nothing shows is listed with props again",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            \"callout\",\n        }",
+    "replace": "            \"callout\",\n            \"analytics-dashboard\",\n        }",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
     "label": "the ripple width rule goes back to a 300px card",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
     "find": "    \"   - The card is about 720px wide on a desktop and must still read on a 360px \"",
@@ -60,6 +69,24 @@
     "replace": "                {\"label\": \"Team\", \"value\": \"6 people\", \"href\": \"https://cdn.example.com/t\"},",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_example_card_passes_the_ripple_checks_whole"
+    ]
+  },
+  {
+    "label": "the example's data rows carry a type that names a widget",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                                            \"title\": \"Mobile beta\",\n                                            \"type\": \"warning\",",
+    "replace": "                                            \"title\": \"Mobile beta\",\n                                            \"type\": \"text\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_example_card_passes_the_ripple_checks_whole"
+    ]
+  },
+  {
+    "label": "the rule against widget-named data row types is dropped",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    'color, rating, icon): call that field \"kind\".',",
+    "replace": "    'color, rating, icon).',",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
     ]
   },
   {

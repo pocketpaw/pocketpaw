@@ -1330,7 +1330,9 @@ _RIPPLE_RULES = (
     '   - "each" takes items ("{state.list}"), item_as and index_as on the node, and '
     '"if" takes condition on the node, not in props. Inside each, the row is '
     '{item.field} and the index {index}; bind a row field as "list.{index}.field" '
-    'and remove a row with {"action":"remove","target":"list","value":"{item}"}.',
+    'and remove a row with {"action":"remove","target":"list","value":"{item}"}. '
+    'A data row never has a "type" naming a widget (text, number, date, image, '
+    'color, rating, icon): call that field "kind".',
     "   - When a number depends on a list (its count or sum), keep it in state and "
     "refresh it with a set whose value is the expression, e.g. "
     "\"{state.items.sum('price')}\", after every push or remove and in the on_change "

@@ -226,16 +226,10 @@ def test_the_ripple_listing_is_bounded_and_covers_every_widget():
     assert "- each {items, item_as?, index_as?}" in text
 
 
-# The ready-made data widgets the authoring rules point at, listed with props.
-_DATA_WIDGETS = (
-    "entity-detail",
-    "timeline",
-    "kv-table",
-    "alert",
-    "callout",
-    "analytics-dashboard",
-    "comparison-layout",
-)
+# The data widgets the authoring rules point at, listed with props; the example
+# card shows their item shapes. The composites whose shapes nothing shows stay brief.
+_DATA_WIDGETS = ("entity-detail", "timeline", "kv-table", "alert", "callout")
+_BRIEF_COMPOSITES = ("analytics-dashboard", "comparison-layout")
 
 
 def _ripple_paragraph() -> str:
@@ -255,6 +249,9 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     text = _ripple_paragraph()
     for widget in _DATA_WIDGETS:
         assert f"   - {widget} {{" in text, widget
+    for widget in _BRIEF_COMPOSITES:
+        assert f"   - {widget}: " in text and f"   - {widget} {{" not in text, widget
+    assert 'call that field "kind"' in text
     entity = next(line for line in text.splitlines() if line.startswith("   - entity-detail {"))
     assert "kpis?" in entity and "meta?" in entity and "status?" in entity
     assert "300px" not in text
@@ -293,6 +290,21 @@ def test_the_example_card_passes_the_ripple_checks_whole():
     assert {"entity-detail", "grid", "stat", "chart", "table", "timeline", "callout"} <= kinds
     root = _RIPPLE_EXAMPLE["ui"]["props"]
     assert root["kpis"] and root["meta"] and "actions" not in root
+    # Each detailed data widget shows its item shape (its main array prop) once.
+    shown = {(n["type"], k) for n in nodes for k in n.get("props", {})}
+    assert {("timeline", "events"), ("kv-table", "rows"), ("table", "rows")} <= shown
+    assert {("alert", "description"), ("callout", "text")} <= shown
+    # No data row has a "type" naming a widget: the landing refuses those as
+    # widget aliases and the server counts them as nodes.
+    rows = [
+        row
+        for n in nodes
+        for v in n.get("props", {}).values()
+        if isinstance(v, list)
+        for row in v
+        if isinstance(row, dict)
+    ]
+    assert rows and not [r for r in rows if r.get("type") in RIPPLE_PROFILE.widget_types]
     assert 20 <= len(nodes) <= 40
     compact = json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":"))
     assert compact.isascii() and len(compact) < 3_000

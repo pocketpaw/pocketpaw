@@ -135,7 +135,9 @@ RIPPLE_PROFILE = CardProfile(
     max_chars=64_000,
     manifest=RIPPLE_MANIFEST,
     # The widgets the authoring rules lean on (the inputs and layouts, and the
-    # ready-made data widgets), listed with their props.
+    # data widgets whose item shapes _RIPPLE_EXAMPLE shows), listed with their
+    # props. A listing line names props, not their types, so a composite whose
+    # shapes nothing shows (analytics-dashboard, comparison-layout) stays brief.
     detailed=frozenset(
         {
             "flex",
@@ -165,8 +167,6 @@ RIPPLE_PROFILE = CardProfile(
             "kv-table",
             "alert",
             "callout",
-            "analytics-dashboard",
-            "comparison-layout",
         }
     ),
     strict=True,
