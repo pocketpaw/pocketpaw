@@ -74,8 +74,8 @@
   {
     "label": "CHOICE-9: the rules drop the choice-button line",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    '\"label\"}}. Choice buttons: label at most 18 chars, an optional plain description '\n    \"hint up to 60; icons are picked from the label. Typed answers go out as value \"\n",
-    "replace": "    '\"label\"}}. '\n    \"Typed answers go out as value \"\n",
+    "find": "    'emits flow.next with value {\"selection\": {\"id\", \"label\"}}. Choice buttons: label '\n    \"at most 18 chars, an optional plain description hint up to 60; icons are picked \"\n    'from the label. Typed answers go out as value {\"formData\": {\"days\": '\n",
+    "replace": "    'emits flow.next with value {\"selection\": {\"id\", \"label\"}}. '\n    'Typed answers go out as value {\"formData\": {\"days\": '\n",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py"
     ]

@@ -200,8 +200,8 @@
   {
     "label": "the example card carries a full https link",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                {\"label\": \"Team\", \"value\": \"6 people\"},",
-    "replace": "                {\"label\": \"Team\", \"value\": \"6 people\", \"href\": \"https://cdn.example.com/t\"},",
+    "find": "                {\"label\": \"Launch\", \"value\": \"Nov 14\"},",
+    "replace": "                {\"label\": \"Launch\", \"value\": \"Nov 14\", \"href\": \"https://cdn.example.com/t\"},",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_example_card_passes_the_ripple_checks_whole"
     ]
@@ -997,8 +997,8 @@
   {
     "label": "DW-9: a typed line lists every prop (booking, menu-order, exec-dashboard)",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            if (shown is None or n in shown) and not",
-    "replace": "            if True and not",
+    "find": "            if (n in shown if shown is not None else not (typed and n in _COMMON_PROPS))",
+    "replace": "            if (True if shown is not None else not (typed and n in _COMMON_PROPS))",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props"
     ]
@@ -1006,8 +1006,8 @@
   {
     "label": "DW-9: typed lines repeat the props the rules teach once",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": " and not (typed and n in _COMMON_PROPS)",
-    "replace": "",
+    "find": " else not (typed and n in _COMMON_PROPS))",
+    "replace": " else True)",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props"
     ]
@@ -1261,8 +1261,8 @@
   {
     "label": "DW-10: the rules stop pointing orders at the store menu",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "\"is an itinerary. A menu or an order is a menu-order: items by product_id from the \"\n    \"store-menu block (and name),",
-    "replace": "\"is an itinerary. A menu or an order is a menu-order: items by product_id \"\n    \"(and name),",
+    "find": "\"is an itinerary. A menu or an order is a menu-order: items by product_id from the \"\n    \"store-menu block (and name);",
+    "replace": "\"is an itinerary. A menu or an order is a menu-order: items by product_id \"\n    \"(and name);",
     "tests": [
       "tests/cloud/test_paw_bar_store_hydration.py::test_build_prompt_puts_the_store_menu_after_the_catalog"
     ]
@@ -1495,8 +1495,8 @@
   {
     "label": "FLOW-PROMPT: the rule no longer says the browser appends the answers",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "\"{expressions}, at most 500 characters). The browser appends each answer to it as \"",
-    "replace": "\"{expressions}, at most 500 characters). Write each answer into it as \"",
+    "find": "\"no {expressions}, at most 500 characters). The browser appends each answer to it \"",
+    "replace": "\"no {expressions}, at most 500 characters). Write each answer into it \"",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
     ]
@@ -1504,8 +1504,8 @@
   {
     "label": "FLOW-PROMPT: the rule stops saying a set into state is lost",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "in the input's own props. Only what a button emits is collected (a set into \"\n    'state is lost): ",
-    "replace": "in the input's own props. Only what a button emits is collected (or what you \"\n    'set into state): ",
+    "find": "\"Only what a button emits is collected (a set into state is lost): an option \"",
+    "replace": "\"Only what a button emits is collected (or what you set into state): an option \"",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask"
     ]

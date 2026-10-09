@@ -1198,17 +1198,14 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
         "props": {
             "eyebrow": "Project status",
             "title": "Volunteer app rebuild",
-            "subtitle": "Team Orchid, sprint 7 of 10",
             "status": {"label": "At risk", "variant": "warning"},
             "kpis": [
                 {"label": "Complete", "value": "64%", "delta": "+9 pts", "trend": "up"},
                 {"label": "Days to launch", "value": 21},
-                {"label": "Budget used", "value": "58%"},
             ],
             "meta": [
                 {"label": "Lead", "value": "Sam O."},
                 {"label": "Launch", "value": "Nov 14"},
-                {"label": "Team", "value": "6 people"},
             ],
         },
         "children": [
@@ -1217,7 +1214,7 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
                 "props": {
                     "variant": "warning",
                     "title": "Mobile is 2 weeks behind",
-                    "description": "Older phones show sign-up layout bugs.",
+                    "description": "Older phones show layout bugs.",
                 },
             },
             {
@@ -1242,7 +1239,6 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
                             "direction": "down-good",
                         },
                     },
-                    {"type": "stat", "props": {"label": "Hours logged", "value": 312}},
                     {
                         "type": "stat",
                         "props": {"label": "Review wait (days)", "value": 2.5, "format": "number"},
@@ -1259,7 +1255,7 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
                             "type": "line",
                             "data": [
                                 {"label": f"W{i}", "value": v}
-                                for i, v in enumerate((52, 47, 41, 36, 25, 18), start=1)
+                                for i, v in enumerate((52, 41, 25, 18), start=1)
                             ],
                         },
                     }
@@ -1276,7 +1272,6 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
                             {"type": "badge", "props": {"text": t, "variant": v}}
                             for t, v in (
                                 ("Design done", "success"),
-                                ("Backend on track", "secondary"),
                                 ("Mobile behind", "warning"),
                                 ("QA blocked", "destructive"),
                             )
@@ -1294,7 +1289,6 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
                                 {"name": n, "owner": o, "done": d}
                                 for n, o, d in (
                                     ("Design", "Ana", "100%"),
-                                    ("Backend", "Lee", "75%"),
                                     ("Mobile", "Raj", "40%"),
                                     ("QA", "Kim", "20%"),
                                 )
@@ -1322,11 +1316,6 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
                                             "type": "success",
                                         },
                                         {
-                                            "date": "Oct 6",
-                                            "title": "Backend beta",
-                                            "type": "success",
-                                        },
-                                        {
                                             "date": "Oct 27",
                                             "title": "Mobile beta",
                                             "type": "warning",
@@ -1346,7 +1335,6 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
                                 "props": {
                                     "rows": [
                                         {"key": "Sprint length", "value": "2 weeks"},
-                                        {"key": "Next demo", "value": "Oct 28"},
                                         {"key": "Platforms", "value": "Web and mobile"},
                                     ]
                                 },
@@ -1360,8 +1348,7 @@ _RIPPLE_EXAMPLE: dict[str, Any] = {
                 "props": {
                     "variant": "insight",
                     "title": "Takeaway",
-                    "text": "Launch holds if mobile fixes land by Oct 27; lend one "
-                    "backend developer to mobile.",
+                    "text": "Launch holds if mobile fixes land by Oct 27.",
                 },
             },
         ],
@@ -1448,20 +1435,18 @@ _RIPPLE_RULES = (
     "   Authoring rules:",
     "   - Write every node's keys in this order: type, props, then bind and handlers, "
     "then children. Seed state with the visitor's own numbers; keep numbers as numbers.",
-    "   - Make it really interactive: bind inputs (number-input, slider, segmented, "
+    "   - Make it interactive: bind inputs (number-input, slider, segmented, "
     'switch, checkbox) to state with "bind": "{state.path}" and derive every output from '
     'state with expressions, e.g. "{state.total / state.people}". Never hardcode a '
     "copy of a state value: write state.items.length, not 4.",
     "   - The only actions are set, toggle, push, remove, open, toast, validate, flow "
     "(steps run in order) and branch (if, then, else), and emit of add_to_cart, "
     "checkout, ask or, in a flow card, flow.next, flow.back and flow.submit (both "
-    "below). There is no api, navigate, confirm, delay or any other action: a card "
-    "using one is dropped, even as a step. A handler may be a list of actions.",
+    "below). There is no api, navigate, confirm, delay or other action; one drops the "
+    "card, even as a step. A handler may be a list of actions.",
     "   - Links and images use same-site paths only (/page, #section); never a full "
     "URL, an expression or a CSS url().",
-    '   - "each" takes items ("{state.list}"), item_as and index_as on the node, and '
-    '"if" takes condition on the node, not in props. Inside each, the row is '
-    '{item.field} and the index {index}; bind a row field as "list.{index}.field" '
+    '   - Inside each (items "{state.list}"), bind a row field as "list.{index}.field" '
     'and remove a row with {"action":"remove","target":"list","value":"{item}"}. '
     'A data row never has a "type" naming a widget (text, number, date, image, '
     'color, rating, icon): call that field "kind".',
@@ -1474,25 +1459,23 @@ _RIPPLE_RULES = (
     "and a ternary only as the whole expression. There is no exponent operator (no ** "
     "or ^) and no Math functions: write compound growth as repeated multiplication. "
     "Division by zero gives 0.",
-    "   - Show a number that can have decimals (a division, a rate, money) with a "
-    'stat (format "number", "currency" or "percent"), never inside a text template.',
+    "   - Show a number with decimals (a division, a rate, money) in a stat (format "
+    '"number", "currency" or "percent"), never in a text template.',
     "   - The card is about 720px wide on a desktop and must still read on a 360px "
     'phone. For a row of tiles give the grid "columns": "repeat(auto-fit, '
-    'minmax(150px, 1fr))" so it wraps (a bigger minimum, like 260px, for cards side '
-    "by side); otherwise at most 2 fixed grid columns. Put number inputs and sliders "
+    'minmax(150px, 1fr))" so it wraps (260px for cards side by side); otherwise at '
+    "most 2 fixed grid columns. Put number inputs and sliders "
     'on a full-width row or a 2-column grid, and set "wrap": true on a flex row with '
     "more than two children. Aim for about 25 to 90 nodes when building from "
-    "primitives; a data widget card is often one node.",
+    "primitives.",
     "   - Match the card to the answer. When a data widget fits, the card is that one "
-    "widget holding only data; it lays out, sums and charts everything itself. A trip "
+    "widget holding only data. A trip "
     "is an itinerary. A menu or an order is a menu-order: items by product_id from the "
-    "store-menu block (and name), plus featured and preset; the server fills the rest. "
-    "A booking is a "
-    "booking: write only preferred {date, after} and party; the server fills services "
-    "and slots. A meal plan is a meal-plan, one dish a recipe, a workout an "
+    "store-menu block (and name); the server fills the rest. A booking is a booking. "
+    "A meal plan is a meal-plan, one dish a recipe, a workout an "
     "interval-workout, study cards a flashcard-deck. Savings or growth is a "
-    "growth-projection (four numbers: initial, deposit, rate, years). Sales or report "
-    "data is an exec-dashboard with the raw rows, measures and dimensions. A choice "
+    "growth-projection. Sales or report "
+    "data is an exec-dashboard with the raw rows. A choice "
     "between options is a comparison-layout with a winner. Splitting a bill or a tip "
     "between people is a bill-split (never seed its bind key in state). Each data "
     "widget also "
@@ -1500,54 +1483,53 @@ _RIPPLE_RULES = (
     "good|warn|bad|info|neutral} (the answer in one sentence, at most 140 chars, "
     "shown first) and, with money, currency? (an ISO code; never a symbol in a "
     "number). Never write on_checkout or on_book, or an image. "
-    "A small calculator or tool the visitor plays with (a converter, a quiz) binds "
-    "primitives to state as above. A summary of one thing (a person, an "
-    "account, a project) starts with entity-detail (title, status, kpis, meta) and "
-    "puts its sections in its children. Any other report leads "
-    "with 3 or 4 stat tiles in a grid, then a chart, then a table. Dated events go in "
-    "a timeline, plain facts in a kv-table (rows of {key, value}; its columns is 1 or "
-    "2), a warning in an alert, the one takeaway in a callout. Put each section in a "
-    "card with a short title, the most important thing first, and colour status with "
+    "A game is a memory-match (pairs), word-guess (a hidden word) or quiz (trivia "
+    "with explanations); tracking habits, a habit-tracker. A small tool (a converter) "
+    "binds primitives to state as above. A summary of one thing (a person, an "
+    "account, a project) starts with entity-detail (title, status, kpis, meta). Any "
+    "other report leads with 3 or 4 stat tiles in a grid, then a chart, then a table. "
+    "Dated events go in a timeline, plain facts in a kv-table (its columns is 1 or 2), "
+    "a warning in an alert, the one takeaway in a callout. Put each section in a card "
+    "with a short title, the most important thing first, and colour status with "
     "badge variants (success, warning, destructive, secondary, outline, default).",
-    "   - A 1-based position or counter never runs past its total, and every seeded "
-    "total equals what its expression gives.",
+    "   - A 1-based position or counter never runs past its total.",
     "   - Never attach a price, rating, opening hours or any other claim to a real "
-    "named business, venue or brand; a named real place costs 0 and any cost goes on "
-    "a separate unnamed item with a round estimate. Placeholders use generic words, "
-    "never brands. No lorem ipsum.",
+    "named business, venue or brand; a named real place costs 0, any cost goes on "
+    "a separate unnamed item with a round estimate. Placeholders are generic words, "
+    "never brands; no lorem ipsum.",
     '   - Flow cards: when the visitor wants to be guided ("step by step", "ask me '
-    'first") or you need 2 to 4 of their choices before you can answer well (never '
-    "for a one-shot answer), write a flow: steps the browser runs one at a time, with "
+    'first") or you need 2 to 4 of their choices to answer well (never '
+    "for a one-shot answer), write a flow: steps the browser runs with "
     'no reply between them. The card\'s ui is step 1, {"flowId", "intent": "select", '
     '"title", "ui": <node>, "chain": <step 2>}; "chain_map": {<option id>: <step>} '
     "branches on the pick instead. Give every step its own snake_case flowId and a "
-    "clear title, and every input a clear label: the answers are named by them. At "
+    "clear title, and every input a clear label (they name the answers). At "
     "most 8 steps, sharing the 400 nodes. A flow's top-level state never reaches its "
-    "steps, so inputs start empty: prefer option buttons, and put any starting value "
-    "in the input's own props. Only what a button emits is collected (a set into "
-    'state is lost): an option emits flow.next with value {"selection": {"id", '
-    '"label"}}. Choice buttons: label at most 18 chars, an optional plain description '
-    "hint up to 60; icons are picked from the label. Typed answers go out as value "
-    '{"formData": {"days": "{state.days}"}}. '
-    'The last step\'s buttons emit flow.submit and it has "onComplete": {"kind": '
-    '"chat", "message": ...}: one fixed sentence saying what to do (plain text, no '
-    "{expressions}, at most 500 characters). The browser appends each answer to it as "
-    'a line ("Trip style: Food") and sends it as the visitor; answer that with the '
-    "matching data widget (an itinerary, a comparison-layout with a winner). A flow "
+    "steps: prefer option buttons, and put an input's starting value in its own props. "
+    "Only what a button emits is collected (a set into state is lost): an option "
+    'emits flow.next with value {"selection": {"id", "label"}}. Choice buttons: label '
+    "at most 18 chars, an optional plain description hint up to 60; icons are picked "
+    'from the label. Typed answers go out as value {"formData": {"days": '
+    '"{state.days}"}}. The last step\'s buttons emit flow.submit and it has '
+    '"onComplete": {"kind": "chat", "message": ...}: one fixed sentence (plain text, '
+    "no {expressions}, at most 500 characters). The browser appends each answer to it "
+    "and sends it as the visitor; answer that with the matching data widget (an "
+    "itinerary, a comparison-layout with a winner). A flow "
     "(copy its shape): " + json.dumps(_RIPPLE_FLOW_EXAMPLE, separators=(",", ":")),
     "   - A click can send a follow-up as the visitor: "
     + json.dumps(_RIPPLE_ASK, separators=(",", ":"))
-    + " (plain text naming what it is about, at most 500 characters, no {expressions}) "
-    "on a button's on_click, or in a comparison item's actions list, which its Choose "
-    "button fires.",
-    "   - When a small picture or diagram helps explain (how something works, the "
-    "steps of a process), add an illustration: svg is the markup, title names it. "
-    "Put every SVG attribute in single quotes so the JSON string needs no escaping, "
-    "and give the root svg a viewBox: <svg viewBox='0 0 200 120'>...</svg>. Keep it "
-    "under 24,000 characters and 400 elements, every dur 0.5s or more. No "
-    "{expressions}; a gradient is fill='url(#id)'. The card may be dark or light, "
-    "so write text with fill='currentColor', never a dark or black fill. Reuse a shape with use "
-    "href='#id' (plain href, never xlink:href), at most 40 uses, none pointing at a use.",
+    + " (plain text, at most 500 characters, no {expressions}) "
+    "on a button's on_click, or in a comparison item's actions list.",
+    "   - When a small picture or diagram helps explain (how something works, a "
+    "process), add an illustration. "
+    "Put SVG attributes in single quotes (no JSON escaping): "
+    "<svg viewBox='0 0 200 120'>...</svg>. Under 24,000 characters and 400 elements, "
+    "every dur 0.5s or more. No {expressions}; a gradient is fill='url(#id)'. The card "
+    "may be dark or light: write text with fill='currentColor', never dark or black. "
+    "Reuse a shape with use href='#id' (plain href, never xlink:href), at most 40 uses, "
+    "none pointing at a use. Up to 8 annotations [{id, label (at most 40 chars), note "
+    "(at most 280), target}] number notes on parts of the drawing: give each drawing "
+    "part an id and point at it.",
     "   - A good summary card (copy its shape, never its data): "
     + json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":")),
 )
@@ -1583,9 +1565,8 @@ def _cards_paragraph(
 
     if getattr(profile, "name", "") == "ripple":
         lines = [
-            "   Cards: when a small interactive tool (a calculator, a planner, a "
-            "comparison, a checklist), a trip, a menu, a booking, a recipe, a summary or "
-            "a report answers the visitor better "
+            "   Cards: when a small tool (a calculator, a planner, a checklist), a trip, a "
+            "menu, a booking, a game, a summary or a report answers the visitor better "
             "than prose, write ONE "
             "```pawbar-card block after a sentence or two of text, holding "
             '{"ui": <node>, "state": {...}}. A node is {"type": ..., "props": {...}, '

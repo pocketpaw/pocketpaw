@@ -248,7 +248,9 @@ def test_the_ripple_listing_is_bounded_and_covers_every_widget():
     assert {line[2:].split(":")[0].split(" {")[0] for line in lines} == (
         RIPPLE_PROFILE.widget_types
     )
-    assert len(text) < 20_000
+    # 20,809 with the games' and habit-tracker's typed lines; the rules shrank by more,
+    # and the whole paragraph's 32,000 bound is the one that holds.
+    assert len(text) < 21_000
     # The rules' widgets carry their props (each's node fields too).
     assert "- stat {label?, value" in text
     assert "- each {items, item_as?, index_as?}" in text
@@ -296,7 +298,10 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # widgets, 24,327 before Ripple's data widgets (typed lines and their rules, less
     # the page chrome), 27,849 after, 30,473 with the flow and ask rules (the flow
     # example alone is 890), 31,191 with the illustration line and rule, 31,972 with
-    # the vendored illustration line, bill-split and the choice-button line.
+    # the vendored illustration line, bill-split and the choice-button line; 32,412 with
+    # the play-wave manifest, then 31,914 after a trim pass (rules that repeat a typed
+    # line or the manifest dropped, the example card shortened, brief lines 85 chars)
+    # and the games, habit-tracker and annotations added.
     assert len(text) < 32_000
 
 
@@ -362,9 +367,15 @@ def test_each_data_widget_card_streams_with_no_false_flag(widget):
 
 
 def test_the_data_widgets_are_the_typed_ones_and_each_has_a_card():
-    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_DATA_WIDGETS, RIPPLE_PROFILE
+    from pocketpaw_ee.paw_bar.card_spec import (
+        RIPPLE_DATA_WIDGETS,
+        RIPPLE_PLAY_WIDGETS,
+        RIPPLE_PROFILE,
+    )
 
-    assert set(_DATA_CARDS) == set(RIPPLE_DATA_WIDGETS) == set(RIPPLE_PROFILE.typed)
+    assert set(_DATA_CARDS) == set(RIPPLE_DATA_WIDGETS)
+    assert set(RIPPLE_PROFILE.typed) == set(RIPPLE_DATA_WIDGETS) | set(RIPPLE_PLAY_WIDGETS)
+    assert set(RIPPLE_DATA_WIDGETS).isdisjoint(RIPPLE_PLAY_WIDGETS)
 
 
 def test_only_the_data_widgets_list_typed_props():
@@ -394,8 +405,8 @@ def test_only_the_data_widgets_list_typed_props():
         assert "verdict" not in _fields(lines[widget]) and "currency" not in _fields(
             lines[widget]
         ), widget
-    # Every other detailed widget still lists names only.
-    for widget in RIPPLE_PROFILE.detailed - RIPPLE_DATA_WIDGETS.keys():
+    # Every other detailed widget (the play widgets are typed too) lists names only.
+    for widget in RIPPLE_PROFILE.detailed - RIPPLE_PROFILE.typed.keys():
         assert ": " not in _fields(lines[widget]), widget
 
 
@@ -431,10 +442,11 @@ def test_the_rules_point_each_answer_at_its_data_widget():
     for phrase in (
         "A trip is an itinerary",
         "a menu-order: items by product_id",
-        "write only preferred {date, after} and party",
+        # booking's and growth-projection's fields are on their typed lines.
+        "A booking is a booking.",
         "A meal plan is a meal-plan, one dish a recipe, a workout an interval-workout, "
         "study cards a flashcard-deck",
-        "growth-projection (four numbers",
+        "Savings or growth is a growth-projection.",
         "an exec-dashboard with the raw rows",
         "a comparison-layout with a winner",
         "verdict? {text, status?: good|warn|bad|info|neutral}",
