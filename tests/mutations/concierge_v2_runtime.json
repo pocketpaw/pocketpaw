@@ -803,5 +803,35 @@
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_scan_partial_only_judges_complete_strings_under_ui_and_state"
     ]
+  },
+  {
+    "label": "card streaming: a repeated key is not flagged mid-stream",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if value in top[4]:\n                self.hit = True\n                return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_repeated_key_stops_the_stream_at_the_repeat_and_rejects",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_key_used_once_per_object_is_not_a_repeat"
+    ]
+  },
+  {
+    "label": "card streaming: the scan never records an object's keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            top[4].add(value)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_repeated_key_stops_the_stream_at_the_repeat_and_rejects",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_key_used_once_per_object_is_not_a_repeat"
+    ]
+  },
+  {
+    "label": "card streaming: every object shares the root's seen keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        self._stack.append([is_obj, \"\" if is_obj else key, is_obj, styled, set()])",
+    "replace": "        self._stack.append([is_obj, \"\" if is_obj else key, is_obj, styled, self._stack[0][4]])",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_key_used_once_per_object_is_not_a_repeat",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_no_prefix_of_a_card_ripple_accepts_is_flagged"
+    ]
   }
 ]

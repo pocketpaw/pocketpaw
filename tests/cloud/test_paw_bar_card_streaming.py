@@ -235,6 +235,52 @@ def test_a_url_split_mid_token_is_not_a_false_positive():
     assert events[-1] == ("card.final", {"card_id": "c1", "card": final})
 
 
+# SEC F3: json.loads keeps a repeated key's last value, so a refused first value
+# (a richtext with an onerror; an ask on on_focus) would have streamed out as
+# deltas while a clean second one passed at the close. The scan stops the card
+# at the repeated key: nothing from it on reaches the client, and it ends rejected.
+@pytest.mark.parametrize(
+    ("body", "dup", "after"),
+    [
+        (
+            '{"ui":{"type":"richtext","props":{"html":"<img src=x onerror=alert(1)>"}},'
+            '"ui":{"type":"text","props":{"text":"ok"}}}',
+            '"ui"',
+            '"ok"',
+        ),
+        (
+            '{"ui":{"type":"button","props":{"label":"x"},'
+            '"on_focus":{"action":"emit","target":"ask","value":{"text":"hi"}},'
+            '"on_focus":{"action":"set","target":"a","value":1}}}',
+            '"on_focus"',
+            '"set"',
+        ),
+    ],
+)
+@pytest.mark.parametrize("size", [1, 3, 7, 10_000])
+def test_a_repeated_key_stops_the_stream_at_the_repeat_and_rejects(body, dup, after, size):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is None
+    text = _fence(body + "\n")
+    events = _events([text[i : i + size] for i in range(0, len(text), size)])
+    sent = "".join(data["text"] for name, data in events if name == "card.delta")
+    repeat = body.index(dup, body.index(dup) + 1)
+    assert body.startswith(sent)
+    assert len(sent) < repeat + len(dup)  # the repeat's closing quote never went out
+    assert after not in sent
+    assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "invalid"})
+
+
+def test_a_key_used_once_per_object_is_not_a_repeat():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    nested = '{"ui":{"type":"flex","children":[{"type":"text"},{"type":"text"}]},"state":{"type":1}'
+    assert not scan_partial(nested, RIPPLE_PROFILE)
+    assert scan_partial('{"ui":{"type":"text","type":"text"', RIPPLE_PROFILE)
+    assert scan_partial('{"ui":{},"\\u0075i":{}', RIPPLE_PROFILE)  # escaped, same key
+
+
 @pytest.mark.parametrize("name", ["ripple_explainer_card", "ripple_bill_splitter_card"])
 def test_no_prefix_of_a_card_ripple_accepts_is_flagged(name):
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, PartialScan, render_card

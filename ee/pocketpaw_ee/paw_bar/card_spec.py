@@ -39,8 +39,9 @@
 # ``follow-up``'s ``event`` is a declared host event; a form has no native submit
 # target; a URL key holds a same-site path or an https URL on ``url_hosts``
 # (none); no text holds a javascript: link; a repeated JSON key is refused.
-# ``PartialScan`` / ``scan_partial`` run the string checks on a body still
-# streaming, flagging only what the finished card is sure to fail.
+# ``PartialScan`` / ``scan_partial`` run the string checks and the repeated-key
+# check on a body still streaming, flagging only what the finished card is sure
+# to fail.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar; ripple-manifest.json
 # from @ripple-ui/svelte's dist/manifest.json minus examples (the ``.source`` file
@@ -1028,18 +1029,17 @@ class PartialScan:
     the next text and returns True once the body holds a DEFINITE violation: a
     COMPLETE string value under the root's ``ui`` / ``state`` that
     ``_check_strict`` would refuse in any finished card (a body with no ``ui``
-    at all is refused at the close anyway). A string still open is never judged, so a
-    half-written ``"/pa`` or ``"java`` passes. Never True for a non-strict
-    profile. A body that stops being a JSON object stops being scanned (the
-    close refuses it anyway).
-    ponytail: a key written twice keeps the LAST value in json.loads; a
-    violation in an earlier, overridden value is still flagged here."""
+    at all is refused at the close anyway), or a key repeated in one object (the
+    close refuses that body whole, and the bytes after it would replace what was
+    checked). A string still open is never judged, so a half-written ``"/pa`` or
+    ``"java`` passes. Never True for a non-strict profile. A body that stops
+    being a JSON object stops being scanned (the close refuses it anyway)."""
 
     def __init__(self, profile: CardProfile) -> None:
         self._hosts = profile.url_hosts
         self._done = not profile.strict
         # Open containers: [is object, key (object: current; array: inherited),
-        # expecting a key, a "style" key on the path].
+        # expecting a key, a "style" key on the path, the object's keys so far].
         self._stack: list[list[Any]] = []
         self._raw: list[str] | None = None  # the open string's raw text
         self._escape = False
@@ -1084,14 +1084,14 @@ class PartialScan:
     def _open(self, is_obj: bool) -> None:
         if not self._stack:
             self._done = not is_obj
-            self._stack.append([True, "", True, False])
+            self._stack.append([True, "", True, False, set()])
             return
         top = self._stack[-1]
         top[2] = False
         # Directly under the root, the walk starts with key "" (as _check_strict).
         key = top[1] if len(self._stack) > 1 else ""
         styled = top[3] or key == "style"
-        self._stack.append([is_obj, "" if is_obj else key, is_obj, styled])
+        self._stack.append([is_obj, "" if is_obj else key, is_obj, styled, set()])
 
     def _string(self, raw: str) -> None:
         try:
@@ -1104,7 +1104,11 @@ class PartialScan:
             self._done = True
             return
         if top[0] and top[2]:
+            if value in top[4]:
+                self.hit = True
+                return
             top[1], top[2] = value, False
+            top[4].add(value)
             return
         if self._stack[0][1] not in ("ui", "state"):
             return
