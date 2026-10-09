@@ -1,11 +1,12 @@
-ripple-manifest.json: @ripple-ui/svelte 0.8.0 manifest, vendored from qbtrix/ripple-iui#182
-(branch feat/data-widgets) at a9ab3b37d9bf24d62fd14932aaf4da53cf1b9593, pending a release.
+ripple-manifest.json: @ripple-ui/svelte 0.8.0 manifest, vendored from qbtrix/ripple-iui#185
+(branch feat/illustration, which carries #182's data widgets plus illustration,
+bill-split and the button's choice-card icon and description) at
+ffed5443f5903f14410403dd7a1c9e9af6e033ad, pending a release.
 It is that commit's packages/svelte/static/manifest.json (generatedAt
-2026-10-09T06:36:29.936Z, 197 widgets, upstream sha256
-1716be4a8c6e61cc87bb6fdb93b98764e0b008a4d8e4d16c7e4ff31ed26030d8; an in-memory
-buildManifest() at that commit matched it), with every widget's "example" removed.
-The server never reads the examples, and one carries a sample Stripe-style key that
-GitHub push protection refuses.
+2026-10-09T18:15:59.014Z, 199 widgets, upstream sha256
+4d9cc2cc15102be50c5d94e9a9c4a702570298b954a7924effb210961e3518ec), with every
+widget's "example" removed. The server never reads the examples, and one carries a
+sample Stripe-style key that GitHub push protection refuses.
 
 Refresh (once the data widgets ship in a release, use the release asset):
   gh release download -R qbtrix/ripple-iui --pattern manifest.json -D <dir>
@@ -20,5 +21,3 @@ Refresh (once the data widgets ship in a release, use the release asset):
   PY
 then update this file and the pins in test_the_vendored_ripple_manifest_has_not_drifted
 (tests/cloud/test_paw_bar_ripple_profile.py: _RIPPLE_MANIFEST_SHA256, version, count).
-Once the manifest carries "illustration", drop ILLUSTRATION_WIDGET from card_spec.py
-and the "illustration" not in every assertion in that drift test.

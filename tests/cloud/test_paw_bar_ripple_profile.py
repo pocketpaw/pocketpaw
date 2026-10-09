@@ -29,7 +29,10 @@
 # loses that one, never two.
 # Odd JSON shapes in handler slots and row lists (``_odd_specs``) are judged by
 # the rules, never by an exception; an unforeseen one is a logged refusal.
-# Mutation plan: tests/mutations/concierge_ripple_rules.json.
+# bill-split's props are held to plain finite numbers, 2 to 12 people and text
+# (``_check_bill_split``); a button's choice-card icon is a key and its description
+# short plain text (``_check_choice``). Mutation plans: tests/mutations/concierge_ripple_rules.json,
+# tests/mutations/concierge_bill_split.json, tests/mutations/concierge_choice_buttons.json.
 
 # ruff: noqa: F811 — pytest fixtures imported by name
 
@@ -57,9 +60,9 @@ from tests.cloud.test_paw_bar_concierge_v2 import (  # noqa: F401 — fixtures
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
-# (vendored from qbtrix/ripple-iui#182 pending a release; drop the widget examples,
+# (vendored from qbtrix/ripple-iui#185 pending a release; drop the widget examples,
 # update the pins below).
-_RIPPLE_MANIFEST_SHA256 = "90bdf531e2a85c9c191e6e44e14f6408d140097e9cfd5f5b0ba69d7c8350447a"
+_RIPPLE_MANIFEST_SHA256 = "470f1535ccd266ee8ea8c27b2209e44a90dff4993b3970f47b8624fe0ae693af"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
@@ -99,16 +102,15 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
     raw = card_spec.RIPPLE_MANIFEST_PATH.read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(raw).hexdigest() == _RIPPLE_MANIFEST_SHA256
     assert card_spec.RIPPLE_MANIFEST["version"] == "0.8.0"
-    assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 197
+    assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 199
     # Every trimmed or typed name is a real widget (a typo would trim nothing).
     every = {w["type"] for w in card_spec.RIPPLE_MANIFEST["widgets"]}
     chrome, deferred = card_spec.RIPPLE_CHROME, card_spec.RIPPLE_DEFERRED
     assert chrome <= every and chrome.isdisjoint(deferred)
     r = card_spec.RIPPLE_PROFILE
     assert r.typed.keys() <= r.detailed <= r.widget_types
-    # illustration is offered before the vendored manifest carries it.
-    assert "illustration" not in every and "illustration" in r.widget_types
-    assert len(r.widget_types) == 197 + 1 - len(deferred) - len(chrome)
+    assert {"illustration", "bill-split"} <= every & r.widget_types
+    assert len(r.widget_types) == 199 - len(deferred) - len(chrome)
 
 
 def test_the_pawbar_profile_is_todays_rules():
@@ -293,12 +295,14 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # The whole paragraph stays bounded: 19,814 chars before the primitives' data
     # widgets, 24,327 before Ripple's data widgets (typed lines and their rules, less
     # the page chrome), 27,849 after, 30,473 with the flow and ask rules (the flow
-    # example alone is 890), 31,191 with the illustration line and rule.
+    # example alone is 890), 31,191 with the illustration line and rule, 31,972 with
+    # the vendored illustration line, bill-split and the choice-button line.
     assert len(text) < 32_000
 
 
 # Ripple's data widgets (qbtrix/ripple-iui#182): one card per widget, its manifest
-# example at a9ab3b37 as ui with its bound state path seeded.
+# example at a9ab3b37 (bill-split: ffed544) as ui with its bound state path seeded,
+# except bill-split's, which the widget holds as an object.
 _DATA_CARDS: dict = json.loads(
     (Path(__file__).parents[1] / "fixtures" / "ripple_data_widget_cards.json").read_text(
         encoding="utf-8"
@@ -2676,3 +2680,178 @@ def test_a_repaired_body_still_may_not_repeat_a_key():
     assert _ripple_body(body + "}") is None
     assert _ripple_body(body) is None
     assert _ripple_body('{"ui":{"type":"text","props":{"text":"ok"}}') is not None
+
+
+# --------------------------------------------------------------------------- #
+# bill-split
+# --------------------------------------------------------------------------- #
+
+
+def _bill(**props) -> dict:
+    base = {
+        "title": "Dinner for 4",
+        "currency": "USD",
+        "subtotal": 186.4,
+        "tip_percent": 18,
+        "people": [{"id": f"p{i}", "name": f"P{i}", "extras": 0} for i in range(1, 5)],
+    }
+    return {"ui": {"type": "bill-split", "bind": "{state.bill}", "props": {**base, **props}}}
+
+
+def test_a_bill_split_card_passes_the_full_validator():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, render_card
+
+    full = _bill(tax=14.9, tip_options=[10, 15, 20], extras_label="Drinks", note="Even split")
+    for spec in (_bill(), full, _bill(people=_people(2)), _bill(people=_people(12))):
+        assert _ripple(spec) is not None
+    assert render_card(_body(_bill()), [], profile=PAWBAR_PROFILE) is None
+
+
+def _people(n: int) -> list[dict]:
+    return [{"id": f"p{i}", "name": f"P{i}"} for i in range(n)]
+
+
+@pytest.mark.parametrize(
+    "props",
+    [
+        {"people": _people(1)},
+        {"people": _people(13)},
+        {"people": "4 people"},
+        {"people": [*_people(2), "p3"]},
+        {"people": [{"id": "p1", "name": "A"}, {"id": "p2"}]},
+        {"people": [{"id": "p1", "name": "A"}, {"id": "p2", "name": "B", "extras": "9"}]},
+        {"subtotal": "186.4"},
+        {"subtotal": True},
+        {"subtotal": "{state.total}"},
+        {"subtotal": None},
+        {"tax": "14"},
+        {"tip_percent": False},
+        {"tip_options": [15, "18"]},
+        {"tip_options": 18},
+        {"title": 4},
+        {"currency": {"code": "USD"}},
+        {"extras_label": ["Drinks"]},
+        {"note": 1},
+    ],
+)
+def test_a_bill_split_with_bad_props_is_refused(props):
+    assert _ripple(_bill(**props)) is None
+
+
+def test_a_bill_split_with_a_non_finite_subtotal_is_refused():
+    from pocketpaw_ee.paw_bar.card_spec import _check_bill_split, _Reject
+
+    body = _body(_bill(subtotal=1.5))
+    assert '"subtotal": 1.5' in body and _ripple_body(body) is not None
+    for bad in ("NaN", "Infinity", "1e999"):
+        assert _ripple_body(body.replace('"subtotal": 1.5', f'"subtotal": {bad}')) is None
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(_Reject):
+            _check_bill_split({}, _bill(subtotal=bad)["ui"]["props"])
+
+
+def _bill_with(node: dict = {}, props: dict = {}) -> dict:  # noqa: B006 (read only)
+    ui = _bill()["ui"]
+    return {"ui": {**ui, **node, "props": {**ui["props"], **props}}}
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        _bill_with(node={"on_change": {"action": "set", "target": "x", "value": 1}}),
+        _bill_with(props={"on_change": {"action": "toast", "message": "hi"}}),
+    ],
+)
+def test_a_handler_on_a_bill_split_is_refused(spec):
+    assert _ripple(spec) is None
+
+
+def test_the_bill_split_typed_line_lists_its_props():
+    line = _fields(_listing()["bill-split"])
+    assert line == (
+        "- bill-split {subtotal: number, tax?: number, tip_percent?: number, "
+        "tip_options?: number[], people: [{id,name,extras?:number}], extras_label?, note?"
+    )
+
+
+def test_the_rules_map_a_bill_split_and_leave_its_bind_unseeded():
+    text = _ripple_paragraph()
+    assert "Splitting a bill or a tip between people is a bill-split" in text
+    assert "never seed its bind key in state" in text
+    assert "(a bill split," not in text
+
+
+# --------------------------------------------------------------------------- #
+# Flow choice buttons (ripple choice cards): icon and description
+# --------------------------------------------------------------------------- #
+
+
+def _choice(**props) -> dict:
+    button = {
+        "type": "button",
+        "props": {"label": "Food", **props},
+        "on_click": {
+            "action": "emit",
+            "target": "flow.submit",
+            "value": {"selection": {"id": "food", "label": "Food"}},
+        },
+    }
+    return {
+        "ui": {
+            "flowId": "trip_style",
+            "intent": "select",
+            "title": "What kind of trip?",
+            "ui": {"type": "flex", "children": [button]},
+            "onComplete": {"kind": "chat", "message": "Plan a trip for me."},
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "props",
+    [
+        {},
+        {"icon": "food", "description": "Markets, street stalls and long lunches"},
+        {"icon": "not-a-known-icon"},  # unknown keys pass: the widget ignores them
+        {"icon": "a" * 24, "description": "x" * 120},
+        {"icon": None, "description": None},
+    ],
+)
+def test_a_choice_button_with_an_icon_key_and_a_short_hint_passes(props):
+    assert _ripple(_choice(**props)) is not None
+    assert _ripple({"ui": {"type": "button", "props": {"label": "Go", **props}}}) is not None
+
+
+@pytest.mark.parametrize(
+    "props",
+    [
+        {"icon": "<svg onload=alert(1)>"},
+        {"icon": "https://evil.test/i.png"},
+        {"icon": "/icons/food.png"},
+        {"icon": "Food"},
+        {"icon": "{state.icon}"},
+        {"icon": ""},
+        {"icon": "a" * 25},
+        {"icon": 3},
+        {"icon": ["food"]},
+        {"description": "x" * 121},
+        {"description": "Pick {state.x}"},
+        {"description": 7},
+        {"description": {"text": "hi"}},
+    ],
+)
+def test_a_choice_button_with_a_bad_icon_or_hint_is_refused(props):
+    assert _ripple(_choice(**props)) is None
+    assert _ripple({"ui": {"type": "button", "props": {"label": "Go", **props}}}) is None
+
+
+def test_the_button_carries_the_choice_props_and_the_rules_teach_them_briefly():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_MANIFEST
+
+    button = next(w for w in RIPPLE_MANIFEST["widgets"] if w["type"] == "button")
+    assert {"icon", "description"} <= button["props"].keys()
+    assert "icon?, description?" in _listing()["button"]
+    text = _ripple_paragraph()
+    assert "Choice buttons: label at most 18 chars" in text
+    assert "description hint up to 60" in text
+    assert "coffee drinks culture" not in text  # the icon keys stay out of the prompt

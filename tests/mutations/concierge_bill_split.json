@@ -1,0 +1,110 @@
+[
+  {
+    "label": "BILL-1: the card never runs the bill-split check",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if kind == BILL_SPLIT:\n                _check_bill_split(value, props)\n",
+    "replace": "            if kind == BILL_SPLIT:\n                pass\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-2: a handler on a bill-split passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        raise _Reject(\"a handler on a bill-split\")",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-3: the people bounds are not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not isinstance(people, list) or not low <= len(people) <= high:",
+    "replace": "    if not isinstance(people, list):",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-4: the upper people bound is off by one",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "BILL_SPLIT_PEOPLE = (2, 12)",
+    "replace": "BILL_SPLIT_PEOPLE = (2, 13)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-5: a number may be non-finite",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)",
+    "replace": "isinstance(value, (int, float)) and not isinstance(value, bool)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-6: a bool counts as a number",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)",
+    "replace": "isinstance(value, (int, float)) and math.isfinite(value)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-7: the subtotal is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not _is_number(props.get(\"subtotal\")):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-8: tip_options rows are not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if tips is not None and not (isinstance(tips, list) and all(map(_is_number, tips))):",
+    "replace": "    if tips is not None and not isinstance(tips, list):",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-9: a person's extras are not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if person.get(\"extras\") is not None and not _is_number(person[\"extras\"]):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-10: the text props are not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    for key in (\"title\", \"currency\", \"extras_label\", \"note\"):",
+    "replace": "    for key in ():",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-11: bill-split is not a typed data widget",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"bill-split\": None,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "BILL-12: the rules do not map a bill to bill-split",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"between options is a comparison-layout with a winner. Splitting a bill or a tip \"\n    \"between people is a bill-split (never seed its bind key in state). Each data \"\n    \"widget also \"",
+    "replace": "\"between options is a comparison-layout with a winner. Each data \"\n    \"widget also \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  }
+]

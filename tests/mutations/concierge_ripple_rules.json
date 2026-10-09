@@ -960,17 +960,17 @@
   {
     "label": "DW-9: page chrome is offered and accepted on ripple",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": " - RIPPLE_DEFERRED - RIPPLE_CHROME,",
-    "replace": " - RIPPLE_DEFERRED,",
+    "find": "    - RIPPLE_DEFERRED\n    - RIPPLE_CHROME,",
+    "replace": "    - RIPPLE_DEFERRED,",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_page_chrome_is_refused_and_unlisted_on_ripple"
     ]
   },
   {
-    "label": "DW-9: comparison-layout items lose their pinned handler rows",
+    "label": "DW-9: comparison-layout items lose their handler rows",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": ") | {(\"comparison-layout\", \"items\")}",
-    "replace": ")",
+    "find": "    if \"EventAction\" in str(spec.get(\"type\", \"\"))\n)\n# A follow-up",
+    "replace": "    if \"EventAction\" in str(spec.get(\"type\", \"\")) and w[\"type\"] != \"comparison-layout\"\n)\n# A follow-up",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
     ]

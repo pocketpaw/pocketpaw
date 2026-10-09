@@ -1,7 +1,7 @@
 {
   "schema": "ripple.manifest/v1",
   "version": "0.8.0",
-  "generatedAt": "2026-10-09T06:36:29.936Z",
+  "generatedAt": "2026-10-09T18:15:59.014Z",
   "spec": {
     "uiField": "ui",
     "stateField": "state",
@@ -1162,7 +1162,7 @@
     {
       "type": "button",
       "category": "input",
-      "description": "Button with variant, size, and loading states. Wire to actions via on_click.",
+      "description": "Button with variant, size, loading. In a flow step, buttons that emit flow.next or flow.submit with value.selection render as choice cards; give each an icon and a description.",
       "props": {
         "label": {
           "type": "string",
@@ -1193,6 +1193,16 @@
           "type": "\"button\" | \"submit\" | \"reset\"",
           "required": false,
           "description": "HTML button type."
+        },
+        "icon": {
+          "type": "\"work\" | \"school\" | \"creative\" | \"gaming\" | \"everyday\" | \"travel\" | \"light\" | \"home\" | \"budget\" | \"mid\" | \"premium\" | \"power\" | \"food\" | \"veg\" | \"meat\" | \"fish\" | \"sweet\" | \"coffee\" | \"drinks\" | \"culture\" | \"outdoors\" | \"relax\" | \"shopping\" | \"morning\" | \"afternoon\" | \"evening\" | \"night\" | \"solo\" | \"couple\" | \"family\" | \"group\" | \"days\" | \"quick\"",
+          "required": false,
+          "description": "Flow choice cards only: the tile icon. Any other name is ignored; without one the icon is guessed from the label, else none."
+        },
+        "description": {
+          "type": "string",
+          "required": false,
+          "description": "Flow choice cards only: a one-line hint under the label."
         }
       },
       "events": {
@@ -2351,9 +2361,9 @@
           "description": "ISO 4217 code for numeric prices. Default \"USD\". Never put a symbol in the data."
         },
         "items": {
-          "type": "Array<{ id: string; name: string; subtitle?: string; price?: number; image?: string; product_id?: string; rating?: number; [featureKey: string]: unknown }>",
+          "type": "Array<{ id: string; name: string; subtitle?: string; price?: number; image?: string; product_id?: string; rating?: number; actions?: EventAction | EventAction[]; learn_more?: EventAction | EventAction[]; [featureKey: string]: unknown }>",
           "required": true,
-          "description": "2 to 6 items. `price` is a number; feature values are keyed by feature `key`. With `product_id` the server fills name, price and image."
+          "description": "2 to 6 items. `price` is a number; feature values are keyed by feature `key`. With `product_id` the server fills name, price and image. Per item, `actions` fires on Choose and `learn_more` on Learn more."
         },
         "features": {
           "type": "Array<{ key: string; label: string; section?: string; kind?: \"text\" | \"number\" | \"boolean\" | \"rating\" | \"icon\" | \"price\" | \"color\"; better?: \"higher\" | \"lower\"; unit?: string; icon?: \"battery\" | \"weight\" | \"display\" | \"cpu\" | \"memory\" | \"storage\" | \"camera\" | \"speed\" | \"price\" | \"ports\" | \"wifi\" | \"keyboard\" | \"audio\" | \"security\" | \"warranty\" | \"size\" | \"rating\" | \"support\"; highlight?: boolean }>",
@@ -4407,6 +4417,34 @@
       }
     },
     {
+      "type": "illustration",
+      "category": "display",
+      "staticSafe": false,
+      "description": "A small animated SVG drawing you write: <svg viewBox> with shapes, gradients and animate/animateTransform. No scripts, styles, links, images or filters. Display only.",
+      "props": {
+        "svg": {
+          "type": "string",
+          "required": true,
+          "description": "SVG markup, root <svg viewBox='...'>. Put attributes in single quotes so the JSON needs no escaping. Under 24,000 chars, 400 elements, 40 animations, 40 use (never a use of a use); every dur 0.5s or more. Elements: svg g defs title desc path rect circle ellipse line polyline polygon text tspan linearGradient radialGradient stop clipPath mask symbol use animate animateTransform animateMotion mpath set. Refs only as url(#id) and href='#id' (plain href, not xlink:href). No style attribute, no on* handlers."
+        },
+        "title": {
+          "type": "string",
+          "required": true,
+          "description": "Accessible name, e.g. \"Sun rising over two hills\"."
+        },
+        "caption": {
+          "type": "string",
+          "required": false,
+          "description": "Optional line under the art."
+        },
+        "max_height": {
+          "type": "number",
+          "required": false,
+          "description": "Height cap in px, 80 to 640. Default 320."
+        }
+      }
+    },
+    {
       "type": "input",
       "category": "input",
       "description": "Single-line text input with label, error states, and optional helper text.",
@@ -4791,6 +4829,59 @@
       }
     },
     {
+      "type": "bill-split",
+      "category": "composite",
+      "staticSafe": true,
+      "description": "Split a bill with tip: subtotal, tip_percent, people with optional extras (drinks). Widget does the cents-exact maths, cards, totals; visitor edits everything. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"Dinner for 4\"."
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO 4217 code. Default \"USD\". Never put a symbol in the numbers."
+        },
+        "subtotal": {
+          "type": "number",
+          "required": true,
+          "description": "The bill before tip and before tax, e.g. 186.4."
+        },
+        "tax": {
+          "type": "number",
+          "required": false,
+          "description": "Tax ON TOP of subtotal, shared in proportion to what each person had. Omit when the subtotal already includes tax."
+        },
+        "tip_percent": {
+          "type": "number",
+          "required": false,
+          "description": "Percent of subtotal: 18 means 18%. Default 18."
+        },
+        "tip_options": {
+          "type": "number[]",
+          "required": false,
+          "description": "Tip chips. Default [15, 18, 20, 22]."
+        },
+        "people": {
+          "type": "Array<{ id: string; name: string; extras?: number }>",
+          "required": true,
+          "description": "2 to 12 people. `extras` is what that person had on top of the shared part (drinks), as an amount. The rest of the subtotal is split evenly."
+        },
+        "extras_label": {
+          "type": "string",
+          "required": false,
+          "description": "What extras are. Default \"Drinks\"."
+        },
+        "note": {
+          "type": "string",
+          "required": false,
+          "description": "One line under the totals."
+        }
+      }
+    },
+    {
       "type": "kanban",
       "category": "data",
       "description": "Drag-and-drop kanban board. Cards group into columns by `columnKey`. Bind to receive reordered cards.",
@@ -5118,7 +5209,12 @@
         "bounds": {
           "type": "[[number, number], [number, number]]",
           "required": false,
-          "description": "Fit-to-bounds rectangle [[swLat, swLng], [neLat, neLng]]. Overrides center+zoom when supplied."
+          "description": "Fit-to-bounds rectangle [[swLat, swLng], [neLat, neLng]]. Overrides center+zoom when supplied. Refits only when the rectangle changes."
+        },
+        "boundsPadding": {
+          "type": "number",
+          "required": false,
+          "description": "Pixel padding around `bounds` when fitting. Default 0."
         },
         "tiles": {
           "type": "\"osm\" | \"carto-voyager\" | \"carto-light\" | \"carto-dark\" | \"osm-hot\" | \"custom\"",
@@ -6049,9 +6145,9 @@
           "description": "Order / shipment / job number shown in the eyebrow."
         },
         "status": {
-          "type": "\"placed\" | \"confirmed\" | \"preparing\" | \"in-transit\" | \"out-for-delivery\" | \"delivered\" | \"failed\" | \"cancelled\"",
+          "type": "\"placed\" | \"confirmed\" | \"preparing\" | \"in-transit\" | \"out-for-delivery\" | \"delivered\" | \"ready-for-pickup\" | \"picked-up\" | \"failed\" | \"cancelled\"",
           "required": false,
-          "description": "Default-pipeline status. Used to compute the active stepper position when `steps` is not supplied."
+          "description": "Default-pipeline status. Sets the active stepper position. \"ready-for-pickup\" and \"picked-up\" switch the default steps to the pickup pipeline (placed, confirmed, preparing, ready for pickup, picked up). When status is the last step it renders done with a check, not active."
         },
         "steps": {
           "type": "Array<{ id: string; label: string; description?: string; completedAt?: string; current?: boolean; failed?: boolean }>",
@@ -6086,12 +6182,12 @@
         "tracker": {
           "type": "{ lat: number; lng: number; heading?: number; label?: string; color?: string }",
           "required": false,
-          "description": "Live courier position. Heading rotates the directional arrow."
+          "description": "Live courier position. Heading rotates the directional arrow. Each new position glides linearly from the old one over the time since the previous update (0.3s to 5s), so polling hosts get continuous motion; reduced motion jumps."
         },
         "route": {
           "type": "[number, number][]",
           "required": false,
-          "description": "Polyline points for the route. If omitted but origin+destination are set, a dashed line connects them."
+          "description": "Polyline points for the route. If omitted but origin+destination are set, a dashed line connects them. An empty array after a route was sent keeps the last route drawn."
         },
         "showMap": {
           "type": "boolean",
@@ -6226,7 +6322,7 @@
           "description": "ISO 4217 code. Default USD. Never a symbol."
         },
         "items": {
-          "type": "Array<{ id?: string; product_id?: string; name?: string; description?: string; price?: number; image?: string; category?: string; tags?: string[]; kind?: \"main\" | \"side\" | \"drink\" | \"dessert\" | \"product\"; featured?: boolean; groups?: Array<{ id: string; name: string; choose: \"one\" | \"many\"; required?: boolean; max?: number; options: Array<{ id: string; name: string; price_delta?: number }> }> }>",
+          "type": "Array<{ id?: string; product_id?: string; name?: string; description?: string; price?: number; image?: string; category?: string; tags?: string[]; kind?: \"main\" | \"side\" | \"drink\" | \"dessert\" | \"product\"; featured?: boolean; groups?: Array<{ id: string; name: string; choose: \"one\" | \"many\"; required?: boolean; max?: number; icon?: string; options: Array<{ id: string; name: string; price_delta?: number; icon?: string }> }> }>",
           "required": true,
           "description": "Menu items. Write product_id (and name for streaming); the server fills price, image and groups. Items without product_id are display only. Rows use kind, never type."
         },
@@ -6265,7 +6361,7 @@
         "on_checkout": {
           "type": "EventAction | EventAction[]",
           "required": false,
-          "description": "Server-wired. Fires with { lines, fulfilment, customer: { name, email?, phone?, address? }, total } when the visitor continues to payment."
+          "description": "Server-wired. Fires with { lines, fulfilment, customer: { name, email, phone, address? }, total } when the visitor continues to payment. Name, email and phone are required, plus the address for delivery."
         }
       }
     },

@@ -1493,13 +1493,15 @@ _RIPPLE_RULES = (
     "interval-workout, study cards a flashcard-deck. Savings or growth is a "
     "growth-projection (four numbers: initial, deposit, rate, years). Sales or report "
     "data is an exec-dashboard with the raw rows, measures and dimensions. A choice "
-    "between options is a comparison-layout with a winner. Each data widget also "
+    "between options is a comparison-layout with a winner. Splitting a bill or a tip "
+    "between people is a bill-split (never seed its bind key in state). Each data "
+    "widget also "
     "takes title? (a recipe: name), subtitle?, verdict? {text, status?: "
     "good|warn|bad|info|neutral} (the answer in one sentence, at most 140 chars, "
     "shown first) and, with money, currency? (an ISO code; never a symbol in a "
     "number). Never write on_checkout or on_book, or an image. "
-    "A small calculator or tool the visitor plays with (a bill split, a converter, a "
-    "quiz) binds primitives to state as above. A summary of one thing (a person, an "
+    "A small calculator or tool the visitor plays with (a converter, a quiz) binds "
+    "primitives to state as above. A summary of one thing (a person, an "
     "account, a project) starts with entity-detail (title, status, kpis, meta) and "
     "puts its sections in its children. Any other report leads "
     "with 3 or 4 stat tiles in a grid, then a chart, then a table. Dated events go in "
@@ -1524,7 +1526,9 @@ _RIPPLE_RULES = (
     "steps, so inputs start empty: prefer option buttons, and put any starting value "
     "in the input's own props. Only what a button emits is collected (a set into "
     'state is lost): an option emits flow.next with value {"selection": {"id", '
-    '"label"}}; typed answers go out as value {"formData": {"days": "{state.days}"}}. '
+    '"label"}}. Choice buttons: label at most 18 chars, an optional plain description '
+    "hint up to 60; icons are picked from the label. Typed answers go out as value "
+    '{"formData": {"days": "{state.days}"}}. '
     'The last step\'s buttons emit flow.submit and it has "onComplete": {"kind": '
     '"chat", "message": ...}: one fixed sentence saying what to do (plain text, no '
     "{expressions}, at most 500 characters). The browser appends each answer to it as "
@@ -1540,8 +1544,7 @@ _RIPPLE_RULES = (
     "steps of a process), add an illustration: svg is the markup, title names it. "
     "Put every SVG attribute in single quotes so the JSON string needs no escaping, "
     "and give the root svg a viewBox: <svg viewBox='0 0 200 120'>...</svg>. Keep it "
-    "under 24,000 characters and 400 elements. Animate with animate or "
-    "animateTransform, dur 0.5s or more. No scripts, styles, links, images or "
+    "under 24,000 characters and 400 elements, every dur 0.5s or more. No "
     "{expressions}; a gradient is fill='url(#id)'. The card may be dark or light, "
     "so write text with fill='currentColor', never a dark or black fill. Reuse a shape with use "
     "href='#id' (plain href, never xlink:href), at most 40 uses, none pointing at a use.",

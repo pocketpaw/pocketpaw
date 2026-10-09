@@ -6,8 +6,9 @@
 # small bounds, the vendored pawbar-manifest.json widgets, the manifest's actions, host
 # events limited to add_to_cart / checkout, and the ``send_to_team`` lead form only
 # with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes ripple-manifest.json
-# minus deferred widgets and page chrome, plus ``illustration`` (an SVG held to
-# illustration_svg's policy) until that manifest carries it, and is ``strict``:
+# minus deferred widgets and page chrome (its ``illustration`` SVG is held to
+# illustration_svg's policy, ``bill-split`` to plain numbers, a button's choice-card
+# ``icon`` and ``description`` to a key and short plain text), and is ``strict``:
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
 # actions, URLs, CSS, expressions, flow cards and ``ask`` to the rules its docstrings
 # name. Any error the walk did not foresee is a logged refusal, never an exception.
@@ -152,45 +153,37 @@ RIPPLE_DATA_WIDGETS: dict[str, frozenset[str] | None] = {
     "interval-workout": None,
     "flashcard-deck": None,
     "comparison-layout": None,
+    "bill-split": None,
     "exec-dashboard": frozenset(
         {"rows", "measures", "dimensions", "x", "split", "compare", "compareLabel", "filters"}
     ),
 }
-# Ripple's ``illustration`` (model-written animated SVG), offered before the vendored
-# manifest carries it: display only, no handlers or bind. Its ``svg`` is held to
-# illustration_svg's policy instead of the text checks (the xmlns URL is fine there).
+# Ripple's ``illustration`` (model-written animated SVG): display only, no handlers or
+# bind. Its ``svg`` is held to illustration_svg's policy instead of the text checks
+# (the xmlns URL is fine there).
 ILLUSTRATION = "illustration"
-ILLUSTRATION_WIDGET: dict[str, Any] = {
-    "type": ILLUSTRATION,
-    "category": "display",
-    "description": "A small animated picture or diagram drawn from SVG markup.",
-    "props": {
-        "svg": {"type": "string", "required": True},
-        "title": {"type": "string", "required": True},
-        "caption": {"type": "string", "required": False},
-        "max_height": {"type": "number", "required": False},
-    },
-}
 ILLUSTRATION_HEIGHT = (80, 640)
-_RIPPLE_WIDGETS: list[dict[str, Any]] = [
-    *RIPPLE_MANIFEST["widgets"],
-    *(
-        []
-        if any(w["type"] == ILLUSTRATION for w in RIPPLE_MANIFEST["widgets"])
-        else [ILLUSTRATION_WIDGET]
-    ),
-]
+# Ripple's ``bill-split``: plain finite numbers, 2 to 12 people, no handlers.
+BILL_SPLIT = "bill-split"
+BILL_SPLIT_PEOPLE = (2, 12)
+# A button's choice-card ``icon`` (a flow option tile): a key shaped like ripple's icon
+# names. An unknown key passes (the widget ignores it); markup or a URL does not.
+# Its ``description`` hint: plain text, at most this long.
+CHOICE_ICON = re.compile(r"[a-z0-9-]{1,24}")
+CHOICE_DESCRIPTION_MAX = 120
 # A ripple card's actions: paw-bar's, plus the client-side flow ones (no network,
 # no navigation). Every step inside a flow or branch is held to the same set.
 RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {"flow", "branch", "validate", "toast"}
 RIPPLE_PROFILE = CardProfile(
     name="ripple",
-    widget_types=frozenset(w["type"] for w in _RIPPLE_WIDGETS) - RIPPLE_DEFERRED - RIPPLE_CHROME,
+    widget_types=frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"])
+    - RIPPLE_DEFERRED
+    - RIPPLE_CHROME,
     actions=RIPPLE_ACTIONS,
     max_nodes=400,
     max_depth=16,
     max_chars=64_000,
-    manifest={**RIPPLE_MANIFEST, "widgets": _RIPPLE_WIDGETS},
+    manifest=RIPPLE_MANIFEST,
     # The widgets the authoring rules lean on (the inputs and layouts, the
     # widgets whose item shapes _RIPPLE_EXAMPLE shows, and the data widgets),
     # listed with their props. Only a data widget's line gives the props' types,
@@ -240,7 +233,7 @@ SERVER_WIRED: dict[str, tuple[str, str]] = {
 }
 
 # Every widget name and action name the Ripple manifest knows (deferred ones too).
-_RIPPLE_TYPES: frozenset[str] = frozenset(w["type"] for w in _RIPPLE_WIDGETS)
+_RIPPLE_TYPES: frozenset[str] = frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"])
 _RIPPLE_ACTIONS: frozenset[str] = frozenset(RIPPLE_MANIFEST["actions"])
 # Props the engine draws as a node (NodeRenderer), by widget: the manifest's
 # ``string | UISpec`` props, plus the ones only the engine reads.
@@ -276,16 +269,14 @@ _NODE_ROWS: dict[tuple[str, str], str] = {
     },
 }
 # Props that carry event handlers (a ``*Actions`` slot, or rows such as
-# comparison ``items`` whose ``actions`` are handlers), by widget. Never an
-# expression: the engine would dispatch whatever it resolves to. comparison-layout
-# still dispatches its rows' legacy ``actions`` and ``learn_more`` though its
-# manifest type stopped naming them (ripple-iui#182), so it is pinned here.
+# comparison ``items`` whose ``actions`` and ``learn_more`` are handlers), by
+# widget. Never an expression: the engine would dispatch whatever it resolves to.
 _HANDLER_PROPS: frozenset[tuple[str, str]] = frozenset(
     (w["type"], name)
     for w in RIPPLE_MANIFEST["widgets"]
     for name, spec in (w.get("props") or {}).items()
     if "EventAction" in str(spec.get("type", ""))
-) | {("comparison-layout", "items")}
+)
 # A follow-up emits ``props.event`` (this when unset) with the typed text, unless
 # its node has an ``on_submit``.
 _FOLLOW_UP_EVENT = "follow-up"
@@ -716,6 +707,10 @@ def _strict_walk(
             base = None if ask is None else False
             if kind == ILLUSTRATION:
                 _check_illustration(value, props)
+            if kind == BILL_SPLIT:
+                _check_bill_split(value, props)
+            if kind == "button":
+                _check_choice(props)
             if kind == "form":
                 if isinstance(props, dict) and _FORM_SUBMIT_PROPS & props.keys():
                     raise _Reject("a form with its own submit target")
@@ -814,13 +809,65 @@ def _check_illustration(node: dict[str, Any], props: Any) -> None:
     height = props.get("max_height")
     height = ILLUSTRATION_HEIGHT[0] if height is None else height
     low, high = ILLUSTRATION_HEIGHT
-    number = isinstance(height, (int, float)) and not isinstance(height, bool)
-    if not number or not low <= height <= high:
+    if not _is_number(height) or not low <= height <= high:
         raise _Reject(f"an illustration max_height outside {low}..{high}")
     if "{" in svg:
         raise _Reject("an expression in an illustration's svg")
     if reason := svg_violation(svg):
         raise _Reject(f"an illustration with {reason}")
+
+
+def _is_number(value: Any) -> bool:
+    """A literal finite JSON number (not a bool, not an expression string)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _check_bill_split(node: dict[str, Any], props: Any) -> None:
+    """A ``bill-split`` node: no handler, ``subtotal`` a finite number and ``tax``,
+    ``tip_percent``, ``tip_options[]`` and each person's ``extras`` too when given
+    (null is absent), ``people`` a list of ``BILL_SPLIT_PEOPLE`` rows with ``id`` and
+    ``name`` text, and ``title``, ``currency``, ``extras_label``, ``note`` text.
+    Literal values only: the widget does the maths, so an expression would reach it
+    as a string."""
+    props = props if isinstance(props, dict) else {}
+    if any(map(_is_handler_key, [*node, *props])):
+        raise _Reject("a handler on a bill-split")
+    if not _is_number(props.get("subtotal")):
+        raise _Reject("a bill-split subtotal that is not a finite number")
+    for key in ("tax", "tip_percent"):
+        if props.get(key) is not None and not _is_number(props[key]):
+            raise _Reject(f"a bill-split {key} that is not a finite number")
+    tips = props.get("tip_options")
+    if tips is not None and not (isinstance(tips, list) and all(map(_is_number, tips))):
+        raise _Reject("bill-split tip_options that are not finite numbers")
+    for key in ("title", "currency", "extras_label", "note"):
+        if props.get(key) is not None and not isinstance(props[key], str):
+            raise _Reject(f"a bill-split {key} that is not text")
+    people = props.get("people")
+    low, high = BILL_SPLIT_PEOPLE
+    if not isinstance(people, list) or not low <= len(people) <= high:
+        raise _Reject(f"a bill-split without {low} to {high} people")
+    for person in people:
+        if not isinstance(person, dict) or not all(
+            isinstance(person.get(k), str) for k in ("id", "name")
+        ):
+            raise _Reject("a bill-split person without id and name text")
+        if person.get("extras") is not None and not _is_number(person["extras"]):
+            raise _Reject("a bill-split person's extras that are not a finite number")
+
+
+def _check_choice(props: Any) -> None:
+    """A button's choice-card props, when given (null is absent): ``icon`` a
+    ``CHOICE_ICON`` key, ``description`` plain text (no ``{...}``) of at most
+    ``CHOICE_DESCRIPTION_MAX`` characters."""
+    props = props if isinstance(props, dict) else {}
+    icon, hint = props.get("icon"), props.get("description")
+    if icon is not None and not (isinstance(icon, str) and CHOICE_ICON.fullmatch(icon)):
+        raise _Reject("a button icon that is not an icon key")
+    if hint is not None and not (
+        isinstance(hint, str) and "{" not in hint and len(hint) <= CHOICE_DESCRIPTION_MAX
+    ):
+        raise _Reject(f"a button description over {CHOICE_DESCRIPTION_MAX} or not plain text")
 
 
 def _check_resolved_prop(kind: str, key: str, value: Any, node_props: frozenset[str]) -> None:
@@ -1787,8 +1834,8 @@ __all__ = [
     "DEFERRED_WIDGETS",
     "FORM_PREFILL_MAX",
     "HOST_EVENTS",
+    "BILL_SPLIT",
     "ILLUSTRATION",
-    "ILLUSTRATION_WIDGET",
     "LEAD_CONTACT_FIELDS",
     "LEAD_FIELDS",
     "LEAD_VERB",

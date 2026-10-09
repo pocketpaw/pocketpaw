@@ -1002,5 +1002,40 @@
     "state": {
       "servings": 4
     }
+  },
+  "bill-split": {
+    "ui": {
+      "type": "bill-split",
+      "bind": "{state.bill}",
+      "props": {
+        "title": "Dinner for 4",
+        "currency": "USD",
+        "subtotal": 186.4,
+        "tip_percent": 18,
+        "people": [
+          {
+            "id": "p1",
+            "name": "Alex",
+            "extras": 12
+          },
+          {
+            "id": "p2",
+            "name": "Sam",
+            "extras": 0
+          },
+          {
+            "id": "p3",
+            "name": "Priya",
+            "extras": 9
+          },
+          {
+            "id": "p4",
+            "name": "Jo",
+            "extras": 0
+          }
+        ]
+      }
+    },
+    "state": {}
   }
 }
