@@ -1032,8 +1032,10 @@ class PartialScan:
     at all is refused at the close anyway), or a key repeated in one object (the
     close refuses that body whole, and the bytes after it would replace what was
     checked). A string still open is never judged, so a half-written ``"/pa`` or
-    ``"java`` passes. Never True for a non-strict profile. A body that stops
-    being a JSON object stops being scanned (the close refuses it anyway)."""
+    ``"java`` passes. Never True for a non-strict profile. The body is read as
+    ``render_card`` reads it: what JS ``trim`` strips (``_JS_SPACE``) is skipped
+    before the root, and a root that is not an object is a violation at once. A
+    body that stops being JSON later stops being scanned (the close refuses it)."""
 
     def __init__(self, profile: CardProfile) -> None:
         self._hosts = profile.url_hosts
@@ -1067,7 +1069,9 @@ class PartialScan:
                 self._string(raw)
                 continue
             ch, i = text[i], i + 1
-            if ch == '"':
+            if not self._stack and ch != "{":
+                self.hit = ch not in _JS_SPACE  # before the root: trimmed, or not a card
+            elif ch == '"':
                 self._raw = []
             elif ch in "{[":
                 self._open(ch == "{")
@@ -1077,13 +1081,10 @@ class PartialScan:
                 self._done = not self._stack
             elif ch == "," and self._stack and self._stack[-1][0]:
                 self._stack[-1][2] = True
-            elif not self._stack and not ch.isspace():
-                self._done = True  # the root is not an object
         return self.hit
 
     def _open(self, is_obj: bool) -> None:
-        if not self._stack:
-            self._done = not is_obj
+        if not self._stack:  # the root, always an object (``feed``)
             self._stack.append([True, "", True, False, set()])
             return
         top = self._stack[-1]

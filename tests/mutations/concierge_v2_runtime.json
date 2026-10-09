@@ -833,5 +833,34 @@
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_key_used_once_per_object_is_not_a_repeat",
       "tests/cloud/test_paw_bar_card_streaming.py::test_no_prefix_of_a_card_ripple_accepts_is_flagged"
     ]
+  },
+  {
+    "label": "card streaming: a body that cannot start an object only stops the scan, and its deltas stream out",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                self.hit = ch not in _JS_SPACE  # before the root: trimmed, or not a card\n",
+    "replace": "                self._done = ch not in _JS_SPACE  # before the root: trimmed, or not a card\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_body_that_cannot_start_an_object_is_rejected_before_any_delta"
+    ]
+  },
+  {
+    "label": "card streaming: before the root, Python's isspace() is skipped, not what JS trim() strips (a BOM flags a good card, \\x1c is skipped)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                self.hit = ch not in _JS_SPACE  # before the root: trimmed, or not a card\n",
+    "replace": "                self.hit = not ch.isspace()  # before the root: trimmed, or not a card\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_what_the_client_trims_before_a_card_keeps_the_stream_checks_on",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_body_that_cannot_start_an_object_is_rejected_before_any_delta"
+    ]
+  },
+  {
+    "label": "card streaming: the old root rule (anything not isspace() stops the scan), so a leading BOM switches the stream checks off",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                self.hit = ch not in _JS_SPACE  # before the root: trimmed, or not a card\n",
+    "replace": "                self._done = not ch.isspace()  # before the root: trimmed, or not a card\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_what_the_client_trims_before_a_card_keeps_the_stream_checks_on",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_body_that_cannot_start_an_object_is_rejected_before_any_delta"
+    ]
   }
 ]

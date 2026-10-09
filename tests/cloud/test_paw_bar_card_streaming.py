@@ -314,6 +314,38 @@ def test_scan_partial_only_judges_complete_strings_under_ui_and_state():
     assert scan_partial('{"ui":{"type":"text","props":{"text":"java\\u0073cript:1"', RIPPLE_PROFILE)
 
 
+# SEC-2b C: render_card strips what JS trim() strips before parsing, so a leading
+# BOM (or NBSP, U+2028, ...) must not switch the streaming checks off: the bad
+# link is still caught mid-stream, and a good card still ends in card.final.
+@pytest.mark.parametrize("lead", ["\ufeff", "\u00a0", "\u2028", "\u3000", " \n"])
+def test_what_the_client_trims_before_a_card_keeps_the_stream_checks_on(lead):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    bad = '{"ui":{"type":"cta","props":{"label":"Go","href":"javascript:alert(1)"}},'
+    bad += '"state":{"after":"x"}}\n'
+    assert scan_partial(lead + bad[: bad.index("}},")], RIPPLE_PROFILE)
+    events = _events(list(_fence(lead + bad)))
+    assert events[-1] == ("card.rejected", {"card_id": "c1", "reason": "invalid"})
+    assert "after" not in "".join(d["text"] for e, d in events if e == "card.delta")
+    good = '{"ui":{"type":"text","props":{"text":"hi"}}}\n'
+    assert _events([_fence(lead + good)])[-1] == (
+        "card.final",
+        {"card_id": "c1", "card": json.loads(good)},
+    )
+
+
+@pytest.mark.parametrize("body", ["x{}", "\x1c{}", "\u200b{}", "[1]", '"s"', "}"])
+def test_a_body_that_cannot_start_an_object_is_rejected_before_any_delta(body):
+    # Past what JS trim() strips, a card body starts with "{" or the close refuses it.
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    assert scan_partial(body, RIPPLE_PROFILE)
+    assert _events([_fence(body + "\n")]) == [
+        ("card.start", {"card_id": "c1"}),
+        ("card.rejected", {"card_id": "c1", "reason": "invalid"}),
+    ]
+
+
 def test_a_card_past_max_chars_is_rejected_and_no_longer_buffered():
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
 
