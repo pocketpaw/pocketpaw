@@ -301,7 +301,7 @@ async def test_the_store_is_cached_per_site_for_a_minute(monkeypatch):
 
     fake = _Store(_routes())
     now = [1000.0]
-    monkeypatch.setattr(concierge_store.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(concierge_store, "time", SimpleNamespace(monotonic=lambda: now[0]))
     await concierge_store.cached_store("s1", _BASE, fetch=fake)
     calls = len(fake.urls)
     await concierge_store.cached_store("s1", _BASE, fetch=fake)
@@ -684,9 +684,14 @@ async def test_only_an_ops_site_on_the_ripple_profile_may_set_a_store(client, mo
     assert res.status_code == 200, res.text
     assert res.json()["concierge_store_url"] == "https://shop.example/test-store"
 
-    # Off the list, a site may still clear it.
+    # Off the list, a site may still clear it, with null or "".
     _pin_ops(monkeypatch, "another")
     res = await c.patch(url, json={"concierge_store_url": None})
+    assert res.status_code == 200 and res.json()["concierge_store_url"] is None
+    _pin_ops(monkeypatch, str(site.id))
+    assert (await c.patch(url, json=store)).json()["concierge_store_url"]
+    _pin_ops(monkeypatch, "another")
+    res = await c.patch(url, json={"concierge_store_url": ""})
     assert res.status_code == 200 and res.json()["concierge_store_url"] is None
 
 
