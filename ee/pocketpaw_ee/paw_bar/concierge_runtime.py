@@ -1127,9 +1127,192 @@ def _catalog_and_actions_block(
     return _data_block(parts)
 
 
+# One good ripple card, the last authoring rule: a fictional project status
+# summary (entity-detail with kpis and meta; tiles, a chart, a table, a timeline,
+# facts and a takeaway in its children). The ripple profile's validator must
+# accept it whole (pinned in tests/cloud/test_paw_bar_ripple_profile.py), and it
+# stays ASCII, link-free and clear of the landing's demo topics.
+_RIPPLE_EXAMPLE: dict[str, Any] = {
+    "ui": {
+        "type": "entity-detail",
+        "props": {
+            "eyebrow": "Project status",
+            "title": "Volunteer app rebuild",
+            "subtitle": "Team Orchid, sprint 7 of 10",
+            "status": {"label": "At risk", "variant": "warning"},
+            "kpis": [
+                {"label": "Complete", "value": "64%", "delta": "+9 pts", "trend": "up"},
+                {"label": "Days to launch", "value": 21},
+                {"label": "Budget used", "value": "58%"},
+            ],
+            "meta": [
+                {"label": "Lead", "value": "Sam O."},
+                {"label": "Launch", "value": "Nov 14"},
+                {"label": "Team", "value": "6 people"},
+            ],
+        },
+        "children": [
+            {
+                "type": "alert",
+                "props": {
+                    "variant": "warning",
+                    "title": "Mobile is 2 weeks behind",
+                    "description": "Older phones show sign-up layout bugs.",
+                },
+            },
+            {
+                "type": "grid",
+                "props": {"columns": "repeat(auto-fit, minmax(150px, 1fr))", "gap": 12},
+                "children": [
+                    {
+                        "type": "stat",
+                        "props": {
+                            "label": "Tasks closed",
+                            "value": 14,
+                            "delta": 4,
+                            "direction": "up-good",
+                        },
+                    },
+                    {
+                        "type": "stat",
+                        "props": {
+                            "label": "Open bugs",
+                            "value": 7,
+                            "delta": -3,
+                            "direction": "down-good",
+                        },
+                    },
+                    {"type": "stat", "props": {"label": "Hours logged", "value": 312}},
+                    {
+                        "type": "stat",
+                        "props": {"label": "Review wait (days)", "value": 2.5, "format": "number"},
+                    },
+                ],
+            },
+            {
+                "type": "card",
+                "props": {"title": "Open tasks by week"},
+                "children": [
+                    {
+                        "type": "chart",
+                        "props": {
+                            "type": "line",
+                            "data": [
+                                {"label": f"W{i}", "value": v}
+                                for i, v in enumerate((52, 47, 41, 36, 25, 18), start=1)
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "type": "card",
+                "props": {"title": "Workstreams"},
+                "children": [
+                    {
+                        "type": "flex",
+                        "props": {"direction": "row", "gap": 8, "wrap": True},
+                        "children": [
+                            {"type": "badge", "props": {"text": t, "variant": v}}
+                            for t, v in (
+                                ("Design done", "success"),
+                                ("Backend on track", "secondary"),
+                                ("Mobile behind", "warning"),
+                                ("QA blocked", "destructive"),
+                            )
+                        ],
+                    },
+                    {
+                        "type": "table",
+                        "props": {
+                            "columns": [
+                                {"header": "Workstream", "accessorKey": "name"},
+                                {"header": "Owner", "accessorKey": "owner"},
+                                {"header": "Done", "accessorKey": "done"},
+                            ],
+                            "rows": [
+                                {"name": n, "owner": o, "done": d}
+                                for n, o, d in (
+                                    ("Design", "Ana", "100%"),
+                                    ("Backend", "Lee", "75%"),
+                                    ("Mobile", "Raj", "40%"),
+                                    ("QA", "Kim", "20%"),
+                                )
+                            ],
+                        },
+                    },
+                ],
+            },
+            {
+                "type": "grid",
+                "props": {"columns": "repeat(auto-fit, minmax(260px, 1fr))", "gap": 12},
+                "children": [
+                    {
+                        "type": "card",
+                        "props": {"title": "Milestones"},
+                        "children": [
+                            {
+                                "type": "timeline",
+                                "props": {
+                                    "density": "compact",
+                                    "events": [
+                                        {
+                                            "date": "Sep 2",
+                                            "title": "Designs signed off",
+                                            "type": "success",
+                                        },
+                                        {
+                                            "date": "Oct 6",
+                                            "title": "Backend beta",
+                                            "type": "success",
+                                        },
+                                        {
+                                            "date": "Oct 27",
+                                            "title": "Mobile beta",
+                                            "type": "warning",
+                                        },
+                                        {"date": "Nov 14", "title": "Launch"},
+                                    ],
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "type": "card",
+                        "props": {"title": "Facts"},
+                        "children": [
+                            {
+                                "type": "kv-table",
+                                "props": {
+                                    "rows": [
+                                        {"key": "Sprint length", "value": "2 weeks"},
+                                        {"key": "Next demo", "value": "Oct 28"},
+                                        {"key": "Platforms", "value": "Web and mobile"},
+                                    ]
+                                },
+                            }
+                        ],
+                    },
+                ],
+            },
+            {
+                "type": "callout",
+                "props": {
+                    "variant": "insight",
+                    "title": "Takeaway",
+                    "text": "Launch holds if mobile fixes land by Oct 27; lend one "
+                    "backend developer to mobile.",
+                },
+            },
+        ],
+    },
+    "state": {},
+}
+
 # How to write a good Ripple card, ported from ripple's record-scenario system
-# prompt (the rules that hold for an answer in a chat card). No flow, branch or
-# toast: the card's actions are card_spec.SPEC_ACTIONS.
+# prompt (the rules that hold for an answer in a chat card) and sized for the
+# ripple landing's chat column (about 720px, still readable at 360px). The
+# actions named are card_spec.RIPPLE_ACTIONS; the last line is _RIPPLE_EXAMPLE.
 _RIPPLE_RULES = (
     "   Authoring rules:",
     "   - Write every node's keys in this order: type, props, then bind and handlers, "
@@ -1159,15 +1342,29 @@ _RIPPLE_RULES = (
     "Division by zero gives 0.",
     "   - Show a number that can have decimals (a division, a rate, money) with a "
     'stat (format "number", "currency" or "percent"), never inside a text template.',
-    "   - It must work in a card about 300px wide: grid columns of 2 at most, number "
-    'inputs and sliders on a full-width row or a 2-column grid, "wrap": true on a '
-    "flex row with more than two children. Aim for 15 to 35 nodes.",
+    "   - The card is about 720px wide on a desktop and must still read on a 360px "
+    'phone. For a row of tiles give the grid "columns": "repeat(auto-fit, '
+    'minmax(150px, 1fr))" so it wraps (a bigger minimum, like 260px, for cards side '
+    "by side); otherwise at most 2 fixed grid columns. Put number inputs and sliders "
+    'on a full-width row or a 2-column grid, and set "wrap": true on a flex row with '
+    "more than two children. Aim for about 25 to 90 nodes.",
+    "   - Match the card to the answer. A tool the visitor plays with (a calculator, "
+    "a planner, a quiz) binds its inputs to state as above. A summary of one thing (a "
+    "person, an account, an order, a trip) starts with entity-detail (title, status, "
+    "kpis, meta) and puts its sections in its children. A report or dashboard leads "
+    "with 3 or 4 stat tiles in a grid, then a chart, then a table. Dated events go in "
+    "a timeline, plain facts in a kv-table (rows of {key, value}; its columns is 1 or "
+    "2), a warning in an alert, the one takeaway in a callout. Put each section in a "
+    "card with a short title, the most important thing first, and colour status with "
+    "badge variants (success, warning, destructive, secondary, outline, default).",
     "   - A 1-based position or counter never runs past its total, and every seeded "
     "total equals what its expression gives.",
     "   - Never attach a price, rating, opening hours or any other claim to a real "
     "named business, venue or brand; a named real place costs 0 and any cost goes on "
     "a separate unnamed item with a round estimate. Placeholders use generic words, "
     "never brands. No lorem ipsum.",
+    "   - A good summary card (copy its shape, never its data): "
+    + json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":")),
 )
 
 
@@ -1202,7 +1399,8 @@ def _cards_paragraph(
     if getattr(profile, "name", "") == "ripple":
         lines = [
             "   Cards: when a small interactive tool (a calculator, a planner, a "
-            "comparison, a checklist) answers the visitor better than prose, write ONE "
+            "comparison, a checklist), a summary or a report answers the visitor better "
+            "than prose, write ONE "
             "```pawbar-card block after a sentence or two of text, holding "
             '{"ui": <node>, "state": {...}}. A node is {"type": ..., "props": {...}, '
             '"bind"?: ..., "on_*"?: ..., "children"?: [...]}, at most '

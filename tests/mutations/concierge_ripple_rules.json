@@ -1,0 +1,101 @@
+[
+  {
+    "label": "entity-detail drops back to a one-line summary with no props",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            \"tabs\",\n            \"entity-detail\",\n",
+    "replace": "            \"tabs\",\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "the ripple width rule goes back to a 300px card",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"   - The card is about 720px wide on a desktop and must still read on a 360px \"",
+    "replace": "    \"   - The card is about 300px wide on a desktop and must still read on a 360px \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "the example card is no longer carried in the rules",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    + json.dumps(_RIPPLE_EXAMPLE, separators=(\",\", \":\")),",
+    "replace": "    + \"{}\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "the match-the-card rule is dropped",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"   - Match the card to the answer. A tool the visitor plays with (a calculator, \"",
+    "replace": "    \"   - A tool the visitor plays with (a calculator, \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
+    ]
+  },
+  {
+    "label": "the rules name a badge variant the manifest does not have",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"badge variants (success, warning, destructive, secondary, outline, default).\",",
+    "replace": "    \"badge variants (success, warning, destructive, info, outline, default).\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_name_only_real_badge_variants"
+    ]
+  },
+  {
+    "label": "the example card uses a widget the ripple profile refuses",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        \"type\": \"entity-detail\",\n        \"props\": {\n            \"eyebrow\": \"Project status\",",
+    "replace": "        \"type\": \"embed\",\n        \"props\": {\n            \"eyebrow\": \"Project status\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_example_card_passes_the_ripple_checks_whole"
+    ]
+  },
+  {
+    "label": "the example card carries a full https link",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                {\"label\": \"Team\", \"value\": \"6 people\"},",
+    "replace": "                {\"label\": \"Team\", \"value\": \"6 people\", \"href\": \"https://cdn.example.com/t\"},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_example_card_passes_the_ripple_checks_whole"
+    ]
+  },
+  {
+    "label": "ripple cards may navigate",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {\"flow\", \"branch\", \"validate\", \"toast\"}",
+    "replace": "RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {\"flow\", \"branch\", \"validate\", \"toast\", \"navigate\"}",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_data_widgets_keep_actions_and_urls_in_check"
+    ]
+  },
+  {
+    "label": "an actions prop is no longer read as a handler",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        key.startswith(\"on_\") or key == \"actions\" or key.endswith(\"Actions\")",
+    "replace": "        key.startswith(\"on_\") or key == \"actionz\" or key.endswith(\"Actions\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_data_widgets_keep_actions_and_urls_in_check"
+    ]
+  },
+  {
+    "label": "card URLs may name an outside host",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    url_hosts: frozenset[str] = frozenset()\n",
+    "replace": "    url_hosts: frozenset[str] = frozenset({\"cdn.example.com\"})\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_data_widgets_keep_actions_and_urls_in_check"
+    ]
+  },
+  {
+    "label": "the ripple rules leak into the pawbar cards paragraph",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        \"nothing else.\",\n    ]\n    if has_catalog:",
+    "replace": "        \"nothing else.\",\n        *_RIPPLE_RULES[:2],\n    ]\n    if has_catalog:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
+    ]
+  }
+]

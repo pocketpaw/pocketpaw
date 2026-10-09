@@ -134,7 +134,8 @@ RIPPLE_PROFILE = CardProfile(
     max_depth=16,
     max_chars=64_000,
     manifest=RIPPLE_MANIFEST,
-    # The widgets the authoring rules lean on, listed with their props.
+    # The widgets the authoring rules lean on (the inputs and layouts, and the
+    # ready-made data widgets), listed with their props.
     detailed=frozenset(
         {
             "flex",
@@ -159,6 +160,13 @@ RIPPLE_PROFILE = CardProfile(
             "badge",
             "separator",
             "tabs",
+            "entity-detail",
+            "timeline",
+            "kv-table",
+            "alert",
+            "callout",
+            "analytics-dashboard",
+            "comparison-layout",
         }
     ),
     strict=True,

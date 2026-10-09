@@ -4,12 +4,16 @@
 # (``card_spec.RIPPLE_PROFILE``: the vendored ripple-manifest.json, 400 nodes,
 # depth 16, 64,000 chars, handlers checked wherever a widget keeps them), the
 # Ripple cards paragraph with no catalog, actions or lead capture, and an 8,000
-# token reply cap. Every other site keeps ``PAWBAR_PROFILE``. Also covered: the
-# per-site daily spend cap over the global one, and both settings through the
-# settings PATCH and its response. The accepted card is ripple's recorded
-# explainer scenario (tests/fixtures/ripple_explainer_card.json, from ripple
-# origin/main 09a56a6, packages/svelte/src/routes/live/fixtures/explainer.json,
-# its chunks joined and wrapped as {ui, state}).
+# token reply cap. Every other site keeps ``PAWBAR_PROFILE``, and its cards
+# paragraph is pinned byte for byte. The Ripple paragraph lists the data widgets
+# (entity-detail, timeline, kv-table, ...) with their props, is sized for the
+# landing's ~720px chat column and ends with ``_RIPPLE_EXAMPLE``, which must pass
+# the ripple checks whole. Also covered: the per-site daily spend cap over the
+# global one, and both settings through the settings PATCH and its response.
+# The accepted card is ripple's recorded explainer scenario
+# (tests/fixtures/ripple_explainer_card.json, from ripple origin/main 09a56a6,
+# packages/svelte/src/routes/live/fixtures/explainer.json, its chunks joined and
+# wrapped as {ui, state}). Mutation plan: tests/mutations/concierge_ripple_rules.json.
 
 # ruff: noqa: F811 — pytest fixtures imported by name
 
@@ -220,6 +224,153 @@ def test_the_ripple_listing_is_bounded_and_covers_every_widget():
     # The rules' widgets carry their props (each's node fields too).
     assert "- stat {label?, value" in text
     assert "- each {items, item_as?, index_as?}" in text
+
+
+# The ready-made data widgets the authoring rules point at, listed with props.
+_DATA_WIDGETS = (
+    "entity-detail",
+    "timeline",
+    "kv-table",
+    "alert",
+    "callout",
+    "analytics-dashboard",
+    "comparison-layout",
+)
+
+
+def _ripple_paragraph() -> str:
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import _cards_paragraph
+
+    return _cards_paragraph([], profile=RIPPLE_PROFILE)
+
+
+def _nodes(node: dict) -> list[dict]:
+    return [node, *(n for kid in node.get("children", []) for n in _nodes(kid))]
+
+
+def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_EXAMPLE, _RIPPLE_RULES
+
+    text = _ripple_paragraph()
+    for widget in _DATA_WIDGETS:
+        assert f"   - {widget} {{" in text, widget
+    entity = next(line for line in text.splitlines() if line.startswith("   - entity-detail {"))
+    assert "kpis?" in entity and "meta?" in entity and "status?" in entity
+    assert "300px" not in text
+    assert "720px" in text and "360px" in text
+    assert '"columns": "repeat(auto-fit, minmax(150px, 1fr))"' in text
+    assert "Aim for about 25 to 90 nodes" in text
+    assert "Match the card to the answer" in text
+    assert "starts with entity-detail (title, status, kpis, meta)" in text
+    # The example is the last rule, as compact JSON.
+    example = json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":"))
+    assert _RIPPLE_RULES[-1].endswith(example) and example in text
+    # The whole paragraph stays bounded (it was 19,814 chars before the data widgets).
+    assert len(text) < 26_000
+
+
+def test_the_rules_name_only_real_badge_variants():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_MANIFEST
+
+    badge = next(w for w in RIPPLE_MANIFEST["widgets"] if w["type"] == "badge")
+    real = set(badge["props"]["variant"]["type"].replace('"', "").split(" | "))
+    named = "success, warning, destructive, secondary, outline, default"
+    assert f"badge variants ({named})" in _ripple_paragraph()
+    assert set(named.split(", ")) == real
+
+
+def test_the_example_card_passes_the_ripple_checks_whole():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, RIPPLE_PROFILE, render_card
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_EXAMPLE
+
+    body = json.dumps(_RIPPLE_EXAMPLE)
+    out = render_card(body, [], profile=RIPPLE_PROFILE)
+    assert out is not None
+    assert json.loads(out.split("\n", 1)[1].rsplit("\n", 1)[0]) == _RIPPLE_EXAMPLE
+    nodes = _nodes(_RIPPLE_EXAMPLE["ui"])
+    kinds = {n["type"] for n in nodes}
+    assert {"entity-detail", "grid", "stat", "chart", "table", "timeline", "callout"} <= kinds
+    root = _RIPPLE_EXAMPLE["ui"]["props"]
+    assert root["kpis"] and root["meta"] and "actions" not in root
+    assert 20 <= len(nodes) <= 40
+    compact = json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":"))
+    assert compact.isascii() and len(compact) < 3_000
+    # Not a pawbar card: its widgets are ripple's.
+    assert render_card(body, [], profile=PAWBAR_PROFILE) is None
+
+
+def _entity_actions(actions) -> dict:
+    return {
+        "ui": {
+            "type": "entity-detail",
+            "props": {"title": "X", "actions": [{"label": "Go", "actions": actions}]},
+        },
+        "state": {"a": 0},
+    }
+
+
+def _compared(image: str) -> dict:
+    items = [{"id": "a", "name": "A", "image": image}, {"id": "b", "name": "B"}]
+    return {"ui": {"type": "comparison-layout", "props": {"items": items}}}
+
+
+@pytest.mark.parametrize(
+    ("spec", "why"),
+    [
+        (
+            _entity_actions([{"action": "navigate", "target": "/x"}]),
+            "navigate in actions[].actions",
+        ),
+        (
+            _entity_actions({"action": "fetch", "target": "a"}),
+            "an unknown action in actions[].actions",
+        ),
+        (_compared("https://cdn.example.com/a.png"), "a full https image on a compared item"),
+    ],
+)
+def test_the_data_widgets_keep_actions_and_urls_in_check(spec, why):
+    assert _ripple(spec) is None, why
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        _entity_actions([{"action": "set", "target": "a", "value": 1}]),
+        _compared("/a.png"),
+    ],
+)
+def test_the_data_widgets_pass_with_allowed_actions_and_paths(spec):
+    assert _ripple(spec) is not None
+
+
+# Pins today's pawbar cards paragraph (with the compact manifest) byte for byte:
+# the ripple rules must never leak into it. If the pawbar paragraph changes on
+# purpose, recompute with hashlib.sha256(_pawbar_paragraphs().encode()).
+_PAWBAR_PARAGRAPH_SHA256 = "96bcf44088350ed721971e5bc0b29cd52b3524c12f0d7b04d9242d8d774422d4"
+
+
+def _pawbar_paragraphs() -> str:
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import _cards_paragraph
+
+    declared = [
+        {"verb": "book", "policy": "approve", "args": {"date": "string"}, "label": "Book"},
+        {"verb": "add_to_cart", "policy": "auto", "args": {}, "label": "Add"},
+    ]
+    rich = _cards_paragraph(declared, has_catalog=True, lead_capture=True)
+    assert rich == _cards_paragraph(
+        declared, has_catalog=True, lead_capture=True, profile=PAWBAR_PROFILE
+    )
+    return rich + "\n---\n" + _cards_paragraph([])
+
+
+def test_the_pawbar_cards_paragraph_is_unchanged():
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_RULES
+
+    text = _pawbar_paragraphs()
+    assert hashlib.sha256(text.encode()).hexdigest() == _PAWBAR_PARAGRAPH_SHA256
+    assert not any(rule.strip() in text for rule in _RIPPLE_RULES)
 
 
 # --------------------------------------------------------------------------- #
