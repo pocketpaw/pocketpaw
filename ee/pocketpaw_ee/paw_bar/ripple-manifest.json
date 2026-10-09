@@ -1,7 +1,7 @@
 {
   "schema": "ripple.manifest/v1",
   "version": "0.8.0",
-  "generatedAt": "2026-10-09T18:15:59.014Z",
+  "generatedAt": "2026-10-09T19:33:41.459Z",
   "spec": {
     "uiField": "ui",
     "stateField": "state",
@@ -4420,7 +4420,7 @@
       "type": "illustration",
       "category": "display",
       "staticSafe": false,
-      "description": "A small animated SVG drawing you write: <svg viewBox> with shapes, gradients and animate/animateTransform. No scripts, styles, links, images or filters. Display only.",
+      "description": "A small animated SVG drawing you write: <svg viewBox> with shapes, gradients and animate/animateTransform. No scripts, styles, links, images or filters. Optional numbered notes pinned on parts of it.",
       "props": {
         "svg": {
           "type": "string",
@@ -4441,6 +4441,18 @@
           "type": "number",
           "required": false,
           "description": "Height cap in px, 80 to 640. Default 320."
+        },
+        "annotations": {
+          "type": "Array<{ id: string; label: string; note: string; target?: string; at?: [number, number] }>",
+          "required": false,
+          "description": "At most 8 numbered notes the reader taps to open. Plain text: label up to 40 chars, note up to 280. Exactly one of `target` (an id in your svg, e.g. 'valve') or `at` ([x, y] in viewBox units). A target id that is not in the svg drops the note."
+        }
+      },
+      "events": {
+        "on_select": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Fires with { id } when the reader opens a note by clicking its pin or legend line."
         }
       }
     },
@@ -6408,6 +6420,38 @@
       }
     },
     {
+      "type": "habit-tracker",
+      "category": "composite",
+      "description": "Habit tracker app: habits[{id, name, icon, target_per_week}] on a week grid the visitor ticks; streaks, weekly target rings, today %. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"My week\"."
+        },
+        "habits": {
+          "type": "Array<{ id: string; name: string; icon?: \"read\" | \"run\" | \"walk\" | \"bike\" | \"gym\" | \"stretch\" | \"water\" | \"sleep\" | \"meditate\" | \"journal\" | \"code\" | \"music\" | \"veg\" | \"no-sugar\" | \"vitamins\"; target_per_week: number }>",
+          "required": true,
+          "description": "1 to 8 habits. target_per_week is 1 to 7 (7 = every day). Any other icon value shows a plain dot."
+        },
+        "week_start": {
+          "type": "\"mon\" | \"sun\"",
+          "required": false,
+          "description": "First day of the week. Default \"mon\"."
+        },
+        "weeks": {
+          "type": "number",
+          "required": false,
+          "description": "Weeks of history the visitor can page back through, 1 to 4. Default 1."
+        },
+        "seed": {
+          "type": "Record<string, number[]>",
+          "required": false,
+          "description": "Demo ticks per habit id as day offsets back from today (0 = today, 1 = yesterday). Leave out for a fresh tracker."
+        }
+      }
+    },
+    {
       "type": "flashcard-deck",
       "category": "composite",
       "description": "Study deck: cards[{front, back, hint, category}]. Flip each card, mark Got it or Missed it, then a score screen with Practise missed. Bind score; on_complete {score, total}.",
@@ -6448,6 +6492,133 @@
           "type": "EventAction",
           "required": false,
           "description": "Fired at the end of every pass with { score, total }."
+        }
+      }
+    },
+    {
+      "type": "word-guess",
+      "category": "composite",
+      "description": "Word guessing game: answer (4 to 7 letters A to Z), hint, max_guesses. Letter feedback, on-screen keyboard, share grid. Bind value {guesses, status, hint_used}; on_complete {won, guesses}.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Puzzle name, e.g. \"Kitchen words\". Defaults to \"Word guess\"."
+        },
+        "answer": {
+          "type": "string",
+          "required": true,
+          "description": "The word to guess: 4 to 7 letters, A to Z only, any case. Anything else shows a friendly error instead of the board."
+        },
+        "hint": {
+          "type": "string",
+          "required": false,
+          "description": "A nudge the player can reveal; using it is recorded in value.hint_used and the share line."
+        },
+        "max_guesses": {
+          "type": "number",
+          "required": false,
+          "description": "Rows on the board. Default 6, clamped 1 to 10."
+        },
+        "allow_any_word": {
+          "type": "boolean",
+          "required": false,
+          "description": "Default true. No dictionary ships, so any letters count as a guess either way."
+        },
+        "value": {
+          "type": "{ guesses: string[]; status: \"playing\" | \"won\" | \"lost\"; hint_used: boolean }",
+          "required": false,
+          "description": "The game so far, written by the widget on every guess and hint. Bind with `bind: \"{state.game}\"` to read it elsewhere; the widget never reads it back."
+        }
+      },
+      "events": {
+        "on_complete": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Fired once when the game ends, with { won, guesses }."
+        }
+      }
+    },
+    {
+      "type": "quiz",
+      "category": "composite",
+      "description": "Trivia game: questions[{prompt, choices, answer (index), why}]. Instant right or wrong, a streak, optional countdown, then a score screen with misses and Retry. Bind value; on_complete.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Quiz name, e.g. \"Space trivia\"."
+        },
+        "topic": {
+          "type": "string",
+          "required": false,
+          "description": "A small label above the title, e.g. \"Astronomy\"."
+        },
+        "questions": {
+          "type": "Array<{ id?: string; prompt: string; choices: string[]; answer: number; why?: string; image?: string }>",
+          "required": true,
+          "description": "3 to 12 questions. `choices` holds 2 to 5 short answers; `answer` is the 0-based index of the right one; `why` is one sentence shown after the pick; `image` an optional https photo URL. A question whose answer is outside its choices is skipped. The answers sit in the spec, so this suits casual play, not exams."
+        },
+        "seconds_per_question": {
+          "type": "number",
+          "required": false,
+          "description": "Seconds per question (3 to 600). Off by default; when set the quiz waits for Start, and running out counts as wrong."
+        },
+        "shuffle_choices": {
+          "type": "boolean",
+          "required": false,
+          "description": "Shuffle each question's choices (a new order on every Retry). Default false."
+        },
+        "value": {
+          "type": "{ index: number; answers: (number | null)[]; score: number; done: boolean }",
+          "required": false,
+          "description": "Progress, written by the widget: the current question, the picked choice per answered question (null = ran out of time), the score and whether every question is answered. Bind with `bind: \"{state.quiz}\"`."
+        }
+      },
+      "events": {
+        "on_complete": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Fired once per run when the last question is answered, with { score, total }."
+        }
+      }
+    },
+    {
+      "type": "memory-match",
+      "category": "composite",
+      "description": "Card-flip pairs game: pairs[{id, a, b}] (6 to 12), each side text, one emoji or \"icon:<key>\". Moves, time, best, win screen. Bind value; on_complete {moves, seconds}.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Theme of the game, e.g. \"Spanish animals\"."
+        },
+        "pairs": {
+          "type": "Array<{ id: string; a: string; b: string }>",
+          "required": true,
+          "description": "6 to 12 pairs (more than 12 are dropped). `a` and `b` are the two cards that match: plain text (a word and its translation), a single emoji, or \"icon:<key>\" with a key from the data icon maps (coffee, flight, train, car, home, food, fish, bread, cheese, camera, wifi, ...). An unknown key shows as its text, so prefer emoji for pictures."
+        },
+        "columns": {
+          "type": "number",
+          "required": false,
+          "description": "Grid columns. Default: auto by card count (4 up to 16 cards, then 5, then 6)."
+        },
+        "time_limit_s": {
+          "type": "number",
+          "required": false,
+          "description": "Optional time limit in seconds; when it runs out the game ends. No limit by default."
+        },
+        "value": {
+          "type": "{ moves: number; matched: string[]; completed: boolean; seconds: number }",
+          "required": false,
+          "description": "The game so far, written by the widget on each move. `matched` lists pair ids. Bind with `bind: \"{state.game}\"` to show it elsewhere."
+        }
+      },
+      "events": {
+        "on_complete": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Fired once when every pair is matched, with { moves, seconds }."
         }
       }
     },
