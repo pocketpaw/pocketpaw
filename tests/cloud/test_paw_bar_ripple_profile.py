@@ -106,7 +106,9 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
     assert chrome <= every and chrome.isdisjoint(deferred)
     r = card_spec.RIPPLE_PROFILE
     assert r.typed.keys() <= r.detailed <= r.widget_types
-    assert len(r.widget_types) == 197 - len(deferred) - len(chrome)
+    # illustration is offered before the vendored manifest carries it.
+    assert "illustration" not in every and "illustration" in r.widget_types
+    assert len(r.widget_types) == 197 + 1 - len(deferred) - len(chrome)
 
 
 def test_the_pawbar_profile_is_todays_rules():
@@ -291,8 +293,8 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # The whole paragraph stays bounded: 19,814 chars before the primitives' data
     # widgets, 24,327 before Ripple's data widgets (typed lines and their rules, less
     # the page chrome), 27,849 after, 30,473 with the flow and ask rules (the flow
-    # example alone is 890).
-    assert len(text) < 31_000
+    # example alone is 890), 31,084 with the illustration line and rule.
+    assert len(text) < 32_000
 
 
 # Ripple's data widgets (qbtrix/ripple-iui#182): one card per widget, its manifest

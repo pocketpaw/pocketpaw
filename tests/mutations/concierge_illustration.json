@@ -1,0 +1,65 @@
+[
+  {
+    "label": "ILL-1: on* attributes pass the SVG policy",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "    if low.startswith(\"on\"):",
+    "replace": "    if low.startswith(\"on-never\"):",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  },
+  {
+    "label": "ILL-2: the attributeName closed list is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "value.strip() not in ATTRIBUTE_NAMES",
+    "replace": "value.strip() in ()",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  },
+  {
+    "label": "ILL-3: the depth cap is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "        if depth > MAX_DEPTH:",
+    "replace": "        if depth > 10**9:",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  },
+  {
+    "label": "ILL-4: CSS escapes are not undone before the url( rule",
+    "file": "ee/pocketpaw_ee/paw_bar/illustration_svg.py",
+    "find": "    plain = _CSS_ESCAPE.sub(_css_char, value)",
+    "replace": "    plain = value",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  },
+  {
+    "label": "ILL-5: the card never runs the SVG policy",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if reason := svg_violation(svg):",
+    "replace": "    if reason := None:",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  },
+  {
+    "label": "ILL-6: an expression in the svg passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if \"{\" in svg:",
+    "replace": "    if False:",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  },
+  {
+    "label": "ILL-7: the partial scan judges an svg by the text rules (xmlns URL refuses mid-stream)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if key == \"svg\":\n        return False",
+    "replace": "    if key == \"svg-never\":\n        return False",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  },
+  {
+    "label": "ILL-8: the svg prop is walked by the text rules too",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                        if kind == ILLUSTRATION and pk == \"svg\":\n                            continue",
+    "replace": "                        if kind == ILLUSTRATION and pk == \"svg-never\":\n                            continue",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  },
+  {
+    "label": "ILL-9: handlers on an illustration pass",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if \"bind\" in node or any(map(_is_handler_key, [*node, *props])):",
+    "replace": "    if False:",
+    "tests": ["tests/cloud/test_paw_bar_illustration.py"]
+  }
+]

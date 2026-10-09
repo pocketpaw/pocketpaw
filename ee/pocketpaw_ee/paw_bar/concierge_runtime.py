@@ -1536,6 +1536,13 @@ _RIPPLE_RULES = (
     + " (plain text naming what it is about, at most 500 characters, no {expressions}) "
     "on a button's on_click, or in a comparison item's actions list, which its Choose "
     "button fires.",
+    "   - When a small picture or diagram helps explain (how something works, the "
+    "steps of a process), add an illustration: svg is the markup, title names it. "
+    "Put every SVG attribute in single quotes so the JSON string needs no escaping, "
+    "and give the root svg a viewBox: <svg viewBox='0 0 200 120'>...</svg>. Keep it "
+    "under 24,000 characters and 400 elements. Animate with animate or "
+    "animateTransform, dur 0.5s or more. No scripts, styles, links, images or "
+    "{expressions}; a gradient is fill='url(#id)'.",
     "   - A good summary card (copy its shape, never its data): "
     + json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":")),
 )

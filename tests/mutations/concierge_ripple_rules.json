@@ -960,8 +960,8 @@
   {
     "label": "DW-9: page chrome is offered and accepted on ripple",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "    - RIPPLE_DEFERRED\n    - RIPPLE_CHROME,",
-    "replace": "    - RIPPLE_DEFERRED,",
+    "find": " - RIPPLE_DEFERRED - RIPPLE_CHROME,",
+    "replace": " - RIPPLE_DEFERRED,",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_page_chrome_is_refused_and_unlisted_on_ripple"
     ]

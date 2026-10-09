@@ -29,7 +29,9 @@
 #     ``MAX_REPAIR_CLOSERS``, a ``ui`` left open closed before the root's
 #     ``,"state":``); one whose root closed one ``}`` early, before a lone
 #     ``,"state":<object>}``, loses that one closer (``_surplus_closer_fix``).
-#     Either is then parsed and checked like any body.
+#     Either is then parsed and checked like any body. ``illustration``
+#     (``ILLUSTRATION_WIDGET``, added until the manifest has it) is display only;
+#     its svg is held to illustration_svg's policy instead of the text checks.
 #
 # Hydration runs after the checks and is not checked again. Product data comes only
 # from the site catalog: a ``product-card``'s ``ids`` become ``items`` (unknown ids
@@ -64,6 +66,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
+
+from pocketpaw_ee.paw_bar.illustration_svg import svg_violation
 
 logger = logging.getLogger(__name__)
 
@@ -179,19 +183,41 @@ RIPPLE_DATA_WIDGETS: dict[str, frozenset[str] | None] = {
         {"rows", "measures", "dimensions", "x", "split", "compare", "compareLabel", "filters"}
     ),
 }
+# Ripple's ``illustration`` (model-written animated SVG), offered before the vendored
+# manifest carries it: display only, no handlers or bind. Its ``svg`` is held to
+# illustration_svg's policy instead of the text checks (the xmlns URL is fine there).
+ILLUSTRATION = "illustration"
+ILLUSTRATION_WIDGET: dict[str, Any] = {
+    "type": ILLUSTRATION,
+    "category": "display",
+    "description": "A small animated picture or diagram drawn from SVG markup.",
+    "props": {
+        "svg": {"type": "string", "required": True},
+        "title": {"type": "string", "required": True},
+        "caption": {"type": "string", "required": False},
+        "max_height": {"type": "number", "required": False},
+    },
+}
+ILLUSTRATION_HEIGHT = (80, 640)
+_RIPPLE_WIDGETS: list[dict[str, Any]] = [
+    *RIPPLE_MANIFEST["widgets"],
+    *(
+        []
+        if any(w["type"] == ILLUSTRATION for w in RIPPLE_MANIFEST["widgets"])
+        else [ILLUSTRATION_WIDGET]
+    ),
+]
 # A ripple card's actions: paw-bar's, plus the client-side flow ones (no network,
 # no navigation). Every step inside a flow or branch is held to the same set.
 RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {"flow", "branch", "validate", "toast"}
 RIPPLE_PROFILE = CardProfile(
     name="ripple",
-    widget_types=frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"])
-    - RIPPLE_DEFERRED
-    - RIPPLE_CHROME,
+    widget_types=frozenset(w["type"] for w in _RIPPLE_WIDGETS) - RIPPLE_DEFERRED - RIPPLE_CHROME,
     actions=RIPPLE_ACTIONS,
     max_nodes=400,
     max_depth=16,
     max_chars=64_000,
-    manifest=RIPPLE_MANIFEST,
+    manifest={**RIPPLE_MANIFEST, "widgets": _RIPPLE_WIDGETS},
     # The widgets the authoring rules lean on (the inputs and layouts, the
     # widgets whose item shapes _RIPPLE_EXAMPLE shows, and the data widgets),
     # listed with their props. Only a data widget's line gives the props' types,
@@ -224,6 +250,7 @@ RIPPLE_PROFILE = CardProfile(
             "entity-detail",
             "timeline",
             "kv-table",
+            ILLUSTRATION,
             "alert",
             "callout",
         }
@@ -240,7 +267,7 @@ SERVER_WIRED: dict[str, tuple[str, str]] = {
 }
 
 # Every widget name and action name the Ripple manifest knows (deferred ones too).
-_RIPPLE_TYPES: frozenset[str] = frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"])
+_RIPPLE_TYPES: frozenset[str] = frozenset(w["type"] for w in _RIPPLE_WIDGETS)
 _RIPPLE_ACTIONS: frozenset[str] = frozenset(RIPPLE_MANIFEST["actions"])
 # Props the engine draws as a node (NodeRenderer), by widget: the manifest's
 # ``string | UISpec`` props, plus the ones only the engine reads.
@@ -714,6 +741,8 @@ def _strict_walk(
                     raise _Reject("a follow-up emits a host event this widget does not declare")
             # A node met in state or inside a handler may not ask at all.
             base = None if ask is None else False
+            if kind == ILLUSTRATION:
+                _check_illustration(value, props)
             if kind == "form":
                 if isinstance(props, dict) and _FORM_SUBMIT_PROPS & props.keys():
                     raise _Reject("a form with its own submit target")
@@ -731,6 +760,8 @@ def _strict_walk(
                 elif k == "props" and isinstance(v, dict):
                     node_props = _NODE_PROPS.get(kind, frozenset())
                     for pk, pv in v.items():
+                        if kind == ILLUSTRATION and pk == "svg":
+                            continue  # held to the SVG policy (_check_illustration)
                         if (kind, pk) in _MARKDOWN_PROPS and isinstance(pv, str):
                             _check_plain_expressions(pv)
                         _check_resolved_prop(kind, pk, pv, node_props)
@@ -790,6 +821,30 @@ def _strict_walk(
             )
             for k, v in value.items()
         )
+
+
+def _check_illustration(node: dict[str, Any], props: Any) -> None:
+    """An ``illustration`` node: no handler or bind, ``svg`` and ``title`` text,
+    ``caption`` text if given, ``max_height`` a number in ``ILLUSTRATION_HEIGHT``,
+    and the svg passes ``svg_violation``. The svg must be literal: a ``{...}``
+    there would be resolved by the engine into markup this check never saw."""
+    props = props or {}
+    if "bind" in node or any(map(_is_handler_key, [*node, *props])):
+        raise _Reject("a handler or bind on an illustration")
+    svg, title = props.get("svg"), props.get("title")
+    if not isinstance(svg, str) or not isinstance(title, str):
+        raise _Reject("an illustration needs svg and title text")
+    if not isinstance(props.get("caption", ""), str):
+        raise _Reject("an illustration caption that is not text")
+    height = props.get("max_height", ILLUSTRATION_HEIGHT[0])
+    low, high = ILLUSTRATION_HEIGHT
+    number = isinstance(height, (int, float)) and not isinstance(height, bool)
+    if not number or not low <= height <= high:
+        raise _Reject(f"an illustration max_height outside {low}..{high}")
+    if "{" in svg:
+        raise _Reject("an expression in an illustration's svg")
+    if reason := svg_violation(svg):
+        raise _Reject(f"an illustration with {reason}")
 
 
 def _check_resolved_prop(kind: str, key: str, value: Any, node_props: frozenset[str]) -> None:
@@ -1520,6 +1575,8 @@ def _string_fails(value: str, key: str, styled: bool, hosts: frozenset[str]) -> 
     """Whether ``_check_strict`` would refuse this string value under ``key``.
     ``styled``: some key on its path is "style", so it may be CSS context; the
     checks that depend on that are skipped rather than guessed."""
+    if key == "svg":
+        return False  # an illustration's svg: its own policy runs on the finished card
     try:
         if key in ("style", "background"):
             _check_css(value, declarations=key == "style")
@@ -1754,6 +1811,8 @@ __all__ = [
     "DEFERRED_WIDGETS",
     "FORM_PREFILL_MAX",
     "HOST_EVENTS",
+    "ILLUSTRATION",
+    "ILLUSTRATION_WIDGET",
     "LEAD_CONTACT_FIELDS",
     "LEAD_FIELDS",
     "LEAD_VERB",
