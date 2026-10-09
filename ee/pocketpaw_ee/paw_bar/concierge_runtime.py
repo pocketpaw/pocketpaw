@@ -288,6 +288,25 @@ def ui_profile(site: Any, settings: Any = None) -> Any:
     return PAWBAR_PROFILE
 
 
+async def storefront_for_turn(site: Any, settings: Any = None, *, fetch: Any = None) -> Any:
+    """The site's store (``concierge_store.StoreData``, cached per site) when it is
+    on the ripple profile (``ui_profile``: ops sites only, read every turn) and
+    names a ``concierge_store_url``; else None. ``fetch`` is for a local harness
+    only (the runtime passes none, so the pinned public-only fetch is used)."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+
+    url = getattr(site, "concierge_store_url", None)
+    if not isinstance(url, str) or not url or ui_profile(site, settings) is not RIPPLE_PROFILE:
+        return None
+    from pocketpaw_ee.paw_bar.concierge_store import cached_store
+
+    try:
+        return await cached_store(str(getattr(site, "id", "")), url, fetch=fetch)
+    except Exception as exc:  # noqa: BLE001 — no store is a turn without one
+        logger.warning("concierge: the store could not be read (%s)", type(exc).__name__)
+        return None
+
+
 def frame_for(site: Any, settings: Any = None) -> str:
     """The frame constant for this site: ``FRAME_DEMO`` on the ripple profile
     (``ui_profile``, ops sites only), whatever its doc-code, lead-capture and
@@ -1027,7 +1046,7 @@ def _source_items(
 # a catalog name or the visitor cannot close a block early and write "outside" it.
 _BLOCK_TAG_RE = re.compile(
     r"<\s*/?\s*(knowledge|item|catalog|history|visitor-message|owner-settings|site-pages|"
-    r"page-tools|page)\b",
+    r"page-tools|store-menu|page)\b",
     re.IGNORECASE,
 )
 
@@ -1421,8 +1440,9 @@ _RIPPLE_RULES = (
     "primitives; a data widget card is often one node.",
     "   - Match the card to the answer. When a data widget fits, the card is that one "
     "widget holding only data; it lays out, sums and charts everything itself. A trip "
-    "is an itinerary. A menu or an order is a menu-order: items by product_id (and "
-    "name), plus featured and preset; the server fills the rest. A booking is a "
+    "is an itinerary. A menu or an order is a menu-order: items by product_id from "
+    "<store-menu> (and name), plus featured and preset; the server fills the rest. A "
+    "booking is a "
     "booking: write only preferred {date, after} and party; the server fills services "
     "and slots. A meal plan is a meal-plan, one dish a recipe, a workout an "
     "interval-workout, study cards a flashcard-deck. Savings or growth is a "
@@ -1724,6 +1744,28 @@ def _page_block(page: PageContext) -> str:
     return _data_block(lines)
 
 
+def _store_menu_block(storefront: Any) -> str:
+    """The store's menu as data, one product per line (id: name, price, kind,
+    tags; no photos or options), plus today's date in the store's timezone when it
+    takes bookings, so the model can write product_ids and a preferred date."""
+    products = getattr(storefront, "products", None)
+    if not products:
+        return ""
+    lines = [
+        "<store-menu>",
+        f"The store's menu (prices in {storefront.currency}). Write these product ids in "
+        "a menu-order or comparison-layout; the server fills prices, photos and options.",
+    ]
+    for pid, item in products.items():
+        facts = [f"{item['price']:.2f}", item.get("kind", ""), *item.get("tags", ())]
+        lines.append(f"- {pid}: {item['name']}, {', '.join(f for f in facts if f)}")
+    if storefront.services:
+        zone = f" ({storefront.tz})" if storefront.tz else ""
+        lines.append(f"Bookings: today is {storefront.today}{zone}; slots for the next 7 days.")
+    lines.append("</store-menu>")
+    return _data_block(lines)
+
+
 def build_prompt(
     items: Sequence[KnowledgeItem],
     widget: Any,
@@ -1735,6 +1777,7 @@ def build_prompt(
     catalog: Sequence[Any] = (),
     tools: Sequence[Any] = (),
     profile: Any = None,
+    storefront: Any = None,
 ) -> str:
     """The user half of the request: the owner's guided fields (when any are set),
     then tagged data blocks in the PRD's fixed order (page, knowledge, catalog and
@@ -1744,7 +1787,9 @@ def build_prompt(
     the turn's ``catalog_for_turn`` items. A site with page actions on also gets
     the <site-pages> block, after the catalog, and, when ``tools`` (the request's
     ``page.tools``) has a tool ``action_spec.valid_tools`` keeps, <page-tools>
-    after it. ``profile`` is the turn's ``ui_profile`` (else read from ``site``)."""
+    after it. ``profile`` is the turn's ``ui_profile`` (else read from ``site``).
+    A ``storefront`` (``storefront_for_turn``) whose menu answered adds
+    <store-menu> right after the catalog."""
     from pocketpaw_ee.paw_bar.concierge_prompt import render_owner_block
 
     owner = render_owner_block(site) if site is not None else ""
@@ -1762,6 +1807,9 @@ def build_prompt(
     )
     if catalog_block:
         blocks.append(catalog_block)
+    menu = _store_menu_block(storefront)
+    if menu:
+        blocks.append(menu)
     if site is not None and page_actions_on(site):
         from pocketpaw_ee.paw_bar.action_spec import valid_tools
 
@@ -2134,9 +2182,12 @@ class FenceFilter:
         action: Any = None,
         profile: Any = None,
         stream_cards: bool = False,
+        storefront: Any = None,
     ) -> None:
         from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE
 
+        # The turn's concierge_store.StoreData (None: no store); fills store widgets.
+        self._storefront = storefront
         self._stream_cards = stream_cards is True
         self._cards = 0
         self._card_id = ""  # the open streamed card, "" when none
@@ -2285,6 +2336,7 @@ class FenceFilter:
                 verbs=self._verbs,
                 lead_capture=self._lead_capture,
                 profile=self._profile,
+                storefront=self._storefront,
             ),
             card_id,
         )
@@ -2335,6 +2387,7 @@ class FenceFilter:
                     verbs=self._verbs,
                     lead_capture=self._lead_capture,
                     profile=self._profile,
+                    storefront=self._storefront,
                 ),
                 card_id,
             )
@@ -2399,11 +2452,13 @@ def _fence_filter_for(
     action: Any = None,
     profile: Any = None,
     stream_cards: bool = False,
+    storefront: Any = None,
 ) -> FenceFilter:
     """A filter hydrating cards from this widget's catalog in ``store`` and its
     declared verbs, and grounding code in ``knowledge`` when the site allows
     documentation code. No store (or no widget id) hydrates nothing. ``action``
-    is the page-action validator, None when the site has page actions off."""
+    is the page-action validator, None when the site has page actions off.
+    ``storefront`` (``storefront_for_turn``) fills the ripple store widgets."""
     spec = getattr(widget, "spec", None)
     widget_id = str(getattr(widget, "id", "") or "")
     lookup = None
@@ -2422,6 +2477,7 @@ def _fence_filter_for(
         action=action,
         profile=profile,
         stream_cards=stream_cards,
+        storefront=storefront,
     )
 
 
@@ -2714,11 +2770,13 @@ async def run_concierge_v2(
         # The search and the page's own article are two kb reads, and the catalog
         # a SQLite one; run them together.
         # The model the owner picked on the concierge agent rides along (memoized).
-        retrieved, page_ctx, catalog, model_spec = await asyncio.gather(
+        # The ripple store (menu, services, slots) rides along, cached per site.
+        retrieved, page_ctx, catalog, model_spec, storefront = await asyncio.gather(
             retrieve(site, query, agent_id=agent_id or None, k=_top_k(budget)),
             _with_page_article(page_ctx, site, query=query, budget=budget),
             catalog_for_turn(store, widget, query, page_ctx),
             _turn_model_spec(settings, widget, site, workspace_id),
+            storefront_for_turn(site, settings),
         )
         retrieved, lead = await _with_page_siblings(
             retrieved, site, page_ctx, budget=budget, message=message
@@ -2735,6 +2793,7 @@ async def run_concierge_v2(
             catalog=catalog,
             tools=declared,
             profile=profile,
+            storefront=storefront,
         )
         model = _build_model(settings, model_spec)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
@@ -2762,6 +2821,7 @@ async def run_concierge_v2(
                 action=_action_renderer(site, page_ctx, catalog, declared),
                 profile=profile,
                 stream_cards=profile.name == "ripple",
+                storefront=storefront,
             )
 
         # Spend attribution: the proxy's spend row names the site and the widget.
