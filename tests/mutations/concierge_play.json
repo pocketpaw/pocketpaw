@@ -306,10 +306,10 @@
     ]
   },
   {
-    "label": "PLAY-35: the quiz aliases are not renamed",
+    "label": "PLAY-35: an alias is not renamed",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            value[\"type\"] = kind = \"quiz\"",
-    "replace": "            pass",
+    "find": "            value[\"type\"] = canonical\n",
+    "replace": "",
     "tests": [
       "tests/cloud/test_paw_bar_play_widgets.py"
     ]
@@ -443,8 +443,8 @@
   {
     "label": "PLAY-50: the rules drop the game mapping",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    \"A game is a memory-match (pairs), word-guess (a hidden word) or quiz (trivia \"\n    \"with explanations); tracking habits, a habit-tracker. A small tool (a converter) \"",
-    "replace": "    \"A small tool (a converter) \"",
+    "find": "    \"A game is a memory-match, word-guess or quiz; tic-tac-toe or connect four \"",
+    "replace": "    \"A game is a memory-match, word-guess or quiz; checkers or connect four \"",
     "tests": [
       "tests/cloud/test_paw_bar_play_widgets.py"
     ]
@@ -481,6 +481,240 @@
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
     "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
     "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\", \"on_complete\"})",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-55: focus-timer checks never run",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"focus-timer\": _check_focus_timer,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-56: board-game checks never run",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"board-game\": _check_board_game,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-57: focus minutes widen",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "FOCUS_MIN = (1, 120)",
+    "replace": "FOCUS_MIN = (0, 121)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-58: break minutes widen",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "BREAK_MIN = (1, 60)",
+    "replace": "BREAK_MIN = (0, 61)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-59: rounds before long widen",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "FOCUS_ROUNDS = (1, 12)",
+    "replace": "FOCUS_ROUNDS = (0, 13)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-60: goal rounds widen",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "FOCUS_GOAL = (1, 24)",
+    "replace": "FOCUS_GOAL = (0, 25)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-61: focus minutes may be fractional",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if props.get(key) is not None and not _is_int(props[key], bounds):",
+    "replace": "        if props.get(key) is not None and not (\n            _is_number(props[key]) and bounds[0] <= props[key] <= bounds[1]\n        ):",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-62: the task cap widens",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "FOCUS_TASK_MAX = 120",
+    "replace": "FOCUS_TASK_MAX = 121",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-63: the task cap counts code points",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_js_len(v) <= FOCUS_TASK_MAX",
+    "replace": "len(v) <= FOCUS_TASK_MAX",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-64: the task may hold an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(\"title\", \"task\"))",
+    "replace": "(\"title\",))",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-65: auto_start_next is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not _optional(props, \"auto_start_next\", lambda v: isinstance(v, bool)):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-66: a focus-timer may take on_complete",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    _play_basics(\"focus-timer\", node, props, None,",
+    "replace": "    _play_basics(\"focus-timer\", node, props, \"on_complete\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-67: a board-game needs no game",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        raise _Reject(\"a board-game without game tic-tac-toe or connect-four\")",
+    "replace": "        game = \"tic-tac-toe\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-68: a player may be either game's mark",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "lambda v: v in BOARD_MARKS[game]",
+    "replace": "lambda v: v in (\"X\", \"O\", \"red\", \"yellow\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-69: first is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not _optional(props, \"first\", lambda v: v in (\"player\", \"computer\")):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-70: difficulty is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not _optional(props, \"difficulty\", lambda v: v in (\"easy\", \"medium\", \"hard\")):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-71: best_of may be any number",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "lambda v: _is_number(v) and v in BOARD_BEST_OF",
+    "replace": "lambda v: _is_number(v)",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-72: best_of may be a bool",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "lambda v: _is_number(v) and v in BOARD_BEST_OF",
+    "replace": "lambda v: v in BOARD_BEST_OF",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-73: an alias does not fill game",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                value[\"props\"] = props = {**props, \"game\": kind}",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-74: an alias overwrites a given game",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if canonical == \"board-game\" and \"game\" not in {*value, *props}:",
+    "replace": "if canonical == \"board-game\":",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-75: a data row by an alias name is renamed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return len(value) > 1 and all(k in known or _is_handler_key(k) for k in value)",
+    "replace": "    return len(value) > 1",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-76: the pomodoro aliases are gone",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"pomodoro\": \"focus-timer\",\n    \"pomodoro-timer\": \"focus-timer\",\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-77: board-game is not typed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    \"board-game\": frozenset({\"game\", \"title\", \"player\", \"first\", \"difficulty\", \"best_of\"}),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-78: a typed line recaps its row shapes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        text = _SHAPE_RECAP.sub(r\"\\1\", text)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-79: a recap with a note is cut too",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_SHAPE_RECAP = re.compile(r\"\\b(\\w+)\\[\\{[^{}()\\[\\]]*\\}\\]\")",
+    "replace": "_SHAPE_RECAP = re.compile(r\"\\b(\\w+)\\[\\{[^{}\\[\\]]*\\}\\]\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
+  },
+  {
+    "label": "PLAY-80: the rules drop the focus-timer mapping",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"habit-tracker; a focus or pomodoro timer, a focus-timer. A small tool (a converter) \"",
+    "replace": "\"habit-tracker; a pomodoro, a timer. A small tool (a converter) \"",
     "tests": [
       "tests/cloud/test_paw_bar_play_widgets.py"
     ]

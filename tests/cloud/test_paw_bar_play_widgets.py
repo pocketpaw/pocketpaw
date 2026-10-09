@@ -1,9 +1,11 @@
-# tests/cloud/test_paw_bar_play_widgets.py: ripple's games, habit tracker and
-# illustration notes on the ripple concierge profile.
+# tests/cloud/test_paw_bar_play_widgets.py: ripple's games, habit tracker, focus timer
+# and illustration notes on the ripple concierge profile.
 #
-# memory-match, word-guess, quiz (also sent as ``trivia`` / ``trivia-quiz``, which
-# the lift renames to quiz) and habit-tracker hold only literal data: plain text, finite
-# numbers, the caps in card_spec, and no handler but a game's ``on_complete``. An
+# memory-match, word-guess, quiz, board-game, habit-tracker and focus-timer hold only
+# literal data: plain text, finite numbers, the caps in card_spec, and no handler but a
+# game's ``on_complete``. A node written under an alias ripple's chat allowlist refuses
+# (``trivia``, ``pomodoro``, ``tic-tac-toe``...) is renamed by the lift, a board-game
+# alias filling a missing ``game``; a data row by such a name stays data. An
 # illustration may carry up to 8 ``annotations``, each pinned on an svg id the widget's
 # rebuild keeps (``svg_ids``) or on a point, and a node-level ``on_select`` that may
 # ask; a game's on_complete never may (a quiz timer can end a run unattended), and
@@ -91,6 +93,32 @@ def _habits(**props) -> dict:
     return {"type": "habit-tracker", "props": {**base, **props}, "bind": "{state.habits}"}
 
 
+def _focus(**props) -> dict:
+    base = {
+        "title": "Deep work",
+        "focus_min": 50,
+        "short_break_min": 10,
+        "long_break_min": 30,
+        "rounds_before_long": 3,
+        "goal_rounds": 6,
+        "task": "Draft the report",
+        "auto_start_next": True,
+    }
+    return {"type": "focus-timer", "props": {**base, **props}, "bind": "{state.focus}"}
+
+
+def _board(**props) -> dict:
+    base = {
+        "game": "tic-tac-toe",
+        "title": "Beat me",
+        "player": "O",
+        "first": "computer",
+        "difficulty": "hard",
+        "best_of": 3,
+    }
+    return {"type": "board-game", "props": {**base, **props}, "bind": "{state.game}"}
+
+
 def _illustration(annotations, svg: str = SVG, **node) -> dict:
     props = {"svg": svg, "title": "A box", "annotations": annotations}
     return {"type": "illustration", "props": props, **node}
@@ -113,6 +141,12 @@ ASK = {"action": "emit", "target": "ask", "value": {"text": "Tell me about the b
         {**_quiz(), "on_complete": DONE},
         _quiz(questions=[_question(image="/img/planet.png")] * 12),
         _habits(),
+        _focus(),
+        {"type": "focus-timer", "bind": "{state.focus}"},
+        _focus(focus_min=1, short_break_min=60, long_break_min=1, goal_rounds=24, task="x" * 120),
+        {**_board(), "on_complete": DONE},
+        _board(game="connect-four", player="yellow", best_of=5, difficulty="easy"),
+        {"type": "board-game", "props": {"game": "connect-four"}},
         _memory(pairs=[{"a": str(i), "b": str(i)} for i in range(12)]),
         _illustration([NOTE, {"id": "b", "label": "Corner", "note": "", "at": [0, 100.5]}]),
         _illustration([{**NOTE, "target": "group"}], on_select=ASK),
@@ -126,7 +160,7 @@ def test_each_play_card_passes(ui):
 
 
 def test_the_cards_go_out_as_written():
-    for ui in (_memory(), _word(), _quiz(), _habits(), _illustration([NOTE])):
+    for ui in (_memory(), _word(), _quiz(), _habits(), _focus(), _board(), _illustration([NOTE])):
         assert _sent(copy.deepcopy(ui)) == ui
 
 
@@ -227,6 +261,48 @@ REFUSED: list[tuple[str, dict]] = [
     ("a seed list", _habits(seed=[0, 1])),
     ("a seed too long", _habits(seed={"read": [0] * 29})),
     ("an on_complete on habit-tracker", {**_habits(), "on_complete": DONE}),
+    # focus-timer
+    ("focus of 0 minutes", _focus(focus_min=0)),
+    ("focus of 121 minutes", _focus(focus_min=121)),
+    ("focus of 25.5 minutes", _focus(focus_min=25.5)),
+    ("focus minutes as text", _focus(focus_min="25")),
+    ("focus minutes from state", _focus(focus_min="{state.m}")),
+    ("a bool focus", _focus(focus_min=True)),
+    ("a 61-minute short break", _focus(short_break_min=61)),
+    ("a 0-minute short break", _focus(short_break_min=0)),
+    ("a 61-minute long break", _focus(long_break_min=61)),
+    ("an infinite long break", _focus(long_break_min=float("inf"))),
+    ("13 rounds before long", _focus(rounds_before_long=13)),
+    ("0 rounds before long", _focus(rounds_before_long=0)),
+    ("a goal of 25 rounds", _focus(goal_rounds=25)),
+    ("a goal of 0 rounds", _focus(goal_rounds=0)),
+    ("a task over 120", _focus(task="x" * 121)),
+    ("a task of emoji over 120 in the browser", _focus(task="\U0001f600" * 61)),
+    ("a task expression", _focus(task="{state.task}")),
+    ("a numeric task", _focus(task=3)),
+    ("a focus title expression", _focus(title="{state.t}")),
+    ("auto_start_next as text", _focus(auto_start_next="yes")),
+    ("an on_complete on focus-timer", {**_focus(), "on_complete": DONE}),
+    ("an on_change on focus-timer", {**_focus(), "on_change": DONE}),
+    # board-game
+    ("no game", {"type": "board-game", "props": {"difficulty": "easy"}}),
+    ("an unknown game", _board(game="chess")),
+    ("a game from state", _board(game="{state.g}")),
+    ("a game list", _board(game=["tic-tac-toe"])),
+    ("red on tic-tac-toe", _board(player="red")),
+    ("X on connect-four", _board(game="connect-four", player="X")),
+    ("a lowercase mark", _board(player="x")),
+    ("a player list", _board(player=["X"])),
+    ("first as anyone", _board(first="anyone")),
+    ("difficulty impossible", _board(difficulty="impossible")),
+    ("best of 2", _board(best_of=2)),
+    ("best of 7", _board(best_of=7)),
+    ("best of true", _board(best_of=True)),
+    ("best of as text", _board(best_of="3")),
+    ("a board title expression", _board(title="{state.t}")),
+    ("an on_click on board-game", {**_board(), "on_click": DONE}),
+    ("a board-game on_complete that asks", {**_board(), "on_complete": ASK}),
+    ("a board-game on_complete list that asks", {**_board(), "on_complete": [DONE, ASK]}),
     # illustration
     ("an on_click on an illustration", _illustration([NOTE], on_click=ASK)),
     (
@@ -324,10 +400,42 @@ def test_a_quiz_alias_is_checked_and_sent_as_a_quiz(alias):
     assert _ripple(bad) is None
 
 
-def test_a_data_row_named_trivia_stays_data():
-    rows = [{"type": "trivia", "label": "Pub quiz"}]
-    ui = {"type": "table", "props": {"rows": rows, "columns": [{"accessorKey": "label"}]}}
-    assert _sent(ui)["props"]["rows"] == rows
+@pytest.mark.parametrize("alias", ["pomodoro", "pomodoro-timer"])
+def test_a_pomodoro_is_checked_and_sent_as_a_focus_timer(alias):
+    assert _sent({**_focus(), "type": alias}) == _focus()
+    assert _ripple({**_focus(focus_min=0), "type": alias}) is None
+
+
+@pytest.mark.parametrize("game", ["tic-tac-toe", "connect-four"])
+def test_a_board_game_alias_is_sent_as_a_board_game_with_its_game(game):
+    sent = _sent({"type": game, "props": {"difficulty": "hard"}, "bind": "{state.g}"})
+    assert sent == {
+        "type": "board-game",
+        "props": {"difficulty": "hard", "game": game},
+        "bind": "{state.g}",
+    }
+    # A flat game is lifted, not overwritten; a given one is kept as written.
+    assert _sent({"type": game, "game": "connect-four"})["props"] == {"game": "connect-four"}
+    assert _sent({**_board(), "type": game})["props"]["game"] == "tic-tac-toe"
+
+
+def test_an_alias_game_is_checked_against_the_player():
+    assert _ripple({"type": "connect-four", "props": {"player": "X"}}) is None
+    assert _ripple({"type": "tic-tac-toe", "props": {"player": "X"}}) is not None
+    assert _ripple({"type": "tic-tac-toe", "player": "red"}) is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"type": "trivia", "label": "Pub quiz"},
+        {"type": "tic-tac-toe", "label": "Board games"},
+        {"type": "pomodoro", "label": "Focus", "minutes": 25},
+    ],
+)
+def test_a_data_row_named_like_an_alias_stays_data(row):
+    ui = {"type": "table", "props": {"rows": [row], "columns": [{"accessorKey": "label"}]}}
+    assert _sent(copy.deepcopy(ui))["props"]["rows"] == [row]
 
 
 @pytest.mark.parametrize(
@@ -338,6 +446,9 @@ def test_a_data_row_named_trivia_stays_data():
         ({"type": "quiz", "title": "Space", "questions": [_question()]}, "questions"),
         ({"type": "trivia", "questions": [_question()]}, "questions"),
         ({"type": "habit-tracker", "habits": _habits()["props"]["habits"]}, "habits"),
+        ({"type": "focus-timer", "focus_min": 45, "task": "Read"}, "focus_min"),
+        ({"type": "pomodoro", "focus_min": 45}, "focus_min"),
+        ({"type": "board-game", "game": "connect-four", "difficulty": "easy"}, "difficulty"),
         (
             {"type": "illustration", "svg": SVG, "title": "Box", "annotations": [NOTE]},
             "annotations",
@@ -376,7 +487,15 @@ def test_the_play_widgets_have_typed_lines():
     lines = _listing()
     fields = {
         w: lines[w][: lines[w].index("}: ") + 1]
-        for w in ("memory-match", "word-guess", "quiz", "habit-tracker", "illustration")
+        for w in (
+            "memory-match",
+            "word-guess",
+            "quiz",
+            "habit-tracker",
+            "focus-timer",
+            "board-game",
+            "illustration",
+        )
     }
     assert fields == {
         "memory-match": "- memory-match {title?, pairs: [{id,a,b}], columns?: number, "
@@ -388,12 +507,22 @@ def test_the_play_widgets_have_typed_lines():
         "habit-tracker": "- habit-tracker {title?, habits: [{id,name,icon?,"
         "target_per_week:number}], week_start?: mon|sun, weeks?: number, "
         "seed?: Record<string,number[]>}",
+        "focus-timer": "- focus-timer {title?, focus_min?: number, short_break_min?: number, "
+        "long_break_min?: number, rounds_before_long?: number, goal_rounds?: number, task?, "
+        "auto_start_next?: boolean}",
+        "board-game": "- board-game {game: tic-tac-toe|connect-four, title?, "
+        "player?: X|O|red|yellow, first?: player|computer, difficulty?: easy|medium|hard, "
+        "best_of?: 1|3|5}",
         "illustration": "- illustration {svg, title, caption?, max_height?, annotations?, "
         "on_select}",
     }
     # Each game's description names its on_complete, so the field list leaves it out.
-    for game in ("memory-match", "word-guess", "quiz"):
+    for game in ("memory-match", "word-guess", "quiz", "board-game"):
         assert "on_complete" in lines[game], game
+    # A pomodoro is a focus-timer now, never a timer.
+    assert "omodoro" not in lines["timer"] and "Pomodoro timer" in lines["focus-timer"]
+    # A row shape the field list gives is not recapped; one with a note stays.
+    assert "habits[{" not in lines["habit-tracker"] and "answer (index)" in lines["quiz"]
 
 
 def test_the_rules_map_games_habits_and_annotations():
@@ -402,10 +531,11 @@ def test_the_rules_map_games_habits_and_annotations():
 
     rule = next(r for r in _RIPPLE_RULES if "Match the card to the answer" in r)
     assert (
-        "A game is a memory-match (pairs), word-guess (a hidden word) or quiz (trivia "
-        "with explanations); tracking habits, a habit-tracker." in rule
+        "A game is a memory-match, word-guess or quiz; tic-tac-toe or connect four "
+        "against the computer, a board-game (game, difficulty). Tracking habits is a "
+        "habit-tracker; a focus or pomodoro timer, a focus-timer." in rule
     )
-    assert "(a converter)" in rule and "a quiz)" not in rule
+    assert "(a converter)" in rule and "a quiz)" not in rule and "is a timer" not in rule
     art = next(r for r in _RIPPLE_RULES if "add an illustration" in r)
     assert "Up to 8 annotations [{id, label (at most 40 chars), note (at most 280), target}]" in art
     assert "give each drawing part an id and point at it" in art
