@@ -2,72 +2,45 @@
 #
 # A site whose ``Site.concierge_runtime`` is "v2" answers visitors here. POST
 # /paw-bar/chat runs every public gate first, then ``run_concierge_v2`` writes the
-# turn's ``ChatRunDoc``, retrieves knowledge and makes ONE streamed pydantic_ai
-# call with NO tools, toolsets or capabilities, relaying ``chunk`` / ``sources`` /
+# turn's ``ChatRunDoc``, retrieves knowledge and makes ONE streamed pydantic_ai call
+# with NO tools, toolsets or capabilities, relaying ``chunk`` / ``sources`` /
 # ``stream_end`` / ``error`` frames as the legacy relay does, plus at most one
 # ``action`` frame ({do, to?, target?, name?, args?, label}) before ``stream_end``.
 #
-# Instructions: one of nine constants picked by ``frame_for(site)`` (doc-code
-# rule 2, lead rule and page-action rule in rule 5; ``FRAME_DEMO`` on the ripple
-# profile), the cache-stable prefix;
-# nothing an owner or visitor writes reaches them. Data (``build_prompt``):
-# <owner-settings>, <page>, <knowledge>, <catalog>, <site-pages> (page actions on:
-# the fence forms, the pages ``navigate`` may name, and the tool rule when the
-# page declared a valid tool), <page-tools> (page actions on and at least one of
-# the request's ``page.tools`` through ``action_spec.valid_tools``), <history>,
-# <visitor-message>. Those tags are neutralized inside every block.
+# Instructions: one of the frame constants picked by ``frame_for(site)`` (the
+# cache-stable prefix; no owner or visitor text reaches it). Data (``build_prompt``):
+# <owner-settings>, <page>, <knowledge>, <catalog>, <store-menu>, <site-pages>,
+# <page-tools>, <history>, <visitor-message>, with our tags neutralized inside each.
+# Model (``_turn_model_spec``): the provider + model the owner picked on the
+# concierge agent, else ``pawbar_concierge_model``, else the backend default; never
+# the agent's runtime, so the call stays tool-free.
 #
-# Model (``_turn_model_spec``, memoized ``_AGENT_MODEL_TTL_S`` per agent): the
-# provider + model the owner picked on the concierge agent (the widget's bound one,
-# else ``concierge-<site_id>``), mapped by ``_agent_spec`` (a blank model on a
-# non-pydantic_ai backend is that backend's own default); else
-# ``pawbar_concierge_model``; else the backend default. Never the agent's runtime:
-# the call stays tool-free. That one spec drives the build, proxy fields and usage.
+# Knowledge (``retrieve`` is a FROZEN SEAM) fills one per-site budget
+# (``knowledge_chars``, ``select_knowledge``): pinned FAQs, the visitor's page
+# article (or, when a hit off that page carries the message's own words, that
+# page first: ``_with_page_siblings``), then KB hits, each cut to what is left.
+# ``resolve_page`` accepts the request's page only on an allowed origin; <catalog>
+# comes per turn from ``catalog_for_turn`` (small catalogs whole, else FTS hits).
 #
-# Knowledge (``retrieve`` is a FROZEN SEAM) goes in one per-site budget
-# (``knowledge_chars``, ``select_knowledge``), items in order, each cut to
-# min(``_ITEM_CHARS``, what is left): pinned FAQs, then the visitor's page
-# article, then KB hits. On a sectioned visitor page the question beats the
-# page: when a hit off that page carries the message's own words (the lead,
-# ``_with_page_siblings``), it leads with the rest of its page, then the
-# visitor's matching sections in a quarter of the budget, then the other hits;
-# a message naming nothing ("how much is this?") keeps the page first. A KB
-# hit's body comes from kb-go's context entries; a section is cited at the page
-# url plus the heading's anchor.
-# ``resolve_page`` accepts the request's page only on an allowed origin;
-# ``with_page_product`` finds its catalog item. <catalog> comes per turn from
-# ``catalog_for_turn``: a small catalog whole, else the page's product plus FTS
-# hits, with a fallback when the search is weak.
+# Output passes ``FenceFilter``: a ```pawbar-card is validated and hydrated
+# (``card_spec.render_card``); any other code fence becomes ``CODE_REPLACEMENT``
+# unless doc code is allowed and ``is_grounded_code`` finds it in this turn's
+# knowledge; the first ```pawbar-action goes through ``action_spec.render_action``.
+# A reply cut off at ``pawbar_concierge_max_tokens`` keeps what streamed; a visitor
+# asking for a person always gets a route to the team (``contact_route``); a
+# transient failure before any text is retried once; an unanswerable turn (spend
+# cap, quota, provider error) ends with ``degrade_reply``. A site's
+# ``concierge_daily_spend_cap`` only lowers the global cap, except on an ops site
+# (``is_ops_site``: ``pawbar_ops_site_ids``), where it replaces it.
 #
-# Output passes ``FenceFilter``: a ```pawbar-card is validated and hydrated from
-# the catalog store; any other code fence becomes ``CODE_REPLACEMENT`` unless doc
-# code is allowed and ``is_grounded_code`` finds it in this turn's knowledge. The
-# first ```pawbar-action goes through ``action_spec.render_action`` (known pages,
-# bounded targets, a ``tool`` only by a declared name with schema-checked args)
-# into the ``action`` frame; others, and all with page actions off, are dropped.
-# The model only writes a fence; the page runs a declared tool, after the
-# visitor's confirm in the bar unless the page opted out.
-#
-# A reply cut off at ``pawbar_concierge_max_tokens`` keeps what streamed. A
-# visitor asking for a person always gets a route to the team
-# (``contact_route.contact_reply``) when the reply has no valid lead card or the
-# model failed. A transient failure before any text is retried once; a turn that
-# still cannot be answered (spend cap, quota, provider error) ends with
-# ``degrade_reply`` (one ``unavailable`` frame, then ``stream_end``). The owner
-# hears about the daily cap once per site per UTC day. The cap is the global one;
-# a site's ``concierge_daily_spend_cap`` only lowers it (0 pauses the site), except
-# on an ops site (``is_ops_site``: ``pawbar_ops_site_ids``), where it replaces it.
-#
-# Card profile (``ui_profile``, read once per turn from
-# ``Site.concierge_ui_profile``): "pawbar" (every site by default) is all of the
-# above. "ripple", honoured only on an ops site, lets cards use the Ripple catalog
-# less its page chrome under ``card_spec.RIPPLE_PROFILE``'s bounds, raises the
-# reply cap to ``_RIPPLE_MAX_TOKENS``, always writes the Ripple cards paragraph in
-# <catalog> (even with no catalog, actions or lead capture) and streams each card as
-# ``card.*`` frames (``FenceFilter(stream_cards=True)``), never inside a chunk.
-# Its frame is ``FRAME_DEMO`` whatever the site's switches: the Ripple landing's
-# demo assistant builds a card for any everyday ask instead of answering only
-# from the site's facts.
+# Card profile (``ui_profile``, read every turn): "ripple" counts only on an ops
+# site. It uses ``card_spec.RIPPLE_PROFILE``, raises the reply cap to
+# ``_RIPPLE_MAX_TOKENS``, always writes the Ripple cards paragraph, streams each card
+# as ``card.*`` frames (``FenceFilter(stream_cards=True)``) and uses ``FRAME_DEMO``.
+# A ripple site with a ``concierge_store_url`` gets its store read once per turn
+# (``storefront_for_turn``, ``concierge_store``, cached per site) alongside
+# retrieval: its menu becomes <store-menu> and the same data fills menu-order,
+# booking and comparison cards in ``card.final``.
 
 from __future__ import annotations
 

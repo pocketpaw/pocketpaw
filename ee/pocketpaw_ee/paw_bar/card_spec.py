@@ -1,47 +1,42 @@
 # ee/pocketpaw_ee/paw_bar/card_spec.py — bound and hydrate the cards a v2 concierge writes.
 #
-# A v2 reply can carry a generated UI as a ```pawbar-card fence whose JSON has a
-# ``ui`` node tree (a Ripple spec). paw-bar draws it on a customer's page, so the
-# server checks it before any of it leaves:
+# A v2 reply can carry a ```pawbar-card fence whose JSON has a ``ui`` node tree (a
+# Ripple spec). It is drawn on a customer's page, so the server checks it first.
+# Every rule reads a ``CardProfile``:
 #
-#   * the same bounds paw-bar's lib/spec-card.ts applies: 32,000 chars, 80 nodes,
-#     depth 8 (root is 1), ``children`` / ``else_children`` lists, ``state`` an
-#     object, so a card the server passes is never one the client refuses;
-#   * every node ``type`` is a widget in the vendored pawbar-manifest.json (minus
-#     ``DEFERRED_WIDGETS``), every event action one the manifest lists, ``emit``
-#     only to the add_to_cart / checkout host events the widget declares;
-#   * form prefill ``value``s are strings of at most ``FORM_PREFILL_MAX``; a
-#     ``send_to_team`` form (the lead card; the legacy ``{"kind": "form"}`` too)
-#     passes only with ``lead_capture`` on, fields from ``LEAD_FIELDS`` and an
-#     email or phone field;
-#   * product data comes only from the site catalog: a ``product-card``'s ``ids``
-#     become ``items``, unknown ids dropped, an empty product-card dropped; a
-#     legacy ``{"kind": "product"}`` card is repriced the same way, other legacy
-#     cards pass through. A body is parsed as paw-bar parses it (``_JS_SPACE``
-#     trimmed); one that is not JSON, or holds NaN / Infinity, is dropped.
+#   * ``PAWBAR_PROFILE`` (the default) mirrors paw-bar's lib/spec-card.ts: 32,000
+#     chars, 80 nodes, depth 8, widgets from the vendored pawbar-manifest.json
+#     (minus ``DEFERRED_WIDGETS``), event actions the manifest lists, ``emit`` only
+#     to the add_to_cart / checkout host events the widget declares, form prefill
+#     values of at most ``FORM_PREFILL_MAX``, and a ``send_to_team`` lead form only
+#     with ``lead_capture`` on (fields from ``LEAD_FIELDS``, an email or phone).
+#     A body is parsed as paw-bar parses it (``_JS_SPACE`` trimmed); one that is not
+#     JSON, or holds NaN / Infinity, is dropped.
+#   * ``RIPPLE_PROFILE`` (``concierge_ui_profile`` "ripple", ops sites) takes
+#     ripple-manifest.json minus ``RIPPLE_DEFERRED`` and page chrome, lists
+#     ``RIPPLE_DATA_WIDGETS`` with typed props, has 400 nodes / depth 16 / 64,000
+#     chars and is ``strict``: ``_check_strict`` walks all of ``ui`` and ``state``
+#     iteratively (nodes in props are nodes; any action anywhere must be allowed;
+#     resolved slots hold literal actions, or a literal node where the engine draws
+#     one; URLs are same-site paths or https on ``url_hosts``; no javascript: text;
+#     no repeated JSON key). A ``ui`` with a
+#     flow field is a flow (at most ``MAX_FLOW_STEPS`` steps, one node budget,
+#     ``FLOW_EVENTS``, a chat-only ``onComplete``), and ``emit ask`` / ``flow.submit``
+#     fire only from an explicit visitor action (``ASK_HANDLERS``).
 #
-# Every rule reads a ``CardProfile``. ``PAWBAR_PROFILE`` (the default) is the
-# paw-bar set and bounds above. ``RIPPLE_PROFILE`` (``concierge_ui_profile``
-# "ripple") takes ripple-manifest.json minus ``RIPPLE_DEFERRED`` and page chrome
-# (``RIPPLE_CHROME``), lists ``RIPPLE_DATA_WIDGETS`` with typed props, has 400
-# nodes / depth 16 / 64,000 chars, and is ``strict``: ``_check_strict`` walks all of ``ui`` and
-# ``state`` iteratively, depth-capped. A node in a prop is a node; an action under
-# a handler key, or named anywhere, must be allowed (an audit-log's own entries
-# are data in ``ui`` only; ``state`` holds no action); a slot a widget resolves
-# before it fires (``_check_resolved_prop``) holds literal action objects, or a
-# literal node where the engine draws one; a ``follow-up``'s ``event`` is a declared
-# host event; a form has no submit target; a URL key holds a same-site path or an
-# https URL on ``url_hosts`` (none); no text holds a javascript: link; a repeated
-# JSON key is refused. Two shapes are ripple-only. A ``ui`` carrying a flow field
-# (Ripple's chain) is a flow: at most
-# ``MAX_FLOW_STEPS`` steps keyed from ``FLOW_STEP_KEYS``, each step's ``ui`` a root
-# node, one node budget for the card, ``emit`` to ``FLOW_EVENTS`` allowed,
-# ``onComplete`` only a plain-text chat message, on a step only. And ``emit ask``
-# (plain ``{text}``, at most ``ASK_MAX``) sends a visitor message, as does
-# ``flow.submit``, only from an explicit visitor action (``ASK_HANDLERS``: the
-# outermost handler key decides; never ``state``).
-# ``PartialScan`` runs the string checks and the repeated-key check on a body
-# still streaming, flagging only what the finished card is sure to fail.
+# Hydration runs after the checks and is not checked again. Product data comes only
+# from the site catalog: a ``product-card``'s ``ids`` become ``items`` (unknown ids
+# dropped, an empty card dropped; a legacy ``{"kind": "product"}`` card is repriced
+# the same way, other legacy cards pass through). On the ripple profile
+# ``_fill_store`` fills menu-order, booking and comparison-layout nodes at any depth
+# from the site's store (``concierge_store.StoreData``, already cleaned): store
+# prices, photos, option groups, services and slots replace the model's, an
+# unknown product id drops its item, and the one host event each may fire
+# (``SERVER_WIRED``: checkout, ripple's ``book``) is attached only when it can
+# fire. A model-written handler on those widgets is refused, so ``book`` never
+# comes from the model. ``card_ids`` / ``has_lead_form`` read a body for the
+# runner; ``PartialScan`` runs the string and repeated-key checks on a body still
+# streaming, flagging only what the finished card is sure to fail.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar; ripple-manifest.json
 # from @ripple-ui/svelte's manifest minus examples (``.source`` beside it says

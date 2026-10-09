@@ -29,17 +29,16 @@
 # OWNER (session-authed; reads gate on ``paw_bar.read``, mutations on
 # ``paw_bar.manage``, both bound to the session workspace; another workspace's id is a
 # 404): /paw-bar/admin/site/{id}/ settings (partial PATCH of the concierge_* switches,
-# guided fields and visitor options; hiding the "Powered by" line is a 402 unless the
-# site is entitled to remove branding; ``embed_snippet`` and ``actions_snippet`` only to
-# a caller who can read the site's pocket), concierge create/delete (the only path that
-# creates one), overview, stats (runs priced at the time they ran, via metering),
-# conversations (list, transcript, PATCH, reply = type-to-takeover), decisions,
-# handoffs, knowledge read/sync, preview-frame, preview-config (a draft rendered to the
-# frame config, writes nothing) and widget spec; plus the bulk POST
-# /paw-bar/admin/sites/conversations. Tenancy runs at two gates: the Site is loaded
-# workspace-scoped, then its widget is resolved from ``Site.pocket_id`` (an empty
-# pocket_id resolves none). Widget CRUD (/paw-bar/widgets...) takes the same role gates
-# or the widget's owner token; list/read return ``PawBarWidgetPublic``.
+# guided fields and visitor options; the ripple profile, a store URL and a raised
+# spend cap are ops-site only (403); hiding "Powered by" is a 402 unless entitled;
+# ``embed_snippet`` / ``actions_snippet`` only to a reader of the site's pocket),
+# concierge create/delete (the only path that creates one), overview, stats (priced
+# via metering), conversations (list, transcript, PATCH, reply = type-to-takeover),
+# decisions, handoffs, knowledge read/sync, preview-frame, preview-config (writes
+# nothing), widget spec, and the bulk POST /paw-bar/admin/sites/conversations. The
+# Site is loaded workspace-scoped, then its widget resolved from ``Site.pocket_id``
+# (an empty one resolves none). Widget CRUD (/paw-bar/widgets...) takes the same role
+# gates or the widget's owner token; list/read return ``PawBarWidgetPublic``.
 #
 # Invariants: one definition of "this visitor's turns" (``_concierge_runs_for_visitor``)
 # and of which conversation a run belongs to (``_conversation_of_run`` /
