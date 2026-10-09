@@ -1686,6 +1686,30 @@ def _ask(text: str = "Add a rest day", key: str = "on_click") -> dict:
     }
 
 
+_ASKED = _ask()["on_click"]
+# Handlers that fire without an explicit visitor action, or are not the composite
+# button list keyed exactly ``actions``.
+_NOT_ASK_HANDLERS = (
+    "on_focus",
+    "on_blur",
+    "on_input",
+    "on_change",
+    "on_complete",
+    "on_mount",
+    "on_error",
+    "on_flip",
+    "finishActions",
+    "nextActions",
+    "refreshActions",
+    "toggleActions",
+    "submitActions",
+)
+
+
+def _asks_from(key: str) -> dict:
+    return {"ui": {"type": "flex", "props": {key: _ASKED}}}
+
+
 # The accepted shape: a step root (flow fields on ``ui``), each step's ``ui`` a
 # node tree, ``chain_map`` branching on the pick, ``chain`` next, and a terminal
 # ``onComplete`` that sends one chat message.
@@ -1857,11 +1881,24 @@ _FLOW_REFUSALS = [
         {"ui": {"type": "button", "on_click": {"action": "emit", "target": "ask"}}},
         "an ask with no value",
     ),
+    # ask only on an explicit visitor action: every other handler is refused.
+    *[(_asks_from(key), f"an ask in {key}") for key in _NOT_ASK_HANDLERS],
     (
-        {"ui": {"type": "wizard-layout", "props": {"finishActions": _ask()["on_click"]}}},
-        "an ask outside an on_* handler",
+        {"ui": {"type": "input", "props": {"autofocus": True}, "on_focus": _ASKED}},
+        "an ask in on_focus with autofocus (fires on mount)",
     ),
-    ({"ui": {"type": "text"}, "state": {"go": _ask()["on_click"]}}, "an ask in state"),
+    ({"ui": {"type": "input", "props": {"on_input": _ASKED}}}, "an ask in a props on_input"),
+    ({"ui": {"type": "timer", "props": {"minutes": 1}, "on_complete": _ASKED}}, "a timer's ask"),
+    ({"ui": {"type": "wizard-layout", "props": {"finishActions": _ASKED}}}, "a wizard's ask"),
+    (
+        {"ui": {"type": "input", "on_focus": {"action": "flow", "steps": [], "actions": [_ASKED]}}},
+        "an actions list nested in on_focus",
+    ),
+    ({"ui": {"type": "text", "props": {"x": _ASKED}}}, "an ask outside any handler"),
+    ({"ui": {"type": "text"}, "state": {"go": _ASKED}}, "an ask in state"),
+    ({"ui": {"type": "text"}, "state": {"actions": [_ASKED]}}, "an actions list in state"),
+    ({"ui": {"type": "text"}, "state": {"b": _ask()}}, "a button kept in state"),
+    (_flow(2, s2={"form_fields": [{"name": "x", "actions": [_ASKED]}]}), "an ask in form_fields"),
 ]
 
 
@@ -1882,25 +1919,55 @@ def test_fl1_the_step_and_node_bounds_are_inclusive():
     )
 
 
-def test_fl1_an_ask_passes_in_any_on_handler_and_only_on_ripple():
-    from pocketpaw_ee.paw_bar.card_spec import render_card
-
-    in_flow = {
-        "action": "flow",
-        "steps": [{"action": "set", "target": "a", "value": 1}, _ask()["on_click"]],
-    }
-    cards = [
-        {"ui": _ask("x" * 500)},
-        {"ui": {"type": "calendar", "props": {"on_select": _ask()["on_click"]}}},
-        {"ui": {"type": "button", "on_click": in_flow}},
+_IN_FLOW = {"action": "flow", "steps": [{"action": "set", "target": "a", "value": 1}, _ASKED]}
+_IN_BRANCH = {"action": "branch", "if": "1", "then": [_ASKED]}
+# Explicit visitor actions: a click, a submit, a pick, a composite's button list.
+_ASK_PASSES = [
+    ({"ui": _ask("x" * 500)}, "on_click at the cap"),
+    ({"ui": {"type": "button", "props": {"on_click": _ASKED}}}, "a props on_click"),
+    ({"ui": {"type": "button", "on_click": _IN_FLOW}}, "a flow under on_click"),
+    ({"ui": {"type": "button", "on_click": _IN_BRANCH}}, "a branch under on_click"),
+    ({"ui": {"type": "calendar", "props": {"on_select": _ASKED}}}, "on_select"),
+    ({"ui": {"type": "calendar", "on_select": _ASKED}}, "a node's on_select"),
+    (
+        {"ui": {"type": "form", "props": {"fields": [{"name": "q"}]}, "on_submit": _ASKED}},
+        "on_submit",
+    ),
+    (
         {
             "ui": {
-                "type": "button",
-                "on_click": {"action": "branch", "if": "1", "then": [_ask()["on_click"]]},
+                "type": "comparison-layout",
+                "props": {"items": [{"id": "a", "title": "Plan A", "actions": [_ASKED]}]},
             }
         },
-    ]
-    for card in cards:
-        assert _ripple(card) is not None, card
-        assert render_card(_body(card), []) is None  # pawbar has no ask
+        "comparison items[].actions",
+    ),
+    (
+        {
+            "ui": {
+                "type": "entity-detail",
+                "props": {"title": "Sam", "actions": [{"label": "Ask", "actions": _IN_FLOW}]},
+            }
+        },
+        "entity-detail actions[].actions with a flow",
+    ),
+    (
+        {
+            "ui": {
+                "type": "order-status",
+                "props": {"actions": [{"label": "Ask", "actions": [_IN_BRANCH]}]},
+            }
+        },
+        "order-status actions[].actions with a branch",
+    ),
+    (_flow(2, s2={"ui": _ask()}), "an ask in a flow step"),
+]
+
+
+@pytest.mark.parametrize(("card", "why"), _ASK_PASSES, ids=[w for _, w in _ASK_PASSES])
+def test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple(card, why):
+    from pocketpaw_ee.paw_bar.card_spec import render_card
+
+    assert _ripple(card) is not None, why
+    assert render_card(_body(card), []) is None  # pawbar has no ask
     assert render_card(_body({"ui": _ask()}), [], verbs=["checkout"]) is None

@@ -35,7 +35,12 @@ from tests.cloud.test_paw_bar_concierge_v2 import (  # noqa: F401 — fixtures
 )
 from tests.cloud.test_paw_bar_concierge_v2_degrade import _FailingModel
 from tests.cloud.test_paw_bar_concierge_v2_output import _splits
-from tests.cloud.test_paw_bar_ripple_profile import _FLOW_REFUSALS, TRIP_FLOW, _flow
+from tests.cloud.test_paw_bar_ripple_profile import (
+    _ASK_PASSES,
+    _FLOW_REFUSALS,
+    TRIP_FLOW,
+    _flow,
+)
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 _CODE_LINE = "I can't share code here."
@@ -603,6 +608,15 @@ def test_a_streamed_flow_card_is_never_flagged_early_and_ends_final():
             assert not any(scan.feed(ch) for ch in body)
             events = _events(list(_fence(body + "\n")))
             assert events[-1] == ("card.final", {"card_id": "c1", "card": card})
+
+
+@pytest.mark.parametrize(("card", "why"), _ASK_PASSES, ids=[w for _, w in _ASK_PASSES])
+def test_a_streamed_ask_on_a_visitor_action_ends_final(card, why):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, PartialScan
+
+    body, scan = json.dumps(card), PartialScan(RIPPLE_PROFILE)
+    assert not any(scan.feed(ch) for ch in body), why
+    assert _events(list(_fence(body + "\n")))[-1] == ("card.final", {"card_id": "c1", "card": card})
 
 
 @pytest.mark.parametrize(("spec", "why"), _FLOW_REFUSALS, ids=[w for _, w in _FLOW_REFUSALS])

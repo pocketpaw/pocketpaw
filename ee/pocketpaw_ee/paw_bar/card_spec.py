@@ -36,7 +36,8 @@
 # ``MAX_FLOW_STEPS`` steps keyed from ``FLOW_STEP_KEYS``, each step's ``ui`` a root
 # node, one node budget for the card, ``emit`` to ``FLOW_EVENTS`` allowed,
 # ``onComplete`` only a chat message. And ``emit ask`` (``{text}``, at most
-# ``ASK_MAX``) sends a visitor message, from an ``on_*`` handler only.
+# ``ASK_MAX``) sends a visitor message, only from an explicit visitor action
+# (``ASK_HANDLERS``: the outermost handler key decides; never ``state``).
 # ``PartialScan`` runs the string checks and the repeated-key check on a body
 # still streaming, flagging only what the finished card is sure to fail.
 #
@@ -288,6 +289,11 @@ FLOW_EVENTS: tuple[str, ...] = ("flow.next", "flow.back", "flow.forward", "flow.
 # text it, or a flow's chat ``onComplete``, may send.
 ASK_EVENT = "ask"
 ASK_MAX = 500
+# The handler keys an ``ask`` may fire from: a click, a submit, a pick, and a
+# composite's button list (comparison ``items[].actions``, entity-detail
+# ``actions[].actions``). Focus, input, change, timers and the wizard's
+# ``*Actions`` fire without one, so they may not.
+ASK_HANDLERS: frozenset[str] = frozenset({"on_click", "on_submit", "on_select", "actions"})
 # CSS that loads something or runs script. Run on ``_css_text``.
 _CSS_LOADS: tuple[str, ...] = (
     "url(",
@@ -394,8 +400,8 @@ def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, 
 def _check_actions(
     value: Any, events: list[str], allowed: frozenset[str] = SPEC_ACTIONS, ask: bool = False
 ) -> None:
-    """``ask``: an ``emit`` to ``ASK_EVENT`` may pass too (ripple, in an ``on_*``
-    handler), its value exactly ``{"text": <at most ASK_MAX chars>}``."""
+    """``ask``: an ``emit`` to ``ASK_EVENT`` may pass too (ripple, from one of
+    ``ASK_HANDLERS``), its value exactly ``{"text": <at most ASK_MAX chars>}``."""
     for action in value if isinstance(value, list) else [value]:
         if not isinstance(action, dict) or action.get("action") not in allowed:
             raise _Reject("an event runs an action the bar does not honour")
@@ -434,6 +440,15 @@ def _is_handler_key(key: Any) -> bool:
         or key.endswith("Actions")
         or key in ("learn_more", "onRowClick")
     )
+
+
+def _ask_from(ask: bool | None, key: str) -> bool | None:
+    """Whether an ``ask`` may fire below ``key``: None until a handler key is
+    met, then fixed by the OUTERMOST one (an ``actions`` nested in an
+    ``on_focus`` handler stays refused)."""
+    if ask is not None or not _is_handler_key(key):
+        return ask
+    return key in ASK_HANDLERS
 
 
 def _normalized(text: str) -> str:
@@ -541,22 +556,22 @@ def _check_strict(
     """The ``strict`` profile's walk over ``ui`` and ``state`` (see the header).
     Iterative, so no card can exhaust the stack; past ``_MAX_SCAN_LEVELS`` of
     nesting the card is refused. A flow card's steps (``_flow_steps``) share one
-    node budget; ``emit ask`` passes only under an ``on_*`` key."""
+    node budget; ``emit ask`` passes only under one of ``ASK_HANDLERS``."""
     allowed, hosts = profile.actions, profile.url_hosts
     nodes = 0
     ui = spec["ui"]
     flow = any(field in ui for field in _FLOW_FIELDS)
     host_events = events
     events = [*events, *FLOW_EVENTS] if flow else events
-    # (value, json level, node depth, key it sits under, under a handler, under an
-    # on_* key, is a node, is a data row whose "action" is its own, inside a style,
-    # in state)
-    stack: list[tuple[Any, int, int, str, bool, bool, bool, bool, bool, bool]] = (
-        _flow_steps(ui) if flow else [(ui, 1, 1, "", False, False, True, False, False, False)]
+    # (value, json level, node depth, key it sits under, under a handler, may ask
+    # (``_ask_from``; False in state), is a node, is a data row whose "action" is
+    # its own, inside a style, in state)
+    stack: list[tuple[Any, int, int, str, bool, bool | None, bool, bool, bool, bool]] = (
+        _flow_steps(ui) if flow else [(ui, 1, 1, "", False, None, True, False, False, False)]
     )
     stack.append((spec.get("state"), 1, 0, "", False, False, False, False, False, True))
     while stack:
-        value, level, depth, key, handler, on, is_node, data_row, css, in_state = stack.pop()
+        value, level, depth, key, handler, ask, is_node, data_row, css, in_state = stack.pop()
         if level > _MAX_SCAN_LEVELS:
             raise _Reject("nested too deeply")
         if isinstance(value, str):
@@ -570,7 +585,7 @@ def _check_strict(
             continue
         if isinstance(value, list):
             stack.extend(
-                (v, level + 1, depth, key, handler, on, False, data_row, css, in_state)
+                (v, level + 1, depth, key, handler, ask, False, data_row, css, in_state)
                 for v in value
             )
             continue
@@ -600,6 +615,8 @@ def _check_strict(
             if kind == "follow-up" and ("event" in (props or {}) or "on_submit" not in value):
                 if (props or {}).get("event", _FOLLOW_UP_EVENT) not in host_events:
                     raise _Reject("a follow-up emits a host event this widget does not declare")
+            # A node met in state or inside a handler may not ask at all.
+            base = None if ask is None else False
             if kind == "form":
                 if isinstance(props, dict) and _FORM_SUBMIT_PROPS & props.keys():
                     raise _Reject("a form with its own submit target")
@@ -611,7 +628,7 @@ def _check_strict(
                     if not isinstance(v, list):
                         raise _Reject(f"{k} is not a list")
                     stack.extend(
-                        (kid, level + 2, depth + 1, k, False, False, True, False, False, in_state)
+                        (kid, level + 2, depth + 1, k, False, base, True, False, False, in_state)
                         for kid in v
                     )
                 elif k == "props" and isinstance(v, dict):
@@ -628,7 +645,7 @@ def _check_strict(
                                 depth + 1 if sub_node else depth,
                                 pk,
                                 _is_handler_key(pk),
-                                pk.startswith("on_"),
+                                _ask_from(base, pk),
                                 sub_node,
                                 (kind, pk) in _DATA_ACTION_ROWS and not in_state,
                                 pk == "style",
@@ -643,7 +660,7 @@ def _check_strict(
                             depth,
                             k,
                             _is_handler_key(k),
-                            k.startswith("on_"),
+                            _ask_from(base, k),
                             False,
                             False,
                             k == "style",
@@ -658,7 +675,7 @@ def _check_strict(
         if is_action:
             if in_state:
                 raise _Reject("state holds an action")
-            _check_actions(value, events, allowed, ask=on)
+            _check_actions(value, events, allowed, ask=ask is True)
             if named in _TOAST_ACTIONS and isinstance(value.get("message"), str):
                 _check_plain_expressions(value["message"])
         stack.extend(
@@ -668,7 +685,7 @@ def _check_strict(
                 depth,
                 k,
                 handler or _is_handler_key(k) or (is_action and k in _STEP_KEYS),
-                on or k.startswith("on_"),
+                _ask_from(ask, k),
                 False,
                 False,
                 css or k == "style",
@@ -754,7 +771,7 @@ def _flow_steps(root: dict[str, Any]) -> list[tuple[Any, ...]]:
                     raise _Reject("a chain_map that is not an object")
                 steps.extend((branch, level + 2) for branch in v.values())
             elif k == "ui":
-                out.append((v, level + 1, 1, k, False, False, True, False, False, False))
+                out.append((v, level + 1, 1, k, False, None, True, False, False, False))
             else:
                 out.append((v, level + 1, 0, k, False, False, False, False, False, False))
     return out
@@ -1283,6 +1300,7 @@ def compact_manifest(profile: CardProfile = PAWBAR_PROFILE) -> str:
 
 __all__ = [
     "ASK_EVENT",
+    "ASK_HANDLERS",
     "ASK_MAX",
     "FLOW_EVENTS",
     "FLOW_STEP_KEYS",
