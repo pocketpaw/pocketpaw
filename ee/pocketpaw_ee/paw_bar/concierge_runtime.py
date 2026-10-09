@@ -61,9 +61,9 @@
 # Card profile (``ui_profile``, read once per turn from
 # ``Site.concierge_ui_profile``): "pawbar" (every site by default) is all of the
 # above. "ripple", honoured only on an ops site, lets cards use the Ripple catalog
-# less its page chrome under ``card_spec.RIPPLE_PROFILE``'s bounds, raises the reply cap to
-# ``_RIPPLE_MAX_TOKENS``, always writes the Ripple cards paragraph in <catalog>
-# (even with no catalog, actions or lead capture) and streams each card as
+# less its page chrome under ``card_spec.RIPPLE_PROFILE``'s bounds, raises the
+# reply cap to ``_RIPPLE_MAX_TOKENS``, always writes the Ripple cards paragraph in
+# <catalog> (even with no catalog, actions or lead capture) and streams each card as
 # ``card.*`` frames (``FenceFilter(stream_cards=True)``), never inside a chunk.
 # Its frame is ``FRAME_DEMO`` whatever the site's switches: the Ripple landing's
 # demo assistant builds a card for any everyday ask instead of answering only

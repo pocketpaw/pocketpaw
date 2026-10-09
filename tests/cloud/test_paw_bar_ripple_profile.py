@@ -338,6 +338,14 @@ def test_each_data_widget_card_passes_ripple_and_not_pawbar(widget):
     assert render_card(body, [], profile=PAWBAR_PROFILE) is None
 
 
+@pytest.mark.parametrize("widget", sorted(_DATA_CARDS))
+def test_each_data_widget_card_streams_with_no_false_flag(widget):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, PartialScan
+
+    scan = PartialScan(RIPPLE_PROFILE)
+    assert not any(scan.feed(ch) for ch in json.dumps(_DATA_CARDS[widget]))
+
+
 def test_the_data_widgets_are_the_typed_ones_and_each_has_a_card():
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_DATA_WIDGETS, RIPPLE_PROFILE
 
