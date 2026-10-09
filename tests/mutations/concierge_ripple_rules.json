@@ -124,5 +124,77 @@
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
     ]
+  },
+  {
+    "label": "frame_for forgets the demo frame, so the ripple landing refuses its own chips",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if ui_profile(site, settings) is RIPPLE_PROFILE:\n        return FRAME_DEMO\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_an_ops_site_on_the_ripple_profile_gets_the_demo_frame"
+    ]
+  },
+  {
+    "label": "the demo frame follows a stored ripple profile off the ops list",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if ui_profile(site, settings) is RIPPLE_PROFILE:\n",
+    "replace": "    if getattr(site, \"concierge_ui_profile\", None) == \"ripple\":\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_stored_ripple_profile_off_the_ops_list_gets_the_normal_frame"
+    ]
+  },
+  {
+    "label": "every ops site gets the demo frame, pawbar profile or not",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if ui_profile(site, settings) is RIPPLE_PROFILE:\n",
+    "replace": "    if is_ops_site(site, settings):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
+    ]
+  },
+  {
+    "label": "a pawbar frame changes by one character",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return f\"{frame[:end]} {_ACTION_RULE}{frame[end:]}\"",
+    "replace": "    return f\"{frame[:end]}  {_ACTION_RULE}{frame[end:]}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
+    ]
+  },
+  {
+    "label": "the turn picks the frame from the switches alone",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        frame = frame_for(site, settings)\n",
+    "replace": "        frame = _FRAMES[(allow_doc_code, lead_capture_on(site), page_actions_on(site))]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_turn_ignores_a_stored_ripple_profile_off_the_ops_list"
+    ]
+  },
+  {
+    "label": "the demo frame keeps the site frame's answer-only-about-this-site rule 1",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    (_RULE_1, _RULE_1_DEMO),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_demo_frame_swaps_the_opening_and_rules_1_2_6_and_keeps_3_to_5"
+    ]
+  },
+  {
+    "label": "the demo frame rewrites rule 5 too",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    (_RULE_6, _RULE_6_DEMO),\n",
+    "replace": "    (_RULE_6, _RULE_6_DEMO),\n    (_RULE_5, \"or to the demo.\\n\"),\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_demo_frame_swaps_the_opening_and_rules_1_2_6_and_keeps_3_to_5"
+    ]
+  },
+  {
+    "label": "the demo rule 2 drops the no-advice line",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"card, and never write long prose (essays, stories, homework). Never give \"\n    \"medical, legal or financial advice: a health or money card shows sample data \"\n",
+    "replace": "    \"card, and never write long prose (essays, stories, homework). A health \"\n    \"or money card shows sample data \"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_demo_frame_swaps_the_opening_and_rules_1_2_6_and_keeps_3_to_5"
+    ]
   }
 ]

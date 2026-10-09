@@ -3,10 +3,12 @@
 # A site whose ``concierge_ui_profile`` is "ripple" gets full-catalog Ripple cards
 # (``card_spec.RIPPLE_PROFILE``: the vendored ripple-manifest.json, 400 nodes,
 # depth 16, 64,000 chars, handlers checked wherever a widget keeps them), the
-# Ripple cards paragraph with no catalog, actions or lead capture, and an 8,000
-# token reply cap. Every other site keeps ``PAWBAR_PROFILE``, and its cards
-# paragraph is pinned byte for byte. The Ripple paragraph lists the data widgets
-# (entity-detail, timeline, kv-table, ...) with their props, is sized for the
+# Ripple cards paragraph with no catalog, actions or lead capture, an 8,000
+# token reply cap and ``FRAME_DEMO`` (rules 3 to 5 of FRAME kept verbatim)
+# whatever its switches. Every other site keeps ``PAWBAR_PROFILE``, and its cards
+# paragraph and all 8 of its frames are pinned byte for byte. The Ripple
+# paragraph lists the data widgets (entity-detail, timeline, kv-table, ...) with
+# their props, is sized for the
 # landing's ~720px chat column and ends with ``_RIPPLE_EXAMPLE``, which must pass
 # the ripple checks whole. Also covered: the per-site daily spend cap over the
 # global one, and both settings through the settings PATCH and its response.
@@ -20,6 +22,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -360,6 +363,14 @@ def test_the_data_widgets_pass_with_allowed_actions_and_paths(spec):
 # the ripple rules must never leak into it. If the pawbar paragraph changes on
 # purpose, recompute with hashlib.sha256(_pawbar_paragraphs().encode()).
 _PAWBAR_PARAGRAPH_SHA256 = "96bcf44088350ed721971e5bc0b29cd52b3524c12f0d7b04d9242d8d774422d4"
+# Pins every pawbar site's frame the same way: ``frame_for`` over all 8 doc-code,
+# lead-capture and page-action combinations (``_SWITCHES`` order), joined by
+# "\n---\n". The demo frame must never reach a pawbar site.
+_PAWBAR_FRAMES_SHA256 = "f0fdea6e8f1095293ba7f0affb189db416b98de3e5851767bad1f647d0756216"
+_SWITCHES = [
+    {"concierge_allow_doc_code": doc, "concierge_lead_capture": lead, "concierge_page_actions": act}
+    for doc, lead, act in itertools.product((False, True), repeat=3)
+]
 
 
 def _pawbar_paragraphs() -> str:
@@ -377,12 +388,61 @@ def _pawbar_paragraphs() -> str:
     return rich + "\n---\n" + _cards_paragraph([])
 
 
-def test_the_pawbar_cards_paragraph_is_unchanged():
-    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_RULES
+def test_the_pawbar_cards_paragraph_is_unchanged(monkeypatch):
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_RULES, frame_for
 
     text = _pawbar_paragraphs()
     assert hashlib.sha256(text.encode()).hexdigest() == _PAWBAR_PARAGRAPH_SHA256
     assert not any(rule.strip() in text for rule in _RIPPLE_RULES)
+
+    frames = [frame_for(SimpleNamespace(**switches)) for switches in _SWITCHES]
+    assert hashlib.sha256("\n---\n".join(frames).encode()).hexdigest() == _PAWBAR_FRAMES_SHA256
+    # An ops site on the pawbar profile keeps the same frames.
+    _pin_ops(monkeypatch, "s1")
+    for switches, frame in zip(_SWITCHES, frames, strict=True):
+        assert frame_for(SimpleNamespace(id="s1", **switches)) == frame
+        assert (
+            frame_for(SimpleNamespace(id="s1", concierge_ui_profile="pawbar", **switches)) == frame
+        )
+
+
+def test_an_ops_site_on_the_ripple_profile_gets_the_demo_frame(monkeypatch):
+    from pocketpaw_ee.paw_bar.concierge_runtime import FRAME_DEMO, frame_for
+
+    _pin_ops(monkeypatch, "s1")
+    for switches in _SWITCHES:
+        site = SimpleNamespace(id="s1", concierge_ui_profile="ripple", **switches)
+        assert frame_for(site) is FRAME_DEMO
+
+
+def test_a_stored_ripple_profile_off_the_ops_list_gets_the_normal_frame(monkeypatch):
+    from pocketpaw_ee.paw_bar.concierge_runtime import _FRAMES, FRAME_DEMO, frame_for
+
+    _pin_ops(monkeypatch, "s1")
+    for switches in _SWITCHES:
+        site = SimpleNamespace(id="s2", concierge_ui_profile="ripple", **switches)
+        assert frame_for(site) is _FRAMES[tuple(switches.values())]
+        assert frame_for(site) != FRAME_DEMO
+
+
+def test_the_demo_frame_swaps_the_opening_and_rules_1_2_6_and_keeps_3_to_5():
+    from pocketpaw_ee.paw_bar.concierge_runtime import FRAME, FRAME_DEMO
+
+    site, demo = FRAME.split("\n"), FRAME_DEMO.split("\n")
+    assert len(site) == len(demo) == 8
+    assert demo[1] == site[1] == "Rules:"
+    assert demo[4:7] == site[4:7]  # rules 3, 4 and 5, word for word
+    assert [demo[i] == site[i] for i in (0, 2, 3, 7)] == [False] * 4
+    assert demo[0].startswith("You are the demo assistant on the Ripple website")
+    assert demo[2].startswith("1. When the visitor asks for something a small interface can do")
+    assert demo[3].startswith(
+        "2. Never write code, scripts, markup, configuration or commands outside the card"
+    )
+    assert "Never give medical, legal or financial advice" in demo[3]
+    assert demo[7] == (
+        "6. Keep the text short: one or two sentences, then the card, in the visitor's language."
+    )
+    assert "Answer only about this site" not in FRAME_DEMO
 
 
 # --------------------------------------------------------------------------- #
@@ -1196,6 +1256,8 @@ async def test_settings_patch_rejects_a_bad_profile_or_cap(client, patch):
 async def test_a_turn_ignores_a_stored_ripple_profile_off_the_ops_list(
     concierge_client, model, monkeypatch
 ):
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
     from tests.cloud.test_paw_bar_concierge_v2 import _HOURS_KB, _chat, _seed_kb
     from tests.cloud.test_paw_bar_concierge_v2 import _site as _v2_site
     from tests.cloud.test_paw_bar_concierge_v2 import _widget as _v2_widget
@@ -1208,10 +1270,12 @@ async def test_a_turn_ignores_a_stored_ripple_profile_off_the_ops_list(
     _pin_ops(monkeypatch, "another-site")
     await _chat(client, widget.id)
     assert "Authoring rules:" not in model.user_prompt()
+    assert model.last["info"].instructions == concierge_runtime.FRAME_LEADS
 
     _pin_ops(monkeypatch, str(site.id))
     await _chat(client, widget.id)
     assert "Authoring rules:" in model.user_prompt()
+    assert model.last["info"].instructions == concierge_runtime.FRAME_DEMO
 
 
 @pytest.mark.asyncio

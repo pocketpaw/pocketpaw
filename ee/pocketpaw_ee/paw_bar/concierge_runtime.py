@@ -7,8 +7,9 @@
 # ``stream_end`` / ``error`` frames as the legacy relay does, plus at most one
 # ``action`` frame ({do, to?, target?, name?, args?, label}) before ``stream_end``.
 #
-# Instructions: one of eight constants picked by ``frame_for(site)`` (doc-code
-# rule 2, lead rule and page-action rule in rule 5), the cache-stable prefix;
+# Instructions: one of nine constants picked by ``frame_for(site)`` (doc-code
+# rule 2, lead rule and page-action rule in rule 5; ``FRAME_DEMO`` on the ripple
+# profile), the cache-stable prefix;
 # nothing an owner or visitor writes reaches them. Data (``build_prompt``):
 # <owner-settings>, <page>, <knowledge>, <catalog>, <site-pages> (page actions on:
 # the fence forms, the pages ``navigate`` may name, and the tool rule when the
@@ -63,7 +64,9 @@
 # catalog under ``card_spec.RIPPLE_PROFILE``'s bounds, raises the reply cap to
 # ``_RIPPLE_MAX_TOKENS`` and always writes the <catalog> block with the Ripple
 # cards paragraph (the catalog, compact, plus the authoring rules), even on a
-# site with no catalog, actions or lead capture. The frame is the same.
+# site with no catalog, actions or lead capture. Its frame is ``FRAME_DEMO``
+# whatever the site's switches: the Ripple landing's demo assistant builds a card
+# for any everyday ask instead of answering only from the site's facts.
 
 from __future__ import annotations
 
@@ -191,6 +194,65 @@ _FRAMES: dict[tuple[bool, bool, bool], str] = {
     (True, True, True): FRAME_DOC_CODE_LEADS_ACTIONS,
 }
 
+# The demo frame, for a site on the ripple card profile (``ui_profile``: ops
+# sites only), which is the Ripple landing: its concierge shows what Ripple does
+# by building a small card for an everyday ask, where FRAME's rules 1 and 2 would
+# refuse anything off the site. FRAME with the opening and rules 1, 2 and 6
+# swapped; rules 3, 4 and 5 stay word for word. A constant, picked by ``frame_for``.
+_OPENING = (
+    "You are the assistant in the chat widget on one business's website, answering "
+    "an anonymous visitor on its pages. Your name, tone and manner come from the "
+    "<owner-settings> block when there is one: introduce yourself by the name it "
+    "gives you. When it gives no name, call yourself the site's assistant.\n"
+)
+_RULE_1 = (
+    "1. Answer only about this site, and only from the facts in the <page>, "
+    "<knowledge> and <catalog> blocks. If they do not contain the answer, say briefly "
+    "that you don't have that information and offer what you can help with instead. "
+    "Never guess, and never invent products, prices, policies, people or links. Offer "
+    "a way to reach the business only when the visitor asks for a person, contact "
+    "details or a callback, or the request needs the business itself (an existing "
+    "order, a complaint, a custom quote); otherwise never add contact details or offer "
+    "to pass the message on.\n"
+)
+_RULE_6 = (
+    "6. Keep answers short: a few sentences of plain text, plus a product card when "
+    "you show products, in the visitor's language unless <owner-settings> says "
+    "otherwise."
+)
+_OPENING_DEMO = (
+    "You are the demo assistant on the Ripple website, talking with an anonymous "
+    "visitor. Ripple turns a model's answer into a live interface, and you show that "
+    "by building one.\n"
+)
+_RULE_1_DEMO = (
+    "1. When the visitor asks for something a small interface can do (a calculator, "
+    "a planner, a tracker, a comparison, a checklist, a summary or a report), build "
+    "it as ONE ```pawbar-card block after a sentence or two of text, as the <catalog> "
+    "block describes. Use the visitor's own numbers. Where you need data you do not "
+    "have, use made-up sample data and say once that it is sample data. Answer "
+    "questions about Ripple itself from the <knowledge> block.\n"
+)
+_RULE_2_DEMO = (
+    "2. Never write code, scripts, markup, configuration or commands outside the "
+    "card, and never write long prose (essays, stories, homework). Never give "
+    "medical, legal or financial advice: a health or money card shows sample data "
+    "and says it is not advice.\n"
+)
+_RULE_6_DEMO = (
+    "6. Keep the text short: one or two sentences, then the card, in the visitor's language."
+)
+FRAME_DEMO = FRAME
+for _old, _new in (
+    (_OPENING, _OPENING_DEMO),
+    (_RULE_1, _RULE_1_DEMO),
+    (_RULE_2, _RULE_2_DEMO),
+    (_RULE_6, _RULE_6_DEMO),
+):
+    if FRAME.count(_old) != 1:
+        raise RuntimeError("FRAME changed; update the FRAME_DEMO sources to match it")
+    FRAME_DEMO = FRAME_DEMO.replace(_old, _new)
+
 
 def page_actions_on(site: Any) -> bool:
     """The owner's "Guide visitors around your site" switch; only an explicit
@@ -225,9 +287,14 @@ def ui_profile(site: Any, settings: Any = None) -> Any:
     return PAWBAR_PROFILE
 
 
-def frame_for(site: Any) -> str:
-    """The frame constant for this site's doc-code, lead-capture and page-action
-    switches."""
+def frame_for(site: Any, settings: Any = None) -> str:
+    """The frame constant for this site: ``FRAME_DEMO`` on the ripple profile
+    (``ui_profile``, ops sites only), whatever its doc-code, lead-capture and
+    page-action switches say; otherwise the constant for those switches."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+
+    if ui_profile(site, settings) is RIPPLE_PROFILE:
+        return FRAME_DEMO
     doc_code = getattr(site, "concierge_allow_doc_code", False) is True
     return _FRAMES[(doc_code, lead_capture_on(site), page_actions_on(site))]
 
@@ -2534,10 +2601,10 @@ async def run_concierge_v2(
         model = _build_model(settings, model_spec)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
         # Constraint 3), asserted in tests and guarded by a mutation plan. The frame
-        # is one of four constants; the owner's doc-code and lead-capture switches
+        # is one of nine constants; the ripple profile and the owner's switches
         # only pick which.
         allow_doc_code = _allows_doc_code(site)
-        frame = frame_for(site)
+        frame = frame_for(site, settings)
         agent = Agent(model, instructions=frame, output_type=str)
 
         # What the model writes is filtered before the visitor (or the owner's
@@ -2677,6 +2744,7 @@ __all__ = [
     "lead_capture_on",
     "page_actions_on",
     "FRAME_DOC_CODE",
+    "FRAME_DEMO",
     "FenceFilter",
     "KnowledgeItem",
     "PageContext",
