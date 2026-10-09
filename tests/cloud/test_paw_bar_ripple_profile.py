@@ -17,7 +17,11 @@
 # packages/svelte/src/routes/live/fixtures/explainer.json, its chunks joined and
 # wrapped as {ui, state}). Flow cards (``TRIP_FLOW`` is the accepted shape) and
 # the ``ask`` host event pass only on ripple; ``_FLOW_REFUSALS`` lists what each
-# refuses and is reused streamed. Mutation plan: tests/mutations/concierge_ripple_rules.json.
+# refuses and is reused streamed. Ripple's data widgets (``RIPPLE_DATA_WIDGETS``,
+# ripple-iui#182) are listed with typed props and the rules map answers to them;
+# each passes with its manifest example (tests/fixtures/ripple_data_widget_cards.json).
+# Page chrome (``RIPPLE_CHROME``) is refused and unlisted.
+# Mutation plan: tests/mutations/concierge_ripple_rules.json.
 
 # ruff: noqa: F811 — pytest fixtures imported by name
 
@@ -88,7 +92,13 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
     assert hashlib.sha256(raw).hexdigest() == _RIPPLE_MANIFEST_SHA256
     assert card_spec.RIPPLE_MANIFEST["version"] == "0.8.0"
     assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 197
-    assert len(card_spec.RIPPLE_PROFILE.widget_types) == 197 - len(card_spec.RIPPLE_DEFERRED)
+    # Every trimmed or typed name is a real widget (a typo would trim nothing).
+    every = {w["type"] for w in card_spec.RIPPLE_MANIFEST["widgets"]}
+    chrome, deferred = card_spec.RIPPLE_CHROME, card_spec.RIPPLE_DEFERRED
+    assert chrome <= every and chrome.isdisjoint(deferred)
+    r = card_spec.RIPPLE_PROFILE
+    assert r.typed.keys() <= r.detailed <= r.widget_types
+    assert len(r.widget_types) == 197 - len(deferred) - len(chrome)
 
 
 def test_the_pawbar_profile_is_todays_rules():
@@ -98,7 +108,7 @@ def test_the_pawbar_profile_is_todays_rules():
     p = card_spec.PAWBAR_PROFILE
     assert (p.widget_types, p.actions) == (card_spec.WIDGET_TYPES, card_spec.SPEC_ACTIONS)
     assert (p.max_nodes, p.max_depth, p.max_chars) == (80, 8, 32_000)
-    assert p.detailed is None and p.strict is False and RIPPLE_STRICT
+    assert p.detailed is None and p.typed == {} and p.strict is False and RIPPLE_STRICT
 
     r = card_spec.RIPPLE_PROFILE
     assert r.actions == card_spec.SPEC_ACTIONS | {"flow", "branch", "validate", "toast"}
@@ -232,10 +242,11 @@ def test_the_ripple_listing_is_bounded_and_covers_every_widget():
     assert "- each {items, item_as?, index_as?}" in text
 
 
-# The data widgets the authoring rules point at, listed with props; the example
-# card shows their item shapes. The composites whose shapes nothing shows stay brief.
+# The primitives' data widgets the authoring rules point at, listed with props; the
+# example card shows their item shapes. A composite whose shapes nothing shows stays
+# brief (Ripple's data widgets, RIPPLE_DATA_WIDGETS, are listed with typed props).
 _DATA_WIDGETS = ("entity-detail", "timeline", "kv-table", "alert", "callout")
-_BRIEF_COMPOSITES = ("analytics-dashboard", "comparison-layout")
+_BRIEF_COMPOSITES = ("analytics-dashboard",)
 
 
 def _ripple_paragraph() -> str:
@@ -269,8 +280,146 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # The example is the last rule, as compact JSON.
     example = json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":"))
     assert _RIPPLE_RULES[-1].endswith(example) and example in text
-    # The whole paragraph stays bounded (it was 19,814 chars before the data widgets).
-    assert len(text) < 26_000
+    # The whole paragraph stays bounded: 19,814 chars before the primitives' data
+    # widgets, 24,327 before Ripple's data widgets (typed lines and their rules, less
+    # the page chrome), 27,823 after.
+    assert len(text) < 29_000
+
+
+# Ripple's data widgets (qbtrix/ripple-iui#182): one card per widget, its manifest
+# example at a9ab3b37 as ui with its bound state path seeded.
+_DATA_CARDS: dict = json.loads(
+    (Path(__file__).parents[1] / "fixtures" / "ripple_data_widget_cards.json").read_text(
+        encoding="utf-8"
+    )
+)
+_CHROME = (
+    "navbar",
+    "footer",
+    "hero",
+    "marketing-hero",
+    "newsletter",
+    "logo-cloud",
+    "testimonial",
+    "app-shell",
+    "sidebar",
+    "breadcrumb",
+    "sheet",
+    "parallax",
+    "reveal",
+    "command-palette",
+    "coachmark",
+    "notification-center",
+)
+
+
+def _listing() -> dict[str, str]:
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, compact_manifest
+
+    lines = compact_manifest(RIPPLE_PROFILE).splitlines()
+    return {line[2:].split(" ", 1)[0].rstrip(":"): line for line in lines}
+
+
+def _fields(line: str) -> str:
+    """A listing line's field list, without its description."""
+    return line[: line.index("}: ")]
+
+
+@pytest.mark.parametrize("widget", sorted(_DATA_CARDS))
+def test_each_data_widget_card_passes_ripple_and_not_pawbar(widget):
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, RIPPLE_PROFILE, render_card
+
+    card = _DATA_CARDS[widget]
+    assert card["ui"]["type"] == widget
+    body = json.dumps(card)
+    out = render_card(body, [], profile=RIPPLE_PROFILE)
+    assert out is not None
+    assert json.loads(out.split("\n", 1)[1].rsplit("\n", 1)[0]) == card
+    assert render_card(body, [], profile=PAWBAR_PROFILE) is None
+
+
+def test_the_data_widgets_are_the_typed_ones_and_each_has_a_card():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_DATA_WIDGETS, RIPPLE_PROFILE
+
+    assert set(_DATA_CARDS) == set(RIPPLE_DATA_WIDGETS) == set(RIPPLE_PROFILE.typed)
+
+
+def test_only_the_data_widgets_list_typed_props():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_DATA_WIDGETS, RIPPLE_PROFILE
+
+    lines = _listing()
+    assert lines["itinerary"].startswith(
+        "- itinerary {budget?: number, route?: string[], days: [{id?,label,when?,"
+    )
+    assert _fields(lines["growth-projection"]).startswith(
+        "- growth-projection {initial?: number, deposit: number, rate: number, years: number,"
+    )
+    assert (
+        "comparison-layout {items: [{id,name,subtitle?,price?:number," in lines["comparison-layout"]
+    )
+    assert "winner?: {id,reason,runner_up?:{id,reason}}" in lines["comparison-layout"]
+    # booking and menu-order list only what the model writes; exec-dashboard its rows.
+    assert _fields(lines["booking"]) == "- booking {party?: number, preferred?: {date?,after?}"
+    menu = _fields(lines["menu-order"])
+    assert menu.startswith("- menu-order {items: [{id?,product_id?,name?,")
+    assert menu.endswith("featured?: {id,reason?}, preset?: [{id,qty:number}]")
+    dash = _fields(lines["exec-dashboard"])
+    assert dash.startswith("- exec-dashboard {rows?: [Record<string,string|number>], measures?:")
+    assert "kpis" not in dash and "primaryChart" not in dash and "on_filter" not in dash
+    # The props every data widget shares are taught once, by the rules.
+    for widget in RIPPLE_DATA_WIDGETS:
+        assert "verdict" not in _fields(lines[widget]) and "currency" not in _fields(
+            lines[widget]
+        ), widget
+    # Every other detailed widget still lists names only.
+    for widget in RIPPLE_PROFILE.detailed - RIPPLE_DATA_WIDGETS.keys():
+        assert ": " not in _fields(lines[widget]), widget
+
+
+def test_a_typed_line_caps_each_type():
+    from pocketpaw_ee.paw_bar.card_spec import _TYPE_CHARS, RIPPLE_MANIFEST, _short_type
+
+    shorts = [
+        _short_type(str(spec.get("type", "")))
+        for w in RIPPLE_MANIFEST["widgets"]
+        for spec in (w.get("props") or {}).values()
+    ]
+    assert max(map(len, shorts)) == _TYPE_CHARS == 90
+    assert "stops:[{id?,time?,title,kind:sight|food|stay|transit|activ…" in _listing()["itinerary"]
+    assert _short_type("string") == "" and _short_type('"a" | "b"') == "a|b"
+
+
+@pytest.mark.parametrize("widget", _CHROME)
+def test_page_chrome_is_refused_and_unlisted_on_ripple(widget):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_CHROME, RIPPLE_PROFILE
+
+    assert RIPPLE_CHROME == set(_CHROME)
+    assert widget not in RIPPLE_PROFILE.widget_types and widget not in _listing()
+    text = {"type": "text", "props": {"text": "hi"}}
+    assert _ripple({"ui": {"type": "flex", "children": [text]}}) is not None
+    assert _ripple({"ui": {"type": "flex", "children": [text, {"type": widget}]}}) is None
+
+
+def test_the_rules_point_each_answer_at_its_data_widget():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_DATA_WIDGETS
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_RULES
+
+    rule = next(r for r in _RIPPLE_RULES if "Match the card to the answer" in r)
+    for phrase in (
+        "A trip is an itinerary",
+        "a menu-order: items by product_id",
+        "write only preferred {date, after} and party",
+        "A meal plan is a meal-plan, one dish a recipe, a workout an interval-workout, "
+        "study cards a flashcard-deck",
+        "growth-projection (four numbers",
+        "an exec-dashboard with the raw rows",
+        "a comparison-layout with a winner",
+        "verdict? {text, status?: good|warn|bad|info|neutral}",
+        "Never write on_checkout or on_book",
+        "binds primitives to state as above",
+    ):
+        assert phrase in rule, phrase
+    assert all(widget in rule for widget in RIPPLE_DATA_WIDGETS)
 
 
 def test_the_rules_name_only_real_badge_variants():
@@ -892,7 +1041,12 @@ def test_c3_a_form_with_a_submit_target_is_refused(props):
         {"ui": {"type": "image", "props": {"src": "/\\evil.test/x.png"}}},
         {"ui": {"type": "cta", "props": {"label": "Go", "href": "vbscript:x"}}},
         {"ui": {"type": "cta", "props": {"label": "Go", "href": "{state.next}"}}},
-        {"ui": {"type": "navbar", "props": {"links": [{"label": "x", "href": "file:///etc"}]}}},
+        {
+            "ui": {
+                "type": "search",
+                "props": {"results": [{"id": 1, "label": "x", "href": "file:///etc"}]},
+            }
+        },
         {"ui": {"type": "markdown", "props": {"content": "[win](javascript:alert(1))"}}},
         {"ui": {"type": "text", "props": {"text": "click <javascript:alert(1)>"}}},
         {"ui": {"type": "map", "props": {"tiles": "custom"}}},
@@ -1016,14 +1170,14 @@ def test_m2_a_ripple_form_validates_and_is_not_a_lead_card():
 @pytest.mark.parametrize(
     "spec",
     [
-        {"ui": {"type": "navbar", "props": {"ctaHref": "//evil.com"}}},
-        {"ui": {"type": "navbar", "props": {"ctaHref": "https://evil.com"}}},
-        {"ui": {"type": "navbar", "props": {"ctaHref": "http://evil.com"}}},
-        {"ui": {"type": "navbar", "props": {"ctaHref": "data:text/html,<b>x</b>"}}},
-        {"ui": {"type": "navbar", "props": {"ctaHref": "http:evil.com"}}},
-        {"ui": {"type": "navbar", "props": {"ctaHref": "https:\\\\evil.com"}}},
-        {"ui": {"type": "hero", "props": {"title": "x", "secondaryCtaHref": "https://evil.com"}}},
-        {"ui": {"type": "marketing-hero", "props": {"ctaHref": "{state.next}"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "//evil.com"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "https://evil.com"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "http://evil.com"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "data:text/html,<b>x</b>"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "http:evil.com"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "https:\\\\evil.com"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "secondaryCtaHref": "https://evil.com"}}},
+        {"ui": {"type": "mention", "props": {"name": "x", "href": "{state.next}"}}},
         {
             "ui": {
                 "type": "model-viewer",
@@ -1051,9 +1205,9 @@ def test_r1_urls_are_checked_under_any_key(spec):
 def test_r1_mail_and_phone_links_only_under_link_keys():
     assert _ripple({"ui": {"type": "cta", "props": {"label": "Mail", "href": "mailto:a@b.test"}}})
     assert _ripple({"ui": {"type": "cta", "props": {"label": "Call", "href": "tel:+15550100"}}})
-    assert _ripple({"ui": {"type": "navbar", "props": {"ctaHref": "tel:+15550100"}}})
+    assert _ripple({"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "tel:+15550100"}}})
     assert _ripple({"ui": {"type": "text", "props": {"text": "Call tel:5550100, 10/12"}}})
-    assert _ripple({"ui": {"type": "navbar", "props": {"ctaHref": "/contact"}}})
+    assert _ripple({"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "/contact"}}})
 
 
 # R5: an expression can build a URL at render time. A URL-ish key refuses
@@ -1065,7 +1219,7 @@ def test_r1_mail_and_phone_links_only_under_link_keys():
         {"ui": {"type": "cta", "props": {"label": "x", "href": "{'java'+'script:alert(1)'}"}}},
         {"ui": {"type": "cta", "props": {"label": "x", "href": "{state.a}:alert(1)"}}},
         {"ui": {"type": "cta", "props": {"label": "x", "href": "javascript{state.c}"}}},
-        {"ui": {"type": "navbar", "props": {"ctaHref": "{state.a}:alert(1)"}}},
+        {"ui": {"type": "cta", "props": {"label": "x", "ctaHref": "{state.a}:alert(1)"}}},
         {
             "ui": {
                 "type": "model-viewer",

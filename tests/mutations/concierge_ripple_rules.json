@@ -173,8 +173,8 @@
   {
     "label": "the match-the-card rule is dropped",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    \"   - Match the card to the answer. A tool the visitor plays with (a calculator, \"",
-    "replace": "    \"   - A tool the visitor plays with (a calculator, \"",
+    "find": "    \"   - Match the card to the answer. When a data widget fits, the card is that one \"",
+    "replace": "    \"   - When a data widget fits, the card is that one \"",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width"
     ]
@@ -955,6 +955,88 @@
     "replace": "            pass",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f6_a_lead_form_in_a_flow_step_is_the_lead_card"
+    ]
+  },
+  {
+    "label": "DW-9: page chrome is offered and accepted on ripple",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    - RIPPLE_DEFERRED\n    - RIPPLE_CHROME,",
+    "replace": "    - RIPPLE_DEFERRED,",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_page_chrome_is_refused_and_unlisted_on_ripple"
+    ]
+  },
+  {
+    "label": "DW-9: comparison-layout items lose their pinned handler rows",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": ") | {(\"comparison-layout\", \"items\")}",
+    "replace": ")",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "DW-9: data widget lines print no types",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        else _widget_line(w, typed=True, shown=profile.typed[w[\"type\"]])",
+    "replace": "        else _widget_line(w)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props"
+    ]
+  },
+  {
+    "label": "DW-9: every detailed line is typed (pawbar too)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        else _widget_line(w)\n        for w in profile.manifest",
+    "replace": "        else _widget_line(w, typed=True)\n        for w in profile.manifest",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_pawbar_cards_paragraph_is_unchanged"
+    ]
+  },
+  {
+    "label": "DW-9: a typed line lists every prop (booking, menu-order, exec-dashboard)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if (shown is None or n in shown) and not",
+    "replace": "            if True and not",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props"
+    ]
+  },
+  {
+    "label": "DW-9: typed lines repeat the props the rules teach once",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": " and not (typed and n in _COMMON_PROPS)",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_only_the_data_widgets_list_typed_props"
+    ]
+  },
+  {
+    "label": "DW-9: types are not capped",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if len(text) > _TYPE_CHARS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_typed_line_caps_each_type"
+    ]
+  },
+  {
+    "label": "DW-9: the rules drop the menu-order mapping",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"is an itinerary. A menu or an order is a menu-order: items by product_id (and \"",
+    "replace": "\"is an itinerary. A menu or an order is a table of items by product_id (and \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_point_each_answer_at_its_data_widget"
+    ]
+  },
+  {
+    "label": "DW-9: the rules let the model write the server-wired handlers",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"number). Never write on_checkout or on_book, or an image. \"",
+    "replace": "\"number). \"",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_point_each_answer_at_its_data_widget"
     ]
   }
 ]

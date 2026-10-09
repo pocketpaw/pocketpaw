@@ -60,8 +60,8 @@
 #
 # Card profile (``ui_profile``, read once per turn from
 # ``Site.concierge_ui_profile``): "pawbar" (every site by default) is all of the
-# above. "ripple", honoured only on an ops site, lets cards use the full Ripple
-# catalog under ``card_spec.RIPPLE_PROFILE``'s bounds, raises the reply cap to
+# above. "ripple", honoured only on an ops site, lets cards use the Ripple catalog
+# less its page chrome under ``card_spec.RIPPLE_PROFILE``'s bounds, raises the reply cap to
 # ``_RIPPLE_MAX_TOKENS``, always writes the Ripple cards paragraph in <catalog>
 # (even with no catalog, actions or lead capture) and streams each card as
 # ``card.*`` frames (``FenceFilter(stream_cards=True)``), never inside a chunk.
@@ -1417,11 +1417,26 @@ _RIPPLE_RULES = (
     'minmax(150px, 1fr))" so it wraps (a bigger minimum, like 260px, for cards side '
     "by side); otherwise at most 2 fixed grid columns. Put number inputs and sliders "
     'on a full-width row or a 2-column grid, and set "wrap": true on a flex row with '
-    "more than two children. Aim for about 25 to 90 nodes.",
-    "   - Match the card to the answer. A tool the visitor plays with (a calculator, "
-    "a planner, a quiz) binds its inputs to state as above. A summary of one thing (a "
-    "person, an account, an order, a trip) starts with entity-detail (title, status, "
-    "kpis, meta) and puts its sections in its children. A report or dashboard leads "
+    "more than two children. Aim for about 25 to 90 nodes when building from "
+    "primitives; a data widget card is often one node.",
+    "   - Match the card to the answer. When a data widget fits, the card is that one "
+    "widget holding only data; it lays out, sums and charts everything itself. A trip "
+    "is an itinerary. A menu or an order is a menu-order: items by product_id (and "
+    "name), plus featured and preset; the server fills the rest. A booking is a "
+    "booking: write only preferred {date, after} and party; the server fills services "
+    "and slots. A meal plan is a meal-plan, one dish a recipe, a workout an "
+    "interval-workout, study cards a flashcard-deck. Savings or growth is a "
+    "growth-projection (four numbers: initial, deposit, rate, years). Sales or report "
+    "data is an exec-dashboard with the raw rows, measures and dimensions. A choice "
+    "between options is a comparison-layout with a winner. Each data widget also "
+    "takes title? (a recipe: name), subtitle?, verdict? {text, status?: "
+    "good|warn|bad|info|neutral} (the answer in one sentence, at most 140 chars, "
+    "shown first) and, with money, currency? (an ISO code; never a symbol in a "
+    "number). Never write on_checkout or on_book, or an image. "
+    "A small calculator or tool the visitor plays with (a bill split, a converter, a "
+    "quiz) binds primitives to state as above. A summary of one thing (a person, an "
+    "account, a project) starts with entity-detail (title, status, kpis, meta) and "
+    "puts its sections in its children. Any other report leads "
     "with 3 or 4 stat tiles in a grid, then a chart, then a table. Dated events go in "
     "a timeline, plain facts in a kv-table (rows of {key, value}; its columns is 1 or "
     "2), a warning in an alert, the one takeaway in a callout. Put each section in a "
@@ -1469,7 +1484,8 @@ def _cards_paragraph(
     if getattr(profile, "name", "") == "ripple":
         lines = [
             "   Cards: when a small interactive tool (a calculator, a planner, a "
-            "comparison, a checklist), a summary or a report answers the visitor better "
+            "comparison, a checklist), a trip, a menu, a booking, a recipe, a summary or "
+            "a report answers the visitor better "
             "than prose, write ONE "
             "```pawbar-card block after a sentence or two of text, holding "
             '{"ui": <node>, "state": {...}}. A node is {"type": ..., "props": {...}, '

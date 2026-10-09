@@ -22,8 +22,9 @@
 #
 # Every rule reads a ``CardProfile``. ``PAWBAR_PROFILE`` (the default) is the
 # paw-bar set and bounds above. ``RIPPLE_PROFILE`` (``concierge_ui_profile``
-# "ripple") takes ripple-manifest.json minus ``RIPPLE_DEFERRED``, 400 nodes / depth
-# 16 / 64,000 chars, and is ``strict``: ``_check_strict`` walks all of ``ui`` and
+# "ripple") takes ripple-manifest.json minus ``RIPPLE_DEFERRED`` and page chrome
+# (``RIPPLE_CHROME``), lists ``RIPPLE_DATA_WIDGETS`` with typed props, has 400
+# nodes / depth 16 / 64,000 chars, and is ``strict``: ``_check_strict`` walks all of ``ui`` and
 # ``state`` iteratively, depth-capped. A node in a prop is a node; an action under
 # a handler key, or named anywhere, must be allowed (an audit-log's own entries
 # are data in ``ui`` only; ``state`` holds no action); a slot a widget resolves
@@ -43,8 +44,8 @@
 # still streaming, flagging only what the finished card is sure to fail.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar; ripple-manifest.json
-# from @ripple-ui/svelte's dist/manifest.json minus examples (the ``.source`` file
-# beside it says how). The drift tests in tests/cloud/test_paw_bar_concierge_v2_output.py
+# from @ripple-ui/svelte's manifest minus examples (``.source`` beside it says
+# where from and how). The drift tests in tests/cloud/test_paw_bar_concierge_v2_output.py
 # and tests/cloud/test_paw_bar_ripple_profile.py pin both hashes; the shared
 # parity fixtures live in tests/fixtures/card_parity/.
 
@@ -57,7 +58,7 @@ import math
 import re
 import unicodedata
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
@@ -95,9 +96,10 @@ SPEC_ACTIONS: frozenset[str] = frozenset(MANIFEST["actions"])
 class CardProfile:
     """What one site's cards may hold. ``detailed`` names the widgets the prompt
     lists with their props (None: all of them; the rest get a one-line summary);
-    ``strict`` runs ``_check_strict`` (nodes in props, actions anywhere, URLs)
-    instead of the children-only walk; ``url_hosts`` are the https hosts its
-    URLs may name."""
+    ``typed`` names the detailed widgets whose props are listed with a short type,
+    each with the props to list (None: all of them); ``strict`` runs
+    ``_check_strict`` (nodes in props, actions anywhere, URLs) instead of the
+    children-only walk; ``url_hosts`` are the https hosts its URLs may name."""
 
     name: str
     widget_types: frozenset[str]
@@ -107,6 +109,7 @@ class CardProfile:
     max_chars: int
     manifest: dict[str, Any]
     detailed: frozenset[str] | None = None
+    typed: dict[str, frozenset[str] | None] = field(default_factory=dict)
     strict: bool = False
     url_hosts: frozenset[str] = frozenset()
 
@@ -127,22 +130,68 @@ RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(enco
 # don't see, ``embed`` frames any third-party URL, ``richtext`` renders trusted HTML
 # and ``rich-text`` (a Tiptap editor) seeds its ``value`` into the editor as HTML.
 RIPPLE_DEFERRED: frozenset[str] = frozenset({"ripple-frame", "embed", "richtext", "rich-text"})
+# Page chrome a chat card never needs: site navigation, page heroes and footers,
+# email capture (a lead path outside lead capture), logo walls and testimonials
+# (claims about real brands), app shells, off-canvas panels, scroll effects, and the
+# global palette, tour and inbox overlays. Not offered to the model, refused in a card.
+RIPPLE_CHROME: frozenset[str] = frozenset(
+    {
+        "navbar",
+        "footer",
+        "hero",
+        "marketing-hero",
+        "newsletter",
+        "logo-cloud",
+        "testimonial",
+        "app-shell",
+        "sidebar",
+        "breadcrumb",
+        "sheet",
+        "parallax",
+        "reveal",
+        "command-palette",
+        "coachmark",
+        "notification-center",
+    }
+)
+# The data widgets: the model writes a few lines of data and the widget draws the
+# card. Listed with typed props, minus the ones every data widget shares (the rules
+# teach those once). booking and menu-order list only what the model writes (the
+# server fills the rest); exec-dashboard its rows mode only, so the model writes
+# rows instead of prebuilt KPI tiles and charts.
+RIPPLE_DATA_WIDGETS: dict[str, frozenset[str] | None] = {
+    "itinerary": None,
+    "booking": frozenset({"party", "preferred"}),
+    "menu-order": frozenset({"items", "featured", "preset"}),
+    "growth-projection": None,
+    "recipe": None,
+    "meal-plan": None,
+    "interval-workout": None,
+    "flashcard-deck": None,
+    "comparison-layout": None,
+    "exec-dashboard": frozenset(
+        {"rows", "measures", "dimensions", "x", "split", "compare", "compareLabel", "filters"}
+    ),
+}
 # A ripple card's actions: paw-bar's, plus the client-side flow ones (no network,
 # no navigation). Every step inside a flow or branch is held to the same set.
 RIPPLE_ACTIONS: frozenset[str] = SPEC_ACTIONS | {"flow", "branch", "validate", "toast"}
 RIPPLE_PROFILE = CardProfile(
     name="ripple",
-    widget_types=frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"]) - RIPPLE_DEFERRED,
+    widget_types=frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"])
+    - RIPPLE_DEFERRED
+    - RIPPLE_CHROME,
     actions=RIPPLE_ACTIONS,
     max_nodes=400,
     max_depth=16,
     max_chars=64_000,
     manifest=RIPPLE_MANIFEST,
-    # The widgets the authoring rules lean on (the inputs and layouts, and the
-    # data widgets whose item shapes _RIPPLE_EXAMPLE shows), listed with their
-    # props. A listing line names props, not their types, so a composite whose
-    # shapes nothing shows (analytics-dashboard, comparison-layout) stays brief.
-    detailed=frozenset(
+    # The widgets the authoring rules lean on (the inputs and layouts, the
+    # widgets whose item shapes _RIPPLE_EXAMPLE shows, and the data widgets),
+    # listed with their props. Only a data widget's line gives the props' types,
+    # so a composite whose shapes nothing shows (analytics-dashboard) stays brief.
+    detailed=frozenset(RIPPLE_DATA_WIDGETS)
+    | frozenset(
         {
             "flex",
             "grid",
@@ -173,6 +222,7 @@ RIPPLE_PROFILE = CardProfile(
             "callout",
         }
     ),
+    typed=RIPPLE_DATA_WIDGETS,
     strict=True,
 )
 
@@ -1283,16 +1333,57 @@ def card_verdict(
 # --------------------------------------------------------------------------- #
 
 
-def _widget_line(widget: dict[str, Any]) -> str:
-    props = [
-        name + ("" if spec.get("required") else "?")
-        for name, spec in (widget.get("props") or {}).items()
-    ]
-    props += list((widget.get("events") or {}).keys())
-    props += [
-        name + ("" if spec.get("required") else "?")
-        for name, spec in (widget.get("nodeFields") or {}).items()
-    ]
+# A typed line's type for one prop, at most this long.
+_TYPE_CHARS = 90
+# Props every data widget shares; the ripple rules teach them once, so a typed
+# line leaves them out.
+_COMMON_PROPS: frozenset[str] = frozenset({"title", "subtitle", "verdict", "currency"})
+# ``: string`` before a delimiter: string is the default, so a typed line omits it.
+_STRING_FIELD = re.compile(r": string(?=\s*(?:[;,}\]]|$))")
+
+
+def _short_type(text: str) -> str:
+    """A prop's TypeScript type as a typed line prints it: ``Array<X>`` as
+    ``[X]``, no quotes, ``string`` left out (empty for a plain string), tight
+    separators, capped at ``_TYPE_CHARS``."""
+    text = " ".join(text.split()).replace('"', "")
+    while (shorter := re.sub(r"Array<((?:[^<>]|<[^<>]*>)*)>", r"[\1]", text)) != text:
+        text = shorter
+    text = _STRING_FIELD.sub("", text)
+    if text == "string":
+        return ""
+    for wide, tight in (
+        ("; ", ","),
+        (", ", ","),
+        (" | ", "|"),
+        (": ", ":"),
+        ("{ ", "{"),
+        (" }", "}"),
+    ):
+        text = text.replace(wide, tight)
+    if len(text) > _TYPE_CHARS:
+        text = text[: _TYPE_CHARS - 1] + "…"
+    return text
+
+
+def _widget_line(
+    widget: dict[str, Any], typed: bool = False, shown: frozenset[str] | None = None
+) -> str:
+    def entry(name: str, spec: dict[str, Any]) -> str:
+        head = name + ("" if spec.get("required") else "?")
+        kind = _short_type(str(spec.get("type", ""))) if typed else ""
+        return f"{head}: {kind}" if kind else head
+
+    def listed(fields: dict[str, Any] | None) -> list[tuple[str, Any]]:
+        return [
+            (n, s)
+            for n, s in (fields or {}).items()
+            if (shown is None or n in shown) and not (typed and n in _COMMON_PROPS)
+        ]
+
+    props = [entry(name, spec) for name, spec in listed(widget.get("props"))]
+    props += [name for name, _ in listed(widget.get("events"))]
+    props += [entry(name, spec) for name, spec in listed(widget.get("nodeFields"))]
     return f"- {widget['type']} {{{', '.join(props)}}}: {widget.get('description', '')}"
 
 
@@ -1309,13 +1400,16 @@ def _brief_line(widget: dict[str, Any]) -> str:
 
 
 def compact_manifest(profile: CardProfile = PAWBAR_PROFILE) -> str:
-    """One line per widget: its type, its props (``?`` = optional), events and
-    node fields, and what it is for; a widget outside ``profile.detailed`` gets
-    only its type and the first sentence of what it is for."""
+    """One line per widget: its type, its props (``?`` = optional; a
+    ``profile.typed`` widget's with a short type), events and node fields, and
+    what it is for; a widget outside ``profile.detailed`` gets only its type and
+    the first sentence of what it is for."""
     return "\n".join(
-        _widget_line(w)
-        if profile.detailed is None or w["type"] in profile.detailed
-        else _brief_line(w)
+        _brief_line(w)
+        if profile.detailed is not None and w["type"] not in profile.detailed
+        else _widget_line(w, typed=True, shown=profile.typed[w["type"]])
+        if w["type"] in profile.typed
+        else _widget_line(w)
         for w in profile.manifest["widgets"]
         if w["type"] in profile.widget_types
     )
@@ -1330,6 +1424,8 @@ __all__ = [
     "MAX_FLOW_STEPS",
     "PAWBAR_PROFILE",
     "PartialScan",
+    "RIPPLE_CHROME",
+    "RIPPLE_DATA_WIDGETS",
     "RIPPLE_DEFERRED",
     "RIPPLE_MANIFEST_PATH",
     "RIPPLE_PROFILE",

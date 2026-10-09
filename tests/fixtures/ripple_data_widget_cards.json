@@ -1,0 +1,1006 @@
+{
+  "comparison-layout": {
+    "ui": {
+      "type": "comparison-layout",
+      "bind": "pick",
+      "props": {
+        "title": "Three laptops for a designer who travels",
+        "verdict": {
+          "text": "Aero 14 for battery and weight; Nimbus Pro 15 if you edit video.",
+          "status": "good"
+        },
+        "currency": "USD",
+        "winner": {
+          "id": "aero-14",
+          "reason": "Lightest of the three with the longest battery, and the lowest price.",
+          "runner_up": {
+            "id": "vertex-x13",
+            "reason": "Same battery and a better keyboard, for $200 more."
+          }
+        },
+        "picks": [
+          {
+            "id": "nimbus-pro-15",
+            "label": "Best for video"
+          },
+          {
+            "id": "vertex-x13",
+            "label": "Best keyboard"
+          }
+        ],
+        "items": [
+          {
+            "id": "aero-14",
+            "name": "Aero 14",
+            "subtitle": "14-inch ultralight",
+            "price": 1099,
+            "battery": 18,
+            "weight": 1.2,
+            "memory": 16,
+            "gpu": false,
+            "rating": 4.6,
+            "extras": [
+              "wifi",
+              "ports"
+            ]
+          },
+          {
+            "id": "nimbus-pro-15",
+            "name": "Nimbus Pro 15",
+            "subtitle": "15-inch creator",
+            "price": 1799,
+            "battery": 11,
+            "weight": 1.9,
+            "memory": 32,
+            "gpu": true,
+            "rating": 4.4,
+            "extras": [
+              "display",
+              "audio"
+            ]
+          },
+          {
+            "id": "vertex-x13",
+            "name": "Vertex X13",
+            "subtitle": "13-inch business",
+            "price": 1299,
+            "battery": 18,
+            "weight": 1.3,
+            "memory": 16,
+            "gpu": false,
+            "rating": 4.5,
+            "extras": [
+              "keyboard",
+              "security"
+            ]
+          }
+        ],
+        "features": [
+          {
+            "key": "battery",
+            "label": "Battery",
+            "section": "Everyday",
+            "kind": "number",
+            "unit": "h",
+            "better": "higher",
+            "icon": "battery",
+            "highlight": true
+          },
+          {
+            "key": "weight",
+            "label": "Weight",
+            "section": "Everyday",
+            "kind": "number",
+            "unit": "kg",
+            "better": "lower",
+            "icon": "weight",
+            "highlight": true
+          },
+          {
+            "key": "extras",
+            "label": "Stands out for",
+            "section": "Everyday",
+            "kind": "icon"
+          },
+          {
+            "key": "memory",
+            "label": "Memory",
+            "section": "Performance",
+            "kind": "number",
+            "unit": "GB",
+            "better": "higher",
+            "icon": "memory"
+          },
+          {
+            "key": "gpu",
+            "label": "Discrete GPU",
+            "section": "Performance",
+            "kind": "boolean"
+          },
+          {
+            "key": "rating",
+            "label": "Owner rating",
+            "section": "Reviews",
+            "kind": "rating",
+            "better": "higher",
+            "icon": "rating"
+          }
+        ]
+      }
+    },
+    "state": {
+      "pick": null
+    }
+  },
+  "exec-dashboard": {
+    "ui": {
+      "type": "exec-dashboard",
+      "bind": "salesFilter",
+      "props": {
+        "title": "Fernleaf Ceramics, Q3 sales",
+        "subtitle": "Online orders, July to September",
+        "verdict": {
+          "text": "September was the best month; East leads on revenue.",
+          "status": "good"
+        },
+        "currency": "USD",
+        "x": "date",
+        "split": "channel",
+        "measures": [
+          {
+            "key": "amount",
+            "label": "Revenue",
+            "format": "money"
+          },
+          {
+            "label": "Orders",
+            "agg": "count"
+          },
+          {
+            "key": "amount",
+            "label": "Avg order",
+            "format": "money",
+            "agg": "avg"
+          },
+          {
+            "key": "items",
+            "label": "Items sold"
+          }
+        ],
+        "dimensions": [
+          {
+            "key": "region",
+            "label": "Region"
+          }
+        ],
+        "table": {
+          "title": "Orders"
+        },
+        "rows": [
+          {
+            "id": "FL-1041",
+            "date": "2026-07-01",
+            "region": "West",
+            "channel": "Marketplace",
+            "items": 3,
+            "amount": 133.38
+          },
+          {
+            "id": "FL-1046",
+            "date": "2026-07-09",
+            "region": "East",
+            "channel": "Web",
+            "items": 2,
+            "amount": 98.4
+          },
+          {
+            "id": "FL-1050",
+            "date": "2026-07-18",
+            "region": "North",
+            "channel": "Social",
+            "items": 1,
+            "amount": 42.5
+          },
+          {
+            "id": "FL-1055",
+            "date": "2026-07-27",
+            "region": "South",
+            "channel": "Web",
+            "items": 2,
+            "amount": 87.1
+          },
+          {
+            "id": "FL-1061",
+            "date": "2026-08-04",
+            "region": "East",
+            "channel": "Web",
+            "items": 3,
+            "amount": 151.2
+          },
+          {
+            "id": "FL-1066",
+            "date": "2026-08-12",
+            "region": "West",
+            "channel": "Social",
+            "items": 1,
+            "amount": 38.9
+          },
+          {
+            "id": "FL-1070",
+            "date": "2026-08-19",
+            "region": "South",
+            "channel": "Marketplace",
+            "items": 2,
+            "amount": 76
+          },
+          {
+            "id": "FL-1074",
+            "date": "2026-08-28",
+            "region": "North",
+            "channel": "Web",
+            "items": 2,
+            "amount": 104.75
+          },
+          {
+            "id": "FL-1081",
+            "date": "2026-09-03",
+            "region": "East",
+            "channel": "Web",
+            "items": 4,
+            "amount": 212.6
+          },
+          {
+            "id": "FL-1086",
+            "date": "2026-09-11",
+            "region": "West",
+            "channel": "Web",
+            "items": 2,
+            "amount": 95.3
+          },
+          {
+            "id": "FL-1090",
+            "date": "2026-09-17",
+            "region": "East",
+            "channel": "Social",
+            "items": 1,
+            "amount": 49
+          },
+          {
+            "id": "FL-1095",
+            "date": "2026-09-22",
+            "region": "South",
+            "channel": "Web",
+            "items": 3,
+            "amount": 139.45
+          },
+          {
+            "id": "FL-1099",
+            "date": "2026-09-29",
+            "region": "North",
+            "channel": "Marketplace",
+            "items": 2,
+            "amount": 88.2
+          }
+        ]
+      }
+    },
+    "state": {
+      "salesFilter": {}
+    }
+  },
+  "itinerary": {
+    "ui": {
+      "type": "itinerary",
+      "bind": "{state.days}",
+      "props": {
+        "title": "Weekend in Lisbon",
+        "subtitle": "2 days · 2 travellers",
+        "currency": "USD",
+        "budget": 400,
+        "route": [
+          "Lisbon",
+          "Sintra",
+          "Lisbon"
+        ],
+        "legs": [
+          {
+            "from": "Lisbon",
+            "to": "Sintra",
+            "kind": "train",
+            "ref": "Rossio line",
+            "minutes": 40,
+            "cost": 5
+          },
+          {
+            "from": "Sintra",
+            "to": "Lisbon",
+            "kind": "train",
+            "ref": "Rossio line",
+            "minutes": 40,
+            "cost": 5
+          }
+        ],
+        "days": [
+          {
+            "label": "Day 1",
+            "when": "Sat 17 Oct",
+            "theme": "Alfama and the river",
+            "stay": "Casa Azulejo, Alfama",
+            "stops": [
+              {
+                "time": "09:30",
+                "title": "Miradouro da Graça",
+                "kind": "sight",
+                "place": "Graça",
+                "minutes": 45,
+                "cost": 0
+              },
+              {
+                "time": "11:00",
+                "title": "Tram 28 to Baixa",
+                "kind": "transit",
+                "minutes": 30,
+                "cost": 3
+              },
+              {
+                "time": "13:00",
+                "title": "Grilled sardines at Taberna Rio",
+                "kind": "food",
+                "place": "Baixa",
+                "cost": 28,
+                "must": true
+              }
+            ]
+          },
+          {
+            "label": "Day 2",
+            "when": "Sun 18 Oct",
+            "theme": "Sintra palaces",
+            "stops": [
+              {
+                "time": "10:00",
+                "title": "Pena Palace",
+                "kind": "sight",
+                "place": "Sintra",
+                "minutes": 120,
+                "cost": 20,
+                "must": true
+              },
+              {
+                "time": "14:00",
+                "title": "Moorish Castle walk",
+                "kind": "nature",
+                "minutes": 90,
+                "cost": 12
+              }
+            ]
+          }
+        ],
+        "packing": [
+          {
+            "group": "Essentials",
+            "items": [
+              "Walking shoes",
+              "Light jacket",
+              "Travel adapter"
+            ]
+          }
+        ]
+      }
+    },
+    "state": {
+      "days": [
+        {
+          "label": "Day 1",
+          "when": "Sat 17 Oct",
+          "theme": "Alfama and the river",
+          "stay": "Casa Azulejo, Alfama",
+          "stops": [
+            {
+              "time": "09:30",
+              "title": "Miradouro da Graça",
+              "kind": "sight",
+              "place": "Graça",
+              "minutes": 45,
+              "cost": 0
+            },
+            {
+              "time": "11:00",
+              "title": "Tram 28 to Baixa",
+              "kind": "transit",
+              "minutes": 30,
+              "cost": 3
+            },
+            {
+              "time": "13:00",
+              "title": "Grilled sardines at Taberna Rio",
+              "kind": "food",
+              "place": "Baixa",
+              "cost": 28,
+              "must": true
+            }
+          ]
+        },
+        {
+          "label": "Day 2",
+          "when": "Sun 18 Oct",
+          "theme": "Sintra palaces",
+          "stops": [
+            {
+              "time": "10:00",
+              "title": "Pena Palace",
+              "kind": "sight",
+              "place": "Sintra",
+              "minutes": 120,
+              "cost": 20,
+              "must": true
+            },
+            {
+              "time": "14:00",
+              "title": "Moorish Castle walk",
+              "kind": "nature",
+              "minutes": 90,
+              "cost": 12
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "growth-projection": {
+    "ui": {
+      "type": "growth-projection",
+      "bind": "{state.deposit}",
+      "props": {
+        "title": "Savings growth",
+        "currency": "USD",
+        "initial": 0,
+        "rate": 5,
+        "years": 10,
+        "compounding": "monthly",
+        "goal": 50000
+      }
+    },
+    "state": {
+      "deposit": 300
+    }
+  },
+  "meal-plan": {
+    "ui": {
+      "type": "meal-plan",
+      "bind": "{state.people}",
+      "props": {
+        "title": "High-protein week",
+        "people": 2,
+        "goal": {
+          "protein_g": 130,
+          "kcal": 2100
+        },
+        "recipes": [
+          {
+            "id": "oats",
+            "name": "Protein overnight oats",
+            "kind": "breakfast",
+            "serves": 1,
+            "kcal": 480,
+            "protein_g": 35,
+            "ingredients": [
+              {
+                "name": "rolled oats",
+                "qty": 0.5,
+                "unit": "cup",
+                "aisle": "grains"
+              },
+              {
+                "name": "Greek yogurt",
+                "qty": 0.75,
+                "unit": "cup",
+                "aisle": "dairy"
+              }
+            ]
+          },
+          {
+            "id": "eggs",
+            "name": "Spinach egg scramble",
+            "kind": "breakfast",
+            "serves": 1,
+            "kcal": 420,
+            "protein_g": 32,
+            "ingredients": [
+              {
+                "name": "eggs",
+                "qty": 4,
+                "aisle": "dairy"
+              },
+              {
+                "name": "baby spinach",
+                "qty": 2,
+                "unit": "cup",
+                "aisle": "produce"
+              }
+            ]
+          },
+          {
+            "id": "chicken-bowl",
+            "name": "Chicken rice bowl",
+            "kind": "lunch",
+            "serves": 2,
+            "kcal": 640,
+            "protein_g": 52,
+            "ingredients": [
+              {
+                "name": "chicken breast",
+                "qty": 500,
+                "unit": "g",
+                "aisle": "protein"
+              },
+              {
+                "name": "jasmine rice",
+                "qty": 1,
+                "unit": "cup",
+                "aisle": "grains"
+              }
+            ]
+          },
+          {
+            "id": "salmon",
+            "name": "Salmon, quinoa and greens",
+            "kind": "dinner",
+            "serves": 2,
+            "kcal": 690,
+            "protein_g": 48,
+            "ingredients": [
+              {
+                "name": "salmon fillet",
+                "qty": 400,
+                "unit": "g",
+                "aisle": "protein"
+              },
+              {
+                "name": "quinoa",
+                "qty": 0.75,
+                "unit": "cup",
+                "aisle": "grains"
+              }
+            ]
+          },
+          {
+            "id": "chili",
+            "name": "Turkey bean chili",
+            "kind": "dinner",
+            "serves": 4,
+            "kcal": 560,
+            "protein_g": 46,
+            "ingredients": [
+              {
+                "name": "ground turkey",
+                "qty": 500,
+                "unit": "g",
+                "aisle": "protein"
+              },
+              {
+                "name": "black beans",
+                "qty": 2,
+                "unit": "can",
+                "aisle": "pantry"
+              }
+            ]
+          }
+        ],
+        "days": [
+          {
+            "day": "Mon",
+            "meals": [
+              {
+                "slot": "breakfast",
+                "recipe": "oats"
+              },
+              {
+                "slot": "lunch",
+                "recipe": "chicken-bowl"
+              },
+              {
+                "slot": "dinner",
+                "recipe": "salmon"
+              }
+            ]
+          },
+          {
+            "day": "Tue",
+            "meals": [
+              {
+                "slot": "breakfast",
+                "recipe": "eggs"
+              },
+              {
+                "slot": "lunch",
+                "recipe": "chicken-bowl"
+              },
+              {
+                "slot": "dinner",
+                "recipe": "chili"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "state": {
+      "people": 2
+    }
+  },
+  "booking": {
+    "ui": {
+      "type": "booking",
+      "props": {
+        "subtitle": "Juniper & Ash, Dupont",
+        "tz": "America/New_York",
+        "party": 4,
+        "preferred": {
+          "date": "2026-10-16",
+          "after": "19:00"
+        },
+        "services": [
+          {
+            "id": "table",
+            "name": "Dinner table",
+            "kind": "table",
+            "duration_min": 90,
+            "party": {
+              "min": 1,
+              "max": 8
+            }
+          }
+        ],
+        "days": [
+          {
+            "date": "2026-10-15",
+            "date_label": "Thu 15 Oct",
+            "slots": [
+              {
+                "start": "2026-10-15T17:30:00-04:00",
+                "label": "5:30 PM",
+                "available": true
+              },
+              {
+                "start": "2026-10-15T18:00:00-04:00",
+                "label": "6:00 PM",
+                "available": true
+              },
+              {
+                "start": "2026-10-15T18:30:00-04:00",
+                "label": "6:30 PM",
+                "available": true
+              },
+              {
+                "start": "2026-10-15T19:00:00-04:00",
+                "label": "7:00 PM",
+                "available": false
+              },
+              {
+                "start": "2026-10-15T19:30:00-04:00",
+                "label": "7:30 PM",
+                "available": true
+              },
+              {
+                "start": "2026-10-15T20:00:00-04:00",
+                "label": "8:00 PM",
+                "available": true
+              }
+            ]
+          },
+          {
+            "date": "2026-10-16",
+            "date_label": "Fri 16 Oct",
+            "slots": [
+              {
+                "start": "2026-10-16T17:30:00-04:00",
+                "label": "5:30 PM",
+                "available": true
+              },
+              {
+                "start": "2026-10-16T18:00:00-04:00",
+                "label": "6:00 PM",
+                "available": true
+              },
+              {
+                "start": "2026-10-16T18:30:00-04:00",
+                "label": "6:30 PM",
+                "available": false
+              },
+              {
+                "start": "2026-10-16T19:00:00-04:00",
+                "label": "7:00 PM",
+                "available": false
+              },
+              {
+                "start": "2026-10-16T19:30:00-04:00",
+                "label": "7:30 PM",
+                "available": false
+              },
+              {
+                "start": "2026-10-16T20:00:00-04:00",
+                "label": "8:00 PM",
+                "available": true
+              }
+            ]
+          },
+          {
+            "date": "2026-10-17",
+            "date_label": "Sat 17 Oct",
+            "slots": [
+              {
+                "start": "2026-10-17T17:30:00-04:00",
+                "label": "5:30 PM",
+                "available": true
+              },
+              {
+                "start": "2026-10-17T18:00:00-04:00",
+                "label": "6:00 PM",
+                "available": false
+              },
+              {
+                "start": "2026-10-17T18:30:00-04:00",
+                "label": "6:30 PM",
+                "available": false
+              },
+              {
+                "start": "2026-10-17T19:00:00-04:00",
+                "label": "7:00 PM",
+                "available": false
+              },
+              {
+                "start": "2026-10-17T19:30:00-04:00",
+                "label": "7:30 PM",
+                "available": false
+              },
+              {
+                "start": "2026-10-17T20:00:00-04:00",
+                "label": "8:00 PM",
+                "available": false
+              }
+            ]
+          }
+        ]
+      },
+      "bind": "{state.booking}"
+    },
+    "state": {
+      "booking": {}
+    }
+  },
+  "menu-order": {
+    "ui": {
+      "type": "menu-order",
+      "props": {
+        "title": "Copper Griddle",
+        "currency": "USD",
+        "featured": {
+          "id": "mushroom-swiss",
+          "reason": "Vegetarian and under $13."
+        },
+        "items": [
+          {
+            "product_id": "smash-burger",
+            "name": "Double Smash Burger",
+            "kind": "main",
+            "category": "Burgers"
+          },
+          {
+            "product_id": "mushroom-swiss",
+            "name": "Mushroom Swiss",
+            "kind": "main",
+            "category": "Burgers"
+          },
+          {
+            "product_id": "shoestring-fries",
+            "name": "Shoestring Fries",
+            "kind": "side",
+            "category": "Sides"
+          },
+          {
+            "product_id": "malted-shake",
+            "name": "Malted Vanilla Shake",
+            "kind": "dessert",
+            "category": "Shakes"
+          }
+        ]
+      }
+    },
+    "state": {}
+  },
+  "interval-workout": {
+    "ui": {
+      "type": "interval-workout",
+      "bind": "{state.workSec}",
+      "props": {
+        "title": "20-minute home HIIT",
+        "subtitle": "No equipment · 2 rounds",
+        "verdict": {
+          "text": "Ten moves, twice through; drop push-ups to your knees if form slips.",
+          "status": "info"
+        },
+        "workSec": 40,
+        "restSec": 20,
+        "rounds": 2,
+        "exercises": [
+          {
+            "name": "Jumping jacks",
+            "cue": "Land softly and keep a steady rhythm.",
+            "kind": "cardio"
+          },
+          {
+            "name": "Bodyweight squats",
+            "cue": "Chest up, hips back, drive through the heels.",
+            "kind": "strength"
+          },
+          {
+            "name": "Mountain climbers",
+            "cue": "Hands under shoulders, knees fast.",
+            "kind": "core"
+          },
+          {
+            "name": "Push-ups",
+            "cue": "Straight line from head to heels.",
+            "kind": "strength"
+          },
+          {
+            "name": "High knees",
+            "cue": "Knees to hip height, stay on the balls of your feet.",
+            "kind": "cardio"
+          },
+          {
+            "name": "Reverse lunges",
+            "cue": "Step back and alternate legs.",
+            "kind": "strength"
+          },
+          {
+            "name": "Plank shoulder taps",
+            "cue": "Feet wide, hips still.",
+            "kind": "core"
+          },
+          {
+            "name": "Skater hops",
+            "cue": "Leap side to side and land on one foot.",
+            "kind": "cardio"
+          },
+          {
+            "name": "Glute bridges",
+            "cue": "Squeeze at the top for a beat.",
+            "kind": "strength"
+          },
+          {
+            "name": "Burpees",
+            "cue": "Squat, jump back, jump in, jump up.",
+            "kind": "cardio"
+          }
+        ]
+      }
+    },
+    "state": {
+      "workSec": 40
+    }
+  },
+  "flashcard-deck": {
+    "ui": {
+      "type": "flashcard-deck",
+      "bind": "{state.score}",
+      "props": {
+        "title": "Beginner Spanish",
+        "subtitle": "Flip, then mark whether you knew it",
+        "cards": [
+          {
+            "front": "Hello",
+            "back": "Hola",
+            "category": "Greetings"
+          },
+          {
+            "front": "Thank you",
+            "back": "Gracias",
+            "category": "Greetings"
+          },
+          {
+            "front": "Please",
+            "back": "Por favor",
+            "category": "Greetings"
+          },
+          {
+            "front": "Water",
+            "back": "Agua",
+            "hint": "Sounds like \"aqua\"",
+            "category": "Food and drink"
+          },
+          {
+            "front": "Friend",
+            "back": "Amigo / Amiga",
+            "category": "People"
+          },
+          {
+            "front": "Where is the bathroom?",
+            "back": "¿Dónde está el baño?",
+            "category": "Travel"
+          }
+        ]
+      }
+    },
+    "state": {
+      "score": 0
+    }
+  },
+  "recipe": {
+    "ui": {
+      "type": "recipe",
+      "bind": "{state.servings}",
+      "props": {
+        "name": "Lemon ricotta pasta",
+        "subtitle": "Bright, creamy, on the table in 25 minutes",
+        "kind": "dinner",
+        "serves": 4,
+        "minutes": 25,
+        "kcal": 610,
+        "protein_g": 27,
+        "difficulty": "easy",
+        "tags": [
+          "vegetarian",
+          "weeknight"
+        ],
+        "ingredients": [
+          {
+            "name": "rigatoni",
+            "qty": 400,
+            "unit": "g",
+            "aisle": "grains"
+          },
+          {
+            "name": "whole-milk ricotta",
+            "qty": 1.5,
+            "unit": "cup",
+            "aisle": "dairy"
+          },
+          {
+            "name": "lemon",
+            "qty": 1,
+            "note": "zest and juice",
+            "aisle": "produce"
+          },
+          {
+            "name": "parmesan",
+            "qty": 0.75,
+            "unit": "cup",
+            "note": "finely grated",
+            "aisle": "dairy"
+          },
+          {
+            "name": "baby spinach",
+            "qty": 3,
+            "unit": "cup",
+            "aisle": "produce"
+          },
+          {
+            "name": "black pepper",
+            "unit": "to taste",
+            "aisle": "pantry"
+          }
+        ],
+        "steps": [
+          {
+            "text": "Boil the rigatoni in well-salted water until just al dente.",
+            "minutes": 11,
+            "tip": "Save a mug of the pasta water before draining."
+          },
+          {
+            "text": "Whisk the ricotta, lemon zest and juice, parmesan and plenty of pepper in a large bowl.",
+            "minutes": 3
+          },
+          {
+            "text": "Toss the hot pasta and spinach into the bowl, loosening with pasta water until glossy.",
+            "minutes": 2
+          }
+        ]
+      }
+    },
+    "state": {
+      "servings": 4
+    }
+  }
+}
