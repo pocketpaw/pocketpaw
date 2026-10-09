@@ -1776,6 +1776,10 @@ _FLOW_REFUSALS = [
         "onComplete invoke_tool",
     ),
     (
+        _flow(3, last={"onComplete": {"kind": "invoke_tool", "message": "x"}}),
+        "onComplete invoke_tool shaped like a chat",
+    ),
+    (
         _flow(3, last={"onComplete": {"kind": "call_binding", "binding": "x"}}),
         "onComplete call_binding",
     ),
@@ -1827,6 +1831,7 @@ _FLOW_REFUSALS = [
         "an action off the set in a step",
     ),
     (_flow(2, s2={"ui": None}), "a step whose ui is not a node"),
+    (_flow(2, s2={"ui": {"children": [_go()]}}), "a step whose ui has no type"),
     ({"ui": {"flowId": "a", "title": "No ui"}}, "a step with no ui"),
     ({"ui": {**_step(1), "chain": "next"}}, "a chain that is not a step"),
     ({"ui": {**_step(1), "chain_map": [_step(2)]}}, "a chain_map that is not an object"),

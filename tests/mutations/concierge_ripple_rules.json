@@ -450,5 +450,312 @@
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_a_a_trailing_trimmed_character_does_not_skip_the_ripple_checks"
     ]
+  },
+  {
+    "label": "FL-1: a ui with flow fields is no longer a step root",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    flow = any(field in ui for field in _FLOW_FIELDS)\n",
+    "replace": "    flow = False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_a_flow_card_passes_ripple_whole_and_not_pawbar"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: a ui with flow fields is no longer a step root",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    flow = any(field in ui for field in _FLOW_FIELDS)\n",
+    "replace": "    flow = False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_card_is_never_flagged_early_and_ends_final"
+    ]
+  },
+  {
+    "label": "FL-1: a step may carry any key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(step, dict) or not step.keys() <= FLOW_STEP_KEYS:\n",
+    "replace": "        if not isinstance(step, dict):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: a step may carry any key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(step, dict) or not step.keys() <= FLOW_STEP_KEYS:\n",
+    "replace": "        if not isinstance(step, dict):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: data joins the step keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        \"form_fields\",\n    }\n)",
+    "replace": "        \"form_fields\",\n        \"data\",\n    }\n)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a step needs no ui node",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not isinstance(step.get(\"ui\"), dict):\n            raise _Reject(\"a flow step with no ui node\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a step's ui is walked as data, not as a root node",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                out.append((v, level + 1, 1, k, False, False, True, False, False))",
+    "replace": "                out.append((v, level + 1, 0, k, False, False, False, False, False))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: step values other than ui skip the walk (no text checks)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False))",
+    "replace": "            else:\n                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: step values other than ui skip the walk",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False))",
+    "replace": "            else:\n                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: chain is not followed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                steps.append((v, level + 1))",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: chain is not followed (step 3 goes unchecked)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                steps.append((v, level + 1))",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_full_url_in_step_3_is_rejected_before_the_fence_closes",
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: chain_map values are not followed",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                steps.extend((branch, level + 2) for branch in v.values())",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a card may hold 9 steps",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "MAX_FLOW_STEPS = 8\n",
+    "replace": "MAX_FLOW_STEPS = 9\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: each step gets a fresh node budget",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            nodes += 1\n",
+    "replace": "            nodes = 1 if key == \"ui\" and depth == 1 else nodes + 1\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: onComplete is never checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if \"onComplete\" in step:\n            _check_on_complete(step[\"onComplete\"])\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: onComplete may be any kind",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and value.get(\"kind\") == \"chat\"\n",
+    "replace": "        and isinstance(value.get(\"kind\"), str)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: onComplete may be any kind",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and value.get(\"kind\") == \"chat\"\n",
+    "replace": "        and isinstance(value.get(\"kind\"), str)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: a chat onComplete may carry more keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and value.keys() <= {\"kind\", \"message\"}\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a chat onComplete message is uncapped",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and len(value[\"message\"]) <= ASK_MAX\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: flow emits pass in every card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    events = [*events, *FLOW_EVENTS] if flow else events\n",
+    "replace": "    events = [*events, *FLOW_EVENTS]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: flow emits pass in every card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    events = [*events, *FLOW_EVENTS] if flow else events\n",
+    "replace": "    events = [*events, *FLOW_EVENTS]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: flow cards get no flow emits",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    events = [*events, *FLOW_EVENTS] if flow else events\n",
+    "replace": "    events = events\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_a_flow_card_passes_ripple_whole_and_not_pawbar"
+    ]
+  },
+  {
+    "label": "FL-1: _hydrate reads a flow root's missing type",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if out.get(\"type\") == _PRODUCT_CARD:",
+    "replace": "    if out[\"type\"] == _PRODUCT_CARD:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_a_flow_card_passes_ripple_whole_and_not_pawbar"
+    ]
+  },
+  {
+    "label": "FL-1: ask passes outside an on_* handler",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            _check_actions(value, events, allowed, ask=on)",
+    "replace": "            _check_actions(value, events, allowed, ask=True)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: a node's own on_* handlers may not ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            _check_events(value, events, allowed, ask=True)",
+    "replace": "            _check_events(value, events, allowed, ask=False)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_in_any_on_handler_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: an on_* key on a node is not marked as one",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                            k.startswith(\"on_\"),\n",
+    "replace": "                            False,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_in_any_on_handler_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: an on_* prop is not marked as one",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                                pk.startswith(\"on_\"),\n",
+    "replace": "                                False,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_in_any_on_handler_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: an action nested in an on_* handler forgets it",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                on or k.startswith(\"on_\"),\n",
+    "replace": "                k.startswith(\"on_\"),\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_in_any_on_handler_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: the pawbar walk lets an on_* handler ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    allowed: frozenset[str] = SPEC_ACTIONS,\n    ask: bool = False,\n) -> None:",
+    "replace": "    allowed: frozenset[str] = SPEC_ACTIONS,\n    ask: bool = True,\n) -> None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_in_any_on_handler_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: ask text may run to 5000 characters",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_MAX = 500\n",
+    "replace": "ASK_MAX = 5000\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1 streamed: ask text may run to 5000 characters",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_MAX = 500\n",
+    "replace": "ASK_MAX = 5000\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
+    ]
+  },
+  {
+    "label": "FL-1: an ask value may carry more than text",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                and said.keys() == {\"text\"}\n",
+    "replace": "                and \"text\" in said\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
+    ]
+  },
+  {
+    "label": "FL-1: the ask cap is exclusive",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                and len(said[\"text\"]) <= ASK_MAX\n",
+    "replace": "                and len(said[\"text\"]) < ASK_MAX\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_in_any_on_handler_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1: the step cap is exclusive",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if count > MAX_FLOW_STEPS:\n",
+    "replace": "        if count >= MAX_FLOW_STEPS:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_the_step_and_node_bounds_are_inclusive"
+    ]
   }
 ]
