@@ -1,7 +1,7 @@
 {
   "schema": "ripple.manifest/v1",
   "version": "0.8.0",
-  "generatedAt": "2026-10-09T19:33:41.459Z",
+  "generatedAt": "2026-10-09T21:00:37.569Z",
   "spec": {
     "uiField": "ui",
     "stateField": "state",
@@ -6452,6 +6452,58 @@
       }
     },
     {
+      "type": "focus-timer",
+      "category": "composite",
+      "description": "Pomodoro timer: focus, short break, a long break every Nth round; rounds toward goal_rounds, a log of finished rounds, an editable task. Use it, not separate timer widgets. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"Deep work\"."
+        },
+        "focus_min": {
+          "type": "number",
+          "required": false,
+          "description": "Minutes of focus, 1 to 120. Default 25."
+        },
+        "short_break_min": {
+          "type": "number",
+          "required": false,
+          "description": "Minutes of short break, 1 to 60. Default 5."
+        },
+        "long_break_min": {
+          "type": "number",
+          "required": false,
+          "description": "Minutes of long break, 1 to 60. Default 15."
+        },
+        "rounds_before_long": {
+          "type": "number",
+          "required": false,
+          "description": "Focus rounds before a long break, 1 to 12. Default 4."
+        },
+        "goal_rounds": {
+          "type": "number",
+          "required": false,
+          "description": "Focus rounds to aim for today, 1 to 24."
+        },
+        "task": {
+          "type": "string",
+          "required": false,
+          "description": "What the visitor is focusing on. The visitor can edit it."
+        },
+        "auto_start_next": {
+          "type": "boolean",
+          "required": false,
+          "description": "Start the next phase on its own when one ends. Default false: it waits with a \"Start break\" button."
+        },
+        "value": {
+          "type": "{ phase: \"focus\" | \"short\" | \"long\"; remaining_s: number; running: boolean; rounds_done: number; task: string; log: string[] }",
+          "required": false,
+          "description": "Two-way bind with `bind: \"{state.focus}\"`. Written on start, pause, reset, skip, phase end and edits (not every second), so remaining_s is as of the last event. `log` holds the ISO time each focus round finished."
+        }
+      }
+    },
+    {
       "type": "flashcard-deck",
       "category": "composite",
       "description": "Study deck: cards[{front, back, hint, category}]. Flip each card, mark Got it or Missed it, then a score screen with Practise missed. Bind score; on_complete {score, total}.",
@@ -6619,6 +6671,55 @@
           "type": "EventAction",
           "required": false,
           "description": "Fired once when every pair is matched, with { moves, seconds }."
+        }
+      }
+    },
+    {
+      "type": "board-game",
+      "category": "composite",
+      "description": "Tic-tac-toe or connect-four against a built-in computer: game, player, first, difficulty, best_of. The widget plays, detects wins and keeps score. Bind value; on_complete {winner, series}.",
+      "props": {
+        "game": {
+          "type": "\"tic-tac-toe\" | \"connect-four\"",
+          "required": true,
+          "description": "Which game. The aliases tic-tac-toe and connect-four pick it too, but always set it."
+        },
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Heading. Default: the game name."
+        },
+        "player": {
+          "type": "\"X\" | \"O\" | \"red\" | \"yellow\"",
+          "required": false,
+          "description": "The mark the visitor plays: X or O for tic-tac-toe, red or yellow for connect-four. Default X / red. The computer takes the other."
+        },
+        "first": {
+          "type": "\"player\" | \"computer\"",
+          "required": false,
+          "description": "Who moves first in every game. Default player."
+        },
+        "difficulty": {
+          "type": "\"easy\" | \"medium\" | \"hard\"",
+          "required": false,
+          "description": "easy plays randomly, medium wins or blocks, hard searches ahead (unbeatable at tic-tac-toe). Default medium."
+        },
+        "best_of": {
+          "type": "1 | 3 | 5",
+          "required": false,
+          "description": "Play a best-of series; it ends when one side has a majority or every game is played. Omit for open-ended play where every game counts."
+        },
+        "value": {
+          "type": "{ board: string[]; turn: \"player\" | \"computer\" | null; result: \"player\" | \"computer\" | \"draw\" | null; series: { player: number; computer: number; draws: number } }",
+          "required": false,
+          "description": "The game so far, written by the widget on every move. `board` is row-major (\"\" empty). Bind with `bind: \"{state.game}\"` to show it elsewhere."
+        }
+      },
+      "events": {
+        "on_complete": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Fired once per finished series with { winner: \"player\" | \"computer\" | \"draw\", series }. Without best_of, every game finishes the series."
         }
       }
     },
@@ -9524,7 +9625,7 @@
     {
       "type": "timer",
       "category": "interactive",
-      "description": "Pomodoro-style countdown timer with start, pause, reset, a progress bar, and duration presets. Fires on_complete when it reaches zero.",
+      "description": "One countdown with start, pause, reset, a progress bar, and duration presets. Fires on_complete when it reaches zero. For a pomodoro or focus session with breaks and rounds, use focus-timer.",
       "props": {
         "duration": {
           "type": "number",

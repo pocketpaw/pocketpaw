@@ -1,10 +1,10 @@
 ripple-manifest.json: @ripple-ui/svelte 0.8.0 manifest, vendored from qbtrix/ripple-iui
 branch feat/play-wave (illustration, bill-split and the button's choice-card icon and
-description, plus memory-match, word-guess, quiz, habit-tracker and the illustration's
-annotations) at d780b7bc, pending a release.
+description, plus memory-match, word-guess, quiz, habit-tracker, focus-timer,
+board-game and the illustration's annotations) at 1b218f7, pending a release.
 It is that commit's packages/svelte/static/manifest.json (generatedAt
-2026-10-09T19:33:41.459Z, 203 widgets, upstream sha256
-acabaf4435c0d297ccad3067007ffa19f24e7cf9be38cd5fd2139f311c2ed9c1), with every
+2026-10-09T21:00:37.569Z, 205 widgets, upstream sha256
+3e4657f3b0eabcdb2831f8e2b8f7ea8a704b0aa14279698b3673d289ca059e8c), with every
 widget's "example" removed. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.
 
