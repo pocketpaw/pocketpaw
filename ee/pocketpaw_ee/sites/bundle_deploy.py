@@ -1,59 +1,30 @@
 # ee/pocketpaw_ee/sites/bundle_deploy.py: deploy a ``paw-build.json`` build (the
-# ``project`` engine / base app templates) through the Cloudflare HTTP API, to one
-# of two TARGETS (``project_deploy_target``):
-#   * ``dispatch``: our Workers for Platforms namespace (the intended home).
-#   * ``account``: a regular account-level Worker script. INTERIM, for an account
-#     without WfP: no dispatch isolation, so a tenant's Worker shares the account's
-#     script namespace and limits. Picked by ``PAW_CF_DEPLOY_MODE=workers`` or the
-#     ``PAW_SITES_PROJECT_DEPLOY_TARGET`` override; see
-#     docs/deployment/sites-bundle-deploys.md for the risks and the switch to WfP.
-# Everything below applies to BOTH targets; only the API URLs differ.
+# ``project`` engine / base app templates) through the Cloudflare HTTP API, either into
+# our Workers for Platforms namespace (``dispatch``) or, as an interim for an account
+# without WfP, to a regular account-level script (``account``; picked by
+# ``project_deploy_target``, risks in docs/deployment/sites-bundle-deploys.md). Only
+# the API URLs differ between the two.
 #
-# The build ran in a sandbox from author-owned config. This module is the trust
-# boundary on the API host: it reads ONLY ``paw-build.json`` and the files it names,
-# never a wrangler config, and never runs anything. What crosses into the upload:
-#   * modules: the files under the worker module dir, part-named by their path
-#     relative to it, typed by extension; ``*.map`` and README.md are skipped.
-#   * assets: every file under ``assetsDir`` except ``_headers`` / ``_redirects``
-#     (they travel as ``assets.config`` strings, next to the routing options
-#     html_handling / not_found_handling / run_worker_first) and ``.assetsignore``
-#     and what it matches. Assets upload whether or not an ``assets`` binding is
-#     requested; the binding only exposes them to the worker.
-#   * compat: the author's date (bumped to 2024-09-23 for nodejs_compat, clamped to
-#     today, defaulted when missing) and only allow-listed flags.
-#   * bindings: requests are mapped by TYPE and NAME onto resources WE provisioned
-#     for this site. Author-supplied ids are never read. ``deploy_bundle`` takes an
-#     optional ``provision`` callback (``binding_provisioner.ensure_bindings``) that
-#     runs after every other check and before the first upload, creating the site's
-#     KV namespaces / R2 buckets; KV and R2 map per binding name, D1 / queues / ai
-#     are one per site. services, dispatch namespaces, tail consumers, images and
-#     anything unknown are dropped with a warning; an unprovisioned d1/kv/r2/do/ai/
-#     queues request refuses the deploy. An optional ``before_upload`` hook gets the
-#     mapped bindings after every check and before the first upload (the project
-#     engine applies its D1 migrations there).
-#   * secrets: every secret the owner SET for the site (``site_secrets``) binds as
-#     ``secret_text``, requested or not. A ``secret`` request with ``required`` or a
-#     name in the manifest's ``requiredSecrets`` that is not set refuses the deploy
-#     with ``sites.secrets_missing`` naming what to set in the builder. Values only
-#     ever live in the binding: never in a warning, an error, a log or a repr.
-#   * platform env: ``ProvisionedResources.plain_text`` binds as ``plain_text`` and
-#     replaces a secret of the same name (a draft's ``BETTER_AUTH_URL``).
-#   * limits: 64 MiB of modules, our own module-count cap (Cloudflare documents
-#     none), and the static-asset caps. Over any of them refuses before upload.
-#   * worker settings (``worker_settings``), only for a bundle with worker modules:
-#     ``observability`` (Workers Logs + traces, sampled; ``PAW_SITES_OBSERVABILITY=0``
-#     turns it off), ``limits`` (per-request CPU and subrequest caps by the site's
-#     plan, ``paid``) and, OPT-IN via ``PAW_SITES_SMART_PLACEMENT=1``, Smart Placement
-#     for a worker that binds a regional backend (D1, R2). Off by default: quiet sites
-#     never get placed, placement moves the whole script (bad with
-#     ``run_worker_first``), and it works against D1 read replicas. A ``draft``
-#     deploy (``draft_worker``) never gets placement and reads the
-#     ``PAW_SITES_DRAFT_*`` limit / observability knobs.
-#
-# The manifest shape is paw-sites' ``buildPawManifest`` (src/starters.ts). The
-# parser also accepts the earlier shape (no ``workerModuleDir`` / ``mainModule``,
-# no ``assetsConfig``, wrangler key names in ``compat``) and ignores unknown fields
-# such as ``sizes`` and ``startup``. Everything the deploy drops is a warning.
+# This module is the trust boundary for an author-built bundle: it reads ONLY
+# ``paw-build.json`` and the files it names, never a wrangler config, and runs nothing.
+#   * modules and assets: path-contained, typed by extension, size and count capped;
+#     ``_headers`` / ``_redirects`` travel as ``assets.config`` strings.
+#   * compat: the author's date (bumped for nodejs_compat, clamped to today) and only
+#     allow-listed flags.
+#   * bindings: requests map by TYPE and NAME onto resources WE provisioned
+#     (``provision`` callback, ``binding_provisioner``); author ids are never read,
+#     unsupported kinds are dropped with a warning, an unprovisioned backend refuses.
+#   * secrets bind as ``secret_text`` (a missing required one refuses with
+#     ``sites.secrets_missing``; values never reach a log or repr); platform env
+#     (``plain_text``) wins over a secret of the same name.
+#   * Durable Objects (``durable_objects``, behind ``PAW_SITES_DURABLE_OBJECTS``):
+#     vetted and migration-planned before ``provision``, bound as
+#     ``durable_object_namespace``; the result carries Cloudflare's ``migration_tag``.
+#   * worker settings: sampled observability, plan-tiered ``limits`` and opt-in Smart
+#     Placement (``worker_settings``); drafts use the ``PAW_SITES_DRAFT_*`` knobs.
+# Every refusal happens before the first upload, so the live site is untouched.
+# The manifest is paw-sites' ``buildPawManifest`` (an earlier shape is still accepted);
+# unknown fields are ignored and everything dropped is a warning.
 from __future__ import annotations
 
 import json
@@ -61,13 +32,14 @@ import logging
 import os
 import posixpath
 import re
-from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites import durable_objects, platform_guard
 from pocketpaw_ee.sites.cloudflare_client import (
     ACCOUNT_TARGET,
     DISPATCH_TARGET,
@@ -183,6 +155,9 @@ class ProvisionedResources:
     # Platform env (``plain_text``), e.g. a draft's ``BETTER_AUTH_URL``. Wins over a
     # secret of the same name.
     plain_text: dict[str, str] = field(default_factory=dict)
+    # Vetted Durable Object bindings, ``{name: class_name}`` (``durable_objects``).
+    # Nothing to create: Cloudflare makes the namespace when the migration applies.
+    durable_objects: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -207,6 +182,12 @@ class BundleDeployResult:
     modules: int
     assets: int
     warnings: list[str]
+    # The script's Durable Object migration tag after the upload (Cloudflare's
+    # ``migration_tag``), the applied tag history ending in it, and the classes live
+    # on it; None / () without DOs. Callers store the history and classes.
+    migration_tag: str | None = None
+    do_classes: tuple[str, ...] = ()
+    migration_tags: tuple[str, ...] = ()
 
 
 def _refuse(message: str) -> ValidationError:
@@ -468,7 +449,7 @@ def map_bindings(
                 continue
             binding = {"type": "secret_text", "name": name, "text": value}
         else:
-            if kind in used and kind not in ("kv", "r2"):
+            if kind in used and kind not in ("kv", "r2", "do"):
                 raise _refuse(f"binding {label}: only one {kind} resource is provisioned per site")
             binding = _provisioned_binding(kind, name, provisioned)
             if binding is None:
@@ -479,6 +460,15 @@ def map_bindings(
         names.add(name)
         bindings.append(binding)
 
+    # The durableObjects block is authoritative: a DO binding with no matching request
+    # still binds, but never over another binding's name.
+    for name, cls in provisioned.durable_objects.items():
+        if any(b["name"] == name and b["type"] == "durable_object_namespace" for b in bindings):
+            continue
+        if name in names:
+            raise _refuse(f"Durable Object binding {name!r} has the same name as another binding")
+        bindings.append({"type": "durable_object_namespace", "name": name, "class_name": cls})
+        names.add(name)
     if missing:
         raise _secrets_missing(missing)
     requested = {b["name"] for b in bindings if b["type"] == "secret_text"}
@@ -513,7 +503,12 @@ def _provisioned_binding(kind: str, name: str, res: ProvisionedResources) -> dic
         return {"type": "queue", "name": name, "queue_name": res.queue_name}
     if kind == "ai" and res.ai:
         return {"type": "ai", "name": name}
-    # Durable Objects need a class + migrations we do not provision yet.
+    if kind == "do" and res.durable_objects.get(name):
+        return {
+            "type": "durable_object_namespace",
+            "name": name,
+            "class_name": res.durable_objects[name],
+        }
     return None
 
 
@@ -746,7 +741,16 @@ async def deploy_bundle(
     target: str = DISPATCH_TARGET,
     paid: bool = False,
     draft: bool = False,
-    main_wrapper: Callable[[str], WorkerModule] | None = None,
+    main_wrapper: Callable[..., WorkerModule] | None = None,
+    do_state: durable_objects.DurableObjectState
+    | Callable[[], Awaitable[durable_objects.DurableObjectState]]
+    | None = None,
+    confirm_do_data_loss: Sequence[str] = (),
+    allow_do_data_loss: bool = False,
+    do_quota_used: Callable[[], Awaitable[int]] | None = None,
+    do_throttled: bool = False,
+    do_suspended: bool = False,
+    site_origins: Sequence[str] | Callable[[], Awaitable[Sequence[str]]] = (),
 ) -> BundleDeployResult:
     """Vet the build, provision its backends, upload its assets, then PUT the
     Worker. Live on success.
@@ -769,17 +773,68 @@ async def deploy_bundle(
     free, the tighter cap. ``draft`` (a ``draft_worker`` deploy) uses the draft
     limit / observability knobs and no placement. ``main_wrapper``, given the main
     module's name, returns a module that becomes the new entry (the draft guard); it
-    is added after every check, so the wrapper itself is never author-controlled."""
+    is added after every check, so the wrapper itself is never author-controlled.
+
+    ``do_state`` is what the script already has applied (Durable Object migration
+    tag, live classes), or an async callable for it that is only awaited when the
+    build declares DOs (the service reconciles with Cloudflare there); unknown means
+    a fresh script. A DO bundle always enters through a platform-owned wrapper
+    (``platform_guard``): ``main_wrapper`` gets ``do_limits=True`` for one, else
+    ``platform_guard.wrapper_module`` is used. ``confirm_do_data_loss`` names
+    the classes the owner agreed to delete or rename; ``allow_do_data_loss`` (drafts)
+    skips that confirmation. ``do_quota_used`` returns how many DO classes the
+    workspace's other scripts hold; it is asked only when this deploy creates a
+    class (``durable_objects.check_workspace_quota``). A DO bundle also gets the
+    platform vars (``durable_objects.platform_vars``: the plan's room cap,
+    ``do_throttled`` from the usage sweep, and ``site_origins``, a list or an async
+    callable only awaited for a DO bundle). The DO block is vetted, its
+    migration planned and the account budget checked before ``provision``, so a
+    refused bundle creates nothing. The result carries the tag Cloudflare reports."""
     if target not in SCRIPT_TARGETS:
         raise _refuse(f"unknown deploy target {target!r}")
     bundle, manifest = _read_bundle(build_dir)
+    if callable(do_state):
+        do_state = await do_state() if durable_objects.declares_durable_objects(manifest) else None
+    vetted = durable_objects.vet_durable_objects(
+        manifest,
+        paid=paid,
+        state=do_state,
+        confirm=confirm_do_data_loss,
+        allow_data_loss=allow_do_data_loss,
+    )
+    if vetted is not None and not bundle.modules:
+        raise _refuse("Durable Objects need a worker module; the build has only assets")
+    if vetted is not None and vetted.plan.new_classes and do_quota_used is not None:
+        durable_objects.check_workspace_quota(await do_quota_used(), vetted)
+    await durable_objects.check_account_budget(cf, vetted, target=target, draft=draft)
     if provision is not None:
         provisioned = await provision(manifest.get("bindingRequests"))
-    _map_into(bundle, manifest, provisioned or ProvisionedResources())
+    provisioned = provisioned or ProvisionedResources()
+    if vetted is not None:
+        provisioned = replace(
+            provisioned,
+            durable_objects=dict(vetted.bindings),
+            plain_text={
+                **provisioned.plain_text,
+                **durable_objects.platform_vars(
+                    paid=paid,
+                    throttled=do_throttled,
+                    suspended=do_suspended,
+                    origins=await site_origins() if callable(site_origins) else site_origins,
+                ),
+            },
+        )
+    _map_into(bundle, manifest, provisioned)
     for warning in bundle.warnings:
         logger.warning("sites.bundle_deploy %s: %s", script_name, warning)
-    if main_wrapper is not None and bundle.main_module:
-        wrapper = main_wrapper(bundle.main_module)
+    if bundle.main_module and (main_wrapper is not None or vetted is not None):
+        # A DO bundle's caps live in a platform-owned wrapper the author cannot edit.
+        if main_wrapper is None:
+            wrapper = platform_guard.wrapper_module(bundle.main_module, do_limits=True)
+        elif vetted is not None:
+            wrapper = main_wrapper(bundle.main_module, do_limits=True)
+        else:
+            wrapper = main_wrapper(bundle.main_module)
         if any(m.name == wrapper.name for m in bundle.modules):
             raise _refuse(f"the build already has a module named {wrapper.name}")
         bundle.modules.append(wrapper)
@@ -799,7 +854,9 @@ async def deploy_bundle(
             script_name=script_name, assets=bundle.assets, salt=salt, target=target
         )
         assets_meta = {"jwt": jwt, "config": bundle.assets_config}
-    await cf.put_worker(
+    # Sent only when the plan has steps, so a deploy without DOs is unchanged.
+    migrations = vetted.plan.migrations if vetted is not None else None
+    upload = await cf.put_worker(
         script_name=script_name,
         modules=bundle.modules,
         main_module=bundle.main_module,
@@ -809,10 +866,29 @@ async def deploy_bundle(
         assets=assets_meta,
         target=target,
         **worker_settings(bundle, paid=paid, draft=draft),
+        **({"migrations": migrations} if migrations else {}),
     )
+    tag: str | None = None
+    history: tuple[str, ...] = ()
+    if vetted is not None:
+        # Cloudflare's answer wins; ours is the cross-check (and the fallback when the
+        # response omits it, since a 2xx upload applied the migration).
+        reported = getattr(upload, "migration_tag", None)
+        if reported and reported != vetted.plan.tag:
+            logger.warning(
+                "sites.bundle_deploy %s: Cloudflare reports migration tag %r, we planned %r",
+                script_name,
+                reported,
+                vetted.plan.tag,
+            )
+        tag = reported or vetted.plan.tag
+        history = durable_objects.migration_tags_after(vetted, reported)
     return BundleDeployResult(
         script_name=script_name,
         modules=len(bundle.modules),
         assets=len(bundle.assets),
         warnings=list(bundle.warnings),
+        migration_tag=tag,
+        do_classes=vetted.classes if vetted is not None else (),
+        migration_tags=history,
     )

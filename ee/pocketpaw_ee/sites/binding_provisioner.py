@@ -13,8 +13,10 @@
 #     before the save), then created. The doc is saved after every create.
 #   * Plan gating (captain, 2026-10-07): d1 and kv are allowed on free, kv capped
 #     tighter there; r2 needs the ``site`` tier or above with an active
-#     subscription (``entitlements.site_paid_backends_entitled``). do, queues and
-#     ai are refused as not supported yet. Every check runs before the first create.
+#     subscription (``entitlements.site_paid_backends_entitled``). queues and ai are
+#     refused as not supported yet; so is do unless ``PAW_SITES_DURABLE_OBJECTS`` is
+#     on, when it needs nothing created here (``durable_objects`` vets it). Every
+#     check runs before the first create.
 #   * Caps per site are env-configurable (see ``_cap``). Cloudflare allows 1,000 KV
 #     namespaces per ACCOUNT, so KV per site is the scarce one.
 #   * d1 is ONE database per site, whatever the binding is called: the site's own
@@ -38,6 +40,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites import durable_objects
 from pocketpaw_ee.sites.bundle_deploy import _BINDING_NAME, ProvisionedResources
 
 logger = logging.getLogger(__name__)
@@ -94,6 +97,8 @@ def _requested(binding_requests: Any) -> dict[str, list[str]]:
             continue
         kind = str(req.get("type", "")).strip().lower()
         name = req.get("name")
+        if kind == "do" and durable_objects.enabled():
+            continue
         if kind in _NOT_SUPPORTED:
             raise _refuse(
                 "sites.binding_unsupported",

@@ -70,6 +70,21 @@ RECIPES = [
         "secrets": [],
         "env": [],
     },
+    {
+        "id": "realtime-room",
+        "name": "Realtime room",
+        "summary": "Multiplayer rooms over WebSockets on a SQLite Durable Object.",
+        "applies_to": ["astro", "next", "tanstack-start", "vite-react-hono"],
+        "unsupported": {
+            "sveltekit": "adapter-cloudflare writes its worker to the wrangler `main` and "
+            "cannot export a Durable Object class from it."
+        },
+        "plan": "site",
+        "bindings": [{"type": "do", "name": "ROOM", "class_name": "Room"}],
+        "migrations": [{"tag": "realtime-room-v1", "new_sqlite_classes": ["Room"]}],
+        "secrets": [],
+        "env": [],
+    },
 ]
 
 

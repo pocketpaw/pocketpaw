@@ -25,11 +25,19 @@
 #     a rung and the build falls back; it never fails.
 #   * ``proxy_target``: which token the preview origin proxies (only the deployed
 #     hash of a ``live`` row; an older hash of a proxied draft is ``SUPERSEDED``).
+#   * Durable Objects (``durable_objects``): the row keeps the draft script's tag
+#     history and live classes, written right after a successful upload. Draft data
+#     is throwaway, so destructive migrations need no confirmation, and a history the
+#     row does not recognise tears the old script down and rotates to a fresh name,
+#     at most ``PAW_SITES_DO_DRAFT_ROTATIONS_PER_HOUR`` times per pocket (then the
+#     ``do_rotation_limit`` rung). A new class counts against the draft DO budget and
+#     the workspace's DO quota (the workspace's other drafts).
 #   * cleanup: ``purge_pocket_drafts`` (publish, site / pocket delete, sweeper).
-#     Idempotent; a Cloudflare 404 is success. A failure leaves the row
-#     ``deleting`` with a backoff and ``sweep_draft_workers`` retries it, reaps
-#     drafts idle past ``PAW_SITES_DRAFT_TTL_DAYS`` and deletes unregistered
-#     ``paw-draft-*`` scripts.
+#     Idempotent; a Cloudflare 404 is success; a script with DOs goes through
+#     ``durable_objects.teardown_script``. A failure leaves the row ``deleting``
+#     with a backoff and ``sweep_draft_workers`` retries it, reaps drafts idle past
+#     ``PAW_SITES_DRAFT_TTL_DAYS`` and force-deletes unregistered ``paw-draft-*``
+#     scripts.
 #   * the script cap: a NEW draft reserves a slot under ``PAW_SITES_DRAFT_SCRIPT_CAP``
 #     account scripts (released on failure), or is refused when the count cannot be
 #     read. Replicas each cache the count for a minute, so they can still overshoot.
@@ -39,7 +47,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
@@ -58,6 +65,8 @@ from pocketpaw_ee.cloud._core.errors import ValidationError
 logger = logging.getLogger(__name__)
 
 ENABLE_ENV = "PAW_SITES_DRAFT_WORKERS"
+DO_ROTATIONS_ENV = "PAW_SITES_DO_DRAFT_ROTATIONS_PER_HOUR"
+DEFAULT_DO_ROTATIONS = 3
 SCRIPT_CAP_ENV = "PAW_SITES_DRAFT_SCRIPT_CAP"
 DEFAULT_SCRIPT_CAP = 450
 TTL_DAYS_ENV = "PAW_SITES_DRAFT_TTL_DAYS"
@@ -94,6 +103,7 @@ REASONS = frozenset(
         "deploy_failed",
         "superseded",
         "gone",
+        "do_rotation_limit",
     }
 )
 
@@ -188,42 +198,21 @@ def required_secrets(manifest: Mapping[str, Any]) -> list[str]:
     return names
 
 
-def guard_module(main_module: str) -> Any:
+def guard_module(main_module: str, *, do_limits: bool = False) -> Any:
     """The draft's entry module: re-exports the real entry, and answers 404 unless
     the request carries ``X-Paw-Draft-Key`` equal to the ``PAW_DRAFT_KEY`` binding,
     which it strips before calling the real ``fetch``. A class default export
     (``WorkerEntrypoint``) is instantiated per request. Static assets the platform
-    serves before the Worker runs are not covered."""
-    from pocketpaw_ee.sites.cloudflare_client import WorkerModule, module_content_type
+    serves before the Worker runs are not covered. For a DO bundle (``do_limits``)
+    the same module also enforces the platform's DO tiers (``platform_guard``), after
+    the key check."""
+    from pocketpaw_ee.sites import platform_guard
 
-    spec = json.dumps("./" + main_module)
-    code = f"""// Paw draft guard: only the preview origin (it holds PAW_DRAFT_KEY) may call.
-import * as app from {spec};
-export * from {spec};
-const HEADER = "{DRAFT_KEY_HEADER}";
-const enc = new TextEncoder();
-function allowed(got, want) {{
-  if (typeof got !== "string" || typeof want !== "string" || !want) return false;
-  const a = enc.encode(got);
-  const b = enc.encode(want);
-  return a.byteLength === b.byteLength && crypto.subtle.timingSafeEqual(a, b);
-}}
-const inner = app.default;
-const isClass = typeof inner === "function";
-const guarded = isClass ? {{}} : {{ ...inner }};
-guarded.fetch = async (request, env, ctx) => {{
-  if (!allowed(request.headers.get(HEADER), env.{DRAFT_KEY_BINDING})) {{
-    return new Response("Not found", {{ status: 404 }});
-  }}
-  const headers = new Headers(request.headers);
-  headers.delete(HEADER);
-  const clean = new Request(request, {{ headers }});
-  return isClass ? new inner(ctx, env).fetch(clean) : inner.fetch(clean, env, ctx);
-}};
-export default guarded;
-"""
-    return WorkerModule(
-        name=GUARD_MODULE, content=code.encode(), content_type=module_content_type(GUARD_MODULE)
+    return platform_guard.wrapper_module(
+        main_module,
+        do_limits=do_limits,
+        draft_key=(DRAFT_KEY_HEADER, DRAFT_KEY_BINDING),
+        name=GUARD_MODULE,
     )
 
 
@@ -241,6 +230,10 @@ class DraftRecord:
     d1_database_id: str = ""
     kv_namespaces: dict[str, str] = field(default_factory=dict)
     r2_buckets: dict[str, str] = field(default_factory=dict)
+    do_migration_tags: list[str] = field(default_factory=list)
+    do_classes: list[str] = field(default_factory=list)
+    # When this pocket's draft last rotated on a DO history change (rate limit).
+    do_rotations: list[datetime] = field(default_factory=list)
     seeded: bool = False
     auth_secret_enc: str = field(default="", repr=False)
     draft_key_enc: str = field(default="", repr=False)
@@ -260,7 +253,14 @@ _FIELDS = tuple(DraftRecord.__dataclass_fields__)
 
 
 def _copy(rec: DraftRecord) -> DraftRecord:
-    return replace(rec, kv_namespaces=dict(rec.kv_namespaces), r2_buckets=dict(rec.r2_buckets))
+    return replace(
+        rec,
+        kv_namespaces=dict(rec.kv_namespaces),
+        r2_buckets=dict(rec.r2_buckets),
+        do_migration_tags=list(rec.do_migration_tags),
+        do_classes=list(rec.do_classes),
+        do_rotations=list(rec.do_rotations),
+    )
 
 
 class MemoryRegistry:
@@ -272,11 +272,7 @@ class MemoryRegistry:
 
     async def get(self, pocket_id: str) -> DraftRecord | None:
         row = self.rows.get(pocket_id)
-        return (
-            replace(row, kv_namespaces=dict(row.kv_namespaces), r2_buckets=dict(row.r2_buckets))
-            if row
-            else None
-        )
+        return _copy(row) if row else None
 
     async def put(self, rec: DraftRecord) -> None:
         current = self.rows.get(rec.pocket_id)
@@ -475,7 +471,13 @@ async def _discard(rec: DraftRecord, current: DraftRecord | None, cf: Any) -> No
         }
     steps: list[tuple[str, Any]] = []
     if rec.script and rec.script != keep_script:
-        steps.append(("delete_account_script", lambda: cf.delete_account_script(rec.script)))
+        if rec.do_classes:
+            # A script with Durable Objects only deletes with force.
+            steps.append(
+                ("delete_account_script", lambda: cf.delete_account_script(rec.script, force=True))
+            )
+        else:
+            steps.append(("delete_account_script", lambda: cf.delete_account_script(rec.script)))
     if rec.d1_database_id and rec.d1_database_id not in keep:
         steps.append(("delete_database", lambda: cf.delete_database(rec.d1_database_id)))
     for ns in rec.kv_namespaces.values():
@@ -612,6 +614,12 @@ def _reason_for(exc: Exception, phase: str) -> str:
         "sites.binding_cap",
     }:
         return "not_entitled"
+    if code == "sites.do_rotation_limit":
+        return "do_rotation_limit"
+    if code in {"sites.do_account_budget", "sites.do_budget_unknown", "sites.do_workspace_quota"}:
+        return "cap"
+    if code in {"sites.do_disabled", "sites.do_class_cap"}:
+        return "not_entitled"
     if code.startswith("sites.migration_"):
         return "migration_failed"
     return {"provision": "provision_failed", "migrate": "migration_failed"}.get(
@@ -641,6 +649,7 @@ async def deploy_for_build(
     from pocketpaw_ee.sites import (
         binding_provisioner,
         bundle_deploy,
+        durable_objects,
         preview_origin,
         project_build,
         project_d1,
@@ -783,9 +792,48 @@ async def deploy_for_build(
                 raise _Gone
             await _write()
 
+        do_state = durable_objects.DurableObjectState.from_history(
+            rec.do_migration_tags, rec.do_classes
+        )
+
+        async def _workspace_draft_classes() -> int:
+            # DO classes the workspace's OTHER drafts hold (the per-workspace quota).
+            return sum(
+                len(r.do_classes)
+                for r in await registry.all()
+                if r.workspace == workspace_id and r.pocket_id != pocket_id
+            )
+
+        if durable_objects.declares_durable_objects(manifest) or rec.do_classes:
+            try:
+                durable_objects.vet_durable_objects(
+                    manifest, paid=paid, state=do_state, allow_data_loss=True
+                )
+            except ValidationError as exc:
+                if exc.code != "sites.do_history_diverged":
+                    raise
+                now = datetime.now(UTC)
+                recent = [
+                    t
+                    for t in rec.do_rotations
+                    if (t if t.tzinfo else t.replace(tzinfo=UTC)) > now - timedelta(hours=1)
+                ]
+                if len(recent) >= _int_env(DO_ROTATIONS_ENV, DEFAULT_DO_ROTATIONS):
+                    raise ValidationError(
+                        "sites.do_rotation_limit",
+                        "This draft's Durable Object history changed too often in the "
+                        "last hour; the preview falls back until it settles.",
+                    ) from exc
+                rec.do_rotations = [*recent, now]
+                # Draft data is throwaway: start a fresh script (fresh namespaces)
+                # instead of refusing, like a changed D1 migration resets the draft DB.
+                await _rotate_script(rec, cf, do_state)
+                await _write()
+                do_state = durable_objects.DurableObjectState()
+
         with tempfile.TemporaryDirectory(prefix="paw-draft-") as work:
             project_build.materialize_bundle(artifact, Path(work))
-            await bundle_deploy.deploy_bundle(
+            result = await bundle_deploy.deploy_bundle(
                 cf,
                 script_name=rec.script,
                 build_dir=work,
@@ -796,7 +844,18 @@ async def deploy_for_build(
                 paid=paid,
                 draft=True,
                 main_wrapper=guard_module,
+                do_state=do_state,
+                allow_do_data_loss=True,
+                do_quota_used=_workspace_draft_classes,
+                # The recipe accepts WebSockets only from this draft's preview origin
+                # (the builder origin is checked by the preview proxy, not here).
+                site_origins=[_origin_of(url)],
             )
+        if result.migration_tags or rec.do_classes:
+            # Right after the upload, so a later failure cannot lose the applied tag.
+            rec.do_migration_tags = list(result.migration_tags)
+            rec.do_classes = list(result.do_classes)
+            await _write()
         phase["v"] = "deploy"
         await cf.enable_workers_dev(rec.script)
         from pocketpaw_ee.sites.workers_deploy import _workers_dev_host
@@ -848,6 +907,41 @@ async def deploy_for_build(
         except _Superseded:
             await _discard(rec, await registry.get(pocket_id), cf)
     return _skip(reason)
+
+
+def _origin_of(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+
+
+async def _rotate_script(rec: DraftRecord, cf: Any, state: Any) -> None:
+    """Point ``rec`` at a fresh script name after tearing the old script's Durable
+    Objects down. A teardown that fails is logged; the orphan sweep force-deletes
+    the old ``paw-draft-*`` script once no row names it."""
+    from pocketpaw_ee.sites import durable_objects
+
+    old = rec.script
+    if old:
+        out = await durable_objects.teardown_script(
+            cf,
+            old,
+            target=durable_objects.ACCOUNT_TARGET,
+            classes=state.live_classes,
+            migration_tag=state.migration_tag,
+        )
+        if not out.ok:
+            logger.warning(
+                "sites.draft: pocket %s old draft %s teardown incomplete: %s",
+                rec.pocket_id,
+                old,
+                out.error,
+            )
+    logger.info("sites.draft: pocket %s DO history changed; rotating the draft", rec.pocket_id)
+    rec.script = new_script_name(rec.pocket_id)
+    rec.host, rec.deployed_hash = "", ""
+    rec.do_migration_tags, rec.do_classes = [], []
 
 
 # ---------------------------------------------------------------- cleanup
@@ -936,7 +1030,26 @@ async def purge_pocket_drafts(
             errors.append(f"cloudflare: {exc}")
     if owns_resources and cf is not None:
         steps: list[tuple[str, Callable[[], Awaitable[Any]], Callable[[], None]]] = []
-        if rec.script:
+        if rec.script and rec.do_classes:
+
+            async def _teardown() -> None:
+                from pocketpaw_ee.sites import durable_objects
+
+                out = await durable_objects.teardown_script(
+                    cf,
+                    rec.script,
+                    target=durable_objects.ACCOUNT_TARGET,
+                    classes=rec.do_classes,
+                    migration_tag=rec.do_migration_tags[-1] if rec.do_migration_tags else None,
+                )
+                if not out.ok:
+                    raise RuntimeError(out.error)
+
+            def _torn_down() -> None:
+                rec.script, rec.do_migration_tags, rec.do_classes = "", [], []
+
+            steps.append(("teardown_durable_objects", _teardown, _torn_down))
+        elif rec.script:
             steps.append(
                 (
                     "delete_account_script",
@@ -1062,7 +1175,8 @@ async def sweep_draft_workers(
         if pocket_of_script(name) is None or name in known:
             continue
         try:
-            await cf.delete_account_script(name)
+            # Forced: an orphan may hold Durable Object namespaces (a rotated draft).
+            await cf.delete_account_script(name, force=True)
             out["orphans"] += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("sites.draft: orphan script %s delete failed: %s", name, exc)

@@ -203,7 +203,8 @@ async def list_templates() -> list[dict[str, Any]]:
 
 async def list_recipes() -> list[dict[str, Any]]:
     """The backend recipes from ``recipes --json``: id, name, summary, applies_to,
-    requires, conflicts, plan, binding requests, secret and env names."""
+    unsupported (template -> why not), requires, conflicts, plan, binding requests (a
+    ``do`` binding carries its ``class_name``), secret and env names."""
     global _recipes_cache
     if _recipes_cache is not None:
         return _recipes_cache
@@ -221,11 +222,22 @@ async def list_recipes() -> list[dict[str, Any]]:
                 "name": r.get("name") or r["id"],
                 "summary": r.get("summary") or "",
                 "applies_to": _strings(r.get("applies_to")),
+                "unsupported": {
+                    k: v
+                    for k, v in (r.get("unsupported") or {}).items()
+                    if isinstance(k, str) and isinstance(v, str)
+                }
+                if isinstance(r.get("unsupported"), dict)
+                else {},
                 "requires": _strings(r.get("requires")),
                 "conflicts": _strings(r.get("conflicts")),
                 "plan": r.get("plan") if r.get("plan") in RECIPE_PLANS else "staff",
                 "bindings": [
-                    {"type": b.get("type"), "name": b.get("name")}
+                    {
+                        "type": b.get("type"),
+                        "name": b.get("name"),
+                        **({"class_name": b["class_name"]} if b.get("class_name") else {}),
+                    }
                     for b in r.get("bindings") or []
                     if isinstance(b, dict)
                 ],

@@ -131,6 +131,27 @@ async def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
     return True
 
 
+async def _require_data_loss_confirmer(user: object, workspace_id: str, classes: list[str]) -> None:
+    """A publish that confirms Durable Object data loss needs a workspace admin
+    (``sites.confirm_data_loss``). Raises ``Forbidden`` with
+    ``sites.data_loss_confirm_forbidden`` for anyone else; a publish confirming
+    nothing is not asked."""
+    if not classes:
+        return
+    from pocketpaw_ee.cloud._core.errors import Forbidden as CloudForbidden
+    from pocketpaw_ee.guards.deps import check_workspace_action
+    from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
+
+    try:
+        await check_workspace_action(user, workspace_id, "sites.confirm_data_loss")
+    except GuardForbidden as exc:
+        raise CloudForbidden(
+            exc.code,
+            "Only a workspace owner or admin can confirm deleting a site's Durable Object "
+            f"data ({', '.join(sorted(classes))}). Ask one to publish this change.",
+        ) from exc
+
+
 @router.post("/sites/publish", response_model=SiteResponse)
 async def publish_site(
     body: PublishRequest,
@@ -154,6 +175,7 @@ async def publish_site(
     # never matches the view's, and every view is a cold miss. This does NOT arm the
     # PUBLIC deploy (builder_origin stays unset here — the public site stays plain); it
     # only steers the pre-warmed armed artifact the native editor consumes.
+    await _require_data_loss_confirmer(user, ctx.workspace_id, list(body.confirm_do_data_loss))
     doc = await sites_service.publish_pocket(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
@@ -162,6 +184,7 @@ async def publish_site(
         purchase_authorized=await _may_buy_site_plan(user, ctx.workspace_id),
         prewarm_origin=request.headers.get("origin") or None,
         confirm_destructive_migrations=body.confirm_destructive_migrations,
+        confirm_do_data_loss=list(body.confirm_do_data_loss),
     )
     return sites_service._to_response(doc)
 

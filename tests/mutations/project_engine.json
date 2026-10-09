@@ -11,7 +11,7 @@
   {
     "label": "a free site's worker binds R2 because the plan gate stops reading binding types",
     "file": "ee/pocketpaw_ee/sites/project_build.py",
-    "find": "            and str(req.get(\"type\", \"\")).strip().lower() not in FREE_WORKER_BINDINGS",
+    "find": "            and str(req.get(\"type\", \"\")).strip().lower() not in free_bindings",
     "replace": "            and False",
     "tests": [
       "tests/ee/sites/test_project_engine.py::test_plan_gate",

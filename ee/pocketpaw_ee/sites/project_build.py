@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
-from pocketpaw_ee.sites import capacity
+from pocketpaw_ee.sites import capacity, durable_objects
 from pocketpaw_ee.sites.engines import (
     PAW_BUILD_FILENAME,
     PROJECT_STAGE_REL,
@@ -355,6 +355,7 @@ CLI_FAILURE_CODES = frozenset(
         "output_missing",
         "wrangler_failed",
         "size_limit",
+        "do_config",
         "internal_error",
     }
 )
@@ -670,13 +671,16 @@ def check_plan_allows(manifest: Mapping[str, Any], *, paid: bool, has_custom_dom
     custom domain, needs the Site plan. A static build is never refused here."""
     if paid or not manifest_has_worker(dict(manifest)):
         return
+    # With Durable Objects on, a free site may bind one class (``durable_objects``
+    # enforces the count); with them off ``do`` stays a Site-plan binding.
+    free_bindings = FREE_WORKER_BINDINGS | ({"do"} if durable_objects.enabled() else set())
     requests = manifest.get("bindingRequests")
     extra = sorted(
         {
             f"{str(req.get('type', '')).lower()} {req.get('name')!s}"
             for req in (requests if isinstance(requests, list) else [])
             if isinstance(req, dict)
-            and str(req.get("type", "")).strip().lower() not in FREE_WORKER_BINDINGS
+            and str(req.get("type", "")).strip().lower() not in free_bindings
         }
     )
     if extra:

@@ -64,6 +64,7 @@ from pocketpaw_ee.cloud.chat.domain import Mention as _MentionDomain
 from pocketpaw_ee.cloud.chat.domain import Message as _MessageDomain
 from pocketpaw_ee.cloud.chat.domain import MessageStep as _MessageStepDomain
 from pocketpaw_ee.cloud.chat.domain import Reaction as _ReactionDomain
+from pocketpaw_ee.cloud.chat.dto import preview_attachment
 from pocketpaw_ee.cloud.chat.group_service import (
     _get_group_or_404,
     _require_can_post,
@@ -394,6 +395,7 @@ def _reply_preview(parent: _MessageDoc | None) -> dict | None:
         "sender": parent.sender,
         "senderType": parent.sender_type,
         "agent": parent.agent,
+        "attachment": preview_attachment(parent.attachments),
     }
 
 

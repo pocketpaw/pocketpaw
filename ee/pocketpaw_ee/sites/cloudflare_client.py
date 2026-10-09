@@ -193,6 +193,14 @@ class WorkerModule:
     content_type: str
 
 
+@dataclass(frozen=True)
+class WorkerUpload:
+    """What a bundle-form ``put_worker`` reports back. ``migration_tag`` is the
+    script's Durable Object migration tag after the upload, None when it has none."""
+
+    migration_tag: str | None = None
+
+
 def asset_hash(content: bytes, path: str, salt: str) -> str:
     """The 32-hex asset hash Cloudflare keys uploads on, salted per tenant.
 
@@ -302,6 +310,10 @@ class CloudflareClient:
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(headers=self._headers, transport=self._transport, timeout=30.0)
 
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
     @staticmethod
     def _unwrap(resp: httpx.Response) -> dict:
         if resp.status_code // 100 != 2:
@@ -337,7 +349,8 @@ class CloudflareClient:
         placement: Mapping[str, Any] | None = None,
         observability: Mapping[str, Any] | None = None,
         limits: Mapping[str, Any] | None = None,
-    ) -> bool:
+        migrations: Mapping[str, Any] | None = None,
+    ) -> bool | WorkerUpload:
         """Upload a user Worker into the dispatch namespace. Live on 200.
 
         ``target="account"`` sends the same upload to a regular account-level script
@@ -367,7 +380,10 @@ class CloudflareClient:
         ``assets`` (``{"jwt": <completion jwt>, "config": {...}}``), followed by one
         part per module named by its path. An empty ``modules`` with ``assets`` is an
         assets-only Worker (no ``main_module``). ``placement``, ``observability`` and
-        ``limits`` (bundle form only) go into the metadata as given. Callers vet every value
+        ``limits`` (bundle form only) go into the metadata as given, and so does
+        ``migrations`` (Durable Object tagged migrations, ``{old_tag?, new_tag, steps}``).
+        The bundle form returns a ``WorkerUpload`` carrying the response's
+        ``migration_tag``; the single-module form returns True. Callers vet every value
         first; this method only checks the shape is self-consistent."""
         if modules is not None:
             return await self._put_worker_bundle(
@@ -384,11 +400,13 @@ class CloudflareClient:
                     "placement": placement,
                     "observability": observability,
                     "limits": limits,
+                    "migrations": migrations,
                 },
             )
-        if placement or observability or limits:
+        if placement or observability or limits or migrations:
             raise ValidationError(
-                "sites.bundle_shape", "placement, observability and limits need the bundle form"
+                "sites.bundle_shape",
+                "placement, observability, limits and migrations need the bundle form",
             )
         url = self._script_url(script_name, target)
         async with self._client() as client:
@@ -446,7 +464,7 @@ class CloudflareClient:
         assets: dict | None,
         target: str = DISPATCH_TARGET,
         settings: Mapping[str, Mapping[str, Any] | None] | None = None,
-    ) -> bool:
+    ) -> WorkerUpload:
         if bundle:
             raise ValidationError(
                 "sites.bundle_shape", "put_worker takes either bundle or modules, not both"
@@ -482,8 +500,9 @@ class CloudflareClient:
         files.extend((m.name, (m.name, m.content, m.content_type)) for m in modules)
         async with self._client() as client:
             resp = await client.put(self._script_url(script_name, target), files=files)
-        self._unwrap(resp)
-        return True
+        result = self._unwrap(resp)
+        tag = result.get("migration_tag") if isinstance(result, dict) else None
+        return WorkerUpload(migration_tag=str(tag) if tag else None)
 
     async def upload_assets(
         self,
@@ -564,7 +583,7 @@ class CloudflareClient:
             )
         return completion
 
-    async def delete_worker(self, script_name: str) -> None:
+    async def delete_worker(self, script_name: str, *, force: bool = False) -> None:
         """Remove a user Worker from the dispatch namespace. Idempotent on a 404.
 
         The inverse of ``put_worker``, and the step in a site teardown that actually
@@ -578,18 +597,21 @@ class CloudflareClient:
         the goal is "this script is not in the namespace", and something already gone
         satisfies it. Raising there would make a resumed teardown fail on the step it
         had already completed — turning a recoverable partial teardown into a
-        permanent orphan, which is precisely what this method exists to prevent."""
+        permanent orphan, which is precisely what this method exists to prevent.
+
+        ``force`` deletes a script that has Durable Object namespaces, and the
+        namespaces with it (``?force=true``)."""
         url = (
             f"{_CF_API}/accounts/{self._account_id}"
             f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
         )
         async with self._client() as client:
-            resp = await client.delete(url)
+            resp = await client.delete(url, params={"force": "true"} if force else None)
         if resp.status_code == 404:
             return
         self._unwrap(resp)
 
-    async def delete_account_script(self, script_name: str) -> None:
+    async def delete_account_script(self, script_name: str, *, force: bool = False) -> None:
         """Remove an ACCOUNT-LEVEL Worker script (the ``workers`` deploy mode).
 
         Sibling of ``delete_worker``, and the difference is the deploy mode, not the
@@ -605,13 +627,33 @@ class CloudflareClient:
         purged), and a subprocess seam can only be honestly proven against the real
         binary. One HTTP call has neither problem.
 
-        Idempotent on a 404, same reasoning as every other delete here."""
+        Idempotent on a 404, same reasoning as every other delete here. ``force`` as in
+        ``delete_worker``."""
         url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}"
         async with self._client() as client:
-            resp = await client.delete(url)
+            resp = await client.delete(url, params={"force": "true"} if force else None)
         if resp.status_code == 404:
             return
         self._unwrap(resp)
+
+    async def list_durable_object_namespaces(self) -> list[dict]:
+        """Every Durable Object namespace on the account (``id``, ``name``, ``script``,
+        ``class``, ``use_sqlite``).
+
+        ``GET /accounts/{id}/workers/durable_objects/namespaces``
+        (https://developers.cloudflare.com/api/resources/durable_objects/subresources/namespaces/methods/list/).
+        Fails closed like every other call here; pages are bounded."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/durable_objects/namespaces"
+        out: list[dict] = []
+        async with self._client() as client:
+            for page in range(1, 51):
+                resp = await client.get(url, params={"page": page, "per_page": 1000})
+                rows = self._unwrap(resp)
+                rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+                out.extend(rows)
+                if len(rows) < 1000:
+                    break
+        return out
 
     async def enable_workers_dev(self, script_name: str) -> None:
         """Serve an ACCOUNT-LEVEL script on ``<script>.<sub>.workers.dev``.
@@ -945,6 +987,7 @@ class CloudflareClient:
         viewport: dict | None = None,
         goto_options: dict | None = None,
         screenshot_options: dict | None = None,
+        wait_for_timeout: int = 0,
     ) -> bytes:
         """Screenshot a page and return the raw image bytes (SC-1, SC-2).
 
@@ -962,6 +1005,8 @@ class CloudflareClient:
         (waitUntil / timeout) and ``screenshotOptions`` (fullPage / type / ...).
         Omitted options are left off the body entirely so Cloudflare's own
         defaults apply (a 1920x1080 viewport, a full-quality png).
+        ``wait_for_timeout`` (ms) becomes ``waitForTimeout``, the pause after the
+        page loads and before the shutter; 0 leaves it off.
 
         ``screenshot_options`` is passed through rather than assembled here on
         purpose — but note the one combination Cloudflare rejects: ``quality`` is
@@ -988,6 +1033,8 @@ class CloudflareClient:
             payload["viewport"] = viewport
         if goto_options:
             payload["gotoOptions"] = goto_options
+        if wait_for_timeout > 0:
+            payload["waitForTimeout"] = wait_for_timeout
         async with self._client() as client:
             resp = await client.post(api_url, json=payload)
         content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
@@ -1075,6 +1122,84 @@ class CloudflareClient:
             found = found if isinstance(found, list) else []
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
+
+    async def get_script_migration_tag(self, script_name: str, *, target: str) -> str | None:
+        """The Durable Object migration tag last applied to the script, or None (no
+        script, or no migration). Account target: the script's row in
+        ``GET /workers/scripts`` (``migration_tag``,
+        https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/list/).
+        Dispatch target: ``GET .../dispatch/namespaces/{ns}/scripts/{name}`` and its
+        ``script.migration_tag``. Fails closed on anything but a 2xx or a 404."""
+        if target == ACCOUNT_TARGET:
+            async with self._client() as client:
+                resp = await client.get(f"{_CF_API}/accounts/{self._account_id}/workers/scripts")
+            rows = self._unwrap(resp)
+            for row in rows if isinstance(rows, list) else []:
+                if isinstance(row, dict) and row.get("id") == script_name:
+                    return str(row.get("migration_tag") or "") or None
+            return None
+        async with self._client() as client:
+            resp = await client.get(self._script_url(script_name, target))
+        if resp.status_code == 404:
+            return None
+        result = self._unwrap(resp)
+        script = result.get("script") if isinstance(result, dict) else None
+        info = script if isinstance(script, dict) else result
+        return str((info or {}).get("migration_tag") or "") or None
+
+    async def get_script_settings(self, script_name: str, *, target: str) -> dict:
+        """The live script's settings (bindings, compat, ...):
+        ``GET .../scripts/{name}/settings`` on ``target``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/get/)."""
+        async with self._client() as client:
+            resp = await client.get(f"{self._script_url(script_name, target)}/settings")
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def patch_script_settings(
+        self, script_name: str, settings: Mapping[str, Any], *, target: str
+    ) -> dict:
+        """``PATCH .../scripts/{name}/settings`` with ``settings`` as the multipart
+        ``settings`` part. No code upload, so the running version keeps its code
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/edit/).
+        Callers send the FULL bindings list (``durable_objects.set_platform_vars_live``)."""
+        files = {"settings": (None, json.dumps(dict(settings)), "application/json")}
+        async with self._client() as client:
+            resp = await client.patch(
+                f"{self._script_url(script_name, target)}/settings", files=files
+            )
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def query_graphql(self, query: str, variables: Mapping[str, Any]) -> dict:
+        """Run one GraphQL Analytics query and return its ``data``.
+
+        ``POST /client/v4/graphql`` with ``{query, variables}``
+        (https://developers.cloudflare.com/analytics/graphql-api/). Values travel as
+        variables, never interpolated. The body is ``{data, errors}``, not the
+        success envelope. Fails closed: a non-2xx, a non-JSON body, any ``errors`` or
+        a missing ``data`` raises ``sites.cloudflare_error``."""
+        async with self._client() as client:
+            resp = await client.post(
+                f"{_CF_API}/graphql", json={"query": query, "variables": dict(variables)}
+            )
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Cloudflare GraphQL {resp.status_code}: {_error_detail(resp)}",
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ValidationError("sites.cloudflare_error", "GraphQL answered non-JSON") from exc
+        errors = body.get("errors") if isinstance(body, dict) else None
+        data = body.get("data") if isinstance(body, dict) else None
+        if errors or not isinstance(data, dict):
+            first = errors[0].get("message", "") if errors and isinstance(errors[0], dict) else ""
+            raise ValidationError(
+                "sites.cloudflare_error", f"Cloudflare GraphQL error: {first or 'no data'}"[:300]
+            )
+        return data
 
     async def query_analytics_sql(self, sql: str) -> list[dict]:
         """Run ONE SQL query against Workers Analytics Engine and return its rows

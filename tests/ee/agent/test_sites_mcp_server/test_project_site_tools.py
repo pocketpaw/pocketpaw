@@ -2,6 +2,8 @@
 # agent tools (``agent/mcp_servers/sites_project.py``) on the sites_manager server.
 #
 # Registration (ids on SITES_TOOL_IDS, the built server lists all twelve), then the
+# realtime-room recipe's agent text (catalogue entry with its sveltekit refusal, the
+# entry-wiring next step, the Durable Objects error guidance on build and publish), then the
 # handlers end to end against a mongomock pocket: start_site_from_template persists a
 # correct project pocket from the (fake) CLI's template copy; the file tools refuse
 # other engines and unsafe paths, and every write lands in the source map and queues
@@ -475,7 +477,12 @@ class TestFileTools:
 class TestRecipes:
     async def test_list_filters_by_template(self, cli, identity) -> None:
         body = _body(await _call("list_site_recipes", {"template": "astro"}))
-        assert {r["id"] for r in body["recipes"]} == {"d1-drizzle", "better-auth", "r2"}
+        assert {r["id"] for r in body["recipes"]} == {
+            "d1-drizzle",
+            "better-auth",
+            "r2",
+            "realtime-room",
+        }
         assert _body(await _call("list_site_recipes", {"template": "rails"}))["recipes"] == []
 
     async def test_apply_writes_back_records_and_returns_secret_names(
@@ -556,6 +563,157 @@ class TestRecipes:
         plan.return_value = ("site", "active")
         out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "r2"})
         assert not out.get("is_error"), out
+
+
+# ---------------------------------------------------------------------------
+# The realtime-room recipe
+# ---------------------------------------------------------------------------
+
+REALTIME_ENTRIES = {
+    "astro": "src/worker.ts",
+    "next": "worker.ts",
+    "tanstack-start": "src/server.ts",
+    "vite-react-hono": "src/server/index.ts",
+}
+
+
+class TestRealtimeRoom:
+    async def test_the_catalogue_lists_it_with_its_sveltekit_refusal(self, cli, identity) -> None:
+        body = _body(await _call("list_site_recipes", {}))
+        room = next(r for r in body["recipes"] if r["id"] == "realtime-room")
+        assert room["plan"] == "site"
+        assert "sveltekit" not in room["applies_to"]
+        assert "adapter-cloudflare" in room["unsupported"]["sveltekit"]
+        assert room["bindings"] == [{"type": "do", "name": "ROOM", "class_name": "Room"}]
+        astro = _body(await _call("list_site_recipes", {"template": "astro"}))
+        assert "realtime-room" in {r["id"] for r in astro["recipes"]}
+        svelte = _body(await _call("list_site_recipes", {"template": "sveltekit"}))
+        assert "realtime-room" not in {r["id"] for r in svelte["recipes"]}
+        assert "realtime-room" in svelte["message"] and "sveltekit" in svelte["message"]
+
+    async def test_sveltekit_is_refused_with_the_reason(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.sites import service as sites_service
+
+        monkeypatch.setattr(
+            sites_service, "project_site_plan", AsyncMock(return_value=("site", "active"))
+        )
+        pocket_id = await _start(cli, slug="sveltekit")
+        out = await _call(
+            "apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "realtime-room"}
+        )
+        assert out["is_error"]
+        text = out["content"][0]["text"]
+        assert "sites.recipe_not_applicable" in text
+        assert "adapter-cloudflare" in text
+        assert not any("apply-recipe" in c for c in cli.calls)
+
+    async def test_applying_it_adds_the_entry_wiring_step(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.sites import service as sites_service
+
+        monkeypatch.setattr(
+            sites_service, "project_site_plan", AsyncMock(return_value=("site", "active"))
+        )
+        pocket_id = await _start(cli)
+        out = await _call(
+            "apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "realtime-room"}
+        )
+        assert not out.get("is_error"), out
+        steps = _body(out)["next_steps"]
+        wiring = " ".join(steps)
+        assert "src/worker.ts" in wiring and "export { Room }" in wiring and "routeRoom" in wiring
+        assert "AGENTS.md" in wiring
+
+    async def test_other_recipes_get_no_wiring_step(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
+        assert "routeRoom" not in json.dumps(_body(out).get("next_steps") or [])
+
+    @pytest.mark.parametrize("template,entry", sorted(REALTIME_ENTRIES.items()))
+    def test_each_template_names_its_own_entry(self, template: str, entry: str) -> None:
+        from pocketpaw_ee.agent.mcp_servers.sites_project import recipe_next_steps
+
+        steps = recipe_next_steps("realtime-room", template)
+        assert len(steps) == 1 and entry in steps[0] and "routeRoom" in steps[0]
+        assert recipe_next_steps("realtime-room", "sveltekit") == []
+        assert recipe_next_steps("kv", template) == []
+
+
+# Every Durable Objects refusal the build (paw-sites ``do_config``) or the deploy
+# (pocketpaw ``sites.do_*``) can return, and a phrase its guidance must carry.
+DO_CODES = {
+    "do_config": "wrangler.jsonc",
+    "sites.do_config": "wrangler.jsonc",
+    "sites.do_disabled": "not enabled",
+    "sites.do_class_missing": "export",
+    "sites.do_class_cap": "plan",
+    "sites.do_history_diverged": "append",
+    "sites.do_data_loss_unconfirmed": "publish dialog",
+    "sites.do_account_budget": "try again later",
+    "sites.do_budget_unknown": "try again later",
+}
+
+
+class TestDurableObjectErrors:
+    @pytest.mark.parametrize("code,phrase", sorted(DO_CODES.items()))
+    def test_each_code_maps_to_an_instruction(self, code: str, phrase: str) -> None:
+        from pocketpaw_ee.agent.mcp_servers.sites_project import agent_error_text
+
+        text = agent_error_text(code, "the server said so")
+        assert text.startswith(f"{code}: the server said so")
+        assert phrase in text.lower() or phrase in text
+        assert "Next:" in text
+
+    def test_other_codes_pass_through_unchanged(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers.sites_project import agent_error_text
+
+        assert agent_error_text("sites.not_found", "gone") == "sites.not_found: gone"
+
+    def test_data_loss_is_the_owner_s_call(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers.sites_project import agent_error_text
+
+        text = agent_error_text("sites.do_data_loss_unconfirmed", "deletes Room")
+        assert "publish dialog" in text and "never" in text.lower()
+        assert "confirm_do_data_loss" in text  # named only to forbid it
+
+    async def test_publish_relays_the_guidance(self, identity, beanie_test_db, monkeypatch) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites as sites_mcp
+        from pocketpaw_ee.cloud._core.errors import ValidationError
+        from pocketpaw_ee.sites import service as sites_service
+
+        async def refuse(**_kw):
+            raise ValidationError("sites.do_data_loss_unconfirmed", "deletes Room for good")
+
+        monkeypatch.setattr(sites_service, "publish_pocket", refuse)
+        out = await sites_mcp._publish_handler({"pocket_id": "pk1"})
+        assert out["is_error"]
+        text = out["content"][0]["text"]
+        assert "sites.do_data_loss_unconfirmed: deletes Room for good" in text
+        assert "publish dialog" in text
+
+    async def test_a_do_config_build_failure_says_what_to_fix(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_project
+        from pocketpaw_ee.sites import project_build
+
+        pocket_id = await _start(cli)
+        monkeypatch.setattr(sites_project, "RUN_BUILD_POLL_SEC", 0)
+        monkeypatch.setattr(
+            project_build,
+            "read_build_record",
+            lambda *_a: {"status": "failed", "reason": "build_failed:do_config", "log": "refused"},
+        )
+        out = await _call("run_site_build", {"pocket_id": pocket_id})
+        assert out["is_error"]
+        body = _body(out)
+        assert "wrangler.jsonc" in body["message"] and "Durable Object" in body["message"]
+        assert out["content"][1]["text"].endswith("refused")
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +868,19 @@ def test_the_project_skill_ships_lean_and_routes_by_template() -> None:
     ):
         assert tool in text
     assert "preview_mode" in text and "static" in text
+    # The realtime-room recipe: when to pick it, its limits, and the wiring.
+    assert "`realtime-room`" in text
+    for phrase in (
+        "sveltekit",
+        "Site plan",
+        "routeRoom",
+        "export `Room`",
+        "ROOM_MAX_PEERS",
+        "PAW_DO_THROTTLED",
+        "wrangler.jsonc",
+        "publish dialog",
+    ):
+        assert phrase in text, phrase
 
 
 # ---------------------------------------------------------------------------

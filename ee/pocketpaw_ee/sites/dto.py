@@ -33,6 +33,10 @@ class PublishRequest(BaseModel):
     # (DROP TABLE / DROP COLUMN / DELETE without WHERE) is refused unless the owner
     # confirms it with this. See ``sites.project_d1``.
     confirm_destructive_migrations: bool = False
+    # Durable Object classes whose stored data the owner agreed to delete (a pending
+    # ``deleted_classes`` / ``renamed_classes`` migration). Only the owner's publish
+    # dialog sends it. See ``sites.durable_objects``.
+    confirm_do_data_loss: list[str] = Field(default_factory=list)
 
 
 class SitePlanRequestBody(BaseModel):

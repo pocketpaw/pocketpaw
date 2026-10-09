@@ -11,8 +11,8 @@
   {
     "label": "the workers-target cascade deletes the site id instead of the Worker name, which 404s (success here) and leaves the Worker serving",
     "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
-    "find": "        await deps.cloudflare.delete_account_script(site_worker_name(site))",
-    "replace": "        await deps.cloudflare.delete_account_script(script)",
+    "find": "        await deps.cloudflare.delete_account_script(site_worker_name(site), **force)",
+    "replace": "        await deps.cloudflare.delete_account_script(script, **force)",
     "tests": [
       "tests/ee/sites/test_sites_worker_name.py"
     ]
