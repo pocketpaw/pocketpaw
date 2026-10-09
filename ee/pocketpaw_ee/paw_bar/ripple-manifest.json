@@ -1,7 +1,7 @@
 {
   "schema": "ripple.manifest/v1",
   "version": "0.8.0",
-  "generatedAt": "2026-09-27T10:00:20.463Z",
+  "generatedAt": "2026-10-09T06:36:29.936Z",
   "spec": {
     "uiField": "ui",
     "stateField": "state",
@@ -2037,7 +2037,7 @@
     {
       "type": "command-palette",
       "category": "overlay",
-      "description": "Searchable command palette with keyboard shortcuts, grouping, and global hotkey (default ⌘K).",
+      "description": "Searchable palette over commands and content: grouped sections, fuzzy search over labels, aliases and menu paths, recents, global hotkey (default ⌘K).",
       "props": {
         "value": {
           "type": "boolean",
@@ -2045,9 +2045,39 @@
           "description": "Open state. Use with bind."
         },
         "commands": {
-          "type": "Array<{ id: string; label: string; keywords?: string[]; icon?: string; shortcut?: string; group?: string; description?: string; disabled?: boolean }>",
+          "type": "Array<{ id: string; label: string; group?: string; aliases?: string[]; keywords?: string[]; menu?: string; description?: string; shortcut?: string; icon?: string; thumb?: string; disabled?: boolean }>",
           "required": true,
-          "description": "Command list."
+          "description": "Items: commands and content. group makes sections; thumb is an image URL."
+        },
+        "groups": {
+          "type": "string[]",
+          "required": false,
+          "description": "Section order by group name."
+        },
+        "recent": {
+          "type": "string[]",
+          "required": false,
+          "description": "Recently used ids, shown first on an empty query."
+        },
+        "slash": {
+          "type": "boolean",
+          "required": false,
+          "description": "Also open on \"/\" outside text fields."
+        },
+        "limit": {
+          "type": "number",
+          "required": false,
+          "description": "Most rows rendered for a query. Default 50."
+        },
+        "groupLimit": {
+          "type": "number",
+          "required": false,
+          "description": "Rows per section on an empty query. Default 6."
+        },
+        "loading": {
+          "type": "boolean",
+          "required": false,
+          "description": "Show a Searching row (async sources)."
         },
         "placeholder": {
           "type": "string",
@@ -2062,7 +2092,7 @@
         "shortcut": {
           "type": "string",
           "required": false,
-          "description": "Global hotkey. Default \"mod+k\"."
+          "description": "Global hotkey. Default \"mod+k\"; \"\" turns it off."
         }
       },
       "pocket": {
@@ -2298,57 +2328,74 @@
     {
       "type": "comparison-layout",
       "category": "composite",
-      "description": "Side-by-side comparison of 2–6 items with hero cards, section-tab feature grid, and Card/Table view toggle. Per-item `actions` and `learn_more` accept ripple event handlers.",
+      "description": "Which to pick: items {id,name,price,image} compared on features {key,label,kind,better,unit}, a winner {id,reason} card, picks tags, best cells marked, price vs winner.",
       "props": {
         "title": {
           "type": "string",
           "required": false,
           "description": "Header title."
         },
-        "description": {
+        "subtitle": {
           "type": "string",
           "required": false,
-          "description": "Subheader description."
+          "description": "One line under the title."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "The answer up front, at most 140 chars, e.g. \"Nimbus Pro 15 if you edit video; Aero 14 for battery.\""
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO 4217 code for numeric prices. Default \"USD\". Never put a symbol in the data."
         },
         "items": {
-          "type": "Array<{ id: string; title?: string; name?: string; subtitle?: string; chip?: string; image?: string; price?: string | number; actions?: EventAction | EventAction[]; learn_more?: EventAction | EventAction[]; [featureKey: string]: unknown }>",
+          "type": "Array<{ id: string; name: string; subtitle?: string; price?: number; image?: string; product_id?: string; rating?: number; [featureKey: string]: unknown }>",
           "required": true,
-          "description": "Items being compared. Extra keys become feature values; `actions` and `learn_more` carry per-item event handlers."
+          "description": "2 to 6 items. `price` is a number; feature values are keyed by feature `key`. With `product_id` the server fills name, price and image."
         },
         "features": {
-          "type": "Array<{ key: string; label: string; section?: string; type?: \"text\" | \"boolean\" | \"rating\" | \"image\" | \"color\"; icon?: string; highlight?: boolean }>",
+          "type": "Array<{ key: string; label: string; section?: string; kind?: \"text\" | \"number\" | \"boolean\" | \"rating\" | \"icon\" | \"price\" | \"color\"; better?: \"higher\" | \"lower\"; unit?: string; icon?: \"battery\" | \"weight\" | \"display\" | \"cpu\" | \"memory\" | \"storage\" | \"camera\" | \"speed\" | \"price\" | \"ports\" | \"wifi\" | \"keyboard\" | \"audio\" | \"security\" | \"warranty\" | \"size\" | \"rating\" | \"support\"; highlight?: boolean }>",
           "required": false,
-          "description": "Explicit feature definitions. If omitted, features are inferred from item keys (text/boolean only) and grouped under a single \"Features\" section. Use `section` to group features into tabs, `highlight: true` to surface a feature as a spec pill on the card, and `type` to control rendering."
+          "description": "Rows, grouped into section chips by `section`. `better` marks the best numeric cell. An `icon`-kind value is one of the `icon` words (or a list of them). `highlight` puts the row on the item card. Inferred from item keys when omitted."
+        },
+        "winner": {
+          "type": "{ id: string; reason: string; runner_up?: { id: string; reason: string } }",
+          "required": false,
+          "description": "The best pick, shown first with its reason, photo and price; every other price shows its difference from it."
+        },
+        "picks": {
+          "type": "Array<{ id: string; label: string }>",
+          "required": false,
+          "description": "At most 3 per-need tags on items, e.g. \"Best for travel\", \"Lightest\"."
+        },
+        "chosen": {
+          "type": "string",
+          "required": false,
+          "description": "The chosen item id. Use top-level `bind` to keep it in state (e.g. `bind: \"pick\"`)."
         },
         "primaryLabel": {
           "type": "string",
           "required": false,
-          "description": "Primary CTA label. Default \"Select\"."
-        },
-        "secondaryLabel": {
-          "type": "string",
-          "required": false,
-          "description": "Secondary \"Learn more\" label. Default \"Learn more\"."
-        },
-        "showPrimary": {
-          "type": "boolean",
-          "required": false,
-          "description": "Render the primary CTA. Default true."
-        },
-        "showSecondary": {
-          "type": "boolean",
-          "required": false,
-          "description": "Render the \"Learn more\" button. Default true."
+          "description": "Choose button label. Default \"Choose\"."
         },
         "defaultView": {
           "type": "\"card\" | \"table\"",
           "required": false,
-          "description": "Initial view mode for the detailed feature grid on mobile. Default \"card\". Desktop always shows the table."
+          "description": "Detailed view below 720px until the visitor picks one. Default \"card\"; wider always shows the table."
         },
         "showDiffToggle": {
           "type": "boolean",
           "required": false,
-          "description": "Show the \"differences only\" filter toggle. Default true."
+          "description": "Show the \"Differences only\" filter. Default true."
+        }
+      },
+      "events": {
+        "on_choose": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Fires with { id, name, product_id? } when the visitor picks an item."
         }
       }
     },
@@ -3160,8 +3207,58 @@
     {
       "type": "exec-dashboard",
       "category": "composite",
-      "description": "Executive dashboard: KPI strip with sparklines, primary chart, activity rail, and data-table footer. Date-range + granularity chips, density toggle, loading/error/empty states, clickable KPIs.",
+      "description": "KPI dashboard from raw rows: give rows, measures {key,label,format,agg}, dimensions {key,label}, x and split; it computes KPIs, trends, a chart, a breakdown and a filtered table with totals.",
       "props": {
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "The answer up front, at most 140 chars, e.g. \"September was the best month; East leads on revenue.\""
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO 4217 code for money measures. Default \"USD\". Never put a symbol in the data."
+        },
+        "rows": {
+          "type": "Array<Record<string, string | number>>",
+          "required": false,
+          "description": "Rows mode: the raw records, one per order/event, e.g. { id, date: \"2026-07-14\", region, channel, amount }. Numbers as numbers. Every KPI, chart bar, breakdown and total is computed from these."
+        },
+        "measures": {
+          "type": "Array<{ key?: string; label: string; format?: \"money\" | \"number\" | \"percent\"; agg?: \"sum\" | \"avg\" | \"count\"; good?: \"up\" | \"down\" }>",
+          "required": false,
+          "description": "One KPI each, in order; the first also drives the chart and breakdown. `agg` defaults to sum (count needs no key). `percent` values are 0 to 100. `good` says which way is good (default up)."
+        },
+        "dimensions": {
+          "type": "Array<{ key: string; label: string }>",
+          "required": false,
+          "description": "Filter chip rows (e.g. region). A pick recomputes every number; the breakdown shows the first dimension not filtered."
+        },
+        "x": {
+          "type": "string",
+          "required": false,
+          "description": "The column the chart runs along. ISO dates group by day (span up to 31 days) or by month; other values group as written."
+        },
+        "split": {
+          "type": "string",
+          "required": false,
+          "description": "A column to stack the chart by (e.g. channel), one colour per value; past five values the rest fold into Other."
+        },
+        "compare": {
+          "type": "Array<Record<string, string | number>>",
+          "required": false,
+          "description": "The previous period's rows, for KPI trends. Without it, trends compare the last x group with the one before."
+        },
+        "compareLabel": {
+          "type": "string",
+          "required": false,
+          "description": "Trend wording when `compare` is given, e.g. \"vs Q2\". Default \"vs previous period\"."
+        },
+        "filters": {
+          "type": "Record<string, string>",
+          "required": false,
+          "description": "The active filter per dimension, e.g. { region: \"West\" }. Use top-level `bind` to keep it in state (e.g. `bind: \"salesFilter\"`)."
+        },
         "title": {
           "type": "string",
           "required": false,
@@ -3185,7 +3282,7 @@
         "activeDateRange": {
           "type": "string",
           "required": false,
-          "description": "Two-way bindable. Defaults to first item."
+          "description": "Active date-range chip. Defaults to the first item."
         },
         "granularities": {
           "type": "string[]",
@@ -3210,7 +3307,7 @@
         "showRefresh": {
           "type": "boolean",
           "required": false,
-          "description": "Show built-in refresh button. Default true."
+          "description": "KPI mode refresh button. Default true in KPI mode, false in rows mode."
         },
         "refreshActions": {
           "type": "EventAction | EventAction[]",
@@ -3273,9 +3370,21 @@
           "description": "Secondary chart row (auto-fit grid). Each `data` may be keyed the same way as `primaryChart.data`."
         },
         "table": {
-          "type": "{ title?: string; columns: Array<{ key: string; label: string; align?: \"left\" | \"right\" | \"center\" }>; rows: Record<string, unknown>[] | Record<string, Record<string, unknown>[]> }",
+          "type": "{ title?: string; columns?: Array<{ key: string; label: string; align?: \"left\" | \"right\" | \"center\" }>; rows?: Record<string, unknown>[] | Record<string, Record<string, unknown>[]> }",
           "required": false,
-          "description": "Data table footer. `rows` may be a flat list or keyed by range/granularity. Horizontally scrolls on narrow screens."
+          "description": "Rows mode: `title` and optional `columns` for the filtered rows table. KPI mode: a table footer whose `rows` may be keyed by range/granularity."
+        }
+      },
+      "events": {
+        "on_filter": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Rows mode. Fires with { key, value } when a filter chip is picked (value null for All)."
+        },
+        "on_date_range_change": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "KPI mode. Fires with the picked date-range chip, e.g. \"30d\"."
         }
       }
     },
@@ -4550,6 +4659,138 @@
       }
     },
     {
+      "type": "itinerary",
+      "category": "composite",
+      "description": "Trip plan by day: days[{label, when, theme, stay, stops[{time, title, kind, place, cost, minutes, must, done}]}], route[], legs[], packing[], budget. Bind days to tick and add stops.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Trip name, e.g. \"5 days in Tokyo\"."
+        },
+        "subtitle": {
+          "type": "string",
+          "required": false,
+          "description": "One line under the title (dates, travellers)."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "The answer up front, at most 140 chars. Omit it and the spend line leads."
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO 4217 code for every cost. Default \"USD\". Never put a symbol in the numbers."
+        },
+        "budget": {
+          "type": "number",
+          "required": false,
+          "description": "Trip budget. Planned spend (stop and leg costs) is shown against it: warning past 90%, alert when over."
+        },
+        "route": {
+          "type": "string[]",
+          "required": false,
+          "description": "Cities in order, drawn as a route strip. Derived from legs when omitted."
+        },
+        "days": {
+          "type": "Array<{ id?: string; label: string; when?: string; theme?: string; stay?: string; stops: Array<{ id?: string; time?: string; title: string; kind: \"sight\" | \"food\" | \"stay\" | \"transit\" | \"activity\" | \"shop\" | \"nature\" | \"nightlife\" | \"flight\"; place?: string; cost?: number; minutes?: number; must?: boolean; done?: boolean; image?: string }> }>",
+          "required": true,
+          "description": "The days. `when` is a display label (\"Fri 16 Oct\"); `time` shows as written (\"08:30\"). `must` tags a must-see. Two-way bind with `bind: \"{state.days}\"` so ticking a stop or adding one persists."
+        },
+        "open": {
+          "type": "number",
+          "required": false,
+          "description": "Index of the expanded day. Default 0; set it to today for \"what is next today\"."
+        },
+        "legs": {
+          "type": "Array<{ id?: string; from: string; to: string; kind: \"flight\" | \"train\" | \"bus\" | \"car\" | \"ferry\" | \"walk\"; ref?: string; minutes?: number; cost?: number }>",
+          "required": false,
+          "description": "Transport between cities. `ref` is the train, flight or line name."
+        },
+        "packing": {
+          "type": "Array<{ id?: string; group: string; items: string[] }>",
+          "required": false,
+          "description": "Packing list by group."
+        }
+      }
+    },
+    {
+      "type": "growth-projection",
+      "category": "composite",
+      "staticSafe": true,
+      "description": "Savings growth from 4 numbers: initial, deposit (a month), rate (% a year), years. Widget computes chart, yearly table, totals; sliders retune. Bind deposit.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"Savings growth\"."
+        },
+        "subtitle": {
+          "type": "string",
+          "required": false,
+          "description": "One line under the title."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "The answer up front, at most 140 chars. Omit it and the final balance leads."
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO 4217 code. Default \"USD\". Never put a symbol in the numbers."
+        },
+        "initial": {
+          "type": "number",
+          "required": false,
+          "description": "Starting balance. Default 0. For a lump sum with no deposits, set this and deposit: 0."
+        },
+        "deposit": {
+          "type": "number",
+          "required": true,
+          "description": "Added at the end of every month. Write 0 for none. Two-way bind with `bind: \"{state.deposit}\"`."
+        },
+        "rate": {
+          "type": "number",
+          "required": true,
+          "description": "Interest in percent a year: 5 means 5%, never 0.05. Capped at 100."
+        },
+        "years": {
+          "type": "number",
+          "required": true,
+          "description": "How long. Fractions round to whole months. Capped at 100."
+        },
+        "compounding": {
+          "type": "\"monthly\" | \"yearly\"",
+          "required": false,
+          "description": "Default \"monthly\". \"yearly\" credits interest once a year."
+        },
+        "goal": {
+          "type": "number",
+          "required": false,
+          "description": "Target balance: draws a goal line and says the year it is reached."
+        },
+        "inflation": {
+          "type": "number",
+          "required": false,
+          "description": "Percent a year; adds the final balance in today's money."
+        }
+      },
+      "events": {
+        "on_ratechange": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Fires with the new rate after the user changes it, e.g. { action: \"set\", target: \"rate\", value: \"{event}\" }."
+        },
+        "on_yearschange": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Fires with the new years after the user changes them."
+        }
+      }
+    },
+    {
       "type": "kanban",
       "category": "data",
       "description": "Drag-and-drop kanban board. Cards group into columns by `columnKey`. Bind to receive reordered cards.",
@@ -5147,6 +5388,48 @@
             }
           },
           "bind": "state.selectedId"
+        }
+      }
+    },
+    {
+      "type": "meal-plan",
+      "category": "composite",
+      "description": "Week of meals: recipes[{id, name, kind, serves, kcal, protein_g, ingredients}] once, days[{day, meals[{slot, recipe: id}]}], goal. Swaps meals, derives the shopping list. Bind people.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Plan name, e.g. \"High-protein week\"."
+        },
+        "subtitle": {
+          "type": "string",
+          "required": false,
+          "description": "One line under the title."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "The answer up front, at most 140 chars."
+        },
+        "people": {
+          "type": "number",
+          "required": true,
+          "description": "People cooked for; scales the shopping list by people / serves. Two-way bind with `bind: \"{state.people}\"`."
+        },
+        "goal": {
+          "type": "{ kcal?: number; protein_g?: number }",
+          "required": false,
+          "description": "Per person per day. Each day and the weekly average are shown against it."
+        },
+        "recipes": {
+          "type": "Array<{ id: string; name: string; kind?: \"breakfast\" | \"lunch\" | \"dinner\" | \"snack\"; serves: number; minutes?: number; kcal?: number; protein_g?: number; tags?: string[]; ingredients: Array<{ name: string; qty?: number; unit?: string; note?: string; aisle?: \"produce\" | \"protein\" | \"dairy\" | \"grains\" | \"pantry\" | \"frozen\" | \"other\" }>; steps?: Array<{ text: string; minutes?: number; tip?: string }> }>",
+          "required": true,
+          "description": "The library, each recipe written ONCE. kcal and protein_g are PER SERVING; qty is a number with a separate unit. Include extra recipes per kind so meals can be swapped."
+        },
+        "days": {
+          "type": "Array<{ id?: string; day: string; meals: Array<{ id?: string; slot: \"breakfast\" | \"lunch\" | \"dinner\" | \"snack\"; recipe: string }> }>",
+          "required": true,
+          "description": "`day` is a display label (\"Mon\"). `recipe` is a recipe id from `recipes`. Swapping a meal writes a new days array."
         }
       }
     },
@@ -5839,6 +6122,236 @@
           "type": "Array<{ id?: string; label: string; icon?: string; variant?: \"default\" | \"outline\" | \"ghost\"; actions?: EventAction | EventAction[] }>",
           "required": false,
           "description": "Actions row at the bottom."
+        }
+      }
+    },
+    {
+      "type": "booking",
+      "category": "composite",
+      "description": "Booking in stages: what, when, details, review. Server fills `services` and `days` (date_label, slots); model sets `party` and `preferred` {date, after}. Fires on_book.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Heading. Defaults to \"Book a table\" for a table service, else \"Book an appointment\"."
+        },
+        "subtitle": {
+          "type": "string",
+          "required": false,
+          "description": "The place, e.g. \"Juniper & Ash, Dupont\"."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "One sentence shown first, at most 140 chars."
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO 4217 code for service prices. Default \"USD\"."
+        },
+        "services": {
+          "type": "Array<{ id: string; name: string; kind?: \"table\" | \"hair\" | \"beauty\" | \"health\" | \"class\" | \"other\"; duration_min: number; price?: number; image?: string; party?: { min: number; max: number } }>",
+          "required": false,
+          "description": "Server-filled from the store. A service with `party` asks for a party size within those bounds."
+        },
+        "days": {
+          "type": "Array<{ date: string; date_label: string; slots: Array<{ start: string; label: string; available: boolean }> }>",
+          "required": false,
+          "description": "Server-filled: days (YYYY-MM-DD, label \"Fri 16 Oct\") with slots (ISO start with the store offset, label \"7:00 PM\"). Unavailable slots show as Full."
+        },
+        "tz": {
+          "type": "string",
+          "required": false,
+          "description": "Server-filled store timezone, e.g. \"America/New_York\". Shown as \"Times are New York time.\""
+        },
+        "party": {
+          "type": "number",
+          "required": false,
+          "description": "Model: the party size the visitor asked for. Clamped to the service bounds."
+        },
+        "preferred": {
+          "type": "{ date?: string; after?: string }",
+          "required": false,
+          "description": "Model: the visitor's ask, e.g. \"Friday evening\" is { date: \"2026-10-16\", after: \"18:00\" }. Pre-selects the nearest open slot."
+        },
+        "notice": {
+          "type": "{ kind: \"error\" | \"info\"; text: string; code?: \"slot_taken\"; start?: string }",
+          "required": false,
+          "description": "Host: the answer to a booking. code \"slot_taken\" (with the slot's start) returns to the times with it marked Full."
+        },
+        "confirmed": {
+          "type": "{ booking_id: string; label: string; date_label: string; service_name: string; party?: number }",
+          "required": false,
+          "description": "Host: the confirmed booking. Shows the confirmation and no more actions."
+        },
+        "selection": {
+          "type": "{ service_id?: string; start?: string; party?: number; customer?: { name?: string; email?: string; phone?: string }; notes?: string }",
+          "required": false,
+          "description": "Bindable: the request in progress."
+        }
+      },
+      "events": {
+        "on_book": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Host-attached, never model-written. Fired with { service_id, start, party?, customer: { name, email?, phone? }, notes? }."
+        }
+      }
+    },
+    {
+      "type": "menu-order",
+      "category": "composite",
+      "staticSafe": false,
+      "description": "Order from a menu in stages: browse, customise, details, review. items[] of {product_id, name, price, groups?}; featured {id, reason}; preset [{id, qty}]. Binds cart; emits on_checkout.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Restaurant or menu name."
+        },
+        "subtitle": {
+          "type": "string",
+          "required": false,
+          "description": "One line under the title (hours, area)."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "One sentence shown first, at most 140 chars."
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO 4217 code. Default USD. Never a symbol."
+        },
+        "items": {
+          "type": "Array<{ id?: string; product_id?: string; name?: string; description?: string; price?: number; image?: string; category?: string; tags?: string[]; kind?: \"main\" | \"side\" | \"drink\" | \"dessert\" | \"product\"; featured?: boolean; groups?: Array<{ id: string; name: string; choose: \"one\" | \"many\"; required?: boolean; max?: number; options: Array<{ id: string; name: string; price_delta?: number }> }> }>",
+          "required": true,
+          "description": "Menu items. Write product_id (and name for streaming); the server fills price, image and groups. Items without product_id are display only. Rows use kind, never type."
+        },
+        "featured": {
+          "type": "{ id: string; reason?: string }",
+          "required": false,
+          "description": "The pick for this visitor, by id or product_id, with a short reason."
+        },
+        "preset": {
+          "type": "Array<{ id: string; qty: number }>",
+          "required": false,
+          "description": "Pre-fills quantities (\"two burgers\")."
+        },
+        "fulfilment": {
+          "type": "Array<\"pickup\" | \"delivery\">",
+          "required": false,
+          "description": "Server-filled. Default [\"pickup\"]."
+        },
+        "fee": {
+          "type": "{ delivery?: number }",
+          "required": false,
+          "description": "Server-filled delivery fee."
+        },
+        "checkout": {
+          "type": "boolean",
+          "required": false,
+          "description": "Server-filled. Ordering controls show only when true. Default false (display only)."
+        },
+        "cart": {
+          "type": "{ lines: Array<{ product_id: string; name: string; qty: number; option_ids: string[]; unit_price: number }>; fulfilment?: \"pickup\" | \"delivery\"; total?: number }",
+          "required": false,
+          "description": "Bindable. The lines so far (qty 1 to 20, at most 30 lines), never the customer. Totals are display only; the store reprices."
+        }
+      },
+      "events": {
+        "on_checkout": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Server-wired. Fires with { lines, fulfilment, customer: { name, email?, phone?, address? }, total } when the visitor continues to payment."
+        }
+      }
+    },
+    {
+      "type": "interval-workout",
+      "category": "composite",
+      "description": "Interval workout timer: exercises[{name, cue, kind}], workSec, restSec, rounds. Counts down work and rest in seconds, one exercise at a time. Bind workSec.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Workout name, e.g. \"20-minute home HIIT\"."
+        },
+        "subtitle": {
+          "type": "string",
+          "required": false,
+          "description": "One line under the title (level, equipment)."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "The answer up front, at most 140 chars. Omit it and the total time leads."
+        },
+        "exercises": {
+          "type": "Array<{ id?: string; name: string; cue?: string; kind?: \"cardio\" | \"strength\" | \"core\" | \"mobility\" | \"rest\" }>",
+          "required": true,
+          "description": "In order, one round. `cue` is a one-line form tip. A \"rest\" kind is a rest block (restSec long) with no extra rest beside it."
+        },
+        "workSec": {
+          "type": "number",
+          "required": true,
+          "description": "Seconds of work per exercise (5 to 600). Two-way bind with `bind: \"{state.workSec}\"`; a change applies from the next interval."
+        },
+        "restSec": {
+          "type": "number",
+          "required": true,
+          "description": "Seconds of rest between exercises (0 to 300; 0 skips rests)."
+        },
+        "rounds": {
+          "type": "number",
+          "required": false,
+          "description": "Times through the list. Default 1. Total time = rounds × exercises × workSec plus the rests."
+        }
+      }
+    },
+    {
+      "type": "flashcard-deck",
+      "category": "composite",
+      "description": "Study deck: cards[{front, back, hint, category}]. Flip each card, mark Got it or Missed it, then a score screen with Practise missed. Bind score; on_complete {score, total}.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Deck name, e.g. \"Beginner Spanish\"."
+        },
+        "subtitle": {
+          "type": "string",
+          "required": false,
+          "description": "One line under the title."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "The answer up front, at most 140 chars. Usually omitted for a deck."
+        },
+        "cards": {
+          "type": "Array<{ id?: string; front: string; back: string; hint?: string; category?: string }>",
+          "required": true,
+          "description": "The cards. `front` is the prompt, `back` the answer, `hint` an optional nudge shown on request, `category` a small topic label."
+        },
+        "shuffle": {
+          "type": "boolean",
+          "required": false,
+          "description": "Deal in shuffled order (a new order on every restart). Default false."
+        },
+        "score": {
+          "type": "number",
+          "required": false,
+          "description": "Cards known since the last restart, written by the widget. Bind with `bind: \"{state.score}\"` to show it elsewhere."
+        }
+      },
+      "events": {
+        "on_complete": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Fired at the end of every pass with { score, total }."
         }
       }
     },
@@ -6624,6 +7137,88 @@
               ]
             }
           ]
+        }
+      }
+    },
+    {
+      "type": "recipe",
+      "category": "composite",
+      "description": "One dish: name, serves, minutes, kcal + protein_g per serving, ingredients[{name, qty (number), unit, note}], steps[{text, minutes, tip}]. Bind servings to scale every qty.",
+      "props": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "description": "Dish name, e.g. \"Lemon ricotta pasta\"."
+        },
+        "subtitle": {
+          "type": "string",
+          "required": false,
+          "description": "One line under the name (cuisine, the hook)."
+        },
+        "verdict": {
+          "type": "{ text: string; status?: \"good\" | \"warn\" | \"bad\" | \"info\" | \"neutral\" }",
+          "required": false,
+          "description": "The answer up front, at most 140 chars."
+        },
+        "kind": {
+          "type": "\"breakfast\" | \"lunch\" | \"dinner\" | \"snack\"",
+          "required": false,
+          "description": "Meal kind; picks the icon when there is no photo."
+        },
+        "image": {
+          "type": "string",
+          "required": false,
+          "description": "Photo URL from the host only; never invent one. Without it a kind icon shows."
+        },
+        "minutes": {
+          "type": "number",
+          "required": false,
+          "description": "Total time. Summed from step minutes when omitted."
+        },
+        "serves": {
+          "type": "number",
+          "required": true,
+          "description": "Servings the quantities are written for. Scaling multiplies qty by servings / serves."
+        },
+        "kcal": {
+          "type": "number",
+          "required": false,
+          "description": "Calories PER SERVING."
+        },
+        "protein_g": {
+          "type": "number",
+          "required": false,
+          "description": "Protein grams PER SERVING."
+        },
+        "tags": {
+          "type": "string[]",
+          "required": false,
+          "description": "Up to 4 short tags (\"vegetarian\", \"one pot\")."
+        },
+        "difficulty": {
+          "type": "\"easy\" | \"medium\" | \"hard\"",
+          "required": false,
+          "description": "Shown as a chip."
+        },
+        "ingredients": {
+          "type": "Array<{ id?: string; name: string; qty?: number; unit?: string; note?: string; aisle?: \"produce\" | \"protein\" | \"dairy\" | \"grains\" | \"pantry\" | \"frozen\" | \"other\" }>",
+          "required": true,
+          "description": "qty is a NUMBER (1.5, not \"1 1/2\"); the widget prints 1½. unit is separate (\"cup\", \"g\", \"tbsp\"); omit it for counted items (\"2\" eggs). note: \"finely grated\"."
+        },
+        "steps": {
+          "type": "Array<{ id?: string; text: string; minutes?: number; tip?: string }>",
+          "required": false,
+          "description": "In order. minutes shows a timer chip; tip shows under the step."
+        },
+        "goal": {
+          "type": "{ kcal?: number; protein_g?: number }",
+          "required": false,
+          "description": "Daily goal per person; the protein per serving is shown as a share of it."
+        },
+        "servings": {
+          "type": "number",
+          "required": false,
+          "description": "Servings to cook; defaults to serves. Two-way bind with `bind: \"{state.servings}\"`."
         }
       }
     },

@@ -1,11 +1,16 @@
-ripple-manifest.json: @ripple-ui/svelte 0.8.0 dist/manifest.json, the qbtrix/ripple-iui v0.8.0
-release asset manifest.json (2026-09-27, upstream sha256
-59f9ca9f5191170e3653470d3e64a26fef769758f87f450dd70270e1e2032bc6), with every widget's
-"example" removed. The server never reads the examples, and one carries a sample
-Stripe-style key that GitHub push protection refuses.
+ripple-manifest.json: @ripple-ui/svelte 0.8.0 manifest, vendored from qbtrix/ripple-iui#182
+(branch feat/data-widgets) at a9ab3b37d9bf24d62fd14932aaf4da53cf1b9593, pending a release.
+It is that commit's packages/svelte/static/manifest.json (generatedAt
+2026-10-09T06:36:29.936Z, 197 widgets, upstream sha256
+1716be4a8c6e61cc87bb6fdb93b98764e0b008a4d8e4d16c7e4ff31ed26030d8; an in-memory
+buildManifest() at that commit matched it), with every widget's "example" removed.
+The server never reads the examples, and one carries a sample Stripe-style key that
+GitHub push protection refuses.
 
-Refresh:
+Refresh (once the data widgets ship in a release, use the release asset):
   gh release download -R qbtrix/ripple-iui --pattern manifest.json -D <dir>
+  (until then: packages/svelte/static/manifest.json at the PR head, after
+  `bun run build:manifest` if it is stale)
   python -I - <dir>/manifest.json ee/pocketpaw_ee/paw_bar/ripple-manifest.json <<'PY'
   import json, sys
   m = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -13,4 +18,5 @@ Refresh:
       w.pop("example", None)
   open(sys.argv[2], "w", encoding="utf-8").write(json.dumps(m, indent=2, ensure_ascii=False) + "\n")
   PY
-then update this file and _RIPPLE_MANIFEST_SHA256 in tests/cloud/test_paw_bar_ripple_profile.py.
+then update this file and the pins in test_the_vendored_ripple_manifest_has_not_drifted
+(tests/cloud/test_paw_bar_ripple_profile.py: _RIPPLE_MANIFEST_SHA256, version, count).

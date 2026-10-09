@@ -45,8 +45,9 @@ from tests.cloud.test_paw_bar_concierge_v2 import (  # noqa: F401 — fixtures
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
-# (download the release asset, drop the widget examples, update both hashes).
-_RIPPLE_MANIFEST_SHA256 = "451f17b6ef0afbc8196cb3a3095bcf531704bab2d16e39baae419cab8986d200"
+# (vendored from qbtrix/ripple-iui#182 pending a release; drop the widget examples,
+# update the pins below).
+_RIPPLE_MANIFEST_SHA256 = "90bdf531e2a85c9c191e6e44e14f6408d140097e9cfd5f5b0ba69d7c8350447a"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
@@ -86,8 +87,8 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
     raw = card_spec.RIPPLE_MANIFEST_PATH.read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(raw).hexdigest() == _RIPPLE_MANIFEST_SHA256
     assert card_spec.RIPPLE_MANIFEST["version"] == "0.8.0"
-    assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 189
-    assert len(card_spec.RIPPLE_PROFILE.widget_types) == 189 - len(card_spec.RIPPLE_DEFERRED)
+    assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 197
+    assert len(card_spec.RIPPLE_PROFILE.widget_types) == 197 - len(card_spec.RIPPLE_DEFERRED)
 
 
 def test_the_pawbar_profile_is_todays_rules():
