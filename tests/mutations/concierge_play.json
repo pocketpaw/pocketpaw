@@ -475,5 +475,14 @@
     "tests": [
       "tests/cloud/test_paw_bar_play_widgets.py"
     ]
+  },
+  {
+    "label": "PLAY-54: a game's on_complete may ask (a quiz timer would send the visitor's turn)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
+    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\", \"on_complete\"})",
+    "tests": [
+      "tests/cloud/test_paw_bar_play_widgets.py"
+    ]
   }
 ]

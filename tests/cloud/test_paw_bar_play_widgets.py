@@ -6,9 +6,10 @@
 # numbers, the caps in card_spec, and no handler but a game's ``on_complete``. An
 # illustration may carry up to 8 ``annotations``, each pinned on an svg id the widget's
 # rebuild keeps (``svg_ids``) or on a point, and a node-level ``on_select`` that may
-# ask. The refusal table for annotations is ported from ripple feat/play-wave
-# packages/svelte/src/lib/security/illustration-annotations.test.ts (ripple has no
-# annotation parity fixture). Also pinned: the typed prompt lines, the rule that maps
+# ask; a game's on_complete never may (a quiz timer can end a run unattended), and
+# annotations are judged on the final card, never mid-stream. The annotation refusal
+# table is ported from ripple feat/play-wave packages/svelte/src/lib/security/
+# illustration-annotations.test.ts (ripple has no annotation parity fixture). Also pinned: the typed prompt lines, the rule that maps
 # a game and habit tracking to these widgets, and the flat-prop lift for each.
 # Mutation plan: tests/mutations/concierge_play.json.
 
@@ -166,6 +167,7 @@ REFUSED: list[tuple[str, dict]] = [
     ("allow_any_word as text", _word(allow_any_word="yes")),
     ("a hint expression", _word(hint="{state.hint}")),
     ("an on_change on word-guess", {**_word(), "on_change": DONE}),
+    ("a word-guess on_complete that asks", {**_word(), "on_complete": ASK}),
     # quiz
     ("no questions", _quiz(questions=[])),
     ("13 questions", _quiz(questions=[_question()] * 13)),
@@ -192,6 +194,13 @@ REFUSED: list[tuple[str, dict]] = [
     ("shuffle as text", _quiz(shuffle_choices="true")),
     ("a topic expression", _quiz(topic="{state.t}")),
     ("an on_select on quiz", {**_quiz(), "on_select": DONE}),
+    # A quiz timer can end a run unattended: on_complete never asks, alone or in a list.
+    ("a quiz on_complete that asks", {**_quiz(), "on_complete": ASK}),
+    ("a quiz on_complete list that asks", {**_quiz(), "on_complete": [DONE, ASK]}),
+    (
+        "a quiz on_complete flow that asks",
+        {**_quiz(), "on_complete": {"action": "flow", "steps": [ASK]}},
+    ),
     # habit-tracker
     ("no habits", _habits(habits=[], seed=None)),
     ("nine habits", _habits(habits=[{**_HABIT, "id": f"h{i}"} for i in range(9)], seed=None)),
@@ -400,3 +409,26 @@ def test_the_rules_map_games_habits_and_annotations():
     assert "Up to 8 annotations [{id, label (at most 40 chars), note (at most 280), target}]" in art
     assert "give each drawing part an id and point at it" in art
     assert "a game" in _cards_paragraph([], profile=RIPPLE_PROFILE).splitlines()[0]
+
+
+# --------------------------------------------------------------------------- #
+# Streaming: annotations are judged on the final card only
+# --------------------------------------------------------------------------- #
+
+
+def test_annotations_are_not_flagged_while_streaming():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, PartialScan
+
+    good = {"ui": _illustration([NOTE], on_select=ASK), "state": {}}
+    # Bad only once whole: the target is not an id the rebuild keeps.
+    bad = {"ui": _illustration([{**NOTE, "target": "dropped"}]), "state": {}}
+    for card in (good, bad):
+        scan = PartialScan(RIPPLE_PROFILE)
+        assert not any(scan.feed(ch) for ch in json.dumps(card))
+    assert _ripple(good["ui"]) is not None and _ripple(bad["ui"]) is None
+
+
+def test_a_game_with_a_harder_round_button_may_ask_on_click():
+    harder = {"type": "button", "props": {"label": "Harder round"}, "on_click": ASK}
+    ui = {"type": "flex", "children": [{**_quiz(), "on_complete": DONE}, harder]}
+    assert _ripple(ui) is not None
