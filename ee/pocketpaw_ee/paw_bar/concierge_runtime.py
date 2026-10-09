@@ -1440,9 +1440,9 @@ _RIPPLE_RULES = (
     "primitives; a data widget card is often one node.",
     "   - Match the card to the answer. When a data widget fits, the card is that one "
     "widget holding only data; it lays out, sums and charts everything itself. A trip "
-    "is an itinerary. A menu or an order is a menu-order: items by product_id from "
-    "<store-menu> (and name), plus featured and preset; the server fills the rest. A "
-    "booking is a "
+    "is an itinerary. A menu or an order is a menu-order: items by product_id from the "
+    "store-menu block (and name), plus featured and preset; the server fills the rest. "
+    "A booking is a "
     "booking: write only preferred {date, after} and party; the server fills services "
     "and slots. A meal plan is a meal-plan, one dish a recipe, a workout an "
     "interval-workout, study cards a flashcard-deck. Savings or growth is a "
