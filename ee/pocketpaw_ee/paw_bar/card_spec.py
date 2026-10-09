@@ -33,17 +33,21 @@
 # iteratively and depth-capped: any node found in a prop (a popover's
 # ``content``) is a node, held to every node rule; any action, under a handler
 # key or named as a manifest action anywhere, must be an allowed one (audit-log
-# entries' own ``action`` field is data); a form may not carry a native submit
-# target; every URL-valued key must be a same-site path or an https URL on
-# ``url_hosts`` (empty: none); and no text may hold a javascript: link.
+# entries' own ``action`` field is data, in ``ui`` only; ``state`` holds no
+# action at all); a handler slot (``_is_handler_key``) holds action objects,
+# never a string the engine could resolve into one, and neither may a prop that
+# carries handlers, a node-valued prop or a node's ``props`` be an expression; a
+# ``follow-up``'s ``event`` is a declared host event; a form may not carry a
+# native submit target; every URL-valued key must be a same-site path or an
+# https URL on ``url_hosts`` (empty: none); and no text may hold a javascript:
+# link. A strict body with a repeated JSON key is refused (``JSON.parse`` keeps
+# the last value, so an earlier one would go unchecked).
 #
-# pawbar-manifest.json is vendored byte-for-byte from paw-bar's
-# app/pawbar-manifest.json; ripple-manifest.json from @ripple-ui/svelte's
-# dist/manifest.json minus each widget's example (the ``.source`` file beside
-# it says how). The drift tests in
-# tests/cloud/test_paw_bar_concierge_v2_output.py and
-# tests/cloud/test_paw_bar_ripple_profile.py pin both hashes and say how to
-# refresh them. The shared parity fixtures live in tests/fixtures/card_parity/.
+# pawbar-manifest.json is vendored byte-for-byte from paw-bar; ripple-manifest.json
+# from @ripple-ui/svelte's dist/manifest.json minus examples (the ``.source`` file
+# beside it says how). The drift tests in tests/cloud/test_paw_bar_concierge_v2_output.py
+# and tests/cloud/test_paw_bar_ripple_profile.py pin both hashes; the shared
+# parity fixtures live in tests/fixtures/card_parity/.
 
 from __future__ import annotations
 
@@ -184,6 +188,18 @@ _NODE_PROPS: dict[str, frozenset[str]] = {
     )
     for w in RIPPLE_MANIFEST["widgets"]
 }
+# Props that carry event handlers (a ``*Actions`` slot, or rows such as
+# comparison ``items`` whose ``actions`` are handlers), by widget. Never an
+# expression: the engine would dispatch whatever it resolves to.
+_HANDLER_PROPS: frozenset[tuple[str, str]] = frozenset(
+    (w["type"], name)
+    for w in RIPPLE_MANIFEST["widgets"]
+    for name, spec in (w.get("props") or {}).items()
+    if "EventAction" in str(spec.get("type", ""))
+)
+# A follow-up emits ``props.event`` (this when unset) with the typed text, unless
+# its node has an ``on_submit``.
+_FOLLOW_UP_EVENT = "follow-up"
 # Lists whose rows carry their own ``action`` field as data, not as a handler.
 _DATA_ACTION_ROWS: frozenset[tuple[str, str]] = frozenset({("audit-log", "entries")})
 # Keys whose string value is a URL a browser loads or follows: these, and any key
@@ -346,8 +362,13 @@ def _check_events(
 
 
 def _is_handler_key(key: Any) -> bool:
+    """A key whose value the engine dispatches: ``on_*``, ``actions``,
+    ``*Actions``, comparison ``learn_more`` and table ``onRowClick``."""
     return isinstance(key, str) and (
-        key.startswith("on_") or key == "actions" or key.endswith("Actions")
+        key.startswith("on_")
+        or key == "actions"
+        or key.endswith("Actions")
+        or key in ("learn_more", "onRowClick")
     )
 
 
@@ -459,13 +480,13 @@ def _check_strict(
     allowed, hosts = profile.actions, profile.url_hosts
     nodes = 0
     # (value, json level, node depth, key it sits under, under a handler, is a
-    # node, is a data row whose "action" is its own, inside a style)
-    stack: list[tuple[Any, int, int, str, bool, bool, bool, bool]] = [
-        (spec["ui"], 1, 1, "", False, True, False, False),
-        (spec.get("state"), 1, 0, "", False, False, False, False),
+    # node, is a data row whose "action" is its own, inside a style, in state)
+    stack: list[tuple[Any, int, int, str, bool, bool, bool, bool, bool]] = [
+        (spec["ui"], 1, 1, "", False, True, False, False, False),
+        (spec.get("state"), 1, 0, "", False, False, False, False, True),
     ]
     while stack:
-        value, level, depth, key, handler, is_node, data_row, css = stack.pop()
+        value, level, depth, key, handler, is_node, data_row, css, in_state = stack.pop()
         if level > _MAX_SCAN_LEVELS:
             raise _Reject("nested too deeply")
         if isinstance(value, str):
@@ -478,7 +499,9 @@ def _check_strict(
             _check_text(value, hosts)
             continue
         if isinstance(value, list):
-            stack.extend((v, level + 1, depth, key, handler, False, data_row, css) for v in value)
+            stack.extend(
+                (v, level + 1, depth, key, handler, False, data_row, css, in_state) for v in value
+            )
             continue
         if not isinstance(value, dict):
             continue
@@ -501,6 +524,11 @@ def _check_strict(
                 raise _Reject(f"unknown widget type {kind!r}")
             _check_events(value, events, allowed)
             props = value.get("props")
+            if props is not None and not isinstance(props, dict):
+                raise _Reject("a node's props are not an object")
+            if kind == "follow-up" and ("event" in (props or {}) or "on_submit" not in value):
+                if (props or {}).get("event", _FOLLOW_UP_EVENT) not in events:
+                    raise _Reject("a follow-up emits a host event this widget does not declare")
             if kind == "form":
                 if isinstance(props, dict) and _FORM_SUBMIT_PROPS & props.keys():
                     raise _Reject("a form with its own submit target")
@@ -512,13 +540,15 @@ def _check_strict(
                     if not isinstance(v, list):
                         raise _Reject(f"{k} is not a list")
                     stack.extend(
-                        (kid, level + 2, depth + 1, k, False, True, False, False) for kid in v
+                        (kid, level + 2, depth + 1, k, False, True, False, False, in_state)
+                        for kid in v
                     )
                 elif k == "props" and isinstance(v, dict):
                     node_props = _NODE_PROPS.get(kind, frozenset())
                     for pk, pv in v.items():
                         if (kind, pk) in _MARKDOWN_PROPS and isinstance(pv, str):
                             _check_plain_expressions(pv)
+                        _check_resolved_prop(kind, pk, pv, node_props)
                         sub_node = pk in node_props and isinstance(pv, dict)
                         stack.append(
                             (
@@ -528,13 +558,24 @@ def _check_strict(
                                 pk,
                                 _is_handler_key(pk),
                                 sub_node,
-                                (kind, pk) in _DATA_ACTION_ROWS,
+                                (kind, pk) in _DATA_ACTION_ROWS and not in_state,
                                 pk == "style",
+                                in_state,
                             )
                         )
                 elif k != "type":
                     stack.append(
-                        (v, level + 1, depth, k, _is_handler_key(k), False, False, k == "style")
+                        (
+                            v,
+                            level + 1,
+                            depth,
+                            k,
+                            _is_handler_key(k),
+                            False,
+                            False,
+                            k == "style",
+                            in_state,
+                        )
                     )
             continue
         named = value.get("action")
@@ -542,6 +583,8 @@ def _check_strict(
             isinstance(named, str) and named in _RIPPLE_ACTIONS and not data_row and not css
         )
         if is_action:
+            if in_state:
+                raise _Reject("state holds an action")
             _check_actions(value, events, allowed)
             if named in _TOAST_ACTIONS and isinstance(value.get("message"), str):
                 _check_plain_expressions(value["message"])
@@ -555,9 +598,34 @@ def _check_strict(
                 False,
                 False,
                 css or k == "style",
+                in_state,
             )
             for k, v in value.items()
         )
+
+
+def _check_resolved_prop(kind: str, key: str, value: Any, node_props: frozenset[str]) -> None:
+    """A node prop the engine resolves (``"{state.h}"`` becomes whatever state
+    holds then) before it dispatches or renders it, so it must be literal. A
+    handler slot holds action objects (``actions``: or a composite's button
+    rows), alone or in a list; a prop whose rows carry slots (comparison
+    ``items``) is a list of objects whose slots hold the same; a node-valued prop
+    is no lone expression. Slots elsewhere (state, data rows, inside an action)
+    are never resolved before they run, so a string there stays inert."""
+    rows = value if isinstance(value, list) else [value]
+    if _is_handler_key(key):
+        for row in rows:
+            if not isinstance(row, dict) or (key != "actions" and "action" not in row):
+                raise _Reject(f"{key} holds something other than actions")
+    if (kind, key) in _HANDLER_PROPS:
+        for row in rows:
+            if not isinstance(row, dict):
+                raise _Reject(f"{key} holds a row that is not an object")
+            for k, v in row.items():
+                _check_resolved_prop("", k, v, frozenset())
+    text = value.strip() if isinstance(value, str) else ""
+    if key in node_props and text.startswith("{") and text.endswith("}"):
+        raise _Reject(f"an expression in {key}, where a node is read")
 
 
 def _check_form(props: Any, lead_capture: bool) -> None:
@@ -709,17 +777,31 @@ def _log_dropped(exc: Exception) -> None:
 # --------------------------------------------------------------------------- #
 
 
-# A body too deeply nested to parse here. Never passed through as a legacy
-# card: the client's parser might read it, and nothing here checked it.
+# A body too deeply nested to parse here, or (strict) one repeating a key in an
+# object. Never passed through as a legacy card: the client's parser might read
+# it, and nothing here checked it (JSON.parse keeps a repeated key's last value).
 _TOO_DEEP = object()
 
 
-def _parse(body: str) -> Any:
+class _DuplicateKey(Exception):
+    pass
+
+
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out = dict(pairs)
+    if len(out) != len(pairs):
+        raise _DuplicateKey
+    return out
+
+
+def _parse(body: str, unique: bool = False) -> Any:
+    """The parsed body; None when it is not JSON; ``_TOO_DEEP`` when it is too
+    deep to read, or, with ``unique``, repeats a key in an object."""
     try:
-        return json.loads(body)
+        return json.loads(body, object_pairs_hook=_unique if unique else None)
     except ValueError:
         return None
-    except RecursionError:
+    except (RecursionError, _DuplicateKey):
         return _TOO_DEEP
 
 
@@ -760,7 +842,7 @@ def _render_card(
     lead_capture: bool,
     profile: CardProfile,
 ) -> str | None:
-    raw = _parse(body)
+    raw = _parse(body, unique=profile.strict)
     if raw is _TOO_DEEP:
         return None
     if _is_spec(raw):

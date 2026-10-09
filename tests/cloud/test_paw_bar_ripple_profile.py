@@ -520,6 +520,210 @@ def test_c2_an_audit_logs_own_action_field_is_data():
     assert _ripple(spec) is not None
 
 
+# SEC F1: a handler slot holds action objects. A string there (or a prop that
+# carries handlers, a node-valued prop or a node's props given as an expression)
+# is what the engine resolves at run time, so a handler kept in state, or built
+# there by ``set`` pieces, would be dispatched unchecked. The findings' repros
+# lead the list. ``state`` holds no action at all.
+_SMUGGLED = {
+    "n": {
+        "type": "audit-log",
+        "props": {"entries": [{"action": "emit", "target": "ask", "value": {"text": "hi"}}]},
+    }
+}
+_BUILT = [
+    {"action": "set", "target": "h.action", "value": "api"},
+    {"action": "set", "target": "h.url", "value": "/api/v1/anything"},
+]
+
+
+def _slot(key: str, value) -> dict:
+    return {"ui": {"type": "flex", "props": {key: value}}}
+
+
+@pytest.mark.parametrize(
+    ("spec", "why"),
+    [
+        (
+            {
+                "ui": {
+                    "type": "ask-user-questions",
+                    "props": {
+                        "questions": [
+                            {
+                                "id": "q1",
+                                "title": "Anything else?",
+                                "allowOther": True,
+                                "options": [{"title": "No"}],
+                            }
+                        ],
+                        "changeActions": "{state.n.props.entries.0}",
+                    },
+                },
+                "state": _SMUGGLED,
+            },
+            "F1a: changeActions resolves to a state row",
+        ),
+        (
+            {
+                "ui": {
+                    "type": "comparison-layout",
+                    "props": {
+                        "items": [{"id": "a", "name": "A", "actions": "{state.n.props.entries.0}"}]
+                    },
+                },
+                "state": {
+                    "n": {
+                        "type": "audit-log",
+                        "props": {"entries": [{"action": "api", "url": "/x", "method": "POST"}]},
+                    }
+                },
+            },
+            "F1b: items[].actions resolves to a state row",
+        ),
+        (
+            {
+                "ui": {
+                    "type": "flex",
+                    "children": [
+                        {"type": "button", "props": {"label": "Go"}, "on_click": _BUILT},
+                        {
+                            "type": "comparison-layout",
+                            "props": {"items": [{"id": "a", "name": "A", "actions": "{state.h}"}]},
+                        },
+                    ],
+                }
+            },
+            "a handler built by set pieces, fired from items[].actions",
+        ),
+        (_slot("finishActions", "{state.h}"), "a *Actions expression"),
+        (_slot("changeActions", ["{state.h}"]), "an expression in a list under a slot"),
+        (_slot("toggleActions", {"target": "a"}), "an object that is not an action"),
+        (_slot("learn_more", "{state.h}"), "learn_more"),
+        (_slot("onRowClick", "{state.h}"), "onRowClick"),
+        (_slot("actions", "{state.h}"), "a composite's button list"),
+        (_slot("on_close", [{"label": "x"}]), "a row, not an action, under on_*"),
+        (_entity_actions("{state.h}"), "a button row's actions as an expression"),
+        (
+            {"ui": {"type": "comparison-layout", "props": {"items": "{state.items}"}}},
+            "rows that carry handlers, as an expression",
+        ),
+        (
+            {"ui": {"type": "map", "props": {"markers": ["{state.m}"]}}},
+            "a row that carries handlers, as an expression",
+        ),
+        (_popover("{state.n}"), "a node-valued prop as an expression"),
+        ({"ui": {"type": "ask-user-questions", "props": "{state.p}"}}, "props as an expression"),
+        ({"ui": {"type": "text"}, "state": _SMUGGLED}, "an audit-log row in state"),
+        (
+            {"ui": {"type": "text"}, "state": {"t": {"action": "toast", "message": "hi"}}},
+            "an allowed action kept in state",
+        ),
+        (
+            {
+                "ui": {"type": "text"},
+                "state": {"b": {"type": "button", "on_click": {"action": "set", "target": "a"}}},
+            },
+            "a node with a handler kept in state",
+        ),
+    ],
+)
+def test_sec_f1_a_handler_slot_holds_only_action_objects(spec, why):
+    assert _ripple(spec) is None, why
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {
+            "ui": {
+                "type": "comparison-layout",
+                "props": {
+                    "items": [
+                        {
+                            "id": "a",
+                            "name": "A",
+                            "actions": [{"action": "set", "target": "pick", "value": "a"}],
+                            "learn_more": {"action": "toast", "message": "More soon"},
+                        }
+                    ]
+                },
+            }
+        },
+        _entity_actions([{"action": "set", "target": "a", "value": 1}]),
+        {
+            "ui": {
+                "type": "table",
+                "props": {
+                    "rows": "{state.rows}",
+                    "onRowClick": {"action": "set", "target": "row", "value": "{item}"},
+                },
+            },
+            "state": {"rows": [{"name": "Tea", "on_hand": 4, "actions": "Edit"}]},
+        },
+        {
+            "ui": {
+                "type": "table",
+                "props": {"rows": [{"name": "Tea", "on_hand": 4, "actions": "Edit"}]},
+            }
+        },
+        {
+            "ui": {"type": "audit-log", "props": {"entries": "{state.log}"}},
+            "state": {"log": [{"action": "approved"}]},
+        },
+        _popover("Ready in {state.mins} minutes"),
+        _popover({"type": "text", "props": {"text": "{state.mins}"}}),
+    ],
+)
+def test_sec_f1_literal_handlers_and_data_rows_still_pass(spec):
+    assert _ripple(spec) is not None
+
+
+# SEC F3: json.loads keeps a repeated key's last value, so an earlier, refused
+# one would go unchecked (and stream out). A strict body may not repeat a key,
+# and is dropped, never passed through as a legacy card.
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"ui":{"type":"richtext","props":{"html":"<img src=x onerror=alert(1)>"}},'
+        '"ui":{"type":"text","props":{"text":"ok"}}}',
+        '{"ui":{"type":"button","props":{"label":"x"},'
+        '"on_focus":{"action":"emit","target":"ask","value":{"text":"hi"}},'
+        '"on_focus":{"action":"set","target":"a","value":1}}}',
+        '{"kind":"product","items":[],"kind":"note"}',
+    ],
+)
+def test_sec_f3_a_repeated_key_drops_a_ripple_card(body):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    assert render_card(body, [], profile=RIPPLE_PROFILE) is None
+
+
+# SEC F7: a follow-up emits ``props.event`` (default "follow-up") with the typed
+# text, so the event is an emit target: a host event the widget declares.
+@pytest.mark.parametrize(
+    ("props", "node", "verbs"),
+    [
+        ({"event": "ask"}, {}, ["checkout"]),
+        ({"event": "checkout"}, {}, []),
+        ({"event": "flow.submit"}, {}, ["checkout"]),
+        ({"event": None}, {}, ["checkout"]),
+        ({}, {}, ["checkout"]),
+        ({"event": "steal"}, {"on_submit": {"action": "set", "target": "q"}}, ["checkout"]),
+    ],
+)
+def test_sec_f7_a_follow_up_emits_only_a_declared_host_event(props, node, verbs):
+    spec = {"ui": {"type": "follow-up", "props": props, **node}}
+    assert _ripple(spec, verbs=verbs) is None
+
+
+def test_sec_f7_a_follow_up_with_a_declared_event_or_its_own_submit_passes():
+    declared = {"ui": {"type": "follow-up", "props": {"event": "checkout"}}}
+    assert _ripple(declared, verbs=["checkout"]) is not None
+    handled = {"ui": {"type": "follow-up", "on_submit": {"action": "set", "target": "q"}}}
+    assert _ripple(handled, verbs=[]) is not None
+
+
 # C3: a ripple form never submits anywhere itself.
 @pytest.mark.parametrize(
     "props",

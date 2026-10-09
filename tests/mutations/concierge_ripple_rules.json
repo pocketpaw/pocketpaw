@@ -1,5 +1,149 @@
 [
   {
+    "label": "SEC F1: a handler slot may hold a string (an expression resolving to a handler)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if not isinstance(row, dict) or (key != \"actions\" and \"action\" not in row):",
+    "replace": "            if not isinstance(row, (dict, str)) or (isinstance(row, dict) and key != \"actions\" and \"action\" not in row):",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: a slot may hold an object that is not an action",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(key != \"actions\" and \"action\" not in row)",
+    "replace": "(key == \"_none\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: learn_more and onRowClick are not handler keys",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        or key in (\"learn_more\", \"onRowClick\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: the resolved-prop check is skipped",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                        _check_resolved_prop(kind, pk, pv, node_props)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: rows that carry handlers may be an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                raise _Reject(f\"{key} holds a row that is not an object\")",
+    "replace": "                continue",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: a slot inside a handler-carrying row is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                _check_resolved_prop(\"\", k, v, frozenset())",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: a node-valued prop may be a lone expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if key in node_props and text.startswith(\"{\") and text.endswith(\"}\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: a node-valued prop refuses any brace, not just a lone expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "text.startswith(\"{\") and text.endswith(\"}\")",
+    "replace": "\"{\" in text",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_literal_handlers_and_data_rows_still_pass"
+    ]
+  },
+  {
+    "label": "SEC F1: a node's props may be an expression",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if props is not None and not isinstance(props, dict):\n                raise _Reject(\"a node's props are not an object\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: an audit-log row in state is data again",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(kind, pk) in _DATA_ACTION_ROWS and not in_state,",
+    "replace": "(kind, pk) in _DATA_ACTION_ROWS,",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F1: state may hold an allowed action",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if in_state:\n                raise _Reject(\"state holds an action\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f1_a_handler_slot_holds_only_action_objects"
+    ]
+  },
+  {
+    "label": "SEC F3: a strict body may repeat a key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    raw = _parse(body, unique=profile.strict)",
+    "replace": "    raw = _parse(body)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f3_a_repeated_key_drops_a_ripple_card"
+    ]
+  },
+  {
+    "label": "SEC F3: a repeated key reads as not-JSON, so the body passes through as a legacy card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        raise _DuplicateKey\n",
+    "replace": "        raise ValueError\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f3_a_repeated_key_drops_a_ripple_card"
+    ]
+  },
+  {
+    "label": "SEC F7: a follow-up's event is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                if (props or {}).get(\"event\", _FOLLOW_UP_EVENT) not in events:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f7_a_follow_up_emits_only_a_declared_host_event"
+    ]
+  },
+  {
+    "label": "SEC F7: an unset follow-up event is taken as declared",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(props or {}).get(\"event\", _FOLLOW_UP_EVENT)",
+    "replace": "(props or {}).get(\"event\", (events or [None])[0])",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f7_a_follow_up_emits_only_a_declared_host_event"
+    ]
+  },
+  {
+    "label": "SEC F7: a follow-up with its own on_submit is still held to an event",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "(\"event\" in (props or {}) or \"on_submit\" not in value)",
+    "replace": "True",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_sec_f7_a_follow_up_with_a_declared_event_or_its_own_submit_passes"
+    ]
+  },
+  {
     "label": "entity-detail drops back to a one-line summary with no props",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
     "find": "            \"tabs\",\n            \"entity-detail\",\n",
@@ -101,8 +245,8 @@
   {
     "label": "an actions prop is no longer read as a handler",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        key.startswith(\"on_\") or key == \"actions\" or key.endswith(\"Actions\")",
-    "replace": "        key.startswith(\"on_\") or key == \"actionz\" or key.endswith(\"Actions\")",
+    "find": "        or key == \"actions\"\n",
+    "replace": "        or key == \"actionz\"\n",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_data_widgets_keep_actions_and_urls_in_check"
     ]
