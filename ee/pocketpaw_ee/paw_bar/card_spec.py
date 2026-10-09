@@ -99,7 +99,10 @@ class CardProfile:
     ``typed`` names the detailed widgets whose props are listed with a short type,
     each with the props to list (None: all of them); ``strict`` runs
     ``_check_strict`` (nodes in props, actions anywhere, URLs) instead of the
-    children-only walk; ``url_hosts`` are the https hosts its URLs may name."""
+    children-only walk; ``url_hosts`` are the https hosts its URLs may name;
+    ``host_events`` are the host events its cards may carry. A model may emit only
+    the widget's declared ones of ``HOST_EVENTS``; the rest (ripple's ``book``)
+    only ever arrive in a handler the server attaches (``SERVER_WIRED``)."""
 
     name: str
     widget_types: frozenset[str]
@@ -112,6 +115,7 @@ class CardProfile:
     typed: dict[str, frozenset[str] | None] = field(default_factory=dict)
     strict: bool = False
     url_hosts: frozenset[str] = frozenset()
+    host_events: tuple[str, ...] = HOST_EVENTS
 
 
 PAWBAR_PROFILE = CardProfile(
@@ -224,7 +228,14 @@ RIPPLE_PROFILE = CardProfile(
     ),
     typed=RIPPLE_DATA_WIDGETS,
     strict=True,
+    host_events=(*HOST_EVENTS, "book"),
 )
+# The widgets whose one handler the server attaches after validation (``_fill_store``):
+# the handler key, the host event it emits. A model-written handler on them is refused.
+SERVER_WIRED: dict[str, tuple[str, str]] = {
+    "menu-order": ("on_checkout", "checkout"),
+    "booking": ("on_book", "book"),
+}
 
 # Every widget name and action name the Ripple manifest knows (deferred ones too).
 _RIPPLE_TYPES: frozenset[str] = frozenset(w["type"] for w in RIPPLE_MANIFEST["widgets"])
@@ -677,6 +688,8 @@ def _check_strict(
             props = value.get("props")
             if props is not None and not isinstance(props, dict):
                 raise _Reject("a node's props are not an object")
+            if kind in SERVER_WIRED and any(map(_is_handler_key, [*value, *(props or ())])):
+                raise _Reject(f"a handler on {kind}, which the server wires")
             if kind == "follow-up" and ("event" in (props or {}) or "on_submit" not in value):
                 if (props or {}).get("event", _FOLLOW_UP_EVENT) not in host_events:
                     raise _Reject("a follow-up emits a host event this widget does not declare")
@@ -942,6 +955,139 @@ def _hydrate(node: dict[str, Any], index: dict[str, Any], verbs: list[str]) -> d
     return out
 
 
+# What a booking says when the store's times could not be read.
+STORE_DOWN_NOTICE: dict[str, str] = {
+    "kind": "info",
+    "text": "Times are unavailable right now. Please try again in a little while.",
+}
+# Item fields only the store writes on an item with a product_id.
+_STORE_ITEM_KEYS = ("name", "description", "price", "image", "category", "tags", "kind", "groups")
+
+
+def _fill_store(value: Any, store: Any, profile: CardProfile) -> Any:
+    """A copy of a ripple ``ui`` with every menu-order, booking and comparison-layout
+    node, at any depth (children, node props, flow steps), filled from ``store``
+    (a ``concierge_store.StoreData``; None when the site names no store). Runs
+    after the walk, so nothing it writes is checked again: the store data is
+    cleaned when read, and nothing here reads a URL or a handler from the model."""
+    if isinstance(value, list):
+        return [_fill_store(v, store, profile) for v in value]
+    if not isinstance(value, dict):
+        return value
+    out = {k: _fill_store(v, store, profile) for k, v in value.items()}
+    fill = _STORE_FILLS.get(out.get("type"))
+    if fill is not None:
+        props = out.get("props")
+        out["props"] = fill(dict(props) if isinstance(props, dict) else {}, store)
+        wired = SERVER_WIRED.get(out["type"])
+        if (
+            wired
+            and store is not None
+            and wired[1] in profile.host_events
+            and _usable(out["props"])
+        ):
+            out[wired[0]] = {"action": "emit", "target": wired[1]}
+    return out
+
+
+def _usable(props: dict[str, Any]) -> bool:
+    """Whether a filled widget can fire: a menu that checks out, a booking with the
+    store's services and days. With no store nothing is wired: the card is display."""
+    return props.get("checkout") is True or bool(props.get("days") and props.get("services"))
+
+
+def _store_items(items: Any, store: Any, *, menu: bool) -> tuple[list[Any], bool]:
+    """(items, every one filled) for a menu-order's or comparison's ``items``: an
+    item with a product_id takes its store fields (the model's dropped), an
+    unknown or repeated product_id drops the item; with no menu (``store`` None
+    or unreachable) the model's price, image and options are dropped instead.
+    ``menu`` (menu-order): every store field; else name, price and image."""
+    import copy
+
+    products = getattr(store, "products", None)
+    keys = _STORE_ITEM_KEYS if menu else ("name", "price", "image")
+    out: list[Any] = []
+    seen: set[str] = set()
+    filled = isinstance(items, list) and bool(items)
+    for item in items if isinstance(items, list) else []:
+        pid = item.get("product_id") if isinstance(item, dict) else None
+        if not isinstance(pid, str) or not pid.strip():
+            filled = False
+            out.append(item)
+            continue
+        if products is None:
+            filled = False
+            out.append({k: v for k, v in item.items() if k not in ("price", "image", "groups")})
+            continue
+        pid = pid.strip()
+        product = products.get(pid)
+        if product is None or pid in seen:
+            continue
+        seen.add(pid)
+        mine = {k: v for k, v in item.items() if k not in keys}
+        out.append({**mine, **{k: copy.deepcopy(product[k]) for k in keys if k in product}})
+    return out, filled and bool(out) and products is not None
+
+
+def _fill_menu_order(props: dict[str, Any], store: Any) -> dict[str, Any]:
+    """Items from the store's menu; ``checkout`` true only when every item filled."""
+    props.pop("checkout", None)
+    if store is None:
+        return props
+    props["items"], filled = _store_items(props.get("items"), store, menu=True)
+    if store.products is not None:
+        props["currency"] = store.currency
+        props["fulfilment"] = list(store.fulfilment)
+        if store.delivery_fee is not None:
+            props["fee"] = {"delivery": store.delivery_fee}
+        else:
+            props.pop("fee", None)
+    if filled:
+        props["checkout"] = True
+    return props
+
+
+def _fill_booking(props: dict[str, Any], store: Any) -> dict[str, Any]:
+    """Services and 7 days of slots from the store; a calm notice when it is down.
+    ``confirmed`` and ``notice`` are the host's to write."""
+    import copy
+
+    props.pop("confirmed", None)
+    props.pop("notice", None)
+    if store is None:
+        return props
+    for key in ("services", "days", "tz"):
+        props.pop(key, None)
+    if store.services:
+        props["services"] = copy.deepcopy(list(store.services))
+    if store.services and store.days:
+        props["days"] = copy.deepcopy(list(store.days))
+        if store.tz:
+            props["tz"] = store.tz
+    else:
+        props["notice"] = dict(STORE_DOWN_NOTICE)
+    return props
+
+
+def _fill_comparison(props: dict[str, Any], store: Any) -> dict[str, Any]:
+    """Name, price and image for each item with a product_id."""
+    if store is None or not any(
+        isinstance(i, dict) and "product_id" in i for i in props.get("items") or []
+    ):
+        return props
+    props["items"], _ = _store_items(props.get("items"), store, menu=False)
+    if store.products is not None:
+        props["currency"] = store.currency
+    return props
+
+
+_STORE_FILLS = {
+    "menu-order": _fill_menu_order,
+    "booking": _fill_booking,
+    "comparison-layout": _fill_comparison,
+}
+
+
 def validate_and_hydrate(
     spec: dict,
     catalog: Iterable[Any] | None,
@@ -949,6 +1095,7 @@ def validate_and_hydrate(
     verbs: Iterable[str] | None = HOST_EVENTS,
     lead_capture: bool = False,
     profile: CardProfile = PAWBAR_PROFILE,
+    storefront: Any = None,
 ) -> dict | None:
     """The card to send, or None to drop it.
 
@@ -960,7 +1107,9 @@ def validate_and_hydrate(
     drops it. It is re-checked after hydration, since filling ids in makes it
     longer and paw-bar measures what it receives. ``lead_capture`` (the site's
     ``concierge_lead_capture``) allows a ``send_to_team`` form; off by default.
-    ``profile`` (the site's ``CardProfile``) gives the widget set and bounds."""
+    ``profile`` (the site's ``CardProfile``) gives the widget set and bounds. On a
+    strict profile ``storefront`` (``concierge_store.StoreData``, None: no store)
+    fills the store widgets (``_fill_store``)."""
     try:
         if not isinstance(spec, dict) or "ui" not in spec:
             raise _Reject("not a spec")
@@ -984,6 +1133,8 @@ def validate_and_hydrate(
         ui = _hydrate(spec["ui"], _catalog_index(catalog), events)
         if ui is None:
             return None
+        if profile.strict:
+            ui = _fill_store(ui, storefront, profile)
         out: dict[str, Any] = {"ui": ui}
         if state is not None:
             out["state"] = state
@@ -1080,6 +1231,7 @@ def render_card(
     verbs: Iterable[str] | None = HOST_EVENTS,
     lead_capture: bool = False,
     profile: CardProfile = PAWBAR_PROFILE,
+    storefront: Any = None,
 ) -> str | None:
     """The complete ```pawbar-card fence to emit for a fence ``body``, or None to
     drop it. A Ripple spec is validated (against ``profile``) and hydrated; a
@@ -1088,7 +1240,7 @@ def render_card(
     that is not JSON is dropped. Never raises: a card no check can read is
     dropped and logged by error type only."""
     try:
-        return _render_card(body, catalog, verbs, lead_capture, profile)
+        return _render_card(body, catalog, verbs, lead_capture, profile, storefront)
     except Exception as exc:  # noqa: BLE001 — see the docstring
         _log_dropped(exc)
         return None
@@ -1100,6 +1252,7 @@ def _render_card(
     verbs: Iterable[str] | None,
     lead_capture: bool,
     profile: CardProfile,
+    storefront: Any = None,
 ) -> str | None:
     raw = _parse(body, unique=profile.strict)
     if raw is None or raw is _TOO_DEEP:
@@ -1109,7 +1262,12 @@ def _render_card(
         if len(body.replace("\r\n", "\n").rstrip(_JS_SPACE)) > profile.max_chars:
             return None
         spec = validate_and_hydrate(
-            raw, catalog, verbs=verbs, lead_capture=lead_capture, profile=profile
+            raw,
+            catalog,
+            verbs=verbs,
+            lead_capture=lead_capture,
+            profile=profile,
+            storefront=storefront,
         )
         return None if spec is None else f"{_FENCE}pawbar-card\n{_serialize(spec)}\n{_FENCE}"
     kind = raw.get("kind") if isinstance(raw, dict) else None
