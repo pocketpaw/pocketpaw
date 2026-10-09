@@ -177,6 +177,13 @@ def test_an_illustration_card_passes_the_ripple_validator_end_to_end():
     assert json.loads(fence.removeprefix("```pawbar-card\n").removesuffix("\n```")) == spec
 
 
+def test_a_null_optional_prop_reads_as_absent():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, validate_and_hydrate
+
+    spec = _card(caption=None, max_height=None)
+    assert validate_and_hydrate(spec, [], profile=RIPPLE_PROFILE) == spec
+
+
 def test_illustration_is_unknown_on_the_pawbar_profile():
     from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, validate_and_hydrate
 

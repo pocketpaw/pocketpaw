@@ -20,3 +20,5 @@ Refresh (once the data widgets ship in a release, use the release asset):
   PY
 then update this file and the pins in test_the_vendored_ripple_manifest_has_not_drifted
 (tests/cloud/test_paw_bar_ripple_profile.py: _RIPPLE_MANIFEST_SHA256, version, count).
+Once the manifest carries "illustration", drop ILLUSTRATION_WIDGET from card_spec.py
+and the "illustration" not in every assertion in that drift test.
