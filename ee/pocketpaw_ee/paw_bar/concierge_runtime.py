@@ -1542,7 +1542,8 @@ _RIPPLE_RULES = (
     "and give the root svg a viewBox: <svg viewBox='0 0 200 120'>...</svg>. Keep it "
     "under 24,000 characters and 400 elements. Animate with animate or "
     "animateTransform, dur 0.5s or more. No scripts, styles, links, images or "
-    "{expressions}; a gradient is fill='url(#id)'.",
+    "{expressions}; a gradient is fill='url(#id)'. Reuse a shape with use "
+    "href='#id' (plain href, never xlink:href), at most 40 uses, none pointing at a use.",
     "   - A good summary card (copy its shape, never its data): "
     + json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":")),
 )

@@ -14,8 +14,9 @@
 # is iterative and stops at the depth cap, so no markup can exhaust the stack.
 # Attribute values are read the way a browser would: CSS escapes undone, then
 # whitespace, control and invisible format characters dropped and lowercased,
-# before the ``url(`` and script-scheme rules. Text content is only held to the
-# script schemes (``Metadata: 5`` is text, never a link).
+# before the ``url(`` and script-scheme rules; text content is never held to them
+# (``Metadata: 5`` is text, never a link). A ``use`` may not point at a subtree
+# holding a ``use`` (no fan-out past the element cap).
 
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ MAX_SVG_CHARS = 24_000
 MAX_ELEMENTS = 400
 MAX_DEPTH = 24
 MAX_ANIMATIONS = 40
+MAX_USES = 40
 MIN_DUR_SECONDS = 0.5
 MAX_REPEAT_COUNT = 1000
 
@@ -101,7 +103,6 @@ _ID_REF = re.compile(r"#[A-Za-z_][\w.\-]*")
 _URL_REF = re.compile(r"url\(\s*#[A-Za-z_][\w.\-]*\s*\)", re.IGNORECASE)
 _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
 _ATTR_SCHEMES = ("javascript:", "data:", "vbscript:", "expression(")
-_TEXT_SCHEMES = ("javascript:", "vbscript:")
 _NUMBER = re.compile(r"\d+(?:\.\d*)?|\.\d+")
 _CLOCK = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(h|min|s|ms)?")
 _FULL_CLOCK = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:\.\d+)?)")
@@ -191,6 +192,8 @@ def svg_violation(markup: str) -> str | None:
     except (ET.ParseError, ValueError):
         return "markup that does not parse"
     elements = animations = 0
+    uses: list[ET.Element] = []
+    ids: dict[str, ET.Element] = {}
     stack: list[tuple[ET.Element, int]] = [(root, 1)]
     while stack:
         el, depth = stack.pop()
@@ -215,8 +218,16 @@ def svg_violation(markup: str) -> str | None:
         for name, value in el.attrib.items():
             if reason := _attr_violation(tag, name, value):
                 return reason
-        for text in (el.text, el.tail):
-            if text and any(s in _folded(text) for s in _TEXT_SCHEMES):
-                return "text holding a script link"
+        if tag == "use":
+            uses.append(el)
+            if len(uses) > MAX_USES:
+                return f"more than {MAX_USES} use elements"
+        if isinstance(el.get("id"), str):
+            ids.setdefault(el.get("id"), el)
         stack.extend((kid, depth + 1) for kid in el)
+    for use in uses:
+        ref = use.get("href") or use.get(f"{{{XLINK_NS}}}href") or ""
+        target = ids.get(ref.strip()[1:])
+        if target is not None and any(_split(e.tag)[1] == "use" for e in target.iter()):
+            return "a use pointing at a use"
     return None

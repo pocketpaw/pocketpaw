@@ -5,8 +5,10 @@
 # (paw-workspace docs/design/drafts/2026-10-09-ripple-illustration-svg.md): anything in
 # the hostile set or over a cap is refused, a harmless unknown (a filter element, a
 # class attribute) passes. ``_HOSTILE`` pins one case per hostile rule and cap, each
-# with the reason it must be refused for, so a case refused by accident (a parse error
-# standing in for the real rule) fails. On the card side, an illustration passes the
+# with the reason it must be refused for, so a case refused by accident (a parse
+# error standing in for the real rule) fails. A use may not point at a subtree
+# holding a use (at most 40 uses); text nodes are never held to the value rules.
+# On the card side, an illustration passes the
 # whole ripple validator end to end, is refused with a clear reason when its svg is
 # hostile or its props are wrong, is unknown on the pawbar profile, and streams to a
 # ``card.final`` even though its svg (an xmlns URL, ``url(#g)``) would break the plain
@@ -102,7 +104,16 @@ _HOSTILE: list[tuple[str, str]] = [
     (_svg("<rect fill='expression(alert(1))'/>"), "a script or data link"),
     # A CSS escape still spells url( for the browser.
     (_svg("<rect fill='\\75 rl(http://x/)'/>"), "url() that is not url(#id)"),
-    (_svg("<text>javascript:alert(1)</text>"), "text holding a script link"),
+    (
+        _svg("<circle id='a' r='2'/><use id='b' href='#a'/><use href='#b'/>"),
+        "a use pointing at a use",
+    ),
+    (
+        _svg("<g id='a'><circle r='2'/><use href='#c'/></g><circle id='c'/><use href='#a'/>"),
+        "a use pointing at a use",
+    ),
+    (_svg("<g id='a'><use href='#a'/></g>"), "a use pointing at a use"),  # its own ancestor
+    (_svg("<circle id='a' r='2'/>" + "<use href='#a'/>" * 41), "more than 40 use elements"),
     (
         _svg("<h:div xmlns:h='http://www.w3.org/1999/xhtml'>x</h:div>"),
         "an element outside the SVG namespace",
@@ -134,10 +145,25 @@ def test_hostile_or_over_cap_svg_is_refused_for_its_rule(markup, reason):
         _svg("<g>" * 23 + "</g>" * 23),
         _svg("<animate attributeName='r' values='1;2' dur='0.5s'/>" * 40),
         _svg("<text>&lt;&#65;&#x42;&quot;&apos;&gt;</text>"),
+        # Value rules read attribute values only, never text.
+        _svg("<text>data: javascript:alert(1) url(http://x) expression(1)</text>"),
+        _svg("<circle id='a' r='2'/>" + "<use href='#a'/>" * 40),
+        _svg("<g id='a'><circle r='2'/><circle r='4'/></g><use href='#a'/><use href='#zz'/>"),
     ],
 )
 def test_good_svg_passes(markup):
     assert _violation(markup) is None
+
+
+def test_plain_model_svg_with_no_xmlns_is_svg():
+    assert _violation("<svg viewBox='0 0 10 10'><rect width='4' height='4'/></svg>") is None
+    xhtml = "<svg xmlns='http://www.w3.org/1999/xhtml' viewBox='0 0 10 10'/>"
+    assert "outside the SVG namespace" in (_violation(xhtml) or "")
+
+
+def test_url_is_matched_in_any_case():
+    assert "url() that is not url(#id)" in (_violation(_svg("<rect fill='URL(http://x)'/>")) or "")
+    assert _violation(_svg("<rect fill='URL(#g)'/>")) is None
 
 
 def test_deep_nesting_never_raises_recursion():
@@ -238,6 +264,13 @@ def test_a_bad_illustration_refuses_the_card_with_a_clear_reason(spec, reason):
         card_spec._check_strict(spec, [], False, profile)
 
 
+def test_a_caption_with_data_text_passes():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, validate_and_hydrate
+
+    spec = _card(caption="Big data: 5 GB a day")
+    assert validate_and_hydrate(spec, [], profile=RIPPLE_PROFILE) == spec
+
+
 def test_the_title_and_caption_still_get_the_text_rules():
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, validate_and_hydrate
 
@@ -284,5 +317,6 @@ def test_the_ripple_paragraph_teaches_the_illustration():
     assert "   - illustration {svg, title, caption?, max_height?}: " in text
     rule = next(line for line in text.splitlines() if "add an illustration" in line)
     assert "single quotes" in rule and "viewBox" in rule and "0.5s" in rule
+    assert "never xlink:href" in rule and "40 uses" in rule
     sample = rule[rule.index("<svg") : rule.index("</svg>") + len("</svg>")]
     assert _violation(sample) is None

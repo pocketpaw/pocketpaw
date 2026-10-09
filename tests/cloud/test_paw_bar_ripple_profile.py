@@ -293,7 +293,7 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # The whole paragraph stays bounded: 19,814 chars before the primitives' data
     # widgets, 24,327 before Ripple's data widgets (typed lines and their rules, less
     # the page chrome), 27,849 after, 30,473 with the flow and ask rules (the flow
-    # example alone is 890), 31,084 with the illustration line and rule.
+    # example alone is 890), 31,191 with the illustration line and rule.
     assert len(text) < 32_000
 
 
