@@ -2252,7 +2252,7 @@ class FenceFilter:
     opening line yields ``CardEvent("card.start")``, its body ``card.delta``s as it
     arrives (the same backtick hold), and its close ``card.final`` with the
     rendered ``{ui, state?}`` object, or ``card.rejected`` ("invalid"; "truncated"
-    from ``close()`` for a fence still open). Before each delta the body is
+    from ``close()`` for a fence still open; "restarted", above). Before each delta the body is
     checked: past ``max_chars``, or with a string ``card_spec.PartialScan`` says
     the card cannot pass, it is rejected ("invalid") at once and the rest of its
     fence swallowed, unbuffered. Card ids run c1, c2... per filter.
