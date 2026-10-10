@@ -15,7 +15,8 @@
 #
 # Capture and the concierge: ``signed_key`` + ``allowed_origins`` are the public,
 # origin-bound embed credential for both site forms and the Paw Bar (``scopes``,
-# ``revoked`` = a 401 kill switch on the KEY). ``concierge_enabled`` is the owner's
+# ``revoked`` = a 401 kill switch on the KEY). Lead capture additionally accepts the
+# owner-added ``lead_intake_origins``. ``concierge_enabled`` is the owner's
 # 403 switch on the concierge, and a concierge exists only once its owner created it
 # (``concierge_created_at``). ``concierge_*`` fields hold the owner's settings
 # (runtime, guided fields, FAQs, sources, doc code, transcript retention, lead
@@ -652,6 +653,12 @@ class Site(TimestampedDocument):
     # back. Existing rows read the default and are therefore un-gated, which is the
     # intended migration: they were the ones silently dropping leads.
     enforce_origin: bool = False
+    # Extra hosts the OWNER allowed to post leads (Collect leads settings), bare
+    # lowercased hostnames, at most 20. Kept apart from ``allowed_origins`` so the
+    # publish stamp and add/remove_domain never drop them, and so an unverified
+    # owner-typed host widens lead capture only, never the concierge key gate or
+    # frame CSP. See ``cloud/leads/intake.py``.
+    lead_intake_origins: list[str] = Field(default_factory=list)
     signed_key: str = ""
     rate_limit_per_min: int = 60
     per_ip_limit_per_min: int = 10

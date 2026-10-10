@@ -8,9 +8,10 @@
 #   Both: site exists -> origin gate (only when ``Site.enforce_origin``) ->
 #   constant-time key compare -> payload size cap -> ``leads_service.capture``.
 #   The origin is otherwise RECORDED on the lead (``origin_unrecognized`` judged
-#   against ``_effective_origins``: the allowlist plus the site's own url host and
-#   custom domains). The pin guarded a key that is public in page source and only
-#   bound browsers, so as a default gate it mostly 403'd real visitors.
+#   against ``_effective_origins``: the allowlist, the site's own url host and
+#   custom domains, and the owner's extra hosts). The pin guarded a key that is
+#   public in page source and only bound browsers, so as a default gate it mostly
+#   403'd real visitors.
 #
 # Owner routes ("sites" plan feature; reads need ``fabric.read``, writes
 # ``fabric.write`` like the sites router's mutations; workspace-scoped, another
@@ -18,6 +19,13 @@
 #   * GET   /sites/{site_id}/leads
 #   * PATCH /sites/{site_id}/leads/{lead_id}  {status?, read?}
 #   * POST  /sites/{site_id}/leads/read-all   -> {updated}
+#
+# Collect leads settings (``notifications.manage``, ADMIN, like lead-notifications;
+# ``site_id`` is the object id or the script_name; logic in ``leads.intake``):
+#   * GET /sites/{site_id}/lead-intake   -> key, absolute capture URLs, origin sets
+#   * PUT /sites/{site_id}/lead-intake   {extra_origins, enforce_origin}
+# The capture gate and the lead's origin flag judge against ``intake.effective_origins``
+# (stamped allowlist + url host + custom domains + the owner's extra hosts).
 #
 # Invariants: the per-IP limiter key is derived from the connection
 # (``_rate_key``), never the body; ``_redirect_base`` never emits a host the caller
@@ -31,11 +39,17 @@ import json
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field
 
 from pocketpaw.sites_capture.ingest import origin_allowed
 from pocketpaw.sites_capture.models import MAX_PAYLOAD_BYTES
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
-from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
+from pocketpaw_ee.cloud._core.deps import (
+    current_workspace_id,
+    require_action_any_workspace,
+    require_plan_feature,
+)
+from pocketpaw_ee.cloud.leads import intake
 from pocketpaw_ee.cloud.leads import service as leads_service
 from pocketpaw_ee.cloud.leads.dto import (
     CaptureRequest,
@@ -88,19 +102,11 @@ def _effective_origins(site: _SiteDoc) -> list[str]:
     So the site's canonical ``url`` host and every attached custom ``domains``
     hostname are folded in here. Both are values WE wrote from a deploy we
     performed, never caller input, so this widens the set only to hosts the site
-    demonstrably owns.
+    demonstrably owns. On top of those come the hosts the owner added in the
+    Collect leads settings (``Site.lead_intake_origins``). The derivation lives in
+    ``leads.intake`` so the settings view and this gate cannot disagree.
     """
-    hosts = list(site.allowed_origins)
-    candidates = [site.url or ""]
-    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)
-    for candidate in candidates:
-        host = candidate.strip().lower()
-        if "://" in host:
-            host = host.split("://", 1)[1]
-        host = host.split("/", 1)[0].split(":", 1)[0]
-        if host and host not in hosts:
-            hosts.append(host)
-    return hosts
+    return intake.effective_origins(site)
 
 
 def _origin_gate(site: _SiteDoc, origin: str) -> None:
@@ -333,3 +339,44 @@ async def read_all_leads(
 ) -> ReadAllResponse:
     """Mark every unread lead on this site read."""
     return ReadAllResponse(updated=await leads_service.mark_all_read(ctx.workspace_id, site_id))
+
+
+# Collect leads settings. Same gate as the lead-notifications routes
+# (``notifications.manage``, ADMIN): the response carries the signed key and the
+# write changes who may post leads.
+_INTAKE_MANAGE = require_action_any_workspace("notifications.manage")
+
+
+class LeadIntakeUpdate(BaseModel):
+    """Full replace of the owner's extra hosts plus the strict pin. Raw entries
+    may be URLs; the server reduces each to a bare hostname and caps the
+    deduplicated list at ``intake.MAX_EXTRA_ORIGINS``."""
+
+    # Both required: a full replace that silently defaulted the pin to off would
+    # be a way to drop strict mode by sending a partial body.
+    extra_origins: list[str] = Field(max_length=100)
+    enforce_origin: bool
+
+
+@router.get("/sites/{site_id}/lead-intake")
+async def get_lead_intake(
+    site_id: str,
+    _user=Depends(_INTAKE_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await intake.get_intake(workspace_id, site_id)
+
+
+@router.put("/sites/{site_id}/lead-intake")
+async def put_lead_intake(
+    site_id: str,
+    body: LeadIntakeUpdate,
+    _user=Depends(_INTAKE_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await intake.update_intake(
+        workspace_id,
+        site_id,
+        extra_origins=body.extra_origins,
+        enforce_origin=body.enforce_origin,
+    )
