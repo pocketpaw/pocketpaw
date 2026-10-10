@@ -2588,6 +2588,48 @@ class Settings(BaseSettings):
         description="Language code of that template. POCKETPAW_MSG91_PLATFORM_LANGUAGE.",
     )
 
+    # Site-owner lead WhatsApp — the platform's Meta WhatsApp Cloud API number
+    # that sends lead / handoff / booking alerts to numbers a site owner added
+    # (ee/pocketpaw_ee/cloud/notifications/whatsapp_notify.py). Without the token
+    # AND the phone number id it runs in mock mode: logged, never delivered.
+    wa_notify_access_token: str | None = Field(
+        default=None,
+        description=(
+            "Meta WhatsApp Cloud API access token, sent as a Bearer token. Set via "
+            "POCKETPAW_WA_NOTIFY_ACCESS_TOKEN. NEVER logged."
+        ),
+    )
+    wa_notify_phone_number_id: str | None = Field(
+        default=None,
+        description=(
+            "Phone number ID of the sending WhatsApp number (not the number itself). "
+            "Set via POCKETPAW_WA_NOTIFY_PHONE_NUMBER_ID."
+        ),
+    )
+    wa_notify_send_as: str = Field(
+        default="template",
+        description=(
+            "'template' (an approved template, works any time) or 'text' (free-form, "
+            "only inside the 24 h window after the recipient messaged the number). "
+            "POCKETPAW_WA_NOTIFY_SEND_AS."
+        ),
+    )
+    wa_notify_template: str = Field(
+        default="hello_world",
+        description=(
+            "Template name for 'template' sends; its one body variable carries the "
+            "alert (hello_world has none). POCKETPAW_WA_NOTIFY_TEMPLATE."
+        ),
+    )
+    wa_notify_template_lang: str = Field(
+        default="en_US",
+        description="Language code of that template. POCKETPAW_WA_NOTIFY_TEMPLATE_LANG.",
+    )
+    wa_notify_api_version: str = Field(
+        default="v26.0",
+        description="Graph API version, e.g. v26.0. POCKETPAW_WA_NOTIFY_API_VERSION.",
+    )
+
     # AI visibility checks (AV-3) — the platform's OWN provider accounts that ask
     # AI search engines about a business (ee/pocketpaw_ee/cloud/ai_visibility).
     # An engine whose key is unset is skipped. All secrets, NEVER logged.

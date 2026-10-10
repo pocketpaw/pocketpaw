@@ -1,6 +1,6 @@
 # ee/pocketpaw_ee/cloud/models/notification_outbox.py
-# One external delivery waiting to happen: an email, a signed webhook POST or a
-# Slack incoming-webhook POST. ``notifications.outbox`` is the only module that
+# One external delivery waiting to happen: an email, a webhook POST, a Slack
+# incoming-webhook POST or a WhatsApp message. ``notifications.outbox`` is the only module that
 # reads or writes it. Producers enqueue (``notifications.delivery`` and the
 # per-site lead routing); the outbox sweeper claims due rows and sends them.
 #
@@ -17,9 +17,12 @@
 # which may quote the visitor (e.g. the handoff question). Finished rows expire
 # after 30 days.
 #
-# Updated 2026-10-02 (PH-6): ``whatsapp`` sink — a partner lead sent to the shop
-# owner's WhatsApp (target = E.164 number) through the platform MSG91 account.
-# Its payload is ``lead_id`` + ``site_ref`` only, like the lead email.
+# Two WhatsApp sinks, both with an E.164 number as ``target``: ``whatsapp`` is a
+# partner lead sent to the shop owner through the platform MSG91 account, and
+# ``whatsapp_owner`` is a site event sent to a number the site owner added,
+# through ``notifications.whatsapp_notify``. A lead row's payload is ``lead_id``
+# + ``site_ref`` only, like the lead email. ``provider`` records which provider
+# sent a row (``mock`` means test mode: logged, not delivered).
 
 from __future__ import annotations
 
@@ -38,9 +41,9 @@ def _now() -> datetime:
 class NotificationOutboxItem(Document):
     workspace: str
     kind: str
-    sink: Literal["email", "webhook", "slack", "whatsapp"]
+    sink: Literal["email", "webhook", "slack", "whatsapp", "whatsapp_owner"]
     # Email address for ``email``; URL for ``webhook`` / ``slack``; E.164 number
-    # for ``whatsapp``.
+    # for ``whatsapp`` / ``whatsapp_owner``.
     target: str
     payload: dict[str, Any] = Field(default_factory=dict)
     # "workspace:<id>" or "site:<site object id>" — whose secret signs a webhook
@@ -57,6 +60,8 @@ class NotificationOutboxItem(Document):
     created_at: datetime = Field(default_factory=_now)
     # Set when the row reaches ``sent`` or ``dead``; drives the TTL below.
     finished_at: datetime | None = None
+    # The provider that sent it (``whatsapp_owner``: "mock" or "meta"), else None.
+    provider: str | None = None
 
     class Settings:
         name = "notification_outbox"

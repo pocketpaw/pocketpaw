@@ -10,7 +10,7 @@
 # A row that fails to parse after the claim is marked dead by ``_id``.
 #
 # Throughput and isolation: rows are worked in two LANES with their own claims
-# and workers (email: 4, webhook + Slack: 8), so a slow webhook can't hold mail
+# and workers (email: 4, webhook + Slack + WhatsApp: 8), so a slow webhook can't hold mail
 # back. Every send runs under a hard ``SEND_DEADLINE_SECONDS`` (well under the
 # lease); hitting it is an ordinary failure.
 #
@@ -45,6 +45,12 @@
 # built from the lead at send time, formatting marks stripped and links broken,
 # capped at ``WHATSAPP_BODY_CAP``. ``count_recent`` filters by sink / target for
 # the per-number daily cap.
+#
+# ``whatsapp_owner`` (a number the site owner added) is worked in the same lane
+# through ``whatsapp_notify``: the number must still be on the site's list at
+# send time, the text is the same lead line (or the event's title and body, or a
+# test line), and a sent row records its ``provider`` ("mock" in test mode).
+# ``count_recent`` also filters by ``payload.site_ref`` for its per-site hourly cap.
 
 from __future__ import annotations
 
@@ -83,7 +89,7 @@ WHATSAPP_BODY_CAP = 900
 # (sinks claimed by the lane, workers in the lane)
 LANES: tuple[tuple[tuple[str, ...], int], ...] = (
     (("email",), 4),
-    (("webhook", "slack", "whatsapp"), 8),
+    (("webhook", "slack", "whatsapp", "whatsapp_owner"), 8),
 )
 
 _sweeper_task: asyncio.Task[None] | None = None
@@ -97,6 +103,8 @@ class Outcome:
     # False when a dead webhook row says nothing about the endpoint's health
     # (its config was removed or changed), so it doesn't count toward auto-disable.
     counts_against_webhook: bool = True
+    # Which provider handled the send, stored on the row ("mock" = test mode).
+    provider: str = ""
 
 
 def _now() -> datetime:
@@ -136,14 +144,19 @@ async def enqueue(**row: Any) -> NotificationOutboxItem:
 async def count_recent(
     *,
     workspace: str,
-    kind: str,
+    kind: str | None,
     since: datetime,
     sink: str | None = None,
     target: str | None = None,
+    site_ref: str | None = None,
 ) -> int:
-    """Rows of ``kind`` queued for ``workspace`` since ``since`` (rate limits),
-    optionally only those of one ``sink`` / ``target``."""
-    query: dict[str, Any] = {"workspace": workspace, "kind": kind, "created_at": {"$gte": since}}
+    """Rows queued for ``workspace`` since ``since`` (rate limits), optionally
+    only those of one ``kind`` / ``sink`` / ``target`` / ``payload.site_ref``."""
+    query: dict[str, Any] = {"workspace": workspace, "created_at": {"$gte": since}}
+    if kind is not None:
+        query["kind"] = kind
+    if site_ref is not None:
+        query["payload.site_ref"] = site_ref
     if sink is not None:
         query["sink"] = sink
     if target is not None:
@@ -239,6 +252,8 @@ async def _finish(item: NotificationOutboxItem, outcome: Outcome, now: datetime)
             "lease_until": None,
             "last_error": None,
         }
+        if outcome.provider:
+            update["provider"] = outcome.provider
     else:
         delay = backoff_after(item.attempts) if outcome.status == "retry" else None
         if delay is None:
@@ -632,6 +647,41 @@ async def _send_whatsapp(item: NotificationOutboxItem) -> Outcome:
 
 
 # ---------------------------------------------------------------------------
+# WhatsApp (the site owner's own numbers)
+# ---------------------------------------------------------------------------
+
+
+async def _owner_whatsapp_text(item: NotificationOutboxItem) -> str | None:
+    from pocketpaw_ee.cloud.notifications import whatsapp_notify
+
+    p = item.payload
+    if p.get("event") == "test":
+        return whatsapp_notify.probe_text(str(p.get("site_name") or ""))
+    if p.get("lead_id"):
+        lead = await _lead_data(item)
+        return whatsapp_lead_text(lead) if lead is not None else None
+    return whatsapp_notify.event_text(
+        site_name=str(p.get("site_name") or ""),
+        title=str(p.get("title") or ""),
+        body=str(p.get("body") or ""),
+    )
+
+
+async def _send_whatsapp_owner(item: NotificationOutboxItem, client: httpx.AsyncClient) -> Outcome:
+    from pocketpaw_ee.cloud.leads import whatsapp_numbers
+    from pocketpaw_ee.cloud.notifications import whatsapp_notify
+
+    site_ref = str(item.payload.get("site_ref") or "")
+    if not await whatsapp_numbers.number_allowed(item.workspace, site_ref, item.target):
+        return Outcome("dead", "number removed")
+    text = await _owner_whatsapp_text(item)
+    if not text:
+        return Outcome("dead", "lead not found")
+    result = await whatsapp_notify.send(item.target, text, client=client)
+    return Outcome(result.status, result.error, provider=result.provider)
+
+
+# ---------------------------------------------------------------------------
 # Sweep
 # ---------------------------------------------------------------------------
 
@@ -649,6 +699,8 @@ async def deliver(item: NotificationOutboxItem, client: httpx.AsyncClient, fetch
                 return await _send_slack(item, fetcher)
             if item.sink == "whatsapp":
                 return await _send_whatsapp(item)
+            if item.sink == "whatsapp_owner":
+                return await _send_whatsapp_owner(item, client)
             return Outcome("dead", f"unknown sink {item.sink!r}")
     except TimeoutError:
         return Outcome("retry", f"deadline: no answer in {SEND_DEADLINE_SECONDS:.0f}s")
