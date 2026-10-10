@@ -697,7 +697,7 @@ async def test_two_hosts_on_one_ip_never_share_a_connection(monkeypatch) -> None
             )
 
     async def _target(item):
-        return item.target, ["s3cret"]
+        return outbox._Target(url=item.target, secrets=["s3cret"])
 
     monkeypatch.setattr(outbox, "_webhook_target", _target)
     await outbox.process_due()

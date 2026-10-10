@@ -23,29 +23,28 @@
 #
 # Webhooks and Slack go out through ``sites.safe_fetch.SafeFetcher.post``: DNS is
 # resolved and checked at send time (failing closed), and the connection is
-# pinned to the checked address, so rebinding can't redirect it. The webhook's
-# secrets are loaded at send time from the config named by ``webhook_ref``
-# ("workspace:<id>" / "site:<id>"); a workspace webhook saved before signing
-# existed has none and is sent unsigned, as before. Lead events carry only
-# ``lead_id`` and the lead is loaded when the row is sent; rows with ``legacy``
-# get those deprecated flat fields merged into the body's top level.
+# pinned to the checked address, so rebinding can't redirect it. A webhook row's
+# target is re-read at send time from ``webhook_ref``: "workspace:<id>", or
+# "site:<site_id>:<webhook_id>" for one site destination ("site:<site_id>", from
+# rows queued before destinations existed, means the ``legacy`` one). A json
+# target gets the signed envelope (a workspace webhook saved before signing
+# existed has no secret and goes unsigned); a chat target (Slack, Discord, Teams,
+# Google Chat) gets ``webhook_formats.render`` with its template, unsigned, and
+# skips ``lead.updated``. Health is counted per destination. Lead events carry
+# only ``lead_id``; the lead is loaded at send time. Rows with ``legacy`` get
+# those deprecated flat fields merged into the body's top level.
 #
 # The sweeper is an app-lifespan task started from ``extensions``. ``enqueue_many``
 # wakes it; without a running sweeper (tests, CLI) rows wait for ``process_due``.
 #
-# Updated 2026-10-02 (PH-6): ``whatsapp`` sink, worked in the webhook lane. A
-# partner lead goes to the shop owner's number through the platform MSG91
-# account (``growth.msg91``): no platform credentials -> dead; the client's
-# number must still be the opted-in target at send time (else dead, like an
-# email recipient who was removed; a failed lookup retries). An MSG91 4xx (not
-# 429) or a rejected send is dead, anything else retries; only the error code
-# and status are stored (the message can echo the response). The text is built
-# at send time from the lead: site, name, message and the visitor's phone or
-# email (the lead email carries those too), on one line, WhatsApp formatting
-# marks stripped and links broken in visitor text, capped at
-# ``WHATSAPP_BODY_CAP`` (below Meta's 1024 so the template's own text fits).
-# ``count_recent`` takes optional ``sink`` / ``target`` filters for the
-# per-number daily cap.
+# ``whatsapp`` (partner leads) is worked in the webhook lane through the
+# platform MSG91 account (``growth.msg91``): no credentials -> dead; the
+# client's number must still be the opted-in target at send time (a failed
+# lookup retries). An MSG91 4xx (not 429) or a rejected send is dead, anything
+# else retries; only the error code and status are stored. The text is one line
+# built from the lead at send time, formatting marks stripped and links broken,
+# capped at ``WHATSAPP_BODY_CAP``. ``count_recent`` filters by sink / target for
+# the per-number daily cap.
 
 from __future__ import annotations
 
@@ -317,17 +316,39 @@ async def _post(fetcher, url: str, body: str, headers: dict[str, str]) -> Outcom
     return Outcome("retry", f"http {result.status}")
 
 
-async def _webhook_target(item: NotificationOutboxItem) -> tuple[str, list[str]] | None:
-    """(url, signing secrets) currently configured for the row's ``webhook_ref``."""
+@dataclass
+class _Target:
+    url: str
+    secrets: list[str]
+    platform: str = "json"
+    template: Any = None
+    site_id: str = ""
+    site_name: str = ""
+
+
+async def _webhook_target(item: NotificationOutboxItem) -> _Target | None:
+    """The destination currently configured for the row's ``webhook_ref``."""
     kind, _, ident = item.webhook_ref.partition(":")
     if kind == "workspace":
         from pocketpaw_ee.cloud.notifications import service as notifications_service
 
-        return await notifications_service.webhook_target(ident)
+        found = await notifications_service.webhook_target(ident)
+        return _Target(url=found[0], secrets=list(found[1])) if found else None
     if kind == "site":
-        from pocketpaw_ee.cloud.leads import notification_settings
+        from pocketpaw_ee.cloud.leads import webhook_destinations
 
-        return await notification_settings.webhook_target(item.workspace, ident)
+        site_id, webhook_id = webhook_destinations.parse_ref(ident)
+        dest = await webhook_destinations.target(item.workspace, site_id, webhook_id)
+        if dest is None:
+            return None
+        return _Target(
+            url=dest.url,
+            secrets=dest.secrets,
+            platform=dest.platform,
+            template=dest.template,
+            site_id=dest.site_id,
+            site_name=dest.site_name,
+        )
     return None
 
 
@@ -339,9 +360,10 @@ async def _record_webhook_result(item: NotificationOutboxItem, ok: bool) -> None
 
             await notifications_service.record_webhook_result(ident, ok=ok)
         elif kind == "site":
-            from pocketpaw_ee.cloud.leads import notification_settings
+            from pocketpaw_ee.cloud.leads import webhook_destinations
 
-            await notification_settings.record_webhook_result(item.workspace, ident, ok=ok)
+            site_id, webhook_id = webhook_destinations.parse_ref(ident)
+            await webhook_destinations.record_result(item.workspace, site_id, webhook_id, ok=ok)
     except Exception:
         logger.warning("could not record webhook result for %s", item.webhook_ref, exc_info=True)
 
@@ -356,12 +378,15 @@ async def _send_webhook(item: NotificationOutboxItem, fetcher) -> Outcome:
     from pocketpaw_ee.cloud.notifications import webhook_signing
 
     target = await _webhook_target(item)
-    if target is None or target[0] != item.target:
+    if target is None or target.url != item.target:
         return Outcome(
             "dead", "webhook removed, changed or switched off", counts_against_webhook=False
         )
-    url, secrets = target
+    url, secrets = target.url, target.secrets
     payload = item.payload
+    event_type = str(payload.get("event_type") or item.kind)
+    if target.platform != "json" and event_type == "lead.updated":
+        return Outcome("dead", "chat destinations skip lead.updated", counts_against_webhook=False)
     if "data" in payload:
         data = payload["data"]
     elif payload.get("lead_id"):
@@ -370,10 +395,13 @@ async def _send_webhook(item: NotificationOutboxItem, fetcher) -> Outcome:
             return Outcome("dead", "lead not found")
     else:
         return Outcome("dead", "no event data")
+    created_at = str(payload.get("created_at") or item.created_at.isoformat())
+    if target.platform != "json":
+        return await _post(fetcher, url, *_chat_body(item, target, event_type, data, created_at))
     event = webhook_signing.build_event(
         event_id=str(payload.get("event_id") or item.id),
-        event_type=str(payload.get("event_type") or item.kind),
-        created_at=str(payload.get("created_at") or item.created_at.isoformat()),
+        event_type=event_type,
+        created_at=created_at,
         data=data,
     )
     legacy = payload.get("legacy")
@@ -388,6 +416,31 @@ async def _send_webhook(item: NotificationOutboxItem, fetcher) -> Outcome:
         else {"Content-Type": "application/json"}  # pre-signing webhook: as before
     )
     return await _post(fetcher, url, body, headers)
+
+
+def _chat_body(
+    item: NotificationOutboxItem, target: _Target, event_type: str, data: Any, created_at: str
+) -> tuple[str, dict[str, str]]:
+    """(body, headers) for a chat-app destination, rendered from its template."""
+    import json
+
+    from pocketpaw_ee.cloud.notifications import email as email_mod
+    from pocketpaw_ee.cloud.notifications import webhook_formats
+
+    link = str(item.payload.get("link") or "")
+    if not link and target.site_id:
+        lead_id = str(item.payload.get("lead_id") or "")
+        link = email_mod.lead_url(target.site_id, lead_id)
+    body, headers = webhook_formats.render(
+        target.platform,
+        event_type,
+        data if isinstance(data, dict) else {},
+        target.template,
+        site_name=target.site_name,
+        link=link,
+        created_at=created_at,
+    )
+    return json.dumps(body, separators=(",", ":"), default=str), headers
 
 
 async def _send_slack(item: NotificationOutboxItem, fetcher) -> Outcome:

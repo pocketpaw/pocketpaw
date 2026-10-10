@@ -6,10 +6,13 @@
 #
 # Settings: who gets email (the workspace owner's account address, once it is
 # verified on the account OR confirmed through our link, plus up to 5 confirmed
-# extras), an optional signed site webhook, and per-event sinks
-# (email | webhook | push). No row means the owner's address with email + push
-# for every event. Every write is a targeted ``$set`` / ``$inc`` / ``$push`` /
-# ``$pull`` / positional update, never a read-modify-write of the whole row.
+# extras), up to 5 webhook destinations (``webhook_destinations``), and per-event
+# sinks (email | webhook | push). No row means the owner's address with email +
+# push for every event. Every write is a targeted ``$set`` / ``$inc`` / ``$push``
+# / ``$pull`` / positional update, never a read-modify-write of the whole row.
+# The legacy PUT ``webhook_url`` / ``clear_webhook`` and the ``webhook-secret``
+# route act on the FIRST destination, and the flat ``webhook_*`` response
+# fields describe it, so older clients keep working.
 #
 # Confirm flow: adding an address stores it unconfirmed with a fresh nonce and
 # queues ONE confirm email carrying a Fernet token (site, workspace, email,
@@ -22,16 +25,17 @@
 #
 # Routing (``dispatch_site_event``): "push" creates the bell rows (and so the
 # OS push); "email" queues one email per allowed recipient; "webhook" queues one
-# signed delivery to the site webhook. The workspace config is the fallback: its
-# Slack always gets the event (subject to its own routes) and its webhook gets
-# it when the site has no webhook of its own, with the deprecated flat
-# notification fields added so existing ``kind`` filters keep working.
+# delivery per active destination that lists the event (rendered for its
+# platform at send time). The workspace config is the fallback: its Slack always
+# gets the event (subject to its own routes) and its webhook gets it when the
+# site has no active destination, with the deprecated flat notification fields
+# added so existing ``kind`` filters keep working.
 #
-# ``dispatch_lead_updated`` is narrower: a status change goes to the site webhook
-# only (when it is active and the owner routes ``lead_captured`` to it), with no
+# ``dispatch_lead_updated`` is narrower: a status change goes only to json
+# destinations that take ``lead_captured`` (chat apps skip updates), with no
 # bell, mail or workspace fallback, since the owner made the change themselves.
 #
-# Partner lead WhatsApp (PH-6, 2026-10-02): a ``lead_captured`` on a partner-sold
+# Partner lead WhatsApp (PH-6): a ``lead_captured`` on a partner-sold
 # site (``Site.partner_client_id``) also queues one ``whatsapp`` row to the
 # partner client's number, sent from the platform MSG91 account. The gate is the
 # client's consent (a ``whatsapp`` number AND ``whatsapp_opt_in_at``), not the
@@ -71,7 +75,6 @@ logger = logging.getLogger(__name__)
 CONFIRM_TTL_SECONDS = 7 * 24 * 3600
 CONFIRM_RESEND_INTERVAL = timedelta(minutes=30)
 CONFIRM_DAILY_CAP = 50
-WEBHOOK_DISABLE_THRESHOLD = 10
 CONFIRM_KIND = "lead_notifications_confirm"
 WHATSAPP_DAILY_CAP = 30
 _VALID_SINKS = frozenset({"email", "webhook", "push"})
@@ -144,6 +147,7 @@ async def _ensure_row(site: _SiteDoc) -> None:
             "$setOnInsert": {
                 "include_owner": True,
                 "emails": [],
+                "webhooks": [],
                 "webhook_url": None,
                 "webhook_secret_enc": "",
                 "webhook_secret_prev_enc": "",
@@ -216,19 +220,21 @@ def _owner_status(settings: SiteNotificationSettings, owner: str, verified: bool
     return "confirmed" if _owner_confirmed(settings, owner) else "pending_confirm"
 
 
-def _site_webhook_active(settings: SiteNotificationSettings) -> bool:
-    return bool(
-        settings.webhook_url
-        and settings.webhook_secret_enc
-        and settings.webhook_disabled_at is None
-    )
+def _wd():
+    from pocketpaw_ee.cloud.leads import webhook_destinations
+
+    return webhook_destinations
 
 
 async def _wire(site: _SiteDoc, *, webhook_secret: str | None = None) -> dict[str, Any]:
+    from pocketpaw_ee.cloud.models.lead_notifications import MAX_WEBHOOKS
     from pocketpaw_ee.cloud.notifications import email as email_mod
 
+    wd = _wd()
     settings = await settings_for(site)
     owner, verified = await owner_identity(site.workspace)
+    dests = wd.destinations(settings)
+    first = dests[0] if dests else None
     return {
         "site_id": str(site.id),
         "configured": settings.id is not None,
@@ -245,11 +251,14 @@ async def _wire(site: _SiteDoc, *, webhook_secret: str | None = None) -> dict[st
             }
             for r in settings.emails
         ],
-        "webhook_url": settings.webhook_url,
-        "has_webhook_secret": bool(settings.webhook_secret_enc),
+        "webhooks": [wd.wire(d) for d in dests],
+        "max_webhooks": MAX_WEBHOOKS,
+        # Legacy single-webhook fields: the first destination.
+        "webhook_url": first.url if first else None,
+        "has_webhook_secret": bool(first and first.secret_enc),
         "webhook_secret": webhook_secret,
-        "webhook_disabled_at": settings.webhook_disabled_at,
-        "webhook_failure_count": settings.webhook_failure_count,
+        "webhook_disabled_at": first.disabled_at if first else None,
+        "webhook_failure_count": first.failure_count if first else 0,
         "events": {e: list(settings.events.get(e, DEFAULT_EVENT_SINKS)) for e in LEAD_EVENTS},
         "email_enabled": email_mod.is_configured(),
     }
@@ -285,14 +294,14 @@ async def update_settings(
     webhook_url: str | None = None,
     clear_webhook: bool = False,
 ) -> dict[str, Any]:
-    """Patch the settings. A webhook URL is SSRF-checked (DNS included); saving
-    one (new or the same) re-arms a webhook that was switched off, and a new URL
-    (or one without a secret) mints a signing secret returned in this response
-    only. ``clear_webhook`` removes it."""
-    from pocketpaw_ee.cloud.audit.webhooks import mint_secret
-    from pocketpaw_ee.cloud.auth.sso import crypto
-    from pocketpaw_ee.cloud.notifications.delivery import validate_webhook_url
+    """Patch the settings. ``webhook_url`` / ``clear_webhook`` are the legacy
+    single-webhook API and act on the first destination: a URL is SSRF-checked
+    (DNS included), saving one (new or the same) re-arms it, and a new URL (or
+    one without a secret) mints a signing secret returned in this response only.
+    With no destination yet it adds one (id ``legacy``)."""
+    from pocketpaw_ee.cloud.models.lead_notifications import LEGACY_WEBHOOK_ID
 
+    wd = _wd()
     site = await _load(workspace_id, site_id)
     update: dict[str, Any] = {}
     new_secret: str | None = None
@@ -302,22 +311,15 @@ async def update_settings(
         for event, sinks in _clean_events(events).items():
             update[f"events.{event}"] = sinks
     if clear_webhook:
-        update.update(
-            webhook_url=None,
-            webhook_secret_enc="",
-            webhook_secret_prev_enc="",
-            webhook_failure_count=0,
-            webhook_disabled_at=None,
-        )
+        first = next(iter(wd.destinations(await settings_for(site))), None)
+        if first is not None:
+            await wd.remove(site, first.id)
     elif webhook_url is not None and webhook_url.strip():
-        url = webhook_url.strip()
-        await validate_webhook_url(url)
-        current = await settings_for(site)
-        if url != current.webhook_url or not current.webhook_secret_enc:
-            new_secret = mint_secret()
-            update["webhook_secret_enc"] = crypto.encrypt(new_secret)
-            update["webhook_secret_prev_enc"] = ""
-        update.update(webhook_url=url, webhook_failure_count=0, webhook_disabled_at=None)
+        first = next(iter(wd.destinations(await settings_for(site))), None)
+        if first is None:
+            _dest, new_secret = await wd.add(site, url=webhook_url, webhook_id=LEGACY_WEBHOOK_ID)
+        else:
+            _dest, new_secret, _show = await wd.update(site, first.id, url=webhook_url, rearm=True)
     await _ensure_row(site)
     if update:
         await _coll().update_one(_key(site), {"$set": update})
@@ -325,28 +327,14 @@ async def update_settings(
 
 
 async def rotate_webhook_secret(workspace_id: str, site_id: str) -> dict[str, Any]:
-    """Mint a new signing secret for the site webhook (returned once) and re-arm
-    it. The replaced secret keeps co-signing for the grace window."""
-    from pocketpaw_ee.cloud.audit.webhooks import mint_secret
-    from pocketpaw_ee.cloud.auth.sso import crypto
-
+    """Legacy route: rotate the FIRST destination's secret (returned once) and
+    re-arm it. The replaced secret keeps co-signing for the grace window."""
+    wd = _wd()
     site = await _load(workspace_id, site_id)
-    current = await settings_for(site)
-    if not current.webhook_url:
+    first = next(iter(wd.destinations(await settings_for(site))), None)
+    if first is None:
         raise NotFound("lead_notification_webhook", site_id)
-    secret = mint_secret()
-    await _coll().update_one(
-        _key(site),
-        {
-            "$set": {
-                "webhook_secret_prev_enc": current.webhook_secret_enc,
-                "webhook_secret_enc": crypto.encrypt(secret),
-                "webhook_secret_rotated_at": _now(),
-                "webhook_failure_count": 0,
-                "webhook_disabled_at": None,
-            }
-        },
-    )
+    _dest, secret = await wd.rotate(site, first.id)
     return await _wire(site, webhook_secret=secret)
 
 
@@ -611,8 +599,8 @@ async def confirm(token: str) -> tuple[str, str]:
 
 
 async def send_test(workspace_id: str, site_id: str) -> dict[str, Any]:
-    """Queue a test email to every allowed recipient and a test delivery to the
-    site webhook. Returns what was queued."""
+    """Queue a test email to every allowed recipient and a test delivery to each
+    active webhook destination. Returns what was queued."""
     from pocketpaw_ee.cloud.notifications import email as email_mod
     from pocketpaw_ee.cloud.notifications import outbox
     from pocketpaw_ee.cloud.notifications.delivery import new_event_envelope
@@ -638,22 +626,19 @@ async def send_test(workspace_id: str, site_id: str) -> dict[str, Any]:
                     },
                 }
             )
-    webhook = _site_webhook_active(settings)
-    if webhook:
-        rows.append(
-            {
-                "workspace": workspace_id,
-                "kind": "lead_notifications_test",
-                "sink": "webhook",
-                "target": settings.webhook_url,
-                "payload": new_event_envelope(
-                    "notification.test", data={"site_id": str(site.id), "site_name": site.name}
-                ),
-                "webhook_ref": f"site:{site.id}",
-            }
-        )
+    hooks = _wd().event_rows(
+        site,
+        settings,
+        event="test",
+        kind="lead_notifications_test",
+        envelope=new_event_envelope(
+            "notification.test", data={"site_id": str(site.id), "site_name": site.name}
+        ),
+        link=email_mod.lead_url(str(site.id)),
+    )
+    rows += hooks
     await outbox.enqueue_many(rows)
-    return {"emails": emails, "webhook": webhook}
+    return {"emails": emails, "webhook": bool(hooks), "webhooks": len(hooks)}
 
 
 # ---------------------------------------------------------------------------
@@ -706,42 +691,20 @@ async def record_bounce(workspace_id: str, site_id: str, email: str) -> None:
         logger.info("permanent bounce for a non-listed address on site %s", site_id)
 
 
-async def webhook_target(workspace_id: str, site_id: str) -> tuple[str, list[str]] | None:
-    """(url, signing secrets) of the site webhook while it is active, else None.
-    Site webhooks are always signed."""
-    from pocketpaw_ee.cloud.notifications.service import signing_secrets
-
-    site = await find_site(workspace_id, site_id)
-    if site is None:
-        return None
-    settings = await settings_for(site)
-    if not _site_webhook_active(settings):
-        return None
-    return str(settings.webhook_url), signing_secrets(
-        settings.webhook_secret_enc,
-        settings.webhook_secret_prev_enc,
-        settings.webhook_secret_rotated_at,
-    )
+async def webhook_target(
+    workspace_id: str, site_id: str, webhook_id: str = "legacy"
+) -> tuple[str, list[str]] | None:
+    """(url, signing secrets) of one destination while it is active, else None.
+    ``webhook_destinations.target`` has the platform and template too."""
+    target = await _wd().target(workspace_id, site_id, webhook_id)
+    return (target.url, target.secrets) if target is not None else None
 
 
-async def record_webhook_result(workspace_id: str, site_id: str, *, ok: bool) -> None:
-    """Atomic: reset on success; on a dead delivery ``$inc`` the counter and,
-    in a separate conditional ``$set``, switch the webhook off at the threshold."""
-    key = {"workspace": workspace_id, "site_id": site_id}
-    if ok:
-        await _coll().update_one(
-            {**key, "webhook_failure_count": {"$gt": 0}}, {"$set": {"webhook_failure_count": 0}}
-        )
-        return
-    await _coll().update_one(key, {"$inc": {"webhook_failure_count": 1}})
-    await _coll().update_one(
-        {
-            **key,
-            "webhook_failure_count": {"$gte": WEBHOOK_DISABLE_THRESHOLD},
-            "webhook_disabled_at": None,
-        },
-        {"$set": {"webhook_disabled_at": _now()}},
-    )
+async def record_webhook_result(
+    workspace_id: str, site_id: str, *, ok: bool, webhook_id: str = "legacy"
+) -> None:
+    """Per-destination health; see ``webhook_destinations.record_result``."""
+    await _wd().record_result(workspace_id, site_id, webhook_id, ok=ok)
 
 
 async def partner_whatsapp_target(
@@ -907,17 +870,18 @@ async def dispatch_site_event(
                         "payload": dict(payload),
                     }
                 )
-        site_webhook = site is not None and _site_webhook_active(settings)
-        if site_webhook and "webhook" in sinks:
-            rows.append(
-                {
-                    "workspace": workspace_id,
-                    "kind": kind,
-                    "sink": "webhook",
-                    "target": settings.webhook_url,
-                    "payload": envelope,
-                    "webhook_ref": f"site:{site.id}",
-                }
+        wd = _wd()
+        site_webhook = site is not None and any(wd.is_active(d) for d in wd.destinations(settings))
+        if site is not None and site_webhook and "webhook" in sinks:
+            site_id = str(site.id)
+            hook_link = email_mod.lead_url(site_id, lead_id) if lead_id else link
+            rows += wd.event_rows(
+                site,
+                settings,
+                event=event,
+                kind=kind,
+                envelope=envelope,
+                link=hook_link or email_mod.lead_url(site_id),
             )
         if site is not None and lead_id and event == "lead_captured":
             try:
@@ -959,9 +923,10 @@ async def dispatch_site_event(
 
 
 async def dispatch_lead_updated(*, workspace_id: str, site_ref: str, lead_id: str) -> bool:
-    """Queue ``lead.updated`` for the site webhook. Returns whether a delivery was
-    queued. Never raises."""
+    """Queue ``lead.updated`` for each json destination that takes
+    ``lead_captured``. Returns whether a delivery was queued. Never raises."""
     from pocketpaw_ee.cloud.notifications import delivery, outbox
+    from pocketpaw_ee.cloud.notifications import email as email_mod
 
     try:
         site = await find_site(workspace_id, site_ref)
@@ -969,20 +934,20 @@ async def dispatch_lead_updated(*, workspace_id: str, site_ref: str, lead_id: st
             return False
         settings = await settings_for(site)
         sinks = settings.events.get("lead_captured", DEFAULT_EVENT_SINKS)
-        if not (_site_webhook_active(settings) and "webhook" in sinks):
+        if "webhook" not in sinks:
             return False
-        await outbox.enqueue_many(
-            [
-                {
-                    "workspace": workspace_id,
-                    "kind": "lead_updated",
-                    "sink": "webhook",
-                    "target": settings.webhook_url,
-                    "payload": delivery.new_event_envelope(LEAD_UPDATED_TYPE, lead_id=lead_id),
-                    "webhook_ref": f"site:{site.id}",
-                }
-            ]
+        rows = _wd().event_rows(
+            site,
+            settings,
+            event="lead_captured",
+            kind="lead_updated",
+            envelope=delivery.new_event_envelope(LEAD_UPDATED_TYPE, lead_id=lead_id),
+            link=email_mod.lead_url(str(site.id), lead_id),
+            json_only=True,
         )
+        if not rows:
+            return False
+        await outbox.enqueue_many(rows)
         return True
     except Exception:
         logger.warning("lead.updated dispatch failed for lead=%s", lead_id, exc_info=True)
