@@ -1,58 +1,46 @@
 # ee/pocketpaw_ee/cloud/belt/headless.py — the HEADLESS develop runner.
-# Created: 2026-06-13 (feat/belt-headless-exec).
 #
-# Updated: 2026-06-13 (PR #1464 review) — store the produced diff VERBATIM (only
-#   normalizing a single trailing newline) instead of the leading/trailing-
-#   stripped value: stripping a real diff's trailing newline corrupts it for
-#   ``git apply``. Emptiness is still decided on the stripped value, so a
-#   whitespace-only diff stays safely queued. Also: dropped the dead ``_calls``
-#   field, and added a best-effort ``headless_diff_attached`` audit-log entry at
-#   diff attachment — the first point LLM-produced content enters the Instinct
-#   store without a human typing it, so an operator trail is worth keeping.
+# An approved mandate plan task becomes a QUEUED ``code_change`` Instinct Action
+# (``station_pending=True``, no diff) via ``mandates.executor.
+# StationTaskDispatcher``. This module removes the human from PRODUCING the diff —
+# and only from that: the produced diff stays PENDING the per-diff Instinct gate,
+# exactly as a human-driven ``belt_propose_change`` would.
 #
-# WHAT THIS CLOSES — the mandate→belt path was NOT autonomous. An approved
-# mandate plan task became a QUEUED ``code_change`` Instinct Action
-# (``station_pending=True``, NO diff) filed by ``mandates.executor.
-# StationTaskDispatcher``, and a HUMAN then had to open the interactive ``/belt``
-# chat surface to PRODUCE the diff. This module removes the human from PRODUCING
-# the diff — and ONLY from that. The per-diff human approval gate is preserved:
-# the runner leaves the action PENDING, carrying a real diff awaiting the
-# Instinct gate exactly as a human-driven ``belt_propose_change`` would.
+#   * ``DevelopFn`` — injectable async ``(DevelopRequest) -> DevelopResult``; the
+#     LLM develop loop is the external boundary. Production wires
+#     ``belt/develop_station.ClaudeCodeDevelop`` via ``set_production_develop_fn``
+#     at app startup (``POCKETPAW_MANDATE_DISPATCHER=headless`` +
+#     ``POCKETPAW_FACTORY_DEVELOP=claude``); tests inject a canned-diff fake.
+#   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued blob (task,
+#     expected outcome, repo, base, mandate provenance, ``recipe``), calls the
+#     DevelopFn,
+#     then back-writes diff + base_branch + ``files_changed`` (the DevelopFn's
+#     count, else the diff's ``+++`` headers) onto the SAME action, clears
+#     ``station_pending`` and mints a Decision-Graph ``correlation_id``. Never
+#     raises: a DevelopFn error (or empty diff / no base) leaves the run queued
+#     and records the reason (secrets redacted) as ``headless_error`` on the
+#     blob, where the console and digest read it. The diff is stored verbatim
+#     (only a trailing newline is ensured — stripping corrupts it for
+#     ``git apply``). A best-effort ``headless_diff_attached`` audit entry marks
+#     LLM content entering the store.
+#   * ``HeadlessTaskDispatcher`` — the mandates ``TaskDispatcher`` that files the
+#     queued run via ``StationTaskDispatcher`` then runs the runner on it. The
+#     production dispatcher (``resolve_headless_dispatcher``) runs the develop in
+#     the BACKGROUND, one at a time (``_DEVELOP_LOCK``), because plan approval
+#     dispatches inside the approve request and a develop takes minutes; tests
+#     construct it inline (``background=False``). A background run is marked
+#     ``headless_state="queued"`` until it attaches or fails, so one orphaned
+#     by a restart shows in the digest; a crashed task is logged at ERROR.
+#     ``develop(run_ref)`` is the same step for an existing run: the belt
+#     executor re-queues an approved headless run whose diff no longer applies
+#     on the moved base and hands it back here (once; see ``belt/executor.py``).
 #
-# THE SHAPE:
-#   * ``DevelopFn`` — an injectable async callable ``(DevelopRequest) ->
-#     DevelopResult``. It is the LLM develop loop (the genuine external boundary,
-#     the analogue of ``GhCliPrOpener`` / ``PrOpener`` in ``belt/executor.py``).
-#     Tests inject a deterministic fake that returns a canned diff — code under
-#     test NEVER calls a real LLM or spawns a real agent. Production wires the
-#     real develop loop here (a follow-up; the runner is agnostic to it).
-#   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued ``code_change``
-#     blob, calls the ``DevelopFn`` for a diff, then back-writes the diff +
-#     base_branch onto the blob, CLEARS ``station_pending``, and mints a
-#     Decision-Graph ``correlation_id`` so the gate closes the chain on approve.
-#     The action stays PENDING. NEVER raises — a ``DevelopFn`` failure (or an
-#     empty diff) leaves the run SAFE (still queued, no diff) and records a note.
-#   * ``HeadlessTaskDispatcher`` — a ``TaskDispatcher`` (the mandates seam) that
-#     files the queued run via the existing ``StationTaskDispatcher`` and then
-#     runs the headless runner on it, so one dispatch turns an approved plan task
-#     into a real pending diff. Additive + selectable via
-#     ``POCKETPAW_MANDATE_DISPATCHER=headless`` — the interactive ``station`` and
-#     announce-only ``bus`` dispatchers are untouched.
-#
-# WHY back-write the SAME action rather than file a fresh one: the queued run is
-# already the row the console Runs tab reads and the belt gate would execute.
-# Populating its diff in place keeps one durable run record per task (provenance
-# to the mandate shift stays on the blob) and reuses the EXACT applyable shape
-# the belt executor expects (``base_branch`` + ``diff`` + cleared
-# ``station_pending`` — see ``belt/executor.py`` schema-2 guard). The store-API
-# blob update mirrors ``belt/executor.py::_persist_run_result`` and the MCP
-# server's ``persist_chain_ids`` — the same pattern, no new store method.
-#
-# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
-#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
+# Blob writes go through ``InstinctStore.update_parameters`` (same pattern as
+# ``belt/executor.py::_persist_run_result``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -84,6 +72,9 @@ class DevelopRequest:
     workspace_id: str
     mandate_id: str = ""
     shift_no: int = 0
+    # A charter recipe name: run that deterministic command instead of an LLM
+    # develop. "" = ordinary develop work.
+    recipe: str = ""
 
 
 @dataclass(frozen=True)
@@ -156,12 +147,15 @@ class HeadlessDevelopRunner:
 
         request = DevelopRequest(
             task=str(blob.get("task") or ""),
-            summary=str(blob.get("summary") or ""),
+            # ``summary`` becomes the develop report once a diff is attached; the
+            # expected outcome is what the develop should aim at.
+            summary=str(blob.get("expected_outcome") or blob.get("summary") or ""),
             repo=str(blob.get("repo") or ""),
             base_branch=str(blob.get("base_branch") or ""),
             workspace_id=str(blob.get("workspace_id") or ""),
             mandate_id=str(blob.get("mandate_id") or ""),
             shift_no=int(blob.get("shift_no") or 0),
+            recipe=str(blob.get("recipe") or ""),
         )
 
         try:
@@ -216,7 +210,7 @@ class HeadlessDevelopRunner:
             diff=diff,
             base_branch=base_branch,
             summary=result.summary or request.summary,
-            files_changed=result.files_changed,
+            files_changed=result.files_changed or _diff_file_count(diff),
         )
         logger.info(
             "headless: produced a diff for action %s (base %s) — now a real "
@@ -272,6 +266,7 @@ class HeadlessDevelopRunner:
             # Provenance — record that this diff was produced headlessly.
             blob["headless"] = True
             blob.pop("headless_error", None)
+            blob.pop("headless_state", None)
             params[_CODE_CHANGE_PARAM_KEY] = blob
 
             await store.update_parameters(action_id, params)
@@ -322,11 +317,33 @@ class HeadlessDevelopRunner:
                 exc_info=True,
             )
 
+    async def mark_queued(self, action_id: str, *, workspace_id: str | None = None) -> None:
+        """Mark a run handed to a background develop (``headless_state=
+        "queued"``). Attach and failure both clear it, so a run that still
+        carries it was orphaned (a restart dropped the in-memory queue, or the
+        task crashed) and the digest reports it as stuck. Best-effort."""
+        from pocketpaw.stores import get_instinct_store
+
+        try:
+            store = get_instinct_store(workspace_id=workspace_id or None)
+            action = await store.get_action(action_id)
+            params = dict(getattr(action, "parameters", None) or {})
+            blob = params.get(_CODE_CHANGE_PARAM_KEY)
+            if not isinstance(blob, dict):
+                return
+            params[_CODE_CHANGE_PARAM_KEY] = {**blob, "headless_state": "queued"}
+            await store.update_parameters(action_id, params)
+        except Exception:  # noqa: BLE001 — the marker must not block dispatch
+            logger.warning("headless: could not mark %s queued", action_id, exc_info=True)
+
     async def _note_failure(self, store: Any, action_id: str, reason: str) -> None:
         """Record a headless-develop failure ON the blob WITHOUT making the run
         applyable. The run STAYS queued (``station_pending=True``, no diff) so a
         human can still drive the station or the dispatcher can retry — we never
-        approve or fail the Action out from under the human gate. Best-effort."""
+        approve or fail the Action out from under the human gate. The reason is
+        redacted (``security.redact``): it can quote check or model output, and
+        the blob is readable by anyone who can read the run. Best-effort."""
+        from pocketpaw.security.redact import redact_output
 
         try:
             action = await store.get_action(action_id)
@@ -340,11 +357,20 @@ class HeadlessDevelopRunner:
             # Keep the run SAFE: still queued, no diff. Only annotate the failure.
             blob["station_pending"] = True
             blob["diff"] = ""
-            blob["headless_error"] = reason
+            blob["headless_error"] = redact_output(reason)
+            blob.pop("headless_state", None)
             params[_CODE_CHANGE_PARAM_KEY] = blob
             await store.update_parameters(action_id, params)
         except Exception:  # noqa: BLE001 — never crash on the failure-note path
             logger.debug("headless: failed to record headless_error note", exc_info=True)
+
+
+def _diff_file_count(diff: str) -> int:
+    """Files a unified diff writes: its ``+++`` headers, minus a deletion's
+    ``+++ /dev/null``. The fallback when a DevelopFn reports no count."""
+    return sum(
+        1 for line in diff.splitlines() if line.startswith("+++ ") and line[4:] != "/dev/null"
+    )
 
 
 @dataclass
@@ -361,6 +387,10 @@ class HeadlessTaskDispatcher:
     still drive the station), so a headless miss never loses the task."""
 
     runner: HeadlessDevelopRunner
+    # True = return as soon as the queued run is filed and develop it in a
+    # background task (serialized by ``_DEVELOP_LOCK``). The production
+    # dispatcher sets it; the inline default keeps tests deterministic.
+    background: bool = False
 
     async def dispatch(
         self,
@@ -386,10 +416,53 @@ class HeadlessTaskDispatcher:
         )
         # 2. Produce the diff headlessly and attach it (the run becomes a real
         #    pending diff). Never raises — a miss leaves the queued run for a
-        #    human to drive. Thread the workspace so the runner's store is scoped
-        #    to the tenant (no ContextVar on this background path — ISO).
-        await self.runner.run(run_ref, workspace_id=workspace_id)
+        #    human to drive.
+        await self.develop(run_ref, workspace_id=workspace_id)
         return run_ref
+
+    async def develop(self, run_ref: str, *, workspace_id: str) -> None:
+        """Develop an already-queued run: a fresh dispatch, or a run the belt
+        executor re-queued because its diff no longer applies on the moved base.
+        Inline, or (``background``) in a task serialized by ``_DEVELOP_LOCK``
+        and marked ``headless_state="queued"`` until it attaches or fails. The
+        workspace is threaded so the runner's store is scoped to the tenant (no
+        ContextVar on this path — ISO)."""
+        if not self.background:
+            await self.runner.run(run_ref, workspace_id=workspace_id)
+            return
+
+        async def _develop() -> None:
+            # ponytail: one develop at a time per process (16 GB box, heavy
+            # checks), unbounded in-memory queue; per-repo locks and a durable
+            # queue if factory throughput ever matters.
+            async with _DEVELOP_LOCK:
+                await self.runner.run(run_ref, workspace_id=workspace_id)
+
+        await self.runner.mark_queued(run_ref, workspace_id=workspace_id)
+        task = asyncio.create_task(_develop(), name=f"belt-headless-develop-{run_ref}")
+        _BACKGROUND_DEVELOPS.add(task)
+        task.add_done_callback(_BACKGROUND_DEVELOPS.discard)
+        task.add_done_callback(_log_develop_crash)
+
+
+def _log_develop_crash(task: asyncio.Task[None]) -> None:
+    """Surface a background develop that raised (``runner.run`` never raises
+    on its own; anything here crashed before its guard, e.g. opening the
+    store). Without this it would only show as "Task exception was never
+    retrieved" at garbage collection. The run keeps ``headless_state``."""
+    if task.cancelled() or task.exception() is None:
+        return
+    logger.error(
+        "headless: background develop %s crashed; its run stays queued",
+        task.get_name(),
+        exc_info=task.exception(),
+    )
+
+
+# Background develops (strong refs so the loop can't drop them) and the lock
+# that serializes them.
+_BACKGROUND_DEVELOPS: set[asyncio.Task[None]] = set()
+_DEVELOP_LOCK = asyncio.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +500,9 @@ def resolve_headless_dispatcher() -> HeadlessTaskDispatcher | None:
     files runs that nothing can develop."""
     if _PRODUCTION_DEVELOP_FN is None:
         return None
-    return HeadlessTaskDispatcher(runner=HeadlessDevelopRunner(develop_fn=_PRODUCTION_DEVELOP_FN))
+    return HeadlessTaskDispatcher(
+        runner=HeadlessDevelopRunner(develop_fn=_PRODUCTION_DEVELOP_FN), background=True
+    )
 
 
 __all__ = [

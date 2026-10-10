@@ -1,0 +1,236 @@
+[
+  {
+    "label": "a headless run whose base moved is failed instead of re-developed",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if code != 0 and check_code != 0 and blob.get(\"headless\"):",
+    "replace": "if code != 0 and check_code != 0 and False:",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_moved_base_redevelops_and_returns_to_the_gate"
+    ]
+  },
+  {
+    "label": "a run re-develops on every conflict instead of failing the second time",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if int(blob.get(\"redevelop\") or 0) >= 1:",
+    "replace": "if int(blob.get(\"redevelop\") or 0) >= 99:",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_a_second_moved_base_fails_with_the_reason"
+    ]
+  },
+  {
+    "label": "a failed run leaves feat/belt-<id> behind, so its retry cannot branch",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if branch_created and not landed:",
+    "replace": "if branch_created and not landed and False:",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_moved_base_redevelops_and_returns_to_the_gate"
+    ]
+  },
+  {
+    "label": "files_changed stays 0 when the DevelopFn reports no count",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "files_changed=result.files_changed or _diff_file_count(diff),",
+    "replace": "files_changed=result.files_changed,",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_headless_runner_produces_pending_diff"
+    ]
+  },
+  {
+    "label": "a run failed by the executor shows no error on the runs read model",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "\"error\": str(getattr(action, \"error\", None) or blob.get(\"headless_error\") or \"\") or None,",
+    "replace": "\"error\": str(blob.get(\"headless_error\") or \"\") or None,",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_a_second_moved_base_fails_with_the_reason"
+    ]
+  },
+  {
+    "label": "the commit subject is built from the develop report, not the task title",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "commit_title = _commit_title(task, summary, title=title)",
+    "replace": "commit_title = _commit_title(task, summary)",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_headless_diff_applies_after_human_approval"
+    ]
+  },
+  {
+    "label": "the sandboxed claude call keeps the default tools (autopilot personas included)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "            claude_cli_argv(\"--tools\", \"\"),\n            cwd=Path(cwd),",
+    "replace": "            claude_cli_argv(),\n            cwd=Path(cwd),",
+    "tests": [
+      "tests/cloud/test_belt_autopilot.py::test_claude_persona_call_is_sandboxed_like_the_foreman"
+    ]
+  },
+  {
+    "label": "the foreman prompt drops the independent-tasks rule",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "6. Tasks in one shift must be INDEPENDENT of each other.",
+    "replace": "6. Tasks in one shift may depend on each other.",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_foreman_validates_recipe_names_and_lists_them"
+    ]
+  },
+  {
+    "label": "backlog: a landed task does not resolve its sightings",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if t[\"status\"] == \"landed\" and t[\"run_id\"]:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_backlog_carries_open_sightings_and_resolves_landed_ones"
+    ]
+  },
+  {
+    "label": "backlog: the shift never records a resolved sighting, so an aged-out run reopens it",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        persist=True,\n",
+    "replace": "        persist=False,\n",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_backlog_carries_open_sightings_and_resolves_landed_ones"
+    ]
+  },
+  {
+    "label": "backlog: a plan waiting at the plan gate is not read, so its tasks are not in flight",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "plan_ids.update(p for p in (*history_plan_ids, *(g.plan_action_id for g in gated)) if p)",
+    "replace": "plan_ids.update(p for p in history_plan_ids if p)",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_backlog_carries_open_sightings_and_resolves_landed_ones"
+    ]
+  },
+  {
+    "label": "backlog: the history drops a failed run's reason",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "\"error\": (run or {}).get(\"error\"),",
+    "replace": "\"error\": None,",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_backlog_carries_open_sightings_and_resolves_landed_ones"
+    ]
+  },
+  {
+    "label": "backlog: gate teaching sightings count as open backlog",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "return ev.get(\"source\") == \"gate\" and ev.get(\"shift_no\") is not None",
+    "replace": "return False",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_gate_rejection_is_shift_history_not_backlog"
+    ]
+  },
+  {
+    "label": "owner: a planted .mcp.json is not removed before the next claude call",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "_TRUST_NAMES = frozenset({\".claude\", \"CLAUDE.md\", \"CLAUDE.local.md\", \"AGENTS.md\", \".mcp.json\"})",
+    "replace": "_TRUST_NAMES = frozenset({\".claude\", \"CLAUDE.md\", \"CLAUDE.local.md\", \"AGENTS.md\"})",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: the restore never deletes planted agent config",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "for path in _trust_entries(worktree):",
+    "replace": "for path in _trust_entries(worktree)[:0]:",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: the restore never checks the committed copies back out",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "if trust.tracked:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: a claude call runs without the restore",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "await self._restore_trusted(cwd, trust)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: the restore follows a planted symlink",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "if path.is_symlink() or not path.is_dir():",
+    "replace": "if not path.is_dir():",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: nested planted CLAUDE.md files survive the restore",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "dirnames[:] = [d for d in dirnames if d not in _TRUST_NAMES and d != \".git\"]",
+    "replace": "dirnames[:] = []",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_restores_agent_config_before_every_claude_call"
+    ]
+  },
+  {
+    "label": "owner: owner setup keeps the isolation flags",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "isolated=trust is None",
+    "replace": "isolated=True",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_drops_isolation_and_keeps_the_tool_rules"
+    ]
+  },
+  {
+    "label": "owner: owner setup wires without a worktree root",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "if owner_setup() and owner_worktree_root() is None:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_owner_setup_without_a_worktree_root_is_refused"
+    ]
+  },
+  {
+    "label": "orient: the develop prompt drops the architecture block",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "f\"{_charter_block(charter)}\\n\\n{_architecture(orient)}\"",
+    "replace": "f\"{_charter_block(charter)}\\n\\n\"",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_orient_brief_lands_in_the_develop_and_review_prompts"
+    ]
+  },
+  {
+    "label": "orient: the review prompt drops the architecture block",
+    "file": "ee/pocketpaw_ee/cloud/belt/develop_station.py",
+    "find": "f\"DIFF:\\n{_untrusted(shown)}\\n\\n{_architecture(orient)}\"",
+    "replace": "f\"DIFF:\\n{_untrusted(shown)}\\n\\n\"",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_orient_brief_lands_in_the_develop_and_review_prompts"
+    ]
+  },
+  {
+    "label": "orient: a task starting with - can be read as a loom flag",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "\"-json\", \"--\", task[:_TASK_CHARS]",
+    "replace": "\"-json\", task[:_TASK_CHARS]",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_orient_brief_lands_in_the_develop_and_review_prompts"
+    ]
+  },
+  {
+    "label": "orient: a failed loom orient fails the run instead of falling back",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "note = f\"loom orient failed (exit {code}); \"",
+    "replace": "raise RuntimeError(\"loom\")",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_orient_degrades_without_a_world_model"
+    ]
+  },
+  {
+    "label": "foreman: the shift drops the repo's C4 components",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "architecture=c4_lines(doc.surface.repo_id),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_shift_gives_the_foreman_the_repo_c4_components"
+    ]
+  }
+]

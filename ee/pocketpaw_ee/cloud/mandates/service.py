@@ -1,42 +1,37 @@
-# ee/pocketpaw_ee/cloud/mandates/service.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
+# ee/pocketpaw_ee/cloud/mandates/service.py — MANDATE business logic.
 #
-# Updated: 2026-06-13 (feat/patrol-engine) — added ``list_cadence_due(now)``, the
-#   cadence scheduler's read: all ACTIVE mandates whose charter cadence interval
-#   has elapsed since their last shift (or that never shifted). "manual" mandates
-#   are never returned. Also: ``run_patrols`` now passes ``workspace_id`` to any
-#   patrol whose signature accepts it (the LIVE ``issues`` patrol needs it to
-#   reach its connector) via signature inspection — the legacy ``deps_patrol``
-#   ``(repo_id)`` shape is unchanged. Additive only.
-# Updated: 2026-06-13 (PR #1463 review) — ``run_patrols`` also threads ``user_id``
-#   to patrols that accept it (audit attribution); the sighting dedup key is
-#   generalized to ``_dedup_signal`` (issues key on ``evidence.iid``, deps on
-#   ``evidence.package``, else summary) so a retitled issue no longer
-#   double-persists; ``list_cadence_due`` carries an explicit N+1 demo-bar
-#   concession note (TODO: single aggregation pipeline).
-#
-# Business logic for the MANDATE primitive — the standing Belt JOB. Sole owner
-# of writes to MandateDoc / ShiftDoc / SightingDoc (the only module that imports
-# those Beanie classes, per the 4-file entity rule).
+# Sole owner of writes to MandateDoc / ShiftDoc / SightingDoc (the only module
+# that imports those Beanie classes, per the 4-file entity rule).
 #
 # Public API (module-level ``async def op(workspace_id, user_id, body) -> dict``):
-#   slice 1: create_mandate, list_mandates, get_mandate
-#   slice 2: file_feedback, list_sightings, run_patrols (deps patrol)
-#   slice 4: trigger_shift (foreman → plan gate)
-#   slice 5: get_pawprints
-#   autopilot (feat/belt-autopilot): set_autopilot (start/stop Foresight-seeded
-#     simulated users feeding the feedback patrol; the loop starts only where
-#     ``autopilot.runs_here()``, and every change is announced to the other web
-#     processes) + repo_for_mandate (the dispatcher/autopilot surface read).
+# create (the repo must sit inside the workspace's belt allowlist roots)/list/get
+# mandates; file_feedback, list_sightings, run_patrols (patrols
+# that accept ``workspace_id`` / ``user_id`` / ``upstream`` get them via
+# signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
+# (sense → foreman → plan gate); prepare_plan_resolution; get_pawprints;
+# set_autopilot; digest (the morning report, composed only from the read
+# functions above plus the belt runs list).
+#
+# The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands.
+# The foreman and the digest both read it by joining the mandate's belt run rows
+# (``plan_action_id`` + ``task_index``) to the ``belt_plan`` tasks' evidence refs;
+# the shift trigger persists what it finds resolved on the sighting
+# (``resolved_by_run``), because the runs list only reaches the newest actions.
+#
+# System/executor reads (no Beanie leaks out): repo_for_mandate,
+# charter_for_mandate (the develop station's checks/recipes/goal read),
+# list_autopilot_enabled, executor_revalidate, mark_shift, and list_cadence_due —
+# the cadence scheduler's cross-workspace read of ACTIVE mandates whose cadence
+# interval (daily = 1 day, weekly = 7 days; manual never) has elapsed since their
+# last shift. ``list_cadence_due`` is N+1 (one shift read per mandate), fine at
+# current mandate counts.
 #
 # Conventions (cloud entity rules): validate body at entry
 # (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
-# find; emit an event on every write (or ``# no-event: <reason>``); errors via
-# ``_core.errors`` CloudError subclasses (never HTTPException).
-#
-# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
-#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``;
-#   the read-merge-write helper is the shared ``cloud/_core/proposals.update_action_blob``.
+# request-path find; emit an event on every write (or ``# no-event: <reason>``);
+# errors via ``_core.errors`` CloudError subclasses (never HTTPException). The
+# Action-blob back-write goes through ``InstinctStore.update_parameters`` via the
+# shared ``cloud/_core/proposals.update_action_blob``.
 
 from __future__ import annotations
 
@@ -57,6 +52,7 @@ from pocketpaw_ee.cloud.mandates.domain import (
     ShiftDoc,
     SightingDoc,
     Surface,
+    UpstreamPin,
 )
 from pocketpaw_ee.cloud.mandates.dto import (
     CreateMandateRequest,
@@ -83,6 +79,8 @@ def _charter_from_request(req: CreateMandateRequest) -> Charter:
             gate_minutes_per_week=req.charter.budget.gate_minutes_per_week,
         ),
         cadence=req.charter.cadence,
+        checks=list(req.charter.checks),
+        recipes=dict(req.charter.recipes),
     )
 
 
@@ -99,6 +97,8 @@ def _charter_to_wire(charter: Charter) -> dict[str, Any]:
             "gate_minutes_per_week": charter.budget.gate_minutes_per_week,
         },
         "cadence": charter.cadence,
+        "checks": list(charter.checks),
+        "recipes": dict(charter.recipes),
     }
 
 
@@ -147,9 +147,32 @@ def _first_pydantic_msg(exc: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _require_allowed_repo(workspace_id: str, repo_id: str) -> None:
+    """A mandate may only bind a repo inside the workspace's belt allowlist
+    roots (settings ∪ the workspace's persisted roots, the console's view),
+    judged on the resolved path so ``..`` or a symlink can't widen it. The
+    develop station re-resolves against the settings allowlist at run time."""
+    from pathlib import Path
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    roots = await belt_service.resolve_allowlist_roots(workspace_id)
+    try:
+        resolved = Path(repo_id).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        resolved = None
+    if resolved is None or not any(resolved.is_relative_to(root) for root in roots):
+        raise ValidationError(
+            "mandate.repo_not_allowed",
+            f"surface.repo_id: {repo_id!r} is outside the workspace's allowed repo roots",
+        )
+
+
 async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str, Any]:
-    """Create a new standing mandate. Charter body validated at entry."""
+    """Create a new standing mandate. Charter body validated at entry; the
+    bound repo must sit inside the workspace's allowed roots (422 otherwise)."""
     body = CreateMandateRequest.model_validate(body)
+    await _require_allowed_repo(workspace_id, body.surface.repo_id)
 
     doc = MandateDoc(
         workspace=workspace_id,
@@ -159,6 +182,7 @@ async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str
         status="active",
         soul_path=body.soul_path,
         patrols=list(body.patrols),
+        upstream=[UpstreamPin(repo=u.repo, pin_file=u.pin_file) for u in body.upstream],
     )
     await doc.insert()
 
@@ -293,6 +317,7 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
         "soul_path": doc.soul_path,
         "patrols": list(doc.patrols),
         "autopilot": _autopilot_to_wire(doc),
+        "upstream": [u.model_dump() for u in doc.upstream],
         "recent_shifts": [
             {
                 "id": str(s.id),
@@ -410,12 +435,14 @@ async def list_sightings(workspace_id: str, user_id: str, mandate_id: str) -> di
 def _dedup_signal(evidence: dict[str, Any] | None, summary: str | None) -> str:
     """The stable per-patrol dedup signal for a sighting / draft.
 
-    Generalized across patrols: ``issues`` carry ``evidence.iid`` (stable across a
-    retitle), ``deps`` carry ``evidence.package``; anything else falls back to the
-    summary. Without the ``iid`` branch an issue retitle would change the summary
-    and double-persist the same issue."""
+    Generalized across patrols: a patrol that knows its own identity sets
+    ``evidence.dedup_key`` (``upstream`` keys on repo + pin + upstream head, so a
+    quiet day files nothing new); ``issues`` carry ``evidence.iid`` (stable across
+    a retitle), ``deps`` carry ``evidence.package``; anything else falls back to
+    the summary. Without the ``iid`` branch an issue retitle would change the
+    summary and double-persist the same issue."""
     ev = evidence or {}
-    signal = ev.get("iid") or ev.get("package") or summary or ""
+    signal = ev.get("dedup_key") or ev.get("iid") or ev.get("package") or summary or ""
     return str(signal)
 
 
@@ -456,6 +483,8 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
                 kwargs["workspace_id"] = workspace_id
             if "user_id" in params:
                 kwargs["user_id"] = user_id
+            if "upstream" in params:
+                kwargs["upstream"] = [u.model_dump() for u in doc.upstream]
             drafts = await patrol(doc.surface.repo_id, **kwargs)
         except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
             logger.warning("mandate: patrol %r raised — skipping", patrol_name, exc_info=True)
@@ -582,6 +611,193 @@ def _sighting_to_wire(s: SightingDoc) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Backlog — open sightings and the planned tasks that cite them
+# ---------------------------------------------------------------------------
+
+# The foreman sees at most this many open sightings (highest severity, then
+# oldest); the prompt says how many it left out.
+_BACKLOG_CAP = 30
+
+# Task statuses that mean someone is still working the task: the foreman must
+# not plan it again.
+_IN_FLIGHT = frozenset(
+    {"queued", "developing", "approved", "pending at gate", "pending at plan gate"}
+)
+
+# A planned task with no run reads its status off the plan Action.
+_PLAN_STATUS = {
+    "pending": "pending at plan gate",
+    "approved": "dispatched",
+    "executed": "dispatched",
+    "rejected": "plan rejected",
+    "failed": "plan failed",
+}
+
+
+def _task_status(run: dict[str, Any]) -> str:
+    """A run row's status in the foreman's words. A queued run whose headless
+    develop failed waits for a human, so it is ``develop failed``, not in
+    flight."""
+    status = str(run.get("status") or "")
+    if status == "queued":
+        if run.get("headless_error"):
+            return "develop failed"
+        return "developing" if run.get("headless_state") else "queued"
+    return "pending at gate" if status == "proposed" else status
+
+
+def _is_gate_teaching(s: SightingDoc) -> bool:
+    """A gate rejection/edit filed as a sighting is shift history, not backlog
+    work: no task can resolve it. Without a ``shift_no`` it stays in the
+    backlog, where the foreman still reads it."""
+    ev = s.evidence or {}
+    return ev.get("source") == "gate" and ev.get("shift_no") is not None
+
+
+async def _planned_tasks(
+    workspace_id: str, plan_ids: list[str], runs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Every task of the given ``belt_plan`` Actions with its outcome, oldest
+    shift first: ``{shift_no, title, evidence_refs, status, in_flight, error,
+    run_id}``.
+
+    A task's run is the newest run row carrying its ``(plan_action_id,
+    task_index)``; ``task_index`` is 1-based into the plan's CURRENT tasks (the
+    executor dispatches the list a resolve kept). A task with no run takes the
+    plan Action's status (pending at the plan gate, rejected, ...)."""
+    from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
+
+    newest: dict[tuple[str, int], dict[str, Any]] = {}
+    for r in runs:  # list_runs is newest-first
+        if r.get("plan_action_id") and r.get("task_index") is not None:
+            newest.setdefault((str(r["plan_action_id"]), int(r["task_index"])), r)
+
+    # ISO: HTTP / scheduler path (no ContextVar) — scope to the caller.
+    store = get_instinct_store(workspace_id=workspace_id or None)
+    out: list[dict[str, Any]] = []
+    for plan_id in plan_ids:
+        try:
+            action = await store.get_action(plan_id)
+        except Exception:  # noqa: BLE001 — an unreadable plan drops its tasks, never the shift
+            logger.debug("mandate: plan read failed for %s", plan_id, exc_info=True)
+            continue
+        blob = (getattr(action, "parameters", None) or {}).get(BELT_PLAN_PARAM_KEY)
+        if not isinstance(blob, dict):
+            continue
+        plan_status = str(getattr(getattr(action, "status", None), "value", "") or "")
+        for i, task in enumerate((blob.get("plan") or {}).get("tasks") or [], start=1):
+            run = newest.get((plan_id, i))
+            status = (
+                _task_status(run)
+                if run
+                else _PLAN_STATUS.get(plan_status, plan_status or "unknown")
+            )
+            out.append(
+                {
+                    "shift_no": int(blob.get("shift_no") or 0),
+                    "title": str(task.get("title") or ""),
+                    "evidence_refs": [str(ref) for ref in task.get("evidence_refs") or []],
+                    "status": status,
+                    "in_flight": status in _IN_FLIGHT,
+                    "error": (run or {}).get("error"),
+                    "run_id": (run or {}).get("action_id"),
+                }
+            )
+    out.sort(key=lambda t: t["shift_no"])
+    return out
+
+
+async def _backlog(
+    workspace_id: str,
+    mandate_id: str,
+    runs: list[dict[str, Any]],
+    *,
+    since: datetime | None = None,
+    history_plan_ids: tuple[str, ...] = (),
+    persist: bool = False,
+) -> dict[str, Any]:
+    """The mandate's OPEN sightings and the planned tasks behind them.
+
+    A sighting is resolved once a task citing it LANDS. Resolution is computed
+    here by joining this mandate's run rows to their plan tasks, and
+    ``persist=True`` (the shift trigger) records it on the sighting, because the
+    runs list only reaches the workspace's newest actions and an old landed run
+    would otherwise fall out of it and reopen its sightings. A failed, rejected
+    or still-running task leaves its sightings open.
+
+    Returns ``{"open": [...], "tasks": [...], "teaching": [...]}``: open entries
+    (highest severity, then oldest) are ``{id, patrol, severity, summary, new,
+    in_flight, tasks}``, where ``new`` means filed after ``since`` and ``tasks``
+    lists the citing tasks (``{shift_no, title, status}``); ``tasks`` covers the
+    plans behind this mandate's runs, every plan still at the plan gate (in
+    flight, however many shifts ago), and ``history_plan_ids``; ``teaching`` is
+    the gate teaching sightings as ``{shift_no, note}`` (shift history, never
+    backlog)."""
+    sightings = await SightingDoc.find(
+        SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
+    ).to_list()
+    gated = await ShiftDoc.find(
+        ShiftDoc.workspace == workspace_id,
+        ShiftDoc.mandate_id == mandate_id,
+        ShiftDoc.state == "in_gate",
+    ).to_list()
+    plan_ids = {str(r["plan_action_id"]) for r in runs if r.get("plan_action_id")}
+    plan_ids.update(p for p in (*history_plan_ids, *(g.plan_action_id for g in gated)) if p)
+    tasks = await _planned_tasks(workspace_id, sorted(plan_ids), runs)
+
+    landed_by: dict[str, str] = {}
+    citing: dict[str, list[dict[str, Any]]] = {}
+    for t in tasks:
+        for ref in t["evidence_refs"]:
+            citing.setdefault(ref, []).append(t)
+            if t["status"] == "landed" and t["run_id"]:
+                landed_by.setdefault(ref, str(t["run_id"]))
+
+    open_docs: list[SightingDoc] = []
+    teaching: list[dict[str, Any]] = []
+    for s in sightings:
+        sid = str(s.id)
+        if s.resolved_by_run:
+            continue
+        if _is_gate_teaching(s):
+            ev = s.evidence
+            title = f' "{ev["task_title"]}"' if ev.get("task_title") else ""
+            note = f"{ev.get('kind', 'note')}{title}: {ev.get('reason') or s.summary}"
+            teaching.append({"shift_no": int(ev["shift_no"]), "note": note})
+            continue
+        if sid in landed_by:
+            if persist:
+                # no-event: bookkeeping on the sighting row; the landed run
+                # already announced itself on belt_run_updated.
+                s.resolved_by_run = landed_by[sid]
+                s.resolved_at = _utcnow()
+                await s.save()
+            continue
+        open_docs.append(s)
+    open_docs.sort(key=lambda s: (-int(s.severity), _aware(s.ts)))
+
+    entries = []
+    for s in open_docs:
+        cites = [
+            {"shift_no": t["shift_no"], "title": t["title"], "status": t["status"]}
+            for t in citing.get(str(s.id), [])
+        ]
+        entries.append(
+            {
+                "id": str(s.id),
+                "patrol": s.patrol,
+                "severity": s.severity,
+                "summary": s.summary,
+                "new": since is None or _aware(s.ts) > _aware(since),
+                "in_flight": any(c["status"] in _IN_FLIGHT for c in cites),
+                "tasks": cites,
+            }
+        )
+    return {"open": entries, "tasks": tasks, "teaching": teaching}
+
+
+# ---------------------------------------------------------------------------
 # Shift trigger — foreman → plan gate (slice 4)
 # ---------------------------------------------------------------------------
 
@@ -640,21 +856,14 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         )
     )
 
-    # 3. JUDGE — assemble the context and make the ONE foreman call.
+    # 3. JUDGE — assemble the context and make the ONE foreman call. The
+    #    foreman reads the open backlog (every sighting no landed task has
+    #    resolved), not just what arrived since the last shift.
+    from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.belt.orient import c4_lines
+
     charter_wire = _charter_to_wire(doc.charter)
     since = last.createdAt if last else None
-    all_sightings = (
-        await SightingDoc.find(
-            SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
-        )
-        .sort("-ts")
-        .to_list()
-    )
-    digest = [
-        {"id": str(s.id), "patrol": s.patrol, "severity": s.severity, "summary": s.summary}
-        for s in all_sightings
-        if since is None or _aware(s.ts) > _aware(since)
-    ]
     history_docs = (
         await ShiftDoc.find(
             ShiftDoc.workspace == workspace_id,
@@ -665,7 +874,29 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         .limit(3)
         .to_list()
     )
-    history = [{"no": h.no, "state": h.state, "outcome": h.outcome} for h in reversed(history_docs)]
+    runs = [
+        r
+        for r in (await belt_service.list_runs(workspace_id))["runs"]
+        if r.get("mandate_id") == mandate_id
+    ]
+    backlog = await _backlog(
+        workspace_id,
+        mandate_id,
+        runs,
+        since=since,
+        history_plan_ids=tuple(h.plan_action_id for h in history_docs if h.plan_action_id),
+        persist=True,
+    )
+    history = [
+        {
+            "no": h.no,
+            "state": h.state,
+            "outcome": h.outcome,
+            "tasks": [t for t in backlog["tasks"] if t["shift_no"] == h.no],
+            "gate": [g["note"] for g in backlog["teaching"] if g["shift_no"] == h.no],
+        }
+        for h in reversed(history_docs)
+    ]
     soul_context = await soul_link.recall_for_planning(
         doc.soul_path, f"{doc.name} {doc.charter.goal}"
     )
@@ -673,9 +904,11 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     context = foreman_mod.ForemanContext(
         shift_no=shift_no,
         charter=charter_wire,
-        sightings=digest,
+        sightings=backlog["open"][:_BACKLOG_CAP],
+        open_total=len(backlog["open"]),
         history=history,
         soul_context=soul_context,
+        architecture=c4_lines(doc.surface.repo_id),
     )
     try:
         plan = await foreman_mod.plan_shift(context)
@@ -1038,11 +1271,18 @@ async def prepare_plan_resolution(
     reject_reason?}`` — ``parameters`` (approve mode) is the full edited
     parameters dict for ``ApproveRequest``; ``edited`` says whether any task
     was edited/dropped (drives the corrections path)."""
+    from pydantic import ValidationError as PydanticValidationError
+
     from pocketpaw.stores import get_instinct_store
     from pocketpaw_ee.cloud.mandates.dto import ResolvePlanRequest
     from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
 
-    body = ResolvePlanRequest.model_validate(body)
+    # A bad body (e.g. an empty decisions list) is a 422, not a 500: the cloud
+    # error handler only maps CloudError.
+    try:
+        body = ResolvePlanRequest.model_validate(body)
+    except PydanticValidationError as exc:
+        raise ValidationError("mandate.plan_resolve_invalid", _first_pydantic_msg(exc)) from exc
     await _fetch_mandate(workspace_id, mandate_id)
 
     shift = await ShiftDoc.find_one(
@@ -1349,6 +1589,172 @@ async def get_pawprints(workspace_id: str, user_id: str, mandate_id: str) -> dic
 
 
 # ---------------------------------------------------------------------------
+# Digest — the workspace's morning report over the existing read models
+# ---------------------------------------------------------------------------
+
+_DIGEST_TOP_SIGHTINGS = 5
+
+
+def _ts_utc(value: Any) -> datetime | None:
+    """A read-model timestamp (datetime or ISO string, naive = UTC) as an aware
+    UTC datetime; ``None`` when it can't be read."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return _aware(value).astimezone(UTC) if isinstance(value, datetime) else None
+
+
+def _since(value: Any, since: datetime) -> bool:
+    ts = _ts_utc(value)
+    return ts is not None and ts >= since
+
+
+def _run_digest_row(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action_id": run.get("action_id"),
+        "status": run.get("status"),
+        "title": str(run.get("title") or run.get("task") or run.get("summary") or "").split(
+            "\n", 1
+        )[0][:200],
+        "pr_url": run.get("pr_url"),
+        "branch": run.get("branch"),
+        "commit_sha": run.get("commit_sha"),
+        "headless_error": run.get("headless_error"),
+        "headless_state": run.get("headless_state"),
+        "error": run.get("error"),
+    }
+
+
+async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str, Any]:
+    """The workspace's mandate digest since ``since`` (default 24 hours ago).
+
+    Per mandate: new sightings (count + top 5 by severity), the open backlog
+    (every sighting no landed task has resolved, any age: count + top 5 by
+    severity then age, each flagged ``in_flight``), shifts and runs
+    created since, the gates still waiting on a human (in-gate plans and
+    per-diff runs at ``proposed``) and ``stuck`` runs (queued with a
+    ``headless_error``, or still marked ``headless_state`` by a background
+    develop that never finished) — those two whatever their age. Built only from the
+    existing read models — ``list_mandates``, ``get_mandate``, ``shift_wire``,
+    ``list_sightings`` and the belt runs list — so the digest can never disagree
+    with the console, plus ``_backlog`` (read-only here), so it agrees with what
+    the next shift's foreman sees. ``totals`` sums the workspace."""
+    # no-event: read-only path; emit only on writes.
+    from pydantic import ValidationError as PydanticValidationError
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.mandates.dto import DigestRequest
+
+    try:
+        req = DigestRequest.model_validate(body or {})
+    except PydanticValidationError as exc:
+        raise ValidationError("mandate.digest_invalid", _first_pydantic_msg(exc)) from exc
+    now = _utcnow()
+    since = _aware(req.since).astimezone(UTC) if req.since else now - timedelta(days=1)
+
+    mandates = (await list_mandates(workspace_id, user_id))["mandates"]
+    runs = (await belt_service.list_runs(workspace_id))["runs"]
+
+    out: list[dict[str, Any]] = []
+    totals = {
+        "mandates": len(mandates),
+        "new_sightings": 0,
+        "shifts": 0,
+        "runs": 0,
+        "landed": 0,
+        "failed": 0,
+        "gates_waiting": 0,
+        "open_backlog": 0,
+    }
+    for m in mandates:
+        mandate_id = m["id"]
+        detail = await get_mandate(workspace_id, user_id, mandate_id)
+        sightings = (await list_sightings(workspace_id, user_id, mandate_id))["sightings"]
+        fresh = [s for s in sightings if _since(s["ts"], since)]
+        top = sorted(fresh, key=lambda s: -int(s["severity"]))[:_DIGEST_TOP_SIGHTINGS]
+
+        shifts: list[dict[str, Any]] = []
+        plan_gates: list[dict[str, Any]] = []
+        for row in detail["recent_shifts"]:
+            is_new = _since(row["created_at"], since)
+            if not is_new and row["state"] != "in_gate":
+                continue
+            wire = await shift_wire(workspace_id, row["id"])
+            if is_new:
+                shifts.append({k: wire[k] for k in ("no", "state", "outcome", "task_count")})
+            if wire["state"] == "in_gate":
+                plan_gates.append(
+                    {
+                        "shift_no": wire["no"],
+                        "plan_action_id": wire["plan_action_id"],
+                        "task_count": wire["task_count"],
+                    }
+                )
+
+        mine = [r for r in runs if r.get("mandate_id") == mandate_id]
+        backlog = (await _backlog(workspace_id, mandate_id, mine))["open"]
+        new_runs = [_run_digest_row(r) for r in mine if _since(r.get("created_at"), since)]
+        diff_gates = [_run_digest_row(r) for r in mine if r.get("status") == "proposed"]
+        # A headless develop that failed (or never finished: a restart drops
+        # the in-memory queue) leaves its run queued for a human, so it is
+        # reported whatever its age, like a gate.
+        stuck = [
+            _run_digest_row(r)
+            for r in mine
+            if r.get("status") == "queued" and (r.get("headless_error") or r.get("headless_state"))
+        ]
+
+        totals["new_sightings"] += len(fresh)
+        totals["shifts"] += len(shifts)
+        totals["runs"] += len(new_runs)
+        totals["landed"] += sum(1 for r in new_runs if r["status"] == "landed")
+        totals["failed"] += sum(
+            1 for r in new_runs if r["status"] == "failed" or r["headless_error"]
+        )
+        totals["gates_waiting"] += len(plan_gates) + len(diff_gates)
+        totals["open_backlog"] += len(backlog)
+        out.append(
+            {
+                "id": mandate_id,
+                "name": m["name"],
+                "status": m["status"],
+                "cadence": m["cadence"],
+                "sightings": {
+                    "count": len(fresh),
+                    "top": [
+                        {"title": s["summary"], "severity": s["severity"], "patrol": s["patrol"]}
+                        for s in top
+                    ],
+                },
+                "backlog": {
+                    "count": len(backlog),
+                    "top": [
+                        {
+                            "title": s["summary"],
+                            "severity": s["severity"],
+                            "patrol": s["patrol"],
+                            "in_flight": s["in_flight"],
+                        }
+                        for s in backlog[:_DIGEST_TOP_SIGHTINGS]
+                    ],
+                },
+                "shifts": shifts,
+                "runs": new_runs,
+                "gates": {"plans": plan_gates, "diffs": diff_gates},
+                "stuck": stuck,
+            }
+        )
+    return {
+        "since": since.isoformat(),
+        "generated_at": now.isoformat(),
+        "mandates": out,
+        "totals": totals,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Executor-facing helpers (the executor never imports Beanie models)
 # ---------------------------------------------------------------------------
 
@@ -1367,6 +1773,24 @@ async def repo_for_mandate(workspace_id: str, mandate_id: str) -> str | None:
     except Exception:  # noqa: BLE001 — malformed id == miss
         doc = None
     return doc.surface.repo_id if doc is not None else None
+
+
+async def charter_for_mandate(workspace_id: str, mandate_id: str) -> dict[str, Any] | None:
+    """Read a mandate's charter (wire dict) plus its bound repo, tenant-scoped.
+
+    The headless develop station's read: it needs the charter's ``checks``,
+    ``recipes``, ``goal``, ``boundaries`` and ``says_no``. Returns
+    ``{"repo": ..., "charter": {...}}`` or ``None`` on a miss / cross-tenant id."""
+    # no-event: read-only path; emit only on writes.
+    try:
+        doc = await MandateDoc.find_one(
+            MandateDoc.workspace == workspace_id, MandateDoc.id == _as_object_id(mandate_id)
+        )
+    except Exception:  # noqa: BLE001 — malformed id == miss
+        doc = None
+    if doc is None:
+        return None
+    return {"repo": doc.surface.repo_id, "charter": _charter_to_wire(doc.charter)}
 
 
 async def list_autopilot_enabled() -> list[dict[str, Any]]:
@@ -1396,10 +1820,12 @@ async def list_autopilot_enabled() -> list[dict[str, Any]]:
     ]
 
 
-# Cadence → due-interval. A "weekly" mandate is due once its last shift is older
-# than this; "manual" mandates are never scheduled (no entry → not due). Kept as a
-# table so a later cadence value ("daily", etc.) only adds a row here.
-_CADENCE_INTERVALS: dict[str, timedelta] = {"weekly": timedelta(days=7)}
+# Cadence → due-interval. A mandate is due once its last shift is older than its
+# interval; "manual" mandates are never scheduled (no entry → not due).
+_CADENCE_INTERVALS: dict[str, timedelta] = {
+    "daily": timedelta(days=1),
+    "weekly": timedelta(days=7),
+}
 
 # The SYSTEM actor a scheduled shift runs as (no human user_id on a cadence fire).
 _SCHEDULER_ACTOR = "system:scheduler"
@@ -1409,8 +1835,8 @@ async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
     """All ACTIVE mandates whose charter cadence is DUE at ``now`` — the cadence
     scheduler's read (``scheduler.run_scheduler_tick``).
 
-    A mandate is DUE when its cadence has a scheduling interval (currently only
-    ``"weekly"`` → 7 days) AND its most recent shift's ``createdAt`` is older than
+    A mandate is DUE when its cadence has a scheduling interval (``"daily"`` → 1
+    day, ``"weekly"`` → 7 days) AND its most recent shift's ``createdAt`` is older than
     that interval before ``now`` (a mandate that has NEVER shifted is always due).
     ``"manual"`` mandates have no interval, so they are never returned — the demo
     bar's manual-trigger path is untouched.
@@ -1518,12 +1944,15 @@ def _utcnow() -> datetime:
 
 
 __all__ = [
+    "charter_for_mandate",
     "create_mandate",
+    "digest",
     "executor_revalidate",
     "file_feedback",
     "get_mandate",
     "get_pawprints",
     "list_autopilot_enabled",
+    "list_cadence_due",
     "list_mandates",
     "list_sightings",
     "mark_shift",

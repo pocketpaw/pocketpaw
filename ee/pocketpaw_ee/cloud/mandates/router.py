@@ -1,28 +1,21 @@
-# ee/pocketpaw_ee/cloud/mandates/router.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
+# ee/pocketpaw_ee/cloud/mandates/router.py — the MANDATE routes.
 #
-# FastAPI router for the MANDATE primitive — the standing Belt JOB. Routes ride
-# the ``/belt/mandates`` prefix (the spec pins them under the belt surface). The
-# routes are THIN: they read identity (workspace + user) from the cloud deps,
-# delegate to ``ee.cloud.mandates.service``, and return the wire dict the service
-# built. RBAC mirrors the belt console — ``belt.read`` (MEMBER) on reads,
-# ``belt.manage`` (ADMIN) on mutations (create / shift trigger / feedback intake).
-# Errors propagate via ``CloudError`` so the central handler maps them; the
-# router never raises ``HTTPException``.
+# FastAPI router for the standing Belt JOB, under the ``/belt/mandates`` prefix.
+# Routes are THIN: read identity (workspace + user) from the cloud deps,
+# delegate to ``mandates.service``, return its wire dict. RBAC mirrors the belt
+# console — ``belt.read`` (MEMBER) on reads, ``belt.manage`` (ADMIN) on
+# mutations (create, shift trigger, feedback intake, plan resolve, autopilot).
+# Errors propagate as ``CloudError``; the router never raises HTTPException.
 #
-# Updated: 2026-06-11 (slice 2 — patrols) — added feedback intake +
-# sightings read.
-# Updated: 2026-06-11 (slice 4 — plan gate) — added POST .../shift.
-# Updated: 2026-06-11 (slice 5 — pawprints) — added GET .../pawprints.
-# Updated: 2026-06-11 (feat/belt-autopilot) — added POST .../autopilot
-# (start/stop Foresight-seeded simulated users; admin-gated).
-# Updated: 2026-06-11 (UI contract sync 2) — added POST .../plan/resolve (the
-# console's per-task gate action, mapped onto the real instinct approve-with-
-# edits / reject paths) and the `patrols` senses toggles on create.
-# Updated: 2026-06-11 (UI contract sync) — POST create returns {"mandate"},
-# POST shift returns {"shift"}; the feedback route accepts BOTH the general
-# {text, severity?, source} shape and the teaching {kind, reason, shift_no?,
-# task_title?} shape (discriminated in the service on `kind`).
+# Envelopes (UI contract): create and autopilot return ``{"mandate"}``, shift
+# and plan/resolve return ``{"shift"}``; GET detail stays bare. The feedback
+# route takes the general ``{text, severity?, source}`` and the teaching
+# ``{kind, reason, shift_no?, task_title?}`` shapes (the service discriminates
+# on ``kind``). ``plan/resolve`` maps the console's per-task verdicts onto the
+# real Instinct approve-with-edits / reject paths.
+#
+# Static paths (``/digest``) are declared before ``/{mandate_id}`` so they are
+# never captured as a mandate id.
 
 """FastAPI router for Belt mandates (standing jobs)."""
 
@@ -68,6 +61,19 @@ async def list_mandates(
 ) -> dict[str, Any]:
     """List the workspace's mandates with a per-mandate health summary."""
     return await mandate_service.list_mandates(workspace_id, user_id)
+
+
+@router.get("/digest")
+async def get_digest(
+    since: str | None = None,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """The workspace's mandate digest since ``since`` (ISO-8601, default 24 hours
+    ago): per mandate the new sightings, shifts, runs and the gates waiting on a
+    human, plus workspace ``totals``."""
+    return await mandate_service.digest(workspace_id, user_id, {"since": since})
 
 
 @router.get("/{mandate_id}")

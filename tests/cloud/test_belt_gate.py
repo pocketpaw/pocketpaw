@@ -1,48 +1,26 @@
-# tests/cloud/test_belt_gate.py — Belt & Pulley code-change gate (BS-3).
+# tests/cloud/test_belt_gate.py — Belt & Pulley code-change gate.
 #
-# Created: 2026-06-10 (feat/belt-gate, Belt & Pulley stations thin slice).
-#
-# Updated: 2026-06-11 (feat/belt-repo-init — local-only gate mode) — added the
-# NO-ORIGIN landing path: a propose→approve cycle against a repo with no
-# ``origin`` remote applies + commits on ``feat/belt-<id>`` LOCALLY, NEVER pushes
-# and NEVER opens a PR (a fake opener proves it's untouched), the branch + commit
-# survive in the repo, and the executed outcome carries the branch + commit sha
-# (and the blob carries branch + commit_sha, NOT pr_url) so the runs read model
-# surfaces a branch chip with pr_url=None.
-#
-# What this pins — the WHOLE gate, driven through the REAL path with a local
-# git fixture (a bare repo as origin + a seeded working clone):
+# Drives the WHOLE gate through the real path with local git fixtures (a bare
+# repo as origin + a seeded working clone, and a repo with NO origin):
 #   * belt_propose_change (the real MCP handler) validates identity + inputs,
 #     files an Instinct Action carrying the ``_code_change`` blob, and returns
-#     {ok, action_id, tray_hint} — only after the store confirms the Action.
-#   * the apply-on-approve executor, on a REAL git repo: fresh worktree off
+#     {ok, action_id, tray_hint} only after the store confirms the Action.
+#   * the apply-on-approve executor on a REAL repo: fresh worktree off
 #     origin/<base>, git apply --3way, branch feat/belt-<id>, Conventional-
-#     Commits commit (summary as body, NO AI attribution), push, PR via an
-#     INJECTED fake opener, mark_executed with {pr_url, branch, files_changed}.
-#     The branch + commit land in the BARE origin; the worktree is removed.
-#   * two actions run back-to-back with no cross-contamination (distinct
-#     branches, distinct PRs, distinct outcomes).
-#   * reject round-trips for a code_change Action (status REJECTED, recorded
-#     reason, NO worktree, NO PR).
-#   * apply conflict (doctored diff against a mutated base) → action FAILED,
-#     worktree cleaned, no branch pushed.
-#   * size-cap rejection (over the changed-line / byte budget).
-#   * identity-missing error (no workspace/user ContextVars).
-#   * repo-outside-allowlist refusal.
+#     Commits commit (summary as body, no AI attribution), push, PR via an
+#     INJECTED fake opener, mark_executed with {pr_url, branch, files_changed};
+#     the branch + commit land in the bare origin and the worktree is removed.
+#   * no-origin repos land locally: no push, no PR, the branch survives in the
+#     repo at the recorded commit (promote is idempotent, no warning), and the
+#     runs read model shows a branch chip (pr_url=None).
+#   * two actions back-to-back don't cross-contaminate; reject round-trips; an
+#     apply conflict fails the action, cleans the worktree and leaves no belt
+#     branch behind; size cap, missing identity and out-of-allowlist refusals.
 #
-# `pocketpaw_ee` is import-skipped on an OSS-only install. The handler reads
-# identity through ee.cloud.chat.agent_service ContextVars (set in-test via
-# attach_agent_identity) and the store through pocketpaw.stores.get_instinct_store
-# (patched to a tmp-file store so nothing touches ~/.pocketpaw/instinct.db).
-#
-# Updated: 2026-06-26 (fix/cloud-iso-executor-scope) — the ``store`` fixture's
-# factory mock is now WORKSPACE-FAITHFUL (resolves explicit workspace_id →
-# current_workspace ContextVar → "", seeded store for "w1" only). The old
-# arg-swallowing mock hid C1: the approve-path executor's bare/unscoped store
-# call (run OUTSIDE _identity, no ContextVar) still reached the seeded store, so
-# split-brain isolation passed. The end-to-end test below now approves+executes
-# outside _identity, so it only stays green because the executor threads the
-# blob's workspace_id.
+# The ``store`` fixture is WORKSPACE-FAITHFUL (explicit workspace_id, then the
+# ``current_workspace`` ContextVar; only "w1" is seeded), so the approve-path
+# executor (run outside ``_identity``) only reaches the seeded store because it
+# threads the blob's workspace_id.
 
 from __future__ import annotations
 
@@ -468,6 +446,9 @@ async def test_apply_conflict_marks_failed_and_cleans_up(repo, store, allowlist)
     # Nothing pushed to origin.
     bare = repo.parent / "origin.git"
     assert _git(bare, "branch", "--list", "feat/belt-*").strip() == ""
+    # The branch the worktree created in the shared refs is gone too, so a retry
+    # of the same action can branch again.
+    assert _git(repo, "branch", "--list", "feat/belt-*").strip() == ""
     # The worktree dir is gone.
 
     leftover = Path(tempfile.gettempdir()) / "belt-actions"
@@ -591,7 +572,9 @@ def local_allowlist(local_repo: Path, monkeypatch) -> None:
     monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
 
 
-async def test_local_only_landing_commits_locally_no_push_no_pr(local_repo, store, local_allowlist):
+async def test_local_only_landing_commits_locally_no_push_no_pr(
+    local_repo, store, local_allowlist, caplog
+):
     """propose→approve against a NO-ORIGIN repo: the change applies + commits on
     feat/belt-<id> LOCALLY, the PR opener is NEVER called (no push, no PR), the
     branch + commit survive in the repo, and the outcome / blob carry branch +
@@ -610,7 +593,10 @@ async def test_local_only_landing_commits_locally_no_push_no_pr(local_repo, stor
 
     approved = await store.approve(action_id, approver="u1")
     opener = FakePrOpener()
-    await belt_executor.execute_approved_change(approved, pr_opener=opener)
+    with caplog.at_level("WARNING", logger=belt_executor.__name__):
+        await belt_executor.execute_approved_change(approved, pr_opener=opener)
+    # The worktree's checkout -b already made the branch; promote is a no-op.
+    assert not [r for r in caplog.records if r.name == belt_executor.__name__], caplog.text
 
     # The PR opener was NEVER called — no remote, so no push and no PR.
     assert opener.calls == []
@@ -646,6 +632,22 @@ async def test_local_only_landing_commits_locally_no_push_no_pr(local_repo, stor
 
     # Still no origin remote was added.
     assert _git(local_repo, "remote").strip() == ""
+
+
+async def test_promote_branch_is_idempotent_and_never_moves_a_branch(local_repo):
+    """Same sha: no-op. Missing: created. Different sha: an error, branch untouched."""
+    base = _git(local_repo, "rev-parse", "main").strip()
+    (local_repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    _git(local_repo, "commit", "-am", "second")
+    second = _git(local_repo, "rev-parse", "main").strip()
+
+    assert await belt_executor._promote_branch(local_repo, "feat/belt-new", base) is None
+    assert _git(local_repo, "rev-parse", "feat/belt-new").strip() == base
+    assert await belt_executor._promote_branch(local_repo, "feat/belt-new", base) is None
+
+    err = await belt_executor._promote_branch(local_repo, "feat/belt-new", second)
+    assert err and "already exists" in err
+    assert _git(local_repo, "rev-parse", "feat/belt-new").strip() == base
 
 
 async def test_local_only_runs_read_model_branch_chip_no_pr(

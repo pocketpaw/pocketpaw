@@ -1,5 +1,4 @@
 # ee/pocketpaw_ee/cloud/mandates/autopilot.py
-# Created: 2026-06-11 (feat/belt-autopilot).
 #
 # AUTOPILOT — Foresight-seeded simulated users that exercise a mandate's surface
 # and feed the FEEDBACK PATROL. When autopilot is ON, a per-mandate background
@@ -8,32 +7,20 @@
 #
 #   1. Reads the bound repo's surface context — the README's first lines + the
 #      recent commit titles (``git log``) — so the personas "use" something real.
-#   2. Builds N personas (1-10, default 3) via the FORESIGHT module's persona
-#      seeding (``ee.foresight.persona.OceanDrift`` — a genuine bridge to the sim
-#      module; the seeded drift shapes each persona's temperament).
+#   2. Builds N personas (1-10, default 3) seeded with the FORESIGHT module's
+#      ``OceanDrift`` (the drift shapes each persona's temperament).
 #   3. Each persona emits 1-3 STRUCTURED feedback items {text, severity 1-5,
-#      source: "autopilot:<persona>"} through a pluggable ``UserSim`` interface,
-#      POSTed through the EXISTING feedback service path
-#      (``service.file_feedback`` — NOT raw HTTP) so they become Sightings the
-#      next shift's foreman cites.
+#      source: "autopilot:<persona>"} through a pluggable ``UserSim``, filed
+#      through the EXISTING feedback service path (``service.file_feedback``) so
+#      they become Sightings the next shift's foreman cites.
 #
-# WHICH PATH + WHY (the honesty note the brief asks for): the brief allows a
-# lighter persona LLM call when foresight's full scenario runner is too heavy
-# for a per-cycle call. We took the LIGHTER path:
-#
-#   * Foresight's ``run_scenario`` / OASIS substrate is a TICK-BASED world
-#     simulation (CAMEL + OASIS + a YAML scenario config, anchors, prediction
-#     records) geared to "rehearse a decision across a population of personas",
-#     NOT "use a product and emit free-text feedback". Spinning it up per cycle
-#     would pull in torch/igraph/pandas and a multi-tick world loop for what is a
-#     one-shot "react to this surface" call — far too heavyweight, and its
-#     action vocabulary (``action/rationale/put``) is the wrong shape.
-#   * Instead we reuse the FOREMAN's proven pluggable transport pattern
-#     (``POCKETPAW_MANDATE_LLM=claude|mock`` — the SAME env the foreman reads) and
-#     the foresight ``OceanDrift`` persona-seed value object. The persona LLM
-#     call lives behind the ``UserSim`` interface so a later PR can swap the full
-#     foresight scenario runner in with no caller change. Mock mode is
-#     deterministic + seeded so tests get stable sightings.
+# Transport: ``POCKETPAW_MANDATE_LLM=claude|mock`` (the SAME env the foreman
+# reads). ``claude`` makes one call per persona through the foreman's sandboxed
+# ``run_claude_no_tools`` (no tools, empty temp cwd, scrubbed env, prompt on
+# stdin; the prompt carries repo text). ``mock`` is deterministic and seeded so
+# tests get stable sightings. Foresight's full scenario runner (a tick-based
+# OASIS world simulation) is too heavy for a per-cycle "react to this surface"
+# call; ``UserSim`` is the seam where it could replace the persona call.
 #
 # RESILIENCE: autopilot must NEVER crash a shift or the app. Every persona call,
 # every feedback POST, and every cycle is wrapped — a failure is logged and
@@ -58,6 +45,7 @@ import logging
 import os
 import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -257,47 +245,30 @@ class MockUserSim:
         return [{"text": text, "severity": rng.randint(2, 5)} for text in chosen]
 
 
+@dataclass
 class ClaudeCliUserSim:
-    """Real persona transport — shells the ``claude`` CLI (demo bar).
-
-    Mirrors the foreman's ``ClaudeCliLlm``: ``claude -p <prompt> --output-format
-    json``; the prompt is a single argv element (the CLI does its own auth). The
-    model is asked for STRICT JSON: a list of ``{text, severity}`` feedback items.
+    """Real persona transport — the foreman's sandboxed tool-less call
+    (``foreman.run_claude_no_tools``: no tools, empty temp cwd, scrubbed env,
+    prompt on stdin), since the prompt carries repo text (README, commit titles).
+    The model is asked for STRICT JSON: a list of ``{text, severity}`` items.
     A transport / parse failure returns an empty list — the caller logs + skips
-    that persona; autopilot never raises out of a cycle."""
+    that persona; autopilot never raises out of a cycle. ``run`` is the develop
+    station's subprocess runner (injectable for tests)."""
+
+    run: Any = None
 
     async def react(self, *, persona: Persona, surface: dict[str, Any]) -> list[dict[str, Any]]:
+        from pocketpaw_ee.cloud.mandates.foreman import run_claude_no_tools
+
         prompt = _build_persona_prompt(persona, surface)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "claude",
-                "-p",
-                prompt,
-                "--output-format",
-                "json",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            text = await run_claude_no_tools(
+                prompt, timeout=_CLI_TIMEOUT, run=self.run, prefix="belt-autopilot-"
             )
-            try:
-                out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=_CLI_TIMEOUT)
-            except TimeoutError:
-                proc.kill()
-                await proc.wait()
-                logger.warning("autopilot: persona %s CLI timed out", persona.name)
-                return []
-            if proc.returncode != 0:
-                logger.warning(
-                    "autopilot: persona %s CLI failed (exit %s): %s",
-                    persona.name,
-                    proc.returncode,
-                    err_b.decode("utf-8", "replace").strip()[:200],
-                )
-                return []
-            text = _unwrap_cli_result(out_b.decode("utf-8", "replace"))
-            return _parse_items(text)
         except Exception:  # noqa: BLE001 — a transport failure skips this persona
-            logger.warning("autopilot: persona %s react crashed", persona.name, exc_info=True)
+            logger.warning("autopilot: persona %s claude call failed", persona.name, exc_info=True)
             return []
+        return _parse_items(text)
 
 
 def _build_persona_prompt(persona: Persona, surface: dict[str, Any]) -> str:
@@ -320,18 +291,6 @@ in the voice of the persona. Each item has a severity 1 (minor) to 5 (blocking).
 
 Reply with STRICT JSON only — no prose, no markdown fences:
 [{{"text": "<one concrete piece of feedback>", "severity": 3}}]"""
-
-
-def _unwrap_cli_result(out: str) -> str:
-    """Pull the ``result`` field off the claude CLI JSON envelope, tolerating a
-    bare-text response (mirrors the foreman's ClaudeCliLlm)."""
-    try:
-        envelope = json.loads(out)
-    except json.JSONDecodeError:
-        return out
-    if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
-        return envelope["result"]
-    return out
 
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)

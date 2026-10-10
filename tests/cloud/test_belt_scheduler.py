@@ -37,6 +37,9 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 pytest.importorskip("mongomock_motor")
 
+# Mandates here bind tmp repos outside the default allowlist roots.
+pytestmark = pytest.mark.usefixtures("any_repo_root")
+
 from pocketpaw_ee.cloud.mandates import patrols as patrols_mod  # noqa: E402
 from pocketpaw_ee.cloud.mandates import scheduler as scheduler_mod  # noqa: E402
 from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402

@@ -1,9 +1,10 @@
-<!-- docs/internal/2026-06-belt-mandates.md
-     Created: 2026-06-11 (feat/belt-mandates) — anatomy, endpoints, and
-     demo-bar concessions for the MANDATE primitive.
-     Updated: 2026-06-11 (UI contract sync) — response envelopes, dual-shape
-     feedback, pawprint item shape, `patrols` toggles, POST .../plan/resolve,
-     and the `belt_plan` realtime topic. -->
+<!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
+     craft factory built on it: anatomy, charter (cadence, checks, recipes),
+     patrols (incl. upstream), the headless develop station (strict and owner
+     Claude setups, the trust restore, ORIENT) and its security posture, the
+     architecture context the foreman and review get, landing and re-develop,
+     endpoints (incl. the digest), env vars, and the remaining demo-bar
+     concessions. -->
 
 # Belt Mandates — the standing JOB primitive
 
@@ -13,25 +14,35 @@ handing the station a task, the mandate **senses** its surface, **judges** what
 (if anything) is worth doing, routes that judgment through a **human gate**,
 and only then dispatches work.
 
-Validated in simulation (5/5 scenarios) before this implementation;
-productionized here at **demo bar** (manual shift trigger, stubbed advisory
-data, synthetic dispatch).
+The **craft factory** is mandates running unattended: a cadence scheduler fires
+shifts, patrols (including `upstream`, which watches pinned GitHub engines)
+feed the foreman, and the headless develop station turns each approved task into
+a checked, reviewed diff that still waits at the per-diff Instinct gate. A
+digest route reports the day. Nothing lands on its own: every plan and every
+diff passes a human gate, and nothing merges.
 
 ## Anatomy
 
 ```
-MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence; surface: repo)
+MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
+          recipes; surface: repo; upstream: pinned GitHub deps)
    │
    ├── PATROLS sense the surface (scoped by the
-   │   mandate's `patrols` toggles) ───────────► SIGHTINGS
+   │   mandate's `patrols` toggles) ───────────► SIGHTINGS (deduped)
    │     • deps      — manifest scan (pyproject/package.json) vs advisory table
+   │     • issues    — open issues on the repo's GitLab project (connector)
+   │     • upstream  — commits on each pinned GitHub dep since its pin
    │     • feedback  — human intake (POST .../feedback)
    │
-   └── SHIFT (manual trigger, one per cycle)
+   └── SHIFT (manual trigger, or the cadence scheduler: daily / weekly)
          1. sense   — run patrols, persist new sightings (deduped)
          2. judge   — the FOREMAN makes ONE LLM call over:
-                      charter (verbatim, BOUNDARIES first) + sighting digest
-                      since last shift + last 3 shifts' outcomes + soul recall
+                      charter (verbatim, BOUNDARIES first) + the OPEN
+                      sightings (the backlog: any sighting no landed task has
+                      resolved; capped at 30; new vs carried over; the tasks
+                      citing each, in-flight ones flagged) + last 3 shifts'
+                      outcomes with each task's run result and failure
+                      reason + soul recall
          3. validate — machine checks on ACTION fields ONLY
                       (budget cap, evidence refs, boundary phrases in
                       title/expected_outcome — the `why` narration is NEVER
@@ -45,7 +56,37 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence; surface: re
                       (mandate active, budget unchanged) and dispatches each
                       task as a Belt run; on REJECT the router closes the
                       chain and the shift records the reason
+         6. develop — with the headless dispatcher, the develop station
+                      produces each run's diff (see below); the diff waits
+                      at the per-diff Instinct gate
 ```
+
+### The charter: cadence, checks, recipes
+
+- **`cadence`** is `daily`, `weekly` or `manual`. The cadence scheduler
+  (`mandates/scheduler.py`, one sweeper loop, every
+  `POCKETPAW_MANDATE_SCHEDULER_INTERVAL` seconds, default 3600) fires a shift
+  for each ACTIVE mandate whose last shift is older than 1 day (`daily`) or 7
+  days (`weekly`); a mandate that never shifted is due at once, and `manual`
+  is never fired. It starts under `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`,
+  through the lease, like the other background loops.
+- **`checks`** are commands that must pass before a headless diff is attached,
+  e.g. `["uv run pytest -q", "uv run ruff check ."]`.
+- **`recipes`** map a name to a deterministic command, e.g.
+  `{"bump-photo": "node scripts/bump-craft-engine.mjs photo"}`. The foreman may
+  name a recipe on a plan task (the validator rejects an unknown name); the
+  station then runs that command instead of an LLM develop, and the checks
+  still gate it.
+
+Checks and recipes are argv strings split with `shlex` and never run through a
+shell. The create DTO rejects (422) one that does not split, or whose program
+(argv[0]) is not on `POCKETPAW_FACTORY_ALLOWED_COMMANDS`: by basename for a bare
+name or an absolute path, and never a relative path, which would resolve into
+the agent's worktree. The default list is `uv, uvx, bun, bunx, node, npm, pnpm,
+python, python3, pytest, cargo, make, go`: no shells, `env`, `sudo`, `curl`,
+`wget` or `git`. Create also rejects (422) a `surface.repo_id` that does not
+resolve inside the workspace's belt allowlist roots. Only `belt.manage`
+(admin) can write a charter.
 
 ### Decision chains (RFC 09)
 
@@ -67,27 +108,94 @@ best-effort and never break the approve response.
 `ee/pocketpaw_ee/cloud/mandates/foreman.py`. One judgment call per shift
 through a pluggable `PlanLlm` protocol, selected by `POCKETPAW_MANDATE_LLM`:
 
-- `claude` (default) — shells `claude -p <prompt> --output-format json`,
-  parses the envelope's `result`, tolerates fenced JSON.
-- `mock` — deterministic (one task per sighting, severity-ranked, budget-capped;
-  `no_action` on a quiet digest). Tests script it via `foreman.set_mock_plan`.
+- `claude` (default) — runs the **system** Claude Code CLI
+  (`claude -p --tools "" --output-format json`, prompt on stdin) in a fresh
+  empty temp dir with the scrubbed env, since the prompt carries third-party
+  sighting text (`foreman.run_claude_no_tools`, which the autopilot personas
+  share); parses the envelope's `result`, tolerates fenced JSON. The binary is `POCKETPAW_FACTORY_CLAUDE_BIN`,
+  else `claude` on PATH (never the SDK's bundled copy, which goes stale); the
+  model is `POCKETPAW_FACTORY_CLAUDE_MODEL`, else the CLI's default.
+- `mock` — deterministic (one task per open sighting that is not in flight,
+  severity-ranked, budget-capped; `no_action` when nothing is left to plan).
+  Tests script it via `foreman.set_mock_plan`.
 
 The prompt encodes every sim-validated rule: charter verbatim with BOUNDARIES
 prominent; at most `budget.max_tasks_per_shift` tasks; every task cites
 sighting ids and names an expected KPI direction; an empty plan with a reason
 is correct and respected; boundaries override KPI opportunities; never repeat
-a failed approach without stating what changed; strict JSON only.
+a failed approach without stating what changed; tasks in one shift are
+independent of each other (they develop from the same base and land
+separately, so dependent follow-up work waits for a later shift; plan
+validation cannot detect a dependency, so only the prompt says it); a task in
+flight is never planned again; a task extends an existing component and never
+plans a duplicate of one (rule 8, below); strict JSON only.
+
+The foreman also gets the bound repo's architecture: the shift trigger reads
+`<repo>/docs/c4/model.json` (`belt/orient.c4_lines`) and the prompt lists the
+repo's own containers and components, one line each with the first sentence of
+its description, capped at about 3k characters (external systems the model
+also names are left out). Rule 8 says a task extends a listed component
+wherever one covers the work, names it in the task's `why`, and never plans a
+new component, module or service that duplicates one listed. With no C4 model
+the block says so. The foreman stays in the strict setup in both modes (it
+reads third-party sighting text), so this injection is how it learns the
+architecture.
+
+#### What the foreman reads: the backlog and the run outcomes
+
+A sighting is **open** until a task that cites it (its `evidence_refs`)
+**lands**. A failed, rejected or still-running task leaves it open. The
+foreman gets every open sighting, not just the ones filed since the last
+shift, so work it skipped or that failed comes back on the next shift:
+
+- **Order and cap.** Highest severity first, then oldest; at most 30
+  (`_BACKLOG_CAP` in `mandates/service.py`). Past the cap the prompt says
+  `(showing 30 of N open sightings: ...)`.
+- **Per sighting.** `new` (filed since the last shift) or `carried over`, the
+  tasks that cited it (`shift N "<title>" <status>`), and `IN FLIGHT` when one
+  of them is still being worked.
+- **Task status.** From the task's run row: `landed`, `failed`, `rejected`,
+  `pending at gate` (diff waiting on a human), `approved` (landing),
+  `developing` (headless develop running), `queued` (waiting for the develop
+  station), or `develop failed` (headless develop failed; waits for a human
+  and is not in flight). A task with no run takes the plan Action's status:
+  `pending at plan gate` (in flight), `plan rejected`, `plan failed`,
+  `dispatched` (announce-only dispatcher). In flight = queued, developing,
+  approved, pending at gate, pending at plan gate.
+- **History.** Each of the last 3 shifts lists its planned tasks with that
+  status, the cited sighting ids and, on failure, the run's `error`. Prompt
+  rule 7 says an in-flight task is never planned again, and the existing rule
+  says a failed approach is not repeated without stating what changed.
+- **Gate teaching.** A rejection or edit at the plan gate is filed as a
+  feedback sighting with `evidence.source == "gate"`. Those with a `shift_no`
+  are history, not backlog: they show under that shift as
+  `at the gate: reject "<task>": <reason>` and never count as open. A rejected
+  task is dropped from the plan, so this note is the only record of it.
+
+**Resolution.** The run rows carry `plan_action_id` and `task_index` (1-based
+into the plan's tasks as dispatched). `_backlog` joins the mandate's runs to
+their plan tasks' `evidence_refs`; a sighting cited by a `landed` run is
+resolved. The shift trigger writes `resolved_by_run` / `resolved_at` on the
+sighting the first time it sees that, and resolved sightings stay out of the
+backlog for good. Computing at shift time was chosen over a hook on the belt
+executor's land path for two reasons: it also resolves runs that landed
+before the join existed, and the belt stays mandate-agnostic. Persisting is
+still needed, because the runs list reads only the workspace's newest 200
+actions, and an old landed run would otherwise drop out and reopen its
+sightings. Plans read per shift: those behind the mandate's runs, every plan
+still at the plan gate, and the last 3 shifts'.
 
 ## Endpoints (`/api/v1/belt/mandates`, RBAC mirrors the belt console)
 
 | Method | Path | Gate | What |
 |--------|------|------|------|
-| POST | `/belt/mandates` | `belt.manage` | Create (charter body + `patrols` senses toggles) → `{mandate}` |
+| POST | `/belt/mandates` | `belt.manage` | Create (charter body + `patrols` senses toggles + optional `upstream` watch list) → `{mandate}` |
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
-| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, recent shifts, sightings-by-patrol |
+| GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
+| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, recent shifts, sightings-by-patrol |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
-| POST | `/belt/mandates/{id}/shift` | `belt.manage` | Run a shift (manual trigger) → `{shift: {shift_id, no, state, plan_action_id, task_count, no_action_reason}}` |
+| POST | `/belt/mandates/{id}/shift` | `belt.manage` | Run a shift now → `{shift: {shift_id, no, state, plan_action_id, task_count, no_action_reason}}` |
 | POST | `/belt/mandates/{id}/plan/resolve` | `belt.manage` | The console's gate action: `{shift_no, decisions: [{index (0-based), decision: approve\|reject\|edit, edited_title?, reason?}]}` → `{shift}`. Every task needs exactly one decision. |
 | POST | `/belt/mandates/{id}/autopilot` | `belt.manage` | Start/stop Foresight-seeded simulated users feeding the feedback patrol: `{action: start\|stop, users?: int (default 3, max 10)}` → `{mandate}`. START persists `autopilot={on, users}`, runs ONE cycle immediately, spawns the background loop; STOP cancels it. |
 | GET | `/belt/mandates/{id}/pawprints` | `belt.read` | `{pawprints}` past-tense feed; item shape `{id, mandate_id, shift_no, kind, summary, evidence_refs, ts}` |
@@ -111,6 +219,41 @@ still closes exactly once.
 `belt_plan` event on the workspace bus (payload `{workspace_id, mandate_id,
 proposal}`), mirroring `belt_run_updated`'s audience fan-out; the mandates page
 subscribes to that topic.
+
+## The `upstream` patrol
+
+Watches pinned GitHub dependencies, such as the craft engines a Cargo.toml pins
+by `rev`. Configure it on create with a top-level `upstream` list and enable it
+by including `"upstream"` in `patrols`:
+
+```json
+{
+  "patrols": ["upstream", "feedback"],
+  "upstream": [
+    {"repo": "storytold/photocraft", "pin_file": "crates/craft-engines/photo/Cargo.toml"}
+  ]
+}
+```
+
+`repo` must be `owner/name`; `pin_file` is relative to the mandate's bound repo
+and may not leave it. Per watch, the patrol:
+
+1. Parses `pin_file` as TOML and takes the `rev` of the first dependency whose
+   `git` URL is `https://github.com/<repo>` (several crates from one repo, or a
+   `[patch]` block, share one rev). The rev must be a hex sha.
+2. Runs `gh api repos/<repo>/compare/<pin>...HEAD` (argv list, 60s timeout) and
+   reads `ahead_by` and the first page of commits only.
+3. Files one summary sighting, `<repo>: N commits since pin <short>`, with
+   severity 2 for 1-20 commits, 3 for 21-100 and 4 above 100 (none when the pin
+   is current), plus up to 5 area sightings (severity 2) that group commit
+   titles by conventional scope (`fix(render): …` → `render`) or prefix
+   (`photocraft-text: …`), each citing up to 8 short shas and titles.
+
+Sightings dedupe on `evidence.dedup_key` = repo + pin + upstream head, so a
+quiet day files nothing and a new upstream head files a fresh set. A broken
+watch (gh not installed, a 404, an unreadable pin file) files one severity-1
+sighting naming the problem instead of raising. The backend's `gh` must be
+authenticated (`gh auth status`) for private repos and for rate limits.
 
 ## Plan-feature gating posture
 
@@ -169,7 +312,9 @@ and a multi-tick loop, and its action vocabulary (`action/rationale/put`) is the
 wrong shape. Instead the persona transport reuses the **foreman's proven
 pluggable pattern** (`POCKETPAW_MANDATE_LLM=claude|mock` — the SAME env) behind
 the `UserSim` interface, and bridges foresight's `OceanDrift` value object for
-the persona seed. Mock mode is deterministic + seeded (a per-persona RNG seeded
+the persona seed. The `claude` persona call goes through the foreman's
+sandboxed `run_claude_no_tools` (no tools, empty temp cwd, scrubbed env, prompt
+on stdin), since its prompt carries the repo's README and commit titles. Mock mode is deterministic + seeded (a per-persona RNG seeded
 on the persona name) so tests get stable sightings. A later PR can swap the full
 scenario runner in behind `UserSim` with no caller change.
 
@@ -193,61 +338,358 @@ registered in `cloud/__init__.mount_cloud` under the same
 `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true` gate as the decisions reconciler / run
 sweeper, so pytest runs never spawn background loops that outlive the test.
 
-## Dispatcher reality — REAL station runs vs. announce-only (feat/belt-autopilot)
+## Dispatchers and the headless develop station
 
-`POCKETPAW_MANDATE_DISPATCHER=station|bus` selects the `TaskDispatcher`
-(default `station` when the belt plumbing imports, else a clean fall-back to
-`bus`):
+`POCKETPAW_MANDATE_DISPATCHER` selects what an approved plan task becomes:
 
-- **`station` (`StationTaskDispatcher`, the real one).** Each approved plan task
-  becomes a **real Belt run** in the console Runs tab.
-- **`bus` (`BusTaskDispatcher`, the prior default).** Announce-only —
-  `belt_run_updated(status="dispatched", stage="station")` under a synthetic run
-  id (`<plan_action_id>:t<n>`); no run record is created.
+- **`station`** (default) — `StationTaskDispatcher` files a real queued
+  `code_change` run (`station_pending=True`, no diff, repo pre-bound; the blob
+  carries the task's `title` and `expected_outcome`). The
+  console shows it as `queued / station`; a human drives the interactive
+  `/belt` station to a diff. The belt executor refuses a `station_pending` blob
+  if it is ever approved (`error_class="StationPending"`).
+- **`headless`** — `HeadlessTaskDispatcher` files the same queued run, then
+  produces the diff with no human in the loop and attaches it; the run becomes
+  a pending `code_change` at the per-diff gate. In production the develop runs
+  in a background task, one at a time, so plan approval returns at once. With
+  no develop loop wired it degrades to `station`.
+- **`bus`** — announce-only (`belt_run_updated(status="dispatched")` under a
+  synthetic run id); no run record.
 
-**HONESTY — is a genuinely headless station run reachable? NO.** The Belt
-*develop station* is an **interactive chat-agent loop**: the `/belt` surface
-preamble (`cloud/surface/handlers/belt.py`) drives a Claude chat session that
-ORIENTs, DEVELOPs, and produces a unified diff, which the
-`mcp__pocketpaw_belt__belt_propose_change` tool then files as a `code_change`
-Instinct Action. There is **no programmatic "task → diff" runner** to call from
-a dispatcher — the diff is the *output* of an LLM chat session, not a function.
+The develop loop for `headless` is `belt/develop_station.ClaudeCodeDevelop`,
+wired by a cloud startup hook when `POCKETPAW_MANDATE_DISPATCHER=headless`
+**and** `POCKETPAW_FACTORY_DEVELOP=claude` (and, in a process serving cloud
+tenants, `POCKETPAW_FACTORY_DEDICATED_HOST=1`; see Security posture; in the
+owner setup, an existing `POCKETPAW_FACTORY_WORKTREE_ROOT`). One run walks a
+fixed sequence:
 
-So `StationTaskDispatcher` does the **closest real thing**: it files a real
-`code_change` Instinct Action per task (the SAME row type the console Runs tab
-reads and the belt gate executes) carrying the task text, in a **queued** state
-(`station_pending=True`, no diff yet, repo pre-bound to the mandate's surface).
-The runs read model surfaces it as `status=queued / stage=station`; a human opens
-the `/belt` station for that queued run (one click) and drives it to a diff,
-which rides the existing belt gate as normal. This is a genuine run record, not a
-bus echo — the tests assert the persisted `code_change` Action + its
-`station_pending` queued state, not a bus message. Because a queued run carries
-no diff it is **not auto-applyable**: the belt executor refuses a
-`station_pending` blob loud (`error_class="StationPending"`) if it is ever
-(mistakenly) approved. When a real headless station runner lands, swap its call
-into `StationTaskDispatcher` behind the same `TaskDispatcher` protocol — no
-caller change.
+```
+PREPARE  screen the task text (InjectionScanner, HIGH refuses); refuse any
+         charter check whose program is not allowed; resolve the bound repo
+         inside POCKETPAW_BELT_REPO_ALLOWLIST (empty = refuse); git worktree
+         add --detach at origin/<base> (after a fetch) when an origin exists,
+         else the local <base>, in a temp dir (owner setup: under
+         POCKETPAW_FACTORY_WORKTREE_ROOT); snapshot the worktree's .git file
+ORIENT   LLM work only (recipes skip it): the repo's architecture brief from
+         loom (else its C4 list) for the develop and review prompts
+WORK     a recipe task runs the charter's recipe command; otherwise
+         `claude -p` develops (--permission-mode acceptEdits)
+CHECK    run every charter check
+FIX ≤2   a red check, or a failed review, sends the failure back to
+         `claude -p`, then CHECK again; at most 2 attempts (recipes get none)
+REVIEW   an independent read-only `claude -p` judges the diff against the task
+         and fails a duplicate of existing code:
+         strict {"verdict": "pass"|"fail", "notes": [...]}
+DONE     git add -A; git diff --cached --binary against the base sha; refused
+         if it touches .claude/, .mcp.json, .git or .gitmodules, or adds a
+         line matching a credential pattern
+CLEANUP  remove the temp dir, then git worktree prune, always
+```
+
+After every agent step the worktree's `.git` file must match its snapshot, or
+the run fails with `INTEGRITY: worktree .git changed`. A dead end raises with
+the failing step's name; the runner leaves the run queued and records the
+reason (secrets redacted) as `headless_error` on the blob, where the console
+and the digest show it. The station never commits to a branch, pushes or
+merges. Background develops are process-local: the dispatcher marks each run
+`headless_state: "queued"` until it attaches or fails, so a run a restart
+dropped stays visible as stuck in the digest (nothing re-drives it yet), and a
+background task that crashes is logged at ERROR. The develop request aims at
+the blob's `expected_outcome`; the attached run's `summary` becomes the
+station's report (checks, setup, orient source, review verdict and notes, fix
+attempts), and its `files_changed` is the station's count (else the diff's
+`+++` headers).
+
+### Claude setup: strict and owner
+
+`POCKETPAW_FACTORY_CLAUDE_SETUP` picks how the develop, fix and review calls
+run the Claude Code CLI.
+
+- **`strict`** (default; hosted deploys). Every call passes
+  `--setting-sources ""`, `--strict-mcp-config` and
+  `--settings '{"disableAllHooks":true}'`: no settings files, no MCP servers,
+  no hooks. The worktree sits in a system temp dir. The agent codes with no
+  CLAUDE.md beyond the repo's own and no skills.
+- **`owner`** (a local factory on the owner's own machine). The factory codes
+  with the owner's real Claude Code setup: workspace and repo CLAUDE.md files,
+  skills, hooks, settings and MCP config. The worktree is created under
+  `POCKETPAW_FACTORY_WORKTREE_ROOT`, which must be an existing directory
+  outside the bound repo; the station refuses to wire without it, and a run
+  refuses at PREPARE if it goes missing. Point it at a directory inside the
+  owner's workspace, e.g. `<workspace>/paw-worktrees/factory-runs`, so CLAUDE.md
+  discovery walks up from the worktree through the workspace. The three
+  isolation flags are dropped; the tool surface is unchanged (`--tools`, the
+  `./**`-scoped allow rules, WebFetch/WebSearch/Task denied). Never `--bare`.
+
+**Trust restore** (owner setup only). Owner mode loads whatever agent config
+sits in the worktree, and the agent can write to the worktree. So immediately
+before every owner-mode claude call (DEVELOP, each FIX, REVIEW) the station
+deletes every entry named `.claude`, `CLAUDE.md`, `CLAUDE.local.md`,
+`AGENTS.md` or `.mcp.json`, at any depth, whether tracked, untracked or
+gitignored (a symlink is unlinked, never followed), then runs
+`git checkout <base sha> -- <those paths tracked at base>`. The settings,
+hooks, MCP servers and instructions that load are always the committed ones.
+The `.git`-file integrity check and the DONE refusal of diffs touching
+`.claude/` or `.mcp.json` stay; for LLM runs the restore before REVIEW already
+reverts any plant, so the DONE rule is defense in depth (a recipe, which has
+no claude step, still meets it). A consequence: an owner-mode run cannot land
+an edit to a CLAUDE.md or AGENTS.md file; the restore reverts it.
+
+The foreman and the autopilot personas stay strict in both setups: they read
+untrusted third-party text, so they get the architecture by prompt injection
+instead (see The foreman). The scrubbed env applies in both setups.
+
+### ORIENT: the architecture as the source of truth
+
+Between PREPARE and WORK (LLM work only) the station orients the agent in the
+repo's existing architecture so it extends what exists instead of building a
+second copy (`belt/orient.py`):
+
+1. Resolve a loom world model: `<loom dir>/worldmodel-<repo dir name,
+   lowercased>.json`, where the loom dir is `POCKETPAW_FACTORY_LOOM_DIR`, else
+   the nearest ancestor of the bound repo that holds a `.loom/` directory (the
+   workspace's, for repos checked out in it).
+2. Run `loom orient -model <model> -json -- <task>` through the station's one
+   runner (argv list, scrubbed env, 60s timeout; the `--` keeps a task that
+   starts with `-` from being read as a flag). The binary is
+   `POCKETPAW_FACTORY_LOOM_BIN`, else `loom` on PATH, else `~/go/bin/loom`.
+3. Render the brief as an `EXISTING ARCHITECTURE` block, capped at about 4k
+   characters: the components the task touches, the code that already exists
+   for it (symbols grouped per file, or C4 components with their description
+   when the model has no symbols), the blast radius, entrypoints, and the
+   rules, ending with "reuse before you add; do not create a second copy of
+   anything listed".
+4. No world model, or loom failing: fall back to the repo's
+   `docs/c4/model.json` list. Neither: no block. ORIENT never fails a run; the
+   summary's `orient:` line names the source (`loom worldmodel-<x>.json`,
+   `no world model; C4 docs/c4/model.json`, `no world model`, with
+   `loom orient failed (exit N)` in front when loom was tried).
+
+The block goes into the develop prompt (after the task and charter, outside the
+`<untrusted>` fence: it is owner-authored repo data) and into the review
+prompt. REVIEW must fail a diff that adds a module, class, component or helper
+duplicating one that already exists, listed or found in the repo, and its notes
+must name what is duplicated and the path of the existing one; the fix loop
+then gets those notes like any other review failure.
+
+World models are generated files under the workspace's `.loom/` (gitignored):
+the `loom-sync.sh` Stop hook refreshes pocketpaw and soul-protocol. loom has
+symbol extractors for Python and Go only, so `worldmodel-paw-enterprise.json`
+and `worldmodel-ripple.json` are built from C4, kb and the shared soul alone
+(`loom build <repo> --scope <scope> --out <model>` from the workspace root);
+their briefs name components, not files, and nothing refreshes them yet.
+
+### Landing and re-develop
+
+When a human approves a run at the per-diff gate, `belt/executor.py` applies it
+in a throwaway worktree and commits it on `feat/belt-<id>`. A run that carries
+a `title` (every mandate task) commits as `feat: <title>` (kept as written when
+the title already has a Conventional-Commits type), trimmed to 72 chars; the
+body is the task's why followed by the station report. The PR title and body on
+the remote path are the same. A hand-proposed change (no title) keeps
+`feat(belt): <summary>`. A local-only landing keeps the branch the worktree
+created (linked worktrees share `refs/heads`); a run that does not land deletes
+its branch, so a retry of the same action can branch again.
+
+Two runs of one shift develop from the same base. Once the first lands and is
+merged, the second's patch may no longer apply. For a headless run (blob
+`headless`) the executor checks the patch with `git apply --check` before the
+`--3way` apply; when both fail it does not fail the run. It **re-develops** it:
+
+```
+approved ──apply conflict──▶ blob: diff cleared, station_pending, redevelop=1,
+                                   summary back to the expected outcome
+                             status: approved → pending  (event action_redevelop)
+                             belt_run_updated(queued, station)
+         ──after cleanup──▶  headless dispatcher develop(run_ref): the station
+                             regenerates the diff against the current base
+                             ──▶ pending at the per-diff gate (fresh approval)
+second apply conflict on the same run ──▶ failed: "base moved twice: …"
+no develop loop wired              ──▶ failed: "… not wired to re-develop it"
+```
+
+The re-develop is not a terminal, so the Decision-Graph chain stays open and
+the run keeps its `correlation_id`; it closes once, when the run lands or
+fails. The status flip uses the store's `_update_status` with
+`require_status=approved`, so a concurrent decision makes the flip a no-op
+(the run then fails with that reason). The reopened row keeps its first
+`approved_by` / `approved_at` until the next approval overwrites them.
+
+### Runs read model
+
+`GET /api/v1/belt/runs` and `GET /api/v1/belt/runs/{id}` rows carry, besides
+status, stage and the landing fields: `title` (the task title, `null` on a
+hand-driven run), `files_changed` (from the attached diff, replaced by the
+staged count on landing), `redevelop` (how many times the run went back to the
+develop station on a moved base: 0 or 1), `plan_action_id` / `task_index` (the
+mandate plan task it works, `null` on a hand-driven run), and `error`: why the
+run failed, which is the executor's reason (`Action.error`) or, for a develop
+that failed, the `headless_error`. `null` when nothing failed.
+
+## Security posture
+
+The develop station runs code the agent wrote, on the host, **before** a human
+sees the diff: the charter checks execute the worktree's own test files,
+Makefile and package scripts. The per-diff Instinct gate decides what lands; it
+does not contain what runs. So the station is for **a dedicated single-tenant
+host running trusted repos**, and it refuses to wire in a process serving cloud
+tenants unless the operator sets `POCKETPAW_FACTORY_DEDICATED_HOST=1`.
+
+What the station scrubs or blocks:
+
+- **Env.** Every subprocess (claude, checks, recipes, git) sees only `PATH`,
+  `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`, `SHELL`. The
+  Mongo URI, tokens, API keys and `POCKETPAW_*` secrets never reach it. The one
+  exception is the claude CLI itself, which also gets `ANTHROPIC_API_KEY` and
+  `CLAUDE_CONFIG_DIR` when set: a hosted factory serving other users must run
+  claude on an API key (subscription OAuth is for the owner's own use), and
+  checks never see either.
+- **Programs.** Check and recipe argv[0] must be on
+  `POCKETPAW_FACTORY_ALLOWED_COMMANDS`, enforced at create (422) and again
+  before exec. No shells, `env`, `sudo`, downloaders, `git`, or relative paths.
+- **Claude seats.** In the strict setup every call (foreman, develop, fix,
+  review) loads no settings files (`--setting-sources ""`), no MCP servers
+  (`--strict-mcp-config`) and no hooks (`disableAllHooks`), so a `.claude/` or
+  `.mcp.json` planted in the worktree never loads. In the owner setup the
+  develop, fix and review calls load the owner's config, and the trust restore
+  puts the worktree's agent config back to the base commit before each call;
+  the foreman and autopilot stay strict. Auth is the CLI's
+  keychain/OAuth login; never `--bare`, which forces API-key auth. Tools are
+  limited with `--tools` and the allow rules are scoped to the worktree
+  (`Read(./**)`, `Edit(./**)`, `Write(./**)`, plus `Bash(<check>:*)` on the
+  edit seats); WebFetch, WebSearch and Task are denied. The foreman and the
+  autopilot personas get no tools at all and an empty temp dir as their cwd.
+- **Git.** Station git calls run with `core.fsmonitor=false` and
+  `core.hooksPath=/dev/null`; the worktree `.git` file is snapshotted and
+  re-checked after every agent step.
+- **The diff.** Refused if it touches `.claude/`, `.mcp.json`, `.git` or
+  `.gitmodules`, or if an added line matches a `security.redact` credential
+  pattern (the error never echoes the value).
+- **Text.** Output tails, prompts' failure text and `headless_error` go through
+  `security.redact`. Task text, check output and the diff sit in `<untrusted>`
+  blocks the prompts tell the model to treat as data, and task text the
+  heuristic InjectionScanner rates HIGH refuses the run.
+- **Processes.** Each subprocess gets its own session; a timeout or a cancelled
+  run kills the whole process group.
+- **Repos.** Mandates bind only repos inside the workspace's allowlist roots;
+  the station also requires an explicit `POCKETPAW_BELT_REPO_ALLOWLIST`.
+
+Residual risks:
+
+- Checks and recipes still execute agent-editable repo code with the host
+  user's privileges: `HOME` (and with it `~/.ssh`, caches under `~/.cargo`,
+  `~/.cache/uv`, `~/.bun`), the network, and anything else that user can reach.
+  An allowed program like `python`, `npm` or `make` runs whatever the worktree
+  tells it to. There is no OS sandbox yet; the next step is a container or
+  `sandbox-exec` runner for checks and recipes.
+- Strict setup: the worktree's `CLAUDE.md` files can still load, so text
+  written in DEVELOP can steer FIX and REVIEW. That is not host exec, and the
+  human gate sees the hunk. The owner setup's trust restore closes this.
+- Owner setup: the owner's hooks, MCP servers and permission settings apply to
+  every develop, fix and review call. User-level Stop hooks may fire on each
+  call (session-log noise, rebuild triggers); whether workspace-level hooks
+  load for a nested worktree has not been checked. The tool surface stays
+  `--tools`-limited, but MCP tools the owner's settings allow are reachable.
+  Use it only on the owner's own machine.
+- The secret scan is pattern-based: it misses unknown formats and can refuse a
+  diff with fixture values such as `password="..."` or a URL with basic auth.
+- The allowlist roots are global settings plus per-workspace console roots; a
+  workspace can bind any repo under a shared root.
+- A process that daemonizes out of its session survives the group kill.
+
+## Digest — the morning report
+
+`GET /belt/mandates/digest?since=<iso>` (default: 24 hours ago; a naive value
+reads as UTC) returns:
+
+```
+{since, generated_at,
+ mandates: [{id, name, status, cadence,
+             sightings: {count, top: [{title, severity, patrol}]},   # top 5
+             backlog:   {count, top: [{title, severity, patrol,
+                                       in_flight}]},     # open, any age, top 5
+             shifts: [{no, state, outcome, task_count}],             # since
+             runs:   [{action_id, status, title, pr_url, branch,
+                       commit_sha, headless_error, headless_state,
+                       error}],                                      # since
+             gates:  {plans: [{shift_no, plan_action_id, task_count}],
+                      diffs: [<run row>]},                           # any age
+             stuck:  [<run row>]}],      # queued with headless_error or a
+                                         # leftover headless_state, any age
+ totals: {mandates, new_sightings, shifts, runs, landed, failed, gates_waiting,
+          open_backlog}}
+```
+
+Gates, stuck runs and the backlog are listed whatever their age: an in-gate
+plan, a diff at `proposed`, or a headless develop from last week that failed or
+never finished still needs a human, and an open sighting is still waiting. The
+backlog is the foreman's (same `_backlog` read, same order), so the report and
+the next shift agree on what is open; the digest never writes resolution. The digest is composed from the existing
+reads (`list_mandates`, `get_mandate`, `shift_wire`, `list_sightings`, the belt
+runs list), so it cannot disagree with the console; shifts come from the
+detail's 10 most recent.
+
+`scripts/factory_digest.py` prints it as markdown (a mandates table with a
+Backlog count, then *Needs you*, *Failures* with each run's `error` or
+`headless_error`, *Landed*, *Backlog* with the top open items, in flight
+marked). Stdlib only; the token comes from
+`--token-file` or `PAW_TOKEN` and is never printed:
+
+```bash
+uv run python scripts/factory_digest.py --base http://localhost:8893 \
+    --token-file ~/.paw/token [--since 2026-10-05T06:00:00+00:00]
+```
+
+## Environment
+
+| Variable | Default | What |
+|---|---|---|
+| `POCKETPAW_MANDATE_DISPATCHER` | `station` | `station` / `headless` / `bus` (above) |
+| `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`) |
+| `POCKETPAW_FACTORY_DEDICATED_HOST` | unset | `1` lets the station wire in a process serving cloud tenants; set it only on a dedicated single-tenant host |
+| `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
+| `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
+| `POCKETPAW_FACTORY_CLAUDE_BIN` | `claude` on PATH | The Claude Code CLI every factory LLM seat shells (foreman, develop, fix, review) |
+| `POCKETPAW_FACTORY_CLAUDE_MODEL` | the CLI's built-in default | Passed as `--model` when set (in the strict setup user settings don't load, so a model set there is ignored) |
+| `POCKETPAW_FACTORY_CLAUDE_SETUP` | `strict` | `owner` runs develop/fix/review with the owner's Claude Code setup (CLAUDE.md, skills, hooks, settings, MCP) plus the trust restore; anything else is `strict` |
+| `POCKETPAW_FACTORY_WORKTREE_ROOT` | unset | Owner setup only, and required there: existing dir outside the bound repo that station worktrees are created under, e.g. `<workspace>/paw-worktrees/factory-runs` |
+| `POCKETPAW_FACTORY_LOOM_DIR` | nearest ancestor `.loom/` of the bound repo | Where ORIENT looks for `worldmodel-<repo dir name>.json` |
+| `POCKETPAW_FACTORY_LOOM_BIN` | `loom` on PATH, else `~/go/bin/loom` | The loom CLI ORIENT runs |
+| `POCKETPAW_FACTORY_DEVELOP_TIMEOUT` | `900` | Seconds per `claude -p` call (develop, fix, review) |
+| `POCKETPAW_FACTORY_CHECK_TIMEOUT` | `600` | Seconds per check or recipe command |
+| `POCKETPAW_MANDATE_LLM` | `claude` | Foreman / autopilot transport: `claude` or `mock` |
+| `POCKETPAW_MANDATE_SCHEDULER_INTERVAL` | `3600` | Cadence sweep interval, seconds |
+| `POCKETPAW_MANDATE_AUTOPILOT_INTERVAL` | `300` | Autopilot cycle interval, seconds |
+| `POCKETPAW_CLOUD_SCHEDULER_ENABLED` | off | Starts the cadence scheduler and autopilot loops |
+
+A local unattended factory runs with `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`,
+`POCKETPAW_MANDATE_DISPATCHER=headless`, `POCKETPAW_FACTORY_DEVELOP=claude`,
+`POCKETPAW_FACTORY_DEDICATED_HOST=1` and a `POCKETPAW_BELT_REPO_ALLOWLIST`
+covering the bound repos, on a dedicated box where those repos are checked out
+and `claude` and `gh` are authenticated. Station subprocesses get the scrubbed
+env, so the station's own `git fetch` has no `SSH_AUTH_SOCK`, `GH_TOKEN`,
+`GIT_SSH_COMMAND` or `GIT_ASKPASS`: SSH keys must work without an agent (key
+files under `~/.ssh`, or the macOS keychain via `UseKeychain`), and `gh`/HTTPS
+auth must live in its config files, not in env vars.
+
+On the owner's own machine, add `POCKETPAW_FACTORY_CLAUDE_SETUP=owner` and
+`POCKETPAW_FACTORY_WORKTREE_ROOT=<workspace>/paw-worktrees/factory-runs` (create
+the directory first) so the factory codes with the workspace CLAUDE.md, the repo
+CLAUDE.md and the workspace skills. Keep the default `strict` on hosted deploys.
 
 ## Demo-bar concessions (each marked in code)
 
-1. **Manual shift trigger only.** `cadence: "weekly"` is stored but not
-   scheduled (autopilot seeds *sightings*, not shift triggers — wiring the
-   cadence scheduler is still a later PR).
-2. **Deps patrol advisory data is a hardcoded table** (`patrols.KNOWN_STALE`).
-   The manifest parsing + sighting plumbing are production-shaped; only the
+1. **Deps patrol advisory data is a hardcoded table** (`patrols.KNOWN_STALE`).
+   The manifest parsing and sighting plumbing are production-shaped; only the
    data source is stubbed.
-3. **Station dispatch QUEUES a real run; it does not auto-produce the diff.**
-   `StationTaskDispatcher` (default) files a real queued `code_change` run a
-   human starts in the console — see *Dispatcher reality* above for why a fully
-   headless diff-producing run is not reachable. `bus` mode keeps the prior
-   announce-only behaviour. The `TaskDispatcher` protocol is the swap point for a
-   future headless runner.
-4. **LLM transport is the `claude` CLI shell-out** behind the `PlanLlm` (foreman)
-   and `UserSim` (autopilot) protocols; an SDK transport can replace either
-   without touching the caller.
-5. **Pawprints read the store, not the journal.** The feed derives from
-   ShiftDoc states + the plan Action's status/blob — the same facts the chain
+2. **LLM transport is the `claude` CLI shell-out** behind the `PlanLlm`
+   (foreman) and `UserSim` (autopilot) protocols, and the develop station shells
+   the same CLI; another transport can replace either without touching callers.
+3. **Pawprints read the store, not the journal.** The feed derives from
+   ShiftDoc states and the plan Action's status/blob, the same facts the chain
    folded from; a journal-walking narrator can replace it later.
+4. **Headless develops are process-local** (see above): a restart mid-develop
+   leaves a queued run nothing re-drives; the digest lists it as stuck.
 
 ## Tests
 
@@ -256,7 +698,40 @@ caller change.
 real-instinct-router approve → dispatch and asserts EXACTLY ONE
 `decision.completed` (this repo's documented chain-doubling seam). Also pinned:
 stood_down, budget cap, boundary-check-ignores-`why`, patrol intake, deps
-patrol + dedup, tenant isolation, reject-closes-once.
+patrol + dedup, tenant isolation, reject-closes-once, and the digest route
+(sightings, backlog, shifts, runs, waiting gates, totals, the `since` window,
+tenant scope; it also renders `scripts/factory_digest.py` against the real wire
+shape). The backlog tests replay the live run's gap through the real station
+dispatcher: unaddressed and failed sightings carry into the next shift's
+prompt, a landed task resolves (and persists) its sightings, a failed task's
+reason shows in the history, in-flight runs and an in-gate plan are flagged,
+a gate rejection lands in history not backlog, and the 30 cap.
+
+`tests/cloud/test_belt_upstream_patrol.py` runs the upstream patrol against a
+tmp repo's Cargo.toml with a fake `gh`: summary and area sightings, the
+severity scale, every failure path as one severity-1 sighting, DTO validation,
+and dedup on the upstream head through `run_patrols`.
+`tests/cloud/test_belt_develop_station.py` drives the develop station against a
+real tmp git repo with real check commands and a faked `claude`, including the
+hardening: claude argv flags, the scrubbed env, refused programs, the
+multi-tenant wiring refusal, `.git` tampering, protected paths, secret diffs,
+redaction, untrusted fencing, the injection screen, process-group kills and
+logged background crashes. It also pins the owner setup (no isolation flags,
+the tool rules kept, the worktree under the root, strict unchanged, the
+worktree-root refusal) and the trust restore (planted `.claude/settings.json`,
+`CLAUDE.md`, nested and gitignored plants, a symlinked `.claude` and an
+untracked `.mcp.json` are all back to base before FIX and REVIEW), ORIENT (the
+loom argv, the block in the develop and review prompts, the review's duplicate
+rule, the C4 fallback, the "no world model" note, recipes skipping it) and the
+foreman's C4 list (`test_belt_mandates.py` checks the shift wires it in);
+`test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
+cadence scheduler; the headless file also lands a run (commit subject from the
+title) and drives the re-develop against a real tmp repo: two diffs from one
+base, the first landed and merged, the second re-developed once and back at the
+gate, a second conflict failing with "base moved twice", and no develop loop
+failing with its reason. `tests/mutations/belt_factory_runs.json` breaks each
+of these on purpose. CI runs these in the "Belt mandates and the craft factory
+develop station" step (`tests/cloud` is outside the default addopts).
 
 `tests/cloud/test_belt_autopilot.py` (feat/belt-autopilot) pins both new pieces:
 autopilot start persists state + runs an immediate cycle whose sightings carry

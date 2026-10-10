@@ -1,45 +1,55 @@
-# ee/pocketpaw_ee/cloud/mandates/foreman.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 3 — foreman).
+# ee/pocketpaw_ee/cloud/mandates/foreman.py — the FOREMAN, a mandate's LLM seat.
 #
-# The FOREMAN — the LLM judgment seat of a mandate. Once per SHIFT it reads the
-# charter, the sighting digest since the last shift, the last 3 shifts'
-# outcomes, and (when a soul is bound) the soul recall, then makes EXACTLY ONE
-# LLM call that returns a strict-JSON PlanProposal: a FEW tasks (≤ the
-# charter's budget) or an explicit empty plan with a reason.
+# Once per SHIFT it reads the charter, the OPEN sightings (the backlog: every
+# sighting no landed task has resolved, capped, each marked new or carried over
+# and annotated with the tasks that cite it), the last 3 shifts' outcomes (each
+# task's run result: landed, failed with its reason, rejected, or in flight; and
+# what a human said at the gate), the bound repo's C4 components, and (when a
+# soul is bound) the soul recall, then makes EXACTLY ONE LLM call that returns a
+# strict-JSON PlanProposal: a FEW tasks (≤ the charter's budget) or an explicit
+# empty plan with a reason. A task may name a charter ``recipe`` (a
+# deterministic command) instead of LLM develop work.
 #
-# Pluggable LLM layer (env ``POCKETPAW_MANDATE_LLM=claude|mock``):
-#   * ``claude`` (default) — shells the ``claude`` CLI:
-#       ``claude -p <prompt> --output-format json``
-#     and reads the ``result`` field off the JSON envelope. DEMO-BAR: the CLI
-#     shell-out is the LLM transport; a later PR can swap an SDK transport in
-#     behind the same ``PlanLlm`` protocol. The prompt is passed as ONE argv
-#     element — never interpolated into a shell string.
-#   * ``mock`` — deterministic: plans one task per sighting (highest severity
-#     first) up to the budget, or a no_action plan when the digest is empty.
-#     Tests can override the scripted response via ``set_mock_plan()``.
+# LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
+# runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
+# prompt on stdin, in an empty temp dir with the factory's scrubbed env — the
+# prompt carries third-party sighting text) and reads the envelope's
+# ``result``; ``mock`` is deterministic (one task per open sighting not already
+# in flight, highest severity first; ``set_mock_plan()`` overrides it in tests).
+# ``claude_cli_argv`` / ``claude_result_text`` are the ONE place the factory
+# resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
+# and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
+# set), and they pin every seat to no settings files, no MCP and no hooks (only
+# the develop station's owner setup opts out). ``run_claude_no_tools`` is the sandboxed
+# tool-less call the foreman and the autopilot personas share. Prompts ride
+# stdin, never argv or a shell.
 #
-# Validation discipline (proven in sim — encoded here, do not weaken):
-#   * machine validation runs on ACTION fields (title, expected_outcome) and
-#     structural fields (task count vs budget, evidence_refs non-empty) ONLY.
-#   * the ``why`` narration is NEVER scanned — a well-behaved foreman names
-#     forbidden things precisely when REFUSING them; scanning why would punish
-#     the refusal.
+# Validation discipline (sim-proven — do not weaken): machine validation runs on
+# ACTION fields (title, expected_outcome) and structural fields (task count vs
+# budget, evidence_refs non-empty, recipe names exist in the charter) ONLY. The
+# ``why`` narration is NEVER scanned — a well-behaved foreman names forbidden
+# things precisely when REFUSING them.
 #
-# Prompt requirements (all sim-validated — keep them in ``build_prompt``):
-#   charter verbatim with BOUNDARIES prominent; ≤ budget tasks; every task
-#   cites sighting ids + names an expected KPI direction; an EMPTY plan with a
-#   reason is correct when signals are quiet and KPIs healthy; boundaries
-#   override KPI opportunities; never repeat a failed approach without stating
-#   what changed; output strict JSON only.
+# Prompt rules (sim-validated — keep them in ``build_prompt``): charter verbatim
+# with BOUNDARIES first; ≤ budget tasks; every task cites sighting ids + names an
+# expected KPI direction; an EMPTY plan with a reason is correct when signals are
+# quiet or all in flight; boundaries override KPI opportunities; never repeat a
+# failed approach without saying what changed; tasks in one shift are independent
+# of each other (they develop from the same base and land separately; dependent
+# follow-up waits for a later shift, which validation cannot detect); an
+# in-flight task is never planned again; a task extends the repo's existing C4
+# components (listed in the prompt) and never plans a duplicate; strict JSON only.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -64,6 +74,9 @@ class PlannedTask(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     expected_outcome: str
     est_cost_hours: float = 1.0
+    # A charter recipe name: the develop station runs that command instead of
+    # an LLM develop (checks still gate it). ``None`` = ordinary develop work.
+    recipe: str | None = None
 
 
 class PlanProposal(BaseModel):
@@ -86,13 +99,22 @@ class ForemanContext:
 
     shift_no: int
     charter: dict[str, Any]
-    # Each digest entry: {id, patrol, severity, summary}
+    # The open backlog, capped: {id, patrol, severity, summary, new, in_flight,
+    # tasks: [{shift_no, title, status}]} — ``new`` = filed since the last
+    # shift; ``tasks`` are the planned tasks citing the sighting.
     sightings: list[dict[str, Any]] = field(default_factory=list)
-    # Last 3 shifts, oldest-first: {no, state, outcome} — outcome is the
-    # free-text result of the shift (what landed / failed / stood down).
+    # How many sightings were open before the cap (0 = same as ``sightings``).
+    open_total: int = 0
+    # Last 3 shifts, oldest-first: {no, state, outcome, tasks, gate} — outcome
+    # is the free-text result of the shift; tasks are its planned tasks with
+    # their run results ({title, evidence_refs, status, in_flight, error});
+    # gate is what a human said when rejecting or editing its plan.
     history: list[dict[str, Any]] = field(default_factory=list)
     # Soul recall lines (empty when no soul bound).
     soul_context: list[str] = field(default_factory=list)
+    # The bound repo's C4 containers/components, one line each, capped
+    # (``belt.orient.c4_lines``); empty when the repo has no C4 model.
+    architecture: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -109,42 +131,87 @@ class PlanLlm(Protocol):
     async def plan(self, *, prompt: str, context: ForemanContext) -> str: ...
 
 
-class ClaudeCliLlm:
-    """Default transport — shells the ``claude`` CLI (demo bar).
+# Every factory seat runs isolated from whatever config sits on disk: no
+# user/project/local settings (so a worktree's ``.claude/settings.json`` can't
+# grant permissions or add hooks), no MCP servers (``.mcp.json`` ignored), no
+# hooks. Auth is the CLI's keychain/OAuth login, which is not a setting source.
+# Never ``--bare``: it forces API-key auth.
+_ISOLATION_FLAGS = (
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+    "--settings",
+    '{"disableAllHooks":true}',
+)
 
-    ``claude -p <prompt> --output-format json`` prints a JSON envelope whose
-    ``result`` field carries the model's text. The prompt is a single argv
-    element (the CLI does its own auth); nothing is shell-interpolated."""
+
+def claude_cli_argv(*args: str, isolated: bool = True) -> list[str]:
+    """argv for one headless call to the SYSTEM Claude Code CLI.
+
+    Every factory LLM seat (foreman, develop, fix, review) builds its command
+    here: ``<bin> -p <args...> <isolation flags> --output-format json
+    [--model M]``. The binary is ``POCKETPAW_FACTORY_CLAUDE_BIN``, else
+    ``claude`` on PATH — never the SDK's bundled copy, which goes stale.
+    Resolved per call so env changes apply. ``isolated=False`` drops the
+    isolation flags: only the develop station's owner setup passes it, and only
+    after restoring the worktree's agent config to the base commit."""
+    binary = os.environ.get("POCKETPAW_FACTORY_CLAUDE_BIN") or shutil.which("claude") or "claude"
+    isolation = _ISOLATION_FLAGS if isolated else ()
+    argv = [binary, "-p", *args, *isolation, "--output-format", "json"]
+    model = (os.environ.get("POCKETPAW_FACTORY_CLAUDE_MODEL") or "").strip()
+    if model:
+        argv += ["--model", model]
+    return argv
+
+
+def claude_result_text(stdout: str) -> str:
+    """The model text from a ``--output-format json`` envelope (its ``result``
+    field); a bare-text stdout (older CLI) is returned as-is."""
+    try:
+        envelope = json.loads(stdout)
+    except json.JSONDecodeError:
+        return stdout
+    if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
+        return envelope["result"]
+    return stdout
+
+
+async def run_claude_no_tools(
+    prompt: str, *, timeout: float, run: Any = None, prefix: str = "belt-foreman-"
+) -> str:
+    """One tool-less ``claude -p`` call for a seat that reads third-party text.
+
+    No tools (``--tools ""``), a fresh empty temp dir as cwd (nothing on disk
+    to read even if a tool slipped through), the prompt on stdin, and the
+    develop station's runner, which passes only the scrubbed env. ``run`` is
+    injectable for tests. Returns the model text; a non-zero exit raises
+    ``RuntimeError`` with the output redacted."""
+    from pocketpaw.security.redact import redact_output
+    from pocketpaw_ee.cloud.belt.develop_station import run_subprocess
+
+    with tempfile.TemporaryDirectory(prefix=prefix) as cwd:
+        code, out, err = await (run or run_subprocess)(
+            claude_cli_argv("--tools", ""),
+            cwd=Path(cwd),
+            timeout=timeout,
+            stdin=prompt,
+        )
+    if code != 0:
+        detail = redact_output((err or out).strip())[:300]
+        raise RuntimeError(f"claude CLI failed (exit {code}): {detail}")
+    return claude_result_text(out)
+
+
+@dataclass
+class ClaudeCliLlm:
+    """Default transport — the foreman reads third-party text (sightings), so
+    it runs through ``run_claude_no_tools``. ``run`` is the develop station's
+    subprocess runner (injectable for tests)."""
+
+    run: Any = None
 
     async def plan(self, *, prompt: str, context: ForemanContext) -> str:
-        proc = await asyncio.create_subprocess_exec(
-            "claude",
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=_CLI_TIMEOUT)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeError(f"claude CLI timed out after {_CLI_TIMEOUT}s") from None
-        out = out_b.decode("utf-8", "replace")
-        if proc.returncode != 0:
-            err = err_b.decode("utf-8", "replace")
-            raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {err.strip()[:300]}")
-        # The envelope is JSON with a ``result`` field; tolerate a bare-text
-        # response (older CLI / plain output) by falling back to stdout.
-        try:
-            envelope = json.loads(out)
-        except json.JSONDecodeError:
-            return out
-        if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
-            return envelope["result"]
-        return out
+        return await run_claude_no_tools(prompt, timeout=_CLI_TIMEOUT, run=self.run)
 
 
 # Test hook — when set, MockLlm returns this verbatim (a dict is dumped to
@@ -162,8 +229,9 @@ def set_mock_plan(plan: dict[str, Any] | str | None) -> None:
 class MockLlm:
     """Deterministic foreman for tests + offline demos.
 
-    Default behavior: one task per sighting (highest severity first) capped at
-    the charter budget; an explicit no_action plan when the digest is empty.
+    Default behavior: one task per open sighting that is not already in flight
+    (highest severity first) capped at the charter budget; an explicit no_action
+    plan when nothing is left to plan.
     ``set_mock_plan`` overrides the response entirely."""
 
     async def plan(self, *, prompt: str, context: ForemanContext) -> str:
@@ -173,7 +241,11 @@ class MockLlm:
         budget = int((context.charter.get("budget") or {}).get("max_tasks_per_shift") or 3)
         kpis = context.charter.get("kpis") or []
         kpi_hint = f"{kpis[0]['name']} {kpis[0]['direction']}" if kpis else "surface health up"
-        ranked = sorted(context.sightings, key=lambda s: int(s.get("severity") or 0), reverse=True)
+        ranked = sorted(
+            (s for s in context.sightings if not s.get("in_flight")),
+            key=lambda s: int(s.get("severity") or 0),
+            reverse=True,
+        )
         if not ranked:
             return json.dumps(
                 {
@@ -217,6 +289,40 @@ def resolve_llm() -> PlanLlm:
 # ---------------------------------------------------------------------------
 
 
+def _sighting_line(s: dict[str, Any]) -> str:
+    """One open sighting: new or carried over, plus every task that cited it
+    (``IN FLIGHT`` when one is still being worked)."""
+    tags = ["new" if s.get("new") else "carried over"]
+    tasks = s.get("tasks") or []
+    if tasks:
+        tags.append(
+            "tasks: "
+            + "; ".join(f'shift {t["shift_no"]} "{t["title"]}" {t["status"]}' for t in tasks)
+        )
+    if s.get("in_flight"):
+        tags.append("IN FLIGHT")
+    return (
+        f"- id={s['id']} patrol={s.get('patrol')} severity={s.get('severity')} "
+        f"[{' | '.join(tags)}]: {s.get('summary')}"
+    )
+
+
+def _history_lines(h: dict[str, Any]) -> str:
+    """One past shift: its outcome, each planned task's run result (with the
+    failure reason), and any gate note."""
+    lines = [f"- shift {h.get('no')}: state={h.get('state')} outcome={h.get('outcome') or 'n/a'}"]
+    for t in h.get("tasks") or []:
+        refs = ", ".join(t.get("evidence_refs") or []) or "none"
+        line = f'    - task "{t.get("title")}" (cites {refs}): {t.get("status")}'
+        if t.get("error"):
+            line += f" — reason: {str(t['error'])[:300]}"
+        if t.get("in_flight"):
+            line += " (IN FLIGHT)"
+        lines.append(line)
+    lines += [f"    - at the gate: {note}" for note in h.get("gate") or []]
+    return "\n".join(lines)
+
+
 def build_prompt(context: ForemanContext) -> str:
     """Assemble the single judgment prompt. Charter rides VERBATIM (as JSON)
     with the BOUNDARIES block pulled out and stated first — boundaries override
@@ -227,21 +333,19 @@ def build_prompt(context: ForemanContext) -> str:
     budget = (charter.get("budget") or {}).get("max_tasks_per_shift", 3)
 
     sighting_lines = (
-        "\n".join(
-            f"- id={s['id']} patrol={s.get('patrol')} severity={s.get('severity')}: "
-            f"{s.get('summary')}"
-            for s in context.sightings
-        )
-        or "(none — the surface has been quiet since the last shift)"
+        "\n".join(_sighting_line(s) for s in context.sightings)
+        or "(none — every sighting is resolved by a landed task, or the surface is quiet)"
     )
-    history_lines = (
-        "\n".join(
-            f"- shift {h.get('no')}: state={h.get('state')} outcome={h.get('outcome') or 'n/a'}"
-            for h in context.history
+    if context.open_total > len(context.sightings):
+        sighting_lines += (
+            f"\n(showing {len(context.sightings)} of {context.open_total} open sightings: "
+            "highest severity first, then oldest)"
         )
-        or "(no prior shifts)"
-    )
+    history_lines = "\n".join(_history_lines(h) for h in context.history) or "(no prior shifts)"
     soul_lines = "\n".join(f"- {line}" for line in context.soul_context) or "(none)"
+    recipe_names = sorted((charter.get("recipes") or {}).keys())
+    recipe_lines = "\n".join(f"- {name}" for name in recipe_names) or "(none)"
+    architecture_lines = "\n".join(context.architecture) or "(no C4 model for this repo)"
 
     return f"""You are the FOREMAN of a standing engineering mandate. Once per shift you decide \
 what FEW tasks (if any) the crew should run. You are judged on judgment, not output volume.
@@ -256,8 +360,11 @@ forbidden thing in your reasoning — that is correct behavior.
 == CHARTER (verbatim) ==
 {json.dumps(charter, indent=2)}
 
-== SIGHTINGS since the last shift ==
+== OPEN SIGHTINGS (the backlog: no landed task has resolved these yet) ==
 {sighting_lines}
+A sighting stays open until a task citing it LANDS. "new" arrived since the last shift; \
+"carried over" is older and still unresolved. A task marked failed, develop failed or \
+rejected did not resolve its sighting.
 
 == LAST SHIFTS' OUTCOMES (oldest first) ==
 {history_lines}
@@ -267,21 +374,39 @@ Never repeat an approach that already failed above without explicitly stating in
 == SOUL CONTEXT (long-lived memory of this mandate) ==
 {soul_lines}
 
+== EXISTING ARCHITECTURE (the repo's C4 model — the source of truth for what exists) ==
+{architecture_lines}
+
+== RECIPES (named deterministic commands the crew can run) ==
+{recipe_lines}
+When a task is exactly what a recipe does, set its "recipe" to that name and the crew runs \
+the command instead of writing code. Use ONLY a name listed above; otherwise "recipe": null.
+
 == YOUR RULES ==
 1. Plan AT MOST {budget} task(s) this shift. Fewer is better. Pick only what moves a KPI.
 2. Every task MUST cite at least one sighting id in "evidence_refs" and MUST name an \
 expected KPI and its direction in "expected_outcome" (e.g. "open_cves down").
-3. An EMPTY plan is a correct, respected outcome: if the signals are quiet and the KPIs are \
-healthy, set "no_action": true with a short "no_action_reason" and an empty "tasks" list. \
-Do not invent work.
+3. An EMPTY plan is a correct, respected outcome: if the signals are quiet (or every open \
+sighting is already IN FLIGHT) and the KPIs are healthy, set "no_action": true with a short \
+"no_action_reason" and an empty "tasks" list. Do not invent work.
 4. Boundaries override KPI opportunities — a boundary-crossing task is never worth it.
 5. This is shift number {context.shift_no}; set "shift_no" to exactly {context.shift_no}.
+6. Tasks in one shift must be INDEPENDENT of each other. Each is developed from the same \
+starting code and lands on its own, so a task never sees another task's change from this \
+shift. Never plan a task that builds on, extends, or needs another task in this shift; \
+plan the first step now and leave the dependent follow-up for a later shift.
+7. A task that is IN FLIGHT (queued, developing, approved, or pending at a gate) is already \
+being worked. Never plan the same work again, even under a new title; its sighting stays \
+open until it lands, and that is expected.
+8. A task EXTENDS the existing components listed under EXISTING ARCHITECTURE wherever one \
+covers the work; name the component it extends in the task's "why". Never plan a new \
+component, module or service that duplicates one listed there.
 
 == OUTPUT (STRICT) ==
 Reply with STRICT JSON only — no prose, no markdown fences, no commentary:
 {{"shift_no": {context.shift_no}, "no_action": false, "no_action_reason": null, "tasks": \
 [{{"title": "...", "why": "...", "evidence_refs": ["<sighting id>"], "expected_outcome": \
-"<kpi> <up|down>; ...", "est_cost_hours": 1.0}}]}}"""
+"<kpi> <up|down>; ...", "est_cost_hours": 1.0, "recipe": null}}]}}"""
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +461,13 @@ def validate_plan(plan: PlanProposal, charter: dict[str, Any]) -> list[str]:
         for p in [*(charter.get("says_no") or []), *(charter.get("boundaries") or [])]
         if isinstance(p, str) and p.strip()
     ]
+    recipes = charter.get("recipes") or {}
     for i, task in enumerate(plan.tasks):
+        if task.recipe and task.recipe not in recipes:
+            violations.append(
+                f"task {i + 1} ({task.title[:40]!r}) names recipe {task.recipe!r}, "
+                "which the charter does not declare"
+            )
         if not task.evidence_refs:
             violations.append(f"task {i + 1} ({task.title[:40]!r}) cites no sighting ids")
         action_text = f"{task.title} {task.expected_outcome}".lower()
@@ -384,9 +515,12 @@ __all__ = [
     "PlanProposal",
     "PlannedTask",
     "build_prompt",
+    "claude_cli_argv",
+    "claude_result_text",
     "parse_plan",
     "plan_shift",
     "resolve_llm",
+    "run_claude_no_tools",
     "set_mock_plan",
     "validate_plan",
 ]

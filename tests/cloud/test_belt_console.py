@@ -501,9 +501,14 @@ async def test_list_runs_shape_and_status_derivation(store):
         "base_branch",
         "created_at",
         "correlation_id",
+        "files_changed",
+        "error",
     ):
         assert key in row
     assert row["correlation_id"] == "corr-123"
+    # A failed run says why; a run that hasn't failed carries no error.
+    assert by_task["t-failed"]["error"] == "apply conflict"
+    assert row["error"] is None
 
 
 async def test_list_runs_newest_first(store):

@@ -1,22 +1,4 @@
-# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
-# cloud.realtime re-export shim is deleted.
 """PocketPaw Enterprise Cloud — domain-driven architecture.
-
-Updated 2026-10-02 (feat/studio-templates): mounts the studio templates router
-(``/api/v1/studio-templates``) next to site templates; Discover lists public
-studio templates through its ``studio_template`` source.
-
-Updated 2026-10-01 (feat/discover-index): ``mount_cloud`` registers the Discover
-sources and the site-template -> listing sync after ``init_realtime``, and mounts
-the Discover router (``/api/v1/discover``) next to site templates.
-
-Updated 2026-10-02 (feat/discover-index, hardening): behind
-``POCKETPAW_CLOUD_SCHEDULER_ENABLED`` a leased loop reindexes Discover from site
-templates every 30 minutes.
-
-Updated 2026-10-02 (feat/discover-index, review): that loop's first pass runs at
-startup; with the scheduler flag off, one background Discover reindex pass runs
-at startup instead (fire-and-forget), so templates public before a deploy list.
 
 ``mount_cloud(app)`` is the cloud's single entry point (reached through the
 ``pocketpaw.routes`` entry-point). It mounts every domain router under
@@ -27,7 +9,9 @@ grants OSS ``full_access`` only to platform superusers), runs
 that need the singleton bus: upload -> KB indexing, pocket outcomes, audit
 mirroring into the SQLite store, the Discover index sync (site templates ->
 listings), tasks/meeting/lead/alert notifications, push fan-out, the Mission
-Control activity buffer, and built-in plus entry-point workspace jobs. Public
+Control activity buffer, and built-in plus entry-point workspace jobs. Studio
+templates (``/api/v1/studio-templates``) and Discover (``/api/v1/discover``,
+which also lists public studio templates) mount next to site templates. Public
 routes that must stay unauthenticated (the Dodo webhook, share-link GETs) are
 mounted separately from their authenticated siblings.
 
@@ -35,14 +19,20 @@ Background loops are collected as lifespan hooks and run by
 ``_install_cloud_lifespan`` inside the host's lifespan (after Mongo is open).
 The scheduled ones (decisions reconciler and action sweeper, cycle snapshots,
 member and Fabric ingest, the websandbox reaper, mandate autopilot and cadence
-scheduler) are gated on ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` and start
-through ``_core/lease.py``: with ``POCKETPAW_REALTIME_BUS=redis-streams`` (several
-web processes) only the lease holder runs each one, once per cluster, or once
-per host for the decisions loops that write a local SQLite file. The same knob
-turns on the cross-process socket broadcast and presence registry
-(``_core/realtime/``), whose start/stop hooks are registered here too.
-Hook names follow ``_start_<x>`` / ``_stop_<x>``: the lifespan derives the
-automations-status running mark from them.
+scheduler, the 30-minute Discover reindex) are gated on
+``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` and start through ``_core/lease.py``:
+with ``POCKETPAW_REALTIME_BUS=redis-streams`` (several web processes) only the
+lease holder runs each one, once per cluster, or once per host for the decisions
+loops that write a local SQLite file. The same knob turns on the cross-process
+socket broadcast and presence registry (``_core/realtime/``), whose start/stop
+hooks are registered here too. Hook names follow ``_start_<x>`` / ``_stop_<x>``:
+the lifespan derives the automations-status running mark from them. With the
+scheduler flag off, one fire-and-forget Discover reindex runs at startup
+instead. The craft factory's headless develop station is wired by a startup
+hook when ``POCKETPAW_MANDATE_DISPATCHER=headless`` and
+``POCKETPAW_FACTORY_DEVELOP=claude`` (``belt/develop_station.wire_from_env``,
+which refuses a multi-tenant process without
+``POCKETPAW_FACTORY_DEDICATED_HOST=1``).
 
 Domains: auth, workspace, chat, pockets, sessions, agents, kb, knowledge,
 mission_control, cycles, tasks.
@@ -1477,6 +1467,17 @@ def mount_cloud(app: FastAPI) -> None:
         @on_shutdown
         async def _stop_mandate_scheduler() -> None:
             await _mandate_scheduler.stop()
+
+    # Craft factory: the headless develop station (system claude CLI). Off unless
+    # POCKETPAW_MANDATE_DISPATCHER=headless and POCKETPAW_FACTORY_DEVELOP=claude;
+    # NOT behind the scheduler gate, because plan approvals dispatch on any host.
+    # A startup hook, not a mount-time call: it must run after Mongo is open so
+    # its multi-tenant refusal (is_multi_tenant_cloud) sees the real signal.
+    from pocketpaw_ee.cloud.belt.develop_station import wire_from_env as _wire_factory_develop
+
+    @on_startup
+    async def _start_factory_develop() -> None:
+        _wire_factory_develop()
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe

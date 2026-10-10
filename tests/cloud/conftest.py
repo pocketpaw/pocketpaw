@@ -240,6 +240,21 @@ async def mongo_db() -> Any:
     yield db
 
 
+@pytest.fixture
+def any_repo_root(monkeypatch):
+    """Let mandate create accept any repo path. Mandate tests bind tmp dirs,
+    which sit outside the default belt allowlist roots; tests of the
+    containment rule itself don't use this."""
+    from pathlib import Path
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    async def _roots(workspace_id: str) -> list[Path]:
+        return [Path("/")]
+
+    monkeypatch.setattr(belt_service, "resolve_allowlist_roots", _roots)
+
+
 def _fixed_user() -> str:
     return "u1"
 
