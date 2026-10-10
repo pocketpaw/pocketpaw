@@ -1,0 +1,26 @@
+{
+  "created_at": "2026-10-10T09:30:00+00:00",
+  "data": {
+    "created_at": "2026-10-10T09:30:00+00:00",
+    "email": "priya@example.com",
+    "form_type": "contact",
+    "id": "sample",
+    "message": "Hi! Could you quote 20 embroidered jackets for our team?",
+    "name": "Priya Sharma",
+    "phone": "+1 555 010 1234",
+    "properties": {
+      "budget": "$2,000",
+      "company": "Northwind Studio",
+      "team_size": "20"
+    },
+    "site_name": "Bright Smile",
+    "source": {
+      "form_type": "contact",
+      "kind": "form",
+      "origin": "https://northwind.example.com/contact"
+    },
+    "status": "new"
+  },
+  "id": "evt_1",
+  "type": "lead.captured"
+}

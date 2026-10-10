@@ -1,0 +1,69 @@
+{
+  "cardsV2": [
+    {
+      "card": {
+        "header": {
+          "subtitle": "Bright Smile",
+          "title": "New booking"
+        },
+        "sections": [
+          {
+            "widgets": [
+              {
+                "decoratedText": {
+                  "text": "Priya Sharma",
+                  "topLabel": "Name",
+                  "wrapText": true
+                }
+              },
+              {
+                "decoratedText": {
+                  "text": "priya@example.com",
+                  "topLabel": "Email",
+                  "wrapText": true
+                }
+              },
+              {
+                "decoratedText": {
+                  "text": "+1 555 010 1234",
+                  "topLabel": "Phone",
+                  "wrapText": true
+                }
+              },
+              {
+                "decoratedText": {
+                  "text": "Hi! Could you quote 20 embroidered jackets for our team?",
+                  "topLabel": "Message",
+                  "wrapText": true
+                }
+              },
+              {
+                "decoratedText": {
+                  "text": "northwind.example.com/contact",
+                  "topLabel": "Page",
+                  "wrapText": true
+                }
+              },
+              {
+                "buttonList": {
+                  "buttons": [
+                    {
+                      "onClick": {
+                        "openLink": {
+                          "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+                        }
+                      },
+                      "text": "Open in Paw"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "cardId": "booking-created"
+    }
+  ],
+  "text": "New booking · Bright Smile"
+}

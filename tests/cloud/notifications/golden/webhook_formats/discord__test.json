@@ -1,0 +1,18 @@
+{
+  "allowed_mentions": {
+    "parse": []
+  },
+  "content": "Test notification · Bright Smile",
+  "embeds": [
+    {
+      "color": 7041664,
+      "fields": [],
+      "footer": {
+        "text": "Bright Smile · Paw"
+      },
+      "timestamp": "2026-10-10T09:30:00+00:00",
+      "title": "Test notification",
+      "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+    }
+  ]
+}

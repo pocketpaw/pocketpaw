@@ -1,0 +1,12 @@
+{
+  "created_at": "2026-10-10T09:30:00+00:00",
+  "data": {
+    "customer_ref": "visitor-42",
+    "email": "priya@example.com",
+    "name": "Priya Sharma",
+    "question": "Can I talk to someone about a bulk order before Friday?",
+    "site_name": "Bright Smile"
+  },
+  "id": "evt_1",
+  "type": "concierge.handoff"
+}
