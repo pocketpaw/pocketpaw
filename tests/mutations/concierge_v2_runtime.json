@@ -108,7 +108,7 @@
   {
     "label": "a fence still open at the end is flushed instead of dropped",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        held = self._buf if self._mode == \"text\" else \"\"",
+    "find": "        held = self._buf if self._mode == \"text\" and not (self._reopen or self._spec) else \"\"",
     "replace": "        held = self._buf",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_unclosed_fence_at_the_end_is_dropped",
@@ -118,8 +118,8 @@
   {
     "label": "trailing backticks are not held — a marker split across chunks slips through",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                    held = len(text) - len(text.rstrip(\"`\"))",
-    "replace": "                    held = 0",
+    "find": "                        len(text) - len(text.rstrip(\"`\")), _bare_spec_held(text, self._line_start)",
+    "replace": "                        0, _bare_spec_held(text, self._line_start)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_code_fence_becomes_the_fixed_line",
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_streams_the_fixed_line_instead_of_code"

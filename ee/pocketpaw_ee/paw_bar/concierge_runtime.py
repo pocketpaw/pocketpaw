@@ -2181,6 +2181,25 @@ class CardEvent:
 
 
 _CARD_HEAD = f"{_TICKS}{_CARD_LANG}\n"
+# A line of visible text that starts like a card spec: stripped up to its fence.
+_BARE_SPEC = '{"ui":'
+
+
+def _bare_spec_at(text: str, line_start: bool) -> int:
+    """Where a line of ``text`` starts with ``_BARE_SPEC``, or -1. ``line_start``:
+    the text before ``text`` ended a line."""
+    if line_start and text.startswith(_BARE_SPEC):
+        return 0
+    i = text.find("\n" + _BARE_SPEC)
+    return -1 if i == -1 else i + 1
+
+
+def _bare_spec_held(text: str, line_start: bool) -> int:
+    """How many trailing chars of ``text`` start a line the way ``_BARE_SPEC``
+    does, so the next chunk decides whether they are a spec."""
+    s = text.rfind("\n") + 1
+    tail = text[s:] if s or line_start else ""
+    return len(tail) if tail and _BARE_SPEC.startswith(tail) else 0
 
 
 def _card_object(fence: str | None) -> dict[str, Any] | None:
@@ -2221,6 +2240,14 @@ class FenceFilter:
     the fixed line too. Text outside fences streams straight through; only up to
     two trailing backticks are held, in case the next chunk completes a marker.
 
+    A model sometimes abandons a card and writes it again. Inside a card body
+    still in an open JSON string (no card can end there), ```pawbar-card is that
+    restart, not a close: the partial card is dropped and a new one opens (its
+    ``card.rejected`` reason is "restarted" when streaming). A card fence that
+    did close and is followed straight by ``pawbar-card`` reopens as a new card.
+    Last line of defence: a text line starting with ``{"ui":`` is never shown;
+    it and everything up to the next ``` are dropped.
+
     With ``stream_cards`` (the "ripple" profile) a card fence is not held: its
     opening line yields ``CardEvent("card.start")``, its body ``card.delta``s as it
     arrives (the same backtick hold), and its close ``card.final`` with the
@@ -2257,6 +2284,10 @@ class FenceFilter:
         self._size = 0  # their total length
         self._partial: Any = None  # its card_spec.PartialScan
         self._swallow = False  # a rejected card's fence is still open
+        self._in_str = self._esc = False  # the open card's body is mid JSON string
+        self._reopen = False  # a card fence just closed; "pawbar-card" next reopens
+        self._spec = False  # dropping a bare {"ui": line up to the next fence
+        self._line_start = True  # the text emitted so far ends a line
 
         # The site's card_spec.CardProfile; every card is checked against it.
         self._profile = profile or PAWBAR_PROFILE
@@ -2300,14 +2331,38 @@ class FenceFilter:
             text, self._buf = self._buf + data, ""
             data = ""
             if self._mode == "text":
+                if self._reopen:
+                    head = text[: len(_CARD_LANG)]
+                    if len(head) < len(_CARD_LANG) and _CARD_LANG.startswith(head):
+                        self._buf = text
+                        break
+                    self._reopen = False
+                    if head == _CARD_LANG:
+                        self._mode, data = "tag", text
+                        continue
+                if self._spec:
+                    j = text.find(_TICKS)
+                    if j == -1:
+                        self._buf = text[-2:]
+                        break
+                    self._spec, data = False, text[j + len(_TICKS) :]
+                    continue
                 i = text.find(_TICKS)
+                k = _bare_spec_at(text if i == -1 else text[:i], self._line_start)
+                if k != -1:
+                    out.append(self._shown(text[:k]))
+                    self._spec, data = True, text[k:]
+                    continue
                 if i == -1:
-                    held = len(text) - len(text.rstrip("`"))
-                    out.append(text[: len(text) - held])
+                    held = max(
+                        len(text) - len(text.rstrip("`")), _bare_spec_held(text, self._line_start)
+                    )
+                    out.append(self._shown(text[: len(text) - held]))
                     self._buf = text[len(text) - held :]
                     break
-                out.append(text[:i])
+                out.append(self._shown(text[:i]))
                 self._mode, data = "tag", text[i + len(_TICKS) :]
+                self._line_start = False
             elif self._mode == "tag":
                 newline, ticks = text.find("\n", start), text.find(_TICKS, start)
                 if ticks != -1 and (newline == -1 or ticks < newline):
@@ -2325,6 +2380,7 @@ class FenceFilter:
                         self._cards += 1
                         self._card_id = f"c{self._cards}"
                         self._parts, self._size = [], 0
+                        self._in_str = self._esc = False
                         self._partial = PartialScan(self._profile)
                         out.append(CardEvent("card.start", {"card_id": self._card_id}))
             elif self._card_id or self._swallow:
@@ -2340,10 +2396,27 @@ class FenceFilter:
                 if j == -1:
                     self._buf = text[end:] if self._card_id else text[-2:]
                     break
+                after = text[j + len(_TICKS) :]
+                if self._card_id and self._in_str:
+                    # Mid JSON string no card can end: ```pawbar-card here is the
+                    # model starting the card over. Hold until that is known.
+                    head = after[: len(_CARD_LANG)]
+                    if _CARD_LANG.startswith(head):
+                        if len(head) < len(_CARD_LANG):
+                            self._buf = text[j:]
+                            break
+                        out.append(
+                            CardEvent(
+                                "card.rejected", {"card_id": self._card_id, "reason": "restarted"}
+                            )
+                        )
+                        self._card_id, self._parts = "", []
+                        self._mode, data = "tag", after
+                        continue
                 if self._card_id:
                     out.append((self._tag, "".join(self._parts), self._card_id))
                 self._card_id, self._swallow, self._parts = "", False, []
-                self._mode, data = "text", text[j + len(_TICKS) :]
+                self._mode, data, self._reopen = "text", after, True
             else:
                 j = text.find(_TICKS, start)
                 if j == -1:
@@ -2351,7 +2424,26 @@ class FenceFilter:
                     break
                 out.append((self._tag, text[:j]))
                 self._mode, data = "text", text[j + len(_TICKS) :]
+                self._reopen = self._tag == _CARD_LANG
         return out
+
+    def _shown(self, piece: str) -> str:
+        """``piece`` as visible text, noting whether it ends a line."""
+        if piece:
+            self._line_start = piece.endswith("\n")
+        return piece
+
+    def _track_strings(self, piece: str) -> None:
+        """Follows whether the open card's body is inside a JSON string."""
+        in_str, esc = self._in_str, self._esc
+        for ch in piece:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = in_str
+            elif ch == '"':
+                in_str = not in_str
+        self._in_str, self._esc = in_str, esc
 
     def _card_piece(self, piece: str) -> CardEvent:
         """The streaming card's next body piece as a ``card.delta``, or
@@ -2366,10 +2458,13 @@ class FenceFilter:
             self._card_id, self._swallow, self._parts = "", True, []
             return CardEvent("card.rejected", {"card_id": card_id, "reason": "invalid"})
         self._parts.append(piece)
+        self._track_strings(piece)
         return CardEvent("card.delta", {"card_id": card_id, "text": piece})
 
     def close(self) -> list[Any]:
-        held = self._buf if self._mode == "text" else ""
+        # A held "pawbar-ca..." after a card, or a bare spec line, is never shown.
+        held = self._buf if self._mode == "text" and not (self._reopen or self._spec) else ""
+        self._reopen = self._spec = False
         out: list[Any] = [held] if held else []
         if self._card_id:
             out.append(
