@@ -725,8 +725,8 @@
   {
     "label": "FL-1 ask: on_focus may ask",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
-    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\", \"on_focus\"})",
+    "find": "\"on_select\", \"on_choose\", \"actions\"}",
+    "replace": "\"on_select\", \"on_choose\", \"actions\", \"on_focus\"}",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
     ]
@@ -734,8 +734,8 @@
   {
     "label": "FL-1 ask streamed: on_focus may ask",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
-    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\", \"on_focus\"})",
+    "find": "\"on_select\", \"on_choose\", \"actions\"}",
+    "replace": "\"on_select\", \"on_choose\", \"actions\", \"on_focus\"}",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
     ]
@@ -743,8 +743,8 @@
   {
     "label": "FL-1 ask: a composite's actions list may not ask",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
-    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\"})",
+    "find": "\"on_select\", \"on_choose\", \"actions\"}",
+    "replace": "\"on_select\", \"on_choose\"}",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
     ]
@@ -752,8 +752,8 @@
   {
     "label": "FL-1 ask streamed: a composite's actions list may not ask",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
-    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\"})",
+    "find": "\"on_select\", \"on_choose\", \"actions\"}",
+    "replace": "\"on_select\", \"on_choose\"}",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_ask_on_a_visitor_action_ends_final"
     ]
@@ -761,8 +761,8 @@
   {
     "label": "FL-1 ask: on_select may not ask",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
-    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"actions\"})",
+    "find": "{\"on_click\", \"on_submit\", \"on_select\", \"on_choose\", \"actions\"}",
+    "replace": "{\"on_click\", \"on_submit\", \"on_choose\", \"actions\"}",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
     ]
@@ -770,8 +770,17 @@
   {
     "label": "FL-1 ask: on_submit may not ask",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_submit\", \"on_select\", \"actions\"})",
-    "replace": "ASK_HANDLERS: frozenset[str] = frozenset({\"on_click\", \"on_select\", \"actions\"})",
+    "find": "{\"on_click\", \"on_submit\", \"on_select\", \"on_choose\", \"actions\"}",
+    "replace": "{\"on_click\", \"on_select\", \"on_choose\", \"actions\"}",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
+    ]
+  },
+  {
+    "label": "FL-1 ask: a comparison Choose click may not ask",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "{\"on_click\", \"on_submit\", \"on_select\", \"on_choose\", \"actions\"}",
+    "replace": "{\"on_click\", \"on_submit\", \"on_select\", \"actions\"}",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
     ]

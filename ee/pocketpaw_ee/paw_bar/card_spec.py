@@ -407,10 +407,13 @@ FLOW_SUBMIT = "flow.submit"
 ASK_EVENT = "ask"
 ASK_MAX = 500
 # The handler keys an ``ask`` (or ``flow.submit``) may fire from: a click, a
-# submit, a pick, and a composite's button list (comparison ``items[].actions``,
-# entity-detail ``actions[].actions``). Focus, input, change, timers and the
-# wizard's ``*Actions`` fire without one, so they may not.
-ASK_HANDLERS: frozenset[str] = frozenset({"on_click", "on_submit", "on_select", "actions"})
+# submit, a pick, a comparison's Choose click (``on_choose``), and a composite's
+# button list (comparison ``items[].actions``, entity-detail ``actions[].actions``).
+# Focus, input, change, timers and the wizard's ``*Actions`` fire without one, so
+# they may not. Keep in parity with ripple's ``routes/pawbar/card-policy.ts``.
+ASK_HANDLERS: frozenset[str] = frozenset(
+    {"on_click", "on_submit", "on_select", "on_choose", "actions"}
+)
 # CSS that loads something or runs script. Run on ``_css_text``.
 _CSS_LOADS: tuple[str, ...] = (
     "url(",

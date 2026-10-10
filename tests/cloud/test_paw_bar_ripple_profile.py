@@ -2285,6 +2285,122 @@ def test_fl1_the_step_and_node_bounds_are_inclusive():
     )
 
 
+# A live comparison card (the "Shop headphones" chip) whose Choose button asks.
+# ``on_choose`` fires only on a Choose click, so it is an explicit visitor action.
+_HEADPHONES = {
+    "ui": {
+        "type": "comparison-layout",
+        "props": {
+            "title": "Wireless headphones under $200",
+            "subtitle": "Sample products, not real listings",
+            "verdict": {
+                "text": "Commute Earbuds give the most features for $129.",
+                "status": "good",
+            },
+            "currency": "USD",
+            "items": [
+                {
+                    "id": "h1",
+                    "name": "ANC Over-Ear",
+                    "subtitle": "Over-ear",
+                    "price": 179,
+                    "rating": 4.6,
+                    "anc": True,
+                    "battery": 30,
+                    "weight": 265,
+                    "multipoint": True,
+                },  # noqa: E501
+                {
+                    "id": "h2",
+                    "name": "Sport In-Ear",
+                    "subtitle": "In-ear",
+                    "price": 89,
+                    "rating": 4.1,
+                    "anc": False,
+                    "battery": 8,
+                    "weight": 6,
+                    "multipoint": False,
+                },  # noqa: E501
+                {
+                    "id": "h3",
+                    "name": "Studio Over-Ear",
+                    "subtitle": "Over-ear",
+                    "price": 139,
+                    "rating": 4.4,
+                    "anc": False,
+                    "battery": 45,
+                    "weight": 240,
+                    "multipoint": True,
+                },  # noqa: E501
+                {
+                    "id": "h4",
+                    "name": "Commute Earbuds",
+                    "subtitle": "True wireless",
+                    "price": 129,
+                    "rating": 4.3,
+                    "anc": True,
+                    "battery": 6,
+                    "weight": 5,
+                    "multipoint": True,
+                },  # noqa: E501
+            ],
+            "features": [
+                {"key": "anc", "label": "Noise cancelling", "kind": "boolean", "better": "higher"},
+                {
+                    "key": "battery",
+                    "label": "Battery",
+                    "kind": "number",
+                    "better": "higher",
+                    "unit": "h",
+                },  # noqa: E501
+                {
+                    "key": "weight",
+                    "label": "Weight",
+                    "kind": "number",
+                    "better": "low",
+                    "unit": "g",
+                },  # noqa: E501
+                {"key": "multipoint", "label": "Multipoint", "kind": "boolean", "better": "higher"},  # noqa: E501
+            ],
+            "winner": {"id": "h4", "reason": "Noise cancelling and multipoint for $129."},
+            "picks": [
+                {"id": "h3", "label": "Longest battery"},
+                {"id": "h2", "label": "Lowest price"},
+            ],  # noqa: E501
+            "defaultView": "card",
+            "showDiffToggle": True,
+            "primaryLabel": "Choose",
+            "on_choose": {
+                "action": "emit",
+                "target": "ask",
+                "value": {"text": "Tell me more about the Commute Earbuds"},
+            },
+        },
+    },
+    "state": {},
+}
+
+
+def _choose_asks(value) -> dict:
+    on_choose = {"action": "emit", "target": "ask", "value": value}
+    return {
+        "ui": {**_HEADPHONES["ui"], "props": {**_HEADPHONES["ui"]["props"], "on_choose": on_choose}}
+    }  # noqa: E501
+
+
+def test_fl1_a_comparison_choose_still_holds_its_ask_to_plain_text():
+    assert _ripple(_choose_asks({"text": "Tell me more"})) is not None
+    assert _ripple(_choose_asks({"text": "hi", "to": "x"})) is None
+    assert _ripple(_choose_asks("Tell me more")) is None
+    assert _ripple(_choose_asks({"text": "x" * 501})) is None
+
+
+def test_fl1_a_non_click_handler_on_a_comparison_may_not_ask():
+    props = {**_HEADPHONES["ui"]["props"]}
+    props["on_change"] = props.pop("on_choose")
+    assert _ripple({"ui": {**_HEADPHONES["ui"], "props": props}}) is None
+
+
 _IN_FLOW = {"action": "flow", "steps": [{"action": "set", "target": "a", "value": 1}, _ASKED]}
 _IN_BRANCH = {"action": "branch", "if": "1", "then": [_ASKED]}
 # Explicit visitor actions: a click, a submit, a pick, a composite's button list.
@@ -2327,6 +2443,7 @@ _ASK_PASSES = [
         "order-status actions[].actions with a branch",
     ),
     (_flow(2, s2={"ui": _ask()}), "an ask in a flow step"),
+    (_HEADPHONES, "comparison on_choose (the live headphones card)"),
 ]
 
 
