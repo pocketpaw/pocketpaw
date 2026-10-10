@@ -74,7 +74,7 @@
   {
     "label": "ILL-9: handlers on an illustration pass",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "    if \"bind\" in node or any(map(_is_handler_key, [*node, *props])):",
+    "find": "    if \"bind\" in node or [k for k in handlers if k != \"on_select\" or k in props]:",
     "replace": "    if False:",
     "tests": [
       "tests/cloud/test_paw_bar_illustration.py"

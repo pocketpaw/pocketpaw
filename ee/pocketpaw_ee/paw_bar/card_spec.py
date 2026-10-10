@@ -7,15 +7,18 @@
 # events limited to add_to_cart / checkout, and the ``send_to_team`` lead form only
 # with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes ripple-manifest.json
 # minus deferred widgets and page chrome (its ``illustration`` SVG is held to
-# illustration_svg's policy, ``bill-split`` to plain numbers, a button's choice-card
-# ``icon`` and ``description`` to a key and short plain text), and is ``strict``:
+# illustration_svg's policy and its annotations to ids the widget keeps, ``bill-split``
+# to plain numbers, the games, habit-tracker and focus-timer to literal data (``_PLAY_CHECKS``), a
+# button's choice-card ``icon`` and ``description`` to a key and short plain text), and
+# is ``strict``:
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
 # actions, URLs, CSS, expressions, flow cards and ``ask`` to the rules its docstrings
 # name. Any error the walk did not foresee is a logged refusal, never an exception.
 # A ripple body that is not JSON only for missing closers, or one surplus closer
 # before its state, is repaired once and then checked like any body; a ripple
 # node's declared props written flat on the node are moved under ``props``
-# (``_lift_flat_props``) before the checks, and the moved card is the one sent.
+# (``_lift_flat_props``, which also renames a widget alias, ``RIPPLE_ALIASES``) before the checks,
+# and the moved card is the one sent.
 #
 # Hydration runs after the checks and is not checked again: product data comes only
 # from the site catalog, and on the ripple profile ``_fill_store`` fills menu-order,
@@ -43,7 +46,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
-from pocketpaw_ee.paw_bar.illustration_svg import svg_violation
+from pocketpaw_ee.paw_bar.illustration_svg import svg_ids, svg_violation
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +171,57 @@ ILLUSTRATION_HEIGHT = (80, 640)
 # Ripple's ``bill-split``: plain finite numbers, 2 to 12 people, no handlers.
 BILL_SPLIT = "bill-split"
 BILL_SPLIT_PEOPLE = (2, 12)
+# Ripple's games and habit tracker: literal data only, plain text, the caps below,
+# ``bind`` value, and no handler but a game's optional ``on_complete``. Listed with
+# typed props, their title included (the data widgets' shared props are not theirs)
+# and on_complete left out (each description names it).
+RIPPLE_PLAY_WIDGETS: dict[str, frozenset[str] | None] = {
+    "memory-match": frozenset({"title", "pairs", "columns", "time_limit_s"}),
+    "word-guess": frozenset({"title", "answer", "hint", "max_guesses", "allow_any_word"}),
+    "quiz": frozenset({"title", "topic", "questions", "seconds_per_question", "shuffle_choices"}),
+    "habit-tracker": frozenset({"title", "habits", "week_start", "weeks", "seed"}),
+    "focus-timer": frozenset(
+        {"title", "focus_min", "short_break_min", "long_break_min", "rounds_before_long"}
+        | {"goal_rounds", "task", "auto_start_next"}
+    ),
+    "board-game": frozenset({"game", "title", "player", "first", "difficulty", "best_of"}),
+}
+MEMORY_PAIRS = (2, 12)
+WORD_GUESS_ANSWER = re.compile(r"[A-Za-z]{4,7}")
+WORD_GUESS_ROWS = (1, 10)
+QUIZ_QUESTIONS = (1, 12)
+QUIZ_CHOICES = (2, 5)
+QUIZ_SECONDS = (3, 600)
+HABITS = (1, 8)
+HABIT_TARGET = (1, 7)
+HABIT_WEEKS = (1, 4)
+HABIT_SEED_DAY = 27  # the most days back a seed tick may sit (4 weeks)
+FOCUS_MIN = (1, 120)
+BREAK_MIN = (1, 60)  # both breaks
+FOCUS_ROUNDS = (1, 12)
+FOCUS_GOAL = (1, 24)
+FOCUS_TASK_MAX = 120
+# A board-game's two marks per game: the visitor's ``player`` is one of them.
+BOARD_MARKS: dict[str, tuple[str, str]] = {
+    "tic-tac-toe": ("X", "O"),
+    "connect-four": ("red", "yellow"),
+}
+BOARD_BEST_OF = (1, 3, 5)
+# Names ripple's registry also draws as one of these widgets, which its chat allowlist
+# refuses: a node by one is checked and sent under the widget's own name, a board-game
+# alias filling a missing ``game``.
+RIPPLE_ALIASES: dict[str, str] = {
+    "trivia": "quiz",
+    "trivia-quiz": "quiz",
+    "pomodoro": "focus-timer",
+    "pomodoro-timer": "focus-timer",
+    "tic-tac-toe": "board-game",
+    "connect-four": "board-game",
+}
+# An illustration's ``annotations``: numbered notes, each pinned on an svg id or a point.
+ANNOTATIONS_MAX = 8
+ANNOTATION_LABEL_MAX = 40
+ANNOTATION_NOTE_MAX = 280
 # A button's choice-card ``icon`` (a flow option tile): a key shaped like ripple's icon
 # names. An unknown key passes (the widget ignores it); markup or a URL does not.
 # Its ``description`` hint: plain text, at most this long.
@@ -191,6 +245,7 @@ RIPPLE_PROFILE = CardProfile(
     # listed with their props. Only a data widget's line gives the props' types,
     # so a composite whose shapes nothing shows (analytics-dashboard) stays brief.
     detailed=frozenset(RIPPLE_DATA_WIDGETS)
+    | frozenset(RIPPLE_PLAY_WIDGETS)
     | frozenset(
         {
             "flex",
@@ -223,7 +278,7 @@ RIPPLE_PROFILE = CardProfile(
             "callout",
         }
     ),
-    typed=RIPPLE_DATA_WIDGETS,
+    typed={**RIPPLE_DATA_WIDGETS, **RIPPLE_PLAY_WIDGETS},
     strict=True,
     host_events=(*HOST_EVENTS, "book"),
 )
@@ -711,6 +766,8 @@ def _strict_walk(
                 _check_illustration(value, props)
             if kind == BILL_SPLIT:
                 _check_bill_split(value, props)
+            if kind in _PLAY_CHECKS:
+                _PLAY_CHECKS[kind](value, props if isinstance(props, dict) else {})
             if kind == "button":
                 _check_choice(props)
             if kind == "form":
@@ -794,12 +851,15 @@ def _strict_walk(
 
 
 def _check_illustration(node: dict[str, Any], props: Any) -> None:
-    """An ``illustration`` node: no handler or bind, ``svg`` and non-blank ``title`` text,
-    ``caption`` text if given (null is absent), ``max_height`` a number in ``ILLUSTRATION_HEIGHT``,
-    and the svg passes ``svg_violation``. The svg must be literal: a ``{...}``
-    there would be resolved by the engine into markup this check never saw."""
+    """An ``illustration`` node: no bind and no handler but a node-level ``on_select``
+    (which may ask), ``svg`` and non-blank ``title`` text, ``caption`` text if given (null
+    is absent), ``max_height`` a number in ``ILLUSTRATION_HEIGHT``, the svg passes
+    ``svg_violation`` and ``annotations``, when given, ``_check_annotations``. The svg
+    must be literal: a ``{...}`` there would be resolved by the engine into markup this
+    check never saw."""
     props = props or {}
-    if "bind" in node or any(map(_is_handler_key, [*node, *props])):
+    handlers = [k for k in [*node, *props] if _is_handler_key(k)]
+    if "bind" in node or [k for k in handlers if k != "on_select" or k in props]:
         raise _Reject("a handler or bind on an illustration")
     svg, title = props.get("svg"), props.get("title")
     if not isinstance(svg, str) or not isinstance(title, str):
@@ -817,6 +877,51 @@ def _check_illustration(node: dict[str, Any], props: Any) -> None:
         raise _Reject("an expression in an illustration's svg")
     if reason := svg_violation(svg):
         raise _Reject(f"an illustration with {reason}")
+    if props.get("annotations") is not None:
+        _check_annotations(props["annotations"], svg)
+
+
+def _js_len(text: str) -> int:
+    """``text.length`` in the browser (UTF-16 units), which ripple's caps count."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _check_annotations(notes: Any, svg: str) -> None:
+    """An illustration's ``annotations``, as ripple's checkIllustrationAnnotations: at
+    most ``ANNOTATIONS_MAX`` objects, each a unique non-blank ``id``, a non-blank
+    ``label`` and a ``note`` of plain text within their caps, and exactly one of
+    ``target`` (an id the widget's rebuild keeps, ``svg_ids``) or ``at`` (two finite
+    numbers). A key set to null counts as given, as it does there."""
+    if not isinstance(notes, list) or len(notes) > ANNOTATIONS_MAX:
+        raise _Reject(f"annotations that are not a list of at most {ANNOTATIONS_MAX}")
+    seen: set[str] = set()
+    kept: frozenset[str] | None = None
+    for note in notes:
+        if not isinstance(note, dict):
+            raise _Reject("an annotation that is not an object")
+        nid, label, text = note.get("id"), note.get("label"), note.get("note")
+        if not isinstance(nid, str) or not nid.strip() or nid in seen:
+            raise _Reject("an annotation without a unique id")
+        seen.add(nid)
+        if not _plain(label) or not label.strip() or _js_len(label) > ANNOTATION_LABEL_MAX:
+            raise _Reject(
+                f"an annotation label that is not plain text of 1 to {ANNOTATION_LABEL_MAX}"
+            )
+        if not _plain(text) or _js_len(text) > ANNOTATION_NOTE_MAX:
+            raise _Reject(
+                f"an annotation note that is not plain text of at most {ANNOTATION_NOTE_MAX}"
+            )
+        if ("target" in note) == ("at" in note):
+            raise _Reject("an annotation without exactly one of target or at")
+        if "at" in note:
+            at = note["at"]
+            if not (isinstance(at, list) and len(at) == 2 and all(map(_is_number, at))):
+                raise _Reject("an annotation at that is not two finite numbers")
+            continue
+        if kept is None:
+            kept = svg_ids(svg)
+        if note["target"] not in kept:
+            raise _Reject("an annotation target that is not an id in the svg")
 
 
 def _is_number(value: Any) -> bool:
@@ -870,6 +975,194 @@ def _check_choice(props: Any) -> None:
         isinstance(hint, str) and "{" not in hint and len(hint) <= CHOICE_DESCRIPTION_MAX
     ):
         raise _Reject(f"a button description over {CHOICE_DESCRIPTION_MAX} or not plain text")
+
+
+def _plain(value: Any) -> bool:
+    """Literal text: a string with no ``{...}`` for the engine to resolve."""
+    return isinstance(value, str) and "{" not in value
+
+
+def _is_int(value: Any, bounds: tuple[int, int]) -> bool:
+    return _is_number(value) and value == int(value) and bounds[0] <= value <= bounds[1]
+
+
+def _play_basics(
+    kind: str,
+    node: dict[str, Any],
+    props: dict[str, Any],
+    handler: str | None,
+    texts: Iterable[str],
+) -> None:
+    """What every play widget shares: no handler but ``handler``, and each of ``texts``
+    plain text when given (null is absent)."""
+    if any(_is_handler_key(k) and k != handler for k in [*node, *props]):
+        raise _Reject(f"a handler on a {kind} it does not take")
+    for key in texts:
+        if props.get(key) is not None and not _plain(props[key]):
+            raise _Reject(f"a {kind} {key} that is not plain text")
+
+
+def _optional(props: dict[str, Any], key: str, ok: Any) -> bool:
+    return props.get(key) is None or ok(props[key])
+
+
+def _check_memory_match(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """``pairs`` a list of ``MEMORY_PAIRS`` rows, each ``a`` and ``b`` plain text (a word,
+    an emoji or ``icon:<key>``) and an ``id`` if given; ``columns`` and
+    ``time_limit_s`` finite numbers; ``on_complete`` its one handler."""
+    _play_basics("memory-match", node, props, "on_complete", ("title",))
+    pairs = props.get("pairs")
+    low, high = MEMORY_PAIRS
+    if not isinstance(pairs, list) or not low <= len(pairs) <= high:
+        raise _Reject(f"a memory-match without {low} to {high} pairs")
+    for pair in pairs:
+        if not isinstance(pair, dict) or not (_plain(pair.get("a")) and _plain(pair.get("b"))):
+            raise _Reject("a memory-match pair without plain a and b text")
+        if not _optional(pair, "id", _plain):
+            raise _Reject("a memory-match pair id that is not plain text")
+    if not (
+        _optional(props, "columns", _is_number) and _optional(props, "time_limit_s", _is_number)
+    ):
+        raise _Reject("a memory-match columns or time_limit_s that is not a finite number")
+
+
+def _check_word_guess(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """``answer`` 4 to 7 letters A to Z, ``max_guesses`` a whole number in
+    ``WORD_GUESS_ROWS``, ``allow_any_word`` a boolean; ``on_complete`` its one handler."""
+    _play_basics("word-guess", node, props, "on_complete", ("title", "hint"))
+    answer = props.get("answer")
+    if not isinstance(answer, str) or not WORD_GUESS_ANSWER.fullmatch(answer):
+        raise _Reject("a word-guess answer that is not 4 to 7 letters A to Z")
+    if not _optional(props, "max_guesses", lambda v: _is_int(v, WORD_GUESS_ROWS)):
+        raise _Reject("a word-guess max_guesses outside 1..10")
+    if not _optional(props, "allow_any_word", lambda v: isinstance(v, bool)):
+        raise _Reject("a word-guess allow_any_word that is not a boolean")
+
+
+def _check_quiz(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """``questions`` a list of ``QUIZ_QUESTIONS`` rows, each a plain ``prompt``,
+    ``QUIZ_CHOICES`` plain ``choices``, ``answer`` a whole-number index into them, and a
+    plain ``why`` and ``id`` and an ``image`` string if given (the walk holds the image
+    to the URL policy); ``seconds_per_question`` in ``QUIZ_SECONDS``,
+    ``shuffle_choices`` a boolean; ``on_complete`` its one handler."""
+    _play_basics("quiz", node, props, "on_complete", ("title", "topic"))
+    questions = props.get("questions")
+    low, high = QUIZ_QUESTIONS
+    if not isinstance(questions, list) or not low <= len(questions) <= high:
+        raise _Reject(f"a quiz without {low} to {high} questions")
+    for q in questions:
+        if not isinstance(q, dict) or not _plain(q.get("prompt")):
+            raise _Reject("a quiz question without a plain prompt")
+        choices = q.get("choices")
+        low, high = QUIZ_CHOICES
+        if not (isinstance(choices, list) and low <= len(choices) <= high):
+            raise _Reject(f"a quiz question without {low} to {high} choices")
+        if not all(map(_plain, choices)):
+            raise _Reject("a quiz choice that is not plain text")
+        if not _is_int(q.get("answer"), (0, len(choices) - 1)):
+            raise _Reject("a quiz answer that is not the index of a choice")
+        if not (_optional(q, "why", _plain) and _optional(q, "id", _plain)):
+            raise _Reject("a quiz why or id that is not plain text")
+        if not _optional(q, "image", lambda v: isinstance(v, str)):
+            raise _Reject("a quiz image that is not text")
+    if not _optional(
+        props,
+        "seconds_per_question",
+        lambda v: _is_number(v) and QUIZ_SECONDS[0] <= v <= QUIZ_SECONDS[1],
+    ):
+        raise _Reject("a quiz seconds_per_question outside 3..600")
+    if not _optional(props, "shuffle_choices", lambda v: isinstance(v, bool)):
+        raise _Reject("a quiz shuffle_choices that is not a boolean")
+
+
+def _check_habit_tracker(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """No handler; ``habits`` a list of ``HABITS`` rows, each a unique plain ``id``, a
+    plain ``name``, an ``icon`` key if given and ``target_per_week`` a whole number in
+    ``HABIT_TARGET``; ``week_start`` mon or sun, ``weeks`` in ``HABIT_WEEKS``, and
+    ``seed`` an object from habit ids to lists of whole days back, 0 to
+    ``HABIT_SEED_DAY``."""
+    _play_basics("habit-tracker", node, props, None, ("title",))
+    habits = props.get("habits")
+    low, high = HABITS
+    if not isinstance(habits, list) or not low <= len(habits) <= high:
+        raise _Reject(f"a habit-tracker without {low} to {high} habits")
+    ids: set[str] = set()
+    for habit in habits:
+        if not isinstance(habit, dict) or not _plain(habit.get("name")):
+            raise _Reject("a habit without a plain name")
+        hid = habit.get("id")
+        if not _plain(hid) or not hid or hid in ids:
+            raise _Reject("a habit without a unique plain id")
+        ids.add(hid)
+        if not _optional(habit, "icon", lambda v: isinstance(v, str) and CHOICE_ICON.fullmatch(v)):
+            raise _Reject("a habit icon that is not an icon key")
+        if not _is_int(habit.get("target_per_week"), HABIT_TARGET):
+            raise _Reject("a habit target_per_week outside 1..7")
+    if not _optional(props, "week_start", lambda v: v in ("mon", "sun")):
+        raise _Reject("a habit-tracker week_start that is not mon or sun")
+    if not _optional(props, "weeks", lambda v: _is_int(v, HABIT_WEEKS)):
+        raise _Reject("a habit-tracker weeks outside 1..4")
+    seed = props.get("seed")
+    if seed is not None and not (
+        isinstance(seed, dict)
+        and seed.keys() <= ids
+        and all(
+            isinstance(days, list)
+            and len(days) <= HABIT_SEED_DAY + 1
+            and all(_is_int(d, (0, HABIT_SEED_DAY)) for d in days)
+            for days in seed.values()
+        )
+    ):
+        raise _Reject("a habit-tracker seed that is not habit ids to days 0..27")
+
+
+def _check_focus_timer(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """No handler; the minutes and rounds whole numbers in ``FOCUS_MIN``, ``BREAK_MIN``,
+    ``FOCUS_ROUNDS`` and ``FOCUS_GOAL`` (ripple rounds and clamps them, so a fraction or
+    an outlier would not draw as written), ``task`` plain text of at most
+    ``FOCUS_TASK_MAX`` and ``auto_start_next`` a boolean."""
+    _play_basics("focus-timer", node, props, None, ("title", "task"))
+    for key, bounds in (
+        ("focus_min", FOCUS_MIN),
+        ("short_break_min", BREAK_MIN),
+        ("long_break_min", BREAK_MIN),
+        ("rounds_before_long", FOCUS_ROUNDS),
+        ("goal_rounds", FOCUS_GOAL),
+    ):
+        if props.get(key) is not None and not _is_int(props[key], bounds):
+            raise _Reject(f"a focus-timer {key} outside {bounds[0]}..{bounds[1]}")
+    if not _optional(props, "task", lambda v: _js_len(v) <= FOCUS_TASK_MAX):
+        raise _Reject(f"a focus-timer task over {FOCUS_TASK_MAX}")
+    if not _optional(props, "auto_start_next", lambda v: isinstance(v, bool)):
+        raise _Reject("a focus-timer auto_start_next that is not a boolean")
+
+
+def _check_board_game(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """``game`` a key of ``BOARD_MARKS`` (an alias fills it), ``player`` one of that
+    game's marks, ``first`` player or computer, ``difficulty`` easy, medium or hard and
+    ``best_of`` one of ``BOARD_BEST_OF``; ``on_complete`` its one handler."""
+    _play_basics("board-game", node, props, "on_complete", ("title",))
+    game = props.get("game")
+    if not isinstance(game, str) or game not in BOARD_MARKS:
+        raise _Reject("a board-game without game tic-tac-toe or connect-four")
+    if not _optional(props, "player", lambda v: v in BOARD_MARKS[game]):
+        raise _Reject(f"a board-game player that is not {' or '.join(BOARD_MARKS[game])}")
+    if not _optional(props, "first", lambda v: v in ("player", "computer")):
+        raise _Reject("a board-game first that is not player or computer")
+    if not _optional(props, "difficulty", lambda v: v in ("easy", "medium", "hard")):
+        raise _Reject("a board-game difficulty that is not easy, medium or hard")
+    if not _optional(props, "best_of", lambda v: _is_number(v) and v in BOARD_BEST_OF):
+        raise _Reject("a board-game best_of that is not 1, 3 or 5")
+
+
+_PLAY_CHECKS = {
+    "memory-match": _check_memory_match,
+    "word-guess": _check_word_guess,
+    "quiz": _check_quiz,
+    "habit-tracker": _check_habit_tracker,
+    "focus-timer": _check_focus_timer,
+    "board-game": _check_board_game,
+}
 
 
 def _check_resolved_prop(kind: str, key: str, value: Any, node_props: frozenset[str]) -> None:
@@ -1473,11 +1766,20 @@ _LIFTABLE: dict[str, frozenset[str]] = {
 }
 
 
+def _is_alias_node(value: dict[str, Any], canonical: str) -> bool:
+    """A node written under an alias of ``canonical``, not a data row that happens to
+    share the name: every key a node key, a handler or one of the widget's props, and
+    one of them more than ``type``."""
+    known = _NODE_KEYS | _LIFTABLE.get(canonical, frozenset())
+    return len(value) > 1 and all(k in known or _is_handler_key(k) for k in value)
+
+
 def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
     """``ui`` with, in place, every widget node's top-level keys that its manifest
     entry declares as props (``_LIFTABLE``) moved into ``props`` (made when
     missing; a key ``props`` already holds stays put, the flat one beside it),
-    at any depth: children, node slots inside props, flow steps. A node's own
+    at any depth: children, node slots inside props, flow steps, a node written under
+    an alias (``RIPPLE_ALIASES``, ``_is_alias_node``) renamed first. A node's own
     ``props`` object is never read as a node. Strict profile only; the caller
     checks the result in full. Returns it and how many keys moved."""
     if not profile.strict:
@@ -1493,6 +1795,12 @@ def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
             continue
         kind = value.get("type")
         props = value.get("props", {})
+        canonical = RIPPLE_ALIASES.get(kind) if isinstance(kind, str) else None
+        if canonical and isinstance(props, dict) and _is_alias_node(value, canonical):
+            value["type"] = canonical
+            if canonical == "board-game" and "game" not in {*value, *props}:
+                value["props"] = props = {**props, "game": kind}
+            kind = canonical
         if isinstance(kind, str) and isinstance(props, dict):
             liftable = _LIFTABLE.get(kind, frozenset())
             flat = [k for k in value if k in liftable and k not in props]
@@ -1801,6 +2109,13 @@ def card_verdict(
 
 # A typed line's type for one prop, at most this long.
 _TYPE_CHARS = 90
+# A union of 12 or more string literals (habit-tracker's icons) prints as a string: the
+# widget's description names the ones that matter, and the row's later fields stay in view.
+_LONG_ENUM = re.compile(r'(?:"[^"]*"\s*\|\s*){11,}"[^"]*"')
+# A typed line's description recapping a row shape its field list already gives
+# (``cards[{front, back}]``) keeps just the name; a recap with a note in parentheses
+# (``answer (index)``) adds something, so it stays.
+_SHAPE_RECAP = re.compile(r"\b(\w+)\[\{[^{}()\[\]]*\}\]")
 # Props every data widget shares; the ripple rules teach them once, so a typed
 # line leaves them out.
 _COMMON_PROPS: frozenset[str] = frozenset({"title", "subtitle", "verdict", "currency"})
@@ -1812,7 +2127,7 @@ def _short_type(text: str) -> str:
     """A prop's TypeScript type as a typed line prints it: ``Array<X>`` as
     ``[X]``, no quotes, ``string`` left out (empty for a plain string), tight
     separators, capped at ``_TYPE_CHARS``."""
-    text = " ".join(text.split()).replace('"', "")
+    text = " ".join(_LONG_ENUM.sub("string", text).split()).replace('"', "")
     while (shorter := re.sub(r"Array<((?:[^<>]|<[^<>]*>)*)>", r"[\1]", text)) != text:
         text = shorter
     text = _STRING_FIELD.sub("", text)
@@ -1844,17 +2159,20 @@ def _widget_line(
         return [
             (n, s)
             for n, s in (fields or {}).items()
-            if (shown is None or n in shown) and not (typed and n in _COMMON_PROPS)
+            if (n in shown if shown is not None else not (typed and n in _COMMON_PROPS))
         ]
 
     props = [entry(name, spec) for name, spec in listed(widget.get("props"))]
     props += [name for name, _ in listed(widget.get("events"))]
     props += [entry(name, spec) for name, spec in listed(widget.get("nodeFields"))]
-    return f"- {widget['type']} {{{', '.join(props)}}}: {widget.get('description', '')}"
+    text = str(widget.get("description", ""))
+    if typed:
+        text = _SHAPE_RECAP.sub(r"\1", text)
+    return f"- {widget['type']} {{{', '.join(props)}}}: {text}"
 
 
 # A summary line's description: its first sentence, at most this long.
-_BRIEF_CHARS = 90
+_BRIEF_CHARS = 73
 
 
 def _brief_line(widget: dict[str, Any]) -> str:
@@ -1900,6 +2218,8 @@ __all__ = [
     "FORM_PREFILL_MAX",
     "HOST_EVENTS",
     "BILL_SPLIT",
+    "RIPPLE_ALIASES",
+    "RIPPLE_PLAY_WIDGETS",
     "ILLUSTRATION",
     "LEAD_CONTACT_FIELDS",
     "LEAD_FIELDS",

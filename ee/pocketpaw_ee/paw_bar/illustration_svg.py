@@ -25,6 +25,10 @@
 # clipPath may reach itself through its subtree's mask / clip-path refs.
 # Caps beyond the contract's, shared with ripple: numbers up to 1e6 in magnitude,
 # values / keyTimes / keySplines up to 200 entries, ``d`` up to 8,000 chars.
+# ``svg_ids(markup)`` gives the ids the widget's rebuild keeps, for an annotation's
+# ``target``: ids on ``KEPT_ELEMENTS`` only, mirroring ripple's ILLUSTRATION_ELEMENTS
+# (core/src/manifest/illustration-svg.ts), since the rebuild drops any other element
+# with its whole subtree.
 # Known ceiling: the flash guard reads only ``dur``, so a ``set`` with a ``begin``
 # list can still flash; the widget's reduced-motion pause and pause button are the floor.
 
@@ -68,6 +72,11 @@ ANIMATION_ELEMENTS: frozenset[str] = frozenset(
     {"animate", "animateTransform", "animateMotion", "set"}
 )
 HREF_ELEMENTS: frozenset[str] = frozenset({"use", "mpath"})
+KEPT_ELEMENTS: frozenset[str] = frozenset(
+    "svg g defs title desc path rect circle ellipse line polyline polygon text tspan "
+    "linearGradient radialGradient stop clipPath mask symbol use animate animateTransform "
+    "animateMotion mpath set".split()
+)
 ATTRIBUTE_NAMES: frozenset[str] = frozenset(
     {
         "fill",
@@ -300,3 +309,27 @@ def _clip_cycle(ids: dict[str, ET.Element]) -> str | None:
                 seen.add(ref)
                 todo.extend(edges[ref])
     return None
+
+
+def svg_ids(markup: str) -> frozenset[str]:
+    """The ids the widget's rebuild keeps: on a ``KEPT_ELEMENTS`` element whose
+    ancestors are all kept, and on an animation element only when it names an
+    attributeName (``animateMotion`` needs none). Ask it only of markup that
+    ``svg_violation`` passed (parsed, namespaced, within the caps)."""
+    ids: set[str] = set()
+    stack = [ET.fromstring(markup)]
+    while stack:
+        el = stack.pop()
+        tag = _split(el.tag)[1] if isinstance(el.tag, str) else ""
+        if tag not in KEPT_ELEMENTS:
+            continue
+        if (
+            tag in ANIMATION_ELEMENTS
+            and tag != "animateMotion"
+            and "attributeName" not in el.attrib
+        ):
+            continue
+        if isinstance(el.get("id"), str):
+            ids.add(el.get("id"))
+        stack.extend(el)
+    return frozenset(ids)
