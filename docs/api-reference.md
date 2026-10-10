@@ -4542,6 +4542,70 @@ action dropped and a warning logged.
 | `409 lead_capture_off` | The owner turned lead capture off. |
 | `503 lead_unavailable` | The limit or the lead write couldn't be checked; nothing was stored. |
 
+### Collecting leads from other websites
+
+A form on a page built outside Paw can post into a site's Leads through the
+public capture routes (`POST /sites/{site_id}/capture` as JSON, `POST
+/capture/form` as a urlencoded form). These two owner routes hand out what that
+form needs and set which extra hosts may post. Both are workspace-scoped and
+need `notifications.manage` (owner or admin), like the lead-notification
+routes: a member gets `403`, a site in another workspace is a `404`. `site_id`
+here is the site's object id or its `script_name`. A connected concierge (no
+`script_name`) has no capture endpoint and is a `404`.
+
+#### `GET /sites/{site_id}/lead-intake`
+
+```json
+{
+  "site_id": "paw-site-abc123",
+  "signed_key": "…",
+  "capture_url": "https://api.example.com/api/v1/sites/paw-site-abc123/capture",
+  "form_url": "https://api.example.com/api/v1/capture/form",
+  "allowed_origins": ["bright.pages.dev", "brightsmile.com", "landing.example.com"],
+  "derived_origins": ["bright.pages.dev", "brightsmile.com"],
+  "extra_origins": ["landing.example.com"],
+  "enforce_origin": false,
+  "max_extra_origins": 20
+}
+```
+
+- `site_id` is the `script_name`, the value the capture routes key on (the JSON
+  path segment, and `paw_site_id` on a form post).
+- `signed_key` is already public in published pages, so it is fine to show here.
+- `capture_url` / `form_url` are absolute, built from `PAW_CAPTURE_API_BASE`, the
+  same base injected into published sites.
+- `derived_origins` are the hosts the system maintains: the publish-stamped
+  allowlist (which also carries the `PAW_SITES_DEFAULT_ORIGINS` seed, `localhost`
+  and `127.0.0.1` unless configured), the site's own url host, and its custom
+  domains. They can't be removed here.
+- `extra_origins` are the hosts the owner added. They live in their own field
+  (`Site.lead_intake_origins`), so a publish or a domain change never drops them,
+  and they only widen lead capture, never the concierge's embed gate.
+- `allowed_origins` is `derived_origins` followed by `extra_origins`, deduped:
+  exactly the set the capture gate checks and the lead's `origin_unrecognized`
+  flag is judged against.
+
+#### `PUT /sites/{site_id}/lead-intake`
+
+```json
+{"extra_origins": ["https://landing.example.com/contact", "shop.example.org"],
+ "enforce_origin": true}
+```
+
+Both fields are required. It replaces the extra hosts and sets the pin, then
+returns the same shape as the GET. Each entry may be a URL or a host: the scheme,
+credentials, path and port are dropped and the host lowercased. IP addresses,
+single-label names, wildcards (`*.example.com`; matching is exact) and anything
+that isn't a valid DNS name are refused with `422 leads.intake_origin_invalid`
+(`details.origin` names the entry). `localhost` is accepted only outside a
+production posture. After dedupe, more than 20 hosts is `422
+leads.intake_origins_too_many`. A refused request changes nothing.
+
+With `enforce_origin: true`, a submission whose `Origin` host isn't in
+`allowed_origins` (or that sends no `Origin`) is a `403`. The site's own url host
+and custom domains are always in that set, so turning the pin on never blocks
+the site's own pages.
+
 ## Owner notifications — email, signed webhooks, per-site recipients
 
 A captured lead, and a concierge handoff, reach the site's owner through three
