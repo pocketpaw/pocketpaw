@@ -4601,6 +4601,12 @@ another workspace is a `404`.
   "webhook_secret": null,
   "webhook_disabled_at": null,
   "webhook_failure_count": 0,
+  "whatsapp": {
+    "numbers": [{"e164": "+14155550123", "added_at": "…", "consent_at": "…"}],
+    "mode": "mock",
+    "send_as": "template",
+    "max_numbers": 3
+  },
   "events": {
     "lead_captured": ["email", "push"],
     "handoff": ["email", "push"],
@@ -4627,6 +4633,11 @@ The flat `webhook_url`, `has_webhook_secret`, `webhook_disabled_at` and
 clients. A site saved before destinations existed shows its single webhook as
 the destination with id `legacy`.
 
+`whatsapp` lists the site owner's WhatsApp numbers (see "WhatsApp to the
+owner"). `mode` is `mock` while the server has no Meta credentials (messages are
+logged, not delivered; show "Test mode") and `live` once it does. `send_as` is
+`template` or `text`.
+
 #### `PUT /sites/{site_id}/lead-notifications`
 
 Partial update; omitted fields are kept.
@@ -4640,7 +4651,8 @@ Partial update; omitted fields are kept.
 }
 ```
 
-Sinks are `email`, `push` and `webhook`. `push` covers the bell row and the OS
+Sinks are `email`, `push`, `webhook` and `whatsapp_owner` (every listed WhatsApp
+number). `push` covers the bell row and the OS
 push together (every bell row is pushed). A `webhook_url` is checked against
 SSRF (https only, any port 1-65535, and every address the host resolves to must
 be globally routable, which also rules out 100.64.0.0/10; a failure is `403
@@ -4762,6 +4774,95 @@ The catalogue for the destination editor (same `notifications.manage` gate):
   "label_max": 80
 }
 ```
+
+### WhatsApp to the owner
+
+The owner can add up to 3 WhatsApp numbers per site and get each new lead,
+handoff and booking on them. Each message goes to every listed number.
+
+#### `POST /sites/{site_id}/lead-notifications/whatsapp/numbers`
+
+Body `{"e164": "+14155550123", "consent": true}`. The number is E.164: `+` then
+8 to 15 digits, first digit not 0 (spaces, dashes, dots and brackets are
+stripped, and a leading `00` reads as `+`). `consent` must be `true`: the person
+adding it confirms this number may get lead messages, and the time is stored as
+`consent_at`. Adding the site's FIRST number also adds `whatsapp_owner` to all
+three events in the same update; the owner can turn it off per event with `PUT`
+afterwards, and later numbers don't turn it back on. Returns the settings (as
+`GET`). Errors, all `422`: `lead_notifications.whatsapp_consent_required`,
+`lead_notifications.invalid_phone`, `lead_notifications.too_many_numbers` (past
+3), `lead_notifications.duplicate_number`.
+
+#### `DELETE /sites/{site_id}/lead-notifications/whatsapp/numbers/{e164}`
+
+Encode the `+` as `%2B` (`/whatsapp/numbers/%2B14155550123`). Removes the number;
+messages already queued for it are dropped at send time. Routing is left as is.
+`404` for a number that isn't listed. Returns the settings.
+
+#### `POST /sites/{site_id}/lead-notifications/whatsapp/test`
+
+Queues one test message to every listed number. Returns
+`{"queued": 2, "numbers": ["+14155550123", "+919876543210"], "mode": "mock"}`.
+`422 lead_notifications.whatsapp_no_numbers` with no numbers, and `429
+lead_notifications.whatsapp_rate_limited` when the hourly cap has no room.
+
+The text is the same one line as a partner lead ("New enquiry for {site} via Paw
+Sites by PocketPaw: {name} — {message} Contact: {phone or email}", defanged and
+at most 900 characters; see "Partner leads on WhatsApp"). A handoff has no lead,
+so it reads "{title} on {site} via Paw Sites by PocketPaw: {body}". Rows use the
+outbox sink `whatsapp_owner`, in the webhook lane, with the same retries. At send
+time the number must still be listed. A sent row records `provider`: `mock` or
+`meta`. A site queues at most 30 WhatsApp messages per rolling hour (test sends
+included); past that, rows are skipped with one warning per event, and leads are
+still saved, emailed and pushed.
+
+Delivery outcomes from Meta: `2xx` is sent. `429`, `5xx`, a throttling code
+(`4`, `80007`, `130429`, `131056`) or a network error is retried. Any other `4xx`
+is dropped. These get a plain error on the row: `131047` (outside the 24-hour
+window: the number must message the business number first, or switch to a
+template), `131030` (the number isn't in the test number's allowed list) and
+`190` (the access token expired or is wrong; also logged at error level). Only
+our own error string is stored, never Meta's text or the token.
+
+| Variable | Purpose |
+|---|---|
+| `POCKETPAW_WA_NOTIFY_ACCESS_TOKEN` | Meta WhatsApp Cloud API access token (Bearer). Secret, never logged. |
+| `POCKETPAW_WA_NOTIFY_PHONE_NUMBER_ID` | Phone number ID of the sending number (not the number itself). |
+| `POCKETPAW_WA_NOTIFY_SEND_AS` | `template` (default) or `text`. |
+| `POCKETPAW_WA_NOTIFY_TEMPLATE` | Template name. Default `hello_world` (takes no variables). |
+| `POCKETPAW_WA_NOTIFY_TEMPLATE_LANG` | Template language code. Default `en_US`. |
+| `POCKETPAW_WA_NOTIFY_API_VERSION` | Graph API version. Default `v26.0`. |
+
+Until the token and the phone number ID are both set, the server is in mock
+mode: every message is logged (number masked) and marked sent with provider
+`mock`, and nothing leaves the server.
+
+`text` sends `{"messaging_product": "whatsapp", "to", "type": "text", "text":
+{"body", "preview_url": false}}`. `template` sends the named template with the
+alert text as body parameter 1, except `hello_world`, which is sent with no
+parameters (so it only proves delivery; it doesn't carry the lead).
+
+**Trying it with the Meta test number.**
+
+1. At developers.facebook.com, create an app of type Business and add the
+   WhatsApp product. Meta gives the app a test sending number.
+2. On WhatsApp > API Setup, copy the **Phone number ID** into
+   `POCKETPAW_WA_NOTIFY_PHONE_NUMBER_ID` and the access token into
+   `POCKETPAW_WA_NOTIFY_ACCESS_TOKEN`. The temporary token expires after about
+   24 hours; for anything longer, create a System User token with
+   `whatsapp_business_messaging`.
+3. Under "To", add up to 5 recipient numbers and verify each with the code
+   WhatsApp sends. Any other number fails with `131030`.
+4. Pick a send mode:
+   - `POCKETPAW_WA_NOTIFY_SEND_AS=text`: from each recipient's phone, send any
+     message (say "hi") to the test number first. That opens a 24-hour window;
+     outside it, sends fail with `131047`.
+   - `template` (default): leave `POCKETPAW_WA_NOTIFY_TEMPLATE=hello_world` to
+     check delivery, or create and get approval for a template whose body has
+     one variable (`{{1}}`) and set its name and language, so the lead text
+     shows up.
+5. Restart the server, add a verified number in Settings, and use the WhatsApp
+   test route (or capture a lead).
 
 #### `POST /sites/{site_id}/lead-notifications/recipients`
 

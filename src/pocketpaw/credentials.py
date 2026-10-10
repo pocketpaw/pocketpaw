@@ -1,18 +1,11 @@
 """Encrypted credential storage for PocketPaw.
 
-Changes:
-  - 2026-10-03: add the four ai_visibility_* provider keys/tokens (AV-3) and
-    turnstile_secret (AV-4 free AI check).
-  - 2026-10-02: add msg91_platform_authkey (partner lead WhatsApp, PH-6).
-  - 2026-06-24: add dodo_payments_api_key + dodo_webhook_secret to SECRET_FIELDS
-    so they persist encrypted, never plaintext in config.json (BC-2 trust boundary).
-  - 2026-04-10: v1 migration failure no longer crashes — logs warning, starts with empty store.
-  - 2026-04-03: Hardened: Argon2id + AES-256-GCM, backup-safe migration, AEAD.
-  - 2026-02-06: Initial implementation — Fernet encryption with machine-derived PBKDF2 key.
-
 Stores API keys and tokens in ~/.pocketpaw/secrets.enc instead of plaintext config.json.
 Encryption key derived from machine identity (hostname + MAC + username) so the encrypted
 file only works on the same machine/user. Salt stored in ~/.pocketpaw/.salt.
+Sealed with AES-256-GCM under an Argon2id-derived key; an older Fernet store is
+migrated with a backup, and a failed migration logs a warning and starts empty.
+``SECRET_FIELDS`` lists every settings field that lives here, never in config.json.
 """
 
 import base64
@@ -72,6 +65,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "lens_api_token",
         "cf_email_api_token",
         "msg91_platform_authkey",
+        "wa_notify_access_token",
         "ai_visibility_openai_api_key",
         "ai_visibility_perplexity_api_key",
         "ai_visibility_anthropic_api_key",

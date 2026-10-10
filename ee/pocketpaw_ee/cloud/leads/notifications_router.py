@@ -1,7 +1,8 @@
 # ee/pocketpaw_ee/cloud/leads/notifications_router.py
 # HTTP surface for per-site owner notifications (``site_notification_settings``).
 # Thin: every route delegates to ``leads.notification_settings`` or, for webhook
-# destinations, ``leads.webhook_destinations``.
+# destinations and WhatsApp numbers, ``leads.webhook_destinations`` and
+# ``leads.whatsapp_numbers``.
 #
 # Owner/admin routes, workspace-scoped through the caller's active workspace and
 # gated on ``notifications.manage`` (ADMIN): a member gets 403, and a site in
@@ -21,6 +22,9 @@
 #   POST   /sites/{site_id}/lead-notifications/webhooks/{webhook_id}/test
 #   POST   /sites/{site_id}/lead-notifications/preview      (render a sample; no network)
 #   GET    /lead-notifications/platforms                    (field + platform catalogue)
+#   POST   /sites/{site_id}/lead-notifications/whatsapp/numbers  (consent required)
+#   DELETE /sites/{site_id}/lead-notifications/whatsapp/numbers/{e164}
+#   POST   /sites/{site_id}/lead-notifications/whatsapp/test
 #
 # PUBLIC: /lead-notifications/confirm/{token}, the link in the confirm email.
 # GET only renders a confirm button (no side effect, so link scanners can't
@@ -40,6 +44,7 @@ from pydantic import BaseModel, Field
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action_any_workspace
 from pocketpaw_ee.cloud.leads import notification_settings as settings_service
 from pocketpaw_ee.cloud.leads import webhook_destinations as destinations
+from pocketpaw_ee.cloud.leads import whatsapp_numbers
 
 router = APIRouter(tags=["Sites"])
 
@@ -58,6 +63,12 @@ class LeadNotificationsUpdate(BaseModel):
 
 class RecipientAdd(BaseModel):
     email: str = Field(max_length=320)
+
+
+class WhatsAppNumberAdd(BaseModel):
+    e164: str = Field(max_length=32)
+    # The adder confirms this number may get lead messages; required.
+    consent: bool = False
 
 
 class WebhookTemplateBody(BaseModel):
@@ -263,6 +274,44 @@ async def preview_lead_notification(
         template=_template(body.template),
         event=body.event,
     )
+
+
+@router.post("/sites/{site_id}/lead-notifications/whatsapp/numbers")
+async def add_lead_notification_whatsapp_number(
+    site_id: str,
+    body: WhatsAppNumberAdd,
+    user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    """Add a WhatsApp number. The first one switches ``whatsapp_owner`` on for
+    every event."""
+    return await whatsapp_numbers.add_number(
+        workspace_id,
+        site_id,
+        body.e164,
+        consent=body.consent,
+        added_by=str(getattr(user, "id", "") or ""),
+    )
+
+
+@router.delete("/sites/{site_id}/lead-notifications/whatsapp/numbers/{e164}")
+async def remove_lead_notification_whatsapp_number(
+    site_id: str,
+    e164: str,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await whatsapp_numbers.remove_number(workspace_id, site_id, e164)
+
+
+@router.post("/sites/{site_id}/lead-notifications/whatsapp/test")
+async def test_lead_notification_whatsapp(
+    site_id: str,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    """Queue a test message to every listed number."""
+    return await whatsapp_numbers.send_test(workspace_id, site_id)
 
 
 _INVALID = (

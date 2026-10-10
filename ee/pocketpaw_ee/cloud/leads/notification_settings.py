@@ -1,13 +1,15 @@
 # ee/pocketpaw_ee/cloud/leads/notification_settings.py
-# Per-site owner notifications: the ONLY writer of ``site_notification_settings``
-# (``models/lead_notifications.py``), and the router that turns a site event (a
-# captured lead, a concierge handoff, later a booking) into bell/push rows,
-# emails and webhook deliveries.
+# Per-site owner notifications: the main writer of ``site_notification_settings``
+# (``models/lead_notifications.py``; ``webhook_destinations`` and
+# ``whatsapp_numbers`` write their own parts), and the router that turns a site
+# event (a captured lead, a concierge handoff, later a booking) into bell/push
+# rows, emails, webhook deliveries and WhatsApp messages.
 #
 # Settings: who gets email (the workspace owner's account address, once it is
 # verified on the account OR confirmed through our link, plus up to 5 confirmed
-# extras), up to 5 webhook destinations (``webhook_destinations``), and per-event
-# sinks (email | webhook | push). No row means the owner's address with email +
+# extras), up to 5 webhook destinations (``webhook_destinations``), up to 3
+# WhatsApp numbers (``whatsapp_numbers``), and per-event sinks (email | webhook |
+# push | whatsapp_owner). No row means the owner's address with email +
 # push for every event. Every write is a targeted ``$set`` / ``$inc`` / ``$push``
 # / ``$pull`` / positional update, never a read-modify-write of the whole row.
 # The legacy PUT ``webhook_url`` / ``clear_webhook`` and the ``webhook-secret``
@@ -18,18 +20,20 @@
 # queues ONE confirm email carrying a Fernet token (site, workspace, email,
 # nonce) that expires after 7 days. Re-sends are limited to one per address per
 # 30 minutes (an atomic marker that survives remove/re-add) and 50 per
-# workspace per day. An unverified owner address gets the same link. The public confirm page shows a
-# button only (GET has no side effect, so link scanners can't confirm); the
-# POST confirms. A new nonce voids older links. Unconfirmed, bounced or
+# workspace per day. An unverified owner address gets the same link. The public
+# confirm page shows a button only (GET has no side effect, so link scanners
+# can't confirm); the POST confirms. A new nonce voids older links. Unconfirmed, bounced or
 # unverified addresses get no other mail, checked at enqueue and at send.
 #
 # Routing (``dispatch_site_event``): "push" creates the bell rows (and so the
 # OS push); "email" queues one email per allowed recipient; "webhook" queues one
 # delivery per active destination that lists the event (rendered for its
-# platform at send time). The workspace config is the fallback: its Slack always
-# gets the event (subject to its own routes) and its webhook gets it when the
-# site has no active destination, with the deprecated flat notification fields
-# added so existing ``kind`` filters keep working.
+# platform at send time); "whatsapp_owner" queues one message per listed number
+# (``whatsapp_numbers.event_rows``, hourly cap per site). The workspace config
+# is the fallback: its Slack always gets the event (subject to its own routes)
+# and its webhook gets it when the site has no active destination, with the
+# deprecated flat notification fields added so existing ``kind`` filters keep
+# working.
 #
 # ``dispatch_lead_updated`` is narrower: a status change goes only to json
 # destinations that take ``lead_captured`` (chat apps skip updates), with no
@@ -77,7 +81,7 @@ CONFIRM_RESEND_INTERVAL = timedelta(minutes=30)
 CONFIRM_DAILY_CAP = 50
 CONFIRM_KIND = "lead_notifications_confirm"
 WHATSAPP_DAILY_CAP = 30
-_VALID_SINKS = frozenset({"email", "webhook", "push"})
+_VALID_SINKS = frozenset({"email", "webhook", "push", "whatsapp_owner"})
 
 # Webhook ``type`` per site event.
 EVENT_TYPES = {
@@ -148,6 +152,7 @@ async def _ensure_row(site: _SiteDoc) -> None:
                 "include_owner": True,
                 "emails": [],
                 "webhooks": [],
+                "whatsapp": {"numbers": []},
                 "webhook_url": None,
                 "webhook_secret_enc": "",
                 "webhook_secret_prev_enc": "",
@@ -226,6 +231,12 @@ def _wd():
     return webhook_destinations
 
 
+def _wa():
+    from pocketpaw_ee.cloud.leads import whatsapp_numbers
+
+    return whatsapp_numbers
+
+
 async def _wire(site: _SiteDoc, *, webhook_secret: str | None = None) -> dict[str, Any]:
     from pocketpaw_ee.cloud.models.lead_notifications import MAX_WEBHOOKS
     from pocketpaw_ee.cloud.notifications import email as email_mod
@@ -259,6 +270,7 @@ async def _wire(site: _SiteDoc, *, webhook_secret: str | None = None) -> dict[st
         "webhook_secret": webhook_secret,
         "webhook_disabled_at": first.disabled_at if first else None,
         "webhook_failure_count": first.failure_count if first else 0,
+        "whatsapp": _wa().wire(settings),
         "events": {e: list(settings.events.get(e, DEFAULT_EVENT_SINKS)) for e in LEAD_EVENTS},
         "email_enabled": email_mod.is_configured(),
     }
@@ -811,7 +823,7 @@ async def dispatch_site_event(
     from pocketpaw_ee.cloud.notifications import email as email_mod
     from pocketpaw_ee.cloud.notifications import service as notifications_service
 
-    counts = {"push": 0, "email": 0, "webhook": 0, "whatsapp": 0}
+    counts = {"push": 0, "email": 0, "webhook": 0, "whatsapp": 0, "whatsapp_owner": 0}
     site: _SiteDoc | None = None
     settings = SiteNotificationSettings(workspace=workspace_id, site_id="")
     try:
@@ -883,6 +895,19 @@ async def dispatch_site_event(
                 envelope=envelope,
                 link=hook_link or email_mod.lead_url(site_id),
             )
+        if site is not None and "whatsapp_owner" in sinks:
+            try:
+                rows += await _wa().event_rows(
+                    site,
+                    settings,
+                    event=event,
+                    kind=kind,
+                    lead_id=lead_id,
+                    title=title,
+                    body=body,
+                )
+            except Exception:  # never costs the owner their email / webhook
+                logger.warning("owner WhatsApp routing failed (event=%s)", event, exc_info=True)
         if site is not None and lead_id and event == "lead_captured":
             try:
                 row = await _partner_whatsapp_row(workspace_id, site, kind, lead_id)
@@ -893,7 +918,7 @@ async def dispatch_site_event(
                 rows.append(row)
         if rows:
             await outbox.enqueue_many(rows)
-        for sink in ("email", "webhook", "whatsapp"):
+        for sink in ("email", "webhook", "whatsapp", "whatsapp_owner"):
             counts[sink] = sum(1 for r in rows if r["sink"] == sink)
 
         # Workspace fallback: its Slack always, its webhook only when the site

@@ -1,7 +1,8 @@
 # ee/pocketpaw_ee/cloud/models/lead_notifications.py
 # Per-site owner-notification settings, one row per (workspace, site_id) in the
 # ``site_notification_settings`` collection. ``cloud.leads.notification_settings``
-# and its ``webhook_destinations`` helper are the only writers; the lead bridge,
+# and its ``webhook_destinations`` and ``whatsapp_numbers`` helpers are the only
+# writers; the lead bridge,
 # the concierge handoff notifier and the outbox read through those modules.
 #
 # It lives in its OWN collection, not on the Site document, on purpose: the
@@ -26,9 +27,14 @@
 # single webhook: readers see it as destination id ``legacy`` and the first
 # webhook write moves it into the list. Nothing else writes them.
 #
-# ``LeadSink`` includes "whatsapp" for partner leads: those are routed by the
-# shop owner's consent, not by these settings, so ``events`` never lists it and
-# the settings API doesn't accept it.
+# WhatsApp to the owner: ``whatsapp.numbers`` holds up to ``MAX_WHATSAPP_NUMBERS``
+# E.164 numbers, each stored with the consent time of the person who added it
+# (``leads.whatsapp_numbers`` is their writer). The ``whatsapp_owner`` sink in
+# ``events`` sends an event to every listed number.
+#
+# ``LeadSink`` also includes "whatsapp" for partner leads: those are routed by
+# the shop owner's consent, not by these settings, so ``events`` never lists it
+# and the settings API doesn't accept it.
 
 from __future__ import annotations
 
@@ -41,10 +47,11 @@ from pymongo import IndexModel
 
 # The site events an owner can route, and the sinks each can go to.
 LEAD_EVENTS: tuple[str, ...] = ("lead_captured", "handoff", "booking")
-LeadSink = Literal["email", "webhook", "push", "whatsapp"]
+LeadSink = Literal["email", "webhook", "push", "whatsapp", "whatsapp_owner"]
 DEFAULT_EVENT_SINKS: list[str] = ["email", "push"]
 MAX_EXTRA_RECIPIENTS = 5
 MAX_WEBHOOKS = 5
+MAX_WHATSAPP_NUMBERS = 3
 LEGACY_WEBHOOK_ID = "legacy"
 WebhookPlatform = Literal["slack", "discord", "teams", "google_chat", "json"]
 DEFAULT_TEMPLATE_FIELDS: tuple[str, ...] = ("name", "email", "phone", "message", "page")
@@ -91,6 +98,19 @@ class LeadWebhook(BaseModel):
     created_at: datetime | None = None
 
 
+class LeadWhatsAppNumber(BaseModel):
+    # E.164: "+" then 8-15 digits.
+    e164: str
+    added_at: datetime
+    added_by: str = ""
+    # When the adder confirmed this number may get lead messages.
+    consent_at: datetime
+
+
+class LeadWhatsApp(BaseModel):
+    numbers: list[LeadWhatsAppNumber] = Field(default_factory=list)
+
+
 class SiteNotificationSettings(Document):
     workspace: str
     site_id: str
@@ -102,6 +122,7 @@ class SiteNotificationSettings(Document):
     owner_confirm: LeadNotificationRecipient | None = None
     emails: list[LeadNotificationRecipient] = Field(default_factory=list)
     webhooks: list[LeadWebhook] = Field(default_factory=list)
+    whatsapp: LeadWhatsApp = Field(default_factory=LeadWhatsApp)
     # The pre-list single webhook (read as destination ``legacy``; see the header).
     webhook_url: str | None = None
     webhook_secret_enc: str = ""
@@ -123,10 +144,13 @@ __all__ = [
     "LEGACY_WEBHOOK_ID",
     "MAX_EXTRA_RECIPIENTS",
     "MAX_WEBHOOKS",
+    "MAX_WHATSAPP_NUMBERS",
     "LeadNotificationRecipient",
     "LeadSink",
     "LeadWebhook",
     "LeadWebhookTemplate",
+    "LeadWhatsApp",
+    "LeadWhatsAppNumber",
     "SiteNotificationSettings",
     "WebhookPlatform",
     "default_events",
