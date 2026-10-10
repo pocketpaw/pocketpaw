@@ -1,29 +1,34 @@
 # ee/pocketpaw_ee/cloud/models/lead_notifications.py
 # Per-site owner-notification settings, one row per (workspace, site_id) in the
 # ``site_notification_settings`` collection. ``cloud.leads.notification_settings``
-# is the only writer; the lead bridge, the concierge handoff notifier and the
-# outbox read it through that module.
+# and its ``webhook_destinations`` helper are the only writers; the lead bridge,
+# the concierge handoff notifier and the outbox read through those modules.
 #
 # It lives in its OWN collection, not on the Site document, on purpose: the
 # sites service saves whole Site documents (``site.save()``), and a Site loaded
 # before a confirm click or a failure-counter bump would write the stale
 # settings straight back. Here every write is a targeted ``$set`` / ``$inc`` /
-# ``$push`` / ``$pull`` on this row, so concurrent writers can't lose updates.
+# ``$push`` / ``$pull`` / positional update on this row, so concurrent writers
+# can't lose updates.
 #
 # No row means "never configured" and reads as the default: the workspace
 # owner's account email plus push for every event. An owner address that the
 # account hasn't verified must confirm through the same link as an extra
-# recipient (``owner_confirm``) first. Extra recipients
-# (at most 5, stored lower-cased) must click a signed confirm link before they
-# get mail; ``confirm_nonce`` is rotated on every (re)send, so a stale link
-# can't confirm. The webhook secret is Fernet ciphertext; after a rotation the
-# previous one keeps signing for a grace window. After 10 consecutive dead
-# deliveries the webhook is switched off until it is saved again.
+# recipient (``owner_confirm``) first. Extra recipients (at most 5, stored
+# lower-cased) must click a signed confirm link before they get mail;
+# ``confirm_nonce`` is rotated on every (re)send, so a stale link can't confirm.
 #
-# Updated 2026-10-02 (PH-6): ``LeadSink`` gains "whatsapp". It is routed by the
-# shop owner's consent, not by these settings: a lead on a partner-sold site goes
-# to the partner client's WhatsApp when that client opted in. ``events`` never
-# needs to list it, and the settings API doesn't accept it.
+# Webhooks: ``webhooks`` holds up to ``MAX_WEBHOOKS`` destinations, each with its
+# own URL, platform override, message template, events, Fernet-encrypted signing
+# secret (the previous one co-signs for a grace window after a rotation) and
+# failure counter (10 consecutive dead deliveries switch that one destination
+# off until it is re-armed). The flat ``webhook_*`` fields are the pre-list
+# single webhook: readers see it as destination id ``legacy`` and the first
+# webhook write moves it into the list. Nothing else writes them.
+#
+# ``LeadSink`` includes "whatsapp" for partner leads: those are routed by the
+# shop owner's consent, not by these settings, so ``events`` never lists it and
+# the settings API doesn't accept it.
 
 from __future__ import annotations
 
@@ -39,6 +44,10 @@ LEAD_EVENTS: tuple[str, ...] = ("lead_captured", "handoff", "booking")
 LeadSink = Literal["email", "webhook", "push", "whatsapp"]
 DEFAULT_EVENT_SINKS: list[str] = ["email", "push"]
 MAX_EXTRA_RECIPIENTS = 5
+MAX_WEBHOOKS = 5
+LEGACY_WEBHOOK_ID = "legacy"
+WebhookPlatform = Literal["slack", "discord", "teams", "google_chat", "json"]
+DEFAULT_TEMPLATE_FIELDS: tuple[str, ...] = ("name", "email", "phone", "message", "page")
 
 
 def default_events() -> dict[str, list[str]]:
@@ -57,6 +66,31 @@ class LeadNotificationRecipient(BaseModel):
     bounced_at: datetime | None = None
 
 
+class LeadWebhookTemplate(BaseModel):
+    # "" means the event's default title.
+    title: str = ""
+    fields: list[str] = Field(default_factory=lambda: list(DEFAULT_TEMPLATE_FIELDS))
+    show_link: bool = True
+
+
+class LeadWebhook(BaseModel):
+    id: str
+    url: str
+    label: str = ""
+    # None: use the platform detected from the URL.
+    platform_override: WebhookPlatform | None = None
+    template: LeadWebhookTemplate = Field(default_factory=LeadWebhookTemplate)
+    # Which site events this destination gets (the routing matrix's "webhook"
+    # column must also be on for the event). ``lead.updated`` follows lead_captured.
+    events: list[str] = Field(default_factory=lambda: list(LEAD_EVENTS))
+    secret_enc: str = ""
+    secret_prev_enc: str = ""
+    secret_rotated_at: datetime | None = None
+    failure_count: int = 0
+    disabled_at: datetime | None = None
+    created_at: datetime | None = None
+
+
 class SiteNotificationSettings(Document):
     workspace: str
     site_id: str
@@ -67,6 +101,8 @@ class SiteNotificationSettings(Document):
     # extra recipient before it gets mail. Unused while the account is verified.
     owner_confirm: LeadNotificationRecipient | None = None
     emails: list[LeadNotificationRecipient] = Field(default_factory=list)
+    webhooks: list[LeadWebhook] = Field(default_factory=list)
+    # The pre-list single webhook (read as destination ``legacy``; see the header).
     webhook_url: str | None = None
     webhook_secret_enc: str = ""
     webhook_secret_prev_enc: str = ""
@@ -82,10 +118,16 @@ class SiteNotificationSettings(Document):
 
 __all__ = [
     "DEFAULT_EVENT_SINKS",
+    "DEFAULT_TEMPLATE_FIELDS",
     "LEAD_EVENTS",
+    "LEGACY_WEBHOOK_ID",
     "MAX_EXTRA_RECIPIENTS",
+    "MAX_WEBHOOKS",
     "LeadNotificationRecipient",
     "LeadSink",
+    "LeadWebhook",
+    "LeadWebhookTemplate",
     "SiteNotificationSettings",
+    "WebhookPlatform",
     "default_events",
 ]

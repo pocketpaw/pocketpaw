@@ -1,0 +1,62 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "text": "New booking",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "fields": [
+        {
+          "text": "*Name*\nPriya Sharma",
+          "type": "mrkdwn"
+        },
+        {
+          "text": "*Email*\npriya@example.com",
+          "type": "mrkdwn"
+        },
+        {
+          "text": "*Phone*\n+1 555 010 1234",
+          "type": "mrkdwn"
+        },
+        {
+          "text": "*Page*\nnorthwind.example.com/contact",
+          "type": "mrkdwn"
+        }
+      ],
+      "type": "section"
+    },
+    {
+      "text": {
+        "text": "*Message*\nHi! Could you quote 20 embroidered jackets for our team?",
+        "type": "mrkdwn"
+      },
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "text": "Bright Smile · Paw",
+          "type": "mrkdwn"
+        }
+      ],
+      "type": "context"
+    },
+    {
+      "elements": [
+        {
+          "text": {
+            "text": "Open in Paw",
+            "type": "plain_text"
+          },
+          "type": "button",
+          "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+        }
+      ],
+      "type": "actions"
+    }
+  ],
+  "text": "New booking · Bright Smile"
+}
