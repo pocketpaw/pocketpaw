@@ -29,17 +29,24 @@
   },
   {
     "label": "the known-host set is not derived (a site's own deployed host reads as foreign)",
-    "file": "ee/pocketpaw_ee/cloud/leads/router.py",
-    "find": "    hosts = list(site.allowed_origins)\n    candidates = [site.url or \"\"]\n    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)",
-    "replace": "    hosts = list(site.allowed_origins)\n    candidates: list[str] = []",
+    "file": "ee/pocketpaw_ee/cloud/leads/intake.py",
+    "find": "    candidates.append(site.url or \"\")\n    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)",
+    "replace": "    pass",
     "tests": ["tests/cloud/leads/test_router.py"]
   },
   {
     "label": "attached custom domains are dropped from the derived set",
-    "file": "ee/pocketpaw_ee/cloud/leads/router.py",
+    "file": "ee/pocketpaw_ee/cloud/leads/intake.py",
     "find": "    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)",
     "replace": "    pass",
     "tests": ["tests/cloud/leads/test_router.py"]
+  },
+  {
+    "label": "owner-added intake hosts are ignored by the capture gate",
+    "file": "ee/pocketpaw_ee/cloud/leads/intake.py",
+    "find": "    for extra in getattr(site, \"lead_intake_origins\", None) or []:",
+    "replace": "    for extra in []:",
+    "tests": ["tests/cloud/leads/test_lead_intake.py"]
   },
   {
     "label": "the origin is never recorded on the lead",
