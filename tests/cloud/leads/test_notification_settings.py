@@ -429,7 +429,7 @@ async def test_send_test_queues_mail_and_webhook(net) -> None:
     site = await _site(ws)
     await ns.update_settings(ws, str(site.id), webhook_url=SITE_HOOK)
     out = await ns.send_test(ws, str(site.id))
-    assert out == {"emails": [OWNER_EMAIL], "webhook": True}
+    assert out == {"emails": [OWNER_EMAIL], "webhook": True, "webhooks": 1}
     await outbox.process_due()
     assert len(_emails(net)) == 1 and len(_hooks(net, SITE_HOOK)) == 1
 
@@ -602,7 +602,8 @@ async def test_s1_concurrent_confirm_bounce_and_failures_all_stick(net) -> None:
     s = await ns.settings_for(site)
     states = {r.email: (r.confirmed_at is not None, r.bounced_at is not None) for r in s.emails}
     assert states == {"a@acme.test": (True, True), "b@acme.test": (True, False)}
-    assert s.webhook_failure_count == 10 and s.webhook_disabled_at is not None
+    hook = s.webhooks[0]
+    assert hook.failure_count == 10 and hook.disabled_at is not None
 
 
 async def _unverify(owner_id: str) -> None:

@@ -1,0 +1,34 @@
+{
+  "cardsV2": [
+    {
+      "card": {
+        "header": {
+          "subtitle": "Bright Smile",
+          "title": "Test notification"
+        },
+        "sections": [
+          {
+            "widgets": [
+              {
+                "buttonList": {
+                  "buttons": [
+                    {
+                      "onClick": {
+                        "openLink": {
+                          "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+                        }
+                      },
+                      "text": "Open in Paw"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "cardId": "notification-test"
+    }
+  ],
+  "text": "Test notification · Bright Smile"
+}

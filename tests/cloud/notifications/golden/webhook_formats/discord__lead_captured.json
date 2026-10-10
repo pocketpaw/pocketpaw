@@ -1,0 +1,44 @@
+{
+  "allowed_mentions": {
+    "parse": []
+  },
+  "content": "New lead · Bright Smile",
+  "embeds": [
+    {
+      "color": 2450411,
+      "fields": [
+        {
+          "inline": true,
+          "name": "Name",
+          "value": "Priya Sharma"
+        },
+        {
+          "inline": true,
+          "name": "Email",
+          "value": "priya@example.com"
+        },
+        {
+          "inline": true,
+          "name": "Phone",
+          "value": "+1 555 010 1234"
+        },
+        {
+          "inline": false,
+          "name": "Message",
+          "value": "Hi! Could you quote 20 embroidered jackets for our team?"
+        },
+        {
+          "inline": true,
+          "name": "Page",
+          "value": "northwind.example.com/contact"
+        }
+      ],
+      "footer": {
+        "text": "Bright Smile · Paw"
+      },
+      "timestamp": "2026-10-10T09:30:00+00:00",
+      "title": "New lead",
+      "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+    }
+  ]
+}
