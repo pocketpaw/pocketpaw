@@ -4575,8 +4575,29 @@ another workspace is a `404`.
   "emails": [
     {"email": "team@acme.com", "status": "pending", "added_at": "…", "confirmed_at": null}
   ],
-  "webhook_url": null,
-  "has_webhook_secret": false,
+  "webhooks": [
+    {
+      "id": "3f9c2a1b7d4e",
+      "url": "https://hooks.slack.com/services/T0/B0/xyz",
+      "label": "Sales channel",
+      "platform": "slack",
+      "detected_platform": "slack",
+      "platform_override": null,
+      "template": {"title": "", "fields": ["name", "email", "phone", "message", "page"],
+                   "show_link": true},
+      "events": ["lead_captured", "handoff", "booking"],
+      "has_secret": true,
+      "signed": false,
+      "status": "active",
+      "failure_count": 0,
+      "disabled_at": null,
+      "secret_rotated_at": null,
+      "created_at": "…"
+    }
+  ],
+  "max_webhooks": 5,
+  "webhook_url": "https://hooks.slack.com/services/T0/B0/xyz",
+  "has_webhook_secret": true,
   "webhook_secret": null,
   "webhook_disabled_at": null,
   "webhook_failure_count": 0,
@@ -4600,6 +4621,12 @@ owner's address re-sends it, under the same rate limits. `status` is `pending`
 reported a permanent bounce; re-add the address to try again). `email_enabled`
 is false while the server has no Cloudflare email credentials.
 
+`webhooks` lists the site's webhook destinations (see "Webhook destinations").
+The flat `webhook_url`, `has_webhook_secret`, `webhook_disabled_at` and
+`webhook_failure_count` describe the FIRST destination and stay for older
+clients. A site saved before destinations existed shows its single webhook as
+the destination with id `legacy`.
+
 #### `PUT /sites/{site_id}/lead-notifications`
 
 Partial update; omitted fields are kept.
@@ -4620,14 +4647,121 @@ be globally routable, which also rules out 100.64.0.0/10; a failure is `403
 notifications.invalid_webhook_url` or `webhooks.private_address`). A NEW URL's
 signing secret comes back **once**, in this response's `webhook_secret`; later
 reads return `null`. Any save that names a webhook URL, the same one included,
-re-arms a webhook that was switched off.
+re-arms a webhook that was switched off. `webhook_url` / `clear_webhook` are the
+pre-destinations API: they act on the first destination (adding one when there
+is none). New clients use the destination routes below.
 
 #### `POST /sites/{site_id}/lead-notifications/webhook-secret`
 
-Rotates the site webhook's signing secret and re-arms the webhook. The new
-secret comes back once in `webhook_secret`. For 24 hours after a rotation the
-old secret also signs (see "Webhook payload and signing"). `404` when the site
-has no webhook.
+Rotates the first destination's signing secret and re-arms it. The new secret
+comes back once in `webhook_secret`. For 24 hours after a rotation the old
+secret also signs (see "Webhook payload and signing"). `404` when the site has
+no webhook.
+
+### Webhook destinations
+
+A site sends to up to 5 webhooks. Each one's platform is detected from its URL
+and gets that app's native message:
+
+| `platform` | Detected from | Message |
+|---|---|---|
+| `slack` | `hooks.slack.com/services/…` | Block Kit (header, fields, message, context, "Open in Paw" button) + `text` |
+| `discord` | `discord.com` / `discordapp.com` `/api/webhooks/…` | `{content, embeds:[…]}` with `allowed_mentions: {"parse": []}` |
+| `teams` | `*.webhook.office.com`, `*.logic.azure.com`, `*.powerplatform.com` | Adaptive Card 1.4 in a `message` attachment |
+| `google_chat` | `chat.googleapis.com/v1/spaces/…/messages` | `cardsV2` + `text` |
+| `json` | anything else (Zapier, Make, n8n, a CRM) | the signed envelope (see "Webhook payload and signing") |
+
+`platform_override` replaces the detected platform. Only `json` is signed; chat
+apps can't verify a signature. Visitor text is escaped for each app (Slack
+`&<>`, Discord markdown and `@` mentions, HTML in Google Chat cards), links in
+it are defanged (`hxxps://`), and values are cut to each app's field limits. The
+template picks the title (empty = the event's default), which fields show
+(`name, email, phone, message, company, source, page, extras`, always in that
+order) and whether the "Open in Paw" link shows; it doesn't apply to `json`.
+
+A destination gets an event when the routing matrix sends that event to
+`webhook` AND the event is in its `events` (`lead_captured`, `handoff`,
+`booking`; default all three). `lead.updated` goes to `json` destinations that
+take `lead_captured`; chat apps skip it. After 10 deliveries in a row that ran
+out of retries, that destination alone is switched off (`status: "disabled"`)
+until it is re-armed, its URL changes or its secret is rotated.
+
+#### `POST /sites/{site_id}/lead-notifications/webhooks`
+
+```json
+{
+  "url": "https://discord.com/api/webhooks/1/abc",
+  "label": "Leads",
+  "platform_override": null,
+  "template": {"title": "New lead", "fields": ["name", "email", "message"], "show_link": true},
+  "events": ["lead_captured", "booking"]
+}
+```
+
+Only `url` is required. The URL goes through the same SSRF check as above
+(`403`). Returns the settings (as `GET`) plus `webhook` (the new destination)
+and `secret`: the signing secret, shown **once**, for a `json` destination, and
+`null` for the chat apps. `422 lead_notifications.too_many_webhooks` past 5,
+`lead_notifications.duplicate_webhook` for a URL already added, and
+`unknown_platform` / `unknown_field` / `unknown_event` / `title_too_long` (150) /
+`label_too_long` (80) for bad input.
+
+#### `PATCH /sites/{site_id}/lead-notifications/webhooks/{webhook_id}`
+
+Partial: any of `url`, `label`, `platform_override` (`null` goes back to the
+detected platform), `template`, `events`, plus `"rearm": true` to switch a
+disabled destination back on. A new URL is SSRF-checked, re-arms, and mints a
+new secret. Returns the same shape as add; `secret` is non-null only when a new
+secret was minted for a destination that is (or just became) `json`. `404` for
+an unknown id.
+
+#### `DELETE /sites/{site_id}/lead-notifications/webhooks/{webhook_id}`
+
+Removes it; deliveries already queued for it are dropped at send time. Returns
+the settings.
+
+#### `POST /sites/{site_id}/lead-notifications/webhooks/{webhook_id}/secret`
+
+Rotates that destination's signing secret (returned once in `secret`, the old
+one co-signs for 24 hours) and re-arms it.
+
+#### `POST /sites/{site_id}/lead-notifications/webhooks/{webhook_id}/test`
+
+Queues one `notification.test` delivery to that destination. Returns
+`{"queued": true, "webhook_id": "…", "platform": "slack"}`. `422
+lead_notifications.webhook_disabled` while it is switched off.
+
+#### `POST /sites/{site_id}/lead-notifications/preview`
+
+```json
+{"platform": null, "url": "https://hooks.slack.com/services/T0/B0/x",
+ "template": {"title": "", "fields": ["name", "email"], "show_link": true},
+ "event": "lead_captured"}
+```
+
+Renders what a destination would get for a made-up lead on this site, with no
+network call. `platform` wins; without it the platform is detected from `url`
+(`json` when neither is given). `event` is `lead_captured`, `handoff`,
+`booking`, `test` or `lead_updated`. Returns
+`{"platform": "slack", "event": "lead_captured", "signed": false, "body": {…}}`,
+where `body` is the exact JSON that would be posted.
+
+#### `GET /lead-notifications/platforms`
+
+The catalogue for the destination editor (same `notifications.manage` gate):
+
+```json
+{
+  "fields": [{"id": "name", "label": "Name"}, {"id": "email", "label": "Email"}, …],
+  "default_fields": ["name", "email", "phone", "message", "page"],
+  "platforms": [{"id": "slack", "label": "Slack", "signed": false}, …,
+                {"id": "json", "label": "JSON (Zapier, Make, n8n, CRM)", "signed": true}],
+  "events": [{"id": "lead_captured", "label": "New lead", "default_title": "New lead"}, …],
+  "max_webhooks": 5,
+  "title_max": 150,
+  "label_max": 80
+}
+```
 
 #### `POST /sites/{site_id}/lead-notifications/recipients`
 
@@ -4650,8 +4784,8 @@ Removes the address. Mail already queued for it is dropped at send time.
 #### `POST /sites/{site_id}/lead-notifications/test`
 
 Queues a test email to every address that may receive mail now and a test
-delivery (`type: "notification.test"`) to the site webhook. Returns
-`{"emails": ["owner@acme.com"], "webhook": true}`.
+delivery (`type: "notification.test"`) to every active webhook destination.
+Returns `{"emails": ["owner@acme.com"], "webhook": true, "webhooks": 2}`.
 
 #### `GET` / `POST /lead-notifications/confirm/{token}` (public)
 
@@ -4670,11 +4804,11 @@ was replaced by a newer one, or the address was removed, and both send
 |---|---|---|
 | `push` | bell + push to the workspace owner and admins | bell + push to the workspace owner |
 | `email` | the full lead; `reply_to` is the visitor's email when valid | a short notice linking to the conversation |
-| `webhook` | the site webhook, `type: "lead.captured"` | the site webhook, `type: "concierge.handoff"` |
+| `webhook` | each destination that takes it, `type: "lead.captured"` | each destination that takes it, `type: "concierge.handoff"` |
 
 The workspace config (`/notifications/delivery-config`) stays the fallback: its
 Slack sink gets every site event (subject to its `routes`), and its webhook gets
-the event when the site has no webhook of its own. Each lead is delivered once
+the event when the site has no active webhook destination. Each lead is delivered once
 per sink, not once per admin. A site event sent to the WORKSPACE webhook also
 carries the deprecated flat fields (`kind` = `lead_captured` /
 `paw_bar_needs_human`, `title`, `body`, `workspace_id`, `recipient_id: null`,
@@ -4744,8 +4878,9 @@ read up to 1 MB and the rest is ignored. The host is resolved and checked when
 each delivery is sent and the connection is pinned to the checked address, on a
 fresh connection per delivery (never one reused from another host); if DNS
 fails nothing is sent and the delivery is retried. After 10 deliveries in a row
-that ran out of retries, the webhook is switched off (`webhook_disabled_at`)
-until its URL is saved again or its secret rotated.
+that ran out of retries, the webhook is switched off (`webhook_disabled_at`, or
+the destination's `disabled_at`) until its URL is saved again, it is re-armed,
+or its secret is rotated.
 
 To verify, recompute the HMAC over the timestamp header, a `.`, and the raw
 request body (before any JSON parsing), compare in constant time, and reject a

@@ -1,17 +1,26 @@
 # ee/pocketpaw_ee/cloud/leads/notifications_router.py
 # HTTP surface for per-site owner notifications (``site_notification_settings``).
-# Thin: every route delegates to ``leads.notification_settings``.
+# Thin: every route delegates to ``leads.notification_settings`` or, for webhook
+# destinations, ``leads.webhook_destinations``.
 #
 # Owner/admin routes, workspace-scoped through the caller's active workspace and
 # gated on ``notifications.manage`` (ADMIN): a member gets 403, and a site in
 # another workspace is a 404 (the service only loads sites in the caller's
 # workspace):
 #   GET    /sites/{site_id}/lead-notifications
-#   PUT    /sites/{site_id}/lead-notifications              (include_owner, events, webhook)
+#   PUT    /sites/{site_id}/lead-notifications              (include_owner, events,
+#                                                            legacy single webhook)
 #   POST   /sites/{site_id}/lead-notifications/recipients   (queues a confirm email)
 #   DELETE /sites/{site_id}/lead-notifications/recipients/{email}
 #   POST   /sites/{site_id}/lead-notifications/test
-#   POST   /sites/{site_id}/lead-notifications/webhook-secret  (rotate; shown once)
+#   POST   /sites/{site_id}/lead-notifications/webhook-secret  (legacy: first webhook)
+#   POST   /sites/{site_id}/lead-notifications/webhooks     (add; secret shown once)
+#   PATCH  /sites/{site_id}/lead-notifications/webhooks/{webhook_id}
+#   DELETE /sites/{site_id}/lead-notifications/webhooks/{webhook_id}
+#   POST   /sites/{site_id}/lead-notifications/webhooks/{webhook_id}/secret
+#   POST   /sites/{site_id}/lead-notifications/webhooks/{webhook_id}/test
+#   POST   /sites/{site_id}/lead-notifications/preview      (render a sample; no network)
+#   GET    /lead-notifications/platforms                    (field + platform catalogue)
 #
 # PUBLIC: /lead-notifications/confirm/{token}, the link in the confirm email.
 # GET only renders a confirm button (no side effect, so link scanners can't
@@ -30,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action_any_workspace
 from pocketpaw_ee.cloud.leads import notification_settings as settings_service
+from pocketpaw_ee.cloud.leads import webhook_destinations as destinations
 
 router = APIRouter(tags=["Sites"])
 
@@ -48,6 +58,44 @@ class LeadNotificationsUpdate(BaseModel):
 
 class RecipientAdd(BaseModel):
     email: str = Field(max_length=320)
+
+
+class WebhookTemplateBody(BaseModel):
+    title: str = Field(default="", max_length=300)
+    fields: list[str] | None = Field(default=None, max_length=20)
+    show_link: bool = True
+
+
+class WebhookCreate(BaseModel):
+    url: str = Field(max_length=2048)
+    label: str = Field(default="", max_length=300)
+    platform_override: str | None = None
+    template: WebhookTemplateBody | None = None
+    events: list[str] | None = Field(default=None, max_length=10)
+
+
+class WebhookPatch(BaseModel):
+    """Partial: omitted fields are left as they are. ``platform_override: null``
+    goes back to the detected platform; ``rearm`` switches a disabled one back on."""
+
+    url: str | None = Field(default=None, max_length=2048)
+    label: str | None = Field(default=None, max_length=300)
+    platform_override: str | None = None
+    template: WebhookTemplateBody | None = None
+    events: list[str] | None = Field(default=None, max_length=10)
+    rearm: bool = False
+
+
+class PreviewRequest(BaseModel):
+    # Omitted: detected from ``url`` (json when neither is given).
+    platform: str | None = None
+    url: str | None = Field(default=None, max_length=2048)
+    template: WebhookTemplateBody | None = None
+    event: str = "lead_captured"
+
+
+def _template(body: WebhookTemplateBody | None) -> dict | None:
+    return body.model_dump() if body is not None else None
 
 
 @router.get("/sites/{site_id}/lead-notifications")
@@ -115,6 +163,106 @@ async def rotate_lead_notification_webhook_secret(
 ) -> dict:
     """New signing secret for the site webhook, returned once; re-arms it."""
     return await settings_service.rotate_webhook_secret(workspace_id, site_id)
+
+
+@router.get("/lead-notifications/platforms")
+async def get_lead_notification_platforms(_user=Depends(_MANAGE)) -> dict:
+    """Template field catalogue, platforms and events for the destination editor."""
+    return destinations.catalogue()
+
+
+@router.post("/sites/{site_id}/lead-notifications/webhooks")
+async def add_lead_notification_webhook(
+    site_id: str,
+    body: WebhookCreate,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await destinations.add_webhook(
+        workspace_id,
+        site_id,
+        url=body.url,
+        label=body.label,
+        platform_override=body.platform_override,
+        template=_template(body.template),
+        events=body.events,
+    )
+
+
+@router.patch("/sites/{site_id}/lead-notifications/webhooks/{webhook_id}")
+async def patch_lead_notification_webhook(
+    site_id: str,
+    webhook_id: str,
+    body: WebhookPatch,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    override = (
+        body.platform_override
+        if "platform_override" in body.model_fields_set
+        else destinations.UNSET
+    )
+    return await destinations.update_webhook(
+        workspace_id,
+        site_id,
+        webhook_id,
+        url=body.url,
+        label=body.label,
+        platform_override=override,
+        template=_template(body.template),
+        events=body.events,
+        rearm=body.rearm,
+    )
+
+
+@router.delete("/sites/{site_id}/lead-notifications/webhooks/{webhook_id}")
+async def delete_lead_notification_webhook(
+    site_id: str,
+    webhook_id: str,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await destinations.remove_webhook(workspace_id, site_id, webhook_id)
+
+
+@router.post("/sites/{site_id}/lead-notifications/webhooks/{webhook_id}/secret")
+async def rotate_lead_notification_webhook(
+    site_id: str,
+    webhook_id: str,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    """New signing secret for one destination, returned once; re-arms it."""
+    return await destinations.rotate_webhook(workspace_id, site_id, webhook_id)
+
+
+@router.post("/sites/{site_id}/lead-notifications/webhooks/{webhook_id}/test")
+async def test_lead_notification_webhook(
+    site_id: str,
+    webhook_id: str,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await destinations.send_webhook_test(workspace_id, site_id, webhook_id)
+
+
+@router.post("/sites/{site_id}/lead-notifications/preview")
+async def preview_lead_notification(
+    site_id: str,
+    body: PreviewRequest,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    """The message a destination would get, rendered on a sample lead. No
+    network calls."""
+    return await destinations.preview_for(
+        workspace_id,
+        site_id,
+        platform=body.platform,
+        url=body.url,
+        template=_template(body.template),
+        event=body.event,
+    )
 
 
 _INVALID = (
