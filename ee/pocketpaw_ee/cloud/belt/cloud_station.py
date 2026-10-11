@@ -18,7 +18,8 @@
 #           instructions (its Agent's system prompt) ride the brief fenced as
 #           data, as in the local develop prompt. One launch at a time.
 #   TRACK   ``gh`` finds the PR by its ``Belt-Run`` line and polls it. The repo's
-#           fast lane + CI is the diff gate:
+#           fast lane + CI is the diff gate. Once the PR is known its diff
+#           goes to ``clef.shadow_diff`` (a recorded score that gates nothing):
 #             merged   -> the run is approved as ``system:fast-lane`` and marked
 #                         executed (landed), with pr_url, head branch, merge sha;
 #             refused  -> (closed unmerged, or a ``Fast lane: not eligible``
@@ -237,6 +238,7 @@ class CloudTaskDispatcher:
                 number = await self._find_pr(slug, run_ref, cwd)
                 if number is not None:
                     await _patch(store, run_ref, cloud={"session_url": session, "pr": number})
+                    await self._shadow_score(blob, run_ref, slug, number, cwd)
             if number is not None:
                 pr = json.loads(
                     await self._ok(
@@ -269,6 +271,22 @@ class CloudTaskDispatcher:
                     f"TRACK: {what} after {self.timeout_seconds:.0f}s (session {session})"
                 )
             await self.sleep(self.poll_seconds)
+
+    async def _shadow_score(
+        self, blob: dict[str, Any], run_ref: str, slug: str, number: int, cwd: Path
+    ) -> None:
+        """Hand the PR's diff to Clef's shadow scorer (``belt/clef.py``, off unless
+        ``POCKETPAW_BELT_CLEF=shadow``). Records a verdict, gates nothing, and a
+        failure here never touches the run."""
+        from pocketpaw_ee.cloud.belt import clef
+
+        try:
+            diff = await self._ok(["gh", "pr", "diff", str(number), "-R", slug], cwd, "CLEF")
+            clef.shadow_diff(
+                str(blob.get("workspace_id") or ""), run_ref, diff, str(blob.get("repo") or "")
+            )
+        except Exception:  # noqa: BLE001 — shadow scoring is best-effort
+            logger.info("belt cloud: clef shadow score skipped for %s", run_ref, exc_info=True)
 
     async def _find_pr(self, slug: str, run_ref: str, cwd: Path) -> int | None:
         out = await self._ok(

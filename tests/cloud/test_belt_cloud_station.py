@@ -12,7 +12,8 @@
 # PR's diff and leaves the run PENDING at the per-diff gate; a launch with no
 # session URL, a launch clone on another origin, and a tracker timeout each leave
 # the run queued with ``headless_error`` (and the origin mismatch never launches);
-# the seated dev's instructions ride the brief, fenced;
+# the seated dev's instructions ride the brief, fenced; the PR's diff goes to
+# Clef's shadow scorer once the PR is known;
 # ``wire_from_env`` wires the cloud dispatcher only with a launch clone.
 
 from __future__ import annotations
@@ -139,7 +140,7 @@ def _dispatcher(runner: FakeRunner, launch: Path, **kw) -> CloudTaskDispatcher:
 SESSION = "Created cloud session: https://claude.ai/code/session_ABC123\r\n"
 
 
-async def test_merged_pr_lands_the_run(store, dirs):
+async def test_merged_pr_lands_the_run(store, dirs, monkeypatch):
     repo, launch = dirs
     run_ref = await _queue(store, repo)
     pr = {
@@ -152,9 +153,15 @@ async def test_merged_pr_lands_the_run(store, dirs):
     }
     runner = FakeRunner(launch_out=SESSION, pr=pr)
     runner.run_ref = run_ref
+    scored: list[tuple] = []
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.belt.clef.shadow_diff", lambda *a, **k: scored.append(a)
+    )
 
     await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
+    # Clef's shadow scorer got the PR's diff once the PR was known.
+    assert scored == [(WS, run_ref, DIFF, str(repo))]
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.EXECUTED
     assert action.approved_by == "system:fast-lane"

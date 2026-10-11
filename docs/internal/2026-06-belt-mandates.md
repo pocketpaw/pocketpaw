@@ -536,7 +536,8 @@ the charter checks until they pass, open ONE PR to the base that says
 `fast-lane`), add no AI attribution, and stop without merging. The seated dev's
 instructions ride the brief fenced as data, as in the local develop prompt.
 The repo's own fast lane and CI are the diff gate for small PRs; the plan gate
-is unchanged. There is no local ORIENT, CHECK or REVIEW in this mode: the
+is unchanged. Once the PR is known, its diff also goes to Clef's shadow scorer
+(`belt/clef.shadow_diff`), which records a verdict and gates nothing. There is no local ORIENT, CHECK or REVIEW in this mode: the
 session works in the cloud. Tracking is process-local: a restart leaves the run
 with `headless_state: "cloud"` (the digest lists it as stuck) and nothing
 resumes it yet.
