@@ -29,6 +29,8 @@
 #     The diff is stored verbatim (only a trailing newline is ensured —
 #     stripping corrupts it for ``git apply``). A best-effort
 #     ``headless_diff_attached`` audit entry marks LLM content entering the store.
+#     The attached diff also goes to ``clef.shadow_diff`` (a background score
+#     recorded on the blob; it gates nothing).
 #   * ``HeadlessTaskDispatcher`` — the mandates ``TaskDispatcher`` that files the
 #     queued run via ``StationTaskDispatcher`` then runs the runner on it. The
 #     production dispatcher (``resolve_headless_dispatcher``) runs the develop in
@@ -340,6 +342,10 @@ class HeadlessDevelopRunner:
             )
             return
         await _emit(workspace_id, action_id, "proposed", "gate")
+        # Shadow only: Clef scores the diff in the background; it gates nothing.
+        from pocketpaw_ee.cloud.belt import clef
+
+        clef.shadow_diff(workspace_id, action_id, diff, str(blob.get("repo") or ""))
 
         # Audit trail — this is the FIRST place LLM-produced content enters the
         # Instinct store without a human typing it, so leave an operator trail of
