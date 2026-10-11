@@ -1,0 +1,65 @@
+[
+  {
+    "label": "a merged PR is not treated as landed",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if pr.get(\"state\") == \"MERGED\":",
+    "replace": "if pr.get(\"state\") == \"MERGED!\":",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_merged_pr_lands_the_run"
+    ]
+  },
+  {
+    "label": "a fast-lane refusal comment does not escalate",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "str(c.get(\"body\") or \"\").startswith(_REFUSED) for c in pr.get(\"comments\") or []",
+    "replace": "False for c in pr.get(\"comments\") or []",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_lane_refusal_escalates_to_the_diff_gate"
+    ]
+  },
+  {
+    "label": "any PR is taken as the run's PR, marker or not",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if any(line.strip() == mark for line in str(pr.get(\"body\") or \"\").splitlines()):",
+    "replace": "if True:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_merged_pr_lands_the_run"
+    ]
+  },
+  {
+    "label": "a launch clone on another origin still launches",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if await self._slug(launch) != slug:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_launch_clone_on_another_origin_never_launches"
+    ]
+  },
+  {
+    "label": "the launch clone is not detached at origin/<base>",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "\"--detach\", f\"origin/{base}\"",
+    "replace": "\"--detach\", \"HEAD\"",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_merged_pr_lands_the_run"
+    ]
+  },
+  {
+    "label": "the tracker never gives up",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if self.clock() >= deadline:",
+    "replace": "if self.clock() >= deadline and False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_tracker_timeout_without_a_pr"
+    ]
+  },
+  {
+    "label": "the seated dev's instructions are left out of the brief",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "f\"{_task_block(request)}\\n\\n{_worker_block(request)}\"",
+    "replace": "f\"{_task_block(request)}\\n\\n\"",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_seated_dev_instructions_ride_the_brief"
+    ]
+  }
+]

@@ -4,6 +4,7 @@
      crew (cloud Agents as workers: roster, seat rule, per-worker model,
      instructions and setup), the headless develop station (strict and owner
      Claude setups, the trust restore, ORIENT) and its security posture, the
+     cloud develop station (claude --cloud + PR tracking through gh), the
      architecture context the foreman and review get, the mandate's line
      branch (base sync, landing, re-develop, one PR, its state on the wire and
      the UI surfaces), the run feed (live over SSE and stored per stage, with
@@ -501,6 +502,44 @@ the blob's `expected_outcome`; the attached run's `summary` becomes the
 station's report (checks, setup, orient source, review verdict and notes, fix
 attempts), and its `files_changed` is the station's count (else the diff's
 `+++` headers).
+
+### The cloud develop station
+
+`POCKETPAW_FACTORY_DEVELOP=cloud` (with `POCKETPAW_MANDATE_DISPATCHER=headless`)
+is for a host that should not build or test: nothing agent-written runs on it.
+`belt/cloud_station.CloudTaskDispatcher` takes the headless dispatcher's seat
+(`headless.set_production_dispatcher`). An approved task is filed as the usual
+queued run, then in the background:
+
+```
+LAUNCH  task text injection-screened; bound repo inside the allowlist; the
+        launch clone (POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR, never the bound repo)
+        must share its GitHub origin; fetch + detach at origin/<base> (a cloud
+        session starts from the local commit); `claude --cloud "<brief>"` under
+        belt/pty_run.py (the CLI refuses a non-TTY); the session URL is read
+        from its output. One launch at a time.
+TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
+        it every POCKETPAW_FACTORY_CLOUD_POLL seconds:
+          merged   -> approved as `system:fast-lane` (audited), mark_executed:
+                      the run is landed, with pr_url, head branch, merge sha
+          refused  -> closed unmerged, or a `Fast lane: not eligible` comment:
+                      `gh pr diff` is attached as the run's diff, which waits
+                      at the per-diff Instinct gate (approving it lands it on
+                      the line like any run; close the PR then)
+          timeout  -> headless_error, the run stays queued
+```
+
+The brief tells the session to do the task, follow the repo's CLAUDE.md, run
+the charter checks until they pass, open ONE PR to the base that says
+`Closes #<issue>` (the first `#n` in the task text) and carries the
+`Belt-Run` line, add the label (`POCKETPAW_FACTORY_CLOUD_PR_LABEL`, default
+`fast-lane`), add no AI attribution, and stop without merging. The seated dev's
+instructions ride the brief fenced as data, as in the local develop prompt.
+The repo's own fast lane and CI are the diff gate for small PRs; the plan gate
+is unchanged. There is no local ORIENT, CHECK or REVIEW in this mode: the
+session works in the cloud. Tracking is process-local: a restart leaves the run
+with `headless_state: "cloud"` (the digest lists it as stuck) and nothing
+resumes it yet.
 
 ### The crew: cloud Agents as workers
 
@@ -1082,7 +1121,11 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | Variable | Default | What |
 |---|---|---|
 | `POCKETPAW_MANDATE_DISPATCHER` | `station` | `station` / `headless` / `bus` (above) |
-| `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`) |
+| `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`); `cloud` wires the cloud develop station instead (see *The cloud develop station*) |
+| `POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR` | unset | Cloud mode only, and required there: an existing clone of the bound repo's origin, already trusted by the claude CLI, that cloud sessions launch from |
+| `POCKETPAW_FACTORY_CLOUD_PR_LABEL` | `fast-lane` | The label the cloud brief tells the session to put on its PR |
+| `POCKETPAW_FACTORY_CLOUD_POLL` | `60` | Seconds between `gh` polls of a cloud run's PR |
+| `POCKETPAW_FACTORY_CLOUD_TIMEOUT` | `14400` | Seconds a cloud run waits for its PR to merge or be refused before it fails back to queued |
 | `POCKETPAW_FACTORY_DEDICATED_HOST` | unset | `1` lets the station wire in a process serving cloud tenants; set it only on a dedicated single-tenant host |
 | `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,belt,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
 | `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |

@@ -41,6 +41,9 @@
 #     executor re-queues an approved headless run whose diff no longer applies
 #     on the moved base or line and hands it back here (once; see
 #     ``belt/executor.py``).
+#   * ``set_production_dispatcher`` — a whole dispatcher that wins over the
+#     develop-fn one: the cloud station (``belt/cloud_station.py``), which hands
+#     each task to a Claude Code cloud session and tracks its PR instead.
 #
 # Blob writes go through ``InstinctStore.update_parameters`` (same pattern as
 # ``belt/executor.py::_persist_run_result``).
@@ -557,6 +560,18 @@ _DEVELOP_LOCK = asyncio.Lock()
 # LLM (tests construct ``HeadlessTaskDispatcher`` with a fake ``DevelopFn``
 # directly, bypassing this seam).
 _PRODUCTION_DEVELOP_FN: DevelopFn | None = None
+# A whole dispatcher that replaces the develop-fn path: the cloud station
+# (``belt/cloud_station.CloudTaskDispatcher``, ``POCKETPAW_FACTORY_DEVELOP=cloud``),
+# which hands the task to a cloud session instead of producing a diff here.
+_PRODUCTION_DISPATCHER: Any = None
+
+
+def set_production_dispatcher(dispatcher: Any) -> None:
+    """Wire (or clear) a dispatcher that ``resolve_headless_dispatcher`` returns
+    ahead of the develop-fn one. It must offer ``dispatch(...)`` and
+    ``develop(run_ref, workspace_id=...)`` like ``HeadlessTaskDispatcher``."""
+    global _PRODUCTION_DISPATCHER
+    _PRODUCTION_DISPATCHER = dispatcher
 
 
 def set_production_develop_fn(fn: DevelopFn | None) -> None:
@@ -569,13 +584,16 @@ def set_production_develop_fn(fn: DevelopFn | None) -> None:
     _PRODUCTION_DEVELOP_FN = fn
 
 
-def resolve_headless_dispatcher() -> HeadlessTaskDispatcher | None:
+def resolve_headless_dispatcher() -> Any:
     """Build the headless dispatcher IF a production develop loop is wired.
 
     Returns ``None`` when no ``DevelopFn`` is wired so the mandates executor can
     degrade to the queued-run station dispatcher (a human can still drive the
     run). This keeps the autonomous path strictly opt-in and never silently
-    files runs that nothing can develop."""
+    files runs that nothing can develop. A wired production dispatcher (the
+    cloud station) wins."""
+    if _PRODUCTION_DISPATCHER is not None:
+        return _PRODUCTION_DISPATCHER
     if _PRODUCTION_DEVELOP_FN is None:
         return None
     return HeadlessTaskDispatcher(
@@ -591,4 +609,5 @@ __all__ = [
     "HeadlessTaskDispatcher",
     "resolve_headless_dispatcher",
     "set_production_develop_fn",
+    "set_production_dispatcher",
 ]

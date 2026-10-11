@@ -45,7 +45,8 @@
 # git with fsmonitor and hooks off, the worktree ``.git`` file re-checked after
 # every agent step (INTEGRITY), claude tools path-scoped to ``./**`` with
 # WebFetch/WebSearch/Task denied. Wired by ``wire_from_env`` when
-# ``POCKETPAW_MANDATE_DISPATCHER=headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``;
+# ``POCKETPAW_MANDATE_DISPATCHER=headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``
+# (``=cloud`` wires ``cloud_station.CloudTaskDispatcher`` instead: no local build);
 # refused in a multi-tenant process unless ``POCKETPAW_FACTORY_DEDICATED_HOST=1``,
 # and in owner setup without a worktree root.
 
@@ -1113,7 +1114,8 @@ def _review_prompt(request: DevelopRequest, diff: str, orient: str = "") -> str:
 def wire_from_env() -> bool:
     """Wire ``ClaudeCodeDevelop`` as the production develop loop when
     ``POCKETPAW_MANDATE_DISPATCHER=headless`` and ``POCKETPAW_FACTORY_DEVELOP=
-    claude``. Returns whether it wired. Called once from a cloud startup hook
+    claude``, or the cloud station (``cloud_station.wire_cloud``) for ``=cloud``.
+    Returns whether it wired. Called once from a cloud startup hook
     (after the cloud DB is open, so the tenancy signal below is real).
 
     The station runs agent-written code (checks, recipes) on this host, so it
@@ -1125,7 +1127,7 @@ def wire_from_env() -> bool:
 
     dispatcher = (os.environ.get("POCKETPAW_MANDATE_DISPATCHER") or "").strip().lower()
     develop = (os.environ.get("POCKETPAW_FACTORY_DEVELOP") or "").strip().lower()
-    if dispatcher != "headless" or develop != "claude":
+    if dispatcher != "headless" or develop not in ("claude", "cloud"):
         return False
     dedicated = (os.environ.get("POCKETPAW_FACTORY_DEDICATED_HOST") or "").strip().lower()
     if cloud_db.is_multi_tenant_cloud() and dedicated not in ("1", "true"):
@@ -1135,6 +1137,10 @@ def wire_from_env() -> bool:
             "POCKETPAW_FACTORY_DEDICATED_HOST=1 only on a dedicated single-tenant host."
         )
         return False
+    if develop == "cloud":
+        from pocketpaw_ee.cloud.belt.cloud_station import wire_cloud
+
+        return wire_cloud()
     if owner_setup() and owner_worktree_root() is None:
         logger.error(
             "belt: NOT wiring the headless develop station: POCKETPAW_FACTORY_CLAUDE_SETUP="
