@@ -372,7 +372,8 @@ feed").
 When a mandate binds `soul_path`, `soul_link.py` recalls up to 5 memories
 before planning and appends an episodic shift summary after every terminal
 (dispatched / rejected / stood_down) via the real soul-protocol API
-(`Soul.awaken → recall/remember → save_local`). Best-effort throughout — a
+(`Soul.awaken → recall/remember`, then `export` back into a `.soul` file, or
+`save_local` for a soul directory). Best-effort throughout — a
 soul failure never wedges a shift.
 
 ## Autopilot — Foresight-seeded simulated users (feat/belt-autopilot)
@@ -516,8 +517,12 @@ LAUNCH  task text injection-screened; bound repo inside the allowlist; the
         launch clone (POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR, never the bound repo)
         must share its GitHub origin; fetch + detach at origin/<base> (a cloud
         session starts from the local commit); `claude --cloud "<brief>"` under
-        belt/pty_run.py (the CLI refuses a non-TTY); the session URL is read
-        from its output. One launch at a time.
+        belt/pty_run.py (the CLI refuses a non-TTY), which streams the CLI's
+        output, so a launch that times out (300 s) still shows what it printed;
+        the session URL is read from that output. If the CLI stops at its
+        folder-trust prompt, pty_run exits and the run fails with `LAUNCH: the
+        claude CLI does not trust <dir>`; open the clone in claude once and
+        accept the prompt (Belt never answers it). One launch at a time.
 TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
         it every POCKETPAW_FACTORY_CLOUD_POLL seconds:
           merged   -> approved as `system:fast-lane` (audited), mark_executed:
