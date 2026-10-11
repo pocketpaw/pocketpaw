@@ -1,5 +1,4 @@
 # ee/pocketpaw_ee/cloud/mandates/soul_link.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 6 — soul wiring, demo bar).
 #
 # The mandate ↔ soul bridge. When a mandate binds a ``soul_path`` (a .soul
 # file), the foreman RECALLS context from it before planning, and every
@@ -12,9 +11,13 @@
 #   * ``remember_shift(soul_path, summary)``     -> bool
 #
 # Implementation rides the real soul-protocol API (``Soul.awaken`` →
-# ``recall``/``remember`` → ``save_local``). EVERYTHING is best-effort: a
-# missing file, a corrupt soul, or a protocol error logs and degrades to an
-# empty recall / no-op remember — a soul failure must never wedge a shift.
+# ``recall``/``remember``), saved back in the shape it was read from: a soul
+# directory with ``save_local``, a ``.soul`` archive with ``export`` (keys
+# kept so later shifts can still sign; written beside the file, then swapped
+# in). ``save_local`` on an archive path would mkdir over the file and fail.
+# EVERYTHING is best-effort: a missing file, a corrupt soul, or a protocol
+# error logs and degrades to an empty recall / no-op remember — a soul failure
+# must never wedge a shift.
 
 from __future__ import annotations
 
@@ -61,7 +64,12 @@ async def remember_shift(soul_path: str | None, summary: str) -> bool:
 
         soul = await Soul.awaken(path)
         await soul.remember(summary.strip(), type=MemoryType.EPISODIC, importance=7)
-        await soul.save_local(path)
+        if path.is_dir():
+            await soul.save_local(path)
+        else:  # write beside it, then swap: a crash mid-write never truncates the soul
+            tmp = path.with_name(path.name + ".tmp")
+            await soul.export(tmp, include_keys=True)
+            tmp.replace(path)
         return True
     except Exception:  # noqa: BLE001 — soul failures must never wedge a shift
         logger.warning("mandate soul: remember failed for %s", soul_path, exc_info=True)
