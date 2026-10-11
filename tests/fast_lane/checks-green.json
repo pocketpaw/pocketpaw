@@ -1,0 +1,91 @@
+[
+  {
+    "__typename": "CheckRun",
+    "name": "Lint",
+    "workflowName": "CI",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "check-quality",
+    "workflowName": "PR Quality Gate",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "pytest (flag mode)",
+    "workflowName": "Tests",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "Build wheels",
+    "workflowName": "CI",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "security-scan",
+    "workflowName": "PR Quality Gate",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "Test (OSS-only)",
+    "workflowName": "CI",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "Test (Python 3.12)",
+    "workflowName": "CI",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "Mutation plan anchors",
+    "workflowName": "CI",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "OSS-EE boundary",
+    "workflowName": "CI",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "Deploy to Coolify",
+    "workflowName": "CI",
+    "status": "COMPLETED",
+    "conclusion": "SKIPPED"
+  },
+  {
+    "__typename": "StatusContext",
+    "context": "ci/external",
+    "state": "SUCCESS"
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "fast-lane",
+    "workflowName": "Fast Lane",
+    "status": "IN_PROGRESS",
+    "conclusion": null
+  },
+  {
+    "__typename": "CheckRun",
+    "name": "Copilot code review",
+    "workflowName": "",
+    "status": "IN_PROGRESS",
+    "conclusion": null
+  }
+]

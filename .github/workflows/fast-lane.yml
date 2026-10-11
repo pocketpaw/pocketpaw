@@ -1,0 +1,61 @@
+# Fast lane: squash-merge small, green, allowlisted PRs labelled `fast-lane`
+# into dev. All logic lives in scripts/fast-lane.sh; docs in docs/fast-lane.md.
+#
+# Safety: this workflow never checks out or runs PR code. It checks out only
+# scripts/fast-lane.sh from the trusted dev branch and talks to the GitHub API.
+# workflow_run fires from the copy of this file on the default branch (main),
+# so that trigger starts working once this file reaches main.
+name: Fast Lane
+
+on:
+  pull_request_target:
+    types: [labeled, synchronize, ready_for_review]
+    branches: [dev]
+  workflow_run:
+    workflows: [CI, Tests, PR Quality Gate]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to evaluate (empty = every open fast-lane PR)
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: fast-lane-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || inputs.pr || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  fast-lane:
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'fast-lane') ||
+      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'fast-lane'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          persist-credentials: false
+          sparse-checkout: scripts/fast-lane.sh
+          sparse-checkout-cone-mode: false
+      - name: Evaluate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_INPUT: ${{ inputs.pr }}
+        run: |
+          case "$EVENT" in
+            pull_request_target) bash scripts/fast-lane.sh "$PR" ;;
+            workflow_run) bash scripts/fast-lane.sh --sha "$SHA" ;;
+            *) bash scripts/fast-lane.sh ${PR_INPUT:+"$PR_INPUT"} ;;
+          esac
