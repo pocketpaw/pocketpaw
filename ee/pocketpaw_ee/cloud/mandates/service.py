@@ -8,7 +8,9 @@
 # mandates; file_feedback, list_sightings, run_patrols (patrols
 # that accept ``workspace_id`` / ``user_id`` / ``upstream`` get them via
 # signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
-# (sense → foreman → plan gate); prepare_plan_resolution; get_pawprints;
+# (sense → foreman → plan gate; a proposed plan is also handed to
+# ``belt.clef.shadow_plan``, which scores it in the background and gates
+# nothing); prepare_plan_resolution; get_pawprints;
 # set_autopilot; set_crew (the roster; each NEW agent must be one the caller can
 # read in this workspace, enabled); digest (the morning report, composed only
 # from the read functions above plus the belt runs list).
@@ -1324,6 +1326,10 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         state="in_gate",
         plan_action_id=str(action.id),
     )
+    # Shadow only: Clef scores the plan in the background; it gates nothing.
+    from pocketpaw_ee.cloud.belt import clef
+
+    clef.shadow_plan(workspace_id, str(action.id), plan.model_dump()["tasks"], charter_wire)
     # UI contract — announce the new plan proposal on the ``belt_plan`` topic
     # (workspace fan-out, mirroring how belt_run_updated rides the bus). The
     # page subscribing to this topic reads {mandate_id, proposal}.
