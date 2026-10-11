@@ -70,5 +70,41 @@
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_merged_pr_lands_the_run"
     ]
+  },
+  {
+    "label": "a timed-out launch drops the output the CLI streamed",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "out = out or \"\\n\".join(seen)",
+    "replace": "out = out",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_launch_timeout_keeps_the_streamed_output"
+    ]
+  },
+  {
+    "label": "an untrusted launch clone is reported as a missing session",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if \"trustthisfolder\" in re.sub(",
+    "replace": "if \"never\" in re.sub(",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_untrusted_launch_clone_fails_with_a_clear_error"
+    ]
+  },
+  {
+    "label": "pty_run buffers instead of streaming",
+    "file": "ee/pocketpaw_ee/cloud/belt/pty_run.py",
+    "find": "    sys.stdout.buffer.flush()\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_pty_run_streams_output_before_a_timeout"
+    ]
+  },
+  {
+    "label": "pty_run waits at the folder-trust prompt",
+    "file": "ee/pocketpaw_ee/cloud/belt/pty_run.py",
+    "find": "_TRUST_PROMPT = b\"trustthisfolder\"",
+    "replace": "_TRUST_PROMPT = b\"neverseen\"",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_pty_run_fails_fast_at_the_folder_trust_prompt"
+    ]
   }
 ]

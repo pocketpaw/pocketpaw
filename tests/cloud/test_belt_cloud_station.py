@@ -13,12 +13,17 @@
 # session URL, a launch clone on another origin, and a tracker timeout each leave
 # the run queued with ``headless_error`` (and the origin mismatch never launches);
 # the seated dev's instructions ride the brief, fenced; the PR's diff goes to
-# Clef's shadow scorer once the PR is known;
+# Clef's shadow scorer once the PR is known; a launch that times out keeps
+# the CLI output it streamed; a launch clone the CLI does not trust fails with
+# a clear error. ``pty_run.py`` itself runs for real: it streams the child's
+# output as it lands and exits on the folder-trust prompt instead of waiting;
 # ``wire_from_env`` wires the cloud dispatcher only with a launch clone.
 
 from __future__ import annotations
 
 import json
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +31,7 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud.belt import cloud_station, headless  # noqa: E402
+from pocketpaw_ee.cloud.belt import develop_station as ds  # noqa: E402
 from pocketpaw_ee.cloud.belt.cloud_station import MARKER, CloudTaskDispatcher  # noqa: E402
 from pocketpaw_ee.cloud.belt.develop_station import ClaudeCodeDevelop  # noqa: E402
 from pocketpaw_ee.cloud.mandates.executor import StationTaskDispatcher  # noqa: E402
@@ -90,9 +96,19 @@ async def _queue(store: InstinctStore, repo: Path) -> str:
 class FakeRunner:
     """Scripted git / launcher / gh. ``pr`` is what ``gh pr view`` returns."""
 
-    def __init__(self, *, launch_out: str, launch_origin: str = SLUG, pr: dict | None = None):
+    def __init__(
+        self,
+        *,
+        launch_out: str,
+        launch_origin: str = SLUG,
+        pr: dict | None = None,
+        launch_code: int = 0,
+        launch_lines: tuple[str, ...] = (),
+    ):
         self.calls: list[tuple[list[str], Path]] = []
         self.launch_out = launch_out
+        self.launch_code = launch_code
+        self.launch_lines = launch_lines  # streamed through on_line before returning
         self.launch_origin = launch_origin
         self.pr = pr
         self.run_ref = ""
@@ -103,7 +119,12 @@ class FakeRunner:
             slug = SLUG if cwd.name == "repo" else self.launch_origin
             return 0, f"https://github.com/{slug}.git\n", ""
         if "--cloud" in argv:
-            return 0, self.launch_out, ""
+            for line in self.launch_lines:
+                if on_line is not None:
+                    await on_line(line)
+            if self.launch_code == -1:  # what run_subprocess returns after the kill
+                return -1, "", f"timed out after {timeout:.0f}s"
+            return self.launch_code, self.launch_out, ""
         if argv[:3] == ["gh", "pr", "list"]:
             if self.pr is None:
                 return 0, "[]", ""
@@ -286,3 +307,73 @@ async def test_seated_dev_instructions_ride_the_brief(store, dirs):
 
     brief = next(a for a, _ in runner.calls if "--cloud" in a)[-1]
     assert "<untrusted>\nRead docs/review-rubric.md first.\n</untrusted>" in brief
+
+
+async def test_launch_timeout_keeps_the_streamed_output(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(
+        launch_out="",
+        launch_code=-1,
+        launch_lines=("Connecting to Claude Code cloud...", "\x1b[2mWaiting for login\x1b[0m"),
+    )
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    err = (await store.get_action(run_ref)).parameters["_code_change"]["headless_error"]
+    assert "no cloud session started (exit -1)" in err
+    assert "Waiting for login" in err and "Connecting to Claude Code cloud" in err
+    assert "\x1b" not in err  # escape codes stripped from the tail
+
+
+async def test_untrusted_launch_clone_fails_with_a_clear_error(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    prompt = (
+        "Quick safety check: Is this a project you created or one you trust?\r\n"
+        "\x1b[1m> 1. Yes,\x1b[1CI\x1b[1Ctrust\x1b[1Cthis\x1b[1Cfolder\x1b[0m"
+    )
+    runner = FakeRunner(launch_out=prompt, launch_code=3)
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    err = (await store.get_action(run_ref)).parameters["_code_change"]["headless_error"]
+    assert err.startswith(f"LAUNCH: the claude CLI does not trust {launch.resolve()}")
+    assert "accept the trust prompt" in err
+    assert not any(a[0] == "gh" for a, _ in runner.calls)
+
+
+def _pty_child(script: str) -> list[str]:
+    return [sys.executable, cloud_station.PTY_RUN, sys.executable, "-c", script]
+
+
+async def test_pty_run_streams_output_before_a_timeout(tmp_path):
+    seen: list[str] = []
+
+    async def on_line(line: str) -> None:
+        seen.append(line)
+
+    child = "import time; print('cloud: starting', flush=True); time.sleep(60)"
+    code, _, err = await ds.run_subprocess(
+        _pty_child(child), cwd=tmp_path, timeout=3, on_line=on_line
+    )
+
+    assert code == -1 and "timed out" in err
+    assert any("cloud: starting" in line for line in seen)
+
+
+async def test_pty_run_fails_fast_at_the_folder_trust_prompt(tmp_path):
+    # The prompt waits for input with no trailing newline, its words split by
+    # cursor moves, as the CLI's TUI renders it.
+    child = (
+        "import sys, time\n"
+        "sys.stdout.write('Quick safety check: Is this a project you created or one you "
+        "trust?\\r\\n\\x1b[1m> 1. Yes,\\x1b[1CI trust\\x1b[1Cthis folder\\x1b[0m')\n"
+        "sys.stdout.flush(); time.sleep(60)"
+    )
+    started = time.monotonic()
+    code, out, _ = await ds.run_subprocess(_pty_child(child), cwd=tmp_path, timeout=30)
+
+    assert code not in (0, -1)  # pty_run bailed on its own, not via the timeout
+    assert time.monotonic() - started < 20
+    assert "Quick safety check" in out

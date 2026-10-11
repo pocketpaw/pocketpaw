@@ -11,12 +11,17 @@
 #           injection-screened. The launch clone is fetched and detached at
 #           ``origin/<base>`` (a cloud session starts from the local commit), then
 #           ``claude --cloud "<brief>"`` runs under ``pty_run.py`` (the CLI refuses
-#           a non-TTY). The brief: do the task, run the charter checks, open ONE
-#           PR to <base> with ``Closes #<issue>`` and the line ``Belt-Run: <run
-#           id>``, label it (``POCKETPAW_FACTORY_CLOUD_PR_LABEL``, default
-#           ``fast-lane``), no AI attribution, stop. The seated dev's
-#           instructions (its Agent's system prompt) ride the brief fenced as
-#           data, as in the local develop prompt. One launch at a time.
+#           a non-TTY), which streams the CLI's output, so a launch that hits
+#           its 300 s timeout still reports what the CLI printed. A launch clone
+#           the CLI does not trust shows a folder-trust prompt; pty_run exits on
+#           it and the run fails with a LAUNCH error naming the clone (the
+#           prompt is never answered for the owner). The brief: do the task,
+#           run the charter checks, open ONE PR to <base> with ``Closes
+#           #<issue>`` and the line ``Belt-Run: <run id>``, label it
+#           (``POCKETPAW_FACTORY_CLOUD_PR_LABEL``, default ``fast-lane``), no AI
+#           attribution, stop. The seated dev's instructions (its Agent's
+#           system prompt) ride the brief fenced as data, as in the local
+#           develop prompt. One launch at a time.
 #   TRACK   ``gh`` finds the PR by its ``Belt-Run`` line and polls it. The repo's
 #           fast lane + CI is the diff gate. Once the PR is known its diff
 #           goes to ``clef.shadow_diff`` (a recorded score that gates nothing):
@@ -42,6 +47,7 @@ import os
 import re
 import sys
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,6 +83,7 @@ _SESSION_URL = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9_-]+")
 _ISSUE = re.compile(r"(?<![\w/&])#(\d+)\b")
 _GH_SLUG = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_ESCAPES = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _LAUNCH_LOCK = asyncio.Lock()
 _TRACKERS: set[asyncio.Task[None]] = set()
 
@@ -204,10 +211,21 @@ class CloudTaskDispatcher:
         checks = list((found.get("charter") or {}).get("checks") or [])
         brief = _brief(request, slug, base, checks, self.label)
         argv = [sys.executable, PTY_RUN, claude_cli_argv()[0], "--cloud", brief]
-        code, out, err = await self.runner(argv, cwd=launch, timeout=300.0)
+        seen: deque[str] = deque(maxlen=200)
+
+        async def keep(line: str) -> None:
+            seen.append(line)
+
+        code, out, err = await self.runner(argv, cwd=launch, timeout=300.0, on_line=keep)
+        out = out or "\n".join(seen)  # a timed-out run returns no stdout; keep what streamed
+        if "trustthisfolder" in re.sub(r"[^a-z]", "", _ESCAPES.sub("", out).lower()):
+            raise CloudStationError(
+                f"LAUNCH: the claude CLI does not trust {launch}; "
+                "open it once in claude and accept the trust prompt"
+            )
         session = _SESSION_URL.search(out)
         if not session:
-            tail = (out + err)[-600:].strip()
+            tail = _ESCAPES.sub("", out + err)[-600:].strip()
             raise CloudStationError(f"LAUNCH: no cloud session started (exit {code}): {tail}")
         logger.info("belt cloud: run %s launched %s", run_ref, session.group(0))
         return slug, session.group(0)
