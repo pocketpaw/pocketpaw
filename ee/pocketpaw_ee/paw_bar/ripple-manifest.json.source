@@ -5,7 +5,10 @@ board-game and the illustration's annotations) at 1b218f7, pending a release.
 It is that commit's packages/svelte/static/manifest.json (generatedAt
 2026-10-09T21:00:37.569Z, 205 widgets, upstream sha256
 3e4657f3b0eabcdb2831f8e2b8f7ea8a704b0aa14279698b3673d289ca059e8c), with every
-widget's "example" removed. The server never reads the examples, and one carries a
+widget's "example" removed. One entry is newer: "model-viewer" is
+the one from branch feat/3d-widget at db6cd37 (its static/manifest.json, generatedAt
+2026-10-11T18:48:57.273Z: asset, annotations, focus and on_select), swapped in alone
+because a full refresh from there changes 35 other widgets this slice does not touch. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.
 
 Refresh (once the data widgets ship in a release, use the release asset):

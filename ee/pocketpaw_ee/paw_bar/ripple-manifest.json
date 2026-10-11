@@ -5713,12 +5713,27 @@
     {
       "type": "model-viewer",
       "category": "media",
-      "description": "Declarative 3D model viewer for GLB/GLTF assets — orbit controls, AR, and environment lighting, all driven by props. The viewer module is lazy-loaded on first use.",
+      "description": "A 3D model the reader can orbit: a built-in model by `asset` id, or a GLB/GLTF `src`. Optional numbered labels on named points of the model.",
       "props": {
+        "asset": {
+          "type": "string",
+          "required": false,
+          "description": "Built-in model id from the catalog, e.g. \"plane\". Wins over `src`. An unknown id shows a quiet \"not available\" box."
+        },
         "src": {
           "type": "string",
-          "required": true,
-          "description": "GLB or GLTF model URL."
+          "required": false,
+          "description": "GLB or GLTF model URL, when no `asset` fits."
+        },
+        "annotations": {
+          "type": "Array<{ anchor?: string; position?: string; normal?: string; label?: string; note?: string }>",
+          "required": false,
+          "description": "Up to 12 numbered labels. On an `asset`, `anchor` names one of its points (unknown anchors are dropped); `label` defaults to the anchor's label. Raw `position` ('x y z' metres) only for `src` models. Plain text: label up to 40 chars, note up to 280."
+        },
+        "focus": {
+          "type": "string",
+          "required": false,
+          "description": "Anchor whose note is open at start."
         },
         "poster": {
           "type": "string",
@@ -5758,7 +5773,14 @@
         "shadowIntensity": {
           "type": "number",
           "required": false,
-          "description": "Strength of the contact shadow under the model (0–1)."
+          "description": "Strength of the contact shadow under the model (0 to 1)."
+        }
+      },
+      "events": {
+        "on_select": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Fires with { anchor, label } when the reader opens a label by its pin or its line in the list."
         }
       }
     },
