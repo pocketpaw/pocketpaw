@@ -168,7 +168,10 @@
 #   the plan alone; ``sweep_subscription_grace`` revokes it once the deadline
 #   passes; ``renewed`` / ``active`` clear the state and restore the plan;
 #   ``expired`` / ``failed`` are terminal at the gateway so they suspend at once.
-#   No dunning path ever claws back credits. The state rides ``subscription.*``
+#   No dunning path ever claws back credits. Owners/admins get an in-app
+#   notice (bell + push) when the hold starts (``billing.payment_failed``) and
+#   when the plan actually drops to free (``billing.plan_downgraded``); a failed
+#   notice never blocks the billing change. The state rides ``subscription.*``
 #   rather than Dodo's ``dunning.*`` events, which are a per-business toggle that
 #   may be off and carry no metadata to route on.
 #
@@ -2562,6 +2565,54 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
     return {"ok": True, "granted": applied}
 
 
+_PAYMENT_FAILED_KIND = "billing.payment_failed"
+_PLAN_DOWNGRADED_KIND = "billing.plan_downgraded"
+
+
+def _plan_name(plan_key: str) -> str:
+    tier = plan_catalog.get_plan(plan_key)
+    return tier.display_name if tier is not None and tier.display_name else plan_key
+
+
+async def _alert_admins(workspace_id: str, kind: str, title: str, body: str) -> None:
+    """Tell a workspace's owners/admins about a dunning step, in-app (bell + push).
+
+    Never raises: the billing state change has already landed by the time this
+    runs, and a broken notification path must not fail or roll it back."""
+    try:
+        from pocketpaw_ee.cloud.notifications import service as notifications_service
+        from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+        admins = await workspace_service.list_admin_ids(workspace_id)
+        if admins:
+            await notifications_service.create_many(
+                workspace_id=workspace_id,
+                recipients=admins,
+                kind=kind,
+                title=title,
+                body=body,
+                deliver_external=False,
+            )
+    except Exception:
+        logger.warning(
+            "billing: could not send the %s notice for workspace=%s",
+            kind,
+            workspace_id,
+            exc_info=True,
+        )
+
+
+async def _alert_moved_to_free(workspace_id: str, plan_key: str) -> None:
+    await _alert_admins(
+        workspace_id,
+        _PLAN_DOWNGRADED_KIND,
+        "Your workspace moved to the Free plan",
+        f"The payment for your {_plan_name(plan_key)} plan wasn't completed, so this "
+        "workspace is on the Free plan now. To get it back, resubscribe in "
+        "Settings > Billing (/settings/billing).",
+    )
+
+
 async def _handle_dunning_hold(event: SubscriptionEvent) -> dict:
     """``subscription.on_hold`` — a payment failed. Start the grace clock.
 
@@ -2601,6 +2652,15 @@ async def _handle_dunning_hold(event: SubscriptionEvent) -> dict:
         event.subscription_id,
         event.event_id,
         grace_until.isoformat(),
+    )
+    plan = _plan_name(event.plan_key)
+    await _alert_admins(
+        event.workspace_id,
+        _PAYMENT_FAILED_KIND,
+        f"Payment failed for your {plan} plan",
+        f"We couldn't charge the card for your {plan} plan. The plan stays active until "
+        f"{grace_until.strftime('%d %b %Y')} (UTC). Update your payment method in "
+        "Settings > Billing (/settings/billing) to keep it.",
     )
     return {"ok": True, "granted": False}
 
@@ -2644,6 +2704,8 @@ async def _handle_dunning_terminal(event: SubscriptionEvent) -> dict:
         event.event_id,
         ok,
     )
+    if ok:
+        await _alert_moved_to_free(event.workspace_id, event.plan_key)
     return {"ok": True, "granted": False}
 
 
@@ -2707,6 +2769,8 @@ async def sweep_subscription_grace() -> int:
             deadline.isoformat(),
             ok,
         )
+        if ok:
+            await _alert_moved_to_free(sub.workspace, sub.plan_key)
     if suspended:
         logger.info("billing.sweep_subscription_grace: suspended %d subscription(s)", suspended)
     return suspended
