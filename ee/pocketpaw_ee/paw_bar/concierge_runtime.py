@@ -1520,9 +1520,9 @@ _RIPPLE_RULES = (
     "   - A click can send a follow-up as the visitor: "
     + json.dumps(_RIPPLE_ASK, separators=(",", ":"))
     + " (plain text, at most 500 characters, no {expressions}) "
-    "on a button's on_click, or in a comparison item's actions list.",
-    "   - When a small picture or diagram helps explain (how something works, a "
-    "process), add an illustration. "
+    "on a button's on_click, a model-viewer's on_select, or in a comparison item's "
+    "actions list.",
+    "   - When a small picture helps explain (how something works), add an illustration. "
     "Put SVG attributes in single quotes (no JSON escaping): "
     "<svg viewBox='0 0 200 120'>...</svg>. Under 24,000 characters and 400 elements, "
     "every dur 0.5s or more. No {expressions}; a gradient is fill='url(#id)'. The card "
@@ -1561,6 +1561,7 @@ def _cards_paragraph(
     from pocketpaw_ee.paw_bar.card_spec import (
         MAX_SPEC_DEPTH,
         MAX_SPEC_NODES,
+        RIPPLE_MODELS,
         compact_manifest,
     )
 
@@ -1575,7 +1576,14 @@ def _cards_paragraph(
             f"{profile.max_nodes} nodes and {profile.max_depth} levels deep, built only "
             "from these widgets:",
             *(f"   {line}" for line in compact_manifest(profile).splitlines()),
-            *_RIPPLE_RULES,
+            *_RIPPLE_RULES[:-1],
+            # 3D: the model library's ids and anchor names, from ripple-models.json.
+            "   - To show, explore or label a thing in 3D, write a model-viewer {asset, "
+            "annotations?: [{anchor, label?, note?}], focus?}: asset one of these ids, "
+            "each anchor and focus one of its names, up to 12 annotations with your own "
+            "plain label and note (an illustration's caps); never a src, poster or URL. "
+            + " ".join(f"{k}({','.join(v['anchors'])})" for k, v in RIPPLE_MODELS.items()),
+            _RIPPLE_RULES[-1],
         ]
         return "\n".join(lines + _form_lines(declared, lead_capture))
 

@@ -827,8 +827,8 @@
   {
     "label": "card streaming: every object shares the root's seen keys",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        self._stack.append([is_obj, \"\" if is_obj else key, is_obj, styled, set()])",
-    "replace": "        self._stack.append([is_obj, \"\" if is_obj else key, is_obj, styled, self._stack[0][4]])",
+    "find": "        self._stack.append([is_obj, \"\" if is_obj else key, is_obj, styled, set(), None])",
+    "replace": "        self._stack.append([is_obj, \"\" if is_obj else key, is_obj, styled, self._stack[0][4], None])",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_key_used_once_per_object_is_not_a_repeat",
       "tests/cloud/test_paw_bar_card_streaming.py::test_no_prefix_of_a_card_ripple_accepts_is_flagged"

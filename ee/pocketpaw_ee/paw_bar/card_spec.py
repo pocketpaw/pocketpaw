@@ -972,8 +972,7 @@ def _check_model_viewer(props: dict[str, Any]) -> None:
         label, text = note.get("label", ""), note.get("note", "")
         if not _plain(label) or _js_len(label) > ANNOTATION_LABEL_MAX:
             raise _Reject(
-                f"a model annotation label that is not plain text of at most "
-                f"{ANNOTATION_LABEL_MAX}"
+                f"a model annotation label that is not plain text of at most {ANNOTATION_LABEL_MAX}"
             )
         if not _plain(text) or _js_len(text) > ANNOTATION_NOTE_MAX:
             raise _Reject(
@@ -2238,7 +2237,7 @@ def _widget_line(
 
 
 # A summary line's description: its first sentence, at most this long.
-_BRIEF_CHARS = 73
+_BRIEF_CHARS = 50
 
 
 def _brief_line(widget: dict[str, Any]) -> str:
