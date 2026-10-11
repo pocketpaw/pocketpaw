@@ -352,6 +352,9 @@ async def record_verdict(
     workspace_id: str,
 ) -> bool:
     """Write ``clef`` onto the judged Action's blob. Never raises."""
+    # ponytail: read-modify-write ~1-2 s after the propose; an approve that edits
+    # the blob inside that window is overwritten (dispatch already read it). A
+    # store-side field merge closes it if Clef ever leaves shadow mode.
     from pocketpaw.stores import get_instinct_store
     from pocketpaw_ee.cloud._core.proposals import update_action_blob
 

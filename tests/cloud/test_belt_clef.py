@@ -25,6 +25,7 @@ from pocketpaw_ee.cloud.belt import clef  # noqa: E402
 import pocketpaw.stores as stores  # noqa: E402
 
 # The mandates module's fixtures and helpers: the real router + store + journal.
+from tests.cloud.test_belt_headless import CANNED_DIFF, _queue_station_run  # noqa: E402
 from tests.cloud.test_belt_mandates import (  # noqa: E402,F401
     USER,
     WS,
@@ -153,8 +154,13 @@ async def test_timeout_returns_none(on):
 
 
 async def test_shadow_hook_swallows_failure_and_records_nothing(on, monkeypatch):
-    on(Fake(exc=RuntimeError("boom")))
+    fake = on(Fake())
     recorded: list = []
+
+    async def explode(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(clef, "score_plan", explode)
 
     async def record(*a, **k):
         recorded.append(a)
@@ -164,7 +170,7 @@ async def test_shadow_hook_swallows_failure_and_records_nothing(on, monkeypatch)
     task = clef.shadow_plan(WS, "a1", TASKS, {"goal": "g"})
     assert task is not None
     await task  # never raises
-    assert recorded == []
+    assert recorded == [] and fake.requests == []
 
 
 @pytest.mark.usefixtures("store", "journal", "graph")
@@ -219,4 +225,27 @@ async def test_shadow_plan_records_verdict_and_lists_it(tmp_path: Path, mongo_db
     rows = await clef.list_verdicts(WS)
     assert [(r["action_id"], r["kind"], r["outcome"]) for r in rows] == [
         (plan_id, "plan", "pending")
+    ]
+
+
+@pytest.mark.usefixtures("store")
+async def test_headless_attach_records_a_diff_verdict(on):
+    from pocketpaw_ee.cloud.belt.headless import DevelopResult, HeadlessDevelopRunner
+
+    fake = on(Fake())
+    st = stores.get_instinct_store()
+    action_id = await _queue_station_run(st)
+
+    async def develop(_req):
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="adds hello.txt")
+
+    await HeadlessDevelopRunner(develop_fn=develop).run(action_id)
+    await asyncio.gather(*list(clef._TASKS))
+    body = json.loads(fake.requests[0].content)
+    assert "- hello.txt" in body["state"]["diff"]
+    rec = (await st.get_action(action_id)).parameters["_code_change"]["clef"]
+    assert rec["kind"] == "diff" and rec["verdict"]["change_kind"] == "fix"
+    rows = await clef.list_verdicts(WS)
+    assert [(r["action_id"], r["kind"], r["outcome"]) for r in rows] == [
+        (action_id, "diff", "pending")
     ]
