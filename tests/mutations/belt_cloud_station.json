@@ -197,5 +197,41 @@
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_resume_does_not_double_a_fixer_on_the_same_head"
     ]
+  },
+  {
+    "label": "a green PR is nudged before the lane-nudge interval",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "elif self.clock() - green_since >= self.lane_nudge_seconds:",
+    "replace": "elif True:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_green_pr_left_open_gets_one_lane_nudge"
+    ]
+  },
+  {
+    "label": "every tracked PR on a repo dispatches the lane on its own",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if last is not None and now - last < self.lane_nudge_seconds:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_two_prs_on_one_repo_share_one_nudge_per_interval"
+    ]
+  },
+  {
+    "label": "a PR the lane should not merge is nudged anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and pr.get(\"mergeable\") == \"MERGEABLE\"\n        and all(",
+    "replace": "and True\n        and all(",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_pr_the_lane_should_not_merge_gets_no_nudge"
+    ]
+  },
+  {
+    "label": "the lane label is never read from gh",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "\"mergeable,statusCheckRollup,labels\",",
+    "replace": "\"mergeable,statusCheckRollup\",",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_green_pr_left_open_gets_one_lane_nudge"
+    ]
   }
 ]

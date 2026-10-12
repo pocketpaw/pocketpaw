@@ -36,6 +36,10 @@
 # nothing is launched; a run without the mark (or a failed one) is not resumed;
 # an unreadable workspace skips only itself; the run timeout counts from
 # ``cloud.launched_at``; a fixer recorded on the PR's head is not doubled.
+# LANE NUDGE: a labelled PR green and mergeable past the interval gets one
+# ``gh workflow run "Fast Lane"`` (none before it); two tracked PRs on one repo
+# share one dispatch per interval; a red, conflicting, pending, unknown or
+# unlabelled PR gets none; a failed dispatch never stops the tracker.
 # ``pty_run.py`` itself runs for real:
 # it streams the child's output as it lands and exits on the folder-trust
 # prompt instead of waiting; ``wire_from_env`` wires the cloud dispatcher only
@@ -43,6 +47,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
@@ -130,6 +135,7 @@ class FakeRunner:
         repo_fetch_code: int = 0,
         snapshots: dict[str, bytes] | None = None,
         download_code: int = 0,
+        workflow_code: int = 0,
     ):
         self.calls: list[tuple[list[str], Path]] = []
         # A list is consumed one entry per launch / per ``gh pr view``, holding the last.
@@ -144,6 +150,10 @@ class FakeRunner:
         # The PR head's CI runs: 502 carries the ``snapshots`` artifact, 501 does not.
         self.snapshots = snapshots
         self.download_code = download_code
+        self.also: list[str] = []  # more run refs, each with its own PR (#10, #11, ...)
+        self.workflow_code = workflow_code  # ``gh workflow run`` (the lane nudge)
+        self.clock = lambda: 0.0  # the dispatcher's clock, to stamp each dispatch
+        self.dispatched: list[float] = []
 
     @staticmethod
     def _next(seq: list):
@@ -165,7 +175,12 @@ class FakeRunner:
             if self.prs[0] is None:
                 return 0, "[]", ""
             body = f"Closes #93\n\n{MARKER} {self.run_ref}\n"
-            return 0, json.dumps([{"number": 7, "body": "other"}, {"number": 9, "body": body}]), ""
+            prs = [{"number": 7, "body": "other"}, {"number": 9, "body": body}]
+            prs += [{"number": 10 + i, "body": f"{MARKER} {r}"} for i, r in enumerate(self.also)]
+            return 0, json.dumps(prs), ""
+        if argv[:3] == ["gh", "workflow", "run"]:
+            self.dispatched.append(self.clock())
+            return self.workflow_code, "", "HTTP 403" if self.workflow_code else ""
         if argv[:3] == ["gh", "pr", "view"]:
             return 0, json.dumps(self._next(self.prs)), ""
         if argv[:3] == ["gh", "run", "view"]:
@@ -1029,3 +1044,116 @@ async def test_resume_does_not_double_a_fixer_on_the_same_head(store, dirs, stag
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.EXECUTED
     assert action.parameters["_code_change"]["fixes"] == [fix]
+
+
+# -- lane nudge: a green PR the lane left open gets its workflow dispatched ----
+
+LANE = [{"name": "fast-lane"}]
+NUDGE = ["gh", "workflow", "run", "Fast Lane", "-R", SLUG]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_lane_gate(monkeypatch) -> None:
+    monkeypatch.setattr(cloud_station, "_LANE_NUDGED", {})
+
+
+def _ready(**kw) -> dict:
+    return {**_open(**kw), "labels": LANE}
+
+
+def _nudger(runner: FakeRunner, launch: Path, **kw) -> CloudTaskDispatcher:
+    # Polls every 60 s, the default 300 s nudge interval, and no fixer in reach.
+    d = _dispatcher(runner, launch, poll_seconds=60, fix_grace_seconds=10**9, **kw)
+    runner.clock = d.clock
+    return d
+
+
+async def test_a_green_pr_left_open_gets_one_lane_nudge(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    # Green at t=0..300, merged at 360: due at 300, not before.
+    runner = FakeRunner(launch_out=SESSION, pr=[_ready()] * 6 + [MERGED])
+    runner.run_ref = run_ref
+
+    await _nudger(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert runner.dispatched == [300.0]
+    assert [a for a, _ in runner.calls if a[:3] == ["gh", "workflow", "run"]] == [NUDGE]
+    view = next(a for a, _ in runner.calls if a[:3] == ["gh", "pr", "view"])
+    assert "labels" in view[view.index("--json") + 1].split(",")
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    (at,) = action.parameters["_code_change"]["lane_nudges"]
+    assert at <= time.time()
+
+
+async def test_two_prs_on_one_repo_share_one_nudge_per_interval(store, dirs):
+    repo, launch = dirs
+    first, second = await _queue(store, repo), await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=[_ready()] * 14 + [MERGED])
+    runner.run_ref, runner.also = first, [second]
+    d = _nudger(runner, launch)
+    inner = d.sleep
+
+    async def sleep(seconds: float) -> None:  # yield, so the two trackers interleave
+        await inner(seconds)
+        await asyncio.sleep(0)
+
+    d.sleep = sleep
+
+    await asyncio.gather(d.run(first, workspace_id=WS), d.run(second, workspace_id=WS))
+
+    times = runner.dispatched
+    assert times and all(b - a >= 300 for a, b in zip(times, times[1:]))
+    blobs = [(await store.get_action(r)).parameters["_code_change"] for r in (first, second)]
+    assert sum(len(b.get("lane_nudges") or []) for b in blobs) == len(times)
+    assert all(b["cloud"]["pr"] in {9, 10} for b in blobs)
+
+
+@pytest.mark.parametrize(
+    "pr",
+    [
+        _ready(red=True),
+        _ready(mergeable="CONFLICTING"),
+        _ready(mergeable="UNKNOWN"),
+        {**_ready(), "statusCheckRollup": [{**GREEN_CHECK, "status": "IN_PROGRESS"}]},
+        _open(),  # green, but not labelled for the lane
+    ],
+    ids=["red", "conflicting", "unknown", "pending", "unlabelled"],
+)
+async def test_a_pr_the_lane_should_not_merge_gets_no_nudge(store, dirs, pr):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=[pr] * 12 + [MERGED])
+    runner.run_ref = run_ref
+
+    await _nudger(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert runner.dispatched == []
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert "lane_nudges" not in cc
+
+
+async def test_a_failed_lane_nudge_never_stops_the_tracker(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=[_ready()] * 6 + [MERGED], workflow_code=1)
+    runner.run_ref = run_ref
+
+    await _nudger(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert runner.dispatched == [300.0]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    cc = action.parameters["_code_change"]
+    assert "lane_nudges" not in cc and "headless_error" not in cc
+
+
+def test_wire_cloud_reads_the_lane_nudge_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(headless, "_PRODUCTION_DISPATCHER", None)
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR", str(tmp_path))
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LANE_NUDGE", "120")
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LANE_WORKFLOW", "Lane")
+    assert cloud_station.wire_cloud() is True
+    d = headless.resolve_headless_dispatcher()
+    assert (d.lane_nudge_seconds, d.lane_workflow) == (120.0, "Lane")

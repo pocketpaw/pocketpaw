@@ -723,6 +723,25 @@ tracking goes on), and emits `belt_run_updated` with `stage="fix"`. When the
 attempts are used up and the PR is still stuck, its diff is attached for the
 per-diff gate, with a summary saying how many fixers ran.
 
+**Lane nudge.** The fast lane is the repo's own workflow (`Fast Lane`, on
+`pull_request_target`, `workflow_run` and a 5-minute cron), and it can go
+quiet: GitHub's cron does not fire reliably on a new repo, and a merge made
+with `GITHUB_TOKEN` starts no further workflow, so a green PR can sit unmerged
+for an hour. The tracker reads `labels` on the same `gh pr view` poll. When the
+PR is open, carries the lane label (`POCKETPAW_FACTORY_CLOUD_PR_LABEL`), is
+`MERGEABLE` (not `CONFLICTING`, not still `UNKNOWN`) and every counted check
+has finished green (the fixer's check rules; a pending check is not green), and
+it stays that way for `POCKETPAW_FACTORY_CLOUD_LANE_NUDGE` seconds (default
+300), the tracker runs `gh workflow run <POCKETPAW_FACTORY_CLOUD_LANE_WORKFLOW>
+-R <slug>` (default `Fast Lane`; with no input the lane sweeps every open
+fast-lane PR) through the scrubbed runner, no shell. It repeats at most once per
+interval while the PR stays ready, and at most once per interval per REPO
+however many of its PRs are tracked (a module-level last-dispatch time per
+slug, stamped on the attempt so a broken `gh` is not retried every poll). Each
+dispatch is appended to the blob's `lane_nudges` (wall-clock times, last 20). A
+failed dispatch is logged and tracking goes on. Red and conflicting PRs never
+get a nudge: those are the fixer's.
+
 **Screenshots.** The app repos' PR CI uploads an artifact named `snapshots`
 with PNGs of the app views. Once a run's PR is known (the first `gh pr view`
 that is not already merged) and again when it lands, the tracker asks
@@ -1391,6 +1410,8 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_CLOUD_TIMEOUT` | `14400` | Seconds a cloud run waits for its PR to merge or be refused before it fails back to queued |
 | `POCKETPAW_FACTORY_CLOUD_FIX_GRACE` | `300` | Seconds a cloud run's PR must stay conflicting or red before a fixer session launches |
 | `POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS` | `2` | Fixer sessions per cloud run; past it a still-stuck PR escalates to the per-diff gate |
+| `POCKETPAW_FACTORY_CLOUD_LANE_NUDGE` | `300` | Seconds a cloud run's labelled PR must stay green and mergeable but unmerged before the tracker dispatches the lane workflow; also the minimum gap between dispatches per repo |
+| `POCKETPAW_FACTORY_CLOUD_LANE_WORKFLOW` | `Fast Lane` | The workflow the lane nudge runs with `gh workflow run` (it needs a `workflow_dispatch` trigger) |
 | `POCKETPAW_FACTORY_CLOUD_TESTER` | off | `1` (or `true`/`yes`/`on`) launches one tester cloud session per landed cloud run on a mandate with a `tester` crew seat |
 | `POCKETPAW_FACTORY_SCREENSHOT_DIR` | `~/.pocketpaw/belt/screenshots` | Where the cloud station keeps each run's snapshot PNGs, one `<run id>/` dir per run |
 | `POCKETPAW_FACTORY_DEDICATED_HOST` | unset | `1` lets the station wire in a process serving cloud tenants; set it only on a dedicated single-tenant host |

@@ -19,10 +19,11 @@
 #           One launch at a time (``_LAUNCH_LOCK``), worker, fixer or tester.
 #   TRACK   ``gh`` finds the PR by its ``Belt-Run`` line and polls it; the repo's
 #           fast lane + CI is the diff gate; the PR's diff goes to Clef's shadow
-#           scorer (gates nothing). SCREENSHOTS once the PR is known and again on
-#           land: the head's newest CI run with a ``snapshots`` artifact is
-#           downloaded and its PNGs kept in ``service.screenshot_dir`` (40 files,
-#           20 MB, sanitized names) as the blob's ``screenshots``; never fatal.
+#           scorer (gates nothing). SCREENSHOTS (PR known, and on land): the head's
+#           CI ``snapshots`` PNGs, capped, as the blob's ``screenshots``; never fatal.
+#           NUDGE: a labelled PR green + MERGEABLE for LANE_NUDGE s still open gets
+#           ``gh workflow run <LANE_WORKFLOW>``, once per interval per repo (the
+#           lane's cron is unreliable); ``lane_nudges`` on the blob; never fatal.
 #             merged   -> approved as ``system:fast-lane`` and executed (landed)
 #                         with pr_url, head branch, merge sha and the PR's diff;
 #                         the bound repo is fetched for the blueprint; then the
@@ -45,7 +46,6 @@
 #           run marked ``headless_state="cloud"`` with no diff (failure, escalation
 #           and land clear it) is tracked again, never relaunched; the timeout
 #           counts from ``cloud.launched_at`` (else a fresh one); ``fixes`` carry.
-#
 # Nothing builds or tests here: the only local processes are git, gh and the
 # launcher. An approved escalated diff lands on the mandate line.
 
@@ -114,6 +114,10 @@ _HEX_SHA = re.compile(r"^[0-9a-f]{7,64}$")
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 _LAUNCH_LOCK = asyncio.Lock()
 _TRACKERS: set[asyncio.Task[None]] = set()
+# slug -> ``clock()`` of its last lane dispatch: one nudge per interval per repo,
+# however many of its PRs are tracked (a dispatch with no input sweeps them all).
+_LANE_NUDGED: dict[str, float] = {}
+_NUDGES_KEPT = 20
 
 
 class CloudStationError(RuntimeError):
@@ -168,6 +172,8 @@ class CloudTaskDispatcher:
     label: str = "fast-lane"
     fix_grace_seconds: float = 300.0
     fix_attempts: int = 2
+    lane_nudge_seconds: float = 300.0
+    lane_workflow: str = "Fast Lane"
     charter_for: Callable[[str, str], Awaitable[dict[str, Any] | None]] = _default_charter_for
     # POCKETPAW_FACTORY_CLOUD_TESTER: one tester session per landed run, when
     # the mandate seats a tester (``tester_for``).
@@ -414,6 +420,7 @@ class CloudTaskDispatcher:
             (str(f.get("head") or "") for f in reversed(fixes) if f.get("session_url")), ""
         )
         clef_diff, clef_head = "", None  # the diff Clef scored, and the head it was of
+        green_since: float | None = None  # first seen ready for the lane (``_lane_ready``)
         shot = False  # screenshots fetched once the PR is known, and again on land
         while True:
             if number is None:
@@ -433,7 +440,7 @@ class CloudTaskDispatcher:
                             slug,
                             "--json",
                             "state,url,headRefName,headRefOid,mergeCommit,comments,files,"
-                            "mergeable,statusCheckRollup",
+                            "mergeable,statusCheckRollup,labels",
                         ],
                         cwd,
                         "TRACK: gh pr view",
@@ -471,6 +478,13 @@ class CloudTaskDispatcher:
                     stuck_key = None
                     if await self._fix(store, run_ref, blob, worker, slug, pr, kind, red, fixes):
                         fixed_head = head
+                if not _lane_ready(pr, self.label):
+                    green_since = None
+                elif green_since is None:
+                    green_since = self.clock()
+                elif self.clock() - green_since >= self.lane_nudge_seconds:
+                    green_since = self.clock()
+                    await self._nudge(store, run_ref, slug, cwd)
             if self.clock() >= deadline:
                 what = f"PR #{number} unresolved" if number else "no PR"
                 raise CloudStationError(
@@ -515,6 +529,26 @@ class CloudTaskDispatcher:
             stage="fix",
         )
         return "session_url" in entry
+
+    async def _nudge(self, store: Any, run_ref: str, slug: str, cwd: Path) -> None:
+        """Dispatch the repo's lane workflow for a PR it left green and open: its
+        cron does not fire reliably on a new repo, and a GITHUB_TOKEN merge starts
+        no workflow. Once per interval per repo (``_LANE_NUDGED``, stamped on the
+        attempt so a broken gh is not retried every poll); never raises."""
+        now = self.clock()
+        last = _LANE_NUDGED.get(slug)
+        if last is not None and now - last < self.lane_nudge_seconds:
+            return
+        _LANE_NUDGED[slug] = now
+        try:
+            argv = ["gh", "workflow", "run", self.lane_workflow, "-R", slug]
+            await self._ok(argv, cwd, "NUDGE: gh workflow run")
+            blob = await _blob(store, run_ref) or {}
+            nudges = [*(blob.get("lane_nudges") or []), time.time()]
+            await _patch(store, run_ref, lane_nudges=nudges[-_NUDGES_KEPT:])
+            logger.info("belt cloud: nudged %s on %s for run %s", self.lane_workflow, slug, run_ref)
+        except Exception:  # noqa: BLE001 — a missed nudge waits for the next interval
+            logger.warning("belt cloud: lane nudge on %s failed", slug, exc_info=True)
 
     async def _failed_log(self, slug: str, red: dict[str, Any], cwd: Path) -> str:
         """The last lines of the red job's ``--log-failed``; empty when unreadable."""
@@ -777,17 +811,41 @@ def _brief(request: DevelopRequest, slug: str, base: str, checks: list[str], lab
     )
 
 
-def _stuck(pr: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
-    """``("rebase", None)`` for a conflicting PR, ``("ci", <red check>)`` for a
-    failed check on its head (scripts/fast-lane.sh's rules: its own Fast Lane
-    check and Copilot checks don't count), else ``(None, None)``."""
-    if pr.get("mergeable") == "CONFLICTING":
-        return "rebase", None
+def _counted(pr: dict[str, Any]) -> list[dict[str, Any]]:
+    """The head's checks scripts/fast-lane.sh counts: not its own Fast Lane
+    check, not Copilot's."""
+    kept = []
     for check in pr.get("statusCheckRollup") or []:
         workflow = str(check.get("workflowName") or "")
         name = f"{check.get('name') or check.get('context') or ''} {workflow}"
-        if workflow == "Fast Lane" or "copilot" in name.lower():
-            continue
+        if workflow != "Fast Lane" and "copilot" not in name.lower():
+            kept.append(check)
+    return kept
+
+
+def _lane_ready(pr: dict[str, Any], label: str) -> bool:
+    """Open, labelled ``label``, MERGEABLE (not CONFLICTING or still UNKNOWN)
+    and every counted check finished green: what the lane should merge."""
+    labels = {str(lb.get("name") or "") for lb in pr.get("labels") or []}
+    return (
+        pr.get("state") == "OPEN"
+        and label in labels
+        and pr.get("mergeable") == "MERGEABLE"
+        and all(
+            check.get("state") == "SUCCESS"
+            if check.get("__typename") == "StatusContext"
+            else check.get("status") == "COMPLETED" and check.get("conclusion") in _CHECK_OK
+            for check in _counted(pr)
+        )
+    )
+
+
+def _stuck(pr: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    """``("rebase", None)`` for a conflicting PR, ``("ci", <red check>)`` for a
+    failed counted check on its head, else ``(None, None)``."""
+    if pr.get("mergeable") == "CONFLICTING":
+        return "rebase", None
+    for check in _counted(pr):
         if check.get("__typename") == "StatusContext":
             red = check.get("state") not in _STATUS_NOT_RED
         else:
@@ -962,6 +1020,10 @@ def wire_cloud() -> bool:
         label=(os.environ.get("POCKETPAW_FACTORY_CLOUD_PR_LABEL") or "fast-lane").strip(),
         fix_grace_seconds=_env_float("POCKETPAW_FACTORY_CLOUD_FIX_GRACE", 300.0),
         fix_attempts=int(_env_float("POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS", 2)),
+        lane_nudge_seconds=_env_float("POCKETPAW_FACTORY_CLOUD_LANE_NUDGE", 300.0),
+        lane_workflow=(
+            os.environ.get("POCKETPAW_FACTORY_CLOUD_LANE_WORKFLOW") or "Fast Lane"
+        ).strip(),
         tester=(os.environ.get("POCKETPAW_FACTORY_CLOUD_TESTER") or "").strip().lower()
         in {"1", "true", "yes", "on"},
     )
