@@ -6687,6 +6687,95 @@
       }
     },
     {
+      "type": "figure",
+      "category": "composite",
+      "description": "A hand-built live isometric figure picked by id (\"heart\": how a heart pumps), with sliders, live readouts and numbered labels on its named parts. Bind value.",
+      "props": {
+        "figure": {
+          "type": "\"heart\"",
+          "required": true,
+          "description": "Figure id. \"heart\" is a beating heart as two pumps: sliders bpm (40-180) and stroke (50-110 ml)."
+        },
+        "params": {
+          "type": "Record<string, number>",
+          "required": false,
+          "description": "Starting slider values, e.g. { \"bpm\": 120 }. Clamped to each slider."
+        },
+        "labels": {
+          "type": "Array<{ anchor: string; label?: string; note?: string }>",
+          "required": false,
+          "description": "Up to 10 numbered pins, plain text. heart anchors: right-atrium, right-ventricle, left-atrium, left-ventricle, tricuspid, mitral, pulmonary-valve, aortic-valve, aorta, vena-cava, pulmonary-artery, pulmonary-veins, lungs, body."
+        },
+        "caption": {
+          "type": "string",
+          "required": false,
+          "description": "One or two plain sentences under the figure."
+        },
+        "value": {
+          "type": "Record<string, number>",
+          "required": false,
+          "description": "Two-way bind with `bind: \"{state.figure}\"`: the slider values, written when one moves."
+        }
+      }
+    },
+    {
+      "type": "iso-scene",
+      "category": "composite",
+      "description": "Live isometric drawing of a machine or system from a parts list: gears, tubes, slabs that spin, slide, swing, pulse or flow, with param sliders, readouts and numbered labels. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Up to 80 characters."
+        },
+        "caption": {
+          "type": "string",
+          "required": false,
+          "description": "One plain sentence under the drawing. Up to 200 characters."
+        },
+        "look": {
+          "type": "\"soft\" | \"color\"",
+          "required": false,
+          "description": "soft (default): near-white parts in four soft tones, colors as faint tints. color: saturated fills."
+        },
+        "scale": {
+          "type": "number",
+          "required": false,
+          "description": "Zoom, 0.4 to 2.5. Default 1 (fits the drawing)."
+        },
+        "params": {
+          "type": "Array<{ key: string; label: string; min: number; max: number; step?: number; unit?: string; value: number }>",
+          "required": false,
+          "description": "Up to 6 sliders. `key` is an identifier that speeds and readouts can use, e.g. \"cadence / 60\"."
+        },
+        "parts": {
+          "type": "Array<{ id: string; kind: \"slab\" | \"box\" | \"cylinder\" | \"disc\" | \"gear\" | \"tube\" | \"sphere\" | \"cone\" | \"rod\" | \"arrow\" | \"plate\"; at?: [x, y, z]; w?: number; d?: number; h?: number; r?: number; teeth?: number; axis?: \"x\" | \"y\" | \"z\"; path?: [x, y, z][]; from?: [x, y, z]; to?: [x, y, z]; label?: string; detail?: \"knurl\"; texture?: \"guilloche\" | \"ribs\"; color?: \"neutral\" | \"accent\" | \"red\" | \"blue\" | \"green\" | \"amber\" | \"metal\"; on?: string }>",
+          "required": true,
+          "description": "Up to 150. Units are free (keep the scene within about 300 across); z is up. `at` is the centre. slab/box/plate: w, d, h (slab r rounds corners, plate shows `label`, `texture` decorates a plate or slab top). `detail: \"knurl\"` ribs a knob. cylinder/disc/gear/cone: r, h along `axis` (default z). tube: `path` points, r. rod and arrow: from, to. `on`: id of a parent part this one moves with. Unknown kinds are skipped."
+        },
+        "motions": {
+          "type": "Array<{ part: string; kind: \"spin\" | \"slide\" | \"swing\" | \"pulse\" | \"flow\"; axis?: \"x\" | \"y\" | \"z\"; speed: number | string; range?: number; phase?: number }>",
+          "required": false,
+          "description": "Up to 20. speed is turns or cycles per second, a number or an expression over params written without braces, e.g. \"cadence / 60\". range: swing degrees (default 25), slide distance (8), pulse growth 0..0.6 (0.12). phase 0..1. flow animates tubes, rods and arrows."
+        },
+        "readouts": {
+          "type": "Array<{ label: string; value: string | number; unit?: string; decimals?: number }>",
+          "required": false,
+          "description": "Up to 4 live numbers, each an expression over params without braces, e.g. \"rate * 70 / 1000\"."
+        },
+        "labels": {
+          "type": "Array<{ part?: string; at?: [x, y, z]; label: string; note?: string }>",
+          "required": false,
+          "description": "Up to 10 numbered pins on a part (they follow it) or a point, listed with their notes under the drawing."
+        },
+        "value": {
+          "type": "Record<string, number>",
+          "required": false,
+          "description": "Two-way bind with `bind: \"{state.scene}\"`: the param values, written when a slider moves."
+        }
+      }
+    },
+    {
       "type": "flashcard-deck",
       "category": "composite",
       "description": "Study deck: cards[{front, back, hint, category}]. Flip each card, mark Got it or Missed it, then a score screen with Practise missed. Bind score; on_complete {score, total}.",

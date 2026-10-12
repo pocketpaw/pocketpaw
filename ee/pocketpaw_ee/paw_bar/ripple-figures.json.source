@@ -1,0 +1,27 @@
+ripple-figures.json: ripple's hand-built figure catalog (the figure widget's `figure`
+ids), as {id: {title, params: [{key, min, max}], anchors}}: each figure's title, its
+slider keys and ranges, and its anchor names in catalog order. Generated from
+qbtrix/ripple-iui branch feat/figure-heart at 5febf65 (#237;
+packages/svelte/src/lib/figures: index.ts for ids and titles, <id>/model.ts PARAMS,
+<id>/figure.ts ANCHOR_POINTS; 1 figure, 14 anchors), pending a release. Only names and
+ranges are vendored: geometry and drawing code stay in ripple.
+
+card_spec holds a ripple card's figure to these ids, param keys and ranges, and anchors,
+and the concierge prompt lists them, so refresh this file whenever the catalog changes:
+  python -I - <ripple>/packages/svelte/src/lib/figures \
+    ee/pocketpaw_ee/paw_bar/ripple-figures.json <<'PY'
+  import json, re, sys
+  from pathlib import Path
+  root = Path(sys.argv[1])
+  ids = re.findall(r"\n\t([a-z0-9-]+): \{ title: '((?:[^'\\]|\\.)*)'", (root / "index.ts").read_text())
+  out = {}
+  for fid, title in ids:
+      model = (root / fid / "model.ts").read_text()
+      params = [{"key": k, "min": float(lo) if "." in lo else int(lo), "max": float(hi) if "." in hi else int(hi)}
+                for k, lo, hi in re.findall(r"\{ key: '([a-z0-9_]+)'[^}]*?min: (-?[\d.]+), max: (-?[\d.]+)", model)]
+      block = (root / fid / "figure.ts").read_text().split("const ANCHOR_POINTS", 1)[1].split("];", 1)[0]
+      out[fid] = {"title": title, "params": params, "anchors": re.findall(r"\['([a-z0-9-]+)', '", block)}
+  Path(sys.argv[2]).write_text(json.dumps(out, indent=2) + "\n")
+  PY
+then update this file and the counts in test_the_vendored_ripple_figures_parse
+(tests/cloud/test_paw_bar_ripple_profile.py).

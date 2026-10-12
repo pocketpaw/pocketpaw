@@ -1,0 +1,1001 @@
+{
+ "iso-bike": {
+  "state": {},
+  "ui": {
+   "type": "iso-scene",
+   "bind": "{state.bike}",
+   "props": {
+    "title": "Bicycle drivetrain",
+    "caption": "A 40 tooth chainring drives a 16 tooth cog, so the wheel turns 2.5 times per pedal turn.",
+    "params": [
+     {
+      "key": "cadence",
+      "label": "Cadence",
+      "min": 30,
+      "max": 120,
+      "step": 5,
+      "unit": "rpm",
+      "value": 80
+     }
+    ],
+    "parts": [
+     {
+      "id": "ground",
+      "kind": "slab",
+      "at": [
+       50,
+       0,
+       -14
+      ],
+      "w": 190,
+      "d": 56,
+      "h": 3,
+      "r": 6
+     },
+     {
+      "id": "chainstay",
+      "kind": "rod",
+      "from": [
+       0,
+       -9,
+       30
+      ],
+      "to": [
+       110,
+       -9,
+       30
+      ],
+      "r": 2.6,
+      "color": "accent"
+     },
+     {
+      "id": "seat-tube",
+      "kind": "rod",
+      "from": [
+       0,
+       -9,
+       30
+      ],
+      "to": [
+       -14,
+       -9,
+       92
+      ],
+      "r": 2.6,
+      "color": "accent"
+     },
+     {
+      "id": "seat-stay",
+      "kind": "rod",
+      "from": [
+       110,
+       -9,
+       30
+      ],
+      "to": [
+       -12,
+       -9,
+       84
+      ],
+      "r": 2.2,
+      "color": "accent"
+     },
+     {
+      "id": "crank-back",
+      "kind": "rod",
+      "from": [
+       0,
+       -5,
+       30
+      ],
+      "to": [
+       0,
+       -5,
+       64
+      ],
+      "r": 2.2,
+      "color": "metal",
+      "on": "ring"
+     },
+     {
+      "id": "ring",
+      "kind": "gear",
+      "at": [
+       0,
+       0,
+       30
+      ],
+      "r": 22,
+      "h": 3,
+      "teeth": 40,
+      "axis": "y",
+      "color": "metal"
+     },
+     {
+      "id": "spindle",
+      "kind": "cylinder",
+      "at": [
+       0,
+       1,
+       30
+      ],
+      "r": 4,
+      "h": 14,
+      "axis": "y",
+      "color": "neutral",
+      "on": "ring"
+     },
+     {
+      "id": "cog",
+      "kind": "gear",
+      "at": [
+       110,
+       0,
+       30
+      ],
+      "r": 9,
+      "h": 3,
+      "teeth": 16,
+      "axis": "y",
+      "color": "metal"
+     },
+     {
+      "id": "hub",
+      "kind": "cylinder",
+      "at": [
+       110,
+       1,
+       30
+      ],
+      "r": 3,
+      "h": 12,
+      "axis": "y",
+      "color": "neutral",
+      "on": "cog"
+     },
+     {
+      "id": "chain",
+      "kind": "tube",
+      "path": [
+       [
+        0,
+        4,
+        53.5
+       ],
+       [
+        -6.6,
+        4,
+        52.5
+       ],
+       [
+        -12.7,
+        4,
+        49.8
+       ],
+       [
+        -17.8,
+        4,
+        45.4
+       ],
+       [
+        -21.4,
+        4,
+        39.8
+       ],
+       [
+        -23.3,
+        4,
+        33.3
+       ],
+       [
+        -23.3,
+        4,
+        26.7
+       ],
+       [
+        -21.4,
+        4,
+        20.2
+       ],
+       [
+        -17.8,
+        4,
+        14.6
+       ],
+       [
+        -12.7,
+        4,
+        10.2
+       ],
+       [
+        -6.6,
+        4,
+        7.5
+       ],
+       [
+        0,
+        4,
+        6.5
+       ],
+       [
+        110,
+        4,
+        19.5
+       ],
+       [
+        114.6,
+        4,
+        20.5
+       ],
+       [
+        118.2,
+        4,
+        23.5
+       ],
+       [
+        120.2,
+        4,
+        27.7
+       ],
+       [
+        120.2,
+        4,
+        32.3
+       ],
+       [
+        118.2,
+        4,
+        36.5
+       ],
+       [
+        114.6,
+        4,
+        39.5
+       ],
+       [
+        110,
+        4,
+        40.5
+       ],
+       [
+        0,
+        4,
+        53.5
+       ]
+      ],
+      "r": 1.5,
+      "color": "neutral"
+     },
+     {
+      "id": "crank",
+      "kind": "rod",
+      "from": [
+       0,
+       8,
+       30
+      ],
+      "to": [
+       0,
+       8,
+       -4
+      ],
+      "r": 2.4,
+      "color": "metal",
+      "on": "ring"
+     },
+     {
+      "id": "pedal",
+      "kind": "box",
+      "at": [
+       0,
+       13,
+       -4
+      ],
+      "w": 9,
+      "d": 12,
+      "h": 3,
+      "color": "neutral",
+      "on": "crank"
+     }
+    ],
+    "motions": [
+     {
+      "part": "ring",
+      "kind": "spin",
+      "axis": "y",
+      "speed": "cadence / 60"
+     },
+     {
+      "part": "cog",
+      "kind": "spin",
+      "axis": "y",
+      "speed": "cadence / 60 * 2.5"
+     },
+     {
+      "part": "chain",
+      "kind": "flow",
+      "speed": "cadence / 60 * 2.5"
+     }
+    ],
+    "readouts": [
+     {
+      "label": "Metres per pedal turn",
+      "value": "2.1 * 40 / 16",
+      "unit": "m",
+      "decimals": 2
+     },
+     {
+      "label": "Road speed",
+      "value": "cadence * 2.1 * 2.5 * 60 / 1000",
+      "unit": "km/h",
+      "decimals": 1
+     }
+    ],
+    "labels": [
+     {
+      "part": "ring",
+      "label": "Chainring",
+      "note": "40 teeth, turned by the cranks"
+     },
+     {
+      "part": "cog",
+      "label": "Rear cog",
+      "note": "16 teeth, 2.5 turns per pedal turn"
+     },
+     {
+      "part": "chain",
+      "label": "Chain",
+      "note": "carries the pull from ring to cog"
+     },
+     {
+      "part": "pedal",
+      "label": "Pedal",
+      "note": "cadence sets how fast this goes round"
+     }
+    ]
+   }
+  }
+ },
+ "iso-heart": {
+  "state": {},
+  "ui": {
+   "type": "iso-scene",
+   "bind": "{state.heart}",
+   "props": {
+    "title": "The heart as two pumps",
+    "caption": "Right side (blue) sends blood to the lungs, left side (red) sends it to the body. Valves keep it one way.",
+    "params": [
+     {
+      "key": "rate",
+      "label": "Heart rate",
+      "min": 40,
+      "max": 180,
+      "step": 1,
+      "unit": "bpm",
+      "value": 72
+     }
+    ],
+    "parts": [
+     {
+      "id": "base",
+      "kind": "slab",
+      "at": [
+       0,
+       0,
+       -2
+      ],
+      "w": 190,
+      "d": 100,
+      "h": 4,
+      "r": 10
+     },
+     {
+      "id": "rv",
+      "kind": "slab",
+      "at": [
+       -40,
+       0,
+       13
+      ],
+      "w": 56,
+      "d": 44,
+      "h": 26,
+      "r": 14,
+      "color": "blue"
+     },
+     {
+      "id": "lv",
+      "kind": "slab",
+      "at": [
+       40,
+       0,
+       14
+      ],
+      "w": 60,
+      "d": 48,
+      "h": 28,
+      "r": 14,
+      "color": "red"
+     },
+     {
+      "id": "tricuspid",
+      "kind": "disc",
+      "at": [
+       -40,
+       0,
+       28.5
+      ],
+      "r": 11,
+      "h": 2,
+      "color": "neutral"
+     },
+     {
+      "id": "mitral",
+      "kind": "disc",
+      "at": [
+       40,
+       0,
+       30.5
+      ],
+      "r": 11,
+      "h": 2,
+      "color": "neutral"
+     },
+     {
+      "id": "ra",
+      "kind": "cylinder",
+      "at": [
+       -40,
+       0,
+       40
+      ],
+      "r": 17,
+      "h": 18,
+      "color": "blue"
+     },
+     {
+      "id": "la",
+      "kind": "cylinder",
+      "at": [
+       40,
+       0,
+       42
+      ],
+      "r": 17,
+      "h": 18,
+      "color": "red"
+     },
+     {
+      "id": "vena-cava",
+      "kind": "tube",
+      "path": [
+       [
+        -96,
+        -30,
+        70
+       ],
+       [
+        -80,
+        -20,
+        60
+       ],
+       [
+        -62,
+        -10,
+        46
+       ],
+       [
+        -55,
+        -4,
+        44
+       ]
+      ],
+      "r": 4,
+      "color": "blue"
+     },
+     {
+      "id": "pulmonary-artery",
+      "kind": "tube",
+      "path": [
+       [
+        -22,
+        14,
+        24
+       ],
+       [
+        -18,
+        4,
+        56
+       ],
+       [
+        -14,
+        -14,
+        80
+       ],
+       [
+        -10,
+        -26,
+        88
+       ]
+      ],
+      "r": 4,
+      "color": "blue"
+     },
+     {
+      "id": "lungs",
+      "kind": "sphere",
+      "at": [
+       0,
+       -30,
+       92
+      ],
+      "r": 12,
+      "color": "green"
+     },
+     {
+      "id": "pulmonary-vein",
+      "kind": "tube",
+      "path": [
+       [
+        10,
+        -26,
+        88
+       ],
+       [
+        18,
+        -18,
+        74
+       ],
+       [
+        24,
+        -8,
+        58
+       ],
+       [
+        27,
+        -4,
+        48
+       ]
+      ],
+      "r": 4,
+      "color": "red"
+     },
+     {
+      "id": "aorta",
+      "kind": "tube",
+      "path": [
+       [
+        62,
+        18,
+        26
+       ],
+       [
+        74,
+        20,
+        40
+       ],
+       [
+        80,
+        10,
+        66
+       ],
+       [
+        84,
+        -10,
+        74
+       ],
+       [
+        88,
+        -30,
+        60
+       ],
+       [
+        90,
+        -36,
+        30
+       ]
+      ],
+      "r": 5,
+      "color": "red"
+     }
+    ],
+    "motions": [
+     {
+      "part": "ra",
+      "kind": "pulse",
+      "speed": "rate / 60",
+      "range": 0.08,
+      "phase": 0
+     },
+     {
+      "part": "la",
+      "kind": "pulse",
+      "speed": "rate / 60",
+      "range": 0.08,
+      "phase": 0
+     },
+     {
+      "part": "rv",
+      "kind": "pulse",
+      "speed": "rate / 60",
+      "range": 0.06,
+      "phase": 0.5
+     },
+     {
+      "part": "lv",
+      "kind": "pulse",
+      "speed": "rate / 60",
+      "range": 0.06,
+      "phase": 0.5
+     },
+     {
+      "part": "tricuspid",
+      "kind": "swing",
+      "axis": "x",
+      "speed": "rate / 60",
+      "range": 22
+     },
+     {
+      "part": "mitral",
+      "kind": "swing",
+      "axis": "x",
+      "speed": "rate / 60",
+      "range": 22
+     },
+     {
+      "part": "vena-cava",
+      "kind": "flow",
+      "speed": "rate / 60"
+     },
+     {
+      "part": "pulmonary-artery",
+      "kind": "flow",
+      "speed": "rate / 60"
+     },
+     {
+      "part": "pulmonary-vein",
+      "kind": "flow",
+      "speed": "rate / 60"
+     },
+     {
+      "part": "aorta",
+      "kind": "flow",
+      "speed": "rate / 60"
+     }
+    ],
+    "readouts": [
+     {
+      "label": "Cardiac output",
+      "value": "rate * 70 / 1000",
+      "unit": "L/min",
+      "decimals": 1
+     },
+     {
+      "label": "One beat",
+      "value": "60 / rate",
+      "unit": "s",
+      "decimals": 2
+     }
+    ],
+    "labels": [
+     {
+      "part": "ra",
+      "label": "Right atrium",
+      "note": "collects blood from the body"
+     },
+     {
+      "part": "rv",
+      "label": "Right ventricle",
+      "note": "pumps it to the lungs"
+     },
+     {
+      "part": "lungs",
+      "label": "Lungs",
+      "note": "swap carbon dioxide for oxygen"
+     },
+     {
+      "part": "la",
+      "label": "Left atrium",
+      "note": "collects blood from the lungs"
+     },
+     {
+      "part": "lv",
+      "label": "Left ventricle",
+      "note": "pumps it out to the body"
+     }
+    ]
+   }
+  }
+ },
+ "iso-engine": {
+  "state": {},
+  "ui": {
+   "type": "iso-scene",
+   "bind": "{state.engine}",
+   "props": {
+    "title": "Piston engine, one cylinder",
+    "caption": "Shown 20 times slower than real. The crank turns the piston up and down; air comes in on one side, exhaust leaves on the other.",
+    "params": [
+     {
+      "key": "rpm",
+      "label": "Engine speed",
+      "min": 600,
+      "max": 3600,
+      "step": 100,
+      "unit": "rpm",
+      "value": 1200
+     }
+    ],
+    "parts": [
+     {
+      "id": "base",
+      "kind": "slab",
+      "at": [
+       0,
+       4,
+       -2
+      ],
+      "w": 150,
+      "d": 70,
+      "h": 4,
+      "r": 8
+     },
+     {
+      "id": "case",
+      "kind": "box",
+      "at": [
+       0,
+       -6,
+       13
+      ],
+      "w": 62,
+      "d": 36,
+      "h": 26
+     },
+     {
+      "id": "crank",
+      "kind": "cylinder",
+      "at": [
+       0,
+       16,
+       15
+      ],
+      "r": 14,
+      "h": 4,
+      "axis": "y",
+      "color": "metal"
+     },
+     {
+      "id": "crank-pin",
+      "kind": "cylinder",
+      "at": [
+       0,
+       20,
+       25
+      ],
+      "r": 3,
+      "h": 6,
+      "axis": "y",
+      "color": "neutral",
+      "on": "crank"
+     },
+     {
+      "id": "rail-left",
+      "kind": "rod",
+      "from": [
+       -18,
+       8,
+       28
+      ],
+      "to": [
+       -18,
+       8,
+       96
+      ],
+      "r": 2.5
+     },
+     {
+      "id": "rail-right",
+      "kind": "rod",
+      "from": [
+       18,
+       8,
+       28
+      ],
+      "to": [
+       18,
+       8,
+       96
+      ],
+      "r": 2.5
+     },
+     {
+      "id": "piston",
+      "kind": "cylinder",
+      "at": [
+       0,
+       8,
+       64
+      ],
+      "r": 14,
+      "h": 14,
+      "color": "amber"
+     },
+     {
+      "id": "con-rod",
+      "kind": "rod",
+      "from": [
+       0,
+       20,
+       57
+      ],
+      "to": [
+       0,
+       20,
+       25
+      ],
+      "r": 2.4,
+      "color": "metal",
+      "on": "piston"
+     },
+     {
+      "id": "head",
+      "kind": "box",
+      "at": [
+       0,
+       8,
+       101
+      ],
+      "w": 50,
+      "d": 34,
+      "h": 10
+     },
+     {
+      "id": "spark-plug",
+      "kind": "cylinder",
+      "at": [
+       0,
+       8,
+       111
+      ],
+      "r": 2.5,
+      "h": 10,
+      "color": "metal"
+     },
+     {
+      "id": "intake",
+      "kind": "arrow",
+      "from": [
+       -66,
+       8,
+       100
+      ],
+      "to": [
+       -28,
+       8,
+       100
+      ],
+      "color": "blue"
+     },
+     {
+      "id": "exhaust",
+      "kind": "arrow",
+      "from": [
+       28,
+       8,
+       100
+      ],
+      "to": [
+       66,
+       8,
+       100
+      ],
+      "color": "red"
+     }
+    ],
+    "motions": [
+     {
+      "part": "crank",
+      "kind": "spin",
+      "axis": "y",
+      "speed": "rpm / 60 / 20"
+     },
+     {
+      "part": "piston",
+      "kind": "slide",
+      "axis": "z",
+      "range": 10,
+      "speed": "rpm / 60 / 20",
+      "phase": 0.25
+     },
+     {
+      "part": "intake",
+      "kind": "flow",
+      "speed": "rpm / 60 / 20"
+     },
+     {
+      "part": "exhaust",
+      "kind": "flow",
+      "speed": "rpm / 60 / 20"
+     }
+    ],
+    "readouts": [
+     {
+      "label": "Crank turns per second",
+      "value": "rpm / 60",
+      "decimals": 0
+     },
+     {
+      "label": "Power strokes per second",
+      "value": "rpm / 120",
+      "decimals": 1
+     }
+    ],
+    "labels": [
+     {
+      "part": "piston",
+      "label": "Piston",
+      "note": "slides up and down"
+     },
+     {
+      "part": "crank",
+      "label": "Crankshaft",
+      "note": "turns the slide into rotation"
+     },
+     {
+      "part": "con-rod",
+      "label": "Connecting rod"
+     },
+     {
+      "part": "intake",
+      "label": "Intake",
+      "note": "air and fuel in"
+     },
+     {
+      "part": "exhaust",
+      "label": "Exhaust",
+      "note": "burnt gas out"
+     }
+    ]
+   }
+  }
+ },
+ "heart-pump": {
+  "state": {
+   "figure": null
+  },
+  "ui": {
+   "type": "figure",
+   "bind": "{state.figure}",
+   "props": {
+    "figure": "heart",
+    "params": {
+     "bpm": 72
+    },
+    "labels": [
+     {
+      "anchor": "right-ventricle",
+      "note": "Pumps oxygen-poor blood to the lungs."
+     },
+     {
+      "anchor": "left-ventricle",
+      "note": "Pumps oxygen-rich blood out to the whole body."
+     },
+     {
+      "anchor": "mitral",
+      "note": "Opens while the left ventricle fills, shuts before it squeezes."
+     },
+     {
+      "anchor": "aortic-valve",
+      "note": "Opens only while the left ventricle pushes blood out."
+     },
+     {
+      "anchor": "lungs",
+      "note": "Blood picks up oxygen here and comes back red."
+     }
+    ],
+    "caption": "Two pumps in one. The right side sends blood to the lungs, the left side sends it round the body. Move the heart rate and watch the output and the pressure change."
+   }
+  }
+ }
+}

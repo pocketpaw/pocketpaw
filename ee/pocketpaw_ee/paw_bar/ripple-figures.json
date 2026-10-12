@@ -1,0 +1,33 @@
+{
+  "heart": {
+    "title": "How a heart pumps",
+    "params": [
+      {
+        "key": "bpm",
+        "min": 40,
+        "max": 180
+      },
+      {
+        "key": "stroke",
+        "min": 50,
+        "max": 110
+      }
+    ],
+    "anchors": [
+      "right-atrium",
+      "right-ventricle",
+      "left-atrium",
+      "left-ventricle",
+      "tricuspid",
+      "mitral",
+      "pulmonary-valve",
+      "aortic-valve",
+      "aorta",
+      "vena-cava",
+      "pulmonary-artery",
+      "pulmonary-veins",
+      "lungs",
+      "body"
+    ]
+  }
+}
