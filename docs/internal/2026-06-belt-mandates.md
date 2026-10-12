@@ -4,7 +4,7 @@
      crew (cloud Agents as workers: roster, seat rule, per-worker model,
      instructions and setup), the headless develop station (strict and owner
      Claude setups, the trust restore, ORIENT) and its security posture, the
-     cloud develop station (claude --cloud + PR tracking through gh), the
+     cloud develop station (claude --cloud, PR tracking through gh, fixers), the
      architecture context the foreman and review get, the mandate's line
      branch (base sync, landing, re-develop, one PR, its state on the wire and
      the UI surfaces), the run feed (live over SSE and stored per stage, with
@@ -591,8 +591,42 @@ TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
                       `gh pr diff` is attached as the run's diff, which waits
                       at the per-diff Instinct gate (approving it lands it on
                       the line like any run; close the PR then)
+          stuck    -> mergeable=CONFLICTING, or a failed check on the head
+                      commit, for POCKETPAW_FACTORY_CLOUD_FIX_GRACE seconds:
+                      one fixer session (see below), at most
+                      POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS per run, then the
+                      PR escalates like a refusal
           timeout  -> headless_error, the run stays queued
 ```
+
+**Fixers.** A cloud worker stops once its PR is open, so a PR can get stuck
+after it: red CI on a runner the session never saw (an older Swift on macOS),
+or a conflict after a sibling PR from the same shift merged first. The tracker
+reads `mergeable` and `statusCheckRollup` from the same `gh pr view` poll and
+classifies checks the way `scripts/fast-lane.sh` does (the lane's own Fast Lane
+check and Copilot checks don't count; the rollup has no "required" flag, so any
+failed check counts). A PR that stays stuck for the grace period (default 300
+s, so the lane's own refresh or a running CI can settle first) gets ONE fixer,
+launched through the same path as the worker (launch clone, `claude --cloud`,
+one launch at a time) with a fix brief instead of the task brief:
+
+- conflicting: check out the PR's branch, rebase onto the latest
+  `origin/<base>`, keep both sides' behavior (shared lists keep both entries),
+  run the charter checks until they pass, `--force-with-lease` to the same
+  branch, comment on the PR;
+- red CI: the failing check's name and the last 40 lines of
+  `gh run view <run> --job <job> --log-failed` (fenced as data); fix minimal,
+  run the charter checks, push to the same branch, wait for CI and retry.
+
+Both say: no new PR, keep the `Belt-Run` line, no AI attribution, never merge.
+The tracker keeps polling the same PR under the same overall timeout. A fixer
+is launched at most once per head commit: the next one waits for a new head
+(a fixer that pushes nothing leaves the run to the timeout). Every attempt is
+appended to the blob's `fixes` list as `{kind: "rebase"|"ci", session_url, at}`,
+or `{kind, error, at}` when the launch failed (that counts as an attempt and
+tracking goes on), and emits `belt_run_updated` with `stage="fix"`. When the
+attempts are used up and the PR is still stuck, its diff is attached for the
+per-diff gate, with a summary saying how many fixers ran.
 
 The brief tells the session to do the task, follow the repo's CLAUDE.md, run
 the charter checks until they pass, open ONE PR to the base that says
@@ -1192,6 +1226,8 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_CLOUD_PR_LABEL` | `fast-lane` | The label the cloud brief tells the session to put on its PR |
 | `POCKETPAW_FACTORY_CLOUD_POLL` | `60` | Seconds between `gh` polls of a cloud run's PR |
 | `POCKETPAW_FACTORY_CLOUD_TIMEOUT` | `14400` | Seconds a cloud run waits for its PR to merge or be refused before it fails back to queued |
+| `POCKETPAW_FACTORY_CLOUD_FIX_GRACE` | `300` | Seconds a cloud run's PR must stay conflicting or red before a fixer session launches |
+| `POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS` | `2` | Fixer sessions per cloud run; past it a still-stuck PR escalates to the per-diff gate |
 | `POCKETPAW_FACTORY_DEDICATED_HOST` | unset | `1` lets the station wire in a process serving cloud tenants; set it only on a dedicated single-tenant host |
 | `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,belt,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
 | `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
