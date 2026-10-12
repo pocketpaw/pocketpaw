@@ -1538,13 +1538,15 @@ _RIPPLE_RULES = (
     "actions list.",
     "   - When a small picture helps explain (how something works), add an illustration. "
     "Put SVG attributes in single quotes (no JSON escaping): "
-    "<svg viewBox='0 0 200 120'>...</svg>. Under 24,000 characters and 400 elements, "
-    "every dur 0.5s or more. No {expressions}; a gradient is fill='url(#id)'. The card "
+    "<svg viewBox='0 0 200 120'>...</svg>. Keep it compact: fewer than about 40 "
+    "elements, short path data, no decorative extras; a long drawing gets cut off. "
+    "Every dur 0.5s or more. No {expressions}; a gradient is fill='url(#id)'. The card "
     "may be dark or light: write text with fill='currentColor', never dark or black. "
     "Reuse a shape with use href='#id' (plain href, never xlink:href), at most 40 uses, "
     "none pointing at a use. Up to 8 annotations [{id, label (at most 40 chars), note "
     "(at most 280), target}] number notes on parts of the drawing: give each drawing "
-    "part an id and point at it.",
+    "part an id and point at it; keep each note to one short sentence. Put on_select "
+    "on the node beside props, never inside props.",
     "   - A good summary card (copy its shape, never its data): "
     + json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":")),
 )

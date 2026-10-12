@@ -9,9 +9,9 @@
 # aliases and name parts, its intent keywords from ripple_widget_intents.json (kept
 # here so a new steering keyword does not wait on a ripple release), and its
 # description words. A table entry may also carry a ``hint`` (steering appended to
-# the widget's line) or a ``line`` (a curated line in its place). Widgets a card
-# earlier in the conversation used are always kept, so an edit to that card still
-# has its props.
+# the widget's line; a core widget's hint rides every turn) or a ``line`` (a
+# curated line in its place). Widgets a card earlier in the conversation used are
+# always kept, so an edit to that card still has its props.
 #
 # Invariants: same input, same output (sorted, no set iteration in output); only
 # manifest and intents-table text reaches the prompt, never visitor text; at most
@@ -156,16 +156,25 @@ def full_line(name: str) -> str:
         if name in typed
         else _widget_line(widget)
     )
-    return f"{line} {entry['hint']}" if entry.get("hint") else line
+    return _hinted(name, line)
+
+
+def _hinted(name: str, line: str) -> str:
+    """``line`` plus the widget's ``hint`` from the intents table, if it has one."""
+    hint = INTENTS.get(name, {}).get("hint")
+    return f"{line} {hint}" if hint else line
 
 
 def core_lines() -> list[str]:
-    """The always-on full lines, in manifest order."""
+    """The always-on full lines, in manifest order, each with its ``hint``."""
     typed = RIPPLE_PROFILE.typed
     return [
-        _widget_line(w, typed=True, shown=typed[w["type"]])
-        if w["type"] in typed
-        else _widget_line(w)
+        _hinted(
+            w["type"],
+            _widget_line(w, typed=True, shown=typed[w["type"]])
+            if w["type"] in typed
+            else _widget_line(w),
+        )
         for w in RIPPLE_PROFILE.manifest["widgets"]
         if w["type"] in CORE
     ]

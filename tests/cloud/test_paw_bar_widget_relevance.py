@@ -83,6 +83,31 @@ def test_the_steering_hints_reach_the_section():
     assert "rain|heavy-rain|thunder|snow|fog|wind|night-clear" in weather
     dentist = _section(_paragraph("Book a dentist appointment"))
     assert "only when it is not a table" in dentist
+    savings = _section(_paragraph("Show me how my savings grow"))
+    assert "never add inputs around it" in savings
+    invoice = _section(_paragraph("create an invoice"))
+    assert "summary rows use value" in invoice
+
+
+def test_the_core_widgets_carry_their_steering_hints_on_every_turn():
+    """stat and table are core lines, never in the per-turn section, so their hints
+    ride the core. THE MUTATION THAT BREAKS THIS: drop the hint from _hinted."""
+    core = _paragraph()
+    stat = next(line for line in core.splitlines() if line.startswith("   - stat "))
+    assert "round numbers before writing them" in stat.lower()
+    table = next(line for line in core.splitlines() if line.startswith("   - table "))
+    assert "short phrases" in table
+    assert "short phrases" not in _section(_paragraph("review this NDA as a table"))
+
+
+def test_the_illustration_rule_asks_for_a_compact_svg_and_a_node_level_on_select():
+    """The bike gears turn: the first SVG was cut off mid-JSON and the restart was
+    refused for an on_select written inside the illustration's props."""
+    core = _paragraph()
+    rule = next(line for line in core.splitlines() if "add an illustration" in line)
+    assert "fewer than about 40 elements" in rule
+    assert "on_select on the node" in rule
+    assert "24,000" not in rule and "400 elements" not in rule
 
 
 def test_the_3d_line_carries_the_asset_library():
@@ -141,9 +166,9 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
 
 
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
-    """The fixed core is about 17,700 chars; the worst per-turn section is the
-    MAX_PICKED longest candidate lines (about 6,700), so the paragraph peaks near
-    24,400, against 31,855 when every widget rode every turn."""
+    """The fixed core is about 18,600 chars; the worst per-turn section is the
+    MAX_PICKED longest candidate lines (about 7,300), so the paragraph peaks near
+    25,900, against 31,855 when every widget rode every turn."""
     core = _paragraph()
     longest = sorted(
         (len(widget_relevance.full_line(n)) + 4 for n in widget_relevance.CANDIDATES),

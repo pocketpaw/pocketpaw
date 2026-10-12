@@ -57,10 +57,11 @@
   {
     "label": "a widget's steering hint never reaches its line",
     "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
-    "find": "    return f\"{line} {entry['hint']}\" if entry.get(\"hint\") else line",
+    "find": "    return f\"{line} {hint}\" if hint else line",
     "replace": "    return line",
     "tests": [
-      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_steering_hints_reach_the_section"
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_steering_hints_reach_the_section",
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_core_widgets_carry_their_steering_hints_on_every_turn"
     ]
   },
   {

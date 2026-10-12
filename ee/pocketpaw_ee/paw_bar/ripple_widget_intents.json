@@ -27,11 +27,14 @@
   "habit-tracker": {"intents": ["habit", "habits", "streak", "daily", "track my", "weekly target"]},
   "focus-timer": {"intents": ["focus", "pomodoro", "timer", "concentrate", "deep work"]},
   "bill-split": {"intents": ["split", "bill", "tip", "share the cost", "each person", "owe"]},
-  "growth-projection": {"intents": ["savings", "save", "invest", "interest", "compound", "grow", "growth", "retirement", "deposit"]},
+  "growth-projection": {
+    "intents": ["savings", "save", "invest", "interest", "compound", "grow", "growth", "retirement", "deposit"],
+    "hint": "It has its own deposit, rate and years controls; never add inputs around it."
+  },
   "illustration": {"intents": ["draw", "drawing", "picture", "diagram", "illustrate", "animated", "how does", "how do", "explain"]},
   "invoice-layout": {
     "intents": ["invoice", "bill client", "billing", "receipt", "hours of", "line items", "bill a client"],
-    "hint": "An invoice or quote is an invoice-layout (from, billTo, invoiceNumber, issueDate, lines [{description, quantity, unitPrice}], total), never a table of inputs."
+    "hint": "An invoice or quote is an invoice-layout (from, billTo, invoiceNumber, issueDate, lines [{description, quantity, unitPrice}], total), never a table of inputs; summary rows use value."
   },
   "checklist-layout": {
     "intents": ["checklist", "due diligence", "compliance", "packing", "study plan", "tick off", "audit", "privacy check", "packing list"],
@@ -45,6 +48,8 @@
     "intents": ["survey", "form", "feedback", "questionnaire", "signup", "sign up"],
     "hint": "A survey, feedback form or questionnaire is a form-layout with sections [{id, title}] and a form inside holding the questions."
   },
+  "stat": {"hint": "Round numbers before writing them (whole numbers for counts, 1 decimal for hours): an average of fixed data is its rounded number, never a division."},
+  "table": {"hint": "Keep cells to short phrases; put explanations in a callout or text below."},
   "todo-list": {"intents": ["todo", "to-do", "to do", "tasks", "task list"]},
   "timeline": {"intents": ["timeline", "milestones", "schedule", "roadmap", "phases", "history"]},
   "calendar": {"intents": ["calendar", "month", "events", "dates"]},
