@@ -1553,16 +1553,24 @@ _RIPPLE_RULES = (
 
 
 # The ripple landing's chat message when a visitor confirms a slot on a booking
-# card the store does not back (ripple routes/pawbar/book.ts slotMessage). Without
-# this note the model answered it with the same booking card again. Only this
-# fixed note reaches the prompt, never the matched text.
+# card the store does not back (ripple routes/pawbar/book.ts slotMessage). The
+# model answered it with the same booking card again, even with a note saying not
+# to, so that turn is text only: this fixed note replaces the whole cards
+# paragraph and the turn's FenceFilter drops any card (``picked_slot``). Only the
+# note reaches the prompt, never the matched text.
 _PICKED_SLOT = re.compile(r"I['\u2019]d like to book .+ at \d")
 _PICKED_SLOT_NOTE = (
-    "   The visitor already picked and confirmed this slot on the card: restate the "
-    "service, day and time in a sentence or two, say it is a demo so nothing is "
-    "booked, and offer one other next step (a reminder note, what to bring, another "
-    "appointment); never send them back to the card, no booking card."
+    "   No card this turn, text only. The visitor already picked and confirmed this "
+    "slot on the card: restate the service, day and time from their message in a "
+    "sentence or two, say it is a demo so nothing is booked, and offer one other next "
+    "step (a reminder note, what to bring, another appointment); never send them back "
+    "to the card and write no ```pawbar-card block."
 )
+
+
+def picked_slot(message: str, profile: Any) -> bool:
+    """Whether this ripple turn is the landing's picked-slot message."""
+    return getattr(profile, "name", "") == "ripple" and bool(_PICKED_SLOT.match(message))
 
 
 def _cards_paragraph(
@@ -1590,7 +1598,8 @@ def _cards_paragraph(
     lines, a names-only index of every widget, ``_RIPPLE_RULES``) and, last, the
     full lines of the widgets this ``message`` (and ``history``) needs, picked by
     ``widget_relevance``; no product-card line. The lead and gated form lines
-    are the same. The core comes first so it stays byte-stable across turns."""
+    are the same. The core comes first so it stays byte-stable across turns.
+    A ``picked_slot`` turn gets ``_PICKED_SLOT_NOTE`` alone: no cards at all."""
     from pocketpaw_ee.paw_bar import widget_relevance
     from pocketpaw_ee.paw_bar.card_spec import (
         MAX_SPEC_DEPTH,
@@ -1598,6 +1607,8 @@ def _cards_paragraph(
         compact_manifest,
     )
 
+    if picked_slot(message, profile):
+        return _PICKED_SLOT_NOTE
     if getattr(profile, "name", "") == "ripple":
         lines = [
             "   Cards: when a small tool (a calculator, a planner, a checklist), a trip, a "
@@ -1620,8 +1631,6 @@ def _cards_paragraph(
         if picked:
             lines.append("   Widgets for this message, with their props:")
             lines += [f"   {widget_relevance.full_line(name)}" for name in picked]
-        if _PICKED_SLOT.match(message):
-            lines.append(_PICKED_SLOT_NOTE)
         return "\n".join(lines)
 
     lines = [
@@ -2319,12 +2328,15 @@ class FenceFilter:
         profile: Any = None,
         stream_cards: bool = False,
         storefront: Any = None,
+        drop_cards: bool = False,
     ) -> None:
         from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE
 
         # The turn's concierge_store.StoreData (None: no store); fills store widgets.
         self._storefront = storefront
-        self._stream_cards = stream_cards is True
+        # A text-only turn (``picked_slot``): every card fence goes, silently.
+        self._drop_cards = drop_cards is True
+        self._stream_cards = stream_cards is True and not self._drop_cards
         self._cards = 0
         self._card_id = ""  # the open streamed card, "" when none
         self._parts: list[str] = []  # its body so far, as sent in card.delta
@@ -2522,7 +2534,7 @@ class FenceFilter:
         return out
 
     async def _afinish(self, tag: str, body: str, card_id: str = "") -> Any:
-        if tag != _CARD_LANG or self._lookup is None:
+        if tag != _CARD_LANG or self._lookup is None or self._drop_cards:
             return self._finish(tag, body, card_id)
         from pocketpaw_ee.paw_bar.card_spec import card_ids, render_card
 
@@ -2580,6 +2592,8 @@ class FenceFilter:
     def _finish(self, tag: str, body: str, card_id: str = "") -> Any:
         if tag == _ACTION_LANG:
             return self._take_action(body)
+        if tag == _CARD_LANG and self._drop_cards:
+            return ""
         if tag == _CARD_LANG:
             from pocketpaw_ee.paw_bar.card_spec import render_card
 
@@ -2657,6 +2671,7 @@ def _fence_filter_for(
     profile: Any = None,
     stream_cards: bool = False,
     storefront: Any = None,
+    drop_cards: bool = False,
 ) -> FenceFilter:
     """A filter hydrating cards from this widget's catalog in ``store`` and its
     declared verbs, and grounding code in ``knowledge`` when the site allows
@@ -2682,6 +2697,7 @@ def _fence_filter_for(
         profile=profile,
         stream_cards=stream_cards,
         storefront=storefront,
+        drop_cards=drop_cards,
     )
 
 
@@ -3026,6 +3042,7 @@ async def run_concierge_v2(
                 profile=profile,
                 stream_cards=profile.name == "ripple",
                 storefront=storefront,
+                drop_cards=picked_slot(message, profile),
             )
 
         # Spend attribution: the proxy's spend row names the site and the widget.

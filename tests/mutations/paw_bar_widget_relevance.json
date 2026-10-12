@@ -74,21 +74,39 @@
     ]
   },
   {
-    "label": "a picked slot gets no confirm note, so the concierge sends the booking card again",
-    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "            lines.append(_PICKED_SLOT_NOTE)\n",
-    "replace": "            pass\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_picked_slot_gets_a_confirm_note_not_another_booking_card"
-    ]
-  },
-  {
     "label": "the picked-slot match is loosened, so a plain booking request loses its card",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
     "find": "d like to book .+ at \\d\")",
     "replace": "d like to book\")",
     "tests": [
       "tests/cloud/test_paw_bar_widget_relevance.py::test_a_booking_request_gets_no_picked_slot_note"
+    ]
+  },
+  {
+    "label": "a picked-slot turn keeps the full cards paragraph, so the model can write a booking card again",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if picked_slot(message, profile):\n        return _PICKED_SLOT_NOTE\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_picked_slot_turn_gets_a_text_only_instruction_and_no_card_grammar"
+    ]
+  },
+  {
+    "label": "FenceFilter ignores drop_cards, so a card on a picked-slot turn still renders",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if tag == _CARD_LANG and self._drop_cards:\n            return \"\"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_picked_slot_turn_drops_a_card_and_keeps_the_text"
+    ]
+  },
+  {
+    "label": "the turn's FenceFilter is built without drop_cards, so the backstop never runs",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                drop_cards=picked_slot(message, profile),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_picked_slot_turn_is_text_only_end_to_end"
     ]
   }
 ]

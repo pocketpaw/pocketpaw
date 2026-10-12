@@ -112,16 +112,18 @@ _NOTE = "already picked and confirmed this slot on the card"
         "I\u2019d like to book Haircut at 4:00 PM.",
     ],
 )
-def test_a_picked_slot_gets_a_confirm_note_not_another_booking_card(message):
+def test_a_picked_slot_turn_gets_a_text_only_instruction_and_no_card_grammar(message):
     """The landing sends this when a visitor confirms a slot on a booking card the
-    store does not back; the concierge answered with the same booking card again.
-    THE MUTATION THAT BREAKS THIS: drop the picked-slot note from _cards_paragraph."""
+    store does not back; the concierge answered with the same booking card again,
+    even with a note telling it not to. That turn's cards paragraph is now the
+    text-only instruction alone. THE MUTATION THAT BREAKS THIS: drop the
+    picked-slot early return from _cards_paragraph."""
     text = _paragraph(message)
-    tail = text[len(_paragraph()) :]
-    assert _NOTE in tail and "no booking card" in tail
-    assert "never send them back to the card" in tail and "a reminder note" in tail
-    assert "Dental" not in tail and "Teeth" not in tail and "Haircut" not in tail
-    assert "the visitor confirmed it on the card" in _section(text)
+    assert _NOTE in text and "never send them back to the card" in text
+    assert "a reminder note" in text
+    for card_grammar in (_SECTION, "Every widget by category", '{"ui"', "   - stat ", "   - "):
+        assert card_grammar not in text
+    assert "Dental" not in text and "Teeth" not in text and "Haircut" not in text
 
 
 @pytest.mark.parametrize(

@@ -1858,6 +1858,58 @@ def test_the_fence_filter_checks_cards_against_the_profile():
     assert "pawbar-card" not in out and out.startswith("Here you go.")
 
 
+def test_a_picked_slot_turn_drops_a_card_and_keeps_the_text():
+    """The backstop for a model that writes a card anyway: the fence goes with no
+    card frame and no visitor-facing note, the text around it stays.
+    THE MUTATION THAT BREAKS THIS: ignore drop_cards in FenceFilter._finish."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import CardEvent, FenceFilter
+
+    reply = f"Noted for Tue at 10.\n```pawbar-card\n{_body(_card())}\n```\nWant a reminder?"
+    dropped = FenceFilter(profile=RIPPLE_PROFILE, stream_cards=True, drop_cards=True)
+    out = dropped.feed(reply) + dropped.close()
+    assert all(isinstance(piece, str) for piece in out)
+    assert "".join(out) == "Noted for Tue at 10.\n\nWant a reminder?"
+    kept = FenceFilter(profile=RIPPLE_PROFILE, stream_cards=True)
+    assert any(isinstance(p, CardEvent) for p in kept.feed(reply) + kept.close())
+
+
+@pytest.mark.asyncio
+async def test_a_picked_slot_turn_is_text_only_end_to_end(concierge_client, model, monkeypatch):
+    """A live run on Haiku sent a second booking card despite the note. On a
+    picked-slot turn the prompt has no card grammar and a card the model writes
+    anyway never reaches the visitor. THE MUTATION THAT BREAKS THIS: build the
+    turn's FenceFilter without drop_cards."""
+    from tests.cloud.test_paw_bar_concierge_v2 import _HOURS_KB, _chat, _frames, _seed_kb
+    from tests.cloud.test_paw_bar_concierge_v2 import _site as _v2_site
+    from tests.cloud.test_paw_bar_concierge_v2 import _widget as _v2_widget
+
+    client, store = concierge_client
+    _seed_kb(monkeypatch, _HOURS_KB)
+    site = await _v2_site(concierge_ui_profile="ripple")
+    widget = await store.create_widget(_v2_widget())
+    _pin_ops(monkeypatch, str(site.id))
+    model.reply = [
+        "Dental cleaning, Tue Oct 20 at 10:00 AM. This is a demo, so nothing is booked.\n",
+        f"```pawbar-card\n{_body(_card())}\n```",
+        "\nWant a reminder note?",
+    ]
+
+    res = await _chat(
+        client, widget.id, message="I'd like to book Dental cleaning on Tue, Oct 20 at 10:00 AM."
+    )
+    frames = _frames(res.text)
+    assert not [e for e, _ in frames if e.startswith("card.")]
+    said = "".join(d.get("content", "") for e, d in frames if e == "chunk")
+    assert "nothing is booked" in said and "Want a reminder note?" in said
+    assert "pawbar-card" not in said and "left out" not in said.lower()
+    prompt = model.user_prompt()
+    assert "Every widget by category" not in prompt and "already picked and confirmed" in prompt
+
+    res = await _chat(client, widget.id, message="Book a dentist appointment")
+    assert [e for e, _ in _frames(res.text) if e.startswith("card.")]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("ops", "own", "global_cap", "spent", "over"),
