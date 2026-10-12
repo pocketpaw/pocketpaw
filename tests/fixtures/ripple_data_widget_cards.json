@@ -1037,5 +1037,93 @@
       }
     },
     "state": {}
+  },
+  "notes": {
+    "ui": {
+      "type": "notes",
+      "bind": "{state.notes}",
+      "props": {
+        "title": "Trip ideas",
+        "notes": [
+          {
+            "id": "n1",
+            "title": "Packing",
+            "text": "Rain jacket, adapter, the good walking shoes.",
+            "tags": [
+              "todo"
+            ],
+            "pinned": true,
+            "color": "yellow"
+          },
+          {
+            "id": "n2",
+            "title": "Food",
+            "text": "Try the custard tarts near the river <3",
+            "tags": [
+              "idea",
+              "food"
+            ]
+          },
+          {
+            "id": "n3",
+            "text": "Ask about a late checkout on day 4."
+          }
+        ],
+        "tags": [
+          "idea",
+          "todo",
+          "food"
+        ]
+      }
+    },
+    "state": {
+      "notes": {}
+    }
+  },
+  "music-player": {
+    "ui": {
+      "type": "music-player",
+      "bind": "{state.music}",
+      "props": {
+        "title": "Deep focus",
+        "tracks": [
+          {
+            "id": "t1",
+            "title": "Soft rain",
+            "sound": "rain",
+            "minutes": 25,
+            "color": "blue"
+          },
+          {
+            "id": "t2",
+            "title": "Brown noise",
+            "sound": "brown-noise",
+            "minutes": 30
+          },
+          {
+            "id": "t3",
+            "title": "Late night lofi",
+            "artist": "Paw",
+            "sound": "lofi",
+            "minutes": 4,
+            "color": "violet"
+          },
+          {
+            "id": "t4",
+            "title": "Quiet piano",
+            "sound": "piano"
+          }
+        ],
+        "volume": 0.6
+      }
+    },
+    "state": {
+      "music": {
+        "index": 0,
+        "playing": false,
+        "shuffle": false,
+        "repeat": true
+      }
+    }
   }
 }

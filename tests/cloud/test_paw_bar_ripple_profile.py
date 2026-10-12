@@ -3182,3 +3182,73 @@ def test_the_prompt_carries_the_map_hint():
         "paths[{id,points:[[lat,lng]...]}]" in text
     )
     assert 'tiles "osm"' in text and "approximate" in text
+
+
+# --------------------------------------------------------------------------- #
+# notes and music-player: plain-text notes, preset sounds only, no URLs
+# --------------------------------------------------------------------------- #
+
+
+def _notes(*notes, **props) -> dict:
+    return {"ui": {"type": "notes", "props": {"notes": list(notes), **props}}, "state": {}}
+
+
+def _music(*tracks, **props) -> dict:
+    return {"ui": {"type": "music-player", "props": {"tracks": list(tracks), **props}}, "state": {}}
+
+
+def _track(**extra) -> dict:
+    return {"title": "Soft rain", "sound": "rain", **extra}
+
+
+def test_realistic_notes_and_music_cards_pass():
+    assert _ripple(_DATA_CARDS["notes"]) is not None
+    assert _ripple(_DATA_CARDS["music-player"]) is not None
+    assert _ripple(_notes()) is not None  # a blank pad
+    assert _ripple(_notes(*[{"text": "x"}] * 50)) is not None
+    assert _ripple(_notes({"title": "t" * 80, "text": "a < b, x" * 250})) is not None
+    sounds = ("rain", "brown-noise", "white-noise", "ocean", "forest", "lofi", "drone", "piano")
+    assert _ripple(_music(*(_track(sound=s, minutes=60) for s in sounds))) is not None
+
+
+@pytest.mark.parametrize(
+    ("why", "spec"),
+    [
+        ("a track src", _music(_track(src="https://cdn.example.com/a.mp3"))),
+        ("a track url", _music(_track(url="/a.mp3"))),
+        ("a track cover image", _music(_track(cover="/a.png"))),
+        ("a player src", _music(_track(), src="/a.mp3")),
+        ("an unknown sound", _music(_track(sound="jazz"))),
+        ("a sound expression", _music(_track(sound="{state.s}"))),
+        ("no tracks", _music()),
+        ("31 tracks", _music(*[_track()] * 31)),
+        ("a track over 60 minutes", _music(_track(minutes=61))),
+        ("a track title expression", _music(_track(title="{state.t}"))),
+        ("html in a track title", _music(_track(title="<b>Rain</b>"))),
+        ("html in a note", _notes({"text": "<img src=x onerror=alert(1)>"})),
+        ("html in a note title", _notes({"title": "<i>hi</i>", "text": "x"})),
+        ("an expression in a note", _notes({"text": "{state.secret}"})),
+        ("a note link", _notes({"text": "x", "link": "/a"})),
+        ("51 notes", _notes(*[{"text": "x"}] * 51)),
+        ("a note title over 80", _notes({"title": "t" * 81, "text": "x"})),
+        ("a note over 2000", _notes({"text": "x" * 2001})),
+        ("a hashed tag", _notes({"text": "x", "tags": ["#idea"]})),
+        ("a long tag", _notes({"text": "x", "tags": ["t" * 25]})),
+        ("a note without text", _notes({"title": "t"})),
+        ("html in a suggested tag", _notes(tags=["<b>"])),
+        (
+            "a handler on notes",
+            {"ui": {**_notes()["ui"], "on_change": {"action": "set", "target": "x", "value": 1}}},
+        ),
+    ],
+)
+def test_notes_and_music_hold_to_plain_text_and_preset_sounds(why, spec):
+    assert _ripple(spec) is None, why
+
+
+def test_the_rules_send_notes_and_music_to_their_widgets():
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_RULES
+
+    rule = next(r for r in _RIPPLE_RULES if "Match the card to the answer" in r)
+    assert "a notes card, never inputs and buttons" in rule
+    assert "a music-player of its preset sounds" in rule
