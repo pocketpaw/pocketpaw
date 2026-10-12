@@ -21,17 +21,18 @@
 # The CREW (``MandateDoc.crew``): ``crew_seat_for_task`` seats a plan task on a
 # live dev (roster order, ``pick_dev`` round-robin), or with ``role`` finds
 # another live seat (the cloud station's tester); ``crew_worker`` reads that
-# agent's CURRENT model + instructions at develop time. Every read is
-# ``agents.service.get_for_viewer`` as the seat's ``seated_by``, so an agent that
-# admin can no longer read is a gone seat.
+# agent's CURRENT model + instructions at develop time, always through
+# ``agents.service.get_for_viewer`` as the seat's ``seated_by`` (unreadable = gone).
 #
 # The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands
 # (the mandate's run rows joined to the plan tasks' evidence refs). The shift
 # trigger persists what it finds resolved (``resolved_by_run``), since the runs
-# list only reaches the newest actions. Each open entry carries its full text's
-# ``Depends on:`` line; the trigger adds the named issues' states from one cached
-# ``patrols.issue_states`` read. The detail's ``line`` block and the
-# foreman's THE LINE read git (``belt.executor.line_status`` / ``line_merged``).
+# list only reaches the newest actions. A sighting is in flight while a task
+# citing it is, or while an OPEN PR on the bound repo closes its ``github:``
+# source issue (``patrols.open_pr_closes``). Each entry carries its ``Depends on:``
+# line; the trigger adds those issues' states (``patrols.issue_states``; both gh
+# reads cached a tick). The detail's ``line`` block and the foreman's THE LINE
+# read git (``belt.executor.line_status`` / ``line_merged``).
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
 # charter_for_mandate, crew_seat_for_task, crew_worker, file_station_sighting,
@@ -1021,6 +1022,7 @@ async def _backlog(
     since: datetime | None = None,
     history_plan_ids: tuple[str, ...] = (),
     persist: bool = False,
+    repo_id: str = "",
 ) -> dict[str, Any]:
     """The mandate's OPEN sightings and the planned tasks behind them.
 
@@ -1031,10 +1033,15 @@ async def _backlog(
     would otherwise fall out of it and reopen its sightings. A failed, rejected
     or still-running task leaves its sightings open.
 
+    With the bound ``repo_id``, a sighting whose ``github:<slug>#<n>`` source
+    issue an OPEN PR closes is in flight too (``open_pr``): another run's PR,
+    still in the fast lane, works it. One cached ``gh pr list``, only when a
+    sighting has such a source; a gh failure marks nothing.
+
     Returns ``{"open": [...], "tasks": [...], "teaching": [...]}``: open entries
     (highest severity, then oldest) are ``{id, patrol, severity, summary, new,
-    in_flight, tasks, depends_on}``, where ``new`` means filed after ``since``,
-    ``tasks`` lists the citing tasks (``{shift_no, title, status}``) and
+    in_flight, open_pr, tasks, depends_on}``, where ``new`` means filed after
+    ``since``, ``tasks`` lists the citing tasks (``{shift_no, title, status}``) and
     ``depends_on`` is the full text's ``Depends on:`` line (or None); ``tasks`` covers the
     plans behind this mandate's runs, every plan still at the plan gate (in
     flight, however many shifts ago), and ``history_plan_ids``; ``teaching`` is
@@ -1083,12 +1090,21 @@ async def _backlog(
         open_docs.append(s)
     open_docs.sort(key=lambda s: (-int(s.severity), _aware(s.ts)))
 
+    closing: dict[str, int] = {}
+    if repo_id and any(
+        str(s.evidence.get("source") or "").startswith("github:") for s in open_docs
+    ):
+        from pocketpaw_ee.cloud.mandates import patrols as mandate_patrols
+
+        closing = await mandate_patrols.open_pr_closes(repo_id)
+
     entries = []
     for s in open_docs:
         cites = [
             {"shift_no": t["shift_no"], "title": t["title"], "status": t["status"]}
             for t in citing.get(str(s.id), [])
         ]
+        open_pr = closing.get(str(s.evidence.get("source") or ""))
         entries.append(
             {
                 "id": str(s.id),
@@ -1096,7 +1112,8 @@ async def _backlog(
                 "severity": s.severity,
                 "summary": s.summary,
                 "new": since is None or _aware(s.ts) > _aware(since),
-                "in_flight": any(c["status"] in _IN_FLIGHT for c in cites),
+                "in_flight": open_pr is not None or any(c["status"] in _IN_FLIGHT for c in cites),
+                "open_pr": open_pr,
                 "tasks": cites,
                 "depends_on": _depends_on(str(s.evidence.get("text") or s.summary)),
             }
@@ -1198,6 +1215,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         since=since,
         history_plan_ids=tuple(h.plan_action_id for h in history_docs if h.plan_action_id),
         persist=True,
+        repo_id=doc.surface.repo_id,
     )
     history = [
         {
@@ -2227,7 +2245,7 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
                 )
 
         mine = [r for r in runs if r.get("mandate_id") == mandate_id]
-        backlog = (await _backlog(workspace_id, mandate_id, mine))["open"]
+        backlog = (await _backlog(workspace_id, mandate_id, mine, repo_id=m["repo_id"]))["open"]
         new_runs = [_run_digest_row(r) for r in mine if _since(r.get("created_at"), since)]
         diff_gates = [_run_digest_row(r) for r in mine if r.get("status") == "proposed"]
         # A headless develop that failed (or never finished: a restart drops
@@ -2473,7 +2491,11 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
             return False
 
     backlog = await _backlog(
-        doc.workspace, mandate_id, runs, since=last.createdAt if last else None
+        doc.workspace,
+        mandate_id,
+        runs,
+        since=last.createdAt if last else None,
+        repo_id=doc.surface.repo_id,
     )
     work = [o for o in backlog["open"] if not o["in_flight"]]
     if last is not None and last.state == "stood_down":

@@ -108,7 +108,8 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
     no plan and the outcome `foreman call failed: <reason>`, so the mandate is
     due again after the minimum gap; after 3 such shifts in a row it waits the
     stall timeout;
-  - it has an open sighting that no landed or in-flight task covers.
+  - it has an open sighting that no landed or in-flight task covers, and that
+    no open PR closes (see *One PR per issue* below).
 
   While any ACTIVE continuous mandate exists, the loop ticks every
   `POCKETPAW_MANDATE_SCHEDULER_CONTINUOUS_INTERVAL` seconds (default 60)
@@ -331,7 +332,8 @@ shift, so work it skipped or that failed comes back on the next shift:
   `(showing 30 of N open sightings: ...)`.
 - **Per sighting.** `new` (filed since the last shift) or `carried over`, the
   tasks that cited it (`shift N "<title>" <status>`), and `IN FLIGHT` when one
-  of them is still being worked.
+  of them is still being worked, or `IN FLIGHT | open PR #<n>` when an open PR
+  closes the sighting's GitHub issue (see *One PR per issue*).
 - **Task status.** From the task's run row: `landed`, `failed`, `rejected`,
   `pending at gate` (diff waiting on a human), `approved` (landing),
   `developing` (headless develop running), `queued` (waiting for the develop
@@ -376,6 +378,49 @@ still needed, because the runs list reads only the workspace's newest 200
 actions, and an old landed run would otherwise drop out and reopen its
 sightings. Plans read per shift: those behind the mandate's runs, every plan
 still at the plan gate, and the last 3 shifts'.
+
+#### One PR per issue
+
+Two cloud workers once built the same issue and opened two PRs that both said
+`Closes #158`. Most likely the first run's PR sat in the fast lane's queue
+while the run stopped counting as in flight (its tracker timed out, or the
+silent-worker path released it), its sighting stayed open, and the next shift
+planned the issue again under a new run id. The relaunch brief's check for a PR with the run's own
+`Belt-Run` line could not see the older PR, which carried another run's id.
+Three rules close that:
+
+1. **An open PR is in flight.** `_backlog` (shared by the shift trigger, the
+   continuous due check and the digest) marks a sighting in flight when its
+   `source` is `github:<owner>/<repo>#<n>` and an OPEN PR on the bound repo
+   closes `#n`: its body says `Closes`, `Fixes` or `Resolves #n` (any case,
+   GitHub's other forms too; `#120` never counts for `#12`). The entry carries
+   `open_pr`, which the foreman's prompt shows. The PRs come from one
+   `gh pr list -R <slug> --state open --limit 200 --json number,body`
+   (`patrols.open_pr_closes`), only when an open sighting has a `github:`
+   source, through the same per-repo cache as the `Depends on:` issue states
+   (`patrols._gh_rows`, 60 s, one call per repo per scheduler tick). A gh
+   failure marks nothing, which is the old behaviour.
+2. **Adopt instead of duplicating.** The worker brief for a task citing `#n`
+   says: if an open PR on the repo already closes `#n`, don't open another;
+   comment on that PR and stop. The tracker's `_find_pr` reads `state` on its
+   `gh pr list` poll; when no PR carries the run's `Belt-Run` line, it takes the
+   first OPEN PR whose body closes the task's issue, records it as
+   `adopted_pr` (and `cloud.pr`) and tracks it like the run's own: fixers,
+   nudges, escalation, and the land on merge, under the same run timeout.
+3. **Release does not orphan.** That check runs on every poll before the no-PR
+   timeout is looked at, so a run whose issue has an open PR is adopted, never
+   relaunched or released.
+
+On resume, a run with `adopted_pr` polls that PR by number, so a PR that merged
+while the backend was down still lands the run. Adoption matters beyond the
+duplicate: rule 1 alone only holds the issue until the PR merges, and since only
+a landed task resolves a sighting, the next shift would then plan an issue
+GitHub already closed. The adopted run lands on the merge and resolves it. The
+tracker's list is the newest 50 PRs, so an older open PR is not adopted (the
+backlog's 200-PR list still holds its sighting in flight). Still open: a run
+whose tracker timed out while its own PR was open is tracked by nobody, so when
+the lane merges that PR no run lands, and its sighting stays open and plannable
+(sightings still have no close path besides a landed run).
 
 ## Endpoints (`/api/v1/belt/mandates`, RBAC mirrors the belt console)
 
@@ -676,8 +721,10 @@ LAUNCH  task text injection-screened; bound repo inside the allowlist; the
         folder-trust prompt, pty_run exits and the run fails with `LAUNCH: the
         claude CLI does not trust <dir>`; open the clone in claude once and
         accept the prompt (Belt never answers it). One launch at a time.
-TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
-        it every POCKETPAW_FACTORY_CLOUD_POLL seconds:
+TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, else
+        adopts an OPEN PR that closes the task's issue (`adopted_pr`, see
+        One PR per issue), then polls it every POCKETPAW_FACTORY_CLOUD_POLL
+        seconds:
           merged   -> approved as `system:fast-lane` (audited), mark_executed:
                       the run is landed, with pr_url, head branch, merge sha
                       and the PR's diff (so the UI can show touched files;
@@ -696,9 +743,10 @@ TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
                       one fixer session (see below), at most
                       POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS per run, then the
                       PR escalates like a refusal
-          no PR    -> none by POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT after the
-                      newest launch: one fresh worker, then the run is
-                      released (rejected); see Silent workers below
+          no PR    -> none (own or adoptable) by
+                      POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT after the newest
+                      launch: one fresh worker, then the run is released
+                      (rejected); see Silent workers below
           timeout  -> headless_error, the run stays queued
 ```
 
@@ -752,7 +800,8 @@ the issue cannot be done as written, or it simply stalled. Its run would then
 sit in flight until the run timeout, and the continuous scheduler holds a
 mandate's next shift while any of its runs is in flight (up to the stall
 timeout), so one silent worker held the whole line for hours. The tracker now
-watches for that. When no PR with the run's `Belt-Run` line exists
+watches for that. When no PR with the run's `Belt-Run` line exists, and no open
+PR closes the task's issue (that one is adopted instead; see *One PR per issue*),
 `POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT` seconds (default 3600) after the newest
 launch (`cloud.launched_at`, or the last relaunch; a resumed run without
 `launched_at` counts from the resume):
@@ -872,7 +921,8 @@ replace the run's.
 The brief tells the session to do the task, follow the repo's CLAUDE.md, run
 the charter checks until they pass, open ONE PR to the base that says
 `Closes #<issue>` (the first `#n` in the task text) and carries the
-`Belt-Run` line, add the label (`POCKETPAW_FACTORY_CLOUD_PR_LABEL`, default
+`Belt-Run` line (or, when an open PR already closes that issue, comment on it
+and open none), add the label (`POCKETPAW_FACTORY_CLOUD_PR_LABEL`, default
 `fast-lane`), add no AI attribution, and stop without merging. The seated dev's
 instructions ride the brief fenced as data, as in the local develop prompt.
 The repo's own fast lane and CI are the diff gate for small PRs; the plan gate
@@ -896,7 +946,7 @@ on `fixes`, and each entry records the head it was launched on, so a resumed
 tracker does not start a second fixer on that head. Relaunches carry over on
 `relaunches`, so a resumed run never gets more than
 `POCKETPAW_FACTORY_CLOUD_RELAUNCHES`, and its no-PR clock counts from the last
-relaunch. A released run is rejected, so it is never resumed. A landed run is
+relaunch. A run that adopted a PR (`adopted_pr`) polls it by number. A released run is rejected, so it is never resumed. A landed run is
 no longer pending, so its tester is never relaunched; with the tester on, its
 PR tracker is resumed when `tester.state` is `open` or unknown (no PR seen yet)
 and `tester.at` is inside the run timeout (the newest 200 executed runs per
@@ -1673,11 +1723,15 @@ a gate rejection lands in history not backlog, and the 30 cap.
 patrol with a fake `gh`: label matching, severity, no labels, the GitLab
 fallback, unsafe slugs, gh failure, the cross-patrol dedup through
 `run_patrols`, the continuous due check sensing first, and the foreman seeing a
-cut sighting's `Depends on:` line with its issues' states.
+cut sighting's `Depends on:` line with its issues' states, and a sighting
+whose issue an open PR closes held in flight (due check, foreman prompt,
+digest; `#120` is not `#12`; a gh failure changes nothing).
 `tests/cloud/test_belt_queued_run_approve.py` pins that no human approve path
 (Mission Control bulk, instinct bulk, single) approves or fails a queued run.
-`tests/cloud/test_belt_cloud_station.py` also covers the tester and the
-screenshots, `tests/cloud/test_belt_console.py` the screenshot route, and
+`tests/cloud/test_belt_cloud_station.py` also covers the tester, the
+screenshots and adoption (an open PR closing the run's issue is adopted at the
+first poll and at the poll that would release the run, never a closed one or a
+`#930` for `#93`; a resumed run keeps its adopted PR once merged), `tests/cloud/test_belt_console.py` the screenshot route, and
 `tests/mutations/belt_crew_testers.json` holds their mutations.
 `tests/cloud/test_belt_review_room.py` covers the Review Room (try on and off
 a Mac, artifact fallback, ambiguous apps, tar traversal, review limits and

@@ -337,8 +337,8 @@
   {
     "label": "the tester PR is looked up by the worker's marker",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "number = await self._find_pr(slug, run_ref, cwd, TEST_MARKER if tester else MARKER)",
-    "replace": "number = await self._find_pr(slug, run_ref, cwd, MARKER)",
+    "find": "marker = TEST_MARKER if tester else MARKER",
+    "replace": "marker = MARKER",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
     ]
@@ -458,6 +458,98 @@
     "replace": "rows.append(_sighting_line(s))",
     "tests": [
       "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states"
+    ]
+  },
+  {
+    "label": "an open PR closing the issue never puts its sighting in flight",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "\"in_flight\": open_pr is not None or any(",
+    "replace": "\"in_flight\": any(",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight",
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_does_not_plan_an_issue_an_open_pr_closes"
+    ]
+  },
+  {
+    "label": "the continuous due check never reads open PRs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "since=last.createdAt if last else None,\n        repo_id=doc.surface.repo_id,",
+    "replace": "since=last.createdAt if last else None,\n        repo_id=\"\",",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight"
+    ]
+  },
+  {
+    "label": "the foreman's backlog never reads open PRs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "persist=True,\n        repo_id=doc.surface.repo_id,",
+    "replace": "persist=True,\n        repo_id=\"\",",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_does_not_plan_an_issue_an_open_pr_closes"
+    ]
+  },
+  {
+    "label": "the digest's backlog never reads open PRs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "repo_id=m[\"repo_id\"]",
+    "replace": "repo_id=\"\"",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_does_not_plan_an_issue_an_open_pr_closes"
+    ]
+  },
+  {
+    "label": "any #n in a PR body reads as closing it",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\\s+#",
+    "replace": "#",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight"
+    ]
+  },
+  {
+    "label": "a run with no PR of its own never adopts one",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                return int(pr[\"number\"]), True\n",
+    "replace": "                return None, False\n",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue",
+      "tests/cloud/test_belt_cloud_station.py::test_a_silent_run_adopts_a_closing_pr_instead_of_being_released"
+    ]
+  },
+  {
+    "label": "a run adopts a closed or merged PR",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if pr.get(\"state\") == \"OPEN\" and issue in closed_by(",
+    "replace": "if issue in closed_by(",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue"
+    ]
+  },
+  {
+    "label": "the adopted PR is not recorded on the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "pr_no = number if adopted else None",
+    "replace": "pr_no = None",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue"
+    ]
+  },
+  {
+    "label": "a resumed run forgets the PR it adopted",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "number: int | None = None if tester else blob.get(\"adopted_pr\")",
+    "replace": "number: int | None = None",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_resume_keeps_an_adopted_pr_that_merged_while_down"
+    ]
+  },
+  {
+    "label": "the brief never says to stop at an open PR for the issue",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "f\"If an open pull request on {slug} already closes #{issue.group(1)}, don't open \"",
+    "replace": "\"\"",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue"
     ]
   }
 ]

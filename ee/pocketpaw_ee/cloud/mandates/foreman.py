@@ -2,17 +2,17 @@
 #
 # Once per SHIFT it reads the charter, the OPEN sightings (the backlog: every
 # sighting no landed task has resolved, capped, each marked new or carried over,
-# annotated with the tasks that cite it and, when it has one, its full
-# ``Depends on:`` line with the named issues' open / closed states, those notes
-# capped per sighting and per prompt), the last 3 shifts' outcomes (each task's
-# run result: landed, failed with its reason, rejected, or in flight; and what a
-# human said at the gate), the mandate's LINE as git has it (the subjects of its
-# commits not in the base yet, awaiting the captain's merge; built either way),
-# the bound repo's C4 components, and (when a soul is bound) the soul recall,
-# then makes EXACTLY ONE LLM call that returns a strict-JSON PlanProposal: a FEW
-# tasks (≤ the charter's budget) or an explicit empty plan with a reason. A task
-# may name a charter ``recipe`` (a deterministic command) instead of LLM develop
-# work.
+# annotated with the tasks that cite it, ``IN FLIGHT`` (and the open PR closing
+# its issue, if that is why) and its full ``Depends on:`` line if any, with the
+# named issues' open / closed states, capped per sighting and per prompt), the
+# last 3 shifts' outcomes (each task's run result: landed, failed with its
+# reason, rejected, or in flight; and what a human said at the gate), the
+# mandate's LINE as git has it (the subjects of its commits not in the base yet,
+# awaiting the captain's merge; built either way), the bound repo's C4
+# components, and (when a soul is bound) the soul recall, then makes EXACTLY ONE
+# LLM call that returns a strict-JSON PlanProposal: a FEW tasks (≤ the charter's
+# budget) or an explicit empty plan with a reason. A task may name a charter
+# ``recipe`` (a deterministic command) instead of LLM develop work.
 #
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
 # runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
@@ -118,8 +118,9 @@ class ForemanContext:
     shift_no: int
     charter: dict[str, Any]
     # The open backlog, capped: {id, patrol, severity, summary, new, in_flight,
-    # tasks: [{shift_no, title, status}], depends_on} — ``new`` = filed since the
-    # last shift; ``tasks`` are the planned tasks citing the sighting;
+    # open_pr, tasks: [{shift_no, title, status}], depends_on} — ``new`` = filed
+    # since the last shift; ``open_pr`` = an open PR closing its issue (in flight);
+    # ``tasks`` are the planned tasks citing the sighting;
     # ``depends_on`` is its ``Depends on:`` line (None when it has none).
     sightings: list[dict[str, Any]] = field(default_factory=list)
     # ``#n`` -> ``open`` / ``closed`` on the bound repo's tracker, for the issues
@@ -383,6 +384,8 @@ def _sighting_line(s: dict[str, Any]) -> str:
         )
     if s.get("in_flight"):
         tags.append("IN FLIGHT")
+    if s.get("open_pr"):
+        tags.append(f"open PR #{s['open_pr']}")
     return (
         f"- id={s['id']} patrol={s.get('patrol')} severity={s.get('severity')} "
         f"[{' | '.join(tags)}]: {s.get('summary')}"

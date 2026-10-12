@@ -19,7 +19,9 @@
 #                    listed. Any other origin reads the GitLab project through
 #                    ``connectors_service.execute``. ``issue_states`` maps a
 #                    GitHub repo's issues to open / closed for the foreman's
-#                    ``Depends on:`` notes (one ``--state all`` list per tick).
+#                    ``Depends on:`` notes; ``open_pr_closes`` maps each issue an
+#                    OPEN PR closes to that PR, for the backlog's in-flight rule
+#                    (one cached gh list each per repo per tick, ``_gh_rows``).
 #   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
 #                    ``rev`` comes from a TOML pin file in the bound repo, the
 #                    delta from ``gh api repos/<repo>/compare/<pin>...HEAD``.
@@ -435,40 +437,73 @@ async def _github_issues(slug: str, labels: list[str], gh: GhFn) -> list[Sightin
     return drafts
 
 
-# Issue states for the foreman's ``Depends on:`` notes: ``#n`` -> ``open`` /
-# ``closed`` from one ``gh issue list --state all``, cached per slug for a
-# scheduler tick so mandates on one repo share the call.
-_ISSUE_STATES: dict[str, tuple[float, dict[int, str]]] = {}
-_ISSUE_STATES_TTL = 60.0
+# The bound repo's gh lists the backlog reads: rows cached per slug for a
+# scheduler tick, so the mandates on one repo share each call. Issue states feed
+# the foreman's ``Depends on:`` notes; open PRs the in-flight rule.
+_ISSUE_STATES: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_OPEN_PRS: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_GH_ROWS_TTL = 60.0
 _GH_STATE_LIMIT = "500"
+_GH_PR_LIMIT = "200"
+
+
+async def _gh_rows(
+    cache: dict[str, tuple[float, list[dict[str, Any]]]],
+    repo_id: str,
+    argv: list[str],
+    gh: GhFn | None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """``(slug, rows)``: the JSON rows ``argv`` (``gh <noun> list``, ``-R <slug>``
+    added) prints for the bound repo, cached in ``cache`` for ``_GH_ROWS_TTL``.
+    No slug (not GitHub, or unsafe) reads ``("", [])``; a gh failure, no rows.
+    Never raises."""
+    runner = gh or _default_gh
+    slug = await _github_slug(repo_id, runner)
+    if not slug:
+        return "", []
+    hit = cache.get(slug)
+    if hit is not None and time.monotonic() - hit[0] < _GH_ROWS_TTL:
+        return slug, hit[1]
+    try:
+        code, out, _ = await runner([*argv[:3], "-R", slug, *argv[3:]])
+        rows = json.loads(out) if code == 0 else []
+    except Exception:  # noqa: BLE001 — a missing read never holds the shift
+        logger.warning("mandate: %s failed for %s", " ".join(argv[:3]), slug, exc_info=True)
+        rows = []
+    rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    cache[slug] = (time.monotonic(), rows)
+    return slug, rows
 
 
 async def issue_states(repo_id: str, gh: GhFn | None = None) -> dict[int, str]:
     """``{number: "open"|"closed"}`` for the bound repo's GitHub issues; empty
     when the repo is not on GitHub (or its slug is unsafe) or gh fails. Never
     raises."""
-    runner = gh or _default_gh
-    slug = await _github_slug(repo_id, runner)
-    if not slug:
-        return {}
-    hit = _ISSUE_STATES.get(slug)
-    if hit is not None and time.monotonic() - hit[0] < _ISSUE_STATES_TTL:
-        return hit[1]
-    argv = ["gh", "issue", "list", "-R", slug, "--state", "all"]
-    argv += ["--limit", _GH_STATE_LIMIT, "--json", "number,state"]
-    try:
-        code, out, _ = await runner(argv)
-        rows = json.loads(out) if code == 0 else []
-    except Exception:  # noqa: BLE001 — a missing state never holds the shift
-        logger.warning("issue states: gh issue list failed for %s", slug, exc_info=True)
-        rows = []
-    states = {
+    argv = ["gh", "issue", "list", "--state", "all", "--limit", _GH_STATE_LIMIT]
+    _, rows = await _gh_rows(_ISSUE_STATES, repo_id, [*argv, "--json", "number,state"], gh)
+    return {
         r["number"]: str(r.get("state") or "").lower()
-        for r in (rows if isinstance(rows, list) else [])
-        if isinstance(r, dict) and isinstance(r.get("number"), int)
+        for r in rows
+        if isinstance(r.get("number"), int)
     }
-    _ISSUE_STATES[slug] = (time.monotonic(), states)
-    return states
+
+
+async def open_pr_closes(repo_id: str, gh: GhFn | None = None) -> dict[str, int]:
+    """``{"github:<slug>#<n>": pr}``: each issue an OPEN PR on the bound repo
+    closes (``Closes`` / ``Fixes`` / ``Resolves #n`` in its body), keyed like an
+    issue sighting's ``source``, to the lowest such PR. Empty when the repo is
+    not on GitHub or gh fails. Never raises."""
+    from pocketpaw_ee.cloud.belt.cloud_station import closed_by
+
+    argv = ["gh", "pr", "list", "--state", "open", "--limit", _GH_PR_LIMIT]
+    slug, rows = await _gh_rows(_OPEN_PRS, repo_id, [*argv, "--json", "number,body"], gh)
+    found: dict[str, int] = {}
+    for r in sorted(
+        (r for r in rows if isinstance(r.get("number"), int)), key=lambda r: r["number"]
+    ):
+        for n in closed_by(str(r.get("body") or "")):
+            found.setdefault(f"github:{slug}#{n}", r["number"])
+    return found
 
 
 # ---------------------------------------------------------------------------

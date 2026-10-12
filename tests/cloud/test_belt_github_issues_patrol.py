@@ -14,6 +14,10 @@
 # the issues patrol first, only on mandates that toggle it, and the foreman's
 # prompt carries a sighting's ``Depends on:`` line (bold or plain) past the
 # summary cut, with each named issue's state from one ``gh issue list --state all``.
+# A sighting whose issue an OPEN PR closes (one ``gh pr list --state open``) is
+# in flight: the due check skips it, the foreman sees ``open PR #n`` and the
+# digest agrees; a PR closing #120 is not one for #12, and a gh failure keeps
+# today's behaviour.
 
 from __future__ import annotations
 
@@ -49,8 +53,9 @@ def _issue(n: int, *labels: str, title: str = "") -> dict:
 
 class FakeGh:
     """Answers ``git remote get-url`` with ``origin``, ``gh issue list --state
-    all`` with ``states`` (``{number: "OPEN"|"CLOSED"}``) and any other ``gh
-    issue list`` with ``issues``; records every argv."""
+    all`` with ``states`` (``{number: "OPEN"|"CLOSED"}``), any other ``gh
+    issue list`` with ``issues`` and ``gh pr list`` with ``prs`` (exit
+    ``pr_code``); records every argv."""
 
     def __init__(
         self,
@@ -59,8 +64,12 @@ class FakeGh:
         origin: str = SLUG,
         code: int = 0,
         states: dict[int, str] | None = None,
+        prs: list[dict] | None = None,
+        pr_code: int = 0,
     ) -> None:
         self.issues = issues
+        self.prs = prs or []
+        self.pr_code = pr_code
         self.origin = origin
         self.code = code
         self.states = states or {}
@@ -74,7 +83,16 @@ class FakeGh:
             return 0, json.dumps([{"number": n, "state": s} for n, s in self.states.items()]), ""
         if argv[:3] == ["gh", "issue", "list"]:
             return self.code, json.dumps(self.issues), "HTTP 502" if self.code else ""
+        if argv[:3] == ["gh", "pr", "list"]:
+            return self.pr_code, json.dumps(self.prs), "HTTP 502" if self.pr_code else ""
         raise AssertionError(f"unexpected argv {argv}")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_gh_caches(monkeypatch) -> None:
+    """The gh reads are cached per repo for a scheduler tick, across tests too."""
+    monkeypatch.setattr(patrols, "_ISSUE_STATES", {})
+    monkeypatch.setattr(patrols, "_OPEN_PRS", {})
 
 
 def _issue_lists(gh: FakeGh) -> list[list[str]]:
@@ -320,3 +338,64 @@ async def test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states(
     assert "Depends on: #4, #5" in prompt
     assert "#4 closed, #5 open" in prompt
     assert len([a for a in gh.calls if a[:3] == ["gh", "issue", "list"] and "all" in a]) == 1
+
+
+@pytest.mark.parametrize(
+    ("prs", "pr_code", "due"),
+    [
+        ([{"number": 160, "body": "Adds text shapes.\n\nfixes #12"}], 0, False),
+        ([{"number": 161, "body": "RESOLVES #12"}], 0, False),
+        ([{"number": 162, "body": "Closes #120\nRefs #12"}], 0, True),
+        ([{"number": 160, "body": "Closes #12"}], 1, True),  # gh failed: as before
+    ],
+)
+async def test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight(
+    tmp_path, mongo_db, monkeypatch, prs, pr_code, due
+):
+    """Another run's PR still waiting in the fast lane works the issue: a new
+    shift must not plan it again, whatever happened to that run."""
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    gh = FakeGh([_issue(12, "suite")], prs=prs, pr_code=pr_code)
+    monkeypatch.setattr(patrols, "_default_gh", gh)
+    mandate_id = await _github_mandate(tmp_path, monkeypatch, gh, cadence="continuous")
+
+    rows = await mandate_service.list_cadence_due(datetime.now(UTC))
+
+    assert (mandate_id in {r["mandate_id"] for r in rows}) is due
+    (listed,) = [a for a in gh.calls if a[:3] == ["gh", "pr", "list"]]
+    assert listed[3:7] == ["-R", SLUG, "--state", "open"] and "--limit" in listed
+
+
+async def test_the_foreman_does_not_plan_an_issue_an_open_pr_closes(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    store,  # noqa: F811
+    journal,  # noqa: F811
+    graph,  # noqa: F811
+):
+    from pocketpaw_ee.cloud.mandates import foreman
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    gh = FakeGh([_issue(12, "suite")], prs=[{"number": 160, "body": "Fixes #12"}])
+    monkeypatch.setattr(patrols, "_default_gh", gh)
+    monkeypatch.setenv("POCKETPAW_MANDATE_LLM", "mock")
+    prompts: list[str] = []
+    real_plan = foreman.MockLlm.plan
+
+    async def capture(self, *, prompt, context):
+        prompts.append(prompt)
+        return await real_plan(self, prompt=prompt, context=context)
+
+    monkeypatch.setattr(foreman.MockLlm, "plan", capture)
+    mandate_id = await _github_mandate(tmp_path, monkeypatch, gh)
+
+    out = await mandate_service.trigger_shift("w1", "u1", mandate_id)
+
+    assert out["shift"]["state"] == "stood_down"
+    (prompt,) = prompts
+    assert "IN FLIGHT | open PR #160]: GitHub issue #12" in prompt
+    # The morning digest agrees with what the foreman saw.
+    (row,) = (await mandate_service.digest("w1", "u1"))["mandates"]
+    assert [b["in_flight"] for b in row["backlog"]["top"]] == [True]

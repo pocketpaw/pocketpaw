@@ -23,6 +23,10 @@
 # after, and the task's sighting stays open; a worker's comment on the issue
 # since the launch releases it at once with that line and labels the issue
 # needs-human; the relaunch count and clock survive a resume.
+# ADOPTION: the brief says not to open a second PR for the issue; a run with no
+# PR of its own adopts an OPEN PR that closes its issue (never a closed one or
+# #930 for #93), also at the poll that would release it, and lands on its merge;
+# a resumed run keeps its adopted PR even once merged.
 # TESTER: with the flag and a seat, a landed run launches ONE tester (engine
 # brief: fuzz; app brief: snapshots against docs/design.md); off by default,
 # none without a seat, one per run, a failed launch recorded. Its Belt-Test PR
@@ -148,6 +152,7 @@ class FakeRunner:
         workflow_code: int = 0,
         tester_pr: dict | list[dict] | None = None,
         issue_comments: list[dict] | None = None,
+        closing: list[list[dict]] | None = None,
     ):
         self.calls: list[tuple[list[str], Path]] = []
         # A list is consumed one entry per launch / per ``gh pr view``, holding the last.
@@ -160,6 +165,9 @@ class FakeRunner:
         self.prs = pr if isinstance(pr, list) else [pr]
         self.tester_prs = tester_pr if isinstance(tester_pr, list) else [tester_pr]
         self.issue_comments = OLD_COMMENT if issue_comments is None else issue_comments
+        # Rows ``gh pr list`` gives INSTEAD of the run's own PR, one entry per call
+        # (holding the last): other PRs, e.g. one that closes the run's issue.
+        self.closing = closing
         self.run_ref = ""
         # The PR head's CI runs: 502 carries the ``snapshots`` artifact, 501 does not.
         self.snapshots = snapshots
@@ -187,7 +195,9 @@ class FakeRunner:
             return self.launch_code, self._next(self.launch_outs), ""
         if argv[:3] == ["gh", "pr", "list"]:
             prs = []
-            if self.prs[0] is not None:
+            if self.closing is not None:
+                prs = list(self._next(self.closing))
+            elif self.prs[0] is not None:
                 body = f"Closes #93\n\n{MARKER} {self.run_ref}\n"
                 prs = [{"number": 7, "body": "other"}, {"number": 9, "body": body}]
                 prs += [
@@ -1330,6 +1340,74 @@ def test_wire_cloud_reads_the_silent_worker_env(tmp_path, monkeypatch):
     assert cloud_station.wire_cloud() is True
     d = headless.resolve_headless_dispatcher()
     assert (d.no_pr_seconds, d.relaunch_attempts) == (900.0, 2)
+
+
+# -- adoption: one PR per issue, whichever run opened it -------------------------
+
+# An open PR from an earlier run that closes the task's issue (#93).
+CLOSING = {"number": 160, "body": "Text shapes.\n\nfixes #93\n\nBelt-Run: an-older-run"}
+MERGED_160 = {**MERGED, "url": f"https://github.com/{SLUG}/pull/160"}
+
+
+async def test_a_run_adopts_an_open_pr_that_closes_its_issue(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    rows = [
+        {"number": 150, "body": "Closes #930", "state": "OPEN"},
+        {"number": 151, "body": "Closes #93", "state": "CLOSED"},
+        {**CLOSING, "state": "OPEN"},
+    ]
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED_160, closing=[rows])
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch, poll_seconds=600).run(run_ref, workspace_id=WS)
+
+    (brief,) = _briefs(runner)  # adopted at the first poll: no relaunch
+    assert f"If an open pull request on {SLUG} already closes #93, don't open another" in brief
+    views = [a[3] for a, _ in runner.calls if a[:3] == ["gh", "pr", "view"]]
+    assert views == ["160"]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    cc = action.parameters["_code_change"]
+    assert cc["adopted_pr"] == 160 and cc["cloud"]["pr"] == 160
+    assert cc["pr_url"] == MERGED_160["url"]
+    assert ("landed", "done") in updates
+
+
+async def test_a_silent_run_adopts_a_closing_pr_instead_of_being_released(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    # No PR for two hours (one relaunch at the hour); the closing PR shows up at
+    # the poll that would release the run.
+    closing = [[]] * 12 + [[{**CLOSING, "state": "OPEN"}]]
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED_160, closing=closing)
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch, poll_seconds=600).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 2
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED, action.rejected_reason
+    assert action.parameters["_code_change"]["adopted_pr"] == 160
+    assert ("rejected", "done") not in updates
+
+
+async def test_resume_keeps_an_adopted_pr_that_merged_while_down(store, dirs):
+    repo, launch = dirs
+    run_ref = await _launched(store, repo, launched_at=time.time())
+    await cloud_station._patch(store, run_ref, adopted_pr=160)
+    # Merged, so no longer an OPEN PR that closes #93.
+    runner = FakeRunner(
+        launch_out=SESSION, pr=MERGED_160, closing=[[{**CLOSING, "state": "MERGED"}]]
+    )
+    runner.run_ref = run_ref
+
+    assert await _resumer(runner, launch).resume_all() == 1
+
+    assert not _briefs(runner)
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert action.parameters["_code_change"]["pr_url"] == MERGED_160["url"]
 
 
 # -- the tester's PR: tracked like the worker's, never holding the line ---------
