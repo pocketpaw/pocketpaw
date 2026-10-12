@@ -8,7 +8,8 @@
 # with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes ripple-manifest.json
 # minus deferred widgets and page chrome (its ``illustration`` SVG is held to
 # illustration_svg's policy and its annotations to ids the widget keeps, ``bill-split``
-# to plain numbers, the games, habit-tracker and focus-timer to literal data (``_PLAY_CHECKS``), a
+# to plain numbers, the games, habit-tracker and focus-timer to literal data (``_PLAY_CHECKS``),
+# ``notes`` to plain-text notes and ``music-player`` to preset sounds (``_DATA_CHECKS``), a
 # button's choice-card ``icon`` and ``description`` to a key and short plain text), and
 # is ``strict``:
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
@@ -159,6 +160,8 @@ RIPPLE_DATA_WIDGETS: dict[str, frozenset[str] | None] = {
     "flashcard-deck": None,
     "comparison-layout": None,
     "bill-split": None,
+    "notes": frozenset({"notes"}),
+    "music-player": frozenset({"tracks"}),
     "exec-dashboard": frozenset(
         {"rows", "measures", "dimensions", "x", "split", "compare", "compareLabel", "filters"}
     ),
@@ -207,6 +210,18 @@ BOARD_MARKS: dict[str, tuple[str, str]] = {
     "connect-four": ("red", "yellow"),
 }
 BOARD_BEST_OF = (1, 3, 5)
+# Ripple's ``notes`` and ``music-player``: literal plain text (no ``{``, no tag), each row
+# only the keys below (so no URL key), caps matching the widget; a track's ``sound`` is one
+# of ``MUSIC_SOUNDS``, which the browser generates (the player loads no file or URL).
+NOTE_KEYS: frozenset[str] = frozenset({"id", "title", "text", "tags", "pinned", "color"})
+NOTES_MAX, NOTE_TITLE_MAX, NOTE_TEXT_MAX = 50, 80, 2000
+NOTE_TAG = re.compile(r"[\w-]{1,24}")
+TRACK_KEYS: frozenset[str] = frozenset({"id", "title", "artist", "sound", "minutes", "color"})
+MUSIC_SOUNDS: frozenset[str] = frozenset(
+    {"rain", "brown-noise", "white-noise", "ocean", "forest", "lofi", "drone", "piano"}
+)
+TRACKS = (1, 30)
+TRACK_MINUTES = (1, 60)
 # Names ripple's registry also draws as one of these widgets, which its chat allowlist
 # refuses: a node by one is checked and sent under the widget's own name, a board-game
 # alias filling a missing ``game``.
@@ -798,6 +813,8 @@ def _strict_walk(
                 _check_map(props or {})
             if kind in _PLAY_CHECKS:
                 _PLAY_CHECKS[kind](value, props if isinstance(props, dict) else {})
+            if kind in _DATA_CHECKS:
+                _DATA_CHECKS[kind](value, props if isinstance(props, dict) else {})
             if kind == "button":
                 _check_choice(props)
             if kind == "form":
@@ -1265,6 +1282,72 @@ def _check_board_game(node: dict[str, Any], props: dict[str, Any]) -> None:
     if not _optional(props, "best_of", lambda v: _is_number(v) and v in BOARD_BEST_OF):
         raise _Reject("a board-game best_of that is not 1, 3 or 5")
 
+
+def _text_ok(value: Any, cap: int) -> bool:
+    """Plain text with no HTML tag, at most ``cap`` browser characters."""
+    return _plain(value) and not _HTML_TAG.search(value) and _js_len(value) <= cap
+
+
+_HTML_TAG = re.compile(r"<[A-Za-z/!?]")
+
+
+def _check_notes(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """No handler; ``notes`` at most ``NOTES_MAX`` rows of ``NOTE_KEYS``, each a plain
+    ``text`` (``NOTE_TEXT_MAX``), ``title`` (``NOTE_TITLE_MAX``) and ``NOTE_TAG`` tags;
+    ``title``, ``placeholder`` and the suggested ``tags`` plain too."""
+    _play_basics("notes", node, props, None, ())
+    for key in ("title", "placeholder"):
+        if not _optional(props, key, lambda v: _text_ok(v, NOTE_TITLE_MAX)):
+            raise _Reject(f"a notes {key} that is not short plain text")
+
+    def tags_ok(tags: Any) -> bool:
+        return isinstance(tags, list) and all(
+            isinstance(t, str) and NOTE_TAG.fullmatch(t) for t in tags
+        )
+
+    if not _optional(props, "tags", tags_ok):
+        raise _Reject("notes tags that are not short single words")
+    notes = props.get("notes", [])
+    if not isinstance(notes, list) or len(notes) > NOTES_MAX:
+        raise _Reject(f"notes that are not a list of at most {NOTES_MAX}")
+    for note in notes:
+        if (
+            not isinstance(note, dict)
+            or not note.keys() <= NOTE_KEYS
+            or not _text_ok(note.get("text"), NOTE_TEXT_MAX)
+            or not _optional(note, "title", lambda v: _text_ok(v, NOTE_TITLE_MAX))
+            or not _optional(note, "tags", tags_ok)
+        ):
+            raise _Reject("a note that is not plain text within the widget's caps")
+
+
+def _check_music_player(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """No handler and no URL-ish prop; ``tracks`` ``TRACKS`` rows of ``TRACK_KEYS``, each
+    a ``sound`` in ``MUSIC_SOUNDS``, plain ``title`` and ``artist``, whole ``minutes`` in
+    ``TRACK_MINUTES``; ``volume`` 0 to 1."""
+    _play_basics("music-player", node, props, None, ())
+    if any(_is_url_key(k) or _URL_ISH_KEY.search(k) for k in props):
+        raise _Reject("a music-player with a URL prop")
+    if not _optional(props, "title", lambda v: _text_ok(v, NOTE_TITLE_MAX)):
+        raise _Reject("a music-player title that is not short plain text")
+    if not _optional(props, "volume", lambda v: _is_number(v) and 0 <= v <= 1):
+        raise _Reject("a music-player volume outside 0..1")
+    tracks = props.get("tracks")
+    if not isinstance(tracks, list) or not TRACKS[0] <= len(tracks) <= TRACKS[1]:
+        raise _Reject(f"a music-player without {TRACKS[0]} to {TRACKS[1]} tracks")
+    for track in tracks:
+        if (
+            not isinstance(track, dict)
+            or not track.keys() <= TRACK_KEYS
+            or track.get("sound") not in MUSIC_SOUNDS
+            or not _text_ok(track.get("title"), NOTE_TITLE_MAX)
+            or not _optional(track, "artist", lambda v: _text_ok(v, NOTE_TITLE_MAX))
+            or not _optional(track, "minutes", lambda v: _is_int(v, TRACK_MINUTES))
+        ):
+            raise _Reject("a music track that is not a preset sound with plain text")
+
+
+_DATA_CHECKS = {"notes": _check_notes, "music-player": _check_music_player}
 
 _PLAY_CHECKS = {
     "memory-match": _check_memory_match,
