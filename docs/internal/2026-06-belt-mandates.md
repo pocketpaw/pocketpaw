@@ -566,6 +566,17 @@ before planning and appends an episodic shift summary after every terminal
 `save_local` for a soul directory). Best-effort throughout — a
 soul failure never wedges a shift.
 
+Several mandates may bind ONE soul (every creative line shares
+`.soul/afterglow/afterglow.soul`), so writes to a path are serialized in the
+process (`soul_link._LOCKS`): awaken then save is a read-modify-write, and two
+trackers landing at once would otherwise drop each other's memories. The cloud
+station also keeps the line's LESSONS there (see *Lessons* under the cloud
+develop station): `note_lesson` writes a PROCEDURAL memory in the
+`belt-lessons` domain unless `reconcile_fact` (the dedup `soul note` runs; the
+installed soul-protocol has no `Soul.note`) finds a near-duplicate among the
+nearest lessons, and `recall_lessons` reads that domain only, so shift
+summaries never crowd lessons out.
+
 ## Autopilot — Foresight-seeded simulated users (feat/belt-autopilot)
 
 `POST /belt/mandates/{id}/autopilot {action, users?}` turns a mandate's feedback
@@ -974,6 +985,30 @@ title,body`; with no model in the clone there is no block and no read, and an
 unreadable issue matches on the task title alone. A failed grep drops only the
 helper names. The block carries only owner-authored model data and grep hits,
 so it rides unfenced, like ORIENT's.
+
+**Docs, not memory.** Every worker and fixer brief also says: "Before using any
+platform or library API (SwiftUI, AppKit, macOS 26 APIs, GRDB, Swift stdlib),
+check current docs with the repo's docs MCP tools (see .mcp.json) instead of
+relying on memory."
+
+**Lessons.** The line learns from its own fixes. `charter_for_mandate` hands
+the station the mandate's `name` (the line) and `soul_path`. When a tracked PR
+merges after a `ci` or `review` fixer worked on it, each such fix becomes one
+lesson in that soul: `Lesson [<slug> · <line>]: <kind> failure on '<task
+title>': <what failed>. Fixed by: <the fixer's commit subject>.` What failed is
+recorded on the fix entry (`failure`) when it launches: a review's first failed
+item, else the failed log's first `error` line (then the first fail/assert
+line). The subject is the first commit after the fix's head in `gh pr view
+--json commits`. A `rebase` fix teaches nothing. When a tester's tracking ends,
+each `bug` issue created since the tester launched and carrying one of the
+charter's `issue_labels` (when it has any) becomes `Lesson [<slug> · <line>]:
+the tester found a bug after '<task title>': <issue title> (#n).` Lessons are
+capped at 400 characters and deduplicated (`soul_link.note_lesson`). Before a
+worker launches (not a fixer), the station recalls the 5 lessons nearest the
+task title and repo and puts them in a "Lessons from this line" block, fenced
+as data (they come from CI logs and issue titles), capped at about 1,200
+characters. No soul bound: no lessons are written or read. A soul failure never
+touches the run.
 The repo's own fast lane and CI are the diff gate for small PRs; the plan gate
 is unchanged. Once the PR is known, its diff also goes to Clef's shadow scorer
 (`belt/clef.shadow_diff`), which records a verdict and gates nothing. There is no local ORIENT, CHECK or REVIEW in this mode: the

@@ -12,6 +12,11 @@
 # launch clone's docs/c4/model.json (at origin/<base>): the components the
 # issue's "Files likely involved" or its title words match, their paths and
 # public helpers (one ``git grep``), the reuse rule verbatim, capped at 2,500.
+# LESSONS: a merged PR a ``ci``/``review`` fixer got through, and each bug a
+# tester files on the line, become one deduplicated procedural lesson in the
+# mandate's soul (real soul-protocol on a tmp ``.soul``), tagged repo and line;
+# a worker brief recalls the top ones, fenced and capped at 1,200, and every
+# worker/fixer brief says to check current docs with the repo's docs MCP tools.
 # Same fakes as tests/cloud/test_belt_cloud_station.py (``FakeRunner`` extended
 # with the gh calls this loop adds); nothing real is launched.
 
@@ -26,6 +31,7 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud.belt import cloud_station, headless, orient  # noqa: E402
+from pocketpaw_ee.cloud.mandates import soul_link  # noqa: E402
 
 from pocketpaw.instinct.models import ActionStatus  # noqa: E402
 from tests.cloud import test_belt_cloud_station as base  # noqa: E402
@@ -58,11 +64,23 @@ class Runner(FakeRunner):
     """``FakeRunner`` plus the commit-status POSTs (kept on ``statuses``), the
     source issue's title and body, and ``git grep``'s output."""
 
-    def __init__(self, *, issue: dict | None = None, grep: str = "", **kw):
+    def __init__(
+        self,
+        *,
+        issue: dict | None = None,
+        grep: str = "",
+        log: str = "",
+        commits: list[dict] | None = None,
+        bugs: list[dict] | None = None,
+        **kw,
+    ):
         super().__init__(**kw)
         self.statuses: list[dict[str, str]] = []
         self.issue = issue or {}
         self.grep = grep
+        self.log = log  # ``gh run view --log-failed``
+        self.commits = commits or []  # ``gh pr view --json commits``
+        self.bugs = bugs or []  # ``gh issue list --label bug``
 
     async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
         if argv[:2] == ["gh", "api"] and "/statuses/" in argv[2]:
@@ -76,6 +94,15 @@ class Runner(FakeRunner):
         if "grep" in argv:
             self.calls.append((list(argv), cwd))
             return 0, self.grep, ""
+        if argv[:3] == ["gh", "run", "view"] and self.log:
+            self.calls.append((list(argv), cwd))
+            return 0, self.log, ""
+        if argv[:3] == ["gh", "pr", "view"] and argv[-1] == "commits":
+            self.calls.append((list(argv), cwd))
+            return 0, json.dumps({"commits": self.commits}), ""
+        if argv[:3] == ["gh", "issue", "list"]:
+            self.calls.append((list(argv), cwd))
+            return 0, json.dumps(self.bugs), ""
         return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin, on_line=on_line)
 
 
@@ -423,3 +450,173 @@ async def test_worker_and_fixer_briefs_carry_the_orientation(store, dirs, stages
         a for a, _ in runner.calls if a[:3] == ["gh", "issue", "view"] and "title,body" in a
     )
     assert view[3:6] == ["93", "-R", SLUG]
+
+
+# -- lessons: what the line learned, in the mandate's soul -------------------
+
+soul_protocol = pytest.importorskip("soul_protocol")
+DOCS_LINE = (
+    "Before using any platform or library API (SwiftUI, AppKit, macOS 26 APIs, GRDB, Swift "
+    "stdlib), check current docs with the repo's docs MCP tools (see .mcp.json) instead of "
+    "relying on memory."
+)
+CI_LOG = (
+    "build\tCompile\t2030-01-01T00:00:00Z Compiling FlareCore\n"
+    "build\tCompile\t2030-01-01T00:00:01Z Commands.swift:88: error: cannot open existential "
+    "'any Command' in Self.merged\n"
+    "build\tCompile\t2030-01-01T00:00:02Z ** BUILD FAILED **\n"
+)
+
+
+@pytest.fixture
+async def soul_file(tmp_path: Path) -> Path:
+    path = tmp_path / "afterglow.soul"
+    soul = await soul_protocol.Soul.birth("afterglow")
+    await soul.export(path, include_keys=True)
+    return path
+
+
+def _lined(d, soul_file: Path, labels: list[str] | None = None):
+    """``d`` whose mandate is the Flare line, bound to ``soul_file``."""
+
+    async def charter(workspace_id: str, mandate_id: str) -> dict:
+        charter = {"checks": ["make ci"], "issue_labels": labels or []}
+        return {"repo": "x", "name": "Flare", "soul_path": str(soul_file), "charter": charter}
+
+    d.charter_for = charter
+    return d
+
+
+async def _lessons(path: Path) -> list[str]:
+    return await soul_link.recall_lessons(str(path), "G41 Text shapes creative-core", limit=10)
+
+
+async def test_note_lesson_dedups_and_recall_reads_only_lessons(soul_file):
+    lesson = "Lesson [qbtrix/creative-core · Flare]: ci failure on 'G41': error. Fixed by: X."
+    assert await soul_link.remember_shift(str(soul_file), "Mandate shift 3: G41 done") is True
+    assert await soul_link.note_lesson(str(soul_file), lesson) is True
+    assert await soul_link.note_lesson(str(soul_file), lesson) is False  # a near-duplicate
+    assert await _lessons(soul_file) == [lesson]  # the shift summary is not a lesson
+    assert await soul_link.note_lesson(None, lesson) is False
+    assert await soul_link.recall_lessons(None, "G41") == []
+    assert soul_file.is_file()  # still an archive
+
+
+async def test_a_merged_ci_fix_becomes_a_lesson(store, dirs, stages, soul_file):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    red = _open("h1", red=True)
+    commits = [
+        {"oid": "h1", "messageHeadline": "Add text shapes"},
+        {"oid": "h2", "messageHeadline": "Open the existential before merging commands"},
+    ]
+    runner = Runner(
+        launch_out=SESSION, pr=[red, red, red, red, MERGED], log=CI_LOG, commits=commits
+    )
+    runner.run_ref = run_ref
+
+    await _lined(_reviewer(runner, launch, reviewer=False), soul_file).run(run_ref, workspace_id=WS)
+
+    assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+    (lesson,) = await _lessons(soul_file)
+    assert lesson.startswith(f"Lesson [{SLUG} · Flare]:")
+    assert "G41: Text shapes" in lesson and "build (macos-14)" in lesson
+    assert "cannot open existential" in lesson and "BUILD FAILED" not in lesson
+    assert "Fixed by: Open the existential before merging commands" in lesson
+    assert len(lesson) <= 400
+
+
+async def test_a_merged_review_fix_becomes_a_lesson_and_a_rebase_does_not(
+    store, dirs, stages, soul_file
+):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    failed = _review(H1, "FAILURE", comments=[REVIEW_NOTE])
+    commits = [{"oid": H1, "messageHeadline": "x"}, {"oid": H2, "messageHeadline": "Reuse clamp"}]
+    seq = [_review(H1), failed, failed, failed, _review(H2), _review(H2, "SUCCESS"), MERGED]
+    runner = Runner(launch_out=SESSION, pr=seq, commits=commits)
+    runner.run_ref = run_ref
+
+    await _lined(_reviewer(runner, launch), soul_file).run(run_ref, workspace_id=WS)
+
+    (lesson,) = await _lessons(soul_file)
+    assert "review" in lesson and "Text.swift:12 duplicates Geometry.clamp" in lesson
+    assert "Fixed by: Reuse clamp" in lesson
+
+    other = await _queue(store, repo)
+    stuck = _open(mergeable="CONFLICTING")
+    runner = Runner(launch_out=SESSION, pr=[stuck] * 4 + [MERGED], commits=commits)
+    runner.run_ref = other
+    await _lined(_reviewer(runner, launch, reviewer=False), soul_file).run(other, workspace_id=WS)
+    assert len(await _lessons(soul_file)) == 1
+
+
+async def test_tester_bugs_on_the_line_become_lessons(store, dirs, updates, soul_file):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    later = "2999-01-01T00:00:00Z"
+    bugs = [
+        {
+            "number": 61,
+            "title": "Text with NaN size crashes",
+            "createdAt": later,
+            "labels": [{"name": "bug"}, {"name": "flare"}],
+        },
+        {
+            "number": 60,
+            "title": "Old bug",
+            "createdAt": "2020-01-01T00:00:00Z",
+            "labels": [{"name": "bug"}, {"name": "flare"}],
+        },
+        {
+            "number": 62,
+            "title": "Another line's bug",
+            "createdAt": later,
+            "labels": [{"name": "bug"}, {"name": "photo"}],
+        },
+    ]
+    runner = Runner(launch_out=SESSION, pr=MERGED, bugs=bugs)
+    runner.run_ref = run_ref
+
+    d = _lined(_tester(runner, launch, poll_seconds=600), soul_file, labels=["flare"])
+    await d.run(run_ref, workspace_id=WS)
+
+    (lesson,) = await _lessons(soul_file)
+    assert lesson.startswith(f"Lesson [{SLUG} · Flare]:") and "tester" in lesson
+    assert "Text with NaN size crashes (#61)" in lesson
+
+
+async def test_a_worker_brief_carries_lessons_and_the_docs_line(store, dirs, stages, soul_file):
+    repo, launch = dirs
+    # Distinct words per lesson (dedup tokens are alphabetic only), ~250 chars each.
+    for w in ("amber", "birch", "cedar", "delta", "ember", "fjord", "garnet", "harbor"):
+        filler = " ".join(f"{w}{x}" for x in ("one", "two", "three", "four", "five", "six") * 3)
+        assert await soul_link.note_lesson(
+            str(soul_file), f"Lesson [{SLUG} · Flare]: G41 Text shapes {filler}"
+        )
+    run_ref = await _queue(store, repo)
+    stuck = _open(mergeable="CONFLICTING")
+    runner = Runner(launch_out=SESSION, pr=[stuck] * 4 + [MERGED])
+    runner.run_ref = run_ref
+
+    await _lined(_reviewer(runner, launch, reviewer=False), soul_file).run(run_ref, workspace_id=WS)
+
+    worker, fixer = _briefs(runner)
+    at = worker.index("Lessons from this line")
+    block = worker[at : worker.index("</untrusted>", at) + len("</untrusted>")]
+    assert "<untrusted>" in block and f"Lesson [{SLUG} · Flare]" in block
+    assert block.count("- Lesson") <= 5 and len(block) <= 1200
+    assert DOCS_LINE in worker and DOCS_LINE in fixer
+    assert "Lessons from this line" not in fixer
+
+
+async def test_no_soul_means_no_lessons_block(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = Runner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    (worker,) = _briefs(runner)
+    assert "Lessons from this line" not in worker and DOCS_LINE in worker

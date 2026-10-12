@@ -2332,8 +2332,10 @@ async def charter_for_mandate(workspace_id: str, mandate_id: str) -> dict[str, A
     """Read a mandate's charter (wire dict) plus its bound repo, tenant-scoped.
 
     The headless develop station's read: it needs the charter's ``checks``,
-    ``recipes``, ``goal``, ``boundaries`` and ``says_no``. Returns
-    ``{"repo": ..., "charter": {...}}`` or ``None`` on a miss / cross-tenant id."""
+    ``recipes``, ``goal``, ``boundaries`` and ``says_no``; the cloud station
+    also the mandate's ``name`` and ``soul_path`` (its lessons). Returns
+    ``{"repo", "name", "soul_path", "charter": {...}}`` or ``None`` on a miss /
+    cross-tenant id."""
     # no-event: read-only path; emit only on writes.
     try:
         doc = await MandateDoc.find_one(
@@ -2343,7 +2345,12 @@ async def charter_for_mandate(workspace_id: str, mandate_id: str) -> dict[str, A
         doc = None
     if doc is None:
         return None
-    return {"repo": doc.surface.repo_id, "charter": _charter_to_wire(doc.charter)}
+    return {
+        "repo": doc.surface.repo_id,
+        "name": doc.name,
+        "soul_path": doc.soul_path,
+        "charter": _charter_to_wire(doc.charter),
+    }
 
 
 async def list_autopilot_enabled() -> list[dict[str, Any]]:

@@ -484,6 +484,7 @@ async def test_charter_checks_and_recipes_round_trip(mongo_db):
     assert found["repo"] == "/tmp/x"
     assert found["charter"]["checks"] == ["uv run pytest -q"]
     assert found["charter"]["recipes"] == {"bump-photo": "node b.mjs photo"}
+    assert found["name"] and "soul_path" in found  # the cloud station's lessons
     assert await service.charter_for_mandate("other-ws", mid) is None
     with pytest.raises((CloudError, ValueError)):
         await _make_mandate("manual", checks=["'unbalanced"])

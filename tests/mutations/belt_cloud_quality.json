@@ -66,10 +66,46 @@
   {
     "label": "a worker brief carries no orientation",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "        + (f\"{orientation}\\n\\n\" if orientation else \"\")\n        + f\"1. Follow",
-    "replace": "        + f\"1. Follow",
+    "find": "        + (f\"{orientation}\\n\\n\" if orientation else \"\")\n        + (f\"{lessons}",
+    "replace": "        + (f\"{lessons}",
     "tests": [
       "tests/cloud/test_belt_cloud_quality.py::test_worker_and_fixer_briefs_carry_the_orientation"
+    ]
+  },
+  {
+    "label": "a worker brief recalls no lessons",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "lessons=_lessons_block(lessons),",
+    "replace": "lessons=\"\",",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_worker_brief_carries_lessons_and_the_docs_line"
+    ]
+  },
+  {
+    "label": "the lessons block is not capped",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if sum(len(k) + 1 for k in kept) + len(line) > budget:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_worker_brief_carries_lessons_and_the_docs_line"
+    ]
+  },
+  {
+    "label": "a rebase fix records a lesson",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "_LESSON_KINDS = {\"ci\", \"review\"}",
+    "replace": "_LESSON_KINDS = {\"ci\", \"review\", \"rebase\"}",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_merged_review_fix_becomes_a_lesson_and_a_rebase_does_not"
+    ]
+  },
+  {
+    "label": "a near-duplicate lesson is stored again",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "if reconcile_fact(text.strip(), near)[0] == \"SKIP\":",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_note_lesson_dedups_and_recall_reads_only_lessons"
     ]
   }
 ]
