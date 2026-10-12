@@ -8,11 +8,16 @@
 # ``review``, the shared cap) and the new head is reviewed again; no verdict by
 # the timeout (or no reviewer session) posts success so the line never stalls;
 # off by default; a resume never doubles a reviewer.
+# ORIENT: every worker and fixer brief carries an Orientation block built from the
+# launch clone's docs/c4/model.json (at origin/<base>): the components the
+# issue's "Files likely involved" or its title words match, their paths and
+# public helpers (one ``git grep``), the reuse rule verbatim, capped at 2,500.
 # Same fakes as tests/cloud/test_belt_cloud_station.py (``FakeRunner`` extended
 # with the gh calls this loop adds); nothing real is launched.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -20,7 +25,7 @@ import pytest
 
 pytest.importorskip("pocketpaw_ee")
 
-from pocketpaw_ee.cloud.belt import cloud_station, headless  # noqa: E402
+from pocketpaw_ee.cloud.belt import cloud_station, headless, orient  # noqa: E402
 
 from pocketpaw.instinct.models import ActionStatus  # noqa: E402
 from tests.cloud import test_belt_cloud_station as base  # noqa: E402
@@ -50,11 +55,14 @@ REVIEW_NOTE = (
 
 
 class Runner(FakeRunner):
-    """``FakeRunner`` plus the commit-status POSTs (kept on ``statuses``)."""
+    """``FakeRunner`` plus the commit-status POSTs (kept on ``statuses``), the
+    source issue's title and body, and ``git grep``'s output."""
 
-    def __init__(self, **kw):
+    def __init__(self, *, issue: dict | None = None, grep: str = "", **kw):
         super().__init__(**kw)
         self.statuses: list[dict[str, str]] = []
+        self.issue = issue or {}
+        self.grep = grep
 
     async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
         if argv[:2] == ["gh", "api"] and "/statuses/" in argv[2]:
@@ -62,6 +70,12 @@ class Runner(FakeRunner):
             fields = dict(a.split("=", 1) for a in argv[3:] if "=" in a)
             self.statuses.append({"sha": argv[2].rsplit("/", 1)[-1], **fields})
             return 0, "{}", ""
+        if argv[:3] == ["gh", "issue", "view"] and "title,body" in argv:
+            self.calls.append((list(argv), cwd))
+            return 0, json.dumps(self.issue), ""
+        if "grep" in argv:
+            self.calls.append((list(argv), cwd))
+            return 0, self.grep, ""
         return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin, on_line=on_line)
 
 
@@ -78,7 +92,7 @@ def _review(head: str, state: str | None = None, *, comments=(), **kw) -> dict:
 def _reviewer(runner: FakeRunner, launch: Path, **kw):
     # Polls every 60 s; a stuck PR gets its fixer 100 s in; no lane nudge in reach.
     kw = {"poll_seconds": 60, "fix_grace_seconds": 100, "lane_nudge_seconds": 10**9, **kw}
-    return _dispatcher(runner, launch, reviewer=True, **kw)
+    return _dispatcher(runner, launch, **{"reviewer": True, **kw})
 
 
 async def test_a_green_pr_gets_one_reviewer_and_its_pass_is_recorded(store, dirs, stages):
@@ -264,3 +278,148 @@ def test_wire_cloud_reads_the_reviewer_env(tmp_path, monkeypatch):
     assert cloud_station.wire_cloud() is True
     d = headless.resolve_headless_dispatcher()
     assert d.reviewer is True and d.review_timeout_seconds == 600.0
+
+
+# -- orientation: the C4 components a task touches, and what they already offer --
+
+MODEL = {
+    "scope": "creative-core",
+    "model": {
+        "systems": [
+            {
+                "id": "creative-core",
+                "containers": [
+                    {
+                        "id": "flarecore",
+                        "name": "FlareCore library",
+                        "components": [
+                            {
+                                "id": "document-commands",
+                                "name": "Document and Command Engine",
+                                "description": "The document and its undoable commands. More.",
+                                "paths": [
+                                    "Sources/FlareCore/Document.swift",
+                                    "Sources/FlareCore/CommandRegistry.swift",
+                                ],
+                            },
+                            {
+                                "id": "timeline",
+                                "name": "Timeline",
+                                "description": "Keyframes and easing.",
+                                "paths": ["Sources/FlareCore/Timeline/"],
+                            },
+                            {
+                                "id": "geometry",
+                                "name": "Geometry",
+                                "description": "Points and paths.",
+                                "paths": ["Sources/FlareCore/Geometry.swift"],
+                            },
+                        ],
+                    }
+                ],
+            },
+            {"id": "grdb", "containers": []},
+        ]
+    },
+}
+ISSUE = {
+    "title": "G41: Text shapes on the timeline",
+    "body": "**Behavior**\nText.\n\n**Files likely involved**\n"
+    "`Sources/FlareCore/Document.swift`, new `Sources/FlareCore/TextCommands.swift`, "
+    "`../escape.swift`.\n\n**Size:** M. Mentions `Sources/FlareCore/Geometry.swift` later.",
+}
+GREP = (
+    "Sources/FlareCore/Document.swift:10:public struct Document {\n"
+    "Sources/FlareCore/Document.swift:40:    public func layer(id: UUID) -> Layer?\n"
+    "Sources/FlareCore/Timeline/Easing.swift:5:public enum Easing {\n"
+)
+REUSE = (
+    "Reuse these before writing anything new. If what you need exists, call it. If you add "
+    "a new component or file, add it to docs/c4/model.json in the same PR."
+)
+
+
+def _clone(root: Path, model: dict | None = MODEL) -> Path:
+    if model is not None:
+        (root / "docs" / "c4").mkdir(parents=True, exist_ok=True)
+        (root / "docs" / "c4" / "model.json").write_text(json.dumps(model))
+    return root
+
+
+async def test_reuse_block_names_the_matched_components_and_their_helpers(tmp_path):
+    seen: list[list[str]] = []
+
+    async def run(argv, *, cwd, timeout):
+        seen.append(list(argv))
+        assert cwd == tmp_path
+        return 0, GREP, ""
+
+    block = await orient.reuse_block(run, _clone(tmp_path), ISSUE["title"], ISSUE["body"])
+
+    assert block.startswith("ORIENTATION")
+    # Document.swift (a listed file) and "timeline" (a title word) match; Geometry
+    # sits outside the Files section and its name is not in the title.
+    assert "Document and Command Engine" in block and "Timeline" in block
+    assert "Geometry" not in block
+    assert "Sources/FlareCore/Document.swift" in block and "Sources/FlareCore/Timeline/" in block
+    assert "struct Document" in block and "func layer" in block and "enum Easing" in block
+    assert block.endswith(REUSE)
+    (argv,) = seen  # one grep, over the matched components' paths only
+    assert "grep" in argv and "--" in argv
+    specs = argv[argv.index("--") + 1 :]
+    assert specs == [
+        ":(glob)Sources/FlareCore/Document.swift",
+        ":(glob)Sources/FlareCore/CommandRegistry.swift",
+        ":(glob)Sources/FlareCore/Timeline/**",
+    ]
+
+
+async def test_reuse_block_is_capped_and_degrades_quietly(tmp_path):
+    async def run(argv, *, cwd, timeout):
+        return 0, "".join(f"Sources/C{i}.swift:1:public func helper{i}()\n" for i in range(400)), ""
+
+    comps = [
+        {
+            "id": f"c{i}",
+            "name": f"Timeline part {i}",
+            "description": "x " * 80,
+            "paths": [f"Sources/C{i}.swift"],
+        }
+        for i in range(200)
+    ]
+    big = {
+        "scope": "s",
+        "model": {"systems": [{"id": "s", "containers": [{"name": "C", "components": comps}]}]},
+    }
+    block = await orient.reuse_block(run, _clone(tmp_path / "a", big), "timeline", "")
+    assert len(block) <= 2500 and block.endswith(REUSE) and "more not shown" in block
+
+    async def broken(argv, *, cwd, timeout):
+        raise OSError("no git")
+
+    block = await orient.reuse_block(broken, _clone(tmp_path / "b"), ISSUE["title"], ISSUE["body"])
+    assert "Document and Command Engine" in block and "public:" not in block  # grep lost only
+    assert await orient.reuse_block(broken, _clone(tmp_path / "c", None), "timeline", "") == ""
+    nothing = await orient.reuse_block(broken, _clone(tmp_path / "d"), "Unrelated", "")
+    assert "no component" in nothing and nothing.endswith(REUSE)
+
+
+async def test_worker_and_fixer_briefs_carry_the_orientation(store, dirs, stages):
+    repo, launch = dirs
+    _clone(launch)
+    run_ref = await _queue(store, repo)
+    stuck = _open(mergeable="CONFLICTING")
+    runner = Runner(
+        launch_out=SESSION, pr=[stuck, stuck, stuck, stuck, MERGED], issue=ISSUE, grep=GREP
+    )
+    runner.run_ref = run_ref
+
+    await _reviewer(runner, launch, reviewer=False).run(run_ref, workspace_id=WS)
+
+    worker, fixer = _briefs(runner)
+    for brief in (worker, fixer):
+        assert "ORIENTATION" in brief and "struct Document" in brief and REUSE in brief
+    view = next(
+        a for a, _ in runner.calls if a[:3] == ["gh", "issue", "view"] and "title,body" in a
+    )
+    assert view[3:6] == ["93", "-R", SLUG]

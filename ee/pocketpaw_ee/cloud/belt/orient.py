@@ -25,6 +25,13 @@
 # and Go only, so the model carries it. ``repo_path`` normalises a path first
 # and refuses an absolute or escaping one.
 #
+#   ``reuse_block``  the cloud station's ORIENTATION block for a worker or fixer
+#       brief: the components of a clone's ``docs/c4/model.json`` that the
+#       issue's "Files likely involved" paths (via the file join below) or its
+#       title words match, their paths, and their public Swift helpers from ONE
+#       ``git grep`` over those paths, then the reuse rule; capped at 2,500
+#       chars. No model: "". It never raises (a failed grep drops the helpers).
+#
 # One pure mapper: ``block_component`` turns a Pulley block manifest into c4-gen's
 # ``Component`` (id, name, description, technology) plus its ``deps`` as sync
 # relationships. It writes nothing and has no caller yet: it is for blueprint
@@ -53,6 +60,17 @@ _REUSE_RULE = (
     "Reuse before you add: extend what is listed here; do not create a second copy "
     "of anything listed."
 )
+REUSE_LINE = (
+    "Reuse these before writing anything new. If what you need exists, call it. If you add "
+    "a new component or file, add it to docs/c4/model.json in the same PR."
+)
+_REUSE_CHARS = 2500
+_GREP_LINES = 400  # grep hits read; the block's cap trims what is shown
+_HELPERS_SHOWN = 12  # public names listed per component
+_PUBLIC = re.compile(r"\bpublic\s+(func|struct|enum)\s+([A-Za-z_]\w*)")
+_TICKED = re.compile(r"`([^`\s]+)`")
+_WORD = re.compile(r"[a-z][a-z0-9]{3,}")
+_STOP = {"with", "from", "that", "this", "into", "each", "when", "have", "than", "also"}
 
 
 def _first_sentence(text: str, limit: int = 160) -> str:
@@ -204,6 +222,89 @@ def block_component(manifest: dict[str, Any]) -> tuple[dict[str, str], list[dict
     return component, relationships
 
 
+def likely_files(body: str) -> list[str]:
+    """The repo paths (backticked) in an issue body's "Files likely involved"
+    paragraph, normalised by ``repo_path`` (escaping ones dropped)."""
+    at = body.lower().find("files likely involved")
+    if at < 0:
+        return []
+    found = (repo_path(t) for t in _TICKED.findall(body[at:].split("\n\n", 1)[0]))
+    return list(dict.fromkeys(p for p in found if p))
+
+
+def _words(text: str) -> set[str]:
+    """Lowercase words of 4+ chars, a trailing ``s`` dropped (shapes ~ shape)."""
+    return {w.rstrip("s") for w in _WORD.findall(text.lower()) if w not in _STOP}
+
+
+async def reuse_block(
+    run: Any, clone: Path, title: str, issue_body: str, *, git: tuple[str, ...] = ("git",)
+) -> str:
+    """The ORIENTATION block for one brief (see the header). ``run`` is the
+    station's runner; ``clone`` a checkout at the base branch."""
+    try:
+        data = load_model((clone / "docs" / "c4" / "model.json").read_text())
+    except (OSError, ValueError):
+        data = None
+    system = _owned_system(data) if data else None
+    if data is None or system is None:
+        return ""
+    index = path_index(data)
+    wanted = {component_for(f, index) for f in likely_files(issue_body)}
+    words = _words(title)
+    comps: list[tuple[str, str, Any, list[str]]] = []
+    for container in _dicts(system["containers"]):
+        for comp in _dicts(container.get("components")):
+            cid = str(comp.get("id") or "")
+            name = str(comp.get("name") or cid)
+            if cid and (cid in wanted or words & _words(f"{name} {cid}")):
+                globs = comp.get("paths") if isinstance(comp.get("paths"), list) else []
+                kept = [g.strip() for g in globs if isinstance(g, str) and g.strip()]
+                comps.append((cid, name, comp.get("description"), kept))
+    head = "ORIENTATION (the components this task touches, from docs/c4/model.json)"
+    if not comps:
+        return (
+            f"{head}\n(no component in the model matches this task's files or title)\n{REUSE_LINE}"
+        )
+    helpers = await _public_helpers(run, clone, [g for *_, gs in comps for g in gs], index, git)
+    lines = [head]
+    for cid, name, desc, globs in comps:
+        lines.append(f"- {name} [{cid}]: {_first_sentence(desc)}")
+        if globs:
+            lines.append(f"  paths: {', '.join(globs)}")
+        names = helpers.get(cid) or []
+        if names:
+            more = f" (+{len(names) - _HELPERS_SHOWN} more)" if len(names) > _HELPERS_SHOWN else ""
+            lines.append(f"  public: {', '.join(names[:_HELPERS_SHOWN])}{more}")
+    # The ``(… N more)`` line ``_capped`` adds rides outside its limit: keep room.
+    body = "\n".join(_capped(lines, _REUSE_CHARS - len(REUSE_LINE) - 40))
+    return f"{body}\n{REUSE_LINE}"
+
+
+async def _public_helpers(
+    run: Any, clone: Path, globs: list[str], index: PathIndex, git: tuple[str, ...]
+) -> dict[str, list[str]]:
+    """``{component id: ["struct Document", "func layer", ...]}`` from ONE
+    ``git grep`` over ``globs`` (``:(glob)`` pathspecs after ``--``, so none
+    reads as a flag); ``{}`` when the grep fails."""
+    specs = [f":(glob){g.removeprefix('./')}{'**' if g.endswith('/') else ''}" for g in globs]
+    argv = [*git, "grep", "-I", "-n", "-E", r"public (func|struct|enum) ", "--"]
+    try:
+        _, out, _ = await run([*argv, *dict.fromkeys(specs)], cwd=clone, timeout=ORIENT_TIMEOUT)
+    except Exception:  # noqa: BLE001 — helpers are a hint; the block stands without them
+        return {}
+    found: dict[str, list[str]] = {}
+    for line in (out or "").splitlines()[:_GREP_LINES]:
+        path, _, rest = line.partition(":")
+        hit = _PUBLIC.search(rest)
+        cid = component_for(path, index) if hit else None
+        if hit and cid:
+            label = f"{hit.group(1)} {hit.group(2)}"
+            if label not in found.setdefault(cid, []):
+                found[cid].append(label)
+    return found
+
+
 def _loom_dir(repo: Path) -> Path | None:
     configured = (os.environ.get("POCKETPAW_FACTORY_LOOM_DIR") or "").strip()
     if configured:
@@ -308,6 +409,7 @@ async def orient_block(run: Any, repo: Path, task: str, *, cwd: Path) -> tuple[s
 
 __all__ = [
     "ORIENT_TIMEOUT",
+    "REUSE_LINE",
     "PathIndex",
     "block_component",
     "c4_lines",
@@ -315,7 +417,9 @@ __all__ = [
     "load_model",
     "loom_binary",
     "orient_block",
+    "likely_files",
     "path_index",
     "repo_path",
+    "reuse_block",
     "world_model_for",
 ]

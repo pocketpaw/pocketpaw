@@ -955,6 +955,25 @@ the charter checks until they pass, open ONE PR to the base that says
 and open none), add the label (`POCKETPAW_FACTORY_CLOUD_PR_LABEL`, default
 `fast-lane`), add no AI attribution, and stop without merging. The seated dev's
 instructions ride the brief fenced as data, as in the local develop prompt.
+
+**Orientation in every worker and fixer brief.** Duplication is the failure the
+factory watches hardest, so before a worker or fixer launches, the station reads
+the launch clone's `docs/c4/model.json` (the clone is detached at
+`origin/<base>`, so this is the base branch's model) and builds an
+ORIENTATION block (`orient.reuse_block`): the owned system's components whose
+`paths` own a file the source issue's "Files likely involved" paragraph names
+(backticked paths, through the same file join ORIENT uses), or whose name or id
+shares a word of four or more letters with the task or issue title; each with
+its paths and its public helpers, taken from ONE `git grep` for `public
+func|struct|enum` over those paths (`:(glob)` pathspecs after `--`, 400 hits
+read, 12 names shown per component); then the line "Reuse these before writing
+anything new. If what you need exists, call it. If you add a new component or
+file, add it to docs/c4/model.json in the same PR." The block is capped at
+about 2,500 characters. The issue is read with one `gh issue view --json
+title,body`; with no model in the clone there is no block and no read, and an
+unreadable issue matches on the task title alone. A failed grep drops only the
+helper names. The block carries only owner-authored model data and grep hits,
+so it rides unfenced, like ORIENT's.
 The repo's own fast lane and CI are the diff gate for small PRs; the plan gate
 is unchanged. Once the PR is known, its diff also goes to Clef's shadow scorer
 (`belt/clef.shadow_diff`), which records a verdict and gates nothing. There is no local ORIENT, CHECK or REVIEW in this mode: the

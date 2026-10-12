@@ -44,5 +44,32 @@
     "tests": [
       "tests/cloud/test_belt_cloud_quality.py::test_a_silent_reviewer_times_out_to_success"
     ]
+  },
+  {
+    "label": "the orientation block is not capped",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "body = \"\\n\".join(_capped(lines, _REUSE_CHARS - len(REUSE_LINE) - 40))",
+    "replace": "body = \"\\n\".join(lines)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_reuse_block_is_capped_and_degrades_quietly"
+    ]
+  },
+  {
+    "label": "the orientation ignores the issue title",
+    "file": "ee/pocketpaw_ee/cloud/belt/orient.py",
+    "find": "if cid and (cid in wanted or words & _words(f\"{name} {cid}\")):",
+    "replace": "if cid and cid in wanted:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_reuse_block_names_the_matched_components_and_their_helpers"
+    ]
+  },
+  {
+    "label": "a worker brief carries no orientation",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        + (f\"{orientation}\\n\\n\" if orientation else \"\")\n        + f\"1. Follow",
+    "replace": "        + f\"1. Follow",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_worker_and_fixer_briefs_carry_the_orientation"
+    ]
   }
 ]
