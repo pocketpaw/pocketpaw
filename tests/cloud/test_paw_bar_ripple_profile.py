@@ -310,7 +310,8 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # drops what the typed lines say, brief lines 73 chars) with their mapping added;
     # 33,627 with the 3D line (the model library's 31 ids and anchors, 1,332 chars of
     # it), then 31,750 with brief lines at 50 chars and the illustration line shorter;
-    # 31,889 with the map line.
+    # 31,889 with the map line; 32,415 with notes and music-player typed, then 31,855
+    # with brief lines at 44 chars, two rule-10 sentences shorter and their mapping added.
     assert len(text) < 32_000
 
 

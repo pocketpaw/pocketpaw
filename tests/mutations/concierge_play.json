@@ -718,5 +718,59 @@
     "tests": [
       "tests/cloud/test_paw_bar_play_widgets.py"
     ]
+  },
+  {
+    "label": "NM-1: notes checks never run",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_DATA_CHECKS = {\"notes\": _check_notes, \"music-player\": _check_music_player}",
+    "replace": "_DATA_CHECKS = {\"music-player\": _check_music_player}",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_notes_and_music_hold_to_plain_text_and_preset_sounds"
+    ]
+  },
+  {
+    "label": "NM-2: music-player checks never run",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_DATA_CHECKS = {\"notes\": _check_notes, \"music-player\": _check_music_player}",
+    "replace": "_DATA_CHECKS = {\"notes\": _check_notes}",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_notes_and_music_hold_to_plain_text_and_preset_sounds"
+    ]
+  },
+  {
+    "label": "NM-3: any sound is taken",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            or track.get(\"sound\") not in MUSIC_SOUNDS\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_notes_and_music_hold_to_plain_text_and_preset_sounds"
+    ]
+  },
+  {
+    "label": "NM-4: a track may carry any key (a url)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            or not track.keys() <= TRACK_KEYS\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_notes_and_music_hold_to_plain_text_and_preset_sounds"
+    ]
+  },
+  {
+    "label": "NM-5: a note may hold an HTML tag",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "not _HTML_TAG.search(value) and ",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_notes_and_music_hold_to_plain_text_and_preset_sounds"
+    ]
+  },
+  {
+    "label": "NM-6: the rules drop the notes and music mapping",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"Notes or jotting down is a notes card, never inputs and buttons; music or focus \"\n    \"sounds, a music-player of its preset sounds. \"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_send_notes_and_music_to_their_widgets"
+    ]
   }
 ]

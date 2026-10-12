@@ -2379,7 +2379,7 @@ def _widget_line(
 
 
 # A summary line's description: its first sentence, at most this long.
-_BRIEF_CHARS = 50
+_BRIEF_CHARS = 44
 
 
 def _brief_line(widget: dict[str, Any]) -> str:
