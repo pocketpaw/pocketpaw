@@ -77,7 +77,9 @@ def _keywords(widget: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
     name = widget["type"]
     names = {_stem(p) for p in name.split("-")} | {name.replace("-", " ")}
     names |= {
-        _stem(p) for alias, target in RIPPLE_ALIASES.items() if target == name
+        _stem(p)
+        for alias, target in RIPPLE_ALIASES.items()
+        if target == name
         for p in alias.split("-")
     }
     intents = {" ".join(_words(i)) for i in INTENTS.get(name, {}).get("intents", ())}
@@ -137,7 +139,8 @@ def full_line(name: str) -> str:
     widget = _WIDGETS[name]
     typed = RIPPLE_PROFILE.typed
     line = (
-        _widget_line(widget, typed=True, shown=typed[name]) if name in typed
+        _widget_line(widget, typed=True, shown=typed[name])
+        if name in typed
         else _widget_line(widget)
     )
     hint = INTENTS.get(name, {}).get("hint")
@@ -157,7 +160,8 @@ def core_lines() -> list[str]:
     """The always-on full lines, in manifest order."""
     typed = RIPPLE_PROFILE.typed
     return [
-        _widget_line(w, typed=True, shown=typed[w["type"]]) if w["type"] in typed
+        _widget_line(w, typed=True, shown=typed[w["type"]])
+        if w["type"] in typed
         else _widget_line(w)
         for w in RIPPLE_PROFILE.manifest["widgets"]
         if w["type"] in CORE

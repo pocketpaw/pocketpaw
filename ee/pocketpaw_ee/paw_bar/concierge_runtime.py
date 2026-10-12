@@ -1136,6 +1136,8 @@ def _catalog_and_actions_block(
     *,
     lead_capture: bool = False,
     profile: Any = None,
+    message: str = "",
+    history: Sequence[dict[str, str]] = (),
 ) -> str:
     """This turn's catalog items (``catalog_for_turn``) and the widget's declared
     actions, as data.
@@ -1180,7 +1182,12 @@ def _catalog_and_actions_block(
             parts.append(f"   - {a['verb']} ({label}): {behavior}.")
     parts.append(
         _cards_paragraph(
-            declared, has_catalog=bool(catalog), lead_capture=lead_capture, profile=profile
+            declared,
+            has_catalog=bool(catalog),
+            lead_capture=lead_capture,
+            profile=profile,
+            message=message,
+            history=history,
         )
     )
     parts.append("</catalog>")
@@ -1544,6 +1551,8 @@ def _cards_paragraph(
     has_catalog: bool = False,
     lead_capture: bool = False,
     profile: Any = None,
+    message: str = "",
+    history: Sequence[dict[str, str]] = (),
 ) -> str:
     """How to write a ```pawbar-card: the compact manifest (one line per widget),
     the host events a button may emit, and each gated verb's form fields. With a
@@ -1557,13 +1566,15 @@ def _cards_paragraph(
     This replaces the legacy ``_form_block``, which teaches the old
     ``{"kind": "form"}`` card and tells the model to call an action tool.
 
-    On the ripple ``profile`` the head is the Ripple catalog (compact) and
-    ``_RIPPLE_RULES`` instead, with no product-card line; the lead and gated
-    form lines are the same."""
+    On the ripple ``profile`` the head is a fixed core (the layout atoms' full
+    lines, a names-only index of every widget, ``_RIPPLE_RULES``) and, last, the
+    full lines of the widgets this ``message`` (and ``history``) needs, picked by
+    ``widget_relevance``; no product-card line. The lead and gated form lines
+    are the same. The core comes first so it stays byte-stable across turns."""
+    from pocketpaw_ee.paw_bar import widget_relevance
     from pocketpaw_ee.paw_bar.card_spec import (
         MAX_SPEC_DEPTH,
         MAX_SPEC_NODES,
-        RIPPLE_MODELS,
         compact_manifest,
     )
 
@@ -1577,19 +1588,16 @@ def _cards_paragraph(
             '"bind"?: ..., "on_*"?: ..., "children"?: [...]}, at most '
             f"{profile.max_nodes} nodes and {profile.max_depth} levels deep, built only "
             "from these widgets:",
-            *(f"   {line}" for line in compact_manifest(profile).splitlines()),
-            *_RIPPLE_RULES[:-1],
-            # 3D: the model library's ids and anchor names, from ripple-models.json.
-            "   - To show, explore or label a thing in 3D, write a model-viewer {asset, "
-            "annotations?: [{anchor, label?, note?}], focus?}: asset one of these ids, "
-            "each anchor and focus one of its names, up to 12 annotations with your own "
-            "plain label and note (an illustration's caps); never a src, poster or URL. "
-            + " ".join(f"{k}({','.join(v['anchors'])})" for k, v in RIPPLE_MODELS.items()),
-            # A map: the documented prop shape, OSM tiles only (card_spec._check_map).
-            "   - map: center [lat,lng], zoom, markers[{id,lat,lng,label}], "
-            'paths[{id,points:[[lat,lng]...]}]; tiles "osm"; say routes are approximate.',
-            _RIPPLE_RULES[-1],
+            *(f"   {line}" for line in widget_relevance.core_lines()),
+            "   Every widget by category (those this message likely needs are listed "
+            "with their props at the end):",
+            *(f"   {line}" for line in widget_relevance.index_lines()),
+            *_RIPPLE_RULES,
         ]
+        picked = widget_relevance.pick_widgets(message, history)
+        if picked:
+            lines.append("   Widgets for this message, with their props:")
+            lines += [f"   {widget_relevance.full_line(name)}" for name in picked]
         return "\n".join(lines + _form_lines(declared, lead_capture))
 
     lines = [
@@ -1879,6 +1887,8 @@ def build_prompt(
         catalog,
         lead_capture=site is not None and lead_capture_on(site),
         profile=profile or ui_profile(site),
+        message=message,
+        history=history,
     )
     if catalog_block:
         blocks.append(catalog_block)
