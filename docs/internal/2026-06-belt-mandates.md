@@ -5,8 +5,8 @@
      seat rule, per-worker model, instructions and setup; the tester), the
      headless develop station (strict and owner Claude setups, the trust
      restore, ORIENT) and its security posture, the cloud develop station
-     (claude --cloud, PR tracking through gh, fixers, the tester, snapshot
-     screenshots), the realtime events, the
+     (claude --cloud, PR tracking through gh, fixers, silent workers, the
+     tester and its PR, snapshot screenshots), the realtime events, the
      architecture context the foreman and review get, the mandate's line
      branch (base sync, landing, re-develop, one PR, its state on the wire and
      the UI surfaces), the run feed (live over SSE and stored per stage, with
@@ -675,6 +675,9 @@ TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
                       one fixer session (see below), at most
                       POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS per run, then the
                       PR escalates like a refusal
+          no PR    -> none by POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT after the
+                      newest launch: one fresh worker, then the run is
+                      released (rejected); see Silent workers below
           timeout  -> headless_error, the run stays queued
 ```
 
@@ -722,6 +725,48 @@ or `{kind, error, at}` when the launch failed (that counts as an attempt and
 tracking goes on), and emits `belt_run_updated` with `stage="fix"`. When the
 attempts are used up and the PR is still stuck, its diff is attached for the
 per-diff gate, with a summary saying how many fixers ran.
+
+**Silent workers.** A cloud worker can stop without opening a PR: it decided
+the issue cannot be done as written, or it simply stalled. Its run would then
+sit in flight until the run timeout, and the continuous scheduler holds a
+mandate's next shift while any of its runs is in flight (up to the stall
+timeout), so one silent worker held the whole line for hours. The tracker now
+watches for that. When no PR with the run's `Belt-Run` line exists
+`POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT` seconds (default 3600) after the newest
+launch (`cloud.launched_at`, or the last relaunch; a resumed run without
+`launched_at` counts from the resume):
+
+1. If the run was already resolved meanwhile (a human rejected it), tracking
+   stops.
+2. When the task cites `#n`, the tracker reads that issue on the bound repo
+   (`gh issue view <n> --json comments`). The repo's CLAUDE.md tells a worker
+   facing an impossible task to comment on the issue and stop, so any comment
+   created after `cloud.launched_at` counts (cloud workers comment as the
+   repo's own user, so the author is not checked). The run is released with
+   that comment's first line as the reason, and the issue gets the label
+   `needs-human` (created on the repo first if it is missing). Nothing is
+   relaunched.
+3. Otherwise ONE fresh worker is launched through the same `_launch` (launch
+   lock, launch clone, the same brief plus a line saying a previous attempt
+   produced no pull request, and to stop if a PR with the run's `Belt-Run` line
+   already exists, since the first worker may still open one late), at most
+   `POCKETPAW_FACTORY_CLOUD_RELAUNCHES` (default 1) per run. A relaunch that
+   fails to launch fails the run like a first launch (`headless_error`, still
+   queued, no longer in flight). Each is appended to the blob's `relaunches` as
+   `{session_url, at}`, the run emits `belt_run_updated` (`running`, `cloud`),
+   and the no-PR clock restarts. `cloud` keeps the first session and its
+   `launched_at`, which still bounds the run timeout.
+4. When the relaunches are used up, the run is RELEASED: rejected through the
+   same `InstinctStore.reject` a human reject uses, as `system:belt-cloud`, with
+   the reason `no PR from N worker(s) in Xm`. Its `headless_state` is cleared,
+   it emits `belt_run_updated` (`rejected`, `done`), and the backend logs one
+   line (`belt cloud: released run <id>: <reason>`). A rejected run is not in
+   flight and its sighting stays open (only a landed task resolves one), so the
+   next shift re-plans it.
+
+The run timeout is checked before the no-PR timeout, so a run whose overall
+timeout has also passed (a resume long after launch) still ends with the usual
+`headless_error`.
 
 **Lane nudge.** The fast lane is the repo's own workflow (`Fast Lane`, on
 `pull_request_target`, `workflow_run` and a 5-minute cron), and it can go
@@ -779,8 +824,29 @@ attribution, never merge. The run blob records `tester: {session_url, at}`
 (`{error, at}` when the launch failed) and the run emits `belt_run_updated`
 with `status: "landed"`, `stage: "test"`. One tester per run (a blob that
 already has `tester` gets none); a tester problem never touches the landed run.
-Belt does not track the tester's issues or PR: its issues come back through the
-`issues` patrol when they carry a line's labels.
+Its issues come back through the `issues` patrol when they carry a line's
+labels.
+
+**The tester's PR.** Once the tester is launched, the same tracker follows its
+PR (`_track` with `kind="tester"`), found by the `Belt-Test: <run id>` line.
+Each poll does what it does for a worker's PR: the lane nudge when it sits
+green and mergeable, a fixer when it is red or conflicting past the grace
+period (the fix brief keeps the `Belt-Test` line), and a merge ends it. The
+results go on `tester`: `pr_url`, `state` (`open` once found, then `merged`,
+`closed`, or `none` when no PR appeared within
+`POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT`, since a tester may file only issues)
+and `fixes`. The tester's fixers have their OWN cap: `tester.fixes` is counted
+against `POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS` on its own, so a hard worker PR
+never starves its tester's PR, and a fixer's update reads `landed`/`test`, never
+`running`. A refused tester PR, or one still stuck past the cap, is left open
+for a human: there is nothing to escalate. The tracker's timeout is the run
+timeout counted from `tester.at`; a failure or timeout is logged and ends it.
+Lane nudges for the tester's PR go on the run's `lane_nudges` like the
+worker's. Tester tracking never holds the line: it starts only after the land
+is marked executed, so the run already reads `landed` (not in flight) to the
+mandate's due check, and it never runs under the worker's failure guard, which
+would re-queue the run. No screenshots are fetched for a tester PR: they would
+replace the run's.
 
 The brief tells the session to do the task, follow the repo's CLAUDE.md, run
 the charter checks until they pass, open ONE PR to the base that says
@@ -797,8 +863,8 @@ session works in the cloud.
 one background `resume_all` at startup. It reads the workspaces that hold a
 mandate (`mandates.service.mandate_workspace_ids`, paused ones included) and,
 in each, every pending run still marked `headless_state: "cloud"` with no diff.
-Failure, escalation and land all clear that mark, so it means "launched, tracker
-alive when the process died". A `cloud.session_url` alone is not enough: a
+Failure, escalation, release and land all clear that mark, so it means
+"launched, tracker alive when the process died". A `cloud.session_url` alone is not enough: a
 tracker that failed or timed out keeps the session but drops the mark, and those
 runs stay as they are. Each resumed run goes back to `_track` (the bound repo's
 slug, the stored session, the PR found by its `Belt-Run` line); nothing is
@@ -806,9 +872,15 @@ launched. The run timeout counts from `cloud.launched_at` (stored at launch), so
 an expired run gets one poll and lands if its PR merged while the backend was
 down; runs from before the field get a fresh timeout. Fixer attempts carry over
 on `fixes`, and each entry records the head it was launched on, so a resumed
-tracker does not start a second fixer on that head. A landed run is no longer
-pending, so its tester is never relaunched. A store error skips that workspace
-only, and startup logs one line: `belt cloud: resumed N run tracker(s) after
+tracker does not start a second fixer on that head. Relaunches carry over on
+`relaunches`, so a resumed run never gets more than
+`POCKETPAW_FACTORY_CLOUD_RELAUNCHES`, and its no-PR clock counts from the last
+relaunch. A released run is rejected, so it is never resumed. A landed run is
+no longer pending, so its tester is never relaunched; with the tester on, its
+PR tracker is resumed when `tester.state` is `open` or unknown (no PR seen yet)
+and `tester.at` is inside the run timeout (the newest 200 executed runs per
+workspace are read). A store error skips that workspace only, and startup logs
+one line: `belt cloud: resumed N run tracker(s) and M tester tracker(s) after
 startup`. A run whose launch was still in progress when the process died has no
 mark and stays queued.
 
@@ -1497,7 +1569,9 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS` | `2` | Fixer sessions per cloud run; past it a still-stuck PR escalates to the per-diff gate |
 | `POCKETPAW_FACTORY_CLOUD_LANE_NUDGE` | `300` | Seconds a cloud run's labelled PR must stay green and mergeable but unmerged before the tracker dispatches the lane workflow; also the minimum gap between dispatches per repo |
 | `POCKETPAW_FACTORY_CLOUD_LANE_WORKFLOW` | `Fast Lane` | The workflow the lane nudge runs with `gh workflow run` (it needs a `workflow_dispatch` trigger) |
-| `POCKETPAW_FACTORY_CLOUD_TESTER` | off | `1` (or `true`/`yes`/`on`) launches one tester cloud session per landed cloud run on a mandate with a `tester` crew seat |
+| `POCKETPAW_FACTORY_CLOUD_TESTER` | off | `1` (or `true`/`yes`/`on`) launches one tester cloud session per landed cloud run on a mandate with a `tester` crew seat, and tracks its PR |
+| `POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT` | `3600` | Seconds after a cloud run's newest launch with no `Belt-Run` PR before the tracker relaunches a worker or releases (rejects) the run; for a tester, the seconds after which no `Belt-Test` PR means it is done |
+| `POCKETPAW_FACTORY_CLOUD_RELAUNCHES` | `1` | Fresh workers launched per cloud run that opened no PR; past it the run is released (rejected) so the mandate's line moves |
 | `POCKETPAW_FACTORY_SCREENSHOT_DIR` | `~/.pocketpaw/belt/screenshots` | Where the cloud station keeps each run's snapshot PNGs, one `<run id>/` dir per run |
 | `POCKETPAW_FACTORY_APP_DIR` | `~/.pocketpaw/belt/apps` | Where a Review Room try downloads and unpacks a run's CI app build, one `<run id>/` dir per run (replaced by each new try) |
 | `POCKETPAW_FACTORY_REVIEW_DIR` | `~/.pocketpaw/belt/reviews` | Where Review Room reviews keep their video and frames, `<run id>/<review id>/` |
