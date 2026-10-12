@@ -15,9 +15,14 @@
 # the seated dev's instructions ride the brief, fenced; the PR's diff goes to
 # Clef's shadow scorer once the PR is known; a launch that times out keeps
 # the CLI output it streamed; a launch clone the CLI does not trust fails with
-# a clear error. ``pty_run.py`` itself runs for real: it streams the child's
-# output as it lands and exits on the folder-trust prompt instead of waiting;
-# ``wire_from_env`` wires the cloud dispatcher only with a launch clone.
+# a clear error. A stuck PR gets a fixer session after the grace period: a
+# conflicting one a rebase brief, a red one a brief carrying the failed job's
+# last 40 log lines; a PR that goes green within grace gets none; the attempts
+# cap escalates like a refusal; a fixer that fails to launch is recorded on the
+# blob's ``fixes`` and tracking goes on. ``pty_run.py`` itself runs for real:
+# it streams the child's output as it lands and exits on the folder-trust
+# prompt instead of waiting; ``wire_from_env`` wires the cloud dispatcher only
+# with a launch clone.
 
 from __future__ import annotations
 
@@ -99,19 +104,24 @@ class FakeRunner:
     def __init__(
         self,
         *,
-        launch_out: str,
+        launch_out: str | list[str],
         launch_origin: str = SLUG,
-        pr: dict | None = None,
+        pr: dict | list[dict] | None = None,
         launch_code: int = 0,
         launch_lines: tuple[str, ...] = (),
     ):
         self.calls: list[tuple[list[str], Path]] = []
-        self.launch_out = launch_out
+        # A list is consumed one entry per launch / per ``gh pr view``, holding the last.
+        self.launch_outs = [launch_out] if isinstance(launch_out, str) else list(launch_out)
         self.launch_code = launch_code
         self.launch_lines = launch_lines  # streamed through on_line before returning
         self.launch_origin = launch_origin
-        self.pr = pr
+        self.prs = pr if isinstance(pr, list) else [pr]
         self.run_ref = ""
+
+    @staticmethod
+    def _next(seq: list):
+        return seq.pop(0) if len(seq) > 1 else seq[0]
 
     async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
         self.calls.append((list(argv), cwd))
@@ -124,14 +134,16 @@ class FakeRunner:
                     await on_line(line)
             if self.launch_code == -1:  # what run_subprocess returns after the kill
                 return -1, "", f"timed out after {timeout:.0f}s"
-            return self.launch_code, self.launch_out, ""
+            return self.launch_code, self._next(self.launch_outs), ""
         if argv[:3] == ["gh", "pr", "list"]:
-            if self.pr is None:
+            if self.prs[0] is None:
                 return 0, "[]", ""
             body = f"Closes #93\n\n{MARKER} {self.run_ref}\n"
             return 0, json.dumps([{"number": 7, "body": "other"}, {"number": 9, "body": body}]), ""
         if argv[:3] == ["gh", "pr", "view"]:
-            return 0, json.dumps(self.pr), ""
+            return 0, json.dumps(self._next(self.prs)), ""
+        if argv[:3] == ["gh", "run", "view"]:
+            return 0, "".join(f"build\tstep\tL{i:03d}\n" for i in range(1, 51)), ""
         if argv[:3] == ["gh", "pr", "diff"]:
             return 0, DIFF, ""
         return 0, "", ""  # git fetch / checkout
@@ -341,6 +353,156 @@ async def test_untrusted_launch_clone_fails_with_a_clear_error(store, dirs):
     assert err.startswith(f"LAUNCH: the claude CLI does not trust {launch.resolve()}")
     assert "accept the trust prompt" in err
     assert not any(a[0] == "gh" for a, _ in runner.calls)
+
+
+# -- fixers: a stuck PR (conflicting, or red CI) gets a fixer session ---------
+
+PR_URL = f"https://github.com/{SLUG}/pull/9"
+RED_CHECK = {
+    "__typename": "CheckRun",
+    "name": "build (macos-14)",
+    "workflowName": "CI",
+    "status": "COMPLETED",
+    "conclusion": "FAILURE",
+    "detailsUrl": f"https://github.com/{SLUG}/actions/runs/555/job/777",
+}
+GREEN_CHECK = {**RED_CHECK, "name": "build (ubuntu)", "conclusion": "SUCCESS"}
+
+
+def _open(head: str = "h1", *, mergeable: str = "MERGEABLE", red: bool = False) -> dict:
+    return {
+        "state": "OPEN",
+        "url": PR_URL,
+        "headRefName": "claude/g41-text",
+        "headRefOid": head,
+        "mergeable": mergeable,
+        "statusCheckRollup": [GREEN_CHECK, RED_CHECK] if red else [GREEN_CHECK],
+        "comments": [],
+        "files": [],
+    }
+
+
+MERGED = {**_open(), "state": "MERGED", "mergeCommit": {"oid": "abc123"}}
+
+
+@pytest.fixture
+def stages(monkeypatch) -> list[str]:
+    seen: list[str] = []
+
+    async def emit(**kw) -> None:
+        seen.append(kw["stage"])
+
+    monkeypatch.setattr(cloud_station, "_emit_run_updated", emit)
+    return seen
+
+
+def _fixer(runner: FakeRunner, launch: Path) -> CloudTaskDispatcher:
+    # Polls at t=0, 60, 120: a PR stuck since t=0 passes the 100 s grace at t=120.
+    return _dispatcher(runner, launch, poll_seconds=60, fix_grace_seconds=100)
+
+
+def _briefs(runner: FakeRunner) -> list[str]:
+    return [a[-1] for a, _ in runner.calls if "--cloud" in a]
+
+
+async def test_conflicting_pr_gets_one_rebase_fixer_then_merges(store, dirs, stages):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    stuck = _open(mergeable="CONFLICTING")
+    runner = FakeRunner(launch_out=SESSION, pr=[stuck, stuck, stuck, stuck, MERGED])
+    runner.run_ref = run_ref
+
+    await _fixer(runner, launch).run(run_ref, workspace_id=WS)
+
+    briefs = _briefs(runner)
+    assert len(briefs) == 2  # the worker, then exactly one fixer
+    fix = briefs[1]
+    assert "#9" in fix and "`claude/g41-text`" in fix
+    assert "rebase" in fix.lower() and "origin/main" in fix
+    assert "both" in fix.lower() and "--force-with-lease" in fix
+    assert "Do not open a new pull request" in fix and "Never merge" in fix
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    (entry,) = action.parameters["_code_change"]["fixes"]
+    assert entry["kind"] == "rebase"
+    assert entry["session_url"] == "https://claude.ai/code/session_ABC123"
+    assert "fix" in stages
+
+
+async def test_red_pr_fixer_brief_carries_the_failed_log_tail(store, dirs, stages):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    red = _open(red=True)
+    runner = FakeRunner(launch_out=SESSION, pr=[red, red, red, red, MERGED])
+    runner.run_ref = run_ref
+
+    await _fixer(runner, launch).run(run_ref, workspace_id=WS)
+
+    fix = _briefs(runner)[1]
+    assert "build (macos-14)" in fix and "#9" in fix
+    assert "L050" in fix and "L011" in fix and "L010" not in fix  # the last 40 lines
+    assert "<untrusted>" in fix  # CI output is fenced as data
+    assert "SAME branch" in fix and "Do not open a new pull request" in fix
+    view = next(a for a, _ in runner.calls if a[:3] == ["gh", "run", "view"])
+    assert "555" in view and "--log-failed" in view
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert [f["kind"] for f in cc["fixes"]] == ["ci"]
+
+
+async def test_fixer_attempts_cap_escalates(store, dirs, stages):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    # Each fixer pushes a new head that is still red.
+    reds = [_open(h, red=True) for h in ("h1", "h1", "h1", "h2", "h2", "h2", "h3")]
+    runner = FakeRunner(launch_out=SESSION, pr=reds)
+    runner.run_ref = run_ref
+
+    await _fixer(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 3  # the worker + the default cap of 2 fixers
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.PENDING
+    cc = action.parameters["_code_change"]
+    assert cc["diff"] == DIFF and cc["station_pending"] is False
+    assert len(cc["fixes"]) == 2
+    assert "2 fixer" in cc["summary"]
+    assert "headless_error" not in cc
+
+
+async def test_pr_green_within_grace_launches_no_fixer(store, dirs, stages):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    red = _open(red=True)
+    runner = FakeRunner(launch_out=SESSION, pr=[red, red, MERGED])
+    runner.run_ref = run_ref
+
+    await _fixer(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 1
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert "fixes" not in action.parameters["_code_change"]
+    assert "fix" not in stages
+
+
+async def test_fixer_launch_failure_is_recorded_and_tracking_goes_on(store, dirs, stages):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    stuck = _open(mergeable="CONFLICTING")
+    runner = FakeRunner(
+        launch_out=[SESSION, "Error: rate limited"], pr=[stuck, stuck, stuck, stuck, MERGED]
+    )
+    runner.run_ref = run_ref
+
+    await _fixer(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    cc = action.parameters["_code_change"]
+    (entry,) = cc["fixes"]
+    assert entry["kind"] == "rebase" and "session_url" not in entry
+    assert "no cloud session started" in entry["error"]
+    assert "headless_error" not in cc
 
 
 def _pty_child(script: str) -> list[str]:

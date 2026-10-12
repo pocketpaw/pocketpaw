@@ -54,6 +54,24 @@
     ]
   },
   {
+    "label": "a stuck PR never passes the fixer grace period",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "elif self.clock() - stuck_since >= self.fix_grace_seconds:",
+    "replace": "elif self.clock() - stuck_since >= self.fix_grace_seconds and False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_conflicting_pr_gets_one_rebase_fixer_then_merges"
+    ]
+  },
+  {
+    "label": "the fixer attempts cap never escalates",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if len(fixes) >= self.fix_attempts:",
+    "replace": "if len(fixes) >= self.fix_attempts and False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_fixer_attempts_cap_escalates"
+    ]
+  },
+  {
     "label": "the seated dev's instructions are left out of the brief",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "f\"{_task_block(request)}\\n\\n{_worker_block(request)}\"",
