@@ -297,3 +297,34 @@ async def test_shared_resolve_is_what_the_route_runs(monkeypatch):
     user = SimpleNamespace(id="u9")
     await mandates_router_mod.resolve_plan("m1", {"x": 1}, user, WS, "u9")
     assert seen == [(WS, "u9", "m1", {"x": 1}, user)]
+
+
+@pytest.mark.usefixtures("store", "journal", "graph")
+async def test_a_slow_clef_escalates_but_still_records_its_score(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    dispatcher,  # noqa: F811 — the imported fixture
+):
+    import asyncio
+
+    monkeypatch.setenv("POCKETPAW_BELT_PLAN_GATE", "auto")
+    monkeypatch.setenv("POCKETPAW_BELT_PLAN_GATE_CLEF_TIMEOUT", "0.05")
+    _clef(monkeypatch, GOOD)
+    fast = clef._transport
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.3)
+        return await fast.handle_async_request(request)
+
+    monkeypatch.setattr(clef, "_transport", httpx.MockTransport(slow))
+    client = _make_client(monkeypatch)
+    mandate_id = _mandate_with_sightings(client, tmp_path)
+
+    out = await mandate_service.trigger_shift(WS, USER, mandate_id)
+    assert out["shift"]["state"] == "in_gate"
+    plan_id = out["shift"]["plan_action_id"]
+    assert (await _blob(plan_id))["policy"]["rule"] == "clef_unavailable"
+
+    await asyncio.gather(*list(clef._TASKS))
+    assert (await _blob(plan_id))["clef"]["verdict"]["in_scope"] == 0.93

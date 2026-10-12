@@ -125,10 +125,10 @@ not resolve inside the workspace's belt allowlist roots. Only `belt.manage`
 ### The auto plan gate
 
 With `POCKETPAW_BELT_PLAN_GATE=auto` (default `manual`: unchanged), the shift
-trigger does not hand the plan to Clef in the background. It awaits Clef's plan
-score inline (`belt/clef.score_and_record_plan`, up to
+trigger awaits Clef's plan score inline instead of leaving it in the background
+(the `belt/clef.shadow_plan` task, shielded, up to
 `POCKETPAW_BELT_PLAN_GATE_CLEF_TIMEOUT` seconds, default 45; the verdict is
-still recorded on the blob as `clef`), then asks the pure
+still recorded on the blob as `clef`, even when the wait times out), then asks the pure
 `mandates/plan_policy.decide`. The plan is approved only when all of these hold:
 
 - every task cites at least one evidence ref that is an open sighting of this

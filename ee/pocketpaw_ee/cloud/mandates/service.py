@@ -1434,9 +1434,11 @@ async def _auto_gate(
 
     timeout = _env_float("POCKETPAW_BELT_PLAN_GATE_CLEF_TIMEOUT", _CLEF_INLINE_TIMEOUT_DEFAULT)
     try:
-        verdict = await asyncio.wait_for(
-            clef.score_and_record_plan(workspace_id, action_id, tasks, charter_wire),
-            timeout=timeout,
+        # The shadow hook's task, shielded: a timeout escalates now while the
+        # score still lands on the blob for the eval.
+        scoring = clef.shadow_plan(workspace_id, action_id, tasks, charter_wire)
+        verdict = (
+            await asyncio.wait_for(asyncio.shield(scoring), timeout=timeout) if scoring else None
         )
     except Exception as exc:  # noqa: BLE001 — a Clef failure escalates, never fails the shift
         logger.warning("mandate: auto gate Clef wait failed (%s)", type(exc).__name__)

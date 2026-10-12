@@ -16,9 +16,10 @@
 #   * ``record_verdict`` / ``list_verdicts`` — the blob write and the eval read.
 #   * ``shadow_plan`` / ``shadow_diff`` — the hooks: a synchronous flag check,
 #     then a fire-and-forget task that scores and records, logging one line.
-#   * ``score_and_record_plan`` — the plan scoring + recording the shadow hook
-#     runs, awaitable: the plan gate's auto policy (``mandates/plan_policy.py``,
-#     ``POCKETPAW_BELT_PLAN_GATE=auto``) awaits it inline and reads the verdict.
+#   * ``score_and_record_plan`` — the plan scoring + recording ``shadow_plan``
+#     runs. ``shadow_plan``'s task returns the verdict, so the plan gate's auto
+#     policy (``mandates/plan_policy.py``, ``POCKETPAW_BELT_PLAN_GATE=auto``)
+#     awaits that task inline (shielded: a timeout still records).
 #
 # Off unless ``POCKETPAW_BELT_CLEF=shadow`` and both ``POCKETPAW_CLEF_TOKEN`` and
 # ``POCKETPAW_CLEF_ACCOUNT_ID`` are set. INVARIANTS: nothing here raises into a
@@ -430,11 +431,12 @@ def _spawn(label: str, coro_fn: Any) -> asyncio.Task[Any] | None:
     if client is None:
         return None
 
-    async def run() -> None:
+    async def run() -> Any:
         try:
-            await coro_fn(client)
+            return await coro_fn(client)
         except Exception as exc:  # noqa: BLE001 — shadow mode never fails a shift
             logger.warning("clef: %s shadow score failed (%s)", label, type(exc).__name__)
+            return None
 
     try:
         task = asyncio.get_running_loop().create_task(run())
@@ -475,10 +477,12 @@ async def score_and_record_plan(
 def shadow_plan(
     workspace_id: str, plan_action_id: str, plan_tasks: list[dict[str, Any]], charter: dict
 ) -> asyncio.Task[Any] | None:
-    """Score a proposed plan in the background and record the verdict."""
+    """Score a proposed plan in the background and record the verdict. The
+    task's result is the ``PlanVerdict`` (or ``None``), so the auto plan gate
+    can await it; a timed-out wait leaves it recording in the background."""
 
-    async def go(client: ClefClient) -> None:
-        await score_and_record_plan(
+    async def go(client: ClefClient) -> PlanVerdict | None:
+        return await score_and_record_plan(
             workspace_id, plan_action_id, plan_tasks, charter, client=client
         )
 
