@@ -41,10 +41,11 @@
 # charter_for_mandate (the develop station's checks/recipes/goal read),
 # crew_seat_for_task, crew_worker, file_station_sighting (the develop station's
 # line conflict, deduped like a patrol's), list_autopilot_enabled,
-# executor_revalidate, mark_shift, and list_cadence_due — the cadence
-# scheduler's cross-workspace read of ACTIVE mandates whose cadence interval
-# (daily = 1 day, weekly = 7 days; manual never) has elapsed since their last
-# shift (N+1, one shift read per mandate; fine at current mandate counts).
+# executor_revalidate, mark_shift, has_continuous_mandate, and list_cadence_due —
+# the cadence scheduler's cross-workspace read of ACTIVE mandates that are due:
+# daily / weekly once that interval has elapsed since the last shift, continuous
+# once the last shift's work is finished and open work remains (``_continuous_due``),
+# manual never (N+1, one shift read per mandate; fine at current mandate counts).
 #
 # Conventions (cloud entity rules): validate body at entry
 # (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
@@ -2265,6 +2266,76 @@ _CADENCE_INTERVALS: dict[str, timedelta] = {
 _SCHEDULER_ACTOR = "system:scheduler"
 
 
+# CONTINUOUS cadence knobs (env): the minimum gap between two shifts, and how
+# old a shift must be before its unfinished runs (or a stuck ``planning`` /
+# ``executing`` state) stop holding the next one.
+_CONTINUOUS_MIN_GAP_MINUTES = 5.0
+_CONTINUOUS_STALL_HOURS = 3.0
+
+
+async def has_continuous_mandate() -> bool:
+    """Whether any ACTIVE mandate runs on the ``continuous`` cadence — the
+    scheduler loop's tick-interval read."""
+    # global-read: the scheduler's system sweep, same posture as list_cadence_due.
+    # no-event: read-only path.
+    doc = await MandateDoc.find_one(
+        MandateDoc.status == "active", MandateDoc.charter.cadence == "continuous"
+    )
+    return doc is not None
+
+
+async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime) -> bool:
+    """A CONTINUOUS mandate is due when the minimum gap since its last shift has
+    passed, that shift is finished (``done``; ``stood_down`` only once a sighting
+    arrived after it, so a foreman that planned nothing is not re-asked about the
+    same backlog), none of its runs is still in flight, and an open sighting no
+    task is working remains. A shift older than the stall timeout stops holding
+    the next one through in-flight runs or a stuck ``planning`` / ``executing``
+    state; a plan waiting ``in_gate`` for a human always holds it."""
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    gap = timedelta(
+        minutes=_env_float(
+            "POCKETPAW_MANDATE_CONTINUOUS_MIN_GAP_MINUTES", _CONTINUOUS_MIN_GAP_MINUTES
+        )
+    )
+    stall = timedelta(
+        hours=_env_float("POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS", _CONTINUOUS_STALL_HOURS)
+    )
+    stalled = False
+    if last is not None:
+        age = now - _aware(last.createdAt)
+        if age < gap:
+            return False
+        stalled = age >= stall
+        if last.state == "in_gate":
+            return False
+        if last.state in ("planning", "executing") and not stalled:
+            return False
+
+    mandate_id = str(doc.id)
+    runs = [
+        r
+        for r in (await belt_service.list_runs(doc.workspace))["runs"]
+        if r.get("mandate_id") == mandate_id
+    ]
+    if last is not None and last.plan_action_id and not stalled:
+        if any(
+            str(r.get("plan_action_id") or "") == last.plan_action_id
+            and _task_status(r) in _IN_FLIGHT
+            for r in runs
+        ):
+            return False
+
+    backlog = await _backlog(
+        doc.workspace, mandate_id, runs, since=last.createdAt if last else None
+    )
+    work = [o for o in backlog["open"] if not o["in_flight"]]
+    if last is not None and last.state == "stood_down":
+        work = [o for o in work if o["new"]]
+    return bool(work)
+
+
 async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
     """All ACTIVE mandates whose charter cadence is DUE at ``now`` — the cadence
     scheduler's read (``scheduler.run_scheduler_tick``).
@@ -2272,8 +2343,8 @@ async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
     A mandate is DUE when its cadence has a scheduling interval (``"daily"`` → 1
     day, ``"weekly"`` → 7 days) AND its most recent shift's ``createdAt`` is older than
     that interval before ``now`` (a mandate that has NEVER shifted is always due).
-    ``"manual"`` mandates have no interval, so they are never returned — the demo
-    bar's manual-trigger path is untouched.
+    A ``"continuous"`` mandate is due by ``_continuous_due``'s rules. ``"manual"``
+    mandates have no interval, so they are never returned.
 
     DELIBERATELY cross-workspace: this is a SYSTEM sweeper read (same posture as
     ``list_autopilot_enabled`` / the stale-run sweeper), not a request-path find.
@@ -2292,8 +2363,9 @@ async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
     docs = await MandateDoc.find(MandateDoc.status == "active").to_list()
     due: list[dict[str, Any]] = []
     for doc in docs:
+        continuous = doc.charter.cadence == "continuous"
         interval = _CADENCE_INTERVALS.get(doc.charter.cadence)
-        if interval is None:
+        if interval is None and not continuous:
             continue  # manual (or an unscheduled cadence) — never auto-fired
         last = (
             await ShiftDoc.find(
@@ -2302,7 +2374,14 @@ async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
             .sort("-no")
             .first_or_none()
         )
-        if last is not None and _aware(last.createdAt) > (now - interval):
+        if continuous:
+            try:
+                if not await _continuous_due(doc, last, now):
+                    continue
+            except Exception:  # noqa: BLE001 — one mandate's read never sinks the sweep
+                logger.warning("mandate: continuous due check failed for %s", doc.id, exc_info=True)
+                continue
+        elif last is not None and _aware(last.createdAt) > (now - interval):
             continue  # shifted inside the cadence window — not due yet
         due.append(
             {
@@ -2387,6 +2466,7 @@ __all__ = [
     "file_feedback",
     "get_mandate",
     "get_pawprints",
+    "has_continuous_mandate",
     "list_autopilot_enabled",
     "list_cadence_due",
     "list_mandates",

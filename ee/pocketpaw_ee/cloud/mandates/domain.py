@@ -6,12 +6,12 @@
 # approved tasks as normal Belt runs.
 #
 # The CHARTER is the standing brief: goal, KPIs, says_no + boundaries (hard
-# constraints), budget, cadence (``daily`` / ``weekly`` / ``manual``), and the
-# factory's deterministic hooks — ``checks`` (commands that must pass before a
-# headless develop run's diff is attached) and ``recipes`` (named commands a plan
-# task can run instead of an LLM develop). Checks and recipes are argv strings
-# split with ``shlex`` and never run through a shell; only ``belt.manage``
-# (admin) can write a charter.
+# constraints), budget, cadence (``daily`` / ``weekly`` / ``continuous`` /
+# ``manual``), and the factory's deterministic hooks — ``checks`` (commands that
+# must pass before a headless develop run's diff is attached) and ``recipes``
+# (named commands a plan task can run instead of an LLM develop). Checks and
+# recipes are argv strings split with ``shlex`` and never run through a shell;
+# only ``belt.manage`` (admin) can write a charter.
 #
 # This module holds BOTH the Beanie documents (MandateDoc / ShiftDoc /
 # SightingDoc) AND the frozen value objects. Per the 4-file entity rule, ONLY
@@ -43,7 +43,7 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 # ---------------------------------------------------------------------------
 
 KpiDirection = Literal["up", "down"]
-Cadence = Literal["daily", "weekly", "manual"]
+Cadence = Literal["daily", "weekly", "continuous", "manual"]
 CrewRole = Literal["dev", "reviewer", "foreman"]
 CrewSetup = Literal["owner", "strict"]
 MandateStatus = Literal["active", "paused"]
@@ -88,8 +88,10 @@ class Charter(BaseModel):
     ``goal`` is the one-line job. ``kpis`` are the tracked outcomes.
     ``says_no`` + ``boundaries`` are hard constraints the foreman must honor
     (a boundary OVERRIDES a KPI opportunity). ``budget`` caps the per-shift
-    task count + weekly gate minutes. ``cadence`` is ``"daily"``, ``"weekly"``
-    or ``"manual"`` (the scheduler never fires a manual mandate).
+    task count + weekly gate minutes. ``cadence`` is ``"daily"``, ``"weekly"``,
+    ``"continuous"`` (the next shift fires once the last one's work is finished
+    and open sightings remain; ``service.list_cadence_due`` has the rules) or
+    ``"manual"`` (the scheduler never fires a manual mandate).
 
     ``checks`` are commands that must pass before a headless develop run's diff
     is attached (e.g. ``uv run pytest -q``). ``recipes`` maps a name to a

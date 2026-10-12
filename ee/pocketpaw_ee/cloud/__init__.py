@@ -20,7 +20,9 @@ Background loops are collected as lifespan hooks and run by
 The scheduled ones (decisions reconciler and action sweeper, cycle snapshots,
 member and Fabric ingest, the websandbox reaper, mandate autopilot and cadence
 scheduler, the 30-minute Discover reindex) are gated on
-``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` and start through ``_core/lease.py``:
+``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` (the mandate cadence scheduler also
+starts alone under ``POCKETPAW_MANDATE_SCHEDULER_ENABLED=true``) and start
+through ``_core/lease.py``:
 with ``POCKETPAW_REALTIME_BUS=redis-streams`` (several web processes) only the
 lease holder runs each one, once per cluster, or once per host for the decisions
 loops that write a local SQLite file. The same knob turns on the cross-process
@@ -1442,17 +1444,18 @@ def mount_cloud(app: FastAPI) -> None:
         async def _stop_mandate_autopilot() -> None:
             await _mandate_autopilot.stop()
 
-        # Mandate cadence scheduler (feat/patrol-engine). A single sweeper loop
-        # that wakes every interval and fires ``service.trigger_shift`` for each
-        # ACTIVE mandate whose charter cadence is DUE (a "weekly" mandate whose
-        # last shift is >7 days old; "manual" mandates are never fired). This
-        # turns ``Charter.cadence`` from a persisted label into an always-on
-        # trigger — until now shifts were manual-only. INTENTIONALLY nested in the
-        # autopilot block: it deliberately shares the SAME
-        # POCKETPAW_CLOUD_SCHEDULER_ENABLED gate as the autopilot/decisions loops,
-        # so a host that runs background loops runs all of them, and pytest runs
-        # (gate off) never spawn a loop that outlives the test. Reconcile starts
-        # with run_immediate=False (a boot never storms a tick).
+    # Mandate cadence scheduler: one sweeper loop that fires
+    # ``service.trigger_shift`` for each ACTIVE mandate whose charter cadence is
+    # DUE (daily, weekly, continuous; manual never). It starts with every other
+    # background loop under POCKETPAW_CLOUD_SCHEDULER_ENABLED, or ALONE under
+    # POCKETPAW_MANDATE_SCHEDULER_ENABLED, so a Belt host can run unattended
+    # shifts without turning on the ingest/cycle loops. pytest sets neither, so
+    # no test spawns a loop that outlives it. Reconcile starts with
+    # run_immediate=False (a boot never storms a tick).
+    if (
+        _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true"
+        or _os.environ.get("POCKETPAW_MANDATE_SCHEDULER_ENABLED", "").lower() == "true"
+    ):
         from pocketpaw_ee.cloud.mandates.scheduler import (
             reconcile_scheduler,
             shutdown_scheduler,

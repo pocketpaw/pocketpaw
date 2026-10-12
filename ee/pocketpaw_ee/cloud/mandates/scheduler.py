@@ -1,38 +1,34 @@
 # ee/pocketpaw_ee/cloud/mandates/scheduler.py
-# Created: 2026-06-13 (feat/patrol-engine).
-# Updated: 2026-06-13 (PR #1463 review) — the run_immediate tick no longer
-#   swallows CancelledError: a cancel mid-tick now propagates and exits the loop
-#   instead of falling through into the long interval sleep (shutdown could hang
-#   for up to an hour). See ``_scheduler_loop``.
 #
-# CADENCE SCHEDULER — the piece that turns ``Charter.cadence`` from a persisted
-# label into an always-on trigger. Until now shifts were MANUAL-ONLY (the
-# ``service.trigger_shift`` "DEMO BAR: manual trigger only" note); a "weekly"
-# cadence persisted but nothing fired it. This module closes that gap.
+# CADENCE SCHEDULER — turns ``Charter.cadence`` from a persisted label into an
+# always-on trigger. A SINGLE process-local sweeper loop (like
+# ``decisions._action_sweeper``) wakes every interval, asks the service which
+# ACTIVE mandates are cadence-DUE (``service.list_cadence_due``: daily, weekly,
+# continuous; never manual), and fires one shift per due mandate through the
+# same ``service.trigger_shift`` the shift route runs. Due-ness is computed per
+# tick from the persisted charter + the last shift, so the loop holds no
+# per-mandate state.
 #
-# SHAPE (mirrors ``autopilot.py``'s lifecycle, with one difference): autopilot
-# runs a per-mandate task; the scheduler is a SINGLE process-local sweeper loop
-# (like ``decisions._action_sweeper``) that wakes every interval, asks the
-# service which ACTIVE mandates are cadence-DUE, and fires one shift per due
-# mandate. One loop is enough — due-ness is computed per tick from the persisted
-# charter + the last shift's timestamp, so there is no per-mandate state to hold.
+# TICK INTERVAL: ``POCKETPAW_MANDATE_SCHEDULER_INTERVAL`` (default 3600 s) while
+# only daily/weekly mandates exist; while any ACTIVE continuous mandate exists
+# the loop sleeps ``POCKETPAW_MANDATE_SCHEDULER_CONTINUOUS_INTERVAL`` (default
+# 60 s) instead (``_next_sleep``, re-read before every sleep).
 #
 # DETERMINISM: the unit of work is ``run_scheduler_tick(now, trigger)``. Both the
-# clock (``now()``) and the shift trigger are INJECTABLE so a test can drive a
-# tick with a frozen clock and a fake trigger — no wall-clock sleeps, no real
-# LLM/foreman call. The live loop passes the real wall clock + the real
-# ``service.trigger_shift``.
+# clock and the shift trigger are injectable, so a test drives a tick with a
+# frozen clock and a fake trigger — no wall-clock sleeps, no real LLM call.
 #
-# RESILIENCE: the scheduler must NEVER crash the app. A due-list read failure,
-# or any single mandate's ``trigger_shift`` raising, is logged and swallowed; the
-# tick keeps sweeping the rest, the loop sleeps and tries again next interval.
+# RESILIENCE: the scheduler must NEVER crash the app. A due-list read failure, or
+# any single mandate's ``trigger_shift`` raising, is logged and swallowed; the
+# loop sleeps and tries again next interval. A cancel mid-tick propagates so
+# shutdown never waits out a long sleep.
 #
-# LIFESPAN: ``reconcile_scheduler`` starts the loop at startup (idempotent — a
-# second call is a no-op when a loop is already live); ``shutdown_scheduler``
-# cancels + awaits it at shutdown. Both are wired into
-# ``cloud/__init__.mount_cloud`` next to the autopilot pair, under the SAME
-# ``POCKETPAW_CLOUD_SCHEDULER_ENABLED`` gate (so pytest runs never spawn a
-# background loop that outlives the test).
+# LIFESPAN: ``reconcile_scheduler`` starts the loop at startup (idempotent;
+# ``run_immediate=False``, a boot never storms a tick); ``shutdown_scheduler``
+# cancels + awaits it. Both are wired in ``cloud/__init__.mount_cloud``, leased,
+# when ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` (every background loop) or
+# ``POCKETPAW_MANDATE_SCHEDULER_ENABLED=true`` (this loop alone). pytest runs set
+# neither, so no test spawns a loop that outlives it.
 
 from __future__ import annotations
 
@@ -126,22 +122,44 @@ async def run_scheduler_tick(
 # ---------------------------------------------------------------------------
 
 
-def _interval_seconds() -> int:
-    """Read the sweep interval from env, default 3600s. A non-int / non-positive
-    value falls back to the default."""
-    raw = os.environ.get("POCKETPAW_MANDATE_SCHEDULER_INTERVAL", "").strip()
+# The continuous-cadence tick — env ``POCKETPAW_MANDATE_SCHEDULER_CONTINUOUS_INTERVAL``.
+_DEFAULT_CONTINUOUS_INTERVAL_SECONDS = 60
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
     if not raw:
-        return _DEFAULT_INTERVAL_SECONDS
+        return default
     try:
         value = int(raw)
     except ValueError:
-        logger.warning(
-            "POCKETPAW_MANDATE_SCHEDULER_INTERVAL=%r is not an int — using %d",
-            raw,
-            _DEFAULT_INTERVAL_SECONDS,
-        )
-        return _DEFAULT_INTERVAL_SECONDS
-    return value if value > 0 else _DEFAULT_INTERVAL_SECONDS
+        logger.warning("%s=%r is not an int — using %d", name, raw, default)
+        return default
+    return value if value > 0 else default
+
+
+async def _next_sleep(interval: int) -> int:
+    """How long to sleep before the next tick: the continuous interval while any
+    ACTIVE continuous mandate exists (never longer than ``interval``), else
+    ``interval``. A failed read keeps ``interval``."""
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    try:
+        if await mandate_service.has_continuous_mandate():
+            continuous = _int_env(
+                "POCKETPAW_MANDATE_SCHEDULER_CONTINUOUS_INTERVAL",
+                _DEFAULT_CONTINUOUS_INTERVAL_SECONDS,
+            )
+            return min(interval, continuous)
+    except Exception:  # noqa: BLE001 — a read failure keeps the normal interval
+        logger.debug("scheduler: continuous-mandate read failed", exc_info=True)
+    return interval
+
+
+def _interval_seconds() -> int:
+    """Read the sweep interval from env, default 3600s. A non-int / non-positive
+    value falls back to the default."""
+    return _int_env("POCKETPAW_MANDATE_SCHEDULER_INTERVAL", _DEFAULT_INTERVAL_SECONDS)
 
 
 async def _scheduler_loop(interval: int, *, run_immediate: bool) -> None:
@@ -165,12 +183,13 @@ async def _scheduler_loop(interval: int, *, run_immediate: bool) -> None:
 
     while True:
         try:
-            await asyncio.sleep(interval)
+            wait = await _next_sleep(interval)
+            await asyncio.sleep(wait)
         except asyncio.CancelledError:
             logger.info("scheduler: loop cancelled — exiting")
             raise
         try:
-            async with sweep_tick("mandate_scheduler", interval):
+            async with sweep_tick("mandate_scheduler", wait):
                 await run_scheduler_tick()
         except Exception:  # noqa: BLE001 — a bad tick never sinks the loop
             logger.warning("scheduler: tick failed", exc_info=True)
