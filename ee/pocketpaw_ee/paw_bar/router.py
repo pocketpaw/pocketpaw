@@ -5707,6 +5707,7 @@ async def _human_replying_response(
     customer_ref: str,
     workspace_id: str,
     text: str,
+    agent_id: str = "",
 ) -> StreamingResponse:
     """The muted-bot answer: keep the visitor's line, escalate, say a human is on it.
 
@@ -5761,6 +5762,7 @@ async def _human_replying_response(
         body=text,
         widget_id=widget_id,
         customer_ref=customer_ref,
+        agent_id=agent_id,
     )
 
     async def gen() -> AsyncIterator[bytes]:
@@ -6118,6 +6120,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
             customer_ref=body.customer_ref,
             workspace_id=ctx.workspace_id,
             text=body.message[:_STORED_USER_TEXT_CHARS] if site.concierge_store_transcripts else "",
+            agent_id=str(getattr(widget, "agent_id", "") or ""),
         )
 
     # Shared by both runtimes, computed once so they cannot drift apart.

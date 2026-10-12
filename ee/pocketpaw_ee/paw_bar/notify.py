@@ -16,6 +16,12 @@
 # signed webhook, with the workspace config as the fallback. The site is found
 # from the widget's pocket.
 #
+# Callers that already hold the widget pass its site and agent in (the handoff
+# producer does), so routing can't disagree with what the caller resolved. The
+# id-only resolvers below are the fallback for callers holding just a widget id;
+# a widget the caller named but the store can't find is logged at WARNING, since
+# it silently downgrades a site event to a bare bell.
+#
 # EVERY function here is fail-soft and never raises. A visitor's turn must not
 # depend on the owner's bookkeeping: the worst acceptable outcome of a broken
 # notifier is an owner who finds the conversation on their next inbox visit;
@@ -99,27 +105,58 @@ async def resolve_workspace_owner(workspace_id: str) -> str:
 async def resolve_widget_agent(widget_id: str, workspace_id: str = "") -> str:
     """The concierge agent bound to a widget, or "" when there isn't one.
 
-    Resolved HERE rather than at each call site on purpose. The three producers
-    differ in what they hold — the new-conversation path has the widget object,
-    the handoff path only has its id — and a notification that silently omits the
-    agent is not a visible failure: it degrades to a link the owner can't follow,
-    which is precisely the bug this field exists to fix. One resolver means a
-    fourth producer cannot forget. Workspace-scoped like every other widget read.
+    The fallback for a producer that passes no ``agent_id``. A notification that
+    silently omits the agent is not a visible failure: it degrades to a link the
+    owner can't follow. Producers holding the widget pass its agent instead.
+    Workspace-scoped like every other widget read.
 
     Returns "" for every failure mode (no widget, unbound widget, store error),
-    all of which mean "no agent to link to" — a normal answer on this path.
+    all of which mean "no agent to link to"; a missing widget is logged.
     """
     if not widget_id:
         return ""
+    widget = await _load_widget(widget_id, workspace_id)
+    return str(getattr(widget, "agent_id", "") or "") if widget is not None else ""
+
+
+async def _load_widget(widget_id: str, workspace_id: str) -> Any | None:
+    """The named widget from the paw-bar store, workspace-scoped, or None.
+
+    Never raises. A miss is a WARNING: the caller named this widget, so not
+    finding it means the notification loses its site routing and its agent link."""
     try:
         from pocketpaw.stores import get_paw_bar_store
 
-        store = get_paw_bar_store(workspace_id=workspace_id or None)
-        widget = await store.get_widget(widget_id, workspace_id=workspace_id or None)
-        return str(getattr(widget, "agent_id", "") or "") if widget is not None else ""
+        widget = await get_paw_bar_store().get_widget(widget_id, workspace_id=workspace_id or None)
     except Exception:  # noqa: BLE001 — notification routing is never load-bearing
-        logger.debug("widget agent lookup failed for %s", widget_id, exc_info=True)
-        return ""
+        logger.warning(
+            "paw-bar notify: widget lookup failed for %s (workspace %s)",
+            widget_id,
+            workspace_id,
+            exc_info=True,
+        )
+        return None
+    if widget is None:
+        logger.warning(
+            "paw-bar notify: widget %s not found in workspace %s", widget_id, workspace_id
+        )
+    return widget
+
+
+async def site_for_pocket(workspace_id: str, pocket_id: str) -> Any | None:
+    """The workspace's Site whose pocket is ``pocket_id``, or None. Never raises.
+
+    The one place a paw-bar widget is matched to its site, shared by the handoff
+    lead and the handoff notification so the two can't pick different sites."""
+    if not workspace_id or not pocket_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud.models.site import Site
+
+        return await Site.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
+    except Exception:  # noqa: BLE001 — notification routing is never load-bearing
+        logger.warning("site lookup failed for pocket %s", pocket_id, exc_info=True)
+        return None
 
 
 async def resolve_widget_site(widget_id: str, workspace_id: str) -> tuple[str, str]:
@@ -127,20 +164,10 @@ async def resolve_widget_site(widget_id: str, workspace_id: str) -> tuple[str, s
     ("", "") when there is none. Workspace-scoped; never raises."""
     if not widget_id or not workspace_id:
         return "", ""
-    try:
-        from pocketpaw.stores import get_paw_bar_store
-        from pocketpaw_ee.cloud.models.site import Site
-
-        store = get_paw_bar_store(workspace_id=workspace_id)
-        widget = await store.get_widget(widget_id, workspace_id=workspace_id)
-        pocket_id = str(getattr(widget, "pocket_id", "") or "") if widget is not None else ""
-        if not pocket_id:
-            return "", ""
-        site = await Site.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
-        return (str(site.id), site.name or "") if site is not None else ("", "")
-    except Exception:  # noqa: BLE001 — notification routing is never load-bearing
-        logger.debug("widget site lookup failed for %s", widget_id, exc_info=True)
-        return "", ""
+    widget = await _load_widget(widget_id, workspace_id)
+    pocket_id = str(getattr(widget, "pocket_id", "") or "") if widget is not None else ""
+    site = await site_for_pocket(workspace_id, pocket_id)
+    return (str(site.id), site.name or "") if site is not None else ("", "")
 
 
 async def notify_workspace_owner(
@@ -152,8 +179,15 @@ async def notify_workspace_owner(
     widget_id: str = "",
     customer_ref: str = "",
     agent_id: str = "",
+    site_id: str | None = None,
+    site_name: str = "",
 ) -> bool:
     """Notify the workspace owner about one conversation. Never raises.
+
+    ``agent_id`` and (for a handoff) ``site_id``/``site_name`` are what the
+    caller already resolved from the widget it holds. ``site_id=None`` means
+    "not resolved, look it up from ``widget_id``"; ``""`` means "resolved, the
+    widget has no site", which routes to the workspace bell.
 
     Returns whether a notification was created — ``False`` covers "no owner
     resolved" and "the notification service failed" alike, because neither is
@@ -185,7 +219,8 @@ async def notify_workspace_owner(
             agent_id=agent_id or None,
         )
         if kind == NOTIFY_NEEDS_HUMAN:
-            site_id, site_name = await resolve_widget_site(widget_id, workspace_id)
+            if site_id is None:
+                site_id, site_name = await resolve_widget_site(widget_id, workspace_id)
             if site_id:
                 from pocketpaw_ee.cloud.leads import notification_settings
                 from pocketpaw_ee.cloud.notifications.email import app_base_url
@@ -312,4 +347,5 @@ __all__ = [
     "resolve_widget_site",
     "resolve_workspace_owner",
     "safe_preview",
+    "site_for_pocket",
 ]
