@@ -90,8 +90,9 @@ TASKS = [{"title": "bump lodash", "why": "CVE", "evidence_refs": ["s1"]}]
 
 async def test_plan_request_shape_and_parse(on):
     fake = on(Fake())
-    verdict = await clef.score_plan(TASKS, "Goal: deps", "Boundary: no auth")
-    assert verdict == clef.PlanVerdict(0.25, 0.25, 0.25, 0.25, truncated=False)
+    evidence = {"s1": "**Acceptance test**\nlodash >= 4.17.21 in the lockfile"}
+    verdict = await clef.score_plan(TASKS, "Goal: deps", "Boundary: no auth", evidence=evidence)
+    assert verdict == clef.PlanVerdict(0.25, 0.25, 0.25, 0.25, truncated=False, spec_clear=(0.25,))
     (req,) = fake.requests
     assert req.method == "POST"
     assert str(req.url).endswith("/accounts/acct-test/ai/run/@cf/cloudflare/clef")
@@ -100,7 +101,15 @@ async def test_plan_request_shape_and_parse(on):
     assert body["model"] == "clef"
     assert body["state"]["mandate_scope"] == "Goal: deps"
     assert "bump lodash" in body["state"]["plan_tasks"]
-    assert set(body["questions"]) == {"in_scope", "low_risk", "tasks_independent", "too_big"}
+    assert "lodash >= 4.17.21" in body["state"]["cited_issues"]
+    assert set(body["questions"]) == {
+        "in_scope",
+        "low_risk",
+        "tasks_independent",
+        "too_big",
+        "spec_clear_0",
+    }
+    assert "task 1" in body["questions"]["spec_clear_0"]["instructions"]
     assert all(q["type"] == "noul" and q["criteria"] for q in body["questions"].values())
 
 

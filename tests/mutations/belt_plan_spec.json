@@ -1,0 +1,48 @@
+[
+  {
+    "label": "the spec threshold never escalates",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "unclear = tuple(i for i, p in enumerate(spec) if 0 <= p < t.min_spec_clear)",
+    "replace": "unclear = ()",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_spec_clarity",
+      "tests/cloud/test_belt_plan_policy.py::test_spec_threshold_from_env"
+    ]
+  },
+  {
+    "label": "an unanswered spec score escalates the plan",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "unclear = tuple(i for i, p in enumerate(spec) if 0 <= p < t.min_spec_clear)",
+    "replace": "unclear = tuple(i for i, p in enumerate(spec) if p < t.min_spec_clear)",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_spec_clarity"
+    ]
+  },
+  {
+    "label": "a spec score on the threshold escalates",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "unclear = tuple(i for i, p in enumerate(spec) if 0 <= p < t.min_spec_clear)",
+    "replace": "unclear = tuple(i for i, p in enumerate(spec) if 0 <= p <= t.min_spec_clear)",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_spec_clarity"
+    ]
+  },
+  {
+    "label": "an issue already labelled needs-spec is commented on again",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "if not isinstance(labels, list) or NEEDS_SPEC in {lb.get(\"name\") for lb in labels}:",
+    "replace": "if not isinstance(labels, list):",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_flag_needs_spec_skips_labelled_and_foreign_sources"
+    ]
+  },
+  {
+    "label": "the auto gate flags no unclear issue",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if decision.rule == \"spec_unclear\":",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_auto_gate_flags_the_unclear_issue_needs_spec"
+    ]
+  }
+]

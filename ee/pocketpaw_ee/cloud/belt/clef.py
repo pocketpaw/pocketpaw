@@ -12,7 +12,10 @@
 #   * ``ClefClient.ask`` — one POST, 20 s timeout, one retry on a 5xx; returns
 #     ``None`` on any failure (timeout, 4xx, ``success:false``, bad JSON).
 #   * ``score_plan`` / ``score_diff`` — pure question builders plus one ask. The
-#     diff state is the file list plus the diff head (it says when it cut).
+#     plan state carries the text of the issues its tasks cite (``evidence``),
+#     and one ``spec_clear_<i>`` question per task asks whether task i's issue
+#     states a concrete, testable acceptance criterion. The diff state is the
+#     file list plus the diff head (it says when it cut).
 #   * ``record_verdict`` / ``list_verdicts`` — the blob write and the eval read.
 #   * ``shadow_plan`` / ``shadow_diff`` — the hooks: a synchronous flag check,
 #     then a fire-and-forget task that scores and records, logging one line.
@@ -51,6 +54,9 @@ MODEL = "clef"
 _URL = "https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/@cf/cloudflare/clef"
 # Clef truncates long state itself; we cut first so the cut is ours and named.
 MAX_STATE_CHARS = 24_000
+# The cited issues' text in a plan state: per issue, and in all.
+_CITED_CHARS = 1_500
+_CITED_TOTAL = 8_000
 _PARAM_KEYS = {"plan": "_belt_plan", "diff": "_code_change"}
 
 # Tests swap in an ``httpx.MockTransport``.
@@ -100,6 +106,9 @@ class PlanVerdict:
     tasks_independent: float
     too_big: float
     truncated: bool
+    # Per task: P(its cited issue states a concrete, testable acceptance
+    # criterion); -1 = unanswered; () = not asked (verdicts before the question).
+    spec_clear: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -192,7 +201,17 @@ def _cap(text: str, limit: int = MAX_STATE_CHARS) -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 
 
-def plan_questions() -> dict[str, Question]:
+def plan_questions(tasks: int = 0) -> dict[str, Question]:
+    """The plan questions, plus ``spec_clear_<i>`` for each of ``tasks`` tasks."""
+    spec = {
+        f"spec_clear_{i}": _noul(
+            f"Does task {i + 1} in the plan cite an issue that states a concrete, testable "
+            "acceptance criterion (see cited_issues)?",
+            "its issue states a concrete, testable acceptance criterion",
+            "its acceptance criterion is missing, vague or not testable",
+        )
+        for i in range(tasks)
+    }
     return {
         "in_scope": _noul(
             "Does every task in the plan stay inside the mandate scope and respect the rubric?",
@@ -214,6 +233,7 @@ def plan_questions() -> dict[str, Question]:
             "at least one task is too big",
             "every task is small and focused",
         ),
+        **spec,
     }
 
 
@@ -223,13 +243,21 @@ async def score_plan(
     rubric_text: str,
     *,
     client: ClefClient | None = None,
+    evidence: dict[str, str] | None = None,
 ) -> PlanVerdict | None:
+    """``evidence``: the text of each sighting (issue) a task cites, by id."""
     client = client or from_env()
     if client is None:
         return None
     tasks_text, truncated = _cap(json.dumps(plan_tasks, default=str, indent=1))
-    state = {"mandate_scope": mandate_scope, "rubric": rubric_text, "plan_tasks": tasks_text}
-    answers = await client.ask(state, plan_questions())
+    cited = "\n\n".join(f"[{sid}]\n{text[:_CITED_CHARS]}" for sid, text in (evidence or {}).items())
+    state = {
+        "mandate_scope": mandate_scope,
+        "rubric": rubric_text,
+        "plan_tasks": tasks_text,
+        "cited_issues": _cap(cited, _CITED_TOTAL)[0] or "(no cited issue text)",
+    }
+    answers = await client.ask(state, plan_questions(len(plan_tasks)))
     if answers is None:
         return None
     return PlanVerdict(
@@ -238,6 +266,7 @@ async def score_plan(
         tasks_independent=_p(answers, "tasks_independent"),
         too_big=_p(answers, "too_big"),
         truncated=truncated,
+        spec_clear=tuple(_p(answers, f"spec_clear_{i}") for i in range(len(plan_tasks))),
     )
 
 
@@ -454,6 +483,7 @@ async def score_and_record_plan(
     charter: dict,
     *,
     client: ClefClient | None = None,
+    evidence: dict[str, str] | None = None,
 ) -> PlanVerdict | None:
     """Score a proposed plan, record the verdict on its ``_belt_plan`` blob and
     return it (``None`` when Clef is off or failed). The shadow hook spawns this;
@@ -466,7 +496,7 @@ async def score_and_record_plan(
         [f"Boundary: {b}" for b in charter.get("boundaries") or []]
         + [f"Says no to: {s}" for s in charter.get("says_no") or []]
     )
-    verdict = await score_plan(plan_tasks, scope, rubric, client=client)
+    verdict = await score_plan(plan_tasks, scope, rubric, client=client, evidence=evidence)
     if verdict is None:
         return None
     await record_verdict(plan_action_id, "plan", verdict, workspace_id=workspace_id)
@@ -475,7 +505,11 @@ async def score_and_record_plan(
 
 
 def shadow_plan(
-    workspace_id: str, plan_action_id: str, plan_tasks: list[dict[str, Any]], charter: dict
+    workspace_id: str,
+    plan_action_id: str,
+    plan_tasks: list[dict[str, Any]],
+    charter: dict,
+    evidence: dict[str, str] | None = None,
 ) -> asyncio.Task[Any] | None:
     """Score a proposed plan in the background and record the verdict. The
     task's result is the ``PlanVerdict`` (or ``None``), so the auto plan gate
@@ -483,7 +517,7 @@ def shadow_plan(
 
     async def go(client: ClefClient) -> PlanVerdict | None:
         return await score_and_record_plan(
-            workspace_id, plan_action_id, plan_tasks, charter, client=client
+            workspace_id, plan_action_id, plan_tasks, charter, client=client, evidence=evidence
         )
 
     return _spawn("plan", go)

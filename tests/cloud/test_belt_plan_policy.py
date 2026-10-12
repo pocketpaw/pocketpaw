@@ -8,10 +8,16 @@
 # approved plan dispatches through the same resolve path the console uses, with
 # ``system:belt-policy`` as the actor and the policy's reason on the blob; an
 # escalated plan stays pending; with the flag off the gate is unchanged.
+# SPEC CLARITY: Clef's per-task ``spec_clear_<i>`` (the cited issue states a
+# concrete, testable acceptance criterion) under the threshold escalates the plan
+# as ``spec_unclear`` naming those tasks, and the auto gate comments on and labels
+# each one's GitHub source issue ``needs-spec`` (once). The gate log predates the
+# question: its rows carry no spec score ("no opinion") and decide as before.
 
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -22,7 +28,7 @@ pytest.importorskip("pocketpaw_ee")
 pytest.importorskip("mongomock_motor")
 
 from pocketpaw_ee.cloud.belt import clef  # noqa: E402
-from pocketpaw_ee.cloud.mandates import plan_policy  # noqa: E402
+from pocketpaw_ee.cloud.mandates import patrols, plan_policy  # noqa: E402
 from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
 
 import pocketpaw.stores as stores  # noqa: E402
@@ -46,9 +52,14 @@ from tests.cloud.test_belt_mandates import (  # noqa: E402,F401
 pytestmark = pytest.mark.usefixtures("any_repo_root")
 
 
-def _v(scope, risk, indep, big, truncated=False):
+def _v(scope, risk, indep, big, truncated=False, spec=()):
     return clef.PlanVerdict(
-        in_scope=scope, low_risk=risk, tasks_independent=indep, too_big=big, truncated=truncated
+        in_scope=scope,
+        low_risk=risk,
+        tasks_independent=indep,
+        too_big=big,
+        truncated=truncated,
+        spec_clear=tuple(spec),
     )
 
 
@@ -85,6 +96,47 @@ def test_policy_against_the_supervisors_gate_log(row):
         assert changed and decision.approve  # the documented disagreement
     else:
         assert decision.approve is not changed
+
+
+# Spec clarity rows, two tasks each, on the gate log's cleanest numbers (quality
+# s5). Synthetic until the shadow eval records real ``spec_clear`` scores: the
+# shapes are an issue with an "Acceptance test" section (high), one whose body
+# is a wish ("make it better", low), the threshold itself, and an unanswered one.
+SPEC_LOG = [
+    # (row, spec_clear per task, approves, flagged task indices)
+    ("both issues carry an acceptance test", (0.91, 0.88), True, ()),
+    ("task 2's issue is a wish", (0.90, 0.31), False, (1,)),
+    ("neither issue is testable", (0.42, 0.18), False, (0, 1)),
+    ("on the threshold", (0.60, 0.60), True, ()),
+    ("an unanswered spec is no opinion", (-1.0, 0.82), True, ()),
+]
+
+
+@pytest.mark.parametrize("row", SPEC_LOG, ids=[r[0] for r in SPEC_LOG])
+def test_spec_clarity(row):
+    _name, spec, approves, flagged = row
+    d = plan_policy.decide(_tasks(2), {"s1"}, 4, _v(0.93, 0.90, 0.74, 0.11, spec=spec))
+    assert d.approve is approves, d.reason
+    assert d.tasks == flagged
+    if not approves:
+        assert d.rule == "spec_unclear"
+        assert all(f"task {i + 1}" in d.reason for i in flagged)
+
+
+def test_gate_log_rows_decide_the_same_with_clear_specs():
+    """Calibration: the threshold flips none of the supervisor's calls when every
+    task's issue is clear (they all carried an Acceptance test section)."""
+    for name, scope, risk, indep, big, n, *_rest, approves in GATE_LOG:
+        d = plan_policy.decide(_tasks(n), {"s1"}, 4, _v(scope, risk, indep, big, spec=[0.9] * n))
+        assert d.approve is approves, (name, d.reason)
+
+
+def test_spec_threshold_from_env(monkeypatch):
+    assert plan_policy.Thresholds().min_spec_clear == 0.60
+    monkeypatch.setenv("POCKETPAW_BELT_POLICY_MIN_SPEC_CLEAR", "0.95")
+    t = plan_policy.thresholds_from_env()
+    d = plan_policy.decide(_tasks(2), {"s1"}, 3, _v(0.9, 0.9, 0.7, 0.1, spec=(0.91, 0.96)), t)
+    assert d.rule == "spec_unclear" and d.tasks == (0,)
 
 
 def test_s4_escalates_on_independence_first():
@@ -168,7 +220,8 @@ def _clef(monkeypatch, scores: dict | None = None, exc: Exception | None = None)
         if exc is not None:
             raise exc
         qs = json.loads(request.content)["questions"]
-        answers = {q: {"type": "noul", "noul": (scores or {})[q]} for q in qs}
+        # Unlisted questions (each task's spec_clear_<i>) answer a clear 0.9.
+        answers = {q: {"type": "noul", "noul": (scores or {}).get(q, 0.9)} for q in qs}
         return httpx.Response(200, json={"success": True, "result": {"answers": answers}})
 
     monkeypatch.setattr(clef, "_transport", httpx.MockTransport(handler))
@@ -342,3 +395,75 @@ async def test_a_slow_clef_escalates_but_still_records_its_score(
 
     await asyncio.gather(*list(clef._TASKS))
     assert (await _blob(plan_id))["clef"]["verdict"]["in_scope"] == 0.93
+
+
+@pytest.mark.usefixtures("store", "journal", "graph")
+async def test_auto_gate_flags_the_unclear_issue_needs_spec(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    dispatcher,  # noqa: F811 — the imported fixture
+):
+    monkeypatch.setenv("POCKETPAW_BELT_PLAN_GATE", "auto")
+    seen = _clef(monkeypatch, {**GOOD, "spec_clear_1": 0.3})
+    labelled: set[str] = {"8"}  # issue #8 was flagged on an earlier shift
+    calls: list[list[str]] = []
+
+    async def gh(argv: list[str]) -> tuple[int, str, str]:
+        calls.append(list(argv))
+        if argv[:3] == ["gh", "issue", "view"]:
+            labels = [{"name": "needs-spec"}] if argv[3] in labelled else [{"name": "gap"}]
+            return 0, json.dumps({"labels": labels}), ""
+        return 0, "", ""
+
+    monkeypatch.setattr(patrols, "_default_gh", gh)
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+    for n, text in ((5, "**Acceptance test**\nUndo returns the document."), (6, "make it nicer")):
+        client.post(
+            f"/belt/mandates/{mandate_id}/feedback",
+            json={
+                "text": text,
+                "severity": 9 - n,
+                "source": f"github:qbtrix/creative-core#{n}",
+            },
+        )
+
+    out = await mandate_service.trigger_shift(WS, USER, mandate_id)
+
+    assert out["shift"]["state"] == "in_gate"
+    action = await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
+    assert action.status == ActionStatus.PENDING
+    policy = action.parameters["_belt_plan"]["policy"]
+    assert policy["rule"] == "spec_unclear" and policy["tasks"] == [1]
+    assert policy["thresholds"]["min_spec_clear"] == 0.6
+    # Clef saw each task's cited issue text, and was asked about each task.
+    body = json.loads(seen[0].content)
+    assert "make it nicer" in body["state"]["cited_issues"]
+    assert {"spec_clear_0", "spec_clear_1"} <= set(body["questions"])
+    # Only task 2's issue (#6) is commented on and labelled, once.
+    comments = [a for a in calls if a[:3] == ["gh", "issue", "comment"]]
+    assert [c[3:6] for c in comments] == [["6", "-R", "qbtrix/creative-core"]]
+    reason = comments[0][comments[0].index("--body") + 1]
+    assert "\n" not in reason and "acceptance" in reason and re.search(r"0\.30", reason)
+    edits = [a for a in calls if a[:3] == ["gh", "issue", "edit"]]
+    assert edits == [
+        ["gh", "issue", "edit", "6", "-R", "qbtrix/creative-core", "--add-label", "needs-spec"]
+    ]
+    assert RecorderDispatcher.instances == []
+
+
+async def test_flag_needs_spec_skips_labelled_and_foreign_sources():
+    calls: list[list[str]] = []
+
+    async def gh(argv):
+        calls.append(argv)
+        return 0, json.dumps({"labels": [{"name": "needs-spec"}]}), ""
+
+    assert await patrols.flag_needs_spec("github:o/r#8", "why", gh=gh) is False
+    assert [a[:3] for a in calls] == [["gh", "issue", "view"]]  # labelled: no comment
+    assert await patrols.flag_needs_spec("support", "why", gh=gh) is False
+    assert await patrols.flag_needs_spec("github:-o/r#8", "why", gh=gh) is False
+    assert len(calls) == 1

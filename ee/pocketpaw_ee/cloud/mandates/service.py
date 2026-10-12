@@ -11,12 +11,12 @@
 # ``_dedup_signal``, or when its ``dedup_key`` is any sighting's ``source`` or
 # ``dedup_key``, so a hand-filed ``github:<owner>/<repo>#<n>`` is not re-sighted);
 # trigger_shift (sense → foreman → plan gate; Clef's ``shadow_plan`` scores the
-# plan in the background, or, under ``POCKETPAW_BELT_PLAN_GATE=auto``, inline for
-# ``plan_policy.decide``); prepare_plan_resolution + resolve_plan (the one resolve
-# path, shared by the ``plan/resolve`` route and the auto gate); get_pawprints;
-# set_autopilot; set_crew (each NEW agent must be readable by the caller, in this
-# workspace, enabled); digest (the morning report, from the reads above plus the
-# belt runs list).
+# plan and its cited issues' text in the background, or, under ``..._PLAN_GATE=
+# auto``, inline for ``plan_policy.decide``, whose ``spec_unclear`` flags issues
+# ``needs-spec``); prepare_plan_resolution + resolve_plan (one resolve path for
+# the route and the auto gate); get_pawprints; set_autopilot; set_crew (each NEW
+# agent must be readable by the caller, in this workspace, enabled); digest (the
+# morning report, from the reads above plus the belt runs list).
 #
 # The CREW (``MandateDoc.crew``): ``crew_seat_for_task`` seats a plan task on a
 # live dev (roster order, ``pick_dev`` round-robin), or with ``role`` finds
@@ -1427,9 +1427,12 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     from pocketpaw_ee.cloud.mandates import plan_policy
 
     auto_gate = plan_policy.enabled()
+    cited = await _cited_sightings(workspace_id, mandate_id, plan.model_dump()["tasks"])
     if not auto_gate:
         # Shadow only: Clef scores the plan in the background; it gates nothing.
-        clef.shadow_plan(workspace_id, str(action.id), plan.model_dump()["tasks"], charter_wire)
+        evidence = {sid: c["text"] for sid, c in cited.items()}
+        tasks_wire = plan.model_dump()["tasks"]
+        clef.shadow_plan(workspace_id, str(action.id), tasks_wire, charter_wire, evidence)
     # UI contract — announce the new plan proposal on the ``belt_plan`` topic
     # (workspace fan-out, mirroring how belt_run_updated rides the bus). The
     # page subscribing to this topic reads {mandate_id, proposal}.
@@ -1467,6 +1470,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
             charter_wire=charter_wire,
             open_ids={str(o["id"]) for o in backlog["open"]},
             budget_max=doc.charter.budget.max_tasks_per_shift,
+            cited=cited,
         )
     # UI contract — the shift response rides a ``shift`` envelope.
     return {
@@ -1484,6 +1488,62 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
 # The inline Clef wait in auto mode. ``ClefClient`` allows 20 s plus one retry,
 # so the default leaves room for the retry to finish.
 _CLEF_INLINE_TIMEOUT_DEFAULT = 45.0
+# A cited sighting's text as Clef's spec question reads it.
+_CITED_TEXT_CHARS = 4000
+
+
+async def _cited_sightings(
+    workspace_id: str, mandate_id: str, tasks: list[dict[str, Any]]
+) -> dict[str, dict[str, str]]:
+    """``{sighting id: {source, text}}`` for the sightings ``tasks`` cite: the
+    issue text Clef's spec question reads, and the ``github:`` source the auto
+    gate flags ``needs-spec``. Never raises (a failed read is ``{}``)."""
+    # no-event: read-only path; emit only on writes.
+    ids = {str(ref) for t in tasks for ref in t.get("evidence_refs") or []}
+    if not ids:
+        return {}
+    try:
+        docs = await SightingDoc.find(
+            SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
+        ).to_list()
+    except Exception:  # noqa: BLE001 — no text: Clef judges the tasks alone
+        logger.warning("mandate: cited sightings unreadable for %s", mandate_id, exc_info=True)
+        return {}
+    return {
+        str(d.id): {
+            "source": str(d.evidence.get("source") or ""),
+            "text": str(d.evidence.get("text") or d.summary)[:_CITED_TEXT_CHARS],
+        }
+        for d in docs
+        if str(d.id) in ids
+    }
+
+
+async def _flag_unclear_specs(
+    tasks: list[dict[str, Any]],
+    unclear: tuple[int, ...],
+    cited: dict[str, dict[str, str]],
+    verdict: Any,
+    min_spec_clear: float,
+) -> None:
+    """Comment on and label ``needs-spec`` the GitHub source issue of each task
+    ``unclear`` names (each issue once), with a one-line reason."""
+    from pocketpaw_ee.cloud.mandates import patrols
+
+    spec = tuple(getattr(verdict, "spec_clear", ()) or ())
+    flagged: set[str] = set()
+    for i in unclear:
+        for ref in tasks[i].get("evidence_refs") or []:
+            source = (cited.get(str(ref)) or {}).get("source") or ""
+            if not source.startswith("github:") or source in flagged:
+                continue
+            flagged.add(source)
+            reason = (
+                f"Belt's plan gate held this issue: its acceptance criterion scored "
+                f"{spec[i]:.2f} for being concrete and testable (needs {min_spec_clear:.2f}). "
+                "Add a concrete, testable acceptance test, then remove the needs-spec label."
+            )
+            await patrols.flag_needs_spec(source, reason)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -1509,12 +1569,15 @@ async def _auto_gate(
     charter_wire: dict[str, Any],
     open_ids: set[str],
     budget_max: int,
+    cited: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """The plan gate's AUTO policy (``POCKETPAW_BELT_PLAN_GATE=auto``): await
     Clef's score inline, ask ``plan_policy.decide``, record the decision on the
     ``_belt_plan`` blob, then either approve through ``resolve_plan`` (the
     console's path) as ``system:belt-policy`` or leave the plan pending for a
-    human. Returns the shift's state. Never raises: any failure escalates."""
+    human; a ``spec_unclear`` escalation also flags each named task's source
+    issue ``needs-spec``. Returns the shift's state. Never raises: any failure
+    escalates."""
     from types import SimpleNamespace
 
     from pocketpaw.stores import get_instinct_store
@@ -1527,7 +1590,9 @@ async def _auto_gate(
     try:
         # The shadow hook's task, shielded: a timeout escalates now while the
         # score still lands on the blob for the eval.
-        scoring = clef.shadow_plan(workspace_id, action_id, tasks, charter_wire)
+        cited = cited or {}
+        evidence = {sid: c["text"] for sid, c in cited.items()}
+        scoring = clef.shadow_plan(workspace_id, action_id, tasks, charter_wire, evidence)
         verdict = (
             await asyncio.wait_for(asyncio.shield(scoring), timeout=timeout) if scoring else None
         )
@@ -1547,9 +1612,12 @@ async def _auto_gate(
             "min_low_risk": thresholds.min_low_risk,
             "min_independent": thresholds.min_independent,
             "max_too_big": thresholds.max_too_big,
+            "min_spec_clear": thresholds.min_spec_clear,
         },
         "at": _utcnow().isoformat(),
     }
+    if decision.tasks:
+        record["tasks"] = list(decision.tasks)
     try:
         store = get_instinct_store(workspace_id=workspace_id or None)
         await update_action_blob(
@@ -1563,6 +1631,10 @@ async def _auto_gate(
         return "in_gate"
 
     if not decision.approve:
+        if decision.rule == "spec_unclear":
+            await _flag_unclear_specs(
+                tasks, decision.tasks, cited or {}, verdict, thresholds.min_spec_clear
+            )
         logger.info(
             "mandate: shift %s of %s escalated to a human (%s): %s",
             shift_no,

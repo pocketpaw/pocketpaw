@@ -22,6 +22,8 @@
 #                    ``Depends on:`` notes; ``open_pr_closes`` maps each issue an
 #                    OPEN PR closes to that PR, for the backlog's in-flight rule
 #                    (one cached gh list each per repo per tick, ``_gh_rows``).
+#                    ``flag_needs_spec`` comments on a ``github:`` source issue
+#                    and labels it ``needs-spec`` (once) for the auto plan gate.
 #   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
 #                    ``rev`` comes from a TOML pin file in the bound repo, the
 #                    delta from ``gh api repos/<repo>/compare/<pin>...HEAD``.
@@ -525,6 +527,40 @@ _MAX_AREA_COMMITS = 8
 _CONVENTIONAL = re.compile(r"^(\w+)(?:\(([^)]+)\))?!?:\s")
 # ``photocraft-text: ...`` / ``GPU: ...`` / ``Never crash: ...`` → that prefix.
 _AREA_PREFIX = re.compile(r"^([A-Za-z0-9][\w.\-/ ]{0,30}?):\s")
+
+
+NEEDS_SPEC = "needs-spec"
+_SPEC_SOURCE = re.compile(r"^github:([\w.-]+/[\w.-]+)#(\d+)$")
+
+
+async def flag_needs_spec(source: str, reason: str, gh: GhFn | None = None) -> bool:
+    """Comment ``reason`` on the ``github:<owner>/<repo>#<n>`` issue ``source``
+    names and label it ``needs-spec``, so a human or a later spec pass rewrites
+    it. Once per issue: one already labelled is left alone. True when it
+    commented; never raises."""
+    found = _SPEC_SOURCE.match(source or "")
+    if not found or any(p in {".", ".."} or p.startswith("-") for p in found[1].split("/")):
+        return False
+    slug, number = found.groups()
+    runner = gh or _default_gh
+    try:
+        code, out, _ = await runner(["gh", "issue", "view", number, "-R", slug, "--json", "labels"])
+        labels = json.loads(out).get("labels") if code == 0 else None
+        if not isinstance(labels, list) or NEEDS_SPEC in {lb.get("name") for lb in labels}:
+            return False
+        # Creating a label that exists fails harmlessly.
+        await runner(["gh", "label", "create", NEEDS_SPEC, "-R", slug, "--color", "fbca04"])
+        code, _, err = await runner(
+            ["gh", "issue", "comment", number, "-R", slug, "--body", reason]
+        )
+        if code != 0:
+            logger.warning("needs-spec: comment on %s#%s failed: %s", slug, number, err[-200:])
+            return False
+        await runner(["gh", "issue", "edit", number, "-R", slug, "--add-label", NEEDS_SPEC])
+        return True
+    except Exception:  # noqa: BLE001 — a missed flag never fails the gate
+        logger.warning("needs-spec: flagging %s failed", source, exc_info=True)
+        return False
 
 
 async def _default_gh(argv: list[str]) -> tuple[int, str, str]:

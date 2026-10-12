@@ -155,7 +155,8 @@ still recorded on the blob as `clef`, even when the wait times out), then asks t
 - every task cites at least one evidence ref that is an open sighting of this
   mandate;
 - the plan fits the charter budget (`max_tasks_per_shift`);
-- Clef scores `in_scope` >= 0.80 and `low_risk` >= 0.75.
+- Clef scores `in_scope` >= 0.80 and `low_risk` >= 0.75;
+- every task's `spec_clear` that Clef answered is >= 0.60 (below).
 
 It escalates the whole plan, leaving it pending for a human exactly as with the
 gate off, when Clef is off, fails, times out or truncated the plan,
@@ -169,7 +170,7 @@ calls, with `system:belt-policy` as the actor, so the chain reads
 `agent.proposed → human.corrected → decision.completed` like a console approval.
 Either way the decision goes on the `_belt_plan` blob as `policy`
 (`decision`, `rule`, `reason` with Clef's four numbers, `approver`, the
-thresholds, `at`), and an escalation is logged with its reason.
+thresholds, `at`, and `tasks` for a `spec_unclear` escalation), and an escalation is logged with its reason.
 
 The thresholds come from the supervisor's gate log of the first unattended
 pilot (seven plan decisions, pinned in `tests/cloud/test_belt_plan_policy.py`).
@@ -177,7 +178,33 @@ Six match. The miss is a plan the supervisor trimmed for a file overlap Clef
 does not score (independence .52, above a plan approved in full at .50), which
 the policy approves as proposed. Each threshold has an env override:
 `POCKETPAW_BELT_POLICY_MIN_IN_SCOPE`, `..._MIN_LOW_RISK`,
-`..._MIN_INDEPENDENT`, `..._MAX_TOO_BIG`.
+`..._MIN_INDEPENDENT`, `..._MAX_TOO_BIG`, `..._MIN_SPEC_CLEAR`.
+
+**Spec clarity.** A plan task is only as good as the issue it cites, so the
+shift trigger reads the text of the sightings the plan cites
+(`service._cited_sightings`: the issue body an `issues` patrol or a feedback
+sighting carries, 4,000 chars each) and Clef's plan state gets it as
+`cited_issues` (1,500 chars per issue, 8,000 in all), in shadow and auto mode
+alike. One more question rides the same ask, once per task:
+`spec_clear_<i>`, "does task i cite an issue that states a concrete, testable
+acceptance criterion?". The verdict carries `spec_clear: [p per task]`. A task
+under `POCKETPAW_BELT_POLICY_MIN_SPEC_CLEAR` (default 0.60, inclusive like the
+others) escalates the plan with rule `spec_unclear`; the policy record names
+those tasks (`tasks: [i]`), and for each the auto gate comments on its
+`github:<owner>/<repo>#<n>` source issue with a one-line reason (the score and
+the threshold, "add a concrete, testable acceptance test, then remove the
+needs-spec label") and labels it `needs-spec`, creating the label if needed
+(`patrols.flag_needs_spec`, through the gh seam). An issue already labelled
+`needs-spec` is left alone, so a plan that keeps citing it is not commented on
+every shift; a source that is not a GitHub issue is not flagged. An unanswered
+spec score (-1), or none (verdicts recorded before the question), is no
+opinion. The rule runs after the evidence and budget checks and before
+`in_scope`. Calibration: the seven gate-log plans predate the question, cited
+issues that all carried an "Acceptance test" section, and decide the same with
+or without a clear spec score; five synthetic spec rows pin the rule until the
+shadow eval has real `spec_clear` numbers (`scripts/clef_verdicts.py` prints
+them). The flagged issue stays open, so the foreman can plan it again before a
+human rewrites it; the gate escalates it again without a new comment.
 
 ### Pulley blocks through recipes
 
@@ -1757,6 +1784,7 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_BELT_POLICY_MIN_LOW_RISK` | `0.75` | Auto gate: lowest Clef `low_risk` that approves |
 | `POCKETPAW_BELT_POLICY_MIN_INDEPENDENT` | `0.40` | Auto gate: below this `tasks_independent` the plan escalates |
 | `POCKETPAW_BELT_POLICY_MAX_TOO_BIG` | `0.65` | Auto gate: above this `too_big` the plan escalates |
+| `POCKETPAW_BELT_POLICY_MIN_SPEC_CLEAR` | `0.60` | Auto gate: a task whose cited issue Clef scores below this for a concrete, testable acceptance criterion escalates the plan (`spec_unclear`) and gets its issue labelled `needs-spec` |
 | `POCKETPAW_MANDATE_AUTOPILOT_INTERVAL` | `300` | Autopilot cycle interval, seconds |
 | `POCKETPAW_CLOUD_SCHEDULER_ENABLED` | off | Starts the cadence scheduler and autopilot loops |
 

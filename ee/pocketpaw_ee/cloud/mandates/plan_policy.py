@@ -10,12 +10,18 @@
 # confident it is in scope and low risk. Anything else ESCALATES the whole plan
 # (it stays pending for a human, as with the gate off): Clef unavailable or
 # truncated, tasks not independent enough, a task too big, or a per-task rule
-# failing. The policy never rejects; a rejection would file a teaching sighting
-# that a human did not write.
+# failing. SPEC CLARITY is per task: a task whose ``spec_clear`` (its cited issue
+# states a concrete, testable acceptance criterion) is under the threshold
+# escalates the plan as ``spec_unclear`` and is named on ``Decision.tasks``, so
+# the caller can flag that issue ``needs-spec``; an unanswered or missing spec
+# score is no opinion (verdicts recorded before the question have none). The
+# policy never rejects; a rejection would file a teaching sighting that a human
+# did not write.
 #
 # Thresholds default to values calibrated on the supervisor's gate log of the
 # first unattended pilot (``tests/cloud/test_belt_plan_policy.py`` holds those
-# rows) and are overridable per env (``thresholds_from_env``).
+# rows; the spec threshold flips none of them) and are overridable per env
+# (``thresholds_from_env``).
 
 from __future__ import annotations
 
@@ -36,6 +42,7 @@ class Thresholds:
     min_low_risk: float = 0.75
     min_independent: float = 0.40
     max_too_big: float = 0.65
+    min_spec_clear: float = 0.60
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,8 @@ class Decision:
     approve: bool
     rule: str
     reason: str
+    # ``spec_unclear``: the indices of the tasks whose issue needs a spec.
+    tasks: tuple[int, ...] = ()
 
 
 _ENV = {
@@ -50,6 +59,7 @@ _ENV = {
     "min_low_risk": "POCKETPAW_BELT_POLICY_MIN_LOW_RISK",
     "min_independent": "POCKETPAW_BELT_POLICY_MIN_INDEPENDENT",
     "max_too_big": "POCKETPAW_BELT_POLICY_MAX_TOO_BIG",
+    "min_spec_clear": "POCKETPAW_BELT_POLICY_MIN_SPEC_CLEAR",
 }
 
 
@@ -123,6 +133,17 @@ def decide(
                 "no_open_evidence",
                 f"task {i + 1} ({str(task.get('title') or '')[:60]!r}) cites no open sighting",
             )
+    spec = tuple(getattr(verdict, "spec_clear", ()) or ())[: len(tasks)]
+    unclear = tuple(i for i, p in enumerate(spec) if 0 <= p < t.min_spec_clear)
+    if unclear:
+        named = ", ".join(f"task {i + 1} ({spec[i]:.2f})" for i in unclear)
+        return Decision(
+            False,
+            "spec_unclear",
+            f"spec_clear < {t.min_spec_clear:.2f}: {named} cite no issue with a concrete, "
+            "testable acceptance criterion",
+            unclear,
+        )
     if verdict.in_scope < t.min_in_scope:
         return esc(
             "out_of_scope",
@@ -139,7 +160,8 @@ def decide(
         f"belt-policy auto-approve: every task cites an open sighting, "
         f"{len(tasks)}/{budget_max} tasks within budget, Clef {_numbers(verdict)} "
         f"(needs in_scope >= {t.min_in_scope:.2f}, low_risk >= {t.min_low_risk:.2f}, "
-        f"tasks_independent >= {t.min_independent:.2f}, too_big <= {t.max_too_big:.2f})",
+        f"tasks_independent >= {t.min_independent:.2f}, too_big <= {t.max_too_big:.2f}, "
+        f"each task's spec_clear >= {t.min_spec_clear:.2f} where scored)",
     )
 
 
