@@ -66,6 +66,8 @@ async def _mandate(tmp_path: Path) -> str:
 
 async def test_a_failed_foreman_call_finishes_the_shift(tmp_path, mongo_db, monkeypatch, caplog):
     mid = await _mandate(tmp_path)
+    monkeypatch.setenv("POCKETPAW_MANDATE_LLM", "mock")
+    real_plan_shift = foreman_mod.plan_shift
 
     async def timed_out(context, llm=None):
         raise RuntimeError("claude CLI failed (exit -1): timed out after 300s")
@@ -90,6 +92,15 @@ async def test_a_failed_foreman_call_finishes_the_shift(tmp_path, mongo_db, monk
     prints = (await mandate_service.get_pawprints(WS, USER, mid))["pawprints"]
     assert [p["kind"] for p in prints] == ["failed"]
     assert "timed out" in prints[0]["summary"]
+
+    # The next shift (the mock foreman, the failed shift in its history) and
+    # the digest both read a ``done`` shift that has no plan.
+    monkeypatch.setattr(foreman_mod, "plan_shift", real_plan_shift)
+    nxt = (await mandate_service.trigger_shift(WS, USER, mid))["shift"]
+    assert nxt["no"] == 2 and nxt["state"] == "in_gate"
+    digest = await mandate_service.digest(WS, USER)
+    (row,) = digest["mandates"]
+    assert [s["no"] for s in row["shifts"]] == [2, 1]
 
 
 async def _failed_shifts(mid: str, n: int, age: timedelta) -> None:
