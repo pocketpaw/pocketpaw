@@ -29,7 +29,8 @@
 # resolves its sightings, in-flight work is marked, the list is capped); the
 # mandate's line (work landed on it is built, awaiting merge or merged; THE LINE
 # and the detail's ``line`` block read git) and the develop station's deduped
-# line-conflict sighting.
+# line-conflict sighting; a resolve announces ``belt_plan_resolved`` and every
+# shift state rides ``belt_mandate_updated``, both fanned out to the workspace.
 
 from __future__ import annotations
 
@@ -735,7 +736,7 @@ async def test_reject_closes_chain_once(
 
 
 async def test_resolve_mixed_verdicts_dispatches_kept_tasks_one_terminal(
-    tmp_path, mongo_db, store, journal, graph, dispatcher, monkeypatch
+    tmp_path, mongo_db, store, journal, graph, dispatcher, monkeypatch, recording_bus
 ):
     """approve + reject + edit on a 3-task plan: the kept two tasks (one with
     the edited title) dispatch as belt runs through the REAL approve-with-edits
@@ -804,9 +805,35 @@ async def test_resolve_mixed_verdicts_dispatches_kept_tasks_one_terminal(
     prints = client.get(f"/belt/mandates/{mandate_id}/pawprints").json()["pawprints"]
     assert [p["kind"] for p in prints] == ["proposed", "edited", "executed"]
 
+    # Realtime: the resolve announced itself, and every shift state rode the bus.
+    resolved = [e.data for e in recording_bus.events if e.type == "belt_plan_resolved"]
+    assert resolved == [
+        {
+            "workspace_id": WS,
+            "mandate_id": mandate_id,
+            "plan_action_id": plan_action_id,
+            "shift_no": shift["no"],
+            "resolved_by": USER,
+            "approved": 2,
+            "rejected": 1,
+        }
+    ]
+    states = [e.data for e in recording_bus.events if e.type == "belt_mandate_updated"]
+    assert [d["state"] for d in states] == ["planning", "in_gate", "executing", "done"]
+    assert all(
+        d
+        == {
+            "workspace_id": WS,
+            "mandate_id": mandate_id,
+            "shift_no": shift["no"],
+            "state": d["state"],
+        }
+        for d in states
+    )
+
 
 async def test_resolve_all_reject_closes_chain_once(
-    tmp_path, mongo_db, store, journal, graph, dispatcher, monkeypatch
+    tmp_path, mongo_db, store, journal, graph, dispatcher, monkeypatch, recording_bus
 ):
     """All tasks rejected → the REAL reject path closes the chain once; zero
     dispatches; the reasons land as teaching sightings."""
@@ -844,6 +871,27 @@ async def test_resolve_all_reject_closes_chain_once(
         if s["evidence"].get("kind") == "reject"
     ]
     assert len(teaching) == 1 and "freeze week" in teaching[0]["summary"]
+
+    (resolved,) = [e.data for e in recording_bus.events if e.type == "belt_plan_resolved"]
+    assert (resolved["approved"], resolved["rejected"]) == (0, 1)
+    assert resolved["plan_action_id"] == shift["plan_action_id"]
+
+
+async def test_belt_plan_resolved_and_mandate_updated_fan_out_to_the_workspace() -> None:
+    from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
+    from pocketpaw_ee.cloud.mandates.events import BeltMandateUpdated, BeltPlanResolved
+
+    async def _members(wid: str) -> list[str]:
+        return [f"{wid}-u1", f"{wid}-u2"]
+
+    resolver = AudienceResolver(workspace_members=_members)
+    for cls, t in (
+        (BeltPlanResolved, "belt_plan_resolved"),
+        (BeltMandateUpdated, "belt_mandate_updated"),
+    ):
+        assert cls.EVENT_TYPE == t
+        assert set(await resolver.audience(cls(data={"workspace_id": "w1"}))) == {"w1-u1", "w1-u2"}
+        assert await resolver.audience(cls(data={"mandate_id": "m1"})) == []
 
 
 async def test_resolve_requires_complete_decisions(

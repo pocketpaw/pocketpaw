@@ -201,6 +201,7 @@ async def test_auto_gate_approves_through_the_resolve_path(
     monkeypatch,
     journal,  # noqa: F811 — the imported fixture
     dispatcher,  # noqa: F811
+    recording_bus,
 ):
     monkeypatch.setenv("POCKETPAW_BELT_PLAN_GATE", "auto")
     _clef(monkeypatch, GOOD)
@@ -225,6 +226,14 @@ async def test_auto_gate_approves_through_the_resolve_path(
     assert [e.action for e in chain] == ["agent.proposed", "human.corrected", "decision.completed"]
     assert chain[1].actor.id == "user:system:belt-policy"
     assert chain[2].payload["action_outcome"] == "dispatched"
+
+    (resolved,) = [e.data for e in recording_bus.events if e.type == "belt_plan_resolved"]
+    assert resolved["resolved_by"] == "system:belt-policy"
+    assert (resolved["plan_action_id"], resolved["approved"], resolved["rejected"]) == (
+        plan_id,
+        2,
+        0,
+    )
 
 
 @pytest.mark.usefixtures("store", "journal", "graph")

@@ -1119,6 +1119,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
             }
         )
     )
+    await _emit_mandate_updated(workspace_id, mandate_id, shift_no, "planning")
 
     # 3. JUDGE — assemble the context and make the ONE foreman call. The
     #    foreman reads the open backlog (every sighting no landed task has
@@ -1777,9 +1778,12 @@ async def prepare_plan_resolution(
         return {
             "action_id": str(shift.plan_action_id),
             "shift_id": str(shift.id),
+            "shift_no": shift.no,
             "mode": "reject",
             "edited": True,
             "reject_reason": reasons or "all tasks rejected at the gate",
+            "approved": 0,
+            "rejected": len(rejected),
         }
 
     new_blob = dict(blob)
@@ -1791,9 +1795,12 @@ async def prepare_plan_resolution(
     return {
         "action_id": str(shift.plan_action_id),
         "shift_id": str(shift.id),
+        "shift_no": shift.no,
         "mode": "approve",
         "edited": edited,
         "parameters": new_params,
+        "approved": len(kept),
+        "rejected": len(rejected),
     }
 
 
@@ -1804,7 +1811,8 @@ async def resolve_plan(
     Instinct approve (with edits when any task was edited or dropped) or reject.
     The ``plan/resolve`` route and the auto plan gate both run this, so there is
     one resolve path. ``approver`` is the actor the Instinct router records
-    (anything with an ``id``). Returns ``{"shift": <shift wire>}``."""
+    (anything with an ``id``). Announces ``belt_plan_resolved`` once the gate
+    took the decision. Returns ``{"shift": <shift wire>}``."""
     orders = await prepare_plan_resolution(workspace_id, user_id, mandate_id, body)
 
     # Lazy import — the mandates package must not put a module-top dependency
@@ -1832,6 +1840,19 @@ async def resolve_plan(
             user=approver,
             workspace_id=workspace_id,
         )
+    await emit(
+        mandate_events.BeltPlanResolved(
+            data={
+                "workspace_id": workspace_id,
+                "mandate_id": mandate_id,
+                "plan_action_id": orders["action_id"],
+                "shift_no": orders["shift_no"],
+                "resolved_by": str(getattr(approver, "id", "") or ""),
+                "approved": orders["approved"],
+                "rejected": orders["rejected"],
+            }
+        )
+    )
     return {"shift": await shift_wire(workspace_id, orders["shift_id"])}
 
 
@@ -2445,8 +2466,9 @@ async def mark_shift(
 ) -> None:
     """State-transition a shift row (tenant-scoped). Used by the trigger path
     and (via a best-effort wrapper) the plan executor + the router's reject
-    hook. Unknown shift ids are a logged no-op — the Instinct outcome stays the
-    source of truth."""
+    hook. Each write announces ``belt_mandate_updated`` for the live UI. Unknown
+    shift ids are a logged no-op — the Instinct outcome stays the source of
+    truth."""
     try:
         doc = await ShiftDoc.find_one(
             ShiftDoc.workspace == workspace_id, ShiftDoc.id == _as_object_id(shift_id)
@@ -2469,6 +2491,23 @@ async def mark_shift(
                 "mandate_id": doc.mandate_id,
                 "shift_id": shift_id,
                 "no": doc.no,
+                "state": state,
+            }
+        )
+    )
+    await _emit_mandate_updated(workspace_id, doc.mandate_id, doc.no, state)
+
+
+async def _emit_mandate_updated(
+    workspace_id: str, mandate_id: str, shift_no: int, state: str
+) -> None:
+    """``belt_mandate_updated`` — the UI's live shift-state topic (workspace fan-out)."""
+    await emit(
+        mandate_events.BeltMandateUpdated(
+            data={
+                "workspace_id": workspace_id,
+                "mandate_id": mandate_id,
+                "shift_no": shift_no,
                 "state": state,
             }
         )

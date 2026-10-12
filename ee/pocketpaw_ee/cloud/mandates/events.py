@@ -1,5 +1,4 @@
-# ee/pocketpaw_ee/cloud/mandates/events.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
+# ee/pocketpaw_ee/cloud/mandates/events.py — realtime events of the mandates service.
 #
 # Realtime events the mandates service emits on writes (cloud entity rule:
 # emit an event on every write, or annotate ``# no-event``). Thin Event
@@ -62,8 +61,28 @@ class BeltPlanProposed(Event):
     EVENT_TYPE: ClassVar[str] = "belt_plan"
 
 
+# UI contract — fired when a shift plan is resolved through
+# ``service.resolve_plan`` (the ``plan/resolve`` route and the auto plan gate).
+# Payload: {workspace_id, mandate_id, plan_action_id, shift_no, resolved_by,
+# approved, rejected} — ``resolved_by`` is the approver id (a user id, or
+# ``system:belt-policy``), the counts are tasks kept and dropped.
+@dataclass
+class BeltPlanResolved(Event):
+    EVENT_TYPE: ClassVar[str] = "belt_plan_resolved"
+
+
+# UI contract — fired on every shift state write (the shift opening at
+# ``planning``, then each ``mark_shift``). Payload: {workspace_id, mandate_id,
+# shift_no, state}.
+@dataclass
+class BeltMandateUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "belt_mandate_updated"
+
+
 __all__ = [
+    "BeltMandateUpdated",
     "BeltPlanProposed",
+    "BeltPlanResolved",
     "MandateAutopilotChanged",
     "MandateCreated",
     "MandateCrewChanged",

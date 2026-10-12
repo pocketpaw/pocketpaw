@@ -393,12 +393,13 @@ class AudienceResolver:
                 return await self._workspace(wid)
             return []
 
-        # --- Belt mandates (shift plan proposals) --------------------------------
+        # --- Belt mandates (plan proposed / resolved, shift state) --------------
         # Workspace-scoped, same rationale as belt_run_updated: a plan lands at
-        # the gate asynchronously and must reach every member with the mandates
-        # page open. The UI subscribes to the ``belt_plan`` topic and reads
-        # {mandate_id, proposal} off the payload.
-        if t == "belt_plan":
+        # the gate, is resolved (by a human or the auto plan gate) and a shift
+        # moves state asynchronously, and each must reach every member with the
+        # mandates page open. The UI subscribes to ``belt_plan`` ({mandate_id,
+        # proposal}), ``belt_plan_resolved`` and ``belt_mandate_updated``.
+        if t in {"belt_plan", "belt_plan_resolved", "belt_mandate_updated"}:
             if wid := d.get("workspace_id"):
                 return await self._workspace(wid)
             return []
