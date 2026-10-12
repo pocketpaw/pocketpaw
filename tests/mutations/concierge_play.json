@@ -772,5 +772,50 @@
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_rules_send_notes_and_music_to_their_widgets"
     ]
+  },
+  {
+    "label": "NW-1: the six new data widget checks never run",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_DATA_CHECKS |= dict.fromkeys(_CATALOG_CHECKS, _check_catalog)",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_new_data_widgets_hold_to_their_enums_counts_and_plain_text"
+    ]
+  },
+  {
+    "label": "NW-2: a row may carry any key",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "and r.keys() <= fields.keys()",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_new_data_widgets_hold_to_their_enums_counts_and_plain_text"
+    ]
+  },
+  {
+    "label": "NW-3: a row field is never checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "and all(r.get(k) is None or ok(r[k]) for k, ok in fields.items())",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_new_data_widgets_hold_to_their_enums_counts_and_plain_text"
+    ]
+  },
+  {
+    "label": "NW-4: a weather condition is any word",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_WEATHER = _one_of(WEATHER_CONDITIONS)",
+    "replace": "_WEATHER = _txt(20)",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_new_data_widgets_hold_to_their_enums_counts_and_plain_text"
+    ]
+  },
+  {
+    "label": "NW-5: a forecast takes any handler",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    _play_basics(kind, node, props, handler, ())\n    for key in (\"title\", \"subtitle\"):",
+    "replace": "    for key in (\"title\", \"subtitle\"):",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_new_data_widgets_hold_to_their_enums_counts_and_plain_text"
+    ]
   }
 ]

@@ -1125,5 +1125,366 @@
         "repeat": true
       }
     }
+  },
+  "weather-forecast": {
+    "ui": {
+      "type": "weather-forecast",
+      "props": {
+        "place": "Lisbon",
+        "unit": "C",
+        "note": "Sample forecast",
+        "now": {
+          "temp": 21,
+          "condition": "partly-cloudy",
+          "feelsLike": 20,
+          "humidity": 64,
+          "wind": "14 km/h NW"
+        },
+        "hourly": [
+          {
+            "time": "Now",
+            "temp": 21,
+            "condition": "partly-cloudy"
+          },
+          {
+            "time": "15:00",
+            "temp": 22,
+            "condition": "sunny"
+          },
+          {
+            "time": "16:00",
+            "temp": 22,
+            "condition": "sunny"
+          },
+          {
+            "time": "17:00",
+            "temp": 21,
+            "condition": "partly-cloudy",
+            "rainChance": 10
+          },
+          {
+            "time": "18:00",
+            "temp": 19,
+            "condition": "cloudy",
+            "rainChance": 20
+          }
+        ],
+        "days": [
+          {
+            "day": "Mon",
+            "condition": "partly-cloudy",
+            "high": 23,
+            "low": 16,
+            "rainChance": 10,
+            "sunrise": "07:31",
+            "sunset": "18:52"
+          },
+          {
+            "day": "Tue",
+            "condition": "sunny",
+            "high": 25,
+            "low": 17
+          },
+          {
+            "day": "Wed",
+            "condition": "cloudy",
+            "high": 21,
+            "low": 16,
+            "rainChance": 30
+          },
+          {
+            "day": "Thu",
+            "condition": "rain",
+            "high": 18,
+            "low": 14,
+            "rainChance": 80
+          },
+          {
+            "day": "Fri",
+            "condition": "thunder",
+            "high": 17,
+            "low": 13,
+            "rainChance": 90
+          },
+          {
+            "day": "Sat",
+            "condition": "partly-cloudy",
+            "high": 20,
+            "low": 14,
+            "rainChance": 20
+          },
+          {
+            "day": "Sun",
+            "condition": "sunny",
+            "high": 22,
+            "low": 15
+          }
+        ]
+      }
+    },
+    "state": {}
+  },
+  "week-schedule": {
+    "ui": {
+      "type": "week-schedule",
+      "bind": "{state.selected}",
+      "props": {
+        "title": "My week",
+        "startHour": 7,
+        "endHour": 21,
+        "events": [
+          {
+            "day": "Mon",
+            "start": "09:00",
+            "end": "12:30",
+            "title": "Deep work",
+            "color": "blue"
+          },
+          {
+            "day": "Mon",
+            "start": "18:00",
+            "end": "19:00",
+            "title": "Gym",
+            "place": "Studio 4",
+            "color": "green"
+          },
+          {
+            "day": "Tue",
+            "start": "09:00",
+            "end": "17:00",
+            "title": "Office",
+            "color": "gray"
+          },
+          {
+            "day": "Wed",
+            "start": "18:00",
+            "end": "19:00",
+            "title": "Gym",
+            "place": "Studio 4",
+            "color": "green"
+          },
+          {
+            "day": "Thu",
+            "start": "10:00",
+            "end": "11:00",
+            "title": "Design review",
+            "color": "purple"
+          },
+          {
+            "day": "Thu",
+            "start": "10:30",
+            "end": "11:30",
+            "title": "1:1 with Sam",
+            "color": "orange"
+          },
+          {
+            "day": "Sun",
+            "start": "19:00",
+            "end": "21:00",
+            "title": "Family dinner",
+            "place": "Home",
+            "color": "pink"
+          }
+        ]
+      }
+    },
+    "state": {
+      "selected": null
+    }
+  },
+  "agenda": {
+    "ui": {
+      "type": "agenda",
+      "bind": "{state.agenda}",
+      "props": {
+        "title": "Weekly team sync",
+        "start": "10:00",
+        "items": [
+          {
+            "title": "Wins from last week",
+            "owner": "Maya Chen",
+            "minutes": 5
+          },
+          {
+            "title": "Metrics review",
+            "owner": "Leo Park",
+            "minutes": 8,
+            "notes": "Signups, churn, support load"
+          },
+          {
+            "title": "Launch checklist",
+            "owner": "Ana Ruiz",
+            "minutes": 10
+          },
+          {
+            "title": "Blockers",
+            "minutes": 5
+          },
+          {
+            "title": "Actions and owners",
+            "owner": "Maya Chen",
+            "minutes": 2
+          }
+        ]
+      }
+    },
+    "state": {
+      "agenda": {}
+    }
+  },
+  "place-results": {
+    "ui": {
+      "type": "place-results",
+      "props": {
+        "title": "Coffee near Harbor Square",
+        "query": "quiet cafes with wifi",
+        "places": [
+          {
+            "id": "p1",
+            "name": "Blue Door Coffee",
+            "kind": "cafe",
+            "rating": 4.7,
+            "reviews": 812,
+            "price": 2,
+            "distance": "350 m",
+            "walkMinutes": 4,
+            "open": true,
+            "hours": "Until 6 pm",
+            "tags": [
+              "wifi",
+              "quiet"
+            ],
+            "blurb": "Bright corner room with long tables and single-origin pour-overs.",
+            "lat": 40.7359,
+            "lng": -73.9911
+          },
+          {
+            "id": "p2",
+            "name": "Morning Loaf",
+            "kind": "bakery",
+            "rating": 4.5,
+            "reviews": 403,
+            "price": 1,
+            "distance": "0.6 km",
+            "walkMinutes": 8,
+            "open": false,
+            "hours": "Opens 7 am",
+            "tags": [
+              "pastries"
+            ],
+            "lat": 40.7381,
+            "lng": -73.9873
+          }
+        ]
+      },
+      "on_choose": {
+        "action": "emit",
+        "target": "ask",
+        "value": {
+          "text": "Tell me more about this one"
+        }
+      }
+    },
+    "state": {}
+  },
+  "product-grid": {
+    "ui": {
+      "type": "product-grid",
+      "props": {
+        "title": "Headphone deals",
+        "currency": "USD",
+        "products": [
+          {
+            "id": "h1",
+            "name": "Quietline 700",
+            "brand": "Sonora",
+            "category": "Over-ear",
+            "price": 229,
+            "was": 299,
+            "rating": 4.6,
+            "reviews": 2140,
+            "badge": "Best seller",
+            "color": "slate",
+            "specs": [
+              "30 h battery",
+              "ANC"
+            ]
+          },
+          {
+            "id": "h2",
+            "name": "Pulse Buds",
+            "brand": "Arcwave",
+            "category": "Earbuds",
+            "price": 79,
+            "was": 99,
+            "rating": 4.3,
+            "reviews": 860,
+            "color": "violet",
+            "specs": [
+              "IPX4",
+              "8 h"
+            ]
+          }
+        ]
+      },
+      "on_choose": {
+        "action": "emit",
+        "target": "ask",
+        "value": {
+          "text": "Tell me more about this one"
+        }
+      }
+    },
+    "state": {}
+  },
+  "media-grid": {
+    "ui": {
+      "type": "media-grid",
+      "bind": "{state.list}",
+      "props": {
+        "title": "Ocean documentaries",
+        "kind": "documentary",
+        "items": [
+          {
+            "id": "d1",
+            "title": "The Deep Blue Hours",
+            "by": "Mara Ellison",
+            "year": 2021,
+            "minutes": 94,
+            "rating": 4.5,
+            "genres": [
+              "Nature",
+              "Ocean"
+            ],
+            "blurb": "A year with the night feeders of a kelp forest.",
+            "color": "teal"
+          },
+          {
+            "id": "d2",
+            "title": "Salt and Ice",
+            "by": "Tomas Reyes",
+            "year": 2019,
+            "minutes": 82,
+            "rating": 4.2,
+            "genres": [
+              "Climate"
+            ],
+            "color": "blue"
+          }
+        ]
+      },
+      "on_choose": {
+        "action": "emit",
+        "target": "ask",
+        "value": {
+          "text": "Tell me more about this one"
+        }
+      }
+    },
+    "state": {
+      "list": {
+        "saved": []
+      }
+    }
   }
 }

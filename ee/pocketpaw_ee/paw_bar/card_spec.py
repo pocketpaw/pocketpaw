@@ -165,6 +165,12 @@ RIPPLE_DATA_WIDGETS: dict[str, frozenset[str] | None] = {
     "bill-split": None,
     "notes": frozenset({"notes"}),
     "music-player": frozenset({"tracks"}),
+    "weather-forecast": None,
+    "week-schedule": None,
+    "agenda": None,
+    "place-results": None,
+    "product-grid": None,
+    "media-grid": None,
     "exec-dashboard": frozenset(
         {"rows", "measures", "dimensions", "x", "split", "compare", "compareLabel", "filters"}
     ),
@@ -1415,8 +1421,268 @@ def _check_booking(node: dict[str, Any], props: dict[str, Any]) -> None:
         raise _Reject("booking days that are not plain data within the widget's caps")
 
 
+# weather-forecast, week-schedule, agenda, place-results, product-grid and media-grid
+# (ripple #223, #224): each listed prop and every row field held to the widget's own
+# enums, counts and plain text (``_text_ok``); a row may carry only the fields below,
+# so no URL key but ``image``, which the walk holds to the URL policy. Only the three
+# catalog grids take a handler, ``on_choose`` (an ``ASK_HANDLERS`` key).
+WEATHER_CONDITIONS: frozenset[str] = frozenset(
+    {"sunny", "partly-cloudy", "cloudy", "rain", "heavy-rain", "thunder", "snow", "fog"}
+    | {"wind", "night-clear"}
+)
+SCHEDULE_COLORS: frozenset[str] = frozenset(
+    {"blue", "green", "orange", "purple", "pink", "teal", "red", "yellow", "gray"}
+)
+CATALOG_COLORS: frozenset[str] = frozenset(
+    {"blue", "violet", "teal", "green", "amber", "rose", "orange", "slate"}
+)
+PLACE_KINDS: frozenset[str] = frozenset(
+    {"cafe", "restaurant", "bar", "bakery", "shop", "park", "museum", "hotel", "other"}
+)
+MEDIA_KINDS: frozenset[str] = frozenset(
+    {"documentary", "film", "series", "podcast", "book", "album"}
+)
+_HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d|24:00")
+
+
+def _txt(cap: int) -> Any:
+    return lambda v: _text_ok(v, cap)
+
+
+def _num(low: float = -math.inf, high: float = math.inf) -> Any:
+    return lambda v: _is_number(v) and low <= v <= high
+
+
+def _int(low: int, high: int) -> Any:
+    return lambda v: _is_int(v, (low, high))
+
+
+def _one_of(allowed: frozenset[str]) -> Any:
+    return lambda v: v in allowed
+
+
+def _hhmm(v: Any) -> bool:
+    return isinstance(v, str) and bool(_HHMM.fullmatch(v))
+
+
+def _flag(v: Any) -> bool:
+    return isinstance(v, bool)
+
+
+def _words_of(count: int, cap: int) -> Any:
+    return lambda v: isinstance(v, list) and len(v) <= count and all(map(_txt(cap), v))
+
+
+def _rows_of(bounds: tuple[int, int], fields: dict[str, Any], required: set[str]) -> Any:
+    """A list of ``bounds`` rows, each only ``fields`` (each passing its check when
+    not null) with every ``required`` one present."""
+
+    def ok(rows: Any) -> bool:
+        return (
+            isinstance(rows, list)
+            and bounds[0] <= len(rows) <= bounds[1]
+            and all(
+                isinstance(r, dict)
+                and r.keys() <= fields.keys()
+                and required <= r.keys()
+                and all(r.get(k) is None or ok(r[k]) for k, ok in fields.items())
+                for r in rows
+            )
+        )
+
+    return ok
+
+
+_ID = _txt(60)
+_RATING = _num(0, 5)
+_COUNT = _int(0, 10**9)
+_WEATHER = _one_of(WEATHER_CONDITIONS)
+# Per widget: (its props' checks, the props it must have, its one handler or None).
+_CATALOG_CHECKS: dict[str, tuple[dict[str, Any], set[str], str | None]] = {
+    "weather-forecast": (
+        {
+            "place": _txt(80),
+            "unit": _one_of(frozenset({"C", "F"})),
+            "now": lambda v: _rows_of(
+                (1, 1),
+                {
+                    "temp": _num(),
+                    "condition": _WEATHER,
+                    "feelsLike": _num(),
+                    "humidity": _num(0, 100),
+                    "wind": _txt(40),
+                },
+                {"temp", "condition"},
+            )([v]),
+            "days": _rows_of(
+                (1, 14),
+                {
+                    "day": _txt(20),
+                    "condition": _WEATHER,
+                    "high": _num(),
+                    "low": _num(),
+                    "rainChance": _num(0, 100),
+                    "sunrise": _txt(10),
+                    "sunset": _txt(10),
+                },
+                {"day", "condition", "high", "low"},
+            ),
+            "hourly": _rows_of(
+                (0, 48),
+                {
+                    "time": _txt(10),
+                    "temp": _num(),
+                    "condition": _WEATHER,
+                    "rainChance": _num(0, 100),
+                },
+                {"time", "temp", "condition"},
+            ),
+            "note": _txt(120),
+        },
+        {"place", "days"},
+        None,
+    ),
+    "week-schedule": (
+        {
+            "startHour": _int(0, 23),
+            "endHour": _int(1, 24),
+            "days": _words_of(14, 12),
+            "events": _rows_of(
+                (0, 60),
+                {
+                    "id": _ID,
+                    "day": _txt(12),
+                    "start": _hhmm,
+                    "end": _hhmm,
+                    "title": _txt(80),
+                    "place": _txt(80),
+                    "color": _one_of(SCHEDULE_COLORS),
+                },
+                {"day", "start", "end", "title"},
+            ),
+        },
+        {"events"},
+        None,
+    ),
+    "agenda": (
+        {
+            "start": _hhmm,
+            "items": _rows_of(
+                (1, 30),
+                {
+                    "id": _ID,
+                    "title": _txt(80),
+                    "owner": _txt(60),
+                    "minutes": _int(1, 240),
+                    "notes": _txt(140),
+                    "done": _flag,
+                },
+                {"title", "minutes"},
+            ),
+        },
+        {"items"},
+        None,
+    ),
+    "place-results": (
+        {
+            "query": _txt(120),
+            "showMap": _flag,
+            "places": _rows_of(
+                (0, 20),
+                {
+                    "id": _ID,
+                    "name": _txt(80),
+                    "kind": _one_of(PLACE_KINDS),
+                    "rating": _RATING,
+                    "reviews": _COUNT,
+                    "price": _int(1, 4),
+                    "distance": lambda v: _num(0)(v) or _txt(20)(v),
+                    "walkMinutes": _int(0, 600),
+                    "open": _flag,
+                    "hours": _txt(40),
+                    "address": _txt(120),
+                    "tags": _words_of(8, 24),
+                    "blurb": _txt(200),
+                    "lat": _num(-90, 90),
+                    "lng": _num(-180, 180),
+                },
+                {"name", "kind"},
+            ),
+        },
+        {"places"},
+        "on_choose",
+    ),
+    "product-grid": (
+        {
+            "filters": _flag,
+            "products": _rows_of(
+                (0, 24),
+                {
+                    "id": _ID,
+                    "name": _txt(80),
+                    "brand": _txt(60),
+                    "category": _txt(40),
+                    "price": _num(0),
+                    "was": _num(0),
+                    "rating": _RATING,
+                    "reviews": _COUNT,
+                    "badge": _txt(24),
+                    "color": _one_of(CATALOG_COLORS),
+                    "image": lambda v: isinstance(v, str),
+                    "specs": _words_of(3, 40),
+                },
+                {"name", "price"},
+            ),
+        },
+        {"products"},
+        "on_choose",
+    ),
+    "media-grid": (
+        {
+            "kind": _one_of(MEDIA_KINDS),
+            "items": _rows_of(
+                (0, 24),
+                {
+                    "id": _ID,
+                    "title": _txt(80),
+                    "by": _txt(80),
+                    "year": _int(1800, 2100),
+                    "minutes": _int(1, 1000),
+                    "episodes": _int(1, 10_000),
+                    "rating": _RATING,
+                    "genres": _words_of(6, 24),
+                    "blurb": _txt(280),
+                    "color": _one_of(CATALOG_COLORS),
+                    "image": lambda v: isinstance(v, str),
+                },
+                {"title"},
+            ),
+        },
+        {"items"},
+        "on_choose",
+    ),
+}
+
+
+def _check_catalog(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """One of ``_CATALOG_CHECKS``: its handler only, a plain ``title`` and
+    ``subtitle``, its required props, and each listed prop passing its check."""
+    kind = node["type"]
+    checks, required, handler = _CATALOG_CHECKS[kind]
+    _play_basics(kind, node, props, handler, ())
+    for key in ("title", "subtitle"):
+        if not _optional(props, key, _txt(120)):
+            raise _Reject(f"a {kind} {key} that is not short plain text")
+    if not required <= props.keys():
+        raise _Reject(f"a {kind} without {', '.join(sorted(required - props.keys()))}")
+    for key, ok in checks.items():
+        if not _optional(props, key, ok):
+            raise _Reject(f"a {kind} {key} outside the widget's enums, caps or plain text")
+
+
 _DATA_CHECKS = {"notes": _check_notes, "music-player": _check_music_player}
 _DATA_CHECKS["booking"] = _check_booking
+_DATA_CHECKS |= dict.fromkeys(_CATALOG_CHECKS, _check_catalog)
 
 _PLAY_CHECKS = {
     "memory-match": _check_memory_match,
