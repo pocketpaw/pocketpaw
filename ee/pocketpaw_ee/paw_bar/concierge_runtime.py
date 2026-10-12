@@ -1583,6 +1583,9 @@ def _cards_paragraph(
             "each anchor and focus one of its names, up to 12 annotations with your own "
             "plain label and note (an illustration's caps); never a src, poster or URL. "
             + " ".join(f"{k}({','.join(v['anchors'])})" for k, v in RIPPLE_MODELS.items()),
+            # A map: the documented prop shape, OSM tiles only (card_spec._check_map).
+            "   - map: center [lat,lng], zoom, markers[{id,lat,lng,label}], "
+            'paths[{id,points:[[lat,lng]...]}]; tiles "osm"; say routes are approximate.',
             _RIPPLE_RULES[-1],
         ]
         return "\n".join(lines + _form_lines(declared, lead_capture))

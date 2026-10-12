@@ -235,6 +235,16 @@ RIPPLE_MODELS: dict[str, dict[str, Any]] = json.loads(
 )
 MODEL_ANNOTATIONS_MAX = 12
 MODEL_URL_PROPS: frozenset[str] = frozenset({"src", "poster", "environmentImage"})
+# Ripple's ``map`` on a model-made card: OSM tiles only (``tiles`` absent or "osm", none
+# of ``MAP_TILE_PROPS``, refused while streaming too), at most ``MAP_MAX_PINS`` markers
+# plus trackers and ``MAP_MAX_POINTS`` points across route, paths, polygons and trails;
+# each marker an object with no ``icon``, a plain-text ``label`` and ``popup`` (no ``<``,
+# no ``{``, at most ``ASK_MAX``) and ``actions`` only an ``emit ask``. Keep in parity
+# with ripple's ``routes/pawbar/card-policy.ts`` rule 14.
+MAP = "map"
+MAP_TILE_PROPS: frozenset[str] = frozenset({"tileUrl", "tileAttribution"})
+MAP_MAX_PINS = 30
+MAP_MAX_POINTS = 500
 # A button's choice-card ``icon`` (a flow option tile): a key shaped like ripple's icon
 # names. An unknown key passes (the widget ignores it); markup or a URL does not.
 # Its ``description`` hint: plain text, at most this long.
@@ -784,6 +794,8 @@ def _strict_walk(
                 _check_bill_split(value, props)
             if kind == MODEL_VIEWER:
                 _check_model_viewer(props or {})
+            if kind == MAP:
+                _check_map(props or {})
             if kind in _PLAY_CHECKS:
                 _PLAY_CHECKS[kind](value, props if isinstance(props, dict) else {})
             if kind == "button":
@@ -978,6 +990,49 @@ def _check_model_viewer(props: dict[str, Any]) -> None:
             raise _Reject(
                 f"a model annotation note that is not plain text of at most {ANNOTATION_NOTE_MAX}"
             )
+
+
+def _check_map(props: dict[str, Any]) -> None:
+    """A ``map`` node: OSM tiles, capped pins and points, plain-text ask-only markers
+    (see ``MAP_TILE_PROPS``)."""
+    if MAP_TILE_PROPS & props.keys() or props.get("tiles", "osm") != "osm":
+        raise _Reject("a map with tiles other than osm")
+
+    def items(value: Any) -> list:
+        return value if isinstance(value, list) else []
+
+    markers, trackers = props.get("markers"), items(props.get("trackers"))
+    lines = [
+        props.get("route"),
+        *(
+            p.get("points")
+            for p in items(props.get("paths")) + items(props.get("polygons"))
+            if isinstance(p, dict)
+        ),
+        *(t.get("trail") for t in trackers if isinstance(t, dict)),
+    ]
+    if (
+        len(items(markers)) + len(trackers) > MAP_MAX_PINS
+        or sum(len(items(v)) for v in lines) > MAP_MAX_POINTS
+    ):
+        raise _Reject(f"a map over {MAP_MAX_PINS} pins or {MAP_MAX_POINTS} points")
+    if "markers" in props and not isinstance(markers, list):
+        raise _Reject("map markers that are not a list")
+    for pin in items(markers):
+        if not isinstance(pin, dict) or "icon" in pin:
+            raise _Reject("a map marker that is not an object without an icon")
+        for key in ("label", "popup"):
+            text = pin.get(key, "")
+            if not _plain(text) or "<" in text or _js_len(text) > ASK_MAX:
+                raise _Reject(f"a map marker {key} that is not plain text")
+        acts = pin.get("actions", [])
+        acts = acts if isinstance(acts, list) else [acts]
+        if not all(
+            isinstance(a, dict) and a.get("action") == "emit" and a.get("target") == ASK_EVENT
+            and a.keys() <= {"action", "target", "value"}
+            for a in acts
+        ):  # fmt: skip
+            raise _Reject("a map marker action that is not an emit ask")
 
 
 def _is_number(value: Any) -> bool:
@@ -2143,6 +2198,10 @@ class PartialScan:
             if node[0] and node[1] == "props" and node[5] == MODEL_VIEWER:
                 self.hit = True
                 return
+        if top[0] and not styled and key in MAP_TILE_PROPS and node is not None:
+            if node[0] and node[1] == "props" and node[5] == MAP:
+                self.hit = True
+                return
         self.hit = _string_fails(value, key, styled, self._hosts)
 
 
@@ -2271,6 +2330,10 @@ __all__ = [
     "FLOW_EVENTS",
     "FLOW_STEP_KEYS",
     "MAX_FLOW_STEPS",
+    "MAP",
+    "MAP_MAX_PINS",
+    "MAP_MAX_POINTS",
+    "MAP_TILE_PROPS",
     "MODEL_ANNOTATIONS_MAX",
     "MODEL_URL_PROPS",
     "MODEL_VIEWER",

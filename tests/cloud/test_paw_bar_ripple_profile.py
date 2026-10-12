@@ -309,7 +309,8 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # description no longer recaps a row shape its field list gives, the game sentence
     # drops what the typed lines say, brief lines 73 chars) with their mapping added;
     # 33,627 with the 3D line (the model library's 31 ids and anchors, 1,332 chars of
-    # it), then 31,750 with brief lines at 50 chars and the illustration line shorter.
+    # it), then 31,750 with brief lines at 50 chars and the illustration line shorter;
+    # 31,889 with the map line.
     assert len(text) < 32_000
 
 
@@ -1297,7 +1298,8 @@ def test_i1_an_allowed_host_passes_and_presets_and_colours_stay_usable():
     assert _ripple(spec) is None
     allowed = dataclasses.replace(RIPPLE_PROFILE, url_hosts=frozenset({"cdn.example.com"}))
     assert render_card(_body(spec), [], profile=allowed) is not None
-    assert _ripple({"ui": {"type": "map", "props": {"tiles": "carto-light"}}}) is not None
+    # A map keeps the osm preset only (_check_map); carto-light is refused.
+    assert _ripple({"ui": {"type": "map", "props": {"tiles": "osm"}}}) is not None
     assert _ripple({"ui": {"type": "qr", "props": {"value": "x", "background": "#fff"}}})
 
 
@@ -3117,8 +3119,12 @@ def test_a_documented_osm_map_with_an_asking_marker_passes():
 
     paths = [{"id": "r", "points": [[38.71, -9.13], [38.72, -9.12]]}]
     markers = [_pin(id="a", popup="The station", actions=_ask())]
-    assert render_card(_body(_map(tiles="osm", paths=paths, markers=markers)), [], profile=RIPPLE_PROFILE)
-    assert render_card(_body(_map(markers=[_pin(actions=[_ask("More")])])), [], profile=RIPPLE_PROFILE)
+    assert render_card(
+        _body(_map(tiles="osm", paths=paths, markers=markers)), [], profile=RIPPLE_PROFILE
+    )
+    assert render_card(
+        _body(_map(markers=[_pin(actions=[_ask("More")])])), [], profile=RIPPLE_PROFILE
+    )
 
 
 @pytest.mark.parametrize(
@@ -3132,12 +3138,26 @@ def test_a_documented_osm_map_with_an_asking_marker_passes():
         ("an expression label", {"markers": [_pin(label="{state.x}")]}),
         ("an html popup", {"markers": [_pin(popup="<i>hi</i>")]}),
         ("a marker icon", {"markers": [_pin(icon="building")]}),
-        ("a marker set action", {"markers": [_pin(actions={"action": "set", "target": "x", "value": 1})]}),
-        ("a marker emitting checkout", {"markers": [_pin(actions={"action": "emit", "target": "checkout", "value": {}})]}),
+        (
+            "a marker set action",
+            {"markers": [_pin(actions={"action": "set", "target": "x", "value": 1})]},
+        ),
+        (
+            "a marker emitting checkout",
+            {"markers": [_pin(actions={"action": "emit", "target": "checkout", "value": {}})]},
+        ),
         ("a marker that is not an object", {"markers": ["Rossio"]}),
         ("31 markers", {"markers": [_pin()] * 31}),
         ("501 route points", {"route": [{"lat": 1, "lng": 2}] * 501}),
-        ("501 points across paths", {"paths": [{"id": "a", "points": [[1, 2]] * 300}, {"id": "b", "points": [[1, 2]] * 201}]}),
+        (
+            "501 points across paths",
+            {
+                "paths": [
+                    {"id": "a", "points": [[1, 2]] * 300},
+                    {"id": "b", "points": [[1, 2]] * 201},
+                ]
+            },
+        ),
     ],
 )
 def test_a_map_holds_to_osm_tiles_and_plain_pins(why, props):
@@ -3157,5 +3177,8 @@ def test_a_streamed_map_tile_url_is_refused_before_the_card_closes():
 
 def test_the_prompt_carries_the_map_hint():
     text = _ripple_paragraph()
-    assert "map: center [lat,lng], zoom, markers[{id,lat,lng,label}], paths[{id,points:[[lat,lng]...]}]" in text
+    assert (
+        "map: center [lat,lng], zoom, markers[{id,lat,lng,label}], "
+        "paths[{id,points:[[lat,lng]...]}]" in text
+    )
     assert 'tiles "osm"' in text and "approximate" in text
