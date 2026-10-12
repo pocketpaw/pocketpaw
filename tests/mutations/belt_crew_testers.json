@@ -296,5 +296,42 @@
     "tests": [
       "tests/cloud/test_belt_foreman_failure.py::test_a_failed_foreman_call_finishes_the_shift"
     ]
+  },
+  {
+    "label": "the runs list drops each run's screenshots",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            for s in blob.get(\"screenshots\") or []\n            if isinstance(s, dict)\n        ],\n    }",
+    "replace": "            for s in []\n        ],\n    }",
+    "tests": [
+      "tests/cloud/test_belt_console.py::test_run_screenshots_are_listed_and_served"
+    ]
+  },
+  {
+    "label": "a recent shift never names who approved its plan",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            approved_by = getattr(action, \"approved_by\", None) or None",
+    "replace": "            approved_by = None",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_auto_gate_approves_through_the_resolve_path",
+      "tests/cloud/test_belt_mandates.py::test_resolve_mixed_verdicts_dispatches_kept_tasks_one_terminal"
+    ]
+  },
+  {
+    "label": "a recent shift drops the auto gate's decision",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "                policy = {\"decision\": found.get(\"decision\"), \"reason\": found.get(\"reason\")}",
+    "replace": "                policy = None",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_auto_gate_approves_through_the_resolve_path"
+    ]
+  },
+  {
+    "label": "Mission Control never says whether a Belt run is ready",
+    "file": "ee/pocketpaw_ee/cloud/mission_control/service.py",
+    "find": "            not _is_queued_station_run(action) if _code_change_blob(action) is not None else None",
+    "replace": "            None",
+    "tests": [
+      "tests/cloud/test_belt_queued_run_approve.py::test_mission_control_items_say_which_belt_runs_are_ready"
+    ]
   }
 ]

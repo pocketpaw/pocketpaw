@@ -363,7 +363,7 @@ still at the plan gate, and the last 3 shifts'.
 | POST | `/belt/mandates` | `belt.manage` | Create (charter body + `patrols` senses toggles + optional `upstream` watch list + optional `crew`) → `{mandate}` |
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
 | GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
-| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts, sightings-by-patrol, and the `line` block (see *The line: one branch per mandate*; the `{mandate}` that create, crew and autopilot return carries it too) |
+| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts (each with `approved_by`, the plan Action's approver such as a user id or `system:belt-policy`, and `policy`, the auto gate's `{decision, reason}`; both `null` when they do not apply), sightings-by-patrol, and the `line` block (see *The line: one branch per mandate*; the `{mandate}` that create, crew and autopilot return carries it too) |
 | PUT | `/belt/mandates/{id}/crew` | `belt.manage` | Replace the crew roster: `{crew: [{agent_id, role: dev\|reviewer\|foreman\|tester, concurrency (1-8), setup?: owner\|strict}]}` → `{mandate}`; see *The crew* below |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
@@ -573,6 +573,9 @@ sweeper, so pytest runs never spawn background loops that outlive the test.
   `belt.run_queued`, and the instinct and Mission Control bulk-approves leave it
   pending and report it in `missing`. The belt executor still refuses a
   `station_pending` blob that reaches it (`error_class="StationPending"`).
+  Mission Control items carry `belt_change_ready` (`true` when a Belt run has
+  a diff to approve, `false` for a queued run, `null` on anything else), so a
+  bulk bar can leave the queued ones out.
 - **`headless`** — `HeadlessTaskDispatcher` files the same queued run, then
   produces the diff with no human in the loop and attaches it; the run becomes
   a pending `code_change` at the per-diff gate. While the station works it the
@@ -1234,9 +1237,9 @@ mandate plan task it works, `null` on a hand-driven run), and `error`: why the
 run failed, which is the executor's reason (`Action.error`) or, for a develop
 that failed, the `headless_error`. `null` when nothing failed.
 
-`GET /api/v1/belt/runs/{id}` also returns `screenshots: [{name, bytes}]` (the
-cloud station's kept snapshot PNGs, `[]` when none) and `tester` (`{session_url,
-at}`, `{error, at}`, or `null`). `GET /api/v1/belt/runs/{id}/screenshots/{name}`
+Every run row, on the list and the detail, carries `screenshots: [{name,
+bytes}]` (the cloud station's kept snapshot PNGs, `[]` when none); the detail
+also returns `tester` (`{session_url, at}`, `{error, at}`, or `null`). `GET /api/v1/belt/runs/{id}/screenshots/{name}`
 (`belt.read`, the same tenancy 404) serves one PNG as `image/png` with
 `X-Content-Type-Options: nosniff`; a name the run does not list, or one that
 resolves anywhere but straight inside the run's dir (a symlink out included),

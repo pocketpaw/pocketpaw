@@ -805,6 +805,10 @@ async def test_resolve_mixed_verdicts_dispatches_kept_tasks_one_terminal(
     prints = client.get(f"/belt/mandates/{mandate_id}/pawprints").json()["pawprints"]
     assert [p["kind"] for p in prints] == ["proposed", "edited", "executed"]
 
+    # The detail's recent shift names who decided the plan (no auto gate here).
+    (recent,) = client.get(f"/belt/mandates/{mandate_id}").json()["recent_shifts"]
+    assert (recent["approved_by"], recent["policy"]) == (USER, None)
+
     # Realtime: the resolve announced itself, and every shift state rode the bus.
     resolved = [e.data for e in recording_bus.events if e.type == "belt_plan_resolved"]
     assert resolved == [

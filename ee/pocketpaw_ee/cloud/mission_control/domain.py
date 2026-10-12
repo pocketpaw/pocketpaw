@@ -94,6 +94,9 @@ class WorkItem:
     fabric_refs: tuple[str, ...] = field(default_factory=tuple)
     blocked_by: tuple[str, ...] = field(default_factory=tuple)
     due_at: datetime | None = None
+    # A Belt run's diff is there to approve (not a queued station run);
+    # ``None`` on anything that is not a Belt run.
+    belt_change_ready: bool | None = None
 
 
 __all__ = [

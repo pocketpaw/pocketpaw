@@ -760,6 +760,13 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "headless_state": str(blob.get("headless_state") or "") or None,
         # How many times the executor sent it back to re-develop on a moved base.
         "redevelop": int(blob.get("redevelop") or 0),
+        # The cloud station's kept snapshot PNGs, served one by one by
+        # ``get_run_screenshot`` (the list's thumbnails).
+        "screenshots": [
+            {"name": str(s.get("name")), "bytes": int(s.get("bytes") or 0)}
+            for s in blob.get("screenshots") or []
+            if isinstance(s, dict)
+        ],
     }
 
 
@@ -813,9 +820,8 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
 
     A foreign or non-belt Action is a 404 (``_owned_run``). The diff is read off
     the blob and truncated to ``MAX_DIFF_BYTES``; a ``diff_truncated`` flag tells
-    the UI when it was cut. ``screenshots`` lists the run's kept snapshot PNGs
-    (``{name, bytes}``, served by ``get_run_screenshot``) and ``tester`` is the
-    cloud tester session, when one ran.
+    the UI when it was cut. ``tester`` is the cloud tester session, when one
+    ran (``screenshots`` rides the shared run row).
     """
     action, blob = await _owned_run(workspace_id, action_id)
     summary = _run_summary(action, blob)
@@ -828,11 +834,6 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
         truncated = True
     summary["diff"] = diff_text
     summary["diff_truncated"] = truncated
-    summary["screenshots"] = [
-        {"name": str(s.get("name")), "bytes": int(s.get("bytes") or 0)}
-        for s in blob.get("screenshots") or []
-        if isinstance(s, dict)
-    ]
     summary["tester"] = blob.get("tester") or None
     return summary
 

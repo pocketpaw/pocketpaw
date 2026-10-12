@@ -258,6 +258,8 @@ class ShiftSummaryResponse(BaseModel):
     state: ShiftState
     plan_action_id: str | None = None
     created_at: datetime
+    approved_by: str | None = None
+    policy: dict | None = None
 
 
 class MandateDetailResponse(BaseModel):

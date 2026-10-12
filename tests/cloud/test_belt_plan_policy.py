@@ -227,6 +227,11 @@ async def test_auto_gate_approves_through_the_resolve_path(
     assert chain[1].actor.id == "user:system:belt-policy"
     assert chain[2].payload["action_outcome"] == "dispatched"
 
+    (shift,) = (await mandate_service.get_mandate(WS, USER, mandate_id))["recent_shifts"]
+    assert shift["approved_by"] == "system:belt-policy"
+    assert shift["policy"]["decision"] == "approved"
+    assert "tasks_independent 0.74" in shift["policy"]["reason"]
+
     (resolved,) = [e.data for e in recording_bus.events if e.type == "belt_plan_resolved"]
     assert resolved["resolved_by"] == "system:belt-policy"
     assert (resolved["plan_action_id"], resolved["approved"], resolved["rejected"]) == (

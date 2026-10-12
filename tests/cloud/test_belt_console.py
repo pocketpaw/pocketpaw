@@ -635,12 +635,15 @@ async def test_run_screenshots_are_listed_and_served(store, tmp_path, monkeypatc
         escape = client.get(f"{base}/screenshots/..%2Fsecret.png")
         link = client.get(f"{base}/screenshots/link.png")
         missing = client.get("/api/v1/belt/runs/act-nope/screenshots/home-dark.png")
+        rows = client.get("/api/v1/belt/runs").json()["runs"]
 
     assert detail["screenshots"] == [
         {"name": "home-dark.png", "bytes": len(PNG)},
         {"name": "link.png", "bytes": len(PNG)},
     ]
     assert detail["tester"] == {"session_url": "https://claude.ai/code/session_T", "at": 1.0}
+    (row,) = [r for r in rows if r["action_id"] == action.id]
+    assert row["screenshots"] == detail["screenshots"]  # the list's thumbnails
     assert png.status_code == 200, png.text
     assert png.headers["content-type"] == "image/png"
     assert png.content == PNG

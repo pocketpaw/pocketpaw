@@ -100,6 +100,39 @@ async def test_mission_control_bulk_approve_skips_queued_runs(store, executed, m
     assert executed == [ready.id]
 
 
+async def test_mission_control_items_say_which_belt_runs_are_ready(store, monkeypatch):
+    monkeypatch.setattr(mc_service, "get_instinct_store", lambda *a, **k: store)
+    monkeypatch.setattr(
+        mc_service.pockets_service, "visible_pocket_refs", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.tasks.service.agent_list_tasks", AsyncMock(return_value=[])
+    )
+    queued = await _run(store)
+    ready = await _run(store, diff=DIFF, pending=False)
+    plain = await store.propose(
+        WS,
+        "Not a belt run",
+        "",
+        "",
+        ActionTrigger(type="agent", source="x", reason="r"),
+        parameters={"_external_action": {"connector": "stripe", "workspace_id": WS}},
+        workspace_id=WS,
+    )
+    ctx = RequestContext(
+        user_id="u1",
+        workspace_id=WS,
+        request_id="r",
+        scope=ScopeKind.NONE,
+        started_at=datetime.now(UTC),
+    )
+
+    items = await mc_service.agent_list_work_items(ctx, {})
+
+    ready_by_id = {it.source_id: it.belt_change_ready for it in items}
+    assert ready_by_id == {queued.id: False, ready.id: True, plain.id: None}
+
+
 @pytest.fixture
 def client(store: InstinctStore, monkeypatch):
     import pocketpaw_ee.cloud.workspace.service as ws_svc

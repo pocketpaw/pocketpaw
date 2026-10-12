@@ -21,7 +21,8 @@
 #     each with the chain emits from ``instinct.chain_emitters`` and per-item
 #     isolation (``executed`` reports each outcome).
 #   * A queued Belt run (``instinct.router._is_queued_station_run``) is never
-#     bulk-approved: it stays pending and is reported in ``missing``.
+#     bulk-approved: it stays pending and is reported in ``missing``. Each Belt
+#     run's item says so up front (``belt_change_ready``; ``None`` off Belt).
 #
 # History lives in ``git log -p`` on this file.
 """Mission Control façade service.
@@ -258,6 +259,8 @@ def _action_to_work_item(
     When the source isn't in the map (unknown user, malformed id) we fall
     back to the id — the same non-leaking behavior the map's builder uses.
     """
+    from pocketpaw_ee.instinct.router import _code_change_blob, _is_queued_station_run
+
     name_map = actor_name_map or {}
     section, status = _status_to_section_status(action.status)
     assignee_id = action.assignee or _trigger_assignee(action) or ""
@@ -285,6 +288,9 @@ def _action_to_work_item(
         created_at=action.created_at,
         updated_at=action.updated_at,
         fabric_refs=tuple(action.context.object_ids) if action.context else (),
+        belt_change_ready=(
+            not _is_queued_station_run(action) if _code_change_blob(action) is not None else None
+        ),
     )
 
 

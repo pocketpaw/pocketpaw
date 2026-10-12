@@ -347,6 +347,7 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
                 "state": s.state,
                 "plan_action_id": s.plan_action_id,
                 "created_at": s.createdAt,
+                **await _plan_decision(workspace_id, s.plan_action_id),
             }
             for s in recent_shifts
         ],
@@ -354,6 +355,30 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
         "created_at": doc.createdAt,
         "line": await line_status(doc.surface.repo_id, mandate_id),
     }
+
+
+async def _plan_decision(workspace_id: str, plan_action_id: str | None) -> dict[str, Any]:
+    """Who decided a shift's plan: ``approved_by`` (the plan Action's approver,
+    a user id or ``system:belt-policy``; ``None`` while undecided or rejected)
+    and ``policy`` (the auto plan gate's ``{decision, reason}`` off the plan
+    blob, ``None`` when the gate never looked)."""
+    approved_by, policy = None, None
+    if plan_action_id:
+        from pocketpaw.stores import get_instinct_store
+        from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
+
+        try:
+            action = await get_instinct_store(workspace_id=workspace_id or None).get_action(
+                plan_action_id
+            )
+            approved_by = getattr(action, "approved_by", None) or None
+            blob = (getattr(action, "parameters", None) or {}).get(BELT_PLAN_PARAM_KEY) or {}
+            found = blob.get("policy") if isinstance(blob, dict) else None
+            if isinstance(found, dict):
+                policy = {"decision": found.get("decision"), "reason": found.get("reason")}
+        except Exception:  # noqa: BLE001 — the detail degrades, never fails
+            logger.debug("mandate: plan decision read failed", exc_info=True)
+    return {"approved_by": approved_by, "policy": policy}
 
 
 # ---------------------------------------------------------------------------
