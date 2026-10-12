@@ -25,8 +25,12 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.paw_bar.card_spec import (
+    ISO_KINDS,
+    ISO_MOTIONS,
+    ISO_ROLES,
     RIPPLE_ALIASES,
     RIPPLE_DATA_WIDGETS,
+    RIPPLE_FIGURES,
     RIPPLE_MODELS,
     RIPPLE_PLAY_WIDGETS,
     RIPPLE_PROFILE,
@@ -40,6 +44,37 @@ TOP_K = 8  # widgets picked by score
 MAX_EARLIER = 4  # widgets kept because an earlier card used them
 MAX_PICKED = TOP_K + MAX_EARLIER
 _HISTORY_TURNS = 2
+# The iso-scene line's example: ripple's manifest example for the widget
+# (manifest/entries/iso-scene.ts, two meshed gears), which the vendored manifest
+# drops, so a small model sees the parts/motions/params shape once. It must pass
+# the ripple checks as a card (tests/cloud/test_paw_bar_widget_relevance.py).
+ISO_SCENE_EXAMPLE: dict[str, Any] = {
+    "type": "iso-scene",
+    "bind": "{state.gears}",
+    "props": {
+        "title": "Two gears",
+        "params": [
+            {"key": "speed", "label": "Input speed", "min": 10, "max": 120, "step": 5,
+             "unit": "rpm", "value": 40}
+        ],
+        "parts": [
+            {"id": "base", "kind": "slab", "at": [20, 0, -4], "w": 120, "d": 60, "h": 4, "r": 6},
+            {"id": "big", "kind": "gear", "at": [0, 0, 6], "r": 30, "h": 6, "teeth": 30,
+             "color": "metal"},
+            {"id": "small", "kind": "gear", "at": [44, 0, 6], "r": 15, "h": 6, "teeth": 15,
+             "color": "accent"},
+        ],
+        "motions": [
+            {"part": "big", "kind": "spin", "speed": "speed / 60"},
+            {"part": "small", "kind": "spin", "speed": "speed / 60 * -2", "phase": 0.03},
+        ],
+        "readouts": [{"label": "Output speed", "value": "speed * 2", "unit": "rpm", "decimals": 0}],
+        "labels": [
+            {"part": "big", "label": "Driver", "note": "30 teeth"},
+            {"part": "small", "label": "Driven", "note": "15 teeth, twice as fast"},
+        ],
+    },
+}  # fmt: skip
 
 # Always listed with full lines: the layout atoms and inputs the authoring rules
 # lean on (the profile's detailed set less the data and play widgets).
@@ -84,6 +119,8 @@ def _keywords(widget: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
     phrases |= {" ".join(_words(i)) for i in INTENTS.get(name, {}).get("intents", ())}
     if name == "model-viewer":
         phrases |= {" ".join(_words(k)) for k in RIPPLE_MODELS}
+    if name == "figure":
+        phrases |= {" ".join(_words(k.replace("-", " "))) for k in RIPPLE_FIGURES}
     parts = {_stem(p) for n in [name, *aliases] if "-" in n for p in n.split("-")}
     desc = {w for w in _words(str(widget.get("description", ""))) if w not in _STOP}
     return phrases - {""}, parts - {""}, desc
@@ -146,6 +183,10 @@ def full_line(name: str) -> str:
             "own plain label and note (an illustration's caps); never a src, poster or "
             "URL. " + " ".join(f"{k}({','.join(v['anchors'])})" for k, v in RIPPLE_MODELS.items())
         )
+    if name == "figure":
+        return _hinted(name, _figure_line())
+    if name == "iso-scene":
+        return _hinted(name, _iso_scene_line())
     entry = INTENTS.get(name, {})
     if entry.get("line"):
         return f"- {name}: {entry['line']}"
@@ -157,6 +198,45 @@ def full_line(name: str) -> str:
         else _widget_line(widget)
     )
     return _hinted(name, line)
+
+
+def _figure_line() -> str:
+    """figure's line from the vendored catalog, so a new figure id rides along."""
+    figures = " ".join(
+        f"{fid}({f['title']}; "
+        + ", ".join(f"{p['key']} {p['min']}..{p['max']}" for p in f["params"])
+        + f"; anchors {','.join(f['anchors'])})"
+        for fid, f in RIPPLE_FIGURES.items()
+    )
+    return (
+        "- figure {figure, params?, labels?: [{anchor, label?, note?}], caption?}, bind "
+        '"{state.<key>}": a hand-built live isometric figure with sliders, readouts and '
+        "numbered labels. figure is one of these ids, params a start value per slider "
+        "key within its range, up to 10 labels each on one of its anchors with your own "
+        f"plain label and note. {figures}."
+    )
+
+
+def _iso_scene_line() -> str:
+    """iso-scene's line: the parts, motions and params shape, the caps card_spec
+    holds it to, and ``ISO_SCENE_EXAMPLE``."""
+    return (
+        "- iso-scene {title?, caption?, params?, parts, motions?, readouts?, labels?}, "
+        'bind "{state.<key>}": a live isometric drawing of a machine or mechanism that '
+        "ripple draws and animates from your parts list (never SVG). parts (up to 150): "
+        f"{{id, kind: {'|'.join(sorted(ISO_KINDS))}, at: [x,y,z] (centre, z up, the "
+        "scene about 300 across), w,d,h (slab, box, plate) or r,h (cylinder, disc, gear "
+        "with teeth, cone; axis x|y|z) or path [[x,y,z]...] and r (tube) or from, to "
+        f"and r (rod, arrow), color?: {'|'.join(sorted(ISO_ROLES))}, on?: a parent part "
+        "id it moves with}. motions (up to 20): {part, kind: "
+        f"{'|'.join(sorted(ISO_MOTIONS))}, axis?, speed (turns a second), range?, "
+        "phase?}. params (up to 6): {key, label, min, max, step?, unit?, value}. "
+        "readouts (up to 4): {label, value, unit?, decimals?}. labels (up to 10): "
+        "{part, label, note?}. A speed or readout value is a number or a plain "
+        "expression over param keys with numbers and + - * / ( ): no braces, no "
+        "functions, no other names. Example: "
+        + json.dumps(ISO_SCENE_EXAMPLE, separators=(",", ":"))
+    )
 
 
 def _hinted(name: str, line: str) -> str:

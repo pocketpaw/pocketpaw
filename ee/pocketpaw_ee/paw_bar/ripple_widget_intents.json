@@ -31,6 +31,14 @@
     "intents": ["savings", "save", "invest", "interest", "compound", "grow", "growth", "retirement", "deposit"],
     "hint": "It has its own deposit, rate and years controls; never add inputs around it."
   },
+  "figure": {
+    "intents": ["heart", "heartbeat", "heart pump", "how the heart pumps", "cardiac"],
+    "hint": "When a figure exists for the subject, use it: pick anchors and write notes; it is hand-built and best, ahead of an iso-scene, a model-viewer or an illustration."
+  },
+  "iso-scene": {
+    "intents": ["how does", "how do", "how it works", "show how", "machine", "mechanism", "gears", "gear", "engine", "pump", "piston", "drivetrain", "animated drawing", "animated diagram"],
+    "hint": "Build the object from parts (base plate, solids, gears, tubes), give moving parts motions driven by 1-3 params, 2-3 readouts computed from the params, 3-6 labels; keep it under ~40 parts. Use it over an illustration for a machine or mechanism (an illustration stays for flat diagrams), and use a figure instead when one exists for the subject."
+  },
   "illustration": {"intents": ["draw", "drawing", "picture", "diagram", "illustrate", "animated", "how does", "how do", "explain"]},
   "invoice-layout": {
     "intents": ["invoice", "bill client", "billing", "receipt", "hours of", "line items", "bill a client"],

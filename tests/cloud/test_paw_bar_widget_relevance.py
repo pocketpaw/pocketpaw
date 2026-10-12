@@ -4,6 +4,8 @@
 # first, and core plus the worst-case section stays under the 32,000 cap.
 from __future__ import annotations
 
+import json
+
 import pytest
 from pocketpaw_ee.paw_bar import widget_relevance
 from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
@@ -54,6 +56,19 @@ _CHIPS = [
     ("create an invoice", "invoice-layout"),
     ("due diligence checklist", "checklist-layout"),
     ("order a pizza", "menu-order"),
+    # The drawing widgets (ripple #236, #237): its /live gallery prompts.
+    (
+        "Show how a bike's chain drive works as a live drawing, with a cadence slider "
+        "and how far one pedal turn takes you",
+        "iso-scene",
+    ),
+    ("Show me how a one-cylinder piston engine moves, with an engine speed slider", "iso-scene"),
+    ("Draw the gears of a clock as an animated diagram", "iso-scene"),
+    (
+        "How does the heart pump blood? Show me the two sides and the valves, and let me "
+        "change the heart rate.",
+        "figure",
+    ),
 ]
 
 
@@ -87,6 +102,29 @@ def test_the_steering_hints_reach_the_section():
     assert "never add inputs around it" in savings
     invoice = _section(_paragraph("create an invoice"))
     assert "summary rows use value" in invoice
+
+
+def test_the_drawing_lines_teach_the_shape_and_the_preference():
+    """figure's line names every catalog id with its sliders and anchors; iso-scene's
+    carries its kinds, the expression rule and an example card that passes the
+    checks; both hints steer figure over iso-scene over illustration.
+    THE MUTATION THAT BREAKS THIS: drop the figure or iso-scene branch of full_line."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES, render_card
+
+    heart = _section(_paragraph("How does the heart pump blood?"))
+    assert "   - figure {figure" in heart and "   - iso-scene {" in heart
+    for fid, figure in RIPPLE_FIGURES.items():
+        assert f"{fid}({figure['title']}; " in heart
+        assert ",".join(figure["anchors"]) in heart
+    assert "bpm 40..180" in heart and "it is hand-built and best" in heart
+    gears = _section(_paragraph("Show how the gears in a gearbox work"))
+    iso = next(line for line in gears.splitlines() if line.startswith("   - iso-scene "))
+    assert "arrow|box|cone|cylinder|disc|gear|plate|rod|slab|sphere|tube" in iso
+    assert "no braces, no functions" in iso and "keep it under ~40 parts" in iso
+    assert "an illustration stays for flat diagrams" in iso
+    assert '"speed":"speed / 60"' in iso
+    card = {"ui": widget_relevance.ISO_SCENE_EXAMPLE, "state": {}}
+    assert render_card(json.dumps(card), [], profile=RIPPLE_PROFILE) is not None
 
 
 def test_the_core_widgets_carry_their_steering_hints_on_every_turn():
@@ -205,9 +243,10 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
 
 
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
-    """The fixed core is about 18,600 chars; the worst per-turn section is the
-    MAX_PICKED longest candidate lines (about 7,300), so the paragraph peaks near
-    25,900, against 31,855 when every widget rode every turn."""
+    """The fixed core is 18,583 chars (the drawing widgets added only their two
+    names to the index); the worst per-turn section is the MAX_PICKED longest
+    candidate lines (about 9,450, iso-scene's 2,136 the longest), so the paragraph
+    peaks near 28,100, under the 32,000 cap."""
     core = _paragraph()
     longest = sorted(
         (len(widget_relevance.full_line(n)) + 4 for n in widget_relevance.CANDIDATES),
