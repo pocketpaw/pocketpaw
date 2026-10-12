@@ -72,6 +72,33 @@
     ]
   },
   {
+    "label": "a landed run keeps an empty diff",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            await _patch(store, run_ref, diff=diff if diff.endswith(\"\\n\") else diff + \"\\n\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_merged_pr_lands_the_run"
+    ]
+  },
+  {
+    "label": "a landing never fetches the bound repo",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        await self._fetch_bound(blob)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_merged_pr_lands_the_run"
+    ]
+  },
+  {
+    "label": "a landing reuses Clef's diff after the head moved",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "known = clef_diff if clef_head == head else \"\"",
+    "replace": "known = clef_diff",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_landing_refetches_the_diff_when_the_head_moved"
+    ]
+  },
+  {
     "label": "the seated dev's instructions are left out of the brief",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "f\"{_task_block(request)}\\n\\n{_worker_block(request)}\"",
@@ -83,8 +110,8 @@
   {
     "label": "the PR's diff never reaches Clef's shadow scorer",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                    await self._shadow_score(blob, run_ref, slug, number, cwd)\n",
-    "replace": "",
+    "find": "clef_diff = await self._shadow_score(blob, run_ref, slug, number, cwd)",
+    "replace": "clef_diff = \"\"",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_merged_pr_lands_the_run"
     ]

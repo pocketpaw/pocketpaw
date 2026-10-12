@@ -19,7 +19,9 @@
 # conflicting one a rebase brief, a red one a brief carrying the failed job's
 # last 40 log lines; a PR that goes green within grace gets none; the attempts
 # cap escalates like a refusal; a fixer that fails to launch is recorded on the
-# blob's ``fixes`` and tracking goes on. ``pty_run.py`` itself runs for real:
+# blob's ``fixes`` and tracking goes on. A landed run carries the PR's diff
+# (Clef's copy when the head has not moved, else fetched again) and fetches the
+# bound repo, whose failure never fails the land. ``pty_run.py`` itself runs for real:
 # it streams the child's output as it lands and exits on the folder-trust
 # prompt instead of waiting; ``wire_from_env`` wires the cloud dispatcher only
 # with a launch clone.
@@ -109,6 +111,7 @@ class FakeRunner:
         pr: dict | list[dict] | None = None,
         launch_code: int = 0,
         launch_lines: tuple[str, ...] = (),
+        repo_fetch_code: int = 0,
     ):
         self.calls: list[tuple[list[str], Path]] = []
         # A list is consumed one entry per launch / per ``gh pr view``, holding the last.
@@ -116,6 +119,7 @@ class FakeRunner:
         self.launch_code = launch_code
         self.launch_lines = launch_lines  # streamed through on_line before returning
         self.launch_origin = launch_origin
+        self.repo_fetch_code = repo_fetch_code  # ``git fetch`` in the bound repo
         self.prs = pr if isinstance(pr, list) else [pr]
         self.run_ref = ""
 
@@ -146,6 +150,8 @@ class FakeRunner:
             return 0, "".join(f"build\tstep\tL{i:03d}\n" for i in range(1, 51)), ""
         if argv[:3] == ["gh", "pr", "diff"]:
             return 0, DIFF, ""
+        if "fetch" in argv and cwd.name == "repo":
+            return self.repo_fetch_code, "", "fatal: unable to access origin"
         return 0, "", ""  # git fetch / checkout
 
 
@@ -206,6 +212,11 @@ async def test_merged_pr_lands_the_run(store, dirs, monkeypatch):
     assert cc["cloud"] == {"session_url": "https://claude.ai/code/session_ABC123", "pr": 9}
     assert any(a[:4] == ["gh", "pr", "view", "9"] for a, _ in runner.calls)
     assert "headless_state" not in cc
+    # The merged PR's diff is on the blob for the UI, reusing Clef's fetch.
+    assert cc["diff"] == DIFF
+    assert sum(a[:3] == ["gh", "pr", "diff"] for a, _ in runner.calls) == 1
+    # The bound repo is fetched so the blueprint reads a fresh origin/main.
+    assert any(a[-3:] == ["fetch", "-q", "origin"] and c == repo for a, c in runner.calls)
 
     # Launched from the launch clone, detached at origin/main, with the brief.
     git = [argv for argv, cwd in runner.calls if cwd == launch and "git" in argv[0]]
@@ -503,6 +514,36 @@ async def test_fixer_launch_failure_is_recorded_and_tracking_goes_on(store, dirs
     assert entry["kind"] == "rebase" and "session_url" not in entry
     assert "no cloud session started" in entry["error"]
     assert "headless_error" not in cc
+
+
+async def test_landing_refetches_the_diff_when_the_head_moved(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=[_open("h1"), {**MERGED, "headRefOid": "h2"}])
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert action.parameters["_code_change"]["diff"] == DIFF
+    # Clef's diff was of h1; the landed diff is fetched again for h2.
+    assert sum(a[:3] == ["gh", "pr", "diff"] for a, _ in runner.calls) == 2
+
+
+async def test_bound_repo_fetch_failure_never_fails_the_land(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED, repo_fetch_code=128)
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    cc = action.parameters["_code_change"]
+    assert cc["diff"] == DIFF and "headless_error" not in cc
+    assert any(a[-3:] == ["fetch", "-q", "origin"] and c == repo for a, c in runner.calls)
 
 
 def _pty_child(script: str) -> list[str]:

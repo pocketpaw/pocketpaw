@@ -26,7 +26,9 @@
 #           fast lane + CI is the diff gate. Once the PR is known its diff
 #           goes to ``clef.shadow_diff`` (a recorded score that gates nothing):
 #             merged   -> the run is approved as ``system:fast-lane`` and marked
-#                         executed (landed), with pr_url, head branch, merge sha;
+#                         executed (landed), with pr_url, head branch, merge sha
+#                         and the PR's diff (Clef's copy if the head hasn't
+#                         moved); the bound repo is fetched for the blueprint;
 #             refused  -> (closed unmerged, or a ``Fast lane: not eligible``
 #                         comment) ``gh pr diff`` is attached as the run's diff,
 #                         so it waits at the per-diff Instinct gate;
@@ -284,12 +286,13 @@ class CloudTaskDispatcher:
         stuck_key: tuple[str, str] | None = None
         stuck_since = 0.0
         fixed_head = ""  # the head a fixer was launched on; the next waits for a new one
+        clef_diff, clef_head = "", None  # the diff Clef scored, and the head it was of
         while True:
             if number is None:
                 number = await self._find_pr(slug, run_ref, cwd)
                 if number is not None:
                     await _patch(store, run_ref, cloud={"session_url": session, "pr": number})
-                    await self._shadow_score(blob, run_ref, slug, number, cwd)
+                    clef_diff = await self._shadow_score(blob, run_ref, slug, number, cwd)
             if number is not None:
                 pr = json.loads(
                     await self._ok(
@@ -308,8 +311,12 @@ class CloudTaskDispatcher:
                         "TRACK: gh pr view",
                     )
                 )
+                head = str(pr.get("headRefOid") or "")
+                if clef_diff and clef_head is None:
+                    clef_head = head
                 if pr.get("state") == "MERGED":
-                    await self._land(store, run_ref, blob, pr, session)
+                    known = clef_diff if clef_head == head else ""
+                    await self._land(store, run_ref, blob, pr, session, slug, cwd, known)
                     return
                 refused = any(
                     str(c.get("body") or "").startswith(_REFUSED) for c in pr.get("comments") or []
@@ -318,7 +325,6 @@ class CloudTaskDispatcher:
                     await self._escalate(store, run_ref, blob, slug, pr, session, cwd)
                     return
                 kind, red = _stuck(pr)
-                head = str(pr.get("headRefOid") or "")
                 if kind is None or head == fixed_head:
                     stuck_key = None
                 elif stuck_key != (kind, head):
@@ -396,12 +402,14 @@ class CloudTaskDispatcher:
 
     async def _shadow_score(
         self, blob: dict[str, Any], run_ref: str, slug: str, number: int, cwd: Path
-    ) -> None:
+    ) -> str:
         """Hand the PR's diff to Clef's shadow scorer (``belt/clef.py``, off unless
         ``POCKETPAW_BELT_CLEF=shadow``). Records a verdict, gates nothing, and a
-        failure here never touches the run."""
+        failure here never touches the run. Returns the diff ("" if unread) so a
+        landing can reuse it."""
         from pocketpaw_ee.cloud.belt import clef
 
+        diff = ""
         try:
             diff = await self._ok(["gh", "pr", "diff", str(number), "-R", slug], cwd, "CLEF")
             clef.shadow_diff(
@@ -409,6 +417,7 @@ class CloudTaskDispatcher:
             )
         except Exception:  # noqa: BLE001 — shadow scoring is best-effort
             logger.info("belt cloud: clef shadow score skipped for %s", run_ref, exc_info=True)
+        return diff
 
     async def _find_pr(self, slug: str, run_ref: str, cwd: Path) -> int | None:
         out = await self._ok(
@@ -435,8 +444,20 @@ class CloudTaskDispatcher:
         return None
 
     async def _land(
-        self, store: Any, run_ref: str, blob: dict[str, Any], pr: dict[str, Any], session: str
+        self,
+        store: Any,
+        run_ref: str,
+        blob: dict[str, Any],
+        pr: dict[str, Any],
+        session: str,
+        slug: str,
+        cwd: Path,
+        diff: str,
     ) -> None:
+        """Approve + execute a merged run. The PR's diff (``diff`` when the caller
+        already holds it for this head) goes on the blob so the UI can show the
+        touched files, and the bound repo is fetched so the blueprint reads a
+        fresh ``origin/<base>``. Neither of those can fail the land."""
         url = str(pr.get("url") or "")
         base = str(blob.get("base_branch") or "main")
         approved = await store.auto_approve(
@@ -451,12 +472,22 @@ class CloudTaskDispatcher:
         await store.mark_executed(
             run_ref, f"Merged {url} into {base} through the fast lane (cloud session {session})."
         )
+        if not diff.strip():
+            try:
+                number = url.rsplit("/", 1)[-1]
+                diff = await self._ok(["gh", "pr", "diff", number, "-R", slug], cwd, "LAND")
+            except Exception:  # noqa: BLE001 — the diff is for display; the land stands
+                logger.info("belt cloud: no diff for landed run %s", run_ref, exc_info=True)
+                diff = ""
+        if diff.strip():
+            await _patch(store, run_ref, diff=diff if diff.endswith("\n") else diff + "\n")
+        await self._fetch_bound(blob)
         head = str(pr.get("headRefName") or "")
         await _persist_run_result(
             store=store,
             action_id=run_ref,
             branch=head,
-            files_changed=len(pr.get("files") or []),
+            files_changed=len(pr.get("files") or []) or _diff_file_count(diff),
             pr_url=url,
             commit_sha=str((pr.get("mergeCommit") or {}).get("oid") or "") or None,
         )
@@ -468,6 +499,19 @@ class CloudTaskDispatcher:
             pr_url=url,
             branch=head,
         )
+
+    async def _fetch_bound(self, blob: dict[str, Any]) -> None:
+        """``git fetch`` the bound repo (best-effort): nothing else updates its
+        ``origin/<base>`` in cloud mode, and the blueprint reads the C4 model there."""
+        try:
+            repo = ClaudeCodeDevelop._resolve_repo(str(blob.get("repo") or ""))
+            code, _, err = await self.runner(
+                [*_GIT, "fetch", "-q", "origin"], cwd=repo, timeout=120.0
+            )
+            if code != 0:
+                logger.info("belt cloud: fetch of %s failed (exit %s): %s", repo, code, err[-300:])
+        except Exception:  # noqa: BLE001 — a stale blueprint never fails a land
+            logger.info("belt cloud: bound repo fetch skipped", exc_info=True)
 
     async def _escalate(
         self,
