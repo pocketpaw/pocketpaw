@@ -95,18 +95,21 @@ def test_the_restarted_heart_card_ends_as_one_final_with_the_whole_second_body()
 
 
 def test_the_restarted_meal_plan_is_judged_on_its_second_body_alone():
-    # The model's second meal-plan body has stray closers, so it is refused, but
-    # as c2 on its own body: c1 is only ever "restarted", and nothing reaches text.
+    # The model's second meal-plan body has stray closers before its state, which
+    # the slip repair drops, so c2 ends final on its own body: c1 is only ever
+    # "restarted", and nothing reaches text.
     reply = _reply("mealplan")
     body = _second_body(reply)
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(body)
     for chunks in _chunkings(reply):
         events = _events(chunks)
         deltas = "".join(d["text"] for e, d in events if e == "card.delta" and d["card_id"] == "c2")
         assert deltas == body
         assert [d for e, d in events if e == "card.rejected"] == [
             {"card_id": "c1", "reason": "restarted"},
-            {"card_id": "c2", "reason": "invalid"},
         ]
+        assert [d["card_id"] for e, d in events if e == "card.final"] == ["c2"]
 
 
 def test_a_restart_left_open_at_the_end_is_truncated_and_never_shown():

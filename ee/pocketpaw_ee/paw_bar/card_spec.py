@@ -15,8 +15,10 @@
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
 # actions, URLs, CSS, expressions, flow cards and ``ask`` to the rules its docstrings
 # name. Any error the walk did not foresee is a logged refusal, never an exception.
-# A ripple body that is not JSON only for missing closers, or one surplus closer
-# before its state, is repaired once and then checked like any body; a ripple
+# A ripple body that is not JSON only for missing closers, surplus closers, a
+# trailing or missing comma, or a raw control character in a string (``_repair``,
+# never inside a string or past the root) is repaired once and then checked like
+# any body; a ripple
 # node's declared props written flat on the node are moved under ``props``
 # (``_lift_flat_props``, which also renames a widget alias, ``RIPPLE_ALIASES``) before the checks,
 # and the moved card is the one sent.
@@ -1921,18 +1923,117 @@ def _surplus_closer_fix(text: str) -> str | None:
     return text[: end - 1] + text[end:]
 
 
-def _repaired(body: str, profile: CardProfile) -> str | None:
+# Most commas and surplus closers ``_slip_fix`` may edit in one body.
+_MAX_SLIP_EDITS = 4
+_CONTROL = re.compile(r"[\x00-\x1f]")
+# Closers left after the root's ``ui`` closed, then the root's own ``,"state":``.
+_SURPLUS_BEFORE_STATE = re.compile(r'[\]} \t\n\r]*(?=,[ \t\n\r]*"state"[ \t\n\r]*:)')
+
+
+def _slip_fix(text: str) -> tuple[str, tuple[str, ...]] | None:
+    """``text`` (an object) with small slips fixed, never inside a string or past
+    the root: a raw control character in a string escaped (its value unchanged),
+    a comma before a closer dropped, a missing comma put between two complete
+    values (``}{``, ``}"``, ``]"``, ``""``), and closers left over once ``ui``
+    closed before the root's ``,"state":``, or once the root closed, dropped.
+    Returns the text and the kinds fixed; None when nothing was fixed, a closer
+    does not match, more than ``_MAX_SLIP_EDITS`` edits are needed, or anything
+    but closers follows the root. Brackets still open at the end stay open."""
+    if not text.startswith("{"):
+        return None
+    out: list[str] = []
+    kinds: set[str] = set()
+    edits = 0
+    stack: list[str] = []  # the closers still owed
+    key_next = after_value = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"' or (ch == "{" and after_value):
+            if after_value:  # two complete values with no comma between
+                out.append(",")
+                kinds.add("missing_comma")
+                edits += 1
+                key_next = stack[-1] == "}"
+        if ch == '"':
+            end = _string_end(text, i)
+            if end < 0:
+                return None
+            raw = text[i:end]
+            safe = _CONTROL.sub(lambda m: f"\\u{ord(m.group()):04x}", raw)
+            if safe != raw:
+                kinds.add("control_char")
+            out.append(safe)
+            after_value, key_next, i = not key_next, False, end
+            continue
+        i += 1
+        if ch in _CLOSER:
+            stack.append(_CLOSER[ch])
+            key_next, after_value = ch == "{", False
+        elif ch == ",":
+            j = i
+            while j < n and text[j] in _JSON_SPACE:
+                j += 1
+            if j < n and text[j] in "}]":
+                kinds.add("trailing_comma")
+                edits += 1
+                continue
+            key_next, after_value = stack[-1] == "}", False
+        elif ch in "}]":
+            surplus = _SURPLUS_BEFORE_STATE.match(text, i - 1) if len(stack) == 1 else None
+            if surplus is not None:
+                kinds.add("surplus_closer")
+                edits += sum(c in "}]" for c in surplus.group())
+                i, after_value = surplus.end(), True
+                continue
+            if ch != stack.pop():
+                return None
+            after_value = True
+            if not stack:
+                out.append(ch)
+                rest = text[i:]
+                if set(rest) - set("}]" + _JSON_SPACE):
+                    return None
+                if extra := sum(c in "}]" for c in rest):
+                    kinds.add("surplus_closer")
+                    edits += extra
+                break
+        elif ch not in _JSON_SPACE:
+            key_next = after_value = False
+        out.append(ch)
+    if not kinds or edits > _MAX_SLIP_EDITS:
+        return None
+    return "".join(out), tuple(sorted(kinds))
+
+
+def _repair(body: str, profile: CardProfile) -> tuple[str, str] | None:
     """On a strict profile, a ``body`` that is not JSON with the fewest closing
     brackets inserted (``_closer_fixes``), or its one surplus closer before the
-    root's state dropped (``_surplus_closer_fix``), that make it JSON holding a
-    spec; else None. The caller parses and checks the result like any body."""
+    root's state dropped (``_surplus_closer_fix``), else its small slips fixed
+    (``_slip_fix``, then any closers still missing), that make it JSON holding a
+    spec, with the slip kinds ("" for closers alone); else None. The caller
+    parses and checks the result like any body."""
     if not profile.strict or len(body) > profile.max_chars:
         return None
     text = body.strip(_JS_SPACE)
     for fixed in [*_closer_fixes(text), _surplus_closer_fix(text)]:
         if fixed is not None and _is_spec(_parse(fixed)):
-            return fixed
+            return fixed, ""
+    slip = _slip_fix(text)
+    if slip is None:
+        return None
+    slipped, kinds = slip
+    for fixed in [slipped, *_closer_fixes(slipped)]:
+        if _is_spec(_parse(fixed)):
+            more = ("missing_closer",) if fixed != slipped else ()
+            return fixed, ",".join(sorted((*kinds, *more)))
     return None
+
+
+def _repaired(body: str, profile: CardProfile) -> str | None:
+    """``_repair``'s body alone."""
+    repair = _repair(body, profile)
+    return None if repair is None else repair[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -2028,9 +2129,9 @@ def render_card(
     drop it. A Ripple spec is validated (against ``profile``) and hydrated; a
     legacy product card is repriced from the catalog; a legacy form card is held
     to the form rules; any other legacy card passes through verbatim; a body
-    that is not JSON is dropped, unless the profile is strict and only closing
-    brackets are missing from a spec (``_repaired``). Never raises: a card no check can read is
-    dropped and logged by error type only."""
+    that is not JSON is dropped, unless the profile is strict and a spec only
+    misses or repeats closers or makes a small slip (``_repair``). Never raises:
+    a card no check can read is dropped and logged by error type only."""
     try:
         return _render_card(body, catalog, verbs, lead_capture, profile, storefront)
     except Exception as exc:  # noqa: BLE001 — see the docstring
@@ -2047,11 +2148,14 @@ def _render_card(
     storefront: Any = None,
 ) -> str | None:
     raw = _parse(body, unique=profile.strict)
-    if raw is None and (fixed := _repaired(body, profile)) is not None:
-        # Only closers were missing, or one too many: the repaired body is read
-        # and checked as any other. Logged by count only, never the card.
+    if raw is None and (repair := _repair(body, profile)) is not None:
+        # Closers missing or surplus, or a small slip: the repaired body is read
+        # and checked as any other. Logged by count or kind only, never the card.
+        fixed, kinds = repair
         added = len(fixed) - len(body.strip(_JS_SPACE))
-        if added > 0:
+        if kinds:
+            logger.info("card_spec: repaired a card (repaired=%s)", kinds)
+        elif added > 0:
             logger.info("card_spec: repaired a card missing %d closing bracket(s)", added)
         else:
             logger.info("card_spec: repaired a card with a surplus closer before its state")
@@ -2144,8 +2248,11 @@ def card_ids(body: str, profile: CardProfile = PAWBAR_PROFILE) -> list[str]:
     """The catalog ids a fence body names: a Ripple spec's product-card ``ids``,
     or a legacy product card's item ids. What a lookup must fetch before
     ``render_card`` can hydrate it; at most ``MAX_CARD_IDS``, first seen first,
-    reading at most ``profile.max_nodes`` nodes."""
+    reading at most ``profile.max_nodes`` nodes, of the body repaired as
+    ``render_card`` repairs it."""
     raw = _parse(body)
+    if raw is None:
+        raw = _parse(_repaired(body, profile) or "")
     out: dict[str, None] = {}
     if _is_spec(raw):
         _ids_in(raw["ui"], out, [profile.max_nodes])
@@ -2202,6 +2309,7 @@ class PartialScan:
         self._stack: list[list[Any]] = []
         self._raw: list[str] | None = None  # the open string's raw text
         self._escape = False
+        self._after = False  # the last token ended a value
         self.hit = False
 
     def feed(self, text: str) -> bool:
@@ -2229,15 +2337,19 @@ class PartialScan:
             if not self._stack and ch != "{":
                 self.hit = ch not in _JS_SPACE  # before the root: trimmed, or not a card
             elif ch == '"':
+                # After a value with no comma, the repair reads this as a key.
+                if self._after and self._stack[-1][0]:
+                    self._stack[-1][2] = True
                 self._raw = []
             elif ch in "{[":
                 self._open(ch == "{")
             elif ch in "}]":
-                if self._stack:
-                    self._stack.pop()
-                self._done = not self._stack
-            elif ch == "," and self._stack and self._stack[-1][0]:
+                # A closer that does not match is the repair's call: stop judging.
+                self._done = self._stack.pop()[0] != (ch == "}") or not self._stack
+            elif ch == "," and self._stack[-1][0]:
                 self._stack[-1][2] = True
+            if ch not in _JS_SPACE and self._raw is None:
+                self._after = ch in "}]"
         return self.hit
 
     def _open(self, is_obj: bool) -> None:
@@ -2268,6 +2380,7 @@ class PartialScan:
             top[1], top[2] = value, False
             top[4].add(value)
             return
+        self._after = True
         if self._stack[0][1] not in ("ui", "state"):
             return
         root = len(self._stack) == 1

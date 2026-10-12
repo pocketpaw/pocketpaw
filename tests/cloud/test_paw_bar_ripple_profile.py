@@ -2658,12 +2658,10 @@ def test_the_ui_brace_and_the_end_closers_count_together():
 @pytest.mark.parametrize(
     "body",
     [
-        '{"ui":{"type":"text" "props":{"text":"hi"}}}',  # a missing comma
-        '{"ui":{"type":"text" "props":{"text":"hi"}}',  # ...and a closer
         '{"ui":{"type":"text","props":{"text":"hi}}}',  # a missing quote
         '{"ui":{"type":"text","props":{"text":hi"}}}',
-        '{"ui":{"type":"text","props":{"text":"hi"}}}}',  # an extra closer stays
         '{"ui":{"type":"text","props":{"text":"hi"]}}',  # a wrong one is not swapped
+        '{"ui":{"type":"text" 1 "props":{"text":"hi"}}}',  # not a comma between values
         '{"ui":{"type":"text","props":{"text":"hi"}}} x',
         '{"ui":{"type":"text","props":{"text":"hi"}},"state":}',
         '{"ui":{"type":"text","props":{"text":"hi"}},"state"',
@@ -2725,17 +2723,13 @@ def test_one_surplus_closer_before_state_is_dropped(spec):
 @pytest.mark.parametrize(
     "body",
     [
-        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}}), 2),  # two surplus
-        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}})) + "}",  # and one at the end
-        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}}))[:-1],  # root never closes
         _add_root_brace(_body({"ui": _TEXT_NODE, "state": []})),  # state not an object
-        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}, "x": 1})),  # more than state
         '{"ui":{"type":"text","props":{"text":"hi"}}},"theme":{}}',  # not state
         '{"ui":{"type":"text","props":{"text":"hi"}}},"state":{} x}',
         '{"kind":"note","text":"hi"},"state":{}}',  # legacy
     ],
 )
-def test_only_one_surplus_closer_before_a_lone_state_is_dropped(body):
+def test_surplus_closers_are_dropped_only_before_the_roots_state(body):
     assert _ripple_body(body) is None
 
 
@@ -2764,6 +2758,191 @@ def test_pawbar_never_drops_a_surplus_closer():
 
     body = _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}}))
     assert render_card(body, [], profile=PAWBAR_PROFILE) is None
+
+
+# --------------------------------------------------------------------------- #
+# Slip repair: small JSON slips a live model made, fixed outside strings only
+# --------------------------------------------------------------------------- #
+
+_SLIPS = Path(__file__).parents[1] / "fixtures" / "ripple_json_slips.json"
+_SLIP_LOG = "card_spec: repaired a card (repaired=%s)"
+
+
+def _slip(name: str) -> str:
+    return json.loads(_SLIPS.read_text(encoding="utf-8"))[name]
+
+
+def _slip_kinds(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.msg == _SLIP_LOG]
+
+
+def test_the_live_laptop_flow_with_a_trailing_surplus_brace_is_repaired(caplog):
+    body = _slip("laptop_trailing_brace")
+    with pytest.raises(json.JSONDecodeError, match="Extra data"):
+        json.loads(body)
+    with caplog.at_level("INFO", logger="pocketpaw_ee.paw_bar.card_spec"):
+        card = _ripple_body(body)
+    assert card == json.loads(body.rstrip()[:-1])
+    assert card["ui"]["flowId"] == "laptop_use"
+    assert _slip_kinds(caplog) == ["card_spec: repaired a card (repaired=surplus_closer)"]
+    assert "Recommend" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("name", "surplus"),
+    [("products_surplus_before_state", "]}"), ("announcement_surplus_before_state", "]")],
+)
+def test_live_cards_with_surplus_closers_before_state_are_repaired(name, surplus, caplog):
+    body = _slip(name)
+    with pytest.raises(json.JSONDecodeError, match="Expecting ',' delimiter"):
+        json.loads(body)
+    i = body.rindex(',"state":')
+    assert body[i - len(surplus) : i] == surplus
+    with caplog.at_level("INFO", logger="pocketpaw_ee.paw_bar.card_spec"):
+        card = _ripple_body(body)
+    assert card == json.loads(body[: i - len(surplus)] + body[i:])
+    assert card["ui"]["type"] == "card" and card["state"]
+    assert _slip_kinds(caplog) == ["card_spec: repaired a card (repaired=surplus_closer)"]
+
+
+def test_live_slip_cards_name_their_catalog_ids_and_stream_unflagged():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, card_ids, scan_partial
+
+    for name in (
+        "laptop_trailing_brace",
+        "products_surplus_before_state",
+        "announcement_surplus_before_state",
+    ):
+        assert not scan_partial(_slip(name), RIPPLE_PROFILE), name
+    spec = {"ui": {"type": "product-card", "props": {"ids": ["p1"]}}, "state": {}}
+    body = _add_root_brace(_body(spec), 2)
+    assert card_ids(body, RIPPLE_PROFILE) == card_ids(_body(spec), RIPPLE_PROFILE)
+
+
+_HI = '{"ui":{"type":"text","props":{"text":"hi"}}'
+
+
+@pytest.mark.parametrize(
+    ("body", "kinds"),
+    [
+        (_HI + ',"state":{"a":[1,2,],}}', "trailing_comma"),
+        (_HI + ',"state":{"a":1 ,\n }}', "trailing_comma"),
+        (_HI + "}}", "surplus_closer"),
+        (_HI + "}}]\n", "surplus_closer"),
+        (_HI + "}} ]\n", "surplus_closer"),
+        (_HI + '}]},"state":{}}', "surplus_closer"),
+        (_HI + '} ] },"state":{}}', "surplus_closer"),
+        (_HI + '}]},"state":{}', "surplus_closer,missing_closer"),
+        ('{"ui":{"type":"text" "props":{"text":"hi"}}}', "missing_comma"),
+        ('{"ui":{"type":"text","props":{"text":"hi"}} "state":{}}', "missing_comma"),
+        (
+            '{"ui":{"type":"text","props":{"text":"hi"}},"state":{"a":[{"x":1}{"x":2}]}}',
+            "missing_comma",
+        ),
+        (
+            '{"ui":{"type":"text","props":{"text":"hi"}},"state":{"a":["x" "y"],"b":[[1] "z"]}}',
+            "missing_comma",
+        ),
+        ('{"ui":{"type":"text","props":{"text":"line one\nline\ttwo"}}}', "control_char"),
+        (
+            '{"ui":{"type":"text" "props":{"text":"hi",}}',
+            "trailing_comma,missing_comma,missing_closer",
+        ),
+    ],
+)
+def test_small_slips_are_repaired_then_logged_by_kind(body, kinds, caplog):
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(body)
+    with caplog.at_level("INFO", logger="pocketpaw_ee.paw_bar.card_spec"):
+        card = _ripple_body(body)
+    assert card is not None and card["ui"]["type"] == "text"
+    assert _slip_kinds(caplog) == [_SLIP_LOG % ",".join(sorted(kinds.split(",")))]
+
+
+# The streaming scan reads a slip as the repair will: a string after a value is a
+# key, and a closer that does not match stops the scan. It never flags a body the
+# close accepts, and still flags a key the repair would repeat.
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"ui":{"type":"image","props":{"src":"/logo.png" "alt":"Logo"}}}',
+        '{"ui":{"type":"button","props":{"label":"Go" "href":"/about"}}}',
+        '{"ui":{"type":"text","props":{"text":"hi"}} "state":{"a":[{"x":1}{"x":2}]}}',
+        _HI + '}]},"state":{"url":"/a"}}',
+        _HI + ',"state":{"a":[1,],}}',
+        '{"ui":{"type":"text","props":{"text":"two\nlines"}}}',
+    ],
+)
+def test_the_streaming_scan_never_flags_a_body_the_repair_accepts(body):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    assert _ripple_body(body) is not None
+    for end in range(1, len(body) + 1):
+        assert not scan_partial(body[:end], RIPPLE_PROFILE), body[:end]
+
+
+def test_the_streaming_scan_flags_a_key_a_missing_comma_repeats():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    body = _HI + ',"state":{"a":"x" "a":"y"}}'
+    assert _ripple_body(body) is None
+    assert scan_partial(body, RIPPLE_PROFILE)
+
+
+def test_a_raw_control_character_keeps_its_place_in_the_string():
+    body = '{"ui":{"type":"text","props":{"text":"a\nb\tc"}}}'
+    assert _ripple_body(body)["ui"]["props"]["text"] == "a\nb\tc"
+
+
+# Repair edits only outside strings and never past the root: whatever it would
+# take to read a second root, or rewrite a string, stays refused.
+@pytest.mark.parametrize(
+    "body",
+    [
+        _HI + '}{"ui":{"type":"text","props":{"text":"x"}}}',  # a second root
+        _HI + '} {"ui":{"type":"text","props":{"text":"x"}}}',
+        _HI + '},{"ui":{"type":"text","props":{"text":"x"}}}',
+        _HI + '}} "state":{}}',  # no comma is invented after the root closes
+        _HI + ',"state":{},"state":{"a":1},}',  # repeated key after a repair
+        _HI + '}},"state":{},"state":{}}',
+        _HI + '},"ui":{"type":"text","props":{"text":"x"}}}',  # a closer before ui
+        _HI + "}}}}}}",  # past the bound
+        _HI + ',"state":{"a":1,,"b":2}}',  # a doubled comma is not a slip
+    ],
+)
+def test_a_slip_repair_never_smuggles_a_second_object(body):
+    assert _ripple_body(body) is None
+
+
+def test_a_slip_repair_never_changes_a_strings_content():
+    text = 'keep }{ and ,] and "}" and \\n and ,} as written'
+    spec = {"ui": {"type": "text", "props": {"text": text}}, "state": {"s": 'a" "b'}}
+    body = _body(spec)
+    assert _ripple_body(body + "}") == spec
+    assert _ripple_body(body[:-1] + ",}") == spec
+    raw = body.replace("as written", "as\nwritten")  # a raw newline in the string
+    assert _ripple_body(raw + "}")["ui"]["props"]["text"] == text.replace(
+        "as written", "as\nwritten"
+    )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"ui": {"type": "image", "props": {"src": "https://evil.example/x.png"}}, "state": {}},
+        {"ui": {"type": "button", "on_click": {"action": "fetch"}}, "state": {}},
+    ],
+)
+def test_a_slip_repaired_card_is_still_refused_for_anything_else(spec):
+    body = _body(spec)
+    assert _ripple_body(body + "}") is None
+    assert _ripple_body(body[:-1] + ",}") is None
+
+
+def test_pawbar_never_repairs_a_slip():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, render_card
+
+    assert render_card(_HI + "}}", [], profile=PAWBAR_PROFILE) is None
 
 
 # A legacy card passes through verbatim, unchecked, so only a spec is repaired.
