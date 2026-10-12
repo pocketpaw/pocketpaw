@@ -480,10 +480,18 @@ async def test_a_table_booking_still_gets_the_stores_table_service(props):
     ("why", "service", "day"),
     [
         ("html in a service name", {"id": "a", "name": "<b>Clean</b>", "duration_min": 30}, {}),
-        ("an unknown service kind", {"id": "a", "name": "A", "kind": "spa", "duration_min": 30}, {}),
+        (
+            "an unknown service kind",
+            {"id": "a", "name": "A", "kind": "spa", "duration_min": 30},
+            {},
+        ),
         ("a zero duration", {"id": "a", "name": "A", "duration_min": 0}, {}),
         ("a bad date", {"id": "a", "name": "A", "duration_min": 30}, {"date": "Wednesday"}),
-        ("html in a day label", {"id": "a", "name": "A", "duration_min": 30}, {"date_label": "<i>"}),
+        (
+            "html in a day label",
+            {"id": "a", "name": "A", "duration_min": 30},
+            {"date_label": "<i>"},
+        ),
     ],
 )
 def test_a_model_written_booking_is_plain_data(why, service, day):
