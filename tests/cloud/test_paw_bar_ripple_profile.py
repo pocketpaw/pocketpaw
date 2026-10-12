@@ -2769,7 +2769,6 @@ def test_pawbar_never_drops_a_surplus_closer():
     assert render_card(body, [], profile=PAWBAR_PROFILE) is None
 
 
-
 # --------------------------------------------------------------------------- #
 # Slip repair: small JSON slips a live model made, fixed outside strings only
 # --------------------------------------------------------------------------- #
@@ -2818,8 +2817,11 @@ def test_live_cards_with_surplus_closers_before_state_are_repaired(name, surplus
 def test_live_slip_cards_name_their_catalog_ids_and_stream_unflagged():
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, card_ids, scan_partial
 
-    for name in ("laptop_trailing_brace", "products_surplus_before_state",
-                 "announcement_surplus_before_state"):
+    for name in (
+        "laptop_trailing_brace",
+        "products_surplus_before_state",
+        "announcement_surplus_before_state",
+    ):
         assert not scan_partial(_slip(name), RIPPLE_PROFILE), name
     spec = {"ui": {"type": "product-card", "props": {"ids": ["p1"]}}, "state": {}}
     body = _add_root_brace(_body(spec), 2)
@@ -2841,12 +2843,19 @@ _HI = '{"ui":{"type":"text","props":{"text":"hi"}}'
         (_HI + '}]},"state":{}', "surplus_closer,missing_closer"),
         ('{"ui":{"type":"text" "props":{"text":"hi"}}}', "missing_comma"),
         ('{"ui":{"type":"text","props":{"text":"hi"}} "state":{}}', "missing_comma"),
-        ('{"ui":{"type":"text","props":{"text":"hi"}},"state":{"a":[{"x":1}{"x":2}]}}',
-         "missing_comma"),
-        ('{"ui":{"type":"text","props":{"text":"hi"}},"state":{"a":["x" "y"],"b":[[1] "z"]}}',
-         "missing_comma"),
+        (
+            '{"ui":{"type":"text","props":{"text":"hi"}},"state":{"a":[{"x":1}{"x":2}]}}',
+            "missing_comma",
+        ),
+        (
+            '{"ui":{"type":"text","props":{"text":"hi"}},"state":{"a":["x" "y"],"b":[[1] "z"]}}',
+            "missing_comma",
+        ),
         ('{"ui":{"type":"text","props":{"text":"line one\nline\ttwo"}}}', "control_char"),
-        ('{"ui":{"type":"text" "props":{"text":"hi",}}', "trailing_comma,missing_comma,missing_closer"),
+        (
+            '{"ui":{"type":"text" "props":{"text":"hi",}}',
+            "trailing_comma,missing_comma,missing_closer",
+        ),
     ],
 )
 def test_small_slips_are_repaired_then_logged_by_kind(body, kinds, caplog):
@@ -2915,12 +2924,14 @@ def test_a_slip_repair_never_smuggles_a_second_object(body):
 
 def test_a_slip_repair_never_changes_a_strings_content():
     text = 'keep }{ and ,] and "}" and \\n and ,} as written'
-    spec = {"ui": {"type": "text", "props": {"text": text}}, "state": {"s": "a\" \"b"}}
+    spec = {"ui": {"type": "text", "props": {"text": text}}, "state": {"s": 'a" "b'}}
     body = _body(spec)
     assert _ripple_body(body + "}") == spec
     assert _ripple_body(body[:-1] + ",}") == spec
     raw = body.replace("as written", "as\nwritten")  # a raw newline in the string
-    assert _ripple_body(raw + "}")["ui"]["props"]["text"] == text.replace("as written", "as\nwritten")
+    assert _ripple_body(raw + "}")["ui"]["props"]["text"] == text.replace(
+        "as written", "as\nwritten"
+    )
 
 
 @pytest.mark.parametrize(

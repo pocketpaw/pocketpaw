@@ -2130,8 +2130,8 @@ def render_card(
     legacy product card is repriced from the catalog; a legacy form card is held
     to the form rules; any other legacy card passes through verbatim; a body
     that is not JSON is dropped, unless the profile is strict and a spec only
-    misses or repeats closers or makes a small slip (``_repair``). Never raises: a card no check can read is
-    dropped and logged by error type only."""
+    misses or repeats closers or makes a small slip (``_repair``). Never raises:
+    a card no check can read is dropped and logged by error type only."""
     try:
         return _render_card(body, catalog, verbs, lead_capture, profile, storefront)
     except Exception as exc:  # noqa: BLE001 — see the docstring
