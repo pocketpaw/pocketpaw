@@ -6,7 +6,7 @@
   "music-player": {"intents": ["music", "playlist", "songs", "song", "sounds", "focus music", "tracks", "lofi", "rain", "calm"]},
   "map": {
     "intents": ["map", "directions", "route", "where", "walking", "walk", "near", "nearby", "distance", "location"],
-    "hint": "center [lat,lng], zoom, markers[{id,lat,lng,label}], paths[{id,points:[[lat,lng]...]}]; tiles \"osm\"; say routes are approximate."
+    "line": "center [lat,lng], zoom, markers[{id,lat,lng,label}], paths[{id,points:[[lat,lng]...]}]; tiles \"osm\"; say routes are approximate."
   },
   "model-viewer": {"intents": ["3d", "model", "rotate", "annotate", "label its parts", "spin", "explore"]},
   "interval-workout": {"intents": ["workout", "yoga", "hiit", "exercise", "stretch", "stretching", "pose", "training", "circuit"]},

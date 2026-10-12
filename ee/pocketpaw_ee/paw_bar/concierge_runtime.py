@@ -1593,12 +1593,14 @@ def _cards_paragraph(
             "with their props at the end):",
             *(f"   {line}" for line in widget_relevance.index_lines()),
             *_RIPPLE_RULES,
+            *_form_lines(declared, lead_capture),
         ]
+        # The per-turn part goes last, so everything above stays byte-stable.
         picked = widget_relevance.pick_widgets(message, history)
         if picked:
             lines.append("   Widgets for this message, with their props:")
             lines += [f"   {widget_relevance.full_line(name)}" for name in picked]
-        return "\n".join(lines + _form_lines(declared, lead_capture))
+        return "\n".join(lines)
 
     lines = [
         "   Cards: to show products, a form or a short layout, write ONE ```pawbar-card "

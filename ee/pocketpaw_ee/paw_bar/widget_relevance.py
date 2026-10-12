@@ -134,26 +134,29 @@ def pick_widgets(message: str, history: Sequence[dict[str, Any]] = ()) -> list[s
 
 
 def full_line(name: str) -> str:
-    """A widget's full manifest line (typed for data and play widgets), plus its
-    steering hint; model-viewer also lists its library assets and anchors."""
-    widget = _WIDGETS[name]
+    """A widget's full manifest line (typed for data and play widgets) plus its
+    ``hint``, or the intents table's own ``line`` instead (map: its refused tile
+    props stay out). model-viewer's line is written here: the model library's ids
+    and anchors, and none of the URL props a card may not use."""
+    if name == "model-viewer":
+        return (
+            "- model-viewer {asset, annotations?: [{anchor, label?, note?}], focus?, "
+            "on_select?}: to show, explore or label a thing in 3D. asset is one of these "
+            "ids, each anchor and focus one of its names, up to 12 annotations with your "
+            "own plain label and note (an illustration's caps); never a src, poster or "
+            "URL. " + " ".join(f"{k}({','.join(v['anchors'])})" for k, v in RIPPLE_MODELS.items())
+        )
+    entry = INTENTS.get(name, {})
+    if entry.get("line"):
+        return f"- {name}: {entry['line']}"
     typed = RIPPLE_PROFILE.typed
+    widget = _WIDGETS[name]
     line = (
         _widget_line(widget, typed=True, shown=typed[name])
         if name in typed
         else _widget_line(widget)
     )
-    hint = INTENTS.get(name, {}).get("hint")
-    if hint:
-        line += f" {hint}"
-    if name == "model-viewer":
-        line += (
-            " To show, explore or label a thing in 3D: asset one of these ids, each "
-            "anchor and focus one of its names, up to 12 annotations with your own plain "
-            "label and note (an illustration's caps); never a src, poster or URL. "
-            + " ".join(f"{k}({','.join(v['anchors'])})" for k, v in RIPPLE_MODELS.items())
-        )
-    return line
+    return f"{line} {entry['hint']}" if entry.get("hint") else line
 
 
 def core_lines() -> list[str]:

@@ -266,11 +266,11 @@ _DATA_WIDGETS = ("entity-detail", "timeline", "kv-table", "alert", "callout")
 _BRIEF_COMPOSITES = ("analytics-dashboard",)
 
 
-def _ripple_paragraph() -> str:
+def _ripple_paragraph(message: str = "") -> str:
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
     from pocketpaw_ee.paw_bar.concierge_runtime import _cards_paragraph
 
-    return _cards_paragraph([], profile=RIPPLE_PROFILE)
+    return _cards_paragraph([], profile=RIPPLE_PROFILE, message=message)
 
 
 def _nodes(node: dict) -> list[dict]:
@@ -283,8 +283,11 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     text = _ripple_paragraph()
     for widget in _DATA_WIDGETS:
         assert f"   - {widget} {{" in text, widget
+    # A widget outside the core is a name in the category index, its props
+    # only on a turn that needs it (test_paw_bar_widget_relevance).
     for widget in _BRIEF_COMPOSITES:
-        assert f"   - {widget}: " in text and f"   - {widget} {{" not in text, widget
+        index = next(line for line in text.splitlines() if line.startswith("   - composite: "))
+        assert widget in index and f"   - {widget} {{" not in text, widget
     assert 'call that field "kind"' in text
     entity = next(line for line in text.splitlines() if line.startswith("   - entity-detail {"))
     assert "kpis?" in entity and "meta?" in entity and "status?" in entity
@@ -297,21 +300,9 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # The example is the last rule, as compact JSON.
     example = json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":"))
     assert _RIPPLE_RULES[-1].endswith(example) and example in text
-    # The whole paragraph stays bounded: 19,814 chars before the primitives' data
-    # widgets, 24,327 before Ripple's data widgets (typed lines and their rules, less
-    # the page chrome), 27,849 after, 30,473 with the flow and ask rules (the flow
-    # example alone is 890), 31,191 with the illustration line and rule, 31,972 with
-    # the vendored illustration line, bill-split and the choice-button line; 32,412 with
-    # the play-wave manifest, then 31,914 after a trim pass (rules that repeat a typed
-    # line or the manifest dropped, the example card shortened, brief lines 85 chars)
-    # and the games, habit-tracker and annotations added; 32,618 with focus-timer and
-    # board-game typed (205 widgets), then 31,895 after a second pass (a typed line's
-    # description no longer recaps a row shape its field list gives, the game sentence
-    # drops what the typed lines say, brief lines 73 chars) with their mapping added;
-    # 33,627 with the 3D line (the model library's 31 ids and anchors, 1,332 chars of
-    # it), then 31,750 with brief lines at 50 chars and the illustration line shorter;
-    # 31,889 with the map line; 32,415 with notes and music-player typed, then 31,855
-    # with brief lines at 44 chars, two rule-10 sentences shorter and their mapping added.
+    # The whole paragraph stays bounded; with no message it is the fixed core
+    # alone. The worst case (core plus the longest picked lines) is held under
+    # 32,000 in test_paw_bar_widget_relevance.
     assert len(text) < 32_000
 
 
@@ -3081,8 +3072,8 @@ def test_a_streamed_model_viewer_src_is_refused_before_the_card_closes():
 
 
 def test_the_prompt_lists_the_model_library_with_its_anchors():
-    text = _ripple_paragraph()
-    assert "write a model-viewer {asset, annotations?: [{anchor, label?, note?}]" in text
+    text = _ripple_paragraph("Show me a plane in 3D and label its parts")
+    assert "- model-viewer {asset, annotations?: [{anchor, label?, note?}]" in text
     assert "plane(nose,cockpit,left-wing,right-wing,engine,tail)" in text
     assert "heart(aorta," in text and "never a src, poster or URL" in text
     assert "a model-viewer's on_select" in text
@@ -3177,7 +3168,7 @@ def test_a_streamed_map_tile_url_is_refused_before_the_card_closes():
 
 
 def test_the_prompt_carries_the_map_hint():
-    text = _ripple_paragraph()
+    text = _ripple_paragraph("Show me a walking route on a map")
     assert (
         "map: center [lat,lng], zoom, markers[{id,lat,lng,label}], "
         "paths[{id,points:[[lat,lng]...]}]" in text
