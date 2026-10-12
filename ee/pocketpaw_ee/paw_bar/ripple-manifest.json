@@ -6501,6 +6501,108 @@
       }
     },
     {
+      "type": "place-results",
+      "category": "composite",
+      "description": "Place search results (cafes, restaurants, parks): cards with rating, price, distance, open now, sort and filter, and a numbered-pin map when lat/lng are given.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"Coffee near Union Square\"."
+        },
+        "query": {
+          "type": "string",
+          "required": false,
+          "description": "What was searched, shown under the title."
+        },
+        "places": {
+          "type": "Array<{ id?: string; name: string; kind: \"cafe\" | \"restaurant\" | \"bar\" | \"bakery\" | \"shop\" | \"park\" | \"museum\" | \"hotel\" | \"other\"; rating?: number; reviews?: number; price?: 1 | 2 | 3 | 4; distance?: string | number; walkMinutes?: number; open?: boolean; hours?: string; address?: string; tags?: string[]; blurb?: string; lat?: number; lng?: number }>",
+          "required": true,
+          "description": "Up to 20. `rating` 0 to 5, `price` 1 to 4 ($ to $$$$), `distance` like \"0.4 km\" (or km as a number). Give lat/lng to get the map. No images or links."
+        },
+        "showMap": {
+          "type": "boolean",
+          "required": false,
+          "description": "Default true when any place has lat/lng."
+        }
+      },
+      "events": {
+        "on_choose": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Fires with { id, name, text } on \"Tell me more\", e.g. { action: \"emit\", target: \"ask\", value: { text: \"Tell me more about this place\" } }."
+        }
+      }
+    },
+    {
+      "type": "product-grid",
+      "category": "composite",
+      "description": "Product grid for shopping and deals: cards with price, was-price and discount badge, rating, spec chips, sort, category chips and a pick-2-or-3 Compare tray.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"Headphone deals this week\"."
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO code. Default \"USD\"."
+        },
+        "products": {
+          "type": "Array<{ id?: string; name: string; brand?: string; category?: string; price: number; was?: number; rating?: number; reviews?: number; badge?: string; color?: \"blue\" | \"violet\" | \"teal\" | \"green\" | \"amber\" | \"rose\" | \"orange\" | \"slate\"; image?: string; specs?: string[] }>",
+          "required": true,
+          "description": "Up to 24. `was` above `price` shows a strike-through and a computed discount. `badge` like \"Best seller\". Up to 3 short `specs`. Covers are generated; skip `image`."
+        },
+        "filters": {
+          "type": "boolean",
+          "required": false,
+          "description": "Category chips built from the data. Default true."
+        }
+      },
+      "events": {
+        "on_choose": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Fires with { id, name, text } on Choose and { ids, names, text: \"Compare A and B\" } from the Compare tray. May emit ask."
+        }
+      }
+    },
+    {
+      "type": "media-grid",
+      "category": "composite",
+      "description": "Poster grid for documentaries, films, series, podcasts, books or albums: generated posters, genre chips, Add to list with a My list view, details on click. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"Nature documentaries\"."
+        },
+        "kind": {
+          "type": "\"documentary\" | \"film\" | \"series\" | \"podcast\" | \"book\" | \"album\"",
+          "required": false,
+          "description": "Sets the poster shape (square for podcast and album). Default \"documentary\"."
+        },
+        "items": {
+          "type": "Array<{ id?: string; title: string; by?: string; year?: number; minutes?: number; episodes?: number; rating?: number; genres?: string[]; blurb?: string; color?: \"blue\" | \"violet\" | \"teal\" | \"green\" | \"amber\" | \"rose\" | \"orange\" | \"slate\"; image?: string }>",
+          "required": true,
+          "description": "Up to 24. `by` is the director, host or author. `rating` 0 to 5. Posters are generated from the title; skip `image`."
+        },
+        "value": {
+          "type": "{ saved: string[] }",
+          "required": false,
+          "description": "Ids on the visitor's list. Use top-level `bind`."
+        }
+      },
+      "events": {
+        "on_choose": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Fires with { id, name, text } on \"Tell me more\" in the details panel. May emit ask."
+        }
+      }
+    },
+    {
       "type": "focus-timer",
       "category": "composite",
       "description": "Pomodoro timer: focus, short break, a long break every Nth round; rounds toward goal_rounds, a log of finished rounds, an editable task. Use it, not separate timer widgets. Bind value.",
@@ -6801,6 +6903,97 @@
           "type": "EventAction",
           "required": false,
           "description": "Fired once per finished series with { winner: \"player\" | \"computer\" | \"draw\", series }. Without best_of, every game finishes the series."
+        }
+      }
+    },
+    {
+      "type": "agenda",
+      "category": "composite",
+      "description": "Meeting agenda app: start \"HH:MM\", items[{title, owner?, minutes, notes?}]; start times, time share bar, tick done, reorder, run mode with a countdown. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": true,
+          "description": "e.g. \"Weekly team sync\"."
+        },
+        "start": {
+          "type": "string",
+          "required": false,
+          "description": "Start time \"HH:MM\" (24 h). Without it items show offsets like +0:15."
+        },
+        "items": {
+          "type": "Array<{ id?: string; title: string; owner?: string; minutes: number; notes?: string; done?: boolean }>",
+          "required": true,
+          "description": "1 to 30 items in running order. minutes 1 to 240. Keep notes to one short line."
+        }
+      }
+    },
+    {
+      "type": "week-schedule",
+      "category": "composite",
+      "description": "Week calendar app: events[{day, start \"HH:MM\", end, title, place?, color?}] as blocks on a days-by-hours grid; overlaps side by side, details on press. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"My week\"."
+        },
+        "startHour": {
+          "type": "number",
+          "required": false,
+          "description": "First hour shown, 0 to 23. Default 7."
+        },
+        "endHour": {
+          "type": "number",
+          "required": false,
+          "description": "Last hour shown, 1 to 24. Default 21."
+        },
+        "days": {
+          "type": "string[]",
+          "required": false,
+          "description": "Column names. Default [\"Mon\",\"Tue\",\"Wed\",\"Thu\",\"Fri\",\"Sat\",\"Sun\"]. An event day matches by name."
+        },
+        "events": {
+          "type": "Array<{ id?: string; day: string; start: string; end: string; title: string; place?: string; color?: \"blue\" | \"green\" | \"orange\" | \"purple\" | \"pink\" | \"teal\" | \"red\" | \"yellow\" | \"gray\" }>",
+          "required": true,
+          "description": "Up to 60 events. start and end are \"HH:MM\" (24 h). Same color for the same kind of event; leave it out to colour by title."
+        }
+      }
+    },
+    {
+      "type": "weather-forecast",
+      "category": "composite",
+      "description": "Weather app card: place, now {temp, condition}, days[{day, condition, high, low, rainChance}], optional hourly. Animated icons, range bars, C/F toggle.",
+      "props": {
+        "place": {
+          "type": "string",
+          "required": true,
+          "description": "e.g. \"Lisbon\"."
+        },
+        "unit": {
+          "type": "\"C\" | \"F\"",
+          "required": false,
+          "description": "The unit the numbers are written in. Default \"C\". The visitor can toggle."
+        },
+        "now": {
+          "type": "{ temp: number; condition: \"sunny\" | \"partly-cloudy\" | \"cloudy\" | \"rain\" | \"heavy-rain\" | \"thunder\" | \"snow\" | \"fog\" | \"wind\" | \"night-clear\"; feelsLike?: number; humidity?: number; wind?: string }",
+          "required": false,
+          "description": "Current conditions. humidity is a percent; wind is text like \"14 km/h NW\"."
+        },
+        "days": {
+          "type": "Array<{ day: string; condition: \"sunny\" | \"partly-cloudy\" | \"cloudy\" | \"rain\" | \"heavy-rain\" | \"thunder\" | \"snow\" | \"fog\" | \"wind\" | \"night-clear\"; high: number; low: number; rainChance?: number; sunrise?: string; sunset?: string }>",
+          "required": true,
+          "description": "1 to 14 days, first is today. day is \"Mon\" or an ISO date. Other condition words map to the closest icon."
+        },
+        "hourly": {
+          "type": "Array<{ time: string; temp: number; condition: \"sunny\" | \"partly-cloudy\" | \"cloudy\" | \"rain\" | \"heavy-rain\" | \"thunder\" | \"snow\" | \"fog\" | \"wind\" | \"night-clear\"; rainChance?: number }>",
+          "required": false,
+          "description": "Up to 48 hours, time like \"14:00\" or \"2 PM\"."
+        },
+        "note": {
+          "type": "string",
+          "required": false,
+          "description": "Small note under the place. Write \"Sample forecast\" when the numbers are made up."
         }
       }
     },

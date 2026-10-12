@@ -15,7 +15,14 @@ sha256 00823d14b2b5e92b4fbfe51b197b9fd42d53d35091214685be1e950a6cf5dbfa) and
 "music-player" from branch feat/music-player at 820fcbd (#217, generatedAt
 2026-10-12T04:42:27.975Z, upstream sha256
 a20b933cdaf41a27d081717e3017ab42969f5be93b3b9e8c9321ce1b2e71db30), each placed after
-the widget that precedes it upstream (207 widgets). interval-workout's optional
+the widget that precedes it upstream (207 widgets). Six data widgets are added the
+same way: "agenda", "week-schedule" and "weather-forecast" from branch
+feat/forecast-schedule-agenda at 041ec69 (#224, generatedAt 2026-10-12T05:46:37.164Z,
+upstream sha256 7faf9a1b180c0d071f83c6776c0ff5abcdacf63ff480c933608e0b33f011a2ea),
+after board-game; "place-results", "product-grid" and "media-grid" from branch
+feat/places-products-media at 4500074 (#223, generatedAt 2026-10-12T05:39:54.325Z,
+upstream sha256 2058fe56281a94ed056bb2c5ee760259aa31ca0c0fc194d9f8f1a161b4685205),
+after notes (213 widgets). interval-workout's optional
 per-exercise "figure" (#216) is not pulled: nothing here checks exercise rows, and the
 widget matches figures by name. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.

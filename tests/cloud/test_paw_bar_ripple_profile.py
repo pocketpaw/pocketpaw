@@ -65,7 +65,7 @@ _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
 # (vendored from ripple branch feat/play-wave pending a release; drop the widget examples,
 # update the pins below).
-_RIPPLE_MANIFEST_SHA256 = "21829be61e0b2c82066ed18c4c0e5af98f3221326327cc31209224176721f066"
+_RIPPLE_MANIFEST_SHA256 = "3dc2a1170009f12c4f865efa551de8dced084f07e5ae19cb99244fea2156308b"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
@@ -105,7 +105,7 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
     raw = card_spec.RIPPLE_MANIFEST_PATH.read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(raw).hexdigest() == _RIPPLE_MANIFEST_SHA256
     assert card_spec.RIPPLE_MANIFEST["version"] == "0.8.0"
-    assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 207
+    assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 213
     # Every trimmed or typed name is a real widget (a typo would trim nothing).
     every = {w["type"] for w in card_spec.RIPPLE_MANIFEST["widgets"]}
     chrome, deferred = card_spec.RIPPLE_CHROME, card_spec.RIPPLE_DEFERRED
@@ -113,7 +113,7 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
     r = card_spec.RIPPLE_PROFILE
     assert r.typed.keys() <= r.detailed <= r.widget_types
     assert {"illustration", "bill-split"} <= every & r.widget_types
-    assert len(r.widget_types) == 207 - len(deferred) - len(chrome)
+    assert len(r.widget_types) == 213 - len(deferred) - len(chrome)
 
 
 def test_the_pawbar_profile_is_todays_rules():
