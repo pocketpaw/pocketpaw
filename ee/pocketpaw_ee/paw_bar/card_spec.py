@@ -1904,12 +1904,7 @@ def _fill_store(value: Any, store: Any, profile: CardProfile) -> Any:
         props = out.get("props")
         out["props"] = fill(dict(props) if isinstance(props, dict) else {}, store)
         wired = SERVER_WIRED.get(out["type"])
-        if (
-            wired
-            and store is not None
-            and wired[1] in profile.host_events
-            and _usable(out["props"], store)
-        ):
+        if wired and wired[1] in profile.host_events and _usable(out["props"], store):
             out[wired[0]] = {"action": "emit", "target": wired[1]}
     return out
 

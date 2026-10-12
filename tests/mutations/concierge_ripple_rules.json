@@ -1070,8 +1070,8 @@
   {
     "label": "DW-10: handlers are wired with no store",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            wired\n            and store is not None\n",
-    "replace": "            wired\n",
+    "find": "    services = getattr(store, \"services\", None)\n",
+    "replace": "    services = props.get(\"services\")\n",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_each_data_widget_card_passes_ripple_and_not_pawbar"
     ]
