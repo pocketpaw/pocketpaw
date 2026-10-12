@@ -62,7 +62,7 @@ _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
 # (vendored from ripple branch feat/play-wave pending a release; drop the widget examples,
 # update the pins below).
-_RIPPLE_MANIFEST_SHA256 = "f2e92414784b051b6c39685aeb0db32959c189e37d9af3cfd4349428565d1087"
+_RIPPLE_MANIFEST_SHA256 = "6329126fc5274eecb234d98545ee5fe7f1e5b8c7fc55c62f95345ab596045054"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
@@ -304,7 +304,9 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     # and the games, habit-tracker and annotations added; 32,618 with focus-timer and
     # board-game typed (205 widgets), then 31,895 after a second pass (a typed line's
     # description no longer recaps a row shape its field list gives, the game sentence
-    # drops what the typed lines say, brief lines 73 chars) with their mapping added.
+    # drops what the typed lines say, brief lines 73 chars) with their mapping added;
+    # 33,627 with the 3D line (the model library's 31 ids and anchors, 1,332 chars of
+    # it), then 31,750 with brief lines at 50 chars and the illustration line shorter.
     assert len(text) < 32_000
 
 
@@ -2987,3 +2989,94 @@ def test_the_button_carries_the_choice_props_and_the_rules_teach_them_briefly():
     assert "Choice buttons: label at most 18 chars" in text
     assert "description hint up to 60" in text
     assert "coffee drinks culture" not in text  # the icon keys stay out of the prompt
+
+
+# --------------------------------------------------------------------------- #
+# model-viewer: library assets and their anchors only (ripple-models.json)
+# --------------------------------------------------------------------------- #
+
+_PLANE_PARTS = ("nose", "cockpit", "left-wing", "engine", "tail")
+
+
+def _plane(**props) -> dict:
+    """A plane card: 5 labels on its anchors, nose open, a label click asks."""
+    node = {
+        "type": "model-viewer",
+        "props": {
+            "asset": "plane",
+            "alt": "A passenger plane",
+            "focus": "nose",
+            "annotations": [
+                {"anchor": a, "label": a.replace("-", " ").title(), "note": f"The {a}."}
+                for a in _PLANE_PARTS
+            ],
+            **props,
+        },
+        "on_select": {"action": "emit", "target": "ask", "value": {"text": "Tell me more"}},
+    }
+    return {"ui": node, "state": {}}
+
+
+def test_the_vendored_ripple_models_parse():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_MODELS
+
+    assert len(RIPPLE_MODELS) == 31
+    assert RIPPLE_MODELS["plane"]["anchors"] == [
+        "nose", "cockpit", "left-wing", "right-wing", "engine", "tail"
+    ]  # fmt: skip
+    assert {"aorta", "left-ventricle"} <= set(RIPPLE_MODELS["heart"]["anchors"])
+    assert all(m["title"] and m["anchors"] for m in RIPPLE_MODELS.values())
+
+
+def test_a_plane_with_anchored_labels_and_an_ask_on_select_passes():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    assert render_card(_body(_plane()), [], profile=RIPPLE_PROFILE) is not None
+    twelve = [{"anchor": "tail"}] * 12  # label defaults to the anchor's
+    assert render_card(_body(_plane(annotations=twelve)), [], profile=RIPPLE_PROFILE)
+
+
+@pytest.mark.parametrize(
+    "why, props",
+    [
+        ("its own src", {"src": "/models/plane.glb"}),
+        ("a poster", {"poster": "/p.png"}),
+        ("an environment", {"environmentImage": "/env.hdr"}),
+        ("an unknown asset", {"asset": "spaceship"}),
+        ("an asset expression", {"asset": "{state.model}"}),
+        ("an unknown anchor", {"annotations": [{"anchor": "wheel"}]}),
+        ("no anchor", {"annotations": [{"label": "Wing"}]}),
+        ("a raw position", {"annotations": [{"anchor": "nose", "position": "0 0 1"}]}),
+        ("a raw normal", {"annotations": [{"anchor": "nose", "normal": "0 0 1"}]}),
+        ("a long label", {"annotations": [{"anchor": "nose", "label": "x" * 41}]}),
+        ("a long note", {"annotations": [{"anchor": "nose", "note": "x" * 281}]}),
+        ("13 annotations", {"annotations": [{"anchor": "tail"}] * 13}),
+        ("a label expression", {"annotations": [{"anchor": "nose", "label": "{state.x}"}]}),
+        ("annotations as an expression", {"annotations": "{state.notes}"}),
+        ("an unknown focus", {"focus": "wheel"}),
+        ("a null focus", {"focus": None}),
+    ],
+)
+def test_a_model_viewer_holds_to_the_model_library(why, props):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    assert render_card(_body(_plane(**props)), [], profile=RIPPLE_PROFILE) is None, why
+
+
+def test_a_streamed_model_viewer_src_is_refused_before_the_card_closes():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    head = '{"ui":{"type":"model-viewer","props":{'
+    assert scan_partial(head + '"src":"/x.glb"', RIPPLE_PROFILE)
+    assert scan_partial(head + '"asset":"plane","poster":"/p.png"', RIPPLE_PROFILE)
+    assert not scan_partial(head + '"asset":"plane","alt":"/x.glb"', RIPPLE_PROFILE)
+    # An image's same-site src is fine.
+    assert not scan_partial('{"ui":{"type":"image","props":{"src":"/x.png"', RIPPLE_PROFILE)
+
+
+def test_the_prompt_lists_the_model_library_with_its_anchors():
+    text = _ripple_paragraph()
+    assert "write a model-viewer {asset, annotations?: [{anchor, label?, note?}]" in text
+    assert "plane(nose,cockpit,left-wing,right-wing,engine,tail)" in text
+    assert "heart(aorta," in text and "never a src, poster or URL" in text
+    assert "a model-viewer's on_select" in text

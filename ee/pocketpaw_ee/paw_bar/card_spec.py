@@ -222,6 +222,19 @@ RIPPLE_ALIASES: dict[str, str] = {
 ANNOTATIONS_MAX = 8
 ANNOTATION_LABEL_MAX = 40
 ANNOTATION_NOTE_MAX = 280
+# Ripple's ``model-viewer`` on a model-made card: a library ``asset`` only (the ids and
+# anchor names vendored in ripple-models.json), never a URL of its own; up to
+# ``MODEL_ANNOTATIONS_MAX`` labels, each on one of that asset's anchors, its label and
+# note plain text within the illustration's caps; ``focus`` an anchor too. A click on a
+# label is ``on_select`` (one of ``ASK_HANDLERS``). Keep in parity with ripple's
+# ``routes/pawbar/card-policy.ts``.
+MODEL_VIEWER = "model-viewer"
+RIPPLE_MODELS_PATH = Path(__file__).with_name("ripple-models.json")
+RIPPLE_MODELS: dict[str, dict[str, Any]] = json.loads(
+    RIPPLE_MODELS_PATH.read_text(encoding="utf-8")
+)
+MODEL_ANNOTATIONS_MAX = 12
+MODEL_URL_PROPS: frozenset[str] = frozenset({"src", "poster", "environmentImage"})
 # A button's choice-card ``icon`` (a flow option tile): a key shaped like ripple's icon
 # names. An unknown key passes (the widget ignores it); markup or a URL does not.
 # Its ``description`` hint: plain text, at most this long.
@@ -769,6 +782,8 @@ def _strict_walk(
                 _check_illustration(value, props)
             if kind == BILL_SPLIT:
                 _check_bill_split(value, props)
+            if kind == MODEL_VIEWER:
+                _check_model_viewer(props or {})
             if kind in _PLAY_CHECKS:
                 _PLAY_CHECKS[kind](value, props if isinstance(props, dict) else {})
             if kind == "button":
@@ -925,6 +940,44 @@ def _check_annotations(notes: Any, svg: str) -> None:
             kept = svg_ids(svg)
         if note["target"] not in kept:
             raise _Reject("an annotation target that is not an id in the svg")
+
+
+def _check_model_viewer(props: dict[str, Any]) -> None:
+    """A ``model-viewer`` node: none of ``MODEL_URL_PROPS``, an ``asset`` in
+    ``RIPPLE_MODELS``, a ``focus`` (when given) among its anchors, and ``annotations``
+    (when given) at most ``MODEL_ANNOTATIONS_MAX`` objects, each an ``anchor`` of the
+    asset, no raw ``position`` or ``normal``, and an optional ``label`` and ``note`` of
+    plain text within ``ANNOTATION_LABEL_MAX`` and ``ANNOTATION_NOTE_MAX``. A key set
+    to null counts as given."""
+    if MODEL_URL_PROPS & props.keys():
+        raise _Reject("a model-viewer with its own src, poster or environmentImage")
+    asset = props.get("asset")
+    if not isinstance(asset, str) or asset not in RIPPLE_MODELS:
+        raise _Reject("a model-viewer asset that is not in the model library")
+    anchors = RIPPLE_MODELS[asset]["anchors"]
+    if "focus" in props and props["focus"] not in anchors:
+        raise _Reject("a model-viewer focus that is not one of its asset's anchors")
+    if "annotations" not in props:
+        return
+    notes = props["annotations"]
+    if not isinstance(notes, list) or len(notes) > MODEL_ANNOTATIONS_MAX:
+        raise _Reject(f"model annotations that are not a list of at most {MODEL_ANNOTATIONS_MAX}")
+    for note in notes:
+        if not isinstance(note, dict):
+            raise _Reject("a model annotation that is not an object")
+        if "position" in note or "normal" in note:
+            raise _Reject("a model annotation with a raw position or normal")
+        if note.get("anchor") not in anchors:
+            raise _Reject("a model annotation anchor that is not one of its asset's anchors")
+        label, text = note.get("label", ""), note.get("note", "")
+        if not _plain(label) or _js_len(label) > ANNOTATION_LABEL_MAX:
+            raise _Reject(
+                f"a model annotation label that is not plain text of at most {ANNOTATION_LABEL_MAX}"
+            )
+        if not _plain(text) or _js_len(text) > ANNOTATION_NOTE_MAX:
+            raise _Reject(
+                f"a model annotation note that is not plain text of at most {ANNOTATION_NOTE_MAX}"
+            )
 
 
 def _is_number(value: Any) -> bool:
@@ -2006,7 +2059,8 @@ class PartialScan:
         self._hosts = profile.url_hosts
         self._done = not profile.strict
         # Open containers: [is object, key (object: current; array: inherited),
-        # expecting a key, a "style" key on the path, the object's keys so far].
+        # expecting a key, a "style" key on the path, the object's keys so far, its
+        # "type" string so far].
         self._stack: list[list[Any]] = []
         self._raw: list[str] | None = None  # the open string's raw text
         self._escape = False
@@ -2050,14 +2104,14 @@ class PartialScan:
 
     def _open(self, is_obj: bool) -> None:
         if not self._stack:  # the root, always an object (``feed``)
-            self._stack.append([True, "", True, False, set()])
+            self._stack.append([True, "", True, False, set(), None])
             return
         top = self._stack[-1]
         top[2] = False
         # Directly under the root, the walk starts with key "" (as _check_strict).
         key = top[1] if len(self._stack) > 1 else ""
         styled = top[3] or key == "style"
-        self._stack.append([is_obj, "" if is_obj else key, is_obj, styled, set()])
+        self._stack.append([is_obj, "" if is_obj else key, is_obj, styled, set(), None])
 
     def _string(self, raw: str) -> None:
         try:
@@ -2081,6 +2135,14 @@ class PartialScan:
         root = len(self._stack) == 1
         key = "" if root else top[1]
         styled = not root and (top[3] or (top[0] and key == "style"))
+        if top[0] and key == "type":
+            top[5] = value
+        # A model-viewer's own URL (``MODEL_URL_PROPS``), once its node's type is in.
+        node = self._stack[-2] if len(self._stack) > 2 else None
+        if top[0] and not styled and key in MODEL_URL_PROPS and node is not None:
+            if node[0] and node[1] == "props" and node[5] == MODEL_VIEWER:
+                self.hit = True
+                return
         self.hit = _string_fails(value, key, styled, self._hosts)
 
 
@@ -2175,7 +2237,7 @@ def _widget_line(
 
 
 # A summary line's description: its first sentence, at most this long.
-_BRIEF_CHARS = 73
+_BRIEF_CHARS = 50
 
 
 def _brief_line(widget: dict[str, Any]) -> str:
@@ -2209,6 +2271,10 @@ __all__ = [
     "FLOW_EVENTS",
     "FLOW_STEP_KEYS",
     "MAX_FLOW_STEPS",
+    "MODEL_ANNOTATIONS_MAX",
+    "MODEL_URL_PROPS",
+    "MODEL_VIEWER",
+    "RIPPLE_MODELS",
     "PAWBAR_PROFILE",
     "PartialScan",
     "RIPPLE_CHROME",

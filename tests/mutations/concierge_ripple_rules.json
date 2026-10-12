@@ -1702,5 +1702,59 @@
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_pawbar_never_drops_a_surplus_closer"
     ]
+  },
+  {
+    "label": "3D: a model-viewer may carry its own src, poster or environmentImage",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if MODEL_URL_PROPS & props.keys():\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_model_viewer_holds_to_the_model_library"
+    ]
+  },
+  {
+    "label": "3D: any asset id passes (an unknown one reads as the plane)",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if not isinstance(asset, str) or asset not in RIPPLE_MODELS:\n        raise _Reject(\"a model-viewer asset that is not in the model library\")\n    anchors = RIPPLE_MODELS[asset][\"anchors\"]",
+    "replace": "    anchors = RIPPLE_MODELS.get(str(asset), RIPPLE_MODELS[\"plane\"])[\"anchors\"]",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_model_viewer_holds_to_the_model_library"
+    ]
+  },
+  {
+    "label": "3D: any anchor passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if note.get(\"anchor\") not in anchors:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_model_viewer_holds_to_the_model_library"
+    ]
+  },
+  {
+    "label": "3D: a 13th annotation passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "len(notes) > MODEL_ANNOTATIONS_MAX",
+    "replace": "len(notes) > MODEL_ANNOTATIONS_MAX + 1",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_model_viewer_holds_to_the_model_library"
+    ]
+  },
+  {
+    "label": "3D: a raw position passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if \"position\" in note or \"normal\" in note:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_model_viewer_holds_to_the_model_library"
+    ]
+  },
+  {
+    "label": "3D: a streamed model-viewer src waits for the close",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if node[0] and node[1] == \"props\" and node[5] == MODEL_VIEWER:\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_streamed_model_viewer_src_is_refused_before_the_card_closes"
+    ]
   }
 ]

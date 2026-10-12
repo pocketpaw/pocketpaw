@@ -362,8 +362,8 @@
   {
     "label": "PLAY-41: the label cap counts code points",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "_js_len(label) > ANNOTATION_LABEL_MAX",
-    "replace": "len(label) > ANNOTATION_LABEL_MAX",
+    "find": "not label.strip() or _js_len(label) > ANNOTATION_LABEL_MAX",
+    "replace": "not label.strip() or len(label) > ANNOTATION_LABEL_MAX",
     "tests": [
       "tests/cloud/test_paw_bar_play_widgets.py"
     ]

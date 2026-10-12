@@ -25,6 +25,7 @@ from pocketpaw_ee.cloud.belt import clef  # noqa: E402
 import pocketpaw.stores as stores  # noqa: E402
 
 # The mandates module's fixtures and helpers: the real router + store + journal.
+from tests.cloud.test_belt_headless import CANNED_DIFF, _queue_station_run  # noqa: E402
 from tests.cloud.test_belt_mandates import (  # noqa: E402,F401
     USER,
     WS,
@@ -219,4 +220,27 @@ async def test_shadow_plan_records_verdict_and_lists_it(tmp_path: Path, mongo_db
     rows = await clef.list_verdicts(WS)
     assert [(r["action_id"], r["kind"], r["outcome"]) for r in rows] == [
         (plan_id, "plan", "pending")
+    ]
+
+
+@pytest.mark.usefixtures("store")
+async def test_headless_attach_records_a_diff_verdict(on):
+    from pocketpaw_ee.cloud.belt.headless import DevelopResult, HeadlessDevelopRunner
+
+    fake = on(Fake())
+    st = stores.get_instinct_store()
+    action_id = await _queue_station_run(st)
+
+    async def develop(_req):
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="adds hello.txt")
+
+    await HeadlessDevelopRunner(develop_fn=develop).run(action_id)
+    await asyncio.gather(*list(clef._TASKS))
+    body = json.loads(fake.requests[0].content)
+    assert "- hello.txt" in body["state"]["diff"]
+    rec = (await st.get_action(action_id)).parameters["_code_change"]["clef"]
+    assert rec["kind"] == "diff" and rec["verdict"]["change_kind"] == "fix"
+    rows = await clef.list_verdicts(WS)
+    assert [(r["action_id"], r["kind"], r["outcome"]) for r in rows] == [
+        (action_id, "diff", "pending")
     ]
