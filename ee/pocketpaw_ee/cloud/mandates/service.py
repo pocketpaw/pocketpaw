@@ -2380,9 +2380,9 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
     task is working remains. A shift older than the stall timeout stops holding
     the next one through in-flight runs or a stuck ``planning`` / ``executing``
     state; a plan waiting ``in_gate`` for a human always holds it, and so do
-    ``_FOREMAN_FAILURE_RUN`` failed foreman calls in a row. Past those
-    holds, a mandate that toggles the ``issues`` patrol runs it before the
-    backlog read, so a new GitHub issue is sighted without waiting for a shift."""
+    ``_FOREMAN_FAILURE_RUN`` failed foreman calls in a row. A mandate that toggles
+    the ``issues`` patrol runs it before the in-flight hold, so a new GitHub issue
+    (work, or a tester's bug) is sighted even while the line is busy."""
     from pocketpaw_ee.cloud.belt import service as belt_service
 
     gap = timedelta(
@@ -2418,6 +2418,16 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
                 return False  # the foreman keeps failing: back off to the stall timeout
 
     mandate_id = str(doc.id)
+    if "issues" in (doc.patrols or []):
+        # The due check senses new issues itself (one ``gh issue list``), before the
+        # in-flight check: a busy line must still see new work and bug reports.
+        try:
+            await run_patrols(
+                doc.workspace, _SCHEDULER_ACTOR, mandate_id, only=frozenset({"issues"})
+            )
+        except Exception:  # noqa: BLE001 — a failed sense never sinks the due check
+            logger.warning("mandate: issues patrol failed for %s", mandate_id, exc_info=True)
+
     runs = [
         r
         for r in (await belt_service.list_runs(doc.workspace))["runs"]
@@ -2430,16 +2440,6 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
             for r in runs
         ):
             return False
-
-    if "issues" in (doc.patrols or []):
-        # No shift senses a continuous mandate whose backlog is empty, so the
-        # due check runs its issues patrol itself (one ``gh issue list``).
-        try:
-            await run_patrols(
-                doc.workspace, _SCHEDULER_ACTOR, mandate_id, only=frozenset({"issues"})
-            )
-        except Exception:  # noqa: BLE001 — a failed sense never sinks the due check
-            logger.warning("mandate: issues patrol failed for %s", mandate_id, exc_info=True)
 
     backlog = await _backlog(
         doc.workspace, mandate_id, runs, since=last.createdAt if last else None

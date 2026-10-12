@@ -30,6 +30,8 @@ pytestmark = pytest.mark.usefixtures("any_repo_root")
 from pocketpaw_ee.cloud.mandates import patrols  # noqa: E402
 from pocketpaw_ee.cloud.mandates.patrols import issues_patrol  # noqa: E402
 
+from tests.cloud.test_belt_mandates import store  # noqa: E402,F401
+
 SLUG = "qbtrix/creative-core"
 
 
@@ -225,3 +227,31 @@ async def test_continuous_due_check_skips_a_mandate_without_the_issues_toggle(
     assert len(_issue_lists(gh)) == 1
     other = created["mandate"]["id"]
     assert (await mandate_service.list_sightings("w1", "u1", other))["sightings"] == []
+
+
+async def test_a_busy_line_still_sights_new_issues(tmp_path, mongo_db, monkeypatch, store):  # noqa: F811
+    """A run in flight holds the next shift, but never the patrol: a tester's bug
+    filed while the line is building must reach the backlog right away."""
+    from datetime import timedelta
+
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+    from pocketpaw_ee.cloud.mandates.domain import ShiftDoc
+
+    from tests.cloud.test_belt_mandates import _seed_run
+
+    gh = FakeGh([_issue(121, "suite", "bug")])
+    mandate_id = await _github_mandate(tmp_path, monkeypatch, gh, cadence="continuous")
+    await _seed_run(
+        store, mandate_id, "in flight", plan_action_id="plan-1", task_index=1, station_pending=True
+    )
+    shift = ShiftDoc(
+        workspace="w1", mandate_id=mandate_id, no=1, state="done", plan_action_id="plan-1"
+    )
+    await shift.insert()
+    await shift.set({ShiftDoc.createdAt: datetime.now(UTC) - timedelta(minutes=30)})
+
+    rows = await mandate_service.list_cadence_due(datetime.now(UTC))
+
+    assert mandate_id not in {r["mandate_id"] for r in rows}, "the run in flight holds the shift"
+    sightings = (await mandate_service.list_sightings("w1", "u1", mandate_id))["sightings"]
+    assert [s["evidence"]["number"] for s in sightings] == [121]
