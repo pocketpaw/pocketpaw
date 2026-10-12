@@ -5,7 +5,7 @@
   },
   "booking": {
     "intents": ["book", "booking", "table", "appointment", "reservation", "reserve", "slot", "slots", "dentist", "haircut"],
-    "hint": "Write services and days only when it is not a table (a dentist, a haircut), slot start like \"2026-10-14T09:00\"."
+    "hint": "Write services and days only when it is not a table (a dentist, a haircut), slot start like \"2026-10-14T09:00\". When the message already names a picked slot, confirm it in text, no new booking card."
   },
   "comparison-layout": {"intents": ["compare", "comparison", "pick", "vs", "versus", "choose", "which", "laptop", "laptops", "headphones", "tablet", "tablets", "phone", "side by side"]},
   "notes": {"intents": ["notes", "note", "notepad", "jot", "ideas", "memo", "scratchpad"]},

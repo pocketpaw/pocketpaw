@@ -72,5 +72,23 @@
     "tests": [
       "tests/cloud/test_paw_bar_widget_relevance.py::test_the_steering_hints_reach_the_section"
     ]
+  },
+  {
+    "label": "a picked slot gets no confirm note, so the concierge sends the booking card again",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            lines.append(_PICKED_SLOT_NOTE)\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_picked_slot_gets_a_confirm_note_not_another_booking_card"
+    ]
+  },
+  {
+    "label": "the picked-slot match is loosened, so a plain booking request loses its card",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "d like to book .+ at \\d\")",
+    "replace": "d like to book\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_booking_request_gets_no_picked_slot_note"
+    ]
   }
 ]

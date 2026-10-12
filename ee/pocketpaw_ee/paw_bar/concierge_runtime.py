@@ -1552,6 +1552,18 @@ _RIPPLE_RULES = (
 )
 
 
+# The ripple landing's chat message when a visitor confirms a slot on a booking
+# card the store does not back (ripple routes/pawbar/book.ts slotMessage). Without
+# this note the model answered it with the same booking card again. Only this
+# fixed note reaches the prompt, never the matched text.
+_PICKED_SLOT = re.compile(r"I['\u2019]d like to book .+ at \d")
+_PICKED_SLOT_NOTE = (
+    "   The visitor already picked this slot: confirm the service, day and time in a "
+    "sentence or two, say it is a demo so nothing is booked, offer one next step; "
+    "no booking card."
+)
+
+
 def _cards_paragraph(
     declared: Sequence[dict[str, Any]],
     *,
@@ -1607,6 +1619,8 @@ def _cards_paragraph(
         if picked:
             lines.append("   Widgets for this message, with their props:")
             lines += [f"   {widget_relevance.full_line(name)}" for name in picked]
+        if _PICKED_SLOT.match(message):
+            lines.append(_PICKED_SLOT_NOTE)
         return "\n".join(lines)
 
     lines = [

@@ -100,6 +100,42 @@ def test_the_core_widgets_carry_their_steering_hints_on_every_turn():
     assert "short phrases" not in _section(_paragraph("review this NDA as a table"))
 
 
+_PICKED = "I'd like to book Dental cleaning on Tue, Oct 20 at 10:00 AM."
+_NOTE = "already picked this slot"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _PICKED,
+        "I'd like to book Teeth cleaning on Tue 14 Oct at 10:30 (3 people). Note: first visit",
+        "I\u2019d like to book Haircut at 4:00 PM.",
+    ],
+)
+def test_a_picked_slot_gets_a_confirm_note_not_another_booking_card(message):
+    """The landing sends this when a visitor confirms a slot on a booking card the
+    store does not back; the concierge answered with the same booking card again.
+    THE MUTATION THAT BREAKS THIS: drop the picked-slot note from _cards_paragraph."""
+    text = _paragraph(message)
+    tail = text[len(_paragraph()) :]
+    assert _NOTE in tail and "no booking card" in tail
+    assert "Dental" not in tail and "Teeth" not in tail and "Haircut" not in tail
+    assert "already names a picked slot" in _section(text)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Book a dentist appointment",
+        "book a dentist appointment",
+        "I'd like to book",
+        "I'd like to book a table at Nobu",
+    ],
+)
+def test_a_booking_request_gets_no_picked_slot_note(message):
+    assert _NOTE not in _paragraph(message)
+
+
 def test_the_illustration_rule_asks_for_a_compact_svg_and_a_node_level_on_select():
     """The bike gears turn: the first SVG was cut off mid-JSON and the restart was
     refused for an on_select written inside the illustration's props."""
