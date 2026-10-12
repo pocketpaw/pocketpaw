@@ -5,6 +5,7 @@
 # ``LeadSource`` onto this (submitter_ref, origin, kind, conversation_ref).
 # ``origin`` / ``origin_unrecognized`` are surfaced because origin enforcement is
 # opt-in: the owner must be able to see where an unexpected lead came from.
+# ``lead_site_id`` is the one rule for which site id a lead is filed under.
 
 from __future__ import annotations
 
@@ -30,3 +31,16 @@ class Lead:
     status: str = "new"
     read_at: datetime | None = None
     created_at: datetime | None = None
+
+
+def lead_site_id(site: Any) -> str:
+    """The id a site's leads are filed under, and the id its public capture
+    routes accept: the ``script_name`` for a built site, the object id for a
+    connected (``foreign_origin``) site, which never gets a script name. ""
+    for anything else (a draft), which has no capture endpoint."""
+    script = str(getattr(site, "script_name", "") or "")
+    if script:
+        return script
+    if getattr(site, "foreign_origin", False) and getattr(site, "id", None) is not None:
+        return str(site.id)
+    return ""

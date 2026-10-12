@@ -228,6 +228,7 @@ async def _write_handoff_lead(
         return
     try:
         from pocketpaw_ee.cloud.leads import service as leads_service
+        from pocketpaw_ee.cloud.leads.domain import lead_site_id
         from pocketpaw_ee.cloud.models.site import Site
         from pocketpaw_ee.paw_bar.ledger import conversation_id
 
@@ -236,7 +237,7 @@ async def _write_handoff_lead(
             return
         ref = conversation_id(widget_id, customer_ref)
         if await leads_service.has_conversation_lead(
-            workspace_id, site.script_name, "handoff", ref
+            workspace_id, lead_site_id(site), "handoff", ref
         ):
             return
         await leads_service.capture_internal(

@@ -130,6 +130,7 @@ async def test_get_returns_key_absolute_urls_and_origin_sets() -> None:
     assert resp.status_code == 200, resp.text
     assert resp.json() == {
         "site_id": "site-bright",
+        "site_kind": "built",
         "signed_key": "key_ok",
         "capture_url": "https://api.paw.test/api/v1/sites/site-bright/capture",
         "form_url": "https://api.paw.test/api/v1/capture/form",
