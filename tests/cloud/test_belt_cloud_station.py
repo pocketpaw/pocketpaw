@@ -5,45 +5,40 @@
 # injected ``Runner``, so these tests script git, the pty launcher and gh with a
 # fake: nothing real is launched and no network is touched.
 #
-# Asserted: a merged PR lands the run (approved by system:fast-lane, executed,
-# pr_url + merge sha + head branch on the blob) and the launch ran from the
-# launch clone detached at origin/<base> with a brief that names the issue, the
-# Belt-Run marker, the label and the charter check; a lane refusal attaches the
-# PR's diff and leaves the run PENDING at the per-diff gate; a launch with no
-# session URL and a tracker timeout each leave the run queued with
-# ``headless_error``; a launch clone on another repo is re-pointed (``set-url``
-# before the fetch, for the worker and the fixer), one on the same repo is not,
-# and a malformed bound-repo slug is refused before any git runs in the clone;
-# the seated dev's instructions ride the brief, fenced; the PR's diff goes to
-# Clef's shadow scorer once the PR is known; a launch that times out keeps
-# the CLI output it streamed; a launch clone the CLI does not trust fails with
-# a clear error. A stuck PR gets a fixer session after the grace period: a
-# conflicting one a rebase brief, a red one a brief carrying the failed job's
-# last 40 log lines; a PR that goes green within grace gets none; the attempts
-# cap escalates like a refusal; a fixer that fails to launch is recorded on the
-# blob's ``fixes`` and tracking goes on. A landed run carries the PR's diff
-# (Clef's copy when the head has not moved, else fetched again) and fetches the
-# bound repo, whose failure never fails the land. With the tester on and a
-# tester seat, a landed run launches ONE tester (engine brief: fuzz; app brief,
-# a ``Sources/*App`` in the clone: snapshots against docs/design.md), recorded as
-# ``tester`` with a landed/test update; off by default, none without a seat, one
-# per run, and a failed launch is recorded while the land stands. Screenshots:
-# the head's CI run with a ``snapshots`` artifact is found through gh api, its
-# real PNGs kept (sanitized, 40 files / 20 MB caps, sha on the blob) once the PR
-# is known and on land, and no artifact or a failed download never fails a land.
-# RESUME (a restart): a launched run (``headless_state="cloud"``, no diff) is
-# tracked again and lands, also when its PR merged while the backend was down;
-# nothing is launched; a run without the mark (or a failed one) is not resumed;
-# an unreadable workspace skips only itself; the run timeout counts from
-# ``cloud.launched_at``; a fixer recorded on the PR's head is not doubled.
+# LAND: a merged PR is approved by system:fast-lane and executed (pr_url, merge
+# sha, head branch, the PR's diff, the bound repo fetched, a failed fetch never
+# fatal); the launch ran from the launch clone detached at origin/<base> with a
+# brief naming the issue, the Belt-Run marker, the label, the charter check and
+# the seated dev's fenced instructions. A lane refusal attaches the diff at the
+# per-diff gate; no session URL or a tracker timeout leaves the run queued with
+# ``headless_error``; the launch clone is re-pointed to another repo's origin
+# (never a malformed slug), keeps streamed output on a timeout, and fails clearly
+# when the CLI does not trust it; Clef shadow-scores the PR's diff.
+# FIXERS: a conflicting PR gets a rebase brief, a red one the failed job's last
+# 40 log lines, after the grace period; green within grace gets none; the cap
+# escalates; a failed fixer launch is recorded and tracking goes on.
+# SILENT WORKERS: no PR by the no-PR timeout relaunches ONE worker (its brief
+# says the last attempt produced none), then the run is rejected with "no PR
+# from N worker(s) in Xm": the mandate's due check is held before and free
+# after, and the task's sighting stays open; a worker's comment on the issue
+# since the launch releases it at once with that line and labels the issue
+# needs-human; the relaunch count and clock survive a resume.
+# TESTER: with the flag and a seat, a landed run launches ONE tester (engine
+# brief: fuzz; app brief: snapshots against docs/design.md); off by default,
+# none without a seat, one per run, a failed launch recorded. Its Belt-Test PR
+# is nudged when green, gets its own fixer when red (marker kept, run fixes and
+# screenshots untouched) and is recorded merged; no PR by the timeout is done;
+# tracking it never holds the mandate's due check; a restart resumes it.
+# SCREENSHOTS: the head's CI ``snapshots`` artifact via gh api, real PNGs kept
+# (sanitized, 40 files / 20 MB), once the PR is known and on land, never fatal.
+# RESUME: a launched run is tracked again, never relaunched, and lands (also
+# when merged while down); unmarked or failed runs and unreadable workspaces are
+# skipped; the timeout counts from ``launched_at``; a fixer is not doubled.
 # LANE NUDGE: a labelled PR green and mergeable past the interval gets one
-# ``gh workflow run "Fast Lane"`` (none before it); two tracked PRs on one repo
-# share one dispatch per interval; a red, conflicting, pending, unknown or
-# unlabelled PR gets none; a failed dispatch never stops the tracker.
-# ``pty_run.py`` itself runs for real:
-# it streams the child's output as it lands and exits on the folder-trust
-# prompt instead of waiting; ``wire_from_env`` wires the cloud dispatcher only
-# with a launch clone.
+# ``gh workflow run "Fast Lane"``, one per interval per repo; red, conflicting,
+# pending, unknown or unlabelled PRs get none; a failed dispatch is harmless.
+# ``pty_run.py`` runs for real: it streams output and exits on the folder-trust
+# prompt; ``wire_from_env`` / ``wire_cloud`` read the env.
 
 from __future__ import annotations
 
@@ -51,6 +46,7 @@ import asyncio
 import json
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -59,11 +55,18 @@ pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud.belt import cloud_station, headless  # noqa: E402
 from pocketpaw_ee.cloud.belt import develop_station as ds  # noqa: E402
-from pocketpaw_ee.cloud.belt.cloud_station import MARKER, CloudTaskDispatcher  # noqa: E402
+from pocketpaw_ee.cloud.belt import service as belt_service  # noqa: E402
+from pocketpaw_ee.cloud.belt.cloud_station import (  # noqa: E402
+    MARKER,
+    TEST_MARKER,
+    CloudTaskDispatcher,
+)
 from pocketpaw_ee.cloud.belt.develop_station import ClaudeCodeDevelop  # noqa: E402
+from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
+from pocketpaw_ee.cloud.mandates.domain import ShiftDoc, SightingDoc  # noqa: E402
 from pocketpaw_ee.cloud.mandates.executor import StationTaskDispatcher  # noqa: E402
 
-from pocketpaw.instinct.models import ActionStatus  # noqa: E402
+from pocketpaw.instinct.models import ActionStatus, ActionTrigger  # noqa: E402
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
 
 WS = "w1"
@@ -87,7 +90,9 @@ def dirs(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     return repo, launch
 
 
-async def _queue(store: InstinctStore, repo: Path) -> str:
+async def _queue(
+    store: InstinctStore, repo: Path, mandate_id: str = "m1", plan_action_id: str = "plan-1"
+) -> str:
     import pocketpaw_ee.cloud.mandates.executor as ex
 
     async def fake_repo(workspace_id: str, mandate_id: str) -> str:
@@ -105,9 +110,9 @@ async def _queue(store: InstinctStore, repo: Path) -> str:
     try:
         return await StationTaskDispatcher().dispatch(
             workspace_id=WS,
-            mandate_id="m1",
+            mandate_id=mandate_id,
             shift_no=1,
-            plan_action_id="plan-1",
+            plan_action_id=plan_action_id,
             index=1,
             task={
                 "title": "G41: Text shapes",
@@ -120,8 +125,13 @@ async def _queue(store: InstinctStore, repo: Path) -> str:
         belt_service.default_base = orig_base  # type: ignore[assignment]
 
 
+# The source issue's comments by default: one from long before any launch.
+OLD_COMMENT = [{"createdAt": "2020-01-02T03:04:05Z", "body": "Spec question from long ago."}]
+
+
 class FakeRunner:
-    """Scripted git / launcher / gh. ``pr`` is what ``gh pr view`` returns."""
+    """Scripted git / launcher / gh. ``pr`` is what ``gh pr view`` returns for
+    the run's PR (#9), ``tester_pr`` for the tester's (#20, ``Belt-Test``)."""
 
     def __init__(
         self,
@@ -136,6 +146,8 @@ class FakeRunner:
         snapshots: dict[str, bytes] | None = None,
         download_code: int = 0,
         workflow_code: int = 0,
+        tester_pr: dict | list[dict] | None = None,
+        issue_comments: list[dict] | None = None,
     ):
         self.calls: list[tuple[list[str], Path]] = []
         # A list is consumed one entry per launch / per ``gh pr view``, holding the last.
@@ -146,6 +158,8 @@ class FakeRunner:
         self.repo_origin = repo_origin
         self.repo_fetch_code = repo_fetch_code  # ``git fetch`` in the bound repo
         self.prs = pr if isinstance(pr, list) else [pr]
+        self.tester_prs = tester_pr if isinstance(tester_pr, list) else [tester_pr]
+        self.issue_comments = OLD_COMMENT if issue_comments is None else issue_comments
         self.run_ref = ""
         # The PR head's CI runs: 502 carries the ``snapshots`` artifact, 501 does not.
         self.snapshots = snapshots
@@ -172,17 +186,24 @@ class FakeRunner:
                 return -1, "", f"timed out after {timeout:.0f}s"
             return self.launch_code, self._next(self.launch_outs), ""
         if argv[:3] == ["gh", "pr", "list"]:
-            if self.prs[0] is None:
-                return 0, "[]", ""
-            body = f"Closes #93\n\n{MARKER} {self.run_ref}\n"
-            prs = [{"number": 7, "body": "other"}, {"number": 9, "body": body}]
-            prs += [{"number": 10 + i, "body": f"{MARKER} {r}"} for i, r in enumerate(self.also)]
+            prs = []
+            if self.prs[0] is not None:
+                body = f"Closes #93\n\n{MARKER} {self.run_ref}\n"
+                prs = [{"number": 7, "body": "other"}, {"number": 9, "body": body}]
+                prs += [
+                    {"number": 10 + i, "body": f"{MARKER} {r}"} for i, r in enumerate(self.also)
+                ]
+            if self.tester_prs[0] is not None:
+                prs.append({"number": 20, "body": f"Tests.\n{TEST_MARKER} {self.run_ref}"})
             return 0, json.dumps(prs), ""
+        if argv[:3] == ["gh", "issue", "view"]:
+            return 0, json.dumps({"comments": self.issue_comments}), ""
         if argv[:3] == ["gh", "workflow", "run"]:
             self.dispatched.append(self.clock())
             return self.workflow_code, "", "HTTP 403" if self.workflow_code else ""
         if argv[:3] == ["gh", "pr", "view"]:
-            return 0, json.dumps(self._next(self.prs)), ""
+            seq = self.tester_prs if argv[3] == "20" else self.prs
+            return 0, json.dumps(self._next(seq)), ""
         if argv[:3] == ["gh", "run", "view"]:
             return 0, "".join(f"build\tstep\tL{i:03d}\n" for i in range(1, 51)), ""
         if argv[:3] == ["gh", "pr", "diff"]:
@@ -655,11 +676,13 @@ def updates(monkeypatch) -> list[tuple[str, str]]:
 TESTER_SEAT = {"agent_id": "t1", "name": "Tess", "setup": "", "seated_by": "u1"}
 
 
-def _tester(runner: FakeRunner, launch: Path, *, seat: dict | None = TESTER_SEAT, **kw):
+def _tester(
+    runner: FakeRunner, launch: Path, *, seat: dict | None = TESTER_SEAT, mandate="m1", **kw
+):
     d = _dispatcher(runner, launch, tester=True, **kw)
 
     async def tester_for(workspace_id: str, mandate_id: str) -> dict | None:
-        assert (workspace_id, mandate_id) == (WS, "m1")
+        assert (workspace_id, mandate_id) == (WS, mandate)
         return seat
 
     async def worker_for(workspace_id: str, agent_id: str, seated_by: str) -> dict:
@@ -1159,3 +1182,258 @@ def test_wire_cloud_reads_the_lane_nudge_env(tmp_path, monkeypatch):
     assert cloud_station.wire_cloud() is True
     d = headless.resolve_headless_dispatcher()
     assert (d.lane_nudge_seconds, d.lane_workflow) == (120.0, "Lane")
+
+
+# -- silent workers: no PR in time -> one fresh worker, then the run is released --
+
+
+async def _mandate_world(store: InstinctStore, repo: Path) -> tuple[str, str, str]:
+    """A continuous mandate with two open sightings and a done shift whose plan's
+    task 1 cites the first, plus that task's queued run: (mandate, run, cited)."""
+    created = await mandate_service.create_mandate(
+        WS,
+        "u1",
+        {
+            "name": "m",
+            "surface": {"repo_id": str(repo)},
+            "charter": {"goal": "g", "cadence": "continuous"},
+        },
+    )
+    mid = created["mandate"]["id"]
+    for text in ("text shapes are missing", "the export button is grey"):
+        await mandate_service.file_feedback(
+            WS, "u1", mid, {"text": text, "severity": 3, "source": "support"}
+        )
+    cited = str((await SightingDoc.find(SightingDoc.mandate_id == mid).to_list())[0].id)
+    plan = await store.propose(
+        WS,
+        "Shift 1 plan",
+        "",
+        "",
+        ActionTrigger(type="agent", source="belt:mandate", reason="test"),
+        parameters={
+            "_belt_plan": {
+                "shift_no": 1,
+                "plan": {"tasks": [{"title": "G41", "evidence_refs": [cited]}]},
+            }
+        },
+    )
+    shift = ShiftDoc(workspace=WS, mandate_id=mid, no=1, state="done", plan_action_id=plan.id)
+    await shift.insert()
+    await shift.set({ShiftDoc.createdAt: datetime.now(UTC) - timedelta(minutes=10)})
+    return mid, await _queue(store, repo, mandate_id=mid, plan_action_id=plan.id), cited
+
+
+async def _due(mandate_id: str) -> bool:
+    """The continuous scheduler's verdict: may the mandate's next shift fire?"""
+    due = await mandate_service.list_cadence_due(datetime.now(UTC))
+    return mandate_id in {r["mandate_id"] for r in due}
+
+
+def _sampling(d: CloudTaskDispatcher, mandate_id: str, *, every: bool) -> list[bool]:
+    """Record the mandate's due verdict at each poll's sleep (or the first only)."""
+    seen: list[bool] = []
+    inner = d.sleep
+
+    async def sleep(seconds: float) -> None:
+        if every or not seen:
+            seen.append(await _due(mandate_id))
+        await inner(seconds)
+
+    d.sleep = sleep
+    return seen
+
+
+@pytest.mark.usefixtures("any_repo_root")
+async def test_a_silent_worker_is_relaunched_once_then_released(store, dirs, mongo_db, updates):
+    repo, launch = dirs
+    mid, run_ref, cited = await _mandate_world(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=None)
+    runner.run_ref = run_ref
+    d = _dispatcher(runner, launch, poll_seconds=600)
+    held = _sampling(d, mid, every=False)
+
+    await d.run(run_ref, workspace_id=WS)
+
+    briefs = _briefs(runner)
+    assert len(briefs) == 2  # the worker, then ONE fresh worker an hour later
+    assert "produced no pull request" not in briefs[0]
+    assert "produced no pull request" in briefs[1] and f"{MARKER} {run_ref}" in briefs[1]
+    # The issue was read before the relaunch; its only comment predates the launch.
+    view = ["gh", "issue", "view", "93", "-R", SLUG, "--json", "comments"]
+    assert view in [a for a, _ in runner.calls]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason == "no PR from 2 worker(s) in 120m"
+    cc = action.parameters["_code_change"]
+    (again,) = cc["relaunches"]
+    assert again["session_url"] == CLOUD_URL and again["at"] <= time.time()
+    assert "headless_state" not in cc and "headless_error" not in cc
+    assert ("running", "cloud") in updates and ("rejected", "done") in updates
+    # The line moved: held while the worker was out, due once released, and the
+    # task's sighting still open (only a landed task resolves one).
+    assert held == [False]
+    assert await _due(mid)
+    backlog = await mandate_service._backlog(WS, mid, (await belt_service.list_runs(WS))["runs"])
+    assert cited in {o["id"] for o in backlog["open"]}
+
+
+async def test_a_worker_that_says_impossible_is_released_without_a_relaunch(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    soon = (datetime.now(UTC) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    said = {"createdAt": soon, "body": "\nImpossible as written: no glyph API.\n\nDetails."}
+    runner = FakeRunner(launch_out=SESSION, pr=None, issue_comments=[*OLD_COMMENT, said])
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch, poll_seconds=600).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 1  # taken at its word: no relaunch
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason == "Impossible as written: no glyph API."
+    calls = [a for a, _ in runner.calls]
+    assert ["gh", "issue", "edit", "93", "-R", SLUG, "--add-label", "needs-human"] in calls
+    assert "relaunches" not in action.parameters["_code_change"]
+    assert ("rejected", "done") in updates
+
+
+async def test_the_relaunch_count_survives_a_resume(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _launched(store, repo, launched_at=time.time() - 2 * 3600)
+    again = {"session_url": "https://claude.ai/code/session_AGAIN", "at": time.time() - 1800}
+    await cloud_station._patch(store, run_ref, relaunches=[again])
+    runner = FakeRunner(launch_out=SESSION, pr=None)
+    runner.run_ref = run_ref
+
+    assert await _resumer(runner, launch).resume_all() == 1
+
+    assert not _briefs(runner)  # the one relaunch was spent before the restart
+    # The no-PR clock counts from that relaunch: 30 more minutes of 60 s polls.
+    assert sum(a[:3] == ["gh", "pr", "list"] for a, _ in runner.calls) == 31
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith("no PR from 2 worker(s) in ")
+    assert action.parameters["_code_change"]["relaunches"] == [again]
+
+
+def test_wire_cloud_reads_the_silent_worker_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(headless, "_PRODUCTION_DISPATCHER", None)
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR", str(tmp_path))
+    monkeypatch.delenv("POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT", raising=False)
+    monkeypatch.delenv("POCKETPAW_FACTORY_CLOUD_RELAUNCHES", raising=False)
+    assert cloud_station.wire_cloud() is True
+    d = headless.resolve_headless_dispatcher()
+    assert (d.no_pr_seconds, d.relaunch_attempts) == (3600.0, 1)
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT", "900")
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_RELAUNCHES", "2")
+    assert cloud_station.wire_cloud() is True
+    d = headless.resolve_headless_dispatcher()
+    assert (d.no_pr_seconds, d.relaunch_attempts) == (900.0, 2)
+
+
+# -- the tester's PR: tracked like the worker's, never holding the line ---------
+
+TESTER_PR = f"https://github.com/{SLUG}/pull/20"
+
+
+def _tester_pr(**kw) -> dict:
+    return {**_ready(**kw), "url": TESTER_PR, "headRefName": "claude/fuzz-text"}
+
+
+async def test_the_tester_pr_is_nudged_fixed_and_recorded_merged(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    green, red = _tester_pr(head="abcdef1"), _tester_pr(head="t2", red=True)
+    runner = FakeRunner(
+        launch_out=SESSION,
+        pr=MERGED,
+        tester_pr=[green] * 6 + [red] * 3 + [{**green, "state": "MERGED"}],
+    )
+    runner.run_ref = run_ref
+    d = _tester(runner, launch, poll_seconds=60, fix_grace_seconds=100)
+    runner.clock = d.clock
+
+    await d.run(run_ref, workspace_id=WS)
+
+    assert runner.dispatched == [300.0]  # green and quiet for the nudge interval
+    briefs = _briefs(runner)
+    assert len(briefs) == 3  # the worker, the tester, one fixer on the tester's PR
+    fix = briefs[2]
+    assert "#20" in fix and "`claude/fuzz-text`" in fix and "build (macos-14)" in fix
+    assert f"{TEST_MARKER} {run_ref}" in fix and f"{MARKER} {run_ref}" not in fix
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    cc = action.parameters["_code_change"]
+    tester = cc["tester"]
+    assert tester["pr_url"] == TESTER_PR and tester["state"] == "merged"
+    (entry,) = tester["fixes"]
+    assert entry["kind"] == "ci" and entry["head"] == "t2"
+    assert "fixes" not in cc  # its own cap: the run's fixers are untouched
+    assert ("running", "fix") not in updates  # a landed run never reads as running
+    # A tester PR's screenshots would replace the run's: none are fetched for it.
+    assert not any("head_sha=abcdef1" in " ".join(a) for a, _ in runner.calls)
+
+
+async def test_a_tester_with_no_pr_is_done_after_the_no_pr_timeout(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    await _tester(runner, launch, poll_seconds=600).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 2  # a tester is never relaunched
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert action.parameters["_code_change"]["tester"]["state"] == "none"
+    assert not any(a[:3] == ["gh", "issue", "view"] for a, _ in runner.calls)
+
+
+@pytest.mark.usefixtures("any_repo_root")
+async def test_tester_tracking_never_holds_the_mandate_due_check(store, dirs, mongo_db, updates):
+    repo, launch = dirs
+    mid, run_ref, _ = await _mandate_world(store, repo)
+    open_pr = _tester_pr()
+    runner = FakeRunner(
+        launch_out=SESSION,
+        pr=[_open("h1"), MERGED],
+        tester_pr=[open_pr] * 3 + [{**open_pr, "state": "MERGED"}],
+    )
+    runner.run_ref = run_ref
+    d = _tester(runner, launch, mandate=mid)
+    due = _sampling(d, mid, every=True)
+
+    await d.run(run_ref, workspace_id=WS)
+
+    # The worker's PR open holds the line; the tester's PR open does not.
+    assert due == [False, True, True, True]
+    tester = (await store.get_action(run_ref)).parameters["_code_change"]["tester"]
+    assert tester["state"] == "merged"
+
+
+async def test_resume_tracks_a_landed_runs_open_tester_pr(store, dirs, updates):
+    repo, launch = dirs
+    refs = []
+    for tester in (
+        {"session_url": CLOUD_URL, "at": time.time() - 600},  # unknown: no PR seen yet
+        {"session_url": CLOUD_URL, "at": time.time() - 600, "state": "merged"},
+        {"session_url": CLOUD_URL, "at": time.time() - 5 * 3600, "state": "open"},  # too old
+    ):
+        run_ref = await _queue(store, repo)
+        await store.approve(run_ref)
+        await store.mark_executed(run_ref, "landed")
+        await cloud_station._patch(store, run_ref, station_pending=False, tester=tester)
+        refs.append(run_ref)
+    runner = FakeRunner(launch_out=SESSION, pr=None, tester_pr={**_tester_pr(), "state": "MERGED"})
+    runner.run_ref = refs[0]
+    d = _resumer(runner, launch)
+
+    assert await d.resume_all() == 0  # the tester off: its PRs are left alone
+    d.tester = True
+    assert await d.resume_all() == 1
+
+    assert not _briefs(runner)
+    tester = (await store.get_action(refs[0])).parameters["_code_change"]["tester"]
+    assert tester["state"] == "merged" and tester["pr_url"] == TESTER_PR
+    assert (await store.get_action(refs[0])).status == ActionStatus.EXECUTED

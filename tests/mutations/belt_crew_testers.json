@@ -333,5 +333,86 @@
     "tests": [
       "tests/cloud/test_belt_queued_run_approve.py::test_mission_control_items_say_which_belt_runs_are_ready"
     ]
+  },
+  {
+    "label": "the tester PR is looked up by the worker's marker",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "number = await self._find_pr(slug, run_ref, cwd, TEST_MARKER if tester else MARKER)",
+    "replace": "number = await self._find_pr(slug, run_ref, cwd, MARKER)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
+    ]
+  },
+  {
+    "label": "a tester's fixer update reads the landed run as running",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "status=\"landed\" if tester else \"running\",\n            stage=\"test\" if tester else \"fix\",",
+    "replace": "status=\"running\",\n            stage=\"fix\",",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
+    ]
+  },
+  {
+    "label": "a tester's fixes go on the run's fixes",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "await (_patch_tester if tester else _patch)(store, run_ref, fixes=fixes)",
+    "replace": "await _patch(store, run_ref, fixes=fixes)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
+    ]
+  },
+  {
+    "label": "a tester PR's screenshots replace the run's",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "shot = tester",
+    "replace": "shot = False",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
+    ]
+  },
+  {
+    "label": "a tester with no PR is never done",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if tester:  # a tester may only file issues: no PR is done",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_tester_with_no_pr_is_done_after_the_no_pr_timeout"
+    ]
+  },
+  {
+    "label": "the tester holds the line: it runs before the land is executed",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        await store.mark_executed(\n            run_ref, f\"Merged {url}",
+    "replace": "        await self._test(store, run_ref, blob, url)\n        await store.mark_executed(\n            run_ref, f\"Merged {url}",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_tester_tracking_never_holds_the_mandate_due_check"
+    ]
+  },
+  {
+    "label": "resume picks up a tester PR already merged",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and tester.get(\"state\") in (None, \"open\")",
+    "replace": "and True",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
+    ]
+  },
+  {
+    "label": "resume picks up a tester older than the run timeout",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and time.time() - at < timeout",
+    "replace": "and True",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
+    ]
+  },
+  {
+    "label": "resume tracks tester PRs with the tester off",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                    if self.tester\n",
+    "replace": "                    if True\n",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
+    ]
   }
 ]

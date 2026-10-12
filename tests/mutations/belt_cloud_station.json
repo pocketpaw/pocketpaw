@@ -233,5 +233,80 @@
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_a_green_pr_left_open_gets_one_lane_nudge"
     ]
+  },
+  {
+    "label": "the no-PR timeout never fires",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if number is None and self.clock() >= no_pr_at:",
+    "replace": "if number is None and self.clock() >= no_pr_at and False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_silent_worker_is_relaunched_once_then_released",
+      "tests/cloud/test_belt_cloud_station.py::test_the_relaunch_count_survives_a_resume"
+    ]
+  },
+  {
+    "label": "the relaunch cap is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if len(relaunches) >= self.relaunch_attempts:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_silent_worker_is_relaunched_once_then_released",
+      "tests/cloud/test_belt_cloud_station.py::test_the_relaunch_count_survives_a_resume"
+    ]
+  },
+  {
+    "label": "a relaunch does not reset the no-PR clock",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "session, no_pr_at = again, self.clock() + self.no_pr_seconds",
+    "replace": "session = again",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_silent_worker_is_relaunched_once_then_released"
+    ]
+  },
+  {
+    "label": "the no-PR clock ignores the newest relaunch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "newest = relaunches[-1].get(\"at\") if relaunches else launched",
+    "replace": "newest = launched",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_relaunch_count_survives_a_resume"
+    ]
+  },
+  {
+    "label": "an issue comment from before the launch counts",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if line and _epoch(comment.get(\"createdAt\")) > since:",
+    "replace": "if line:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_silent_worker_is_relaunched_once_then_released"
+    ]
+  },
+  {
+    "label": "a worker's impossible comment is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if issue and said:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_worker_that_says_impossible_is_released_without_a_relaunch"
+    ]
+  },
+  {
+    "label": "the impossible issue is not labelled needs-human",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "await self._flag_issue(slug, issue.group(1), cwd)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_worker_that_says_impossible_is_released_without_a_relaunch"
+    ]
+  },
+  {
+    "label": "a released run is not rejected",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if await store.reject(run_ref, reason=why, rejector=_RELEASER) is None:",
+    "replace": "if True:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_silent_worker_is_relaunched_once_then_released",
+      "tests/cloud/test_belt_cloud_station.py::test_a_worker_that_says_impossible_is_released_without_a_relaunch"
+    ]
   }
 ]
