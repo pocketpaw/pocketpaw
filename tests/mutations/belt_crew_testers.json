@@ -432,5 +432,32 @@
     "tests": [
       "tests/cloud/test_belt_continuous_cadence.py::test_a_stood_down_shift_wakes_when_a_run_settles_after_it"
     ]
+  },
+  {
+    "label": "the Depends on line is read off the cut summary",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "_depends_on(str(s.evidence.get(\"text\") or s.summary))",
+    "replace": "_depends_on(s.summary)",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states"
+    ]
+  },
+  {
+    "label": "the issue states never reach the foreman",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        issue_states=issue_states,\n",
+    "replace": "        issue_states={},\n",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states"
+    ]
+  },
+  {
+    "label": "the foreman prompt drops the Depends on note",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "rows.append(_sighting_line(s) + note)",
+    "replace": "rows.append(_sighting_line(s))",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states"
+    ]
   }
 ]

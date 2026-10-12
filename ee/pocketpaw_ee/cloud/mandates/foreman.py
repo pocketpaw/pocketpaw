@@ -1,16 +1,18 @@
 # ee/pocketpaw_ee/cloud/mandates/foreman.py — the FOREMAN, a mandate's LLM seat.
 #
 # Once per SHIFT it reads the charter, the OPEN sightings (the backlog: every
-# sighting no landed task has resolved, capped, each marked new or carried over
-# and annotated with the tasks that cite it), the last 3 shifts' outcomes (each
-# task's run result: landed, failed with its reason, rejected, or in flight; and
-# what a human said at the gate), the mandate's LINE as git has it (the
-# subjects of its commits not in the base yet, awaiting the captain's merge;
-# built either way), the bound repo's C4 components, and (when a soul is bound) the soul
-# recall, then makes EXACTLY ONE LLM call that returns a
-# strict-JSON PlanProposal: a FEW tasks (≤ the charter's budget) or an explicit
-# empty plan with a reason. A task may name a charter ``recipe`` (a
-# deterministic command) instead of LLM develop work.
+# sighting no landed task has resolved, capped, each marked new or carried over,
+# annotated with the tasks that cite it and, when it has one, its full
+# ``Depends on:`` line with the named issues' open / closed states, those notes
+# capped per sighting and per prompt), the last 3 shifts' outcomes (each task's
+# run result: landed, failed with its reason, rejected, or in flight; and what a
+# human said at the gate), the mandate's LINE as git has it (the subjects of its
+# commits not in the base yet, awaiting the captain's merge; built either way),
+# the bound repo's C4 components, and (when a soul is bound) the soul recall,
+# then makes EXACTLY ONE LLM call that returns a strict-JSON PlanProposal: a FEW
+# tasks (≤ the charter's budget) or an explicit empty plan with a reason. A task
+# may name a charter ``recipe`` (a deterministic command) instead of LLM develop
+# work.
 #
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
 # runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
@@ -116,9 +118,13 @@ class ForemanContext:
     shift_no: int
     charter: dict[str, Any]
     # The open backlog, capped: {id, patrol, severity, summary, new, in_flight,
-    # tasks: [{shift_no, title, status}]} — ``new`` = filed since the last
-    # shift; ``tasks`` are the planned tasks citing the sighting.
+    # tasks: [{shift_no, title, status}], depends_on} — ``new`` = filed since the
+    # last shift; ``tasks`` are the planned tasks citing the sighting;
+    # ``depends_on`` is its ``Depends on:`` line (None when it has none).
     sightings: list[dict[str, Any]] = field(default_factory=list)
+    # ``#n`` -> ``open`` / ``closed`` on the bound repo's tracker, for the issues
+    # a ``depends_on`` line names (empty when unknown).
+    issue_states: dict[int, str] = field(default_factory=dict)
     # How many sightings were open before the cap (0 = same as ``sightings``).
     open_total: int = 0
     # Last 3 shifts, oldest-first: {no, state, outcome, tasks, gate} — outcome
@@ -383,6 +389,23 @@ def _sighting_line(s: dict[str, Any]) -> str:
     )
 
 
+# A ``Depends on:`` note names at most this many issue states, and the notes in
+# one prompt stop at this many characters (the line itself is capped upstream).
+_DEPENDS_REFS_CAP = 10
+_DEPENDS_PROMPT_CAP = 3000
+
+
+def _depends_note(s: dict[str, Any], states: dict[int, str]) -> str:
+    """The sighting's ``Depends on:`` line in full, with the state of each
+    issue it names when known (``#4 closed, #5 open``); "" when it has none."""
+    line = s.get("depends_on")
+    if not line:
+        return ""
+    refs = [int(n) for n in re.findall(r"#(\d+)", line)][:_DEPENDS_REFS_CAP]
+    known = ", ".join(f"#{n} {states[n]}" for n in refs if n in states)
+    return f"\n    {line}" + (f" ({known})" if known else "")
+
+
 def _history_lines(h: dict[str, Any]) -> str:
     """One past shift: its outcome, each planned task's run result (with the
     failure reason), and any gate note."""
@@ -410,8 +433,14 @@ def build_prompt(context: ForemanContext) -> str:
     says_no = list(charter.get("says_no") or [])
     budget = (charter.get("budget") or {}).get("max_tasks_per_shift", 3)
 
+    rows, room = [], _DEPENDS_PROMPT_CAP
+    for s in context.sightings:
+        note = _depends_note(s, context.issue_states)
+        note = note if len(note) <= room else ""
+        room -= len(note)
+        rows.append(_sighting_line(s) + note)
     sighting_lines = (
-        "\n".join(_sighting_line(s) for s in context.sightings)
+        "\n".join(rows)
         or "(none — every sighting is resolved by a landed task, or the surface is quiet)"
     )
     if context.open_total > len(context.sightings):
@@ -455,7 +484,8 @@ forbidden thing in your reasoning — that is correct behavior.
 {sighting_lines}
 A sighting stays open until a task citing it LANDS. "new" arrived since the last shift; \
 "carried over" is older and still unresolved. A task marked failed, develop failed or \
-rejected did not resolve its sighting.
+rejected did not resolve its sighting. A "Depends on:" line under a sighting names the \
+issues it needs, with their state when known: plan it only once those are closed.
 
 == LAST SHIFTS' OUTCOMES (oldest first) ==
 {history_lines}

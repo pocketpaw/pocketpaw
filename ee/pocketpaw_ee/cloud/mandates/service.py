@@ -28,7 +28,9 @@
 # The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands
 # (the mandate's run rows joined to the plan tasks' evidence refs). The shift
 # trigger persists what it finds resolved (``resolved_by_run``), since the runs
-# list only reaches the newest actions. The detail's ``line`` block and the
+# list only reaches the newest actions. Each open entry carries its full text's
+# ``Depends on:`` line; the trigger adds the named issues' states from one cached
+# ``patrols.issue_states`` read. The detail's ``line`` block and the
 # foreman's THE LINE read git (``belt.executor.line_status`` / ``line_merged``).
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
@@ -51,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
 
@@ -884,6 +887,19 @@ def _sighting_to_wire(s: SightingDoc) -> dict[str, Any]:
 # oldest); the prompt says how many it left out.
 _BACKLOG_CAP = 30
 
+# A sighting's ``Depends on:`` line (``**Depends on:** #4``, ``Depends on: #4``),
+# read off the full text since issue bodies end with it and summaries are cut;
+# capped per sighting.
+_DEPENDS_ON = re.compile(r"^[ \t>*_-]*depends on[ \t*_]*:.*$", re.IGNORECASE | re.MULTILINE)
+_DEPENDS_ON_CAP = 200
+
+
+def _depends_on(text: str) -> str | None:
+    """The first ``Depends on:`` line in ``text``, stripped and capped, or None."""
+    found = _DEPENDS_ON.search(text or "")
+    return found.group(0).strip()[:_DEPENDS_ON_CAP] if found else None
+
+
 # Task statuses that mean someone is still working the task: the foreman must
 # not plan it again.
 _IN_FLIGHT = frozenset(
@@ -1017,8 +1033,9 @@ async def _backlog(
 
     Returns ``{"open": [...], "tasks": [...], "teaching": [...]}``: open entries
     (highest severity, then oldest) are ``{id, patrol, severity, summary, new,
-    in_flight, tasks}``, where ``new`` means filed after ``since`` and ``tasks``
-    lists the citing tasks (``{shift_no, title, status}``); ``tasks`` covers the
+    in_flight, tasks, depends_on}``, where ``new`` means filed after ``since``,
+    ``tasks`` lists the citing tasks (``{shift_no, title, status}``) and
+    ``depends_on`` is the full text's ``Depends on:`` line (or None); ``tasks`` covers the
     plans behind this mandate's runs, every plan still at the plan gate (in
     flight, however many shifts ago), and ``history_plan_ids``; ``teaching`` is
     the gate teaching sightings as ``{shift_no, note}`` (shift history, never
@@ -1081,6 +1098,7 @@ async def _backlog(
                 "new": since is None or _aware(s.ts) > _aware(since),
                 "in_flight": any(c["status"] in _IN_FLIGHT for c in cites),
                 "tasks": cites,
+                "depends_on": _depends_on(str(s.evidence.get("text") or s.summary)),
             }
         )
     return {"open": entries, "tasks": tasks, "teaching": teaching}
@@ -1115,6 +1133,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     from uuid import uuid4
 
     from pocketpaw_ee.cloud.mandates import foreman as foreman_mod
+    from pocketpaw_ee.cloud.mandates import patrols as mandate_patrols
     from pocketpaw_ee.cloud.mandates import soul_link
 
     doc = await _fetch_mandate(workspace_id, mandate_id)
@@ -1194,10 +1213,19 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         doc.soul_path, f"{doc.name} {doc.charter.goal}"
     )
 
+    shown = backlog["open"][:_BACKLOG_CAP]
+    # One cached ``gh issue list --state all``, and only when a sighting names
+    # its dependencies, so the foreman can plan work whose dependencies closed.
+    issue_states = (
+        await mandate_patrols.issue_states(doc.surface.repo_id)
+        if any(s["depends_on"] for s in shown)
+        else {}
+    )
     context = foreman_mod.ForemanContext(
         shift_no=shift_no,
         charter=charter_wire,
-        sightings=backlog["open"][:_BACKLOG_CAP],
+        sightings=shown,
+        issue_states=issue_states,
         open_total=len(backlog["open"]),
         history=history,
         line=await line_status(doc.surface.repo_id, mandate_id),

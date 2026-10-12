@@ -10,8 +10,10 @@
 # GitLab-bound repo keeps the connector path, an unsafe slug never reaches gh, a
 # gh failure files nothing; through mongomock, ``run_patrols`` dedupes on
 # ``github:<owner>/<repo>#<n>`` across patrols (a hand-filed feedback sighting
-# with that source blocks the patrol's copy), and the continuous due check runs
-# the issues patrol first, only on mandates that toggle it.
+# with that source blocks the patrol's copy), the continuous due check runs
+# the issues patrol first, only on mandates that toggle it, and the foreman's
+# prompt carries a sighting's ``Depends on:`` line (bold or plain) past the
+# summary cut, with each named issue's state from one ``gh issue list --state all``.
 
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ pytestmark = pytest.mark.usefixtures("any_repo_root")
 from pocketpaw_ee.cloud.mandates import patrols  # noqa: E402
 from pocketpaw_ee.cloud.mandates.patrols import issues_patrol  # noqa: E402
 
-from tests.cloud.test_belt_mandates import store  # noqa: E402,F401
+from tests.cloud.test_belt_mandates import graph, journal, store  # noqa: E402,F401
 
 SLUG = "qbtrix/creative-core"
 
@@ -46,19 +48,30 @@ def _issue(n: int, *labels: str, title: str = "") -> dict:
 
 
 class FakeGh:
-    """Answers ``git remote get-url`` with ``origin`` and ``gh issue list`` with
-    ``issues``; records every argv."""
+    """Answers ``git remote get-url`` with ``origin``, ``gh issue list --state
+    all`` with ``states`` (``{number: "OPEN"|"CLOSED"}``) and any other ``gh
+    issue list`` with ``issues``; records every argv."""
 
-    def __init__(self, issues: list[dict], *, origin: str = SLUG, code: int = 0) -> None:
+    def __init__(
+        self,
+        issues: list[dict],
+        *,
+        origin: str = SLUG,
+        code: int = 0,
+        states: dict[int, str] | None = None,
+    ) -> None:
         self.issues = issues
         self.origin = origin
         self.code = code
+        self.states = states or {}
         self.calls: list[list[str]] = []
 
     async def __call__(self, argv: list[str]) -> tuple[int, str, str]:
         self.calls.append(list(argv))
         if "get-url" in argv:
             return 0, f"https://github.com/{self.origin}.git\n", ""
+        if argv[:3] == ["gh", "issue", "list"] and "all" in argv:
+            return 0, json.dumps([{"number": n, "state": s} for n, s in self.states.items()]), ""
         if argv[:3] == ["gh", "issue", "list"]:
             return self.code, json.dumps(self.issues), "HTTP 502" if self.code else ""
         raise AssertionError(f"unexpected argv {argv}")
@@ -255,3 +268,55 @@ async def test_a_busy_line_still_sights_new_issues(tmp_path, mongo_db, monkeypat
     assert mandate_id not in {r["mandate_id"] for r in rows}, "the run in flight holds the shift"
     sightings = (await mandate_service.list_sightings("w1", "u1", mandate_id))["sightings"]
     assert [s["evidence"]["number"] for s in sightings] == [121]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["**Depends on:** #4, #5", "**Depends on**: #4, #5", "Depends on: #4, #5", "- depends on: #4"],
+)
+def test_a_depends_on_line_is_found_bold_or_plain(line):
+    from pocketpaw_ee.cloud.mandates.service import _depends_on
+
+    assert _depends_on(f"**Behavior**\nthis depends on: nothing\n\n{line}\n") == line
+    assert _depends_on("no dependency here") is None
+
+
+async def test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    store,  # noqa: F811
+    journal,  # noqa: F811
+    graph,  # noqa: F811
+):
+    """The summary is cut at 280 characters and the ``Depends on:`` line ends a
+    long body: the foreman still reads it, with each named issue's state, so it
+    can plan work whose dependencies are closed."""
+    from pocketpaw_ee.cloud.mandates import foreman
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    issue = _issue(12, "suite")
+    filler = "the export panel drops frames " * 30
+    issue["body"] = f"**Behavior**\n{filler}\n\nDepends on: #4, #5"
+    gh = FakeGh([issue], states={4: "CLOSED", 5: "OPEN", 12: "OPEN"})
+    monkeypatch.setattr(patrols, "_default_gh", gh)
+    monkeypatch.setattr(patrols, "_ISSUE_STATES", {})
+    monkeypatch.setenv("POCKETPAW_MANDATE_LLM", "mock")
+    prompts: list[str] = []
+    real_plan = foreman.MockLlm.plan
+
+    async def capture(self, *, prompt, context):
+        prompts.append(prompt)
+        return await real_plan(self, prompt=prompt, context=context)
+
+    monkeypatch.setattr(foreman.MockLlm, "plan", capture)
+    mandate_id = await _github_mandate(tmp_path, monkeypatch, gh)
+
+    await mandate_service.trigger_shift("w1", "u1", mandate_id)
+
+    (prompt,) = prompts
+    (sighting,) = (await mandate_service.list_sightings("w1", "u1", mandate_id))["sightings"]
+    assert "Depends on" not in sighting["summary"], "the summary cut drops the line"
+    assert "Depends on: #4, #5" in prompt
+    assert "#4 closed, #5 open" in prompt
+    assert len([a for a in gh.calls if a[:3] == ["gh", "issue", "list"] and "all" in a]) == 1

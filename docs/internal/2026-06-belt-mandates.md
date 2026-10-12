@@ -294,6 +294,20 @@ the mandate's line is built and never planned again; a task in
 flight is never planned again; a task extends an existing component and never
 plans a duplicate of one (rule 8, below); strict JSON only.
 
+Sighting summaries are cut at 280 characters, and an issue body puts its
+`**Depends on:**` line near the end, so the backlog reads that line off the
+sighting's full text (`evidence.text`, else the summary): bold or plain, the
+first one, capped at 200 characters. The prompt shows it in full under the
+sighting, with the state of each issue it names when known, e.g.
+`Depends on: #4, #5 (#4 closed, #5 open)`, and tells the foreman to plan such a
+sighting only once its dependencies are closed. The states come from
+`patrols.issue_states`: one `gh issue list -R <owner/repo> --state all --limit
+500 --json number,state` through the issues patrol's scrubbed runner, only when
+a shown sighting has a dependency line, cached per repo for 60 s (one scheduler
+tick) so lines on the same repo share it. A non-GitHub repo or a gh failure
+shows the line without states. At most 10 states per sighting, and the notes in
+one prompt stop at 3000 characters.
+
 The foreman also gets the bound repo's architecture: the shift trigger reads
 `<repo>/docs/c4/model.json` (`belt/orient.c4_lines`) and the prompt lists the
 repo's own containers and components, one line each with the first sentence of
@@ -1658,7 +1672,8 @@ a gate rejection lands in history not backlog, and the 30 cap.
 `tests/cloud/test_belt_github_issues_patrol.py` runs the GitHub `issues`
 patrol with a fake `gh`: label matching, severity, no labels, the GitLab
 fallback, unsafe slugs, gh failure, the cross-patrol dedup through
-`run_patrols`, and the continuous due check sensing first.
+`run_patrols`, the continuous due check sensing first, and the foreman seeing a
+cut sighting's `Depends on:` line with its issues' states.
 `tests/cloud/test_belt_queued_run_approve.py` pins that no human approve path
 (Mission Control bulk, instinct bulk, single) approves or fails a queued run.
 `tests/cloud/test_belt_cloud_station.py` also covers the tester and the

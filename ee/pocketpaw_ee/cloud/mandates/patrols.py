@@ -17,7 +17,9 @@
 #                    source key hand-filed feedback sightings use, so the
 #                    service dedupes across both); closed issues are never
 #                    listed. Any other origin reads the GitLab project through
-#                    ``connectors_service.execute``.
+#                    ``connectors_service.execute``. ``issue_states`` maps a
+#                    GitHub repo's issues to open / closed for the foreman's
+#                    ``Depends on:`` notes (one ``--state all`` list per tick).
 #   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
 #                    ``rev`` comes from a TOML pin file in the bound repo, the
 #                    delta from ``gh api repos/<repo>/compare/<pin>...HEAD``.
@@ -42,6 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import tomllib
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -430,6 +433,42 @@ async def _github_issues(slug: str, labels: list[str], gh: GhFn) -> list[Sightin
             }
         )
     return drafts
+
+
+# Issue states for the foreman's ``Depends on:`` notes: ``#n`` -> ``open`` /
+# ``closed`` from one ``gh issue list --state all``, cached per slug for a
+# scheduler tick so mandates on one repo share the call.
+_ISSUE_STATES: dict[str, tuple[float, dict[int, str]]] = {}
+_ISSUE_STATES_TTL = 60.0
+_GH_STATE_LIMIT = "500"
+
+
+async def issue_states(repo_id: str, gh: GhFn | None = None) -> dict[int, str]:
+    """``{number: "open"|"closed"}`` for the bound repo's GitHub issues; empty
+    when the repo is not on GitHub (or its slug is unsafe) or gh fails. Never
+    raises."""
+    runner = gh or _default_gh
+    slug = await _github_slug(repo_id, runner)
+    if not slug:
+        return {}
+    hit = _ISSUE_STATES.get(slug)
+    if hit is not None and time.monotonic() - hit[0] < _ISSUE_STATES_TTL:
+        return hit[1]
+    argv = ["gh", "issue", "list", "-R", slug, "--state", "all"]
+    argv += ["--limit", _GH_STATE_LIMIT, "--json", "number,state"]
+    try:
+        code, out, _ = await runner(argv)
+        rows = json.loads(out) if code == 0 else []
+    except Exception:  # noqa: BLE001 — a missing state never holds the shift
+        logger.warning("issue states: gh issue list failed for %s", slug, exc_info=True)
+        rows = []
+    states = {
+        r["number"]: str(r.get("state") or "").lower()
+        for r in (rows if isinstance(rows, list) else [])
+        if isinstance(r, dict) and isinstance(r.get("number"), int)
+    }
+    _ISSUE_STATES[slug] = (time.monotonic(), states)
+    return states
 
 
 # ---------------------------------------------------------------------------
