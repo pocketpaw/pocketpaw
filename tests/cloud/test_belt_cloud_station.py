@@ -693,7 +693,9 @@ async def test_the_tester_is_off_by_default(store, dirs, updates):
     runner = FakeRunner(launch_out=SESSION, pr=MERGED)
     runner.run_ref = run_ref
 
-    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+    d = _tester(runner, launch)  # a tester seat is there; the env flag is not
+    d.tester = False
+    await d.run(run_ref, workspace_id=WS)
 
     assert len(_briefs(runner)) == 1
     assert "tester" not in (await store.get_action(run_ref)).parameters["_code_change"]

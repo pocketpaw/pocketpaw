@@ -1,10 +1,12 @@
 <!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
-     craft factory built on it: anatomy, charter (cadence, checks, recipes),
-     Pulley blocks installed through recipes, patrols (incl. upstream), the
-     crew (cloud Agents as workers: roster, seat rule, per-worker model,
-     instructions and setup), the headless develop station (strict and owner
-     Claude setups, the trust restore, ORIENT) and its security posture, the
-     cloud develop station (claude --cloud, PR tracking through gh, fixers), the
+     craft factory built on it: anatomy, charter (cadence, checks, recipes,
+     issue labels), Pulley blocks installed through recipes, patrols (incl.
+     upstream and GitHub issues), the crew (cloud Agents as workers: roster,
+     seat rule, per-worker model, instructions and setup; the tester), the
+     headless develop station (strict and owner Claude setups, the trust
+     restore, ORIENT) and its security posture, the cloud develop station
+     (claude --cloud, PR tracking through gh, fixers, the tester, snapshot
+     screenshots), the realtime events, the
      architecture context the foreman and review get, the mandate's line
      branch (base sync, landing, re-develop, one PR, its state on the wire and
      the UI surfaces), the run feed (live over SSE and stored per stage, with
@@ -35,12 +37,14 @@ the rest for a human.
 ```
 MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
           recipes; surface: repo; upstream: pinned GitHub deps;
-          crew: cloud Agents seated as dev / reviewer / foreman)
+          crew: cloud Agents seated as dev / reviewer / foreman / tester)
    │
    ├── PATROLS sense the surface (scoped by the
    │   mandate's `patrols` toggles) ───────────► SIGHTINGS (deduped)
    │     • deps      — manifest scan (pyproject/package.json) vs advisory table
-   │     • issues    — open issues on the repo's GitLab project (connector)
+   │     • issues    — open issues on the repo's tracker: GitHub through gh,
+   │                   taken by the charter's issue_labels; else GitLab
+   │                   (connector)
    │     • upstream  — commits on each pinned GitHub dep since its pin
    │     • feedback  — human intake (POST .../feedback)
    │
@@ -102,6 +106,10 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   alone under `POCKETPAW_MANDATE_SCHEDULER_ENABLED=true`, through the lease
   either way. Pair `continuous` with the auto plan gate, or every shift waits
   for a human at the plan gate.
+- **`issue_labels`** (optional, at most 20) scopes the `issues` patrol on a
+  GitHub-bound repo: an open issue is sighted when it carries one of these
+  labels, compared case-insensitively (see *The `issues` patrol on GitHub*).
+  Empty means the GitHub patrol takes nothing.
 - **`checks`** are commands that must pass before a headless diff is attached,
   e.g. `["uv run pytest -q", "uv run ruff check ."]`.
 - **`recipes`** map a name to a deterministic command, e.g.
@@ -346,7 +354,7 @@ still at the plan gate, and the last 3 shifts'.
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
 | GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
 | GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts, sightings-by-patrol, and the `line` block (see *The line: one branch per mandate*; the `{mandate}` that create, crew and autopilot return carries it too) |
-| PUT | `/belt/mandates/{id}/crew` | `belt.manage` | Replace the crew roster: `{crew: [{agent_id, role: dev\|reviewer\|foreman, concurrency (1-8), setup?: owner\|strict}]}` → `{mandate}`; see *The crew* below |
+| PUT | `/belt/mandates/{id}/crew` | `belt.manage` | Replace the crew roster: `{crew: [{agent_id, role: dev\|reviewer\|foreman\|tester, concurrency (1-8), setup?: owner\|strict}]}` → `{mandate}`; see *The crew* below |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
 | POST | `/belt/mandates/{id}/shift` | `belt.manage` | Run a shift now → `{shift: {shift_id, no, state, plan_action_id, task_count, no_action_reason}}` |
@@ -369,10 +377,19 @@ Rejected tasks are recorded as teaching sightings. Direct
 keeps working unchanged — both surfaces hit the same transition, so the chain
 still closes exactly once.
 
-**Realtime:** when a plan proposal lands at the gate, the service emits a
-`belt_plan` event on the workspace bus (payload `{workspace_id, mandate_id,
-proposal}`), mirroring `belt_run_updated`'s audience fan-out; the mandates page
-subscribes to that topic.
+**Realtime:** three mandate topics ride the workspace bus with the same
+workspace fan-out as `belt_run_updated` (`_core/realtime/audience.py`), and the
+mandates page subscribes to them:
+
+| Topic | When | Payload (plus `workspace_id`) |
+|---|---|---|
+| `belt_plan` | a plan proposal lands at the gate | `{mandate_id, proposal}` |
+| `belt_plan_resolved` | `service.resolve_plan` resolved a plan: the `plan/resolve` route or the auto plan gate | `{mandate_id, plan_action_id, shift_no, resolved_by, approved, rejected}`; `resolved_by` is the approver id (a user id or `system:belt-policy`), the counts are tasks kept and dropped |
+| `belt_mandate_updated` | a shift opens (`planning`) and on every `mark_shift` write (`planning`, `in_gate`, `executing`, `done`, `stood_down`) | `{mandate_id, shift_no, state}` |
+
+A plan resolved straight through `POST /instinct/actions/{id}/approve\|reject`
+(the Tray, MCP) skips `resolve_plan`, so it sends no `belt_plan_resolved`; its
+shift still moves, which sends `belt_mandate_updated`.
 
 ## The `upstream` patrol
 
@@ -408,6 +425,43 @@ quiet day files nothing and a new upstream head files a fresh set. A broken
 watch (gh not installed, a 404, an unreadable pin file) files one severity-1
 sighting naming the problem instead of raising. The backend's `gh` must be
 authenticated (`gh auth status`) for private repos and for rate limits.
+
+## The `issues` patrol on GitHub
+
+When the bound repo's `origin` is on GitHub (`git -C <repo> remote get-url
+origin`, the slug read with the cloud station's rules and refused when a part
+is `.`, `..` or starts with `-`), the `issues` patrol reads
+`gh issue list -R <owner/repo> --state open --limit 100 --json
+number,title,body,labels,url` (argv, the scrubbed env, 60 s) instead of the
+GitLab connector, and files one sighting per open issue carrying a label from
+the charter's `issue_labels` (case-insensitive; no labels, nothing taken). A
+`gh` failure or a malformed payload files nothing. Any other origin keeps the
+GitLab path.
+
+- **Severity** reuses the label map: `p1` and `bug` 4, `p2` 3 (`p0`,
+  `critical`, `security`, `blocker` 5), anything else 2.
+- **Sighting:** summary `GitHub issue #<n>: <title>` plus the start of the
+  body (280 chars); evidence `{number, title, labels, url, text, source,
+  dedup_key}` with `source = dedup_key = github:<owner>/<repo>#<n>`.
+- **Dedup:** `run_patrols` skips a draft whose `dedup_key` is any existing
+  sighting's `source` or `dedup_key`, whichever patrol filed it, so an issue
+  already filed by hand through the feedback intake (the pilot files them with
+  `source: github:<owner>/<repo>#<n>`) is not sighted again.
+- **Closing:** sightings have no close path besides a landed run, so closed
+  issues are simply never listed; a sighting whose issue a human closed stays
+  open until a task citing it lands.
+- **Schedule:** a daily or weekly shift senses at its start as before. A
+  `continuous` mandate that toggles `issues` also runs it inside its due check
+  (`_continuous_due`, after the gap, gate and in-flight holds, before the
+  backlog read), so a new issue makes the mandate due without waiting for a
+  shift: one `gh issue list` per mandate per tick.
+- **Cross-line requests:** a line picks up any label it lists, so the engines
+  line on `qbtrix/creative-core` lists `needs-core` and sees requests the app
+  lines file there. They must be filed on creative-core.
+
+Enable it with `"issues"` in `patrols` and `issue_labels` on the charter. No
+route edits an existing mandate's charter or patrols yet, so a live mandate gets
+them through a new mandate or a direct database edit.
 
 ## Plan-feature gating posture
 
@@ -503,8 +557,12 @@ sweeper, so pytest runs never spawn background loops that outlive the test.
   `code_change` run (`station_pending=True`, no diff, repo pre-bound; the blob
   carries the task's `title` and `expected_outcome`). The
   console shows it as `queued / station`; a human drives the interactive
-  `/belt` station to a diff. The belt executor refuses a `station_pending` blob
-  if it is ever approved (`error_class="StationPending"`).
+  `/belt` station to a diff. No human approve path approves a queued run (a
+  `code_change` with `station_pending` or no diff,
+  `instinct.router._is_queued_station_run`): the single approve answers 409
+  `belt.run_queued`, and the instinct and Mission Control bulk-approves leave it
+  pending and report it in `missing`. The belt executor still refuses a
+  `station_pending` blob that reaches it (`error_class="StationPending"`).
 - **`headless`** — `HeadlessTaskDispatcher` files the same queued run, then
   produces the diff with no human in the loop and attaches it; the run becomes
   a pending `code_change` at the per-diff gate. While the station works it the
@@ -593,7 +651,8 @@ TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
                       moved since); then `git fetch -q origin` in the bound
                       repo, since nothing else refreshes its origin/<base>
                       in cloud mode and the blueprint reads the C4 model
-                      there (a failed fetch is logged, never fails the land)
+                      there (a failed fetch is logged, never fails the land);
+                      then the screenshots and the tester (below)
           refused  -> closed unmerged, or a `Fast lane: not eligible` comment:
                       `gh pr diff` is attached as the run's diff, which waits
                       at the per-diff Instinct gate (approving it lands it on
@@ -651,6 +710,46 @@ tracking goes on), and emits `belt_run_updated` with `stage="fix"`. When the
 attempts are used up and the PR is still stuck, its diff is attached for the
 per-diff gate, with a summary saying how many fixers ran.
 
+**Screenshots.** The app repos' PR CI uploads an artifact named `snapshots`
+with PNGs of the app views. Once a run's PR is known (the first `gh pr view`
+that is not already merged) and again when it lands, the tracker asks
+`gh api repos/<slug>/actions/runs?head_sha=<head>` (the head must be a hex sha)
+for the PR head's CI runs, checks the newest 5 with
+`gh api repos/<slug>/actions/runs/<id>/artifacts` for an unexpired `snapshots`
+artifact, and runs `gh run download <id> -R <slug> -n snapshots -D <temp dir>`.
+From the temp dir it keeps only regular files (no symlinks, `os.walk` never
+follows a linked dir) whose sanitized basename (`[A-Za-z0-9._-]`, others become
+`_`, no dotfiles, first of a name wins) ends in `.png` and whose bytes start
+with the PNG signature, at most 40 files and 20 MB per run. The run's dir
+(`<POCKETPAW_FACTORY_SCREENSHOT_DIR>/<run id>/`, default
+`~/.pocketpaw/belt/screenshots`) is emptied first, so it only ever holds what
+the blob lists, and the blob gets `screenshots: [{name, bytes, sha}]` (sha256).
+No artifact, a failed download or anything else is logged and never touches the
+run. Nothing removes old run dirs yet.
+
+**The tester.** With `POCKETPAW_FACTORY_CLOUD_TESTER=1` (off by default) and a
+live `tester` seat on the mandate's crew (the first one, read like a dev seat
+through `crew_seat_for_task(role="tester")`), a landed run gets ONE more cloud
+session, launched through the same `_launch` as a fixer (launch lock, launch
+clone re-pointed and detached at the new `origin/<base>`, the tester agent's
+instructions fenced as data). Its brief: read the source issue's acceptance
+test and the merged PR, exercise the landed feature the way a user would and
+try to break it. For engine code it writes adversarial, edge-case and fuzz
+tests; when the launch clone has a `Sources/*App` it is app UI, and the brief
+names the `gh run download <id> -R <slug> -n snapshots` command (the CI run the
+screenshots came from, when known) and asks it to look at every PNG against
+`docs/design.md` and the issue: text, layout, spacing, light and dark, empty
+states. Each bug becomes one GitHub issue with a repro, labelled `bug`, `gap`
+and the line label copied from the source issue (the brief lists the charter's
+`issue_labels`); it never fixes a bug itself. Tests worth keeping that pass go
+in ONE PR labelled `fast-lane` whose body carries `Belt-Test: <run id>`; no AI
+attribution, never merge. The run blob records `tester: {session_url, at}`
+(`{error, at}` when the launch failed) and the run emits `belt_run_updated`
+with `status: "landed"`, `stage: "test"`. One tester per run (a blob that
+already has `tester` gets none); a tester problem never touches the landed run.
+Belt does not track the tester's issues or PR: its issues come back through the
+`issues` patrol when they carry a line's labels.
+
 The brief tells the session to do the task, follow the repo's CLAUDE.md, run
 the charter checks until they pass, open ONE PR to the base that says
 `Closes #<issue>` (the first `#n` in the task text) and carries the
@@ -671,7 +770,7 @@ prompt) and soul live on the Agent and are edited in the agent editor. The
 mandate stores only a roster, `MandateDoc.crew`, one seat per agent:
 
 ```
-{agent_id, role: dev | reviewer | foreman, concurrency: 1-8, setup: owner | strict | null,
+{agent_id, role: dev | reviewer | foreman | tester, concurrency: 1-8, setup: owner | strict | null,
  seated_by}
 ```
 
@@ -730,6 +829,9 @@ the factory env for everything, setup included, and the report says
   the operator never configured one.
 
 The report gains `worker: <name> (model <id or default>)`.
+
+A `tester` seat never takes plan tasks; the cloud station seats the first live
+one on each landed run when its tester is on (see *The cloud develop station*).
 
 Not wired yet: `reviewer` and `foreman` seats are stored and shown but the
 review and foreman calls still use the factory defaults; `concurrency` is
@@ -1122,6 +1224,14 @@ mandate plan task it works, `null` on a hand-driven run), and `error`: why the
 run failed, which is the executor's reason (`Action.error`) or, for a develop
 that failed, the `headless_error`. `null` when nothing failed.
 
+`GET /api/v1/belt/runs/{id}` also returns `screenshots: [{name, bytes}]` (the
+cloud station's kept snapshot PNGs, `[]` when none) and `tester` (`{session_url,
+at}`, `{error, at}`, or `null`). `GET /api/v1/belt/runs/{id}/screenshots/{name}`
+(`belt.read`, the same tenancy 404) serves one PNG as `image/png` with
+`X-Content-Type-Options: nosniff`; a name the run does not list, or one that
+resolves anywhere but straight inside the run's dir (a symlink out included),
+is a 404.
+
 ## Security posture
 
 The develop station runs code the agent wrote, on the host, **before** a human
@@ -1251,6 +1361,8 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_CLOUD_TIMEOUT` | `14400` | Seconds a cloud run waits for its PR to merge or be refused before it fails back to queued |
 | `POCKETPAW_FACTORY_CLOUD_FIX_GRACE` | `300` | Seconds a cloud run's PR must stay conflicting or red before a fixer session launches |
 | `POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS` | `2` | Fixer sessions per cloud run; past it a still-stuck PR escalates to the per-diff gate |
+| `POCKETPAW_FACTORY_CLOUD_TESTER` | off | `1` (or `true`/`yes`/`on`) launches one tester cloud session per landed cloud run on a mandate with a `tester` crew seat |
+| `POCKETPAW_FACTORY_SCREENSHOT_DIR` | `~/.pocketpaw/belt/screenshots` | Where the cloud station keeps each run's snapshot PNGs, one `<run id>/` dir per run |
 | `POCKETPAW_FACTORY_DEDICATED_HOST` | unset | `1` lets the station wire in a process serving cloud tenants; set it only on a dedicated single-tenant host |
 | `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,belt,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
 | `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
@@ -1322,6 +1434,15 @@ prompt, a landed task resolves (and persists) its sightings, a failed task's
 reason shows in the history, in-flight runs and an in-gate plan are flagged,
 a gate rejection lands in history not backlog, and the 30 cap.
 
+`tests/cloud/test_belt_github_issues_patrol.py` runs the GitHub `issues`
+patrol with a fake `gh`: label matching, severity, no labels, the GitLab
+fallback, unsafe slugs, gh failure, the cross-patrol dedup through
+`run_patrols`, and the continuous due check sensing first.
+`tests/cloud/test_belt_queued_run_approve.py` pins that no human approve path
+(Mission Control bulk, instinct bulk, single) approves or fails a queued run.
+`tests/cloud/test_belt_cloud_station.py` also covers the tester and the
+screenshots, `tests/cloud/test_belt_console.py` the screenshot route, and
+`tests/mutations/belt_crew_testers.json` holds their mutations.
 `tests/cloud/test_belt_upstream_patrol.py` runs the upstream patrol against a
 tmp repo's Cargo.toml with a fake `gh`: summary and area sightings, the
 severity scale, every failure path as one severity-1 sighting, DTO validation,
