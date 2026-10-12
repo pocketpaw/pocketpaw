@@ -2733,13 +2733,12 @@ def test_one_surplus_closer_before_state_is_dropped(spec):
     "body",
     [
         _add_root_brace(_body({"ui": _TEXT_NODE, "state": []})),  # state not an object
-        _add_root_brace(_body({"ui": _TEXT_NODE, "state": {}, "x": 1})),  # more than state
         '{"ui":{"type":"text","props":{"text":"hi"}}},"theme":{}}',  # not state
         '{"ui":{"type":"text","props":{"text":"hi"}}},"state":{} x}',
         '{"kind":"note","text":"hi"},"state":{}}',  # legacy
     ],
 )
-def test_surplus_closers_are_dropped_only_before_a_lone_state(body):
+def test_surplus_closers_are_dropped_only_before_the_roots_state(body):
     assert _ripple_body(body) is None
 
 
@@ -2857,6 +2856,36 @@ def test_small_slips_are_repaired_then_logged_by_kind(body, kinds, caplog):
         card = _ripple_body(body)
     assert card is not None and card["ui"]["type"] == "text"
     assert _slip_kinds(caplog) == [_SLIP_LOG % ",".join(sorted(kinds.split(",")))]
+
+
+# The streaming scan reads a slip as the repair will: a string after a value is a
+# key, and a closer that does not match stops the scan. It never flags a body the
+# close accepts, and still flags a key the repair would repeat.
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"ui":{"type":"image","props":{"src":"/logo.png" "alt":"Logo"}}}',
+        '{"ui":{"type":"button","props":{"label":"Go" "href":"/about"}}}',
+        '{"ui":{"type":"text","props":{"text":"hi"}} "state":{"a":[{"x":1}{"x":2}]}}',
+        _HI + '}]},"state":{"url":"/a"}}',
+        _HI + ',"state":{"a":[1,],}}',
+        '{"ui":{"type":"text","props":{"text":"two\nlines"}}}',
+    ],
+)
+def test_the_streaming_scan_never_flags_a_body_the_repair_accepts(body):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    assert _ripple_body(body) is not None
+    for end in range(1, len(body) + 1):
+        assert not scan_partial(body[:end], RIPPLE_PROFILE), body[:end]
+
+
+def test_the_streaming_scan_flags_a_key_a_missing_comma_repeats():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    body = _HI + ',"state":{"a":"x" "a":"y"}}'
+    assert _ripple_body(body) is None
+    assert scan_partial(body, RIPPLE_PROFILE)
 
 
 def test_a_raw_control_character_keeps_its_place_in_the_string():
