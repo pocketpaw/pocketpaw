@@ -271,6 +271,34 @@ RIPPLE_MODELS: dict[str, dict[str, Any]] = json.loads(
 )
 MODEL_ANNOTATIONS_MAX = 12
 MODEL_URL_PROPS: frozenset[str] = frozenset({"src", "poster", "environmentImage"})
+# Ripple's ``iso-scene`` (a live isometric drawing from a parts list) and ``figure``
+# (a hand-built one picked by id from ripple-figures.json): literal data only, no
+# handler. Numbers are refused past the bounds ripple's scene model clamps to
+# (core/src/iso/scene.ts ISO_LIMITS); a speed or readout is a number or a short
+# brace-free expression over the declared param keys (``_iso_expression``).
+ISO_SCENE = "iso-scene"
+ISO_KINDS: frozenset[str] = frozenset(
+    {"slab", "box", "cylinder", "disc", "gear", "tube", "sphere", "cone", "rod", "arrow"}
+    | {"plate"}
+)
+ISO_ROLES: frozenset[str] = frozenset(
+    {"neutral", "accent", "red", "blue", "green", "amber", "metal"}
+)
+ISO_MOTIONS: frozenset[str] = frozenset({"spin", "slide", "swing", "pulse", "flow"})
+ISO_PARTS, ISO_MOTIONS_MAX, ISO_PARAMS, ISO_READOUTS, ISO_LABELS = 150, 20, 6, 4, 10
+ISO_COORD, ISO_SIZE, ISO_SPEED, ISO_PATH_POINTS = 500, 400, 20, 64
+ISO_EXPRESSION_MAX = 80
+# A param key: an identifier the widget spreads beside ``state`` and ``params``.
+_ISO_KEY = re.compile(r"[a-z][a-z0-9_]{0,23}")
+_ISO_RESERVED: frozenset[str] = frozenset({"state", "params", "item", "index"})
+_ISO_EXPR_CHARS = re.compile(r"[\w\s.+\-*/()]+", re.ASCII)
+_ISO_NAME = re.compile(r"[A-Za-z_]\w*")
+FIGURE = "figure"
+RIPPLE_FIGURES_PATH = Path(__file__).with_name("ripple-figures.json")
+RIPPLE_FIGURES: dict[str, dict[str, Any]] = json.loads(
+    RIPPLE_FIGURES_PATH.read_text(encoding="utf-8")
+)
+FIGURE_LABELS = 10
 # Ripple's ``map`` on a model-made card: OSM tiles only (``tiles`` absent or "osm", none
 # of ``MAP_TILE_PROPS``, refused while streaming too), at most ``MAP_MAX_PINS`` markers
 # plus trackers and ``MAP_MAX_POINTS`` points across route, paths, polygons and trails;
@@ -1683,7 +1711,168 @@ def _check_catalog(node: dict[str, Any], props: dict[str, Any]) -> None:
             raise _Reject(f"a {kind} {key} outside the widget's enums, caps or plain text")
 
 
+def _point(v: Any) -> bool:
+    return isinstance(v, list) and len(v) == 3 and all(map(_num(-ISO_COORD, ISO_COORD), v))
+
+
+def _iso_expression(keys: frozenset[str], low: float, high: float) -> Any:
+    """A literal number in ``low..high``, or an expression of at most
+    ``ISO_EXPRESSION_MAX`` characters made of numbers, ``keys``, whitespace and
+    ``+ - * / ( )``: no braces, quotes, commas, dots after a name or other names,
+    so no state read, no string and no function call."""
+
+    def ok(v: Any) -> bool:
+        if not isinstance(v, str):
+            return _num(low, high)(v)
+        return (
+            len(v) <= ISO_EXPRESSION_MAX
+            and bool(_ISO_EXPR_CHARS.fullmatch(v))
+            and not re.search(r"[A-Za-z_]\w*\s*[.(]", v)
+            and set(_ISO_NAME.findall(v)) <= keys
+        )
+
+    return ok
+
+
+def _check_iso_scene(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """No handler; ``parts`` 1 to ``ISO_PARTS`` rows of the kit's kinds, colour roles
+    and bounds, unique ids, each ``on`` an id; ``params`` up to ``ISO_PARAMS``
+    sliders keyed by ``_ISO_KEY`` (not ``_ISO_RESERVED``) with min < max and the
+    value between; ``motions`` and ``readouts`` over those keys
+    (``_iso_expression``), each motion ``part`` an id; ``labels`` plain text within
+    the annotation caps, each ``part`` an id. Every text field is plain."""
+    _play_basics(ISO_SCENE, node, props, None, ())
+    params = props.get("params") or []
+    param_ok = _rows_of(
+        (0, ISO_PARAMS),
+        {
+            "key": lambda v: (
+                isinstance(v, str) and bool(_ISO_KEY.fullmatch(v)) and v not in _ISO_RESERVED
+            ),
+            "label": _txt(40),
+            "min": _num(),
+            "max": _num(),
+            "step": _num(0, math.inf),
+            "unit": _txt(12),
+            "value": _num(),
+        },
+        {"key", "label", "min", "max", "value"},
+    )
+    if not param_ok(params) or not all(
+        p["min"] < p["max"] and p["min"] <= p["value"] <= p["max"] for p in params
+    ):
+        raise _Reject("iso-scene params outside the widget's caps or their own range")
+    keys = frozenset(p["key"] for p in params)
+    size, coord = _num(0.5, ISO_SIZE), _num(-ISO_COORD, ISO_COORD)
+    checks: dict[str, Any] = {
+        "title": _txt(80),
+        "caption": _txt(200),
+        "look": _one_of(frozenset({"soft", "color"})),
+        "scale": _num(0.4, 2.5),
+        "parts": _rows_of(
+            (1, ISO_PARTS),
+            {
+                "id": _txt(40),
+                "kind": _one_of(ISO_KINDS),
+                "at": _point,
+                "w": size,
+                "d": size,
+                "h": size,
+                "r": _num(0.3, ISO_SIZE / 2),
+                "teeth": _int(6, 64),
+                "axis": _one_of(frozenset("xyz")),
+                "path": lambda v: (
+                    isinstance(v, list) and 2 <= len(v) <= ISO_PATH_POINTS and all(map(_point, v))
+                ),
+                "from": _point,
+                "to": _point,
+                "label": _txt(24),
+                "detail": _one_of(frozenset({"knurl"})),
+                "texture": _one_of(frozenset({"guilloche", "ribs"})),
+                "color": _one_of(ISO_ROLES),
+                "on": _txt(40),
+            },
+            {"id", "kind"},
+        ),
+        "motions": _rows_of(
+            (0, ISO_MOTIONS_MAX),
+            {
+                "part": _txt(40),
+                "kind": _one_of(ISO_MOTIONS),
+                "axis": _one_of(frozenset("xyz")),
+                "speed": _iso_expression(keys, -ISO_SPEED, ISO_SPEED),
+                "range": _num(0, ISO_SIZE),
+                "phase": _num(-1, 1),
+            },
+            {"part", "kind", "speed"},
+        ),
+        "readouts": _rows_of(
+            (0, ISO_READOUTS),
+            {
+                "label": _txt(ANNOTATION_LABEL_MAX),
+                "value": _iso_expression(keys, -math.inf, math.inf),
+                "unit": _txt(12),
+                "decimals": _int(0, 4),
+            },
+            {"label", "value"},
+        ),
+        "labels": _rows_of(
+            (0, ISO_LABELS),
+            {
+                "part": _txt(40),
+                "at": _point,
+                "label": _txt(ANNOTATION_LABEL_MAX),
+                "note": _txt(ANNOTATION_NOTE_MAX),
+            },
+            {"label"},
+        ),
+    }
+    if "parts" not in props:
+        raise _Reject("an iso-scene without parts")
+    for key, ok in checks.items():
+        if not _optional(props, key, ok):
+            raise _Reject(f"an iso-scene {key} outside the widget's kinds, caps or plain text")
+    ids = [p["id"] for p in props["parts"]]
+    known = set(ids)
+    refs = [p.get("on") for p in props["parts"]]
+    refs += [m["part"] for m in props.get("motions") or []]
+    refs += [lab.get("part") for lab in props.get("labels") or []]
+    if len(known) < len(ids) or not {r for r in refs if r is not None} <= known:
+        raise _Reject("an iso-scene part id that repeats, or a reference to no part")
+
+
+def _check_figure(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """No handler; ``figure`` a ``RIPPLE_FIGURES`` id, ``params`` only its keys within
+    its ranges, ``labels`` up to ``FIGURE_LABELS`` on its anchors with plain text
+    within the annotation caps, ``caption`` plain."""
+    _play_basics(FIGURE, node, props, None, ())
+    if props.get("figure") not in RIPPLE_FIGURES:
+        raise _Reject("a figure that is not in the figure catalog")
+    figure = RIPPLE_FIGURES[props["figure"]]
+    ranges = {p["key"]: _num(p["min"], p["max"]) for p in figure["params"]}
+    params = props.get("params") or {}
+    if not isinstance(params, dict) or not all(
+        k in ranges and ranges[k](v) for k, v in params.items()
+    ):
+        raise _Reject("figure params that are not its sliders within their ranges")
+    labels_ok = _rows_of(
+        (0, FIGURE_LABELS),
+        {
+            "anchor": _one_of(frozenset(figure["anchors"])),
+            "label": _txt(ANNOTATION_LABEL_MAX),
+            "note": _txt(ANNOTATION_NOTE_MAX),
+        },
+        {"anchor"},
+    )
+    if not _optional(props, "labels", labels_ok):
+        raise _Reject("figure labels off its anchors or not plain text within the caps")
+    if not _optional(props, "caption", _txt(ANNOTATION_NOTE_MAX)):
+        raise _Reject("a figure caption that is not plain text")
+
+
 _DATA_CHECKS = {"notes": _check_notes, "music-player": _check_music_player}
+_DATA_CHECKS[ISO_SCENE] = _check_iso_scene
+_DATA_CHECKS[FIGURE] = _check_figure
 _DATA_CHECKS["booking"] = _check_booking
 _DATA_CHECKS |= dict.fromkeys(_CATALOG_CHECKS, _check_catalog)
 

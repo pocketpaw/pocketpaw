@@ -251,9 +251,9 @@ def test_the_ripple_listing_is_bounded_and_covers_every_widget():
     assert {line[2:].split(":")[0].split(" {")[0] for line in lines} == (
         RIPPLE_PROFILE.widget_types
     )
-    # 20,809 with the games' and habit-tracker's typed lines; the rules shrank by more,
-    # and the whole paragraph's 32,000 bound is the one that holds.
-    assert len(text) < 21_000
+    # 21,039 with the games' and habit-tracker's typed lines and the figure and
+    # iso-scene brief lines; the whole paragraph's 32,000 bound is the one that holds.
+    assert len(text) < 21_500
     # The rules' widgets carry their props (each's node fields too).
     assert "- stat {label?, value" in text
     assert "- each {items, item_as?, index_as?}" in text
