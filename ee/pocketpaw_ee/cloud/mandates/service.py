@@ -10,7 +10,10 @@
 # signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
 # (sense → foreman → plan gate; a proposed plan is also handed to
 # ``belt.clef.shadow_plan``, which scores it in the background and gates
-# nothing); prepare_plan_resolution; get_pawprints;
+# nothing, unless ``POCKETPAW_BELT_PLAN_GATE=auto``: then the trigger awaits the
+# score and ``plan_policy.decide`` approves the plan as ``system:belt-policy`` or
+# leaves it for a human); prepare_plan_resolution + resolve_plan (the one
+# resolve path, shared by the ``plan/resolve`` route and the auto gate); get_pawprints;
 # set_autopilot; set_crew (the roster; each NEW agent must be one the caller can
 # read in this workspace, enabled); digest (the morning report, composed only
 # from the read functions above plus the belt runs list).
@@ -1056,7 +1059,9 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     machine-validate → route the plan through the Instinct PLAN GATE as a
     ``belt_plan`` proposal, or stand the shift down on an empty plan.
 
-    DEMO BAR: manual trigger only (``cadence`` scheduling is a later PR).
+    Fired by hand (the shift route) or by the cadence scheduler. With
+    ``POCKETPAW_BELT_PLAN_GATE=auto`` a proposed plan goes through ``_auto_gate``
+    before this returns, so the shift may already be ``done``.
 
     Terminal shapes:
       * tasks planned   → ShiftDoc(state="in_gate", plan_action_id=...) and a
@@ -1326,10 +1331,13 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         state="in_gate",
         plan_action_id=str(action.id),
     )
-    # Shadow only: Clef scores the plan in the background; it gates nothing.
     from pocketpaw_ee.cloud.belt import clef
+    from pocketpaw_ee.cloud.mandates import plan_policy
 
-    clef.shadow_plan(workspace_id, str(action.id), plan.model_dump()["tasks"], charter_wire)
+    auto_gate = plan_policy.enabled()
+    if not auto_gate:
+        # Shadow only: Clef scores the plan in the background; it gates nothing.
+        clef.shadow_plan(workspace_id, str(action.id), plan.model_dump()["tasks"], charter_wire)
     # UI contract — announce the new plan proposal on the ``belt_plan`` topic
     # (workspace fan-out, mirroring how belt_run_updated rides the bus). The
     # page subscribing to this topic reads {mandate_id, proposal}.
@@ -1355,17 +1363,148 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         action.id,
         correlation_id,
     )
+    state = "in_gate"
+    if auto_gate:
+        state = await _auto_gate(
+            workspace_id=workspace_id,
+            mandate_id=mandate_id,
+            shift_id=str(shift.id),
+            shift_no=shift_no,
+            action_id=str(action.id),
+            tasks=plan.model_dump()["tasks"],
+            charter_wire=charter_wire,
+            open_ids={str(o["id"]) for o in backlog["open"]},
+            budget_max=doc.charter.budget.max_tasks_per_shift,
+        )
     # UI contract — the shift response rides a ``shift`` envelope.
     return {
         "shift": {
             "shift_id": str(shift.id),
             "no": shift_no,
-            "state": "in_gate",
+            "state": state,
             "plan_action_id": str(action.id),
             "task_count": len(plan.tasks),
             "no_action_reason": None,
         }
     }
+
+
+# The inline Clef wait in auto mode. ``ClefClient`` allows 20 s plus one retry,
+# so the default leaves room for the retry to finish.
+_CLEF_INLINE_TIMEOUT_DEFAULT = 45.0
+
+
+def _env_float(name: str, default: float) -> float:
+    import os
+
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        logger.warning("%s=%r is not a number; using %s", name, raw, default)
+        return default
+    return value if value > 0 else default
+
+
+async def _auto_gate(
+    *,
+    workspace_id: str,
+    mandate_id: str,
+    shift_id: str,
+    shift_no: int,
+    action_id: str,
+    tasks: list[dict[str, Any]],
+    charter_wire: dict[str, Any],
+    open_ids: set[str],
+    budget_max: int,
+) -> str:
+    """The plan gate's AUTO policy (``POCKETPAW_BELT_PLAN_GATE=auto``): await
+    Clef's score inline, ask ``plan_policy.decide``, record the decision on the
+    ``_belt_plan`` blob, then either approve through ``resolve_plan`` (the
+    console's path) as ``system:belt-policy`` or leave the plan pending for a
+    human. Returns the shift's state. Never raises: any failure escalates."""
+    from types import SimpleNamespace
+
+    from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.cloud._core.proposals import update_action_blob
+    from pocketpaw_ee.cloud.belt import clef
+    from pocketpaw_ee.cloud.mandates import plan_policy
+    from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
+
+    timeout = _env_float("POCKETPAW_BELT_PLAN_GATE_CLEF_TIMEOUT", _CLEF_INLINE_TIMEOUT_DEFAULT)
+    try:
+        verdict = await asyncio.wait_for(
+            clef.score_and_record_plan(workspace_id, action_id, tasks, charter_wire),
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001 — a Clef failure escalates, never fails the shift
+        logger.warning("mandate: auto gate Clef wait failed (%s)", type(exc).__name__)
+        verdict = None
+
+    thresholds = plan_policy.thresholds_from_env()
+    decision = plan_policy.decide(tasks, open_ids, budget_max, verdict, thresholds)
+    record = {
+        "decision": "approved" if decision.approve else "escalated",
+        "rule": decision.rule,
+        "reason": decision.reason,
+        "approver": plan_policy.APPROVER if decision.approve else None,
+        "thresholds": {
+            "min_in_scope": thresholds.min_in_scope,
+            "min_low_risk": thresholds.min_low_risk,
+            "min_independent": thresholds.min_independent,
+            "max_too_big": thresholds.max_too_big,
+        },
+        "at": _utcnow().isoformat(),
+    }
+    try:
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        await update_action_blob(
+            store=store,
+            action_id=action_id,
+            param_key=BELT_PLAN_PARAM_KEY,
+            updates={"policy": record},
+        )
+    except Exception:  # noqa: BLE001 — the audit write failing must not approve blind
+        logger.warning("mandate: could not record the gate policy on %s", action_id, exc_info=True)
+        return "in_gate"
+
+    if not decision.approve:
+        logger.info(
+            "mandate: shift %s of %s escalated to a human (%s): %s",
+            shift_no,
+            mandate_id,
+            decision.rule,
+            decision.reason,
+        )
+        return "in_gate"
+
+    try:
+        out = await resolve_plan(
+            workspace_id,
+            plan_policy.APPROVER,
+            mandate_id,
+            {
+                "shift_no": shift_no,
+                "decisions": [{"index": i, "decision": "approve"} for i in range(len(tasks))],
+            },
+            approver=SimpleNamespace(id=plan_policy.APPROVER),
+        )
+    except Exception:  # noqa: BLE001 — a failed auto-approve leaves the plan for a human
+        logger.warning(
+            "mandate: auto gate approve failed for shift %s of %s; left pending",
+            shift_no,
+            mandate_id,
+            exc_info=True,
+        )
+        return "in_gate"
+    logger.info(
+        "mandate: shift %s of %s auto-approved by %s: %s",
+        shift_no,
+        mandate_id,
+        plan_policy.APPROVER,
+        decision.reason,
+    )
+    return str(out["shift"].get("state") or "in_gate")
 
 
 def _aware(ts: datetime) -> datetime:
@@ -1644,6 +1783,44 @@ async def prepare_plan_resolution(
         "edited": edited,
         "parameters": new_params,
     }
+
+
+async def resolve_plan(
+    workspace_id: str, user_id: str, mandate_id: str, body: Any, *, approver: Any
+) -> dict[str, Any]:
+    """Resolve an in_gate shift plan: ``prepare_plan_resolution`` then the REAL
+    Instinct approve (with edits when any task was edited or dropped) or reject.
+    The ``plan/resolve`` route and the auto plan gate both run this, so there is
+    one resolve path. ``approver`` is the actor the Instinct router records
+    (anything with an ``id``). Returns ``{"shift": <shift wire>}``."""
+    orders = await prepare_plan_resolution(workspace_id, user_id, mandate_id, body)
+
+    # Lazy import — the mandates package must not put a module-top dependency
+    # on the instinct package (the instinct router lazy-imports the mandates
+    # executor on its approve path).
+    from pocketpaw_ee.instinct.router import (
+        ApproveRequest,
+        RejectRequest,
+        approve_action,
+        reject_action,
+    )
+
+    if orders["mode"] == "reject":
+        await reject_action(
+            orders["action_id"],
+            req=RejectRequest(reason=str(orders.get("reject_reason") or "")),
+            user=approver,
+            workspace_id=workspace_id,
+        )
+    else:
+        req = ApproveRequest(parameters=orders["parameters"]) if orders["edited"] else None
+        await approve_action(
+            orders["action_id"],
+            req=req,
+            user=approver,
+            workspace_id=workspace_id,
+        )
+    return {"shift": await shift_wire(workspace_id, orders["shift_id"])}
 
 
 async def shift_wire(workspace_id: str, shift_id: str) -> dict[str, Any]:
@@ -2218,6 +2395,7 @@ __all__ = [
     "pick_dev",
     "prepare_plan_resolution",
     "repo_for_mandate",
+    "resolve_plan",
     "run_patrols",
     "set_autopilot",
     "set_crew",

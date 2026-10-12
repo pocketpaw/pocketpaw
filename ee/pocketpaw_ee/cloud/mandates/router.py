@@ -13,7 +13,8 @@
 # route takes the general ``{text, severity?, source}`` and the teaching
 # ``{kind, reason, shift_no?, task_title?}`` shapes (the service discriminates
 # on ``kind``). ``plan/resolve`` maps the console's per-task verdicts onto the
-# real Instinct approve-with-edits / reject paths.
+# real Instinct approve-with-edits / reject paths through
+# ``service.resolve_plan``, the same function the auto plan gate calls.
 #
 # Static paths (``/digest``) are declared before ``/{mandate_id}`` so they are
 # never captured as a mandate id.
@@ -158,35 +159,9 @@ async def resolve_plan(
     Rejected tasks are recorded as teaching sightings (reason + task title) so
     the foreman's next digest learns. Decision ``index`` is 0-based into the
     plan's tasks array, and every task must carry exactly one decision."""
-    orders = await mandate_service.prepare_plan_resolution(workspace_id, user_id, mandate_id, body)
-
-    # Lazy import — the mandates router must not put a module-top dependency on
-    # the instinct package (mirrors how the instinct router lazy-imports the
-    # mandates executor on its approve path).
-    from pocketpaw_ee.instinct.router import (
-        ApproveRequest,
-        RejectRequest,
-        approve_action,
-        reject_action,
+    return await mandate_service.resolve_plan(
+        workspace_id, user_id, mandate_id, body, approver=user
     )
-
-    if orders["mode"] == "reject":
-        await reject_action(
-            orders["action_id"],
-            req=RejectRequest(reason=str(orders.get("reject_reason") or "")),
-            user=user,
-            workspace_id=workspace_id,
-        )
-    else:
-        req = ApproveRequest(parameters=orders["parameters"]) if orders["edited"] else None
-        await approve_action(
-            orders["action_id"],
-            req=req,
-            user=user,
-            workspace_id=workspace_id,
-        )
-
-    return {"shift": await mandate_service.shift_wire(workspace_id, orders["shift_id"])}
 
 
 @router.post("/{mandate_id}/autopilot")
