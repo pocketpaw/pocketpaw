@@ -31,6 +31,11 @@
 # the head's CI run with a ``snapshots`` artifact is found through gh api, its
 # real PNGs kept (sanitized, 40 files / 20 MB caps, sha on the blob) once the PR
 # is known and on land, and no artifact or a failed download never fails a land.
+# RESUME (a restart): a launched run (``headless_state="cloud"``, no diff) is
+# tracked again and lands, also when its PR merged while the backend was down;
+# nothing is launched; a run without the mark (or a failed one) is not resumed;
+# an unreadable workspace skips only itself; the run timeout counts from
+# ``cloud.launched_at``; a fixer recorded on the PR's head is not doubled.
 # ``pty_run.py`` itself runs for real:
 # it streams the child's output as it lands and exits on the folder-trust
 # prompt instead of waiting; ``wire_from_env`` wires the cloud dispatcher only
@@ -238,7 +243,9 @@ async def test_merged_pr_lands_the_run(store, dirs, monkeypatch):
     assert cc["commit_sha"] == "abc123"
     assert cc["branch"] == "claude/g41-text"
     assert cc["files_changed"] == 2
-    assert cc["cloud"] == {"session_url": "https://claude.ai/code/session_ABC123", "pr": 9}
+    assert cc["cloud"]["session_url"] == "https://claude.ai/code/session_ABC123"
+    assert cc["cloud"]["pr"] == 9
+    assert cc["cloud"]["launched_at"] <= time.time()  # the run timeout counts from it
     assert any(a[:4] == ["gh", "pr", "view", "9"] for a, _ in runner.calls)
     assert "headless_state" not in cc
     # The merged PR's diff is on the blob for the UI, reusing Clef's fetch.
@@ -900,3 +907,125 @@ async def test_pty_run_fails_fast_at_the_folder_trust_prompt(tmp_path):
     assert code not in (0, -1)  # pty_run bailed on its own, not via the timeout
     assert time.monotonic() - started < 20
     assert "Quick safety check" in out
+
+
+# -- resume after a restart -------------------------------------------------
+
+CLOUD_URL = "https://claude.ai/code/session_ABC123"
+
+
+async def _launched(store: InstinctStore, repo: Path, **cloud) -> str:
+    """A queued run as ``run()`` leaves it once launched, its tracker gone."""
+    run_ref = await _queue(store, repo)
+    await cloud_station._patch(
+        store, run_ref, headless_state="cloud", cloud={"session_url": CLOUD_URL, **cloud}
+    )
+    return run_ref
+
+
+def _resumer(runner: FakeRunner, launch: Path, **kw) -> CloudTaskDispatcher:
+    async def workspaces() -> list[str]:
+        return [WS]
+
+    return _dispatcher(runner, launch, workspaces_for=workspaces, **kw)
+
+
+async def test_resume_tracks_a_launched_run_and_lands_it(store, dirs):
+    repo, launch = dirs
+    run_ref = await _launched(store, repo, launched_at=time.time())
+    runner = FakeRunner(launch_out=SESSION, pr=[_open("h1"), MERGED])
+    runner.run_ref = run_ref
+
+    assert await _resumer(runner, launch).resume_all() == 1
+
+    assert not _briefs(runner)  # the worker exists: nothing is launched
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    cc = action.parameters["_code_change"]
+    assert cc["pr_url"] == PR_URL and cc["cloud"]["pr"] == 9
+    assert "headless_state" not in cc
+
+
+async def test_resume_lands_a_pr_that_merged_while_the_backend_was_down(store, dirs):
+    repo, launch = dirs
+    run_ref = await _launched(store, repo)  # no launched_at: an older run
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    assert await _resumer(runner, launch).resume_all() == 1
+
+    views = [a for a, _ in runner.calls if a[:3] == ["gh", "pr", "view"]]
+    assert len(views) == 1  # the first poll saw MERGED and landed it
+    assert not _briefs(runner)
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert action.approved_by == "system:fast-lane"
+
+
+async def test_resume_skips_runs_without_the_cloud_mark(store, dirs):
+    repo, launch = dirs
+    await _queue(store, repo)  # queued, never launched
+    failed = await _queue(store, repo)  # a tracker that gave up keeps only its session
+    await cloud_station._patch(
+        store, failed, cloud={"session_url": CLOUD_URL}, headless_error="TRACK: no PR"
+    )
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+
+    assert await _resumer(runner, launch).resume_all() == 0
+
+    assert runner.calls == []
+    assert (await store.get_action(failed)).status == ActionStatus.PENDING
+
+
+async def test_resume_survives_a_store_error(store, dirs, monkeypatch):
+    repo, launch = dirs
+    run_ref = await _launched(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    def get_store(*, workspace_id=None):
+        if workspace_id == "broken":
+            raise OSError("disk I/O error")
+        return store
+
+    async def workspaces() -> list[str]:
+        return ["broken", WS]
+
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", get_store)
+    assert await _dispatcher(runner, launch, workspaces_for=workspaces).resume_all() == 1
+    assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+
+    async def no_workspaces() -> list[str]:
+        raise RuntimeError("mongo is down")
+
+    assert await _dispatcher(runner, launch, workspaces_for=no_workspaces).resume_all() == 0
+
+
+async def test_resume_counts_the_timeout_from_the_launch(store, dirs):
+    repo, launch = dirs
+    run_ref = await _launched(store, repo, launched_at=time.time() - 5 * 3600)
+    runner = FakeRunner(launch_out=SESSION, pr=None)
+    runner.run_ref = run_ref
+
+    await _resumer(runner, launch).resume_all()  # the 4 h timeout already ran out
+
+    assert sum(a[:3] == ["gh", "pr", "list"] for a, _ in runner.calls) == 1
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert "no PR" in cc["headless_error"] and cc["station_pending"] is True
+
+
+async def test_resume_does_not_double_a_fixer_on_the_same_head(store, dirs, stages):
+    repo, launch = dirs
+    fix = {"kind": "ci", "at": time.time(), "head": "h1", "session_url": CLOUD_URL}
+    run_ref = await _launched(store, repo, launched_at=time.time())
+    await cloud_station._patch(store, run_ref, fixes=[fix])
+    red = _open("h1", red=True)  # the fixer is still working on h1
+    runner = FakeRunner(launch_out=SESSION, pr=[red] * 6 + [MERGED])
+    runner.run_ref = run_ref
+
+    await _resumer(runner, launch, poll_seconds=60, fix_grace_seconds=100).resume_all()
+
+    assert not _briefs(runner)
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert action.parameters["_code_change"]["fixes"] == [fix]

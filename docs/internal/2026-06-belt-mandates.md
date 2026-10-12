@@ -772,9 +772,26 @@ instructions ride the brief fenced as data, as in the local develop prompt.
 The repo's own fast lane and CI are the diff gate for small PRs; the plan gate
 is unchanged. Once the PR is known, its diff also goes to Clef's shadow scorer
 (`belt/clef.shadow_diff`), which records a verdict and gates nothing. There is no local ORIENT, CHECK or REVIEW in this mode: the
-session works in the cloud. Tracking is process-local: a restart leaves the run
-with `headless_state: "cloud"` (the digest lists it as stuck) and nothing
-resumes it yet.
+session works in the cloud.
+
+**Resume after a restart.** Tracking is process-local, so `wire_cloud` schedules
+one background `resume_all` at startup. It reads the workspaces that hold a
+mandate (`mandates.service.mandate_workspace_ids`, paused ones included) and,
+in each, every pending run still marked `headless_state: "cloud"` with no diff.
+Failure, escalation and land all clear that mark, so it means "launched, tracker
+alive when the process died". A `cloud.session_url` alone is not enough: a
+tracker that failed or timed out keeps the session but drops the mark, and those
+runs stay as they are. Each resumed run goes back to `_track` (the bound repo's
+slug, the stored session, the PR found by its `Belt-Run` line); nothing is
+launched. The run timeout counts from `cloud.launched_at` (stored at launch), so
+an expired run gets one poll and lands if its PR merged while the backend was
+down; runs from before the field get a fresh timeout. Fixer attempts carry over
+on `fixes`, and each entry records the head it was launched on, so a resumed
+tracker does not start a second fixer on that head. A landed run is no longer
+pending, so its tester is never relaunched. A store error skips that workspace
+only, and startup logs one line: `belt cloud: resumed N run tracker(s) after
+startup`. A run whose launch was still in progress when the process died has no
+mark and stays queued.
 
 ### The crew: cloud Agents as workers
 

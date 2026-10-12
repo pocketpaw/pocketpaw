@@ -33,8 +33,9 @@
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
 # charter_for_mandate, crew_seat_for_task, crew_worker, file_station_sighting,
-# list_autopilot_enabled, executor_revalidate, mark_shift, has_continuous_mandate,
-# and list_cadence_due: the scheduler's cross-workspace read of ACTIVE mandates
+# list_autopilot_enabled, mandate_workspace_ids (the cloud station's startup
+# resume), executor_revalidate, mark_shift, has_continuous_mandate, and
+# list_cadence_due: the scheduler's cross-workspace read of ACTIVE mandates
 # that are due (daily / weekly by interval; continuous by ``_continuous_due``,
 # which first runs the ``issues`` patrol on a mandate that toggles it; manual
 # never; N+1 reads, fine at current mandate counts).
@@ -2323,6 +2324,18 @@ async def list_autopilot_enabled() -> list[dict[str, Any]]:
         }
         for d in docs
     ]
+
+
+async def mandate_workspace_ids() -> list[str]:
+    """Every workspace holding a mandate, paused ones included (a paused
+    mandate's PR can still merge): the cloud station's startup resume read
+    (``cloud_station.resume_all``). DELIBERATELY cross-workspace, a SYSTEM
+    boot read like ``list_autopilot_enabled``."""
+    # global-read: system boot read, same posture as list_autopilot_enabled.
+    # no-event: read-only path.
+    # ponytail: loads every mandate row; a distinct() read when mandates number thousands.
+    docs = await MandateDoc.find_all().to_list()
+    return sorted({d.workspace for d in docs if d.workspace})
 
 
 # Cadence → due-interval. A mandate is due once its last shift is older than its

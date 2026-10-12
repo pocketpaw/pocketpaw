@@ -36,16 +36,18 @@
 #             timeout  -> ``headless_error``, the run stays queued.
 #   TESTER  ``POCKETPAW_FACTORY_CLOUD_TESTER=1`` and a live ``tester`` crew seat:
 #           ONE session per landed run tries to break what it built (engine code:
-#           adversarial, edge-case and fuzz tests; app UI, a ``Sources/*App`` in
-#           the clone: the PR's ``snapshots`` PNGs against docs/design.md), files
-#           each bug as an issue (``bug``, ``gap``, the line label), puts useful
-#           tests in one ``fast-lane`` PR marked ``Belt-Test: <run id>``, fixes
-#           nothing. ``tester: {session_url | error, at}`` on the blob, a
-#           ``landed``/``test`` run update; never fails the land.
+#           fuzz and edge-case tests; app UI, a ``Sources/*App`` in the clone: the
+#           PR's ``snapshots`` against docs/design.md), files each bug as an issue
+#           (``bug``, ``gap``, line label), puts useful tests in one ``fast-lane``
+#           PR marked ``Belt-Test: <run id>``, fixes nothing. ``tester: {session_url
+#           | error, at}`` on the blob; never fails the land.
+#   RESUME  ``wire_cloud`` schedules ``resume_all`` once at startup: each pending
+#           run marked ``headless_state="cloud"`` with no diff (failure, escalation
+#           and land clear it) is tracked again, never relaunched; the timeout
+#           counts from ``cloud.launched_at`` (else a fresh one); ``fixes`` carry.
 #
 # Nothing builds or tests here: the only local processes are git, gh and the
-# launcher. Tracking is process-local (a restart leaves ``headless_state="cloud"``,
-# shown as stuck); an approved escalated diff lands on the mandate line.
+# launcher. An approved escalated diff lands on the mandate line.
 
 from __future__ import annotations
 
@@ -132,6 +134,27 @@ async def _default_tester_for(workspace_id: str, mandate_id: str) -> dict[str, A
     return await mandate_service.crew_seat_for_task(workspace_id, mandate_id, 1, role="tester")
 
 
+async def _default_workspaces() -> list[str]:
+    """Every workspace holding a mandate: where ``resume_all`` looks for runs."""
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    return await mandate_service.mandate_workspace_ids()
+
+
+def _resumable(blob: dict[str, Any]) -> bool:
+    """A launched run whose tracker a restart dropped: still queued, no diff,
+    and ``headless_state="cloud"``. A ``cloud.session_url`` alone is not enough:
+    a failed or timed-out tracker clears the state but keeps the session."""
+    cloud = blob.get("cloud")
+    return (
+        bool(blob.get("station_pending"))
+        and not str(blob.get("diff") or "").strip()
+        and blob.get("headless_state") == "cloud"
+        and isinstance(cloud, dict)
+        and bool(cloud.get("session_url"))
+    )
+
+
 @dataclass
 class CloudTaskDispatcher:
     """The headless dispatcher's cloud twin: files the queued run, launches a
@@ -150,6 +173,7 @@ class CloudTaskDispatcher:
     # the mandate seats a tester (``tester_for``).
     tester: bool = False
     tester_for: Callable[[str, str], Awaitable[dict[str, Any] | None]] = _default_tester_for
+    workspaces_for: Callable[[], Awaitable[list[str]]] = _default_workspaces
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.monotonic
     # The headless runner, for its blob writers (attach a diff / note a failure).
@@ -182,12 +206,14 @@ class CloudTaskDispatcher:
 
     async def develop(self, run_ref: str, *, workspace_id: str) -> None:
         """Launch and track one queued run, inline or as a background task."""
+        await self._start(run_ref, self.run(run_ref, workspace_id=workspace_id))
+
+    async def _start(self, run_ref: str, work: Awaitable[None]) -> None:
         if not self.background:
-            await self.run(run_ref, workspace_id=workspace_id)
+            await work
             return
-        task = asyncio.create_task(
-            self.run(run_ref, workspace_id=workspace_id), name=f"belt-cloud-{run_ref}"
-        )
+        task = asyncio.ensure_future(work)
+        task.set_name(f"belt-cloud-{run_ref}")
         _TRACKERS.add(task)
         task.add_done_callback(_TRACKERS.discard)
 
@@ -199,15 +225,63 @@ class CloudTaskDispatcher:
         blob = await _blob(store, run_ref)
         if blob is None or not blob.get("station_pending") or (blob.get("diff") or "").strip():
             return
-        try:
+
+        async def launch_and_track() -> None:
             worker = await self._blobs._worker(blob)
             async with _LAUNCH_LOCK:
                 slug, session = await self._launch(run_ref, blob, worker)
-            await _patch(store, run_ref, headless_state="cloud", cloud={"session_url": session})
+            cloud = {"session_url": session, "launched_at": time.time()}
+            await _patch(store, run_ref, headless_state="cloud", cloud=cloud)
             await _emit_run_updated(
                 workspace_id=workspace_id, action_id=run_ref, status="running", stage="cloud"
             )
-            await self._track(store, run_ref, blob, slug, session, worker)
+            await self._track(store, run_ref, blob, slug, cloud, worker)
+
+        await self._guard(store, run_ref, launch_and_track())
+
+    async def resume_all(self) -> int:
+        """Track again every run a restart orphaned (``_resumable``), from its PR:
+        nothing is launched. Returns how many; never raises."""
+        from pocketpaw.stores import get_instinct_store
+
+        try:
+            workspaces = await self.workspaces_for()
+        except Exception:  # noqa: BLE001 — a failed resume never fails startup
+            logger.warning("belt cloud: resume could not list workspaces", exc_info=True)
+            workspaces = []
+        live = {t.get_name() for t in _TRACKERS}
+        resumed = 0
+        for ws in workspaces:
+            try:
+                store = get_instinct_store(workspace_id=ws or None)
+                actions = await store.pending(pocket_id=ws, workspace_id=ws)
+            except Exception:  # noqa: BLE001 — one unreadable workspace skips only itself
+                logger.warning("belt cloud: resume could not read %s", ws, exc_info=True)
+                continue
+            for action in actions:
+                blob = (action.parameters or {}).get(_CODE_CHANGE_PARAM_KEY)
+                if not isinstance(blob, dict) or not _resumable(blob):
+                    continue
+                if f"belt-cloud-{action.id}" in live:
+                    continue  # already tracked in this process
+                resumed += 1
+                await self._start(
+                    action.id,
+                    self._guard(store, action.id, self._retrack(store, action.id, dict(blob))),
+                )
+        logger.info("belt cloud: resumed %d run tracker(s) after startup", resumed)
+        return resumed
+
+    async def _retrack(self, store: Any, run_ref: str, blob: dict[str, Any]) -> None:
+        """``run()``'s tracking half for a run already launched: the bound repo's
+        slug again, the stored session, never ``_launch``."""
+        worker = await self._blobs._worker(blob)
+        slug = await self._slug(ClaudeCodeDevelop._resolve_repo(str(blob.get("repo") or "")))
+        await self._track(store, run_ref, blob, slug, dict(blob["cloud"]), worker)
+
+    async def _guard(self, store: Any, run_ref: str, work: Awaitable[None]) -> None:
+        try:
+            await work
         except (CloudStationError, DevelopStationError) as exc:
             await self._blobs._note_failure(store, run_ref, str(exc))
         except Exception as exc:  # noqa: BLE001 — a tracker must never crash the loop
@@ -319,23 +393,33 @@ class CloudTaskDispatcher:
         run_ref: str,
         blob: dict[str, Any],
         slug: str,
-        session: str,
+        cloud: dict[str, Any],
         worker: dict[str, str],
     ) -> None:
-        deadline = self.clock() + self.timeout_seconds
+        session = str(cloud["session_url"])
+        # The run timeout counts from the launch (wall clock, so a resumed run
+        # keeps it); a run with no ``launched_at`` gets a fresh one. An expired
+        # run still gets one poll first, so a PR merged meanwhile lands.
+        launched = cloud.get("launched_at")
+        spent = max(0.0, time.time() - launched) if isinstance(launched, int | float) else 0.0
+        deadline = self.clock() + self.timeout_seconds - spent
         number: int | None = None
         cwd = Path(self.launch_dir).expanduser()
         fixes: list[dict[str, Any]] = list(blob.get("fixes") or [])
         stuck_key: tuple[str, str] | None = None
         stuck_since = 0.0
-        fixed_head = ""  # the head a fixer was launched on; the next waits for a new one
+        # The head the last fixer was launched on; the next waits for a new one.
+        # Read off ``fixes`` so a resumed tracker does not double a live fixer.
+        fixed_head = next(
+            (str(f.get("head") or "") for f in reversed(fixes) if f.get("session_url")), ""
+        )
         clef_diff, clef_head = "", None  # the diff Clef scored, and the head it was of
         shot = False  # screenshots fetched once the PR is known, and again on land
         while True:
             if number is None:
                 number = await self._find_pr(slug, run_ref, cwd)
                 if number is not None:
-                    await _patch(store, run_ref, cloud={"session_url": session, "pr": number})
+                    await _patch(store, run_ref, cloud={**cloud, "pr": number})
                     clef_diff = await self._shadow_score(blob, run_ref, slug, number, cwd)
             if number is not None:
                 pr = json.loads(
@@ -415,7 +499,7 @@ class CloudTaskDispatcher:
             "check": str((red or {}).get("name") or (red or {}).get("context") or ""),
             "log": await self._failed_log(slug, red, cwd) if red else "",
         }
-        entry: dict[str, Any] = {"kind": kind, "at": time.time()}
+        entry: dict[str, Any] = {"kind": kind, "at": time.time(), "head": pr.get("headRefOid")}
         try:
             async with _LAUNCH_LOCK:
                 _, url = await self._launch(run_ref, blob, worker, fix=fix)
@@ -870,20 +954,27 @@ def wire_cloud() -> bool:
             "must name an existing git clone the claude CLI trusts."
         )
         return False
-    set_production_dispatcher(
-        CloudTaskDispatcher(
-            launch_dir=launch,
-            background=True,
-            poll_seconds=_env_float("POCKETPAW_FACTORY_CLOUD_POLL", 60.0),
-            timeout_seconds=_env_float("POCKETPAW_FACTORY_CLOUD_TIMEOUT", 4 * 3600.0),
-            label=(os.environ.get("POCKETPAW_FACTORY_CLOUD_PR_LABEL") or "fast-lane").strip(),
-            fix_grace_seconds=_env_float("POCKETPAW_FACTORY_CLOUD_FIX_GRACE", 300.0),
-            fix_attempts=int(_env_float("POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS", 2)),
-            tester=(os.environ.get("POCKETPAW_FACTORY_CLOUD_TESTER") or "").strip().lower()
-            in {"1", "true", "yes", "on"},
-        )
+    dispatcher = CloudTaskDispatcher(
+        launch_dir=launch,
+        background=True,
+        poll_seconds=_env_float("POCKETPAW_FACTORY_CLOUD_POLL", 60.0),
+        timeout_seconds=_env_float("POCKETPAW_FACTORY_CLOUD_TIMEOUT", 4 * 3600.0),
+        label=(os.environ.get("POCKETPAW_FACTORY_CLOUD_PR_LABEL") or "fast-lane").strip(),
+        fix_grace_seconds=_env_float("POCKETPAW_FACTORY_CLOUD_FIX_GRACE", 300.0),
+        fix_attempts=int(_env_float("POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS", 2)),
+        tester=(os.environ.get("POCKETPAW_FACTORY_CLOUD_TESTER") or "").strip().lower()
+        in {"1", "true", "yes", "on"},
     )
+    set_production_dispatcher(dispatcher)
     logger.info("belt: cloud develop station wired (claude --cloud, launch clone %s)", launch)
+    try:  # re-track the runs a restart orphaned, in the background
+        task = asyncio.get_running_loop().create_task(
+            dispatcher.resume_all(), name="belt-cloud-resume"
+        )
+        _TRACKERS.add(task)
+        task.add_done_callback(_TRACKERS.discard)
+    except RuntimeError:  # no running loop (a sync caller): nothing to resume from here
+        logger.info("belt cloud: no event loop; tracker resume skipped")
     return True
 
 

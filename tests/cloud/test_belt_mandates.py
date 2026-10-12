@@ -1616,3 +1616,18 @@ async def test_station_sighting_files_once_per_signal(tmp_path, mongo_db, store,
         "line-conflict:belt/line/x:aaa",
         "line-conflict:x:bbb",
     ]
+
+
+async def test_mandate_workspace_ids_names_each_mandate_workspace_once(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch
+):
+    """The cloud station's startup resume reads where to look from here."""
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    assert await mandate_service.mandate_workspace_ids() == []
+    client = _make_client(monkeypatch)
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        _create_mandate(client, tmp_path / name)
+
+    assert await mandate_service.mandate_workspace_ids() == [WS]
