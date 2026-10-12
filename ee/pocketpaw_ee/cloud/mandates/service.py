@@ -1182,13 +1182,21 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     except Exception as exc:  # noqa: BLE001 — surface a clean upstream failure
         from pocketpaw_ee.cloud._core.errors import CloudError
 
-        # Failure path keeps the state UNCHANGED ("planning") and only records
-        # the failure on ``outcome`` — the shift never advances on a bad call.
+        # A failed call FINISHES the shift (``done``, no plan) with the failure
+        # as its outcome, so a continuous mandate retries after the minimum gap
+        # (``_continuous_due`` backs off after ``_FOREMAN_FAILURE_RUN`` in a row).
+        logger.warning(
+            "mandate: foreman call failed for mandate %s shift %s (prompt %d chars): %s",
+            mandate_id,
+            shift_no,
+            len(foreman_mod.build_prompt(context)),
+            exc,
+        )
         await mark_shift(
             workspace_id=workspace_id,
             shift_id=str(shift.id),
-            state="planning",
-            outcome=f"foreman call failed: {exc}",
+            state="done",
+            outcome=f"{_FOREMAN_FAILED}: {exc}",
         )
         raise CloudError(
             502, "mandate.foreman_failed", f"The foreman's judgment call failed: {exc}"
@@ -1970,6 +1978,11 @@ async def get_pawprints(workspace_id: str, user_id: str, mandate_id: str) -> dic
                 summary = f"Shift {shift.no}: plan did not reach the gate — {shift.outcome}"
             prints.append(_item(shift, "planning", summary, [], shift.updatedAt))
             continue
+        if shift.state == "done" and not shift.plan_action_id:
+            # A failed foreman call finished the shift with no plan.
+            summary = f"Shift {shift.no}: plan did not reach the gate — {shift.outcome or ''}"
+            prints.append(_item(shift, "failed", summary.rstrip(" —"), [], shift.updatedAt))
+            continue
 
         # in_gate / executing / done — read the plan Action for status + refs.
         action = None
@@ -2298,6 +2311,11 @@ _CADENCE_INTERVALS: dict[str, timedelta] = {
 _SCHEDULER_ACTOR = "system:scheduler"
 
 
+# A shift whose foreman call failed is ``done`` with this outcome prefix; after
+# this many in a row a continuous mandate waits the stall timeout.
+_FOREMAN_FAILED = "foreman call failed"
+_FOREMAN_FAILURE_RUN = 3
+
 # CONTINUOUS cadence knobs (env): the minimum gap between two shifts, and how
 # old a shift must be before its unfinished runs (or a stuck ``planning`` /
 # ``executing`` state) stop holding the next one.
@@ -2323,7 +2341,8 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
     same backlog), none of its runs is still in flight, and an open sighting no
     task is working remains. A shift older than the stall timeout stops holding
     the next one through in-flight runs or a stuck ``planning`` / ``executing``
-    state; a plan waiting ``in_gate`` for a human always holds it. Past those
+    state; a plan waiting ``in_gate`` for a human always holds it, and so do
+    ``_FOREMAN_FAILURE_RUN`` failed foreman calls in a row. Past those
     holds, a mandate that toggles the ``issues`` patrol runs it before the
     backlog read, so a new GitHub issue is sighted without waiting for a shift."""
     from pocketpaw_ee.cloud.belt import service as belt_service
@@ -2346,6 +2365,19 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
             return False
         if last.state in ("planning", "executing") and not stalled:
             return False
+        if not stalled and (last.outcome or "").startswith(_FOREMAN_FAILED):
+            recent = (
+                await ShiftDoc.find(
+                    ShiftDoc.workspace == doc.workspace, ShiftDoc.mandate_id == str(doc.id)
+                )
+                .sort("-no")
+                .limit(_FOREMAN_FAILURE_RUN)
+                .to_list()
+            )
+            if len(recent) == _FOREMAN_FAILURE_RUN and all(
+                (s.outcome or "").startswith(_FOREMAN_FAILED) for s in recent
+            ):
+                return False  # the foreman keeps failing: back off to the stall timeout
 
     mandate_id = str(doc.id)
     runs = [

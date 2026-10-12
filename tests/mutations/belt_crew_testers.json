@@ -242,5 +242,59 @@
     "tests": [
       "tests/cloud/test_belt_mandates.py::test_belt_plan_resolved_and_mandate_updated_fan_out_to_the_workspace"
     ]
+  },
+  {
+    "label": "the foreman timeout ignores POCKETPAW_MANDATE_FOREMAN_TIMEOUT",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "return await run_claude_no_tools(prompt, timeout=_cli_timeout(), run=self.run)",
+    "replace": "return await run_claude_no_tools(prompt, timeout=_CLI_TIMEOUT, run=self.run)",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_the_foreman_timeout_comes_from_the_env"
+    ]
+  },
+  {
+    "label": "a failed foreman call leaves the shift in planning",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            state=\"done\",\n            outcome=f\"{_FOREMAN_FAILED}: {exc}\",",
+    "replace": "            state=\"planning\",\n            outcome=f\"{_FOREMAN_FAILED}: {exc}\",",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_a_failed_foreman_call_finishes_the_shift"
+    ]
+  },
+  {
+    "label": "the foreman failure log hides the prompt size",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            len(foreman_mod.build_prompt(context)),",
+    "replace": "            0,",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_a_failed_foreman_call_finishes_the_shift"
+    ]
+  },
+  {
+    "label": "three foreman failures in a row never back off",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "                return False  # the foreman keeps failing: back off to the stall timeout",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_three_foreman_failures_wait_the_stall_timeout"
+    ]
+  },
+  {
+    "label": "two foreman failures already back off",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            if len(recent) == _FOREMAN_FAILURE_RUN and all(",
+    "replace": "            if len(recent) >= 1 and all(",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_two_foreman_failures_still_retry_after_the_gap"
+    ]
+  },
+  {
+    "label": "a shift the foreman failed reads as proposed in pawprints",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        if shift.state == \"done\" and not shift.plan_action_id:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_a_failed_foreman_call_finishes_the_shift"
+    ]
   }
 ]

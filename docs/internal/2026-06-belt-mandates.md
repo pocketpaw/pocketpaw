@@ -95,7 +95,12 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   - none of that shift's runs is still in flight (queued, developing, pending at
     the diff gate). A shift older than `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS`
     (default 3) stops holding the next one this way, and also releases a shift
-    stuck in `planning` (a failed foreman call) or `executing`;
+    stuck in `planning` (a plan machine validation refused) or `executing`;
+  - the foreman did not fail 3 shifts in a row. A failed foreman call
+    (timeout, CLI error, unparseable plan) finishes its shift as `done` with
+    no plan and the outcome `foreman call failed: <reason>`, so the mandate is
+    due again after the minimum gap; after 3 such shifts in a row it waits the
+    stall timeout;
   - it has an open sighting that no landed or in-flight task covers.
 
   While any ACTIVE continuous mandate exists, the loop ticks every
@@ -260,7 +265,12 @@ through a pluggable `PlanLlm` protocol, selected by `POCKETPAW_MANDATE_LLM`:
   sighting text (`foreman.run_claude_no_tools`, which the autopilot personas
   share); parses the envelope's `result`, tolerates fenced JSON. The binary is `POCKETPAW_FACTORY_CLAUDE_BIN`,
   else `claude` on PATH (never the SDK's bundled copy, which goes stale); the
-  model is `POCKETPAW_FACTORY_CLAUDE_MODEL`, else the CLI's default.
+  model is `POCKETPAW_FACTORY_CLAUDE_MODEL`, else the CLI's default. The call
+  times out after `POCKETPAW_MANDATE_FOREMAN_TIMEOUT` seconds (default 300). A
+  failed call logs one warning naming the mandate, the shift and the prompt
+  size in characters, finishes the shift (see the continuous cadence above),
+  shows in pawprints as `failed`, and the shift route answers 502
+  `mandate.foreman_failed`.
 - `mock` — deterministic (one task per open sighting that is not in flight,
   severity-ranked, budget-capped; `no_action` when nothing is left to plan).
   Tests script it via `foreman.set_mock_plan`.
@@ -1375,6 +1385,7 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_DEVELOP_TIMEOUT` | `900` | Seconds per `claude -p` call (develop, fix, review) |
 | `POCKETPAW_FACTORY_CHECK_TIMEOUT` | `600` | Seconds per check or recipe command |
 | `POCKETPAW_MANDATE_LLM` | `claude` | Foreman / autopilot transport: `claude` or `mock` |
+| `POCKETPAW_MANDATE_FOREMAN_TIMEOUT` | `300` | Seconds the foreman's `claude -p` call may take before it fails and finishes its shift |
 | `POCKETPAW_MANDATE_SCHEDULER_INTERVAL` | `3600` | Cadence sweep interval, seconds |
 | `POCKETPAW_MANDATE_SCHEDULER_CONTINUOUS_INTERVAL` | `60` | Sweep interval while any active `continuous` mandate exists, seconds |
 | `POCKETPAW_MANDATE_SCHEDULER_ENABLED` | off | `true` starts the cadence scheduler alone, without the other background loops |

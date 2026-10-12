@@ -15,7 +15,8 @@
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
 # runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
 # prompt on stdin, in an empty temp dir with the factory's scrubbed env — the
-# prompt carries third-party sighting text) and reads the envelope's
+# prompt carries third-party sighting text — timing out after
+# ``POCKETPAW_MANDATE_FOREMAN_TIMEOUT`` s, default 300) and reads the envelope's
 # ``result``; ``mock`` is deterministic (one task per open sighting not already
 # in flight, highest severity first; ``set_mock_plan()`` overrides it in tests).
 # ``claude_cli_argv`` / ``claude_result_text`` (``claude_result_envelope``
@@ -62,9 +63,18 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-# Subprocess timeout for the claude CLI call (seconds). A hung CLI must not
-# wedge the shift trigger forever.
-_CLI_TIMEOUT = 180.0
+# Subprocess timeout for the claude CLI call (seconds), env
+# ``POCKETPAW_MANDATE_FOREMAN_TIMEOUT``. A hung CLI must not wedge the shift
+# trigger forever; a long backlog prompt needs more than a short chat turn.
+_CLI_TIMEOUT = 300.0
+
+
+def _cli_timeout() -> float:
+    try:
+        value = float(os.environ.get("POCKETPAW_MANDATE_FOREMAN_TIMEOUT") or _CLI_TIMEOUT)
+    except ValueError:
+        return _CLI_TIMEOUT
+    return value if value > 0 else _CLI_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +287,7 @@ class ClaudeCliLlm:
     run: Any = None
 
     async def plan(self, *, prompt: str, context: ForemanContext) -> str:
-        return await run_claude_no_tools(prompt, timeout=_CLI_TIMEOUT, run=self.run)
+        return await run_claude_no_tools(prompt, timeout=_cli_timeout(), run=self.run)
 
 
 # Test hook — when set, MockLlm returns this verbatim (a dict is dumped to
