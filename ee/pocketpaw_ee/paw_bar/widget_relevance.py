@@ -8,8 +8,10 @@
 # (weight 2) and the last two history turns (weight 1) against each widget's name
 # parts and aliases, its intent keywords from ripple_widget_intents.json (kept
 # here so a new steering keyword does not wait on a ripple release), and its
-# description words. Widgets a card earlier in the conversation used are always
-# kept, so an edit to that card still has its props.
+# description words. A table entry may also carry a ``hint`` (steering appended to
+# the widget's line) or a ``line`` (a curated line in its place). Widgets a card
+# earlier in the conversation used are always kept, so an edit to that card still
+# has its props.
 #
 # Invariants: same input, same output (sorted, no set iteration in output); only
 # manifest and intents-table text reaches the prompt, never visitor text; at most

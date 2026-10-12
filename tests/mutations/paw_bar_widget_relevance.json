@@ -1,0 +1,57 @@
+[
+  {
+    "label": "the intents table is dropped, so chip prompts lose their widget",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    intents = {\" \".join(_words(i)) for i in INTENTS.get(name, {}).get(\"intents\", ())}",
+    "replace": "    intents = set()",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_chip_prompt_gets_its_widget_with_props"
+    ]
+  },
+  {
+    "label": "history is not scored, so a follow-up loses its widget",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "        score = 2 * _score(name, now, now_words) + _score(name, past, past_words)",
+    "replace": "        score = 2 * _score(name, now, now_words)",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_follow_up_keeps_the_widget_from_the_last_turns"
+    ]
+  },
+  {
+    "label": "widgets an earlier card used are not kept",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    earlier = earlier_widgets(history)\n",
+    "replace": "    earlier = []\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_widget_an_earlier_card_used_stays_picked"
+    ]
+  },
+  {
+    "label": "the top-K cap is dropped, so the per-turn section is unbounded",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "if name not in earlier][:TOP_K]",
+    "replace": "if name not in earlier]",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_picks_are_capped_and_never_echo_the_visitor"
+    ]
+  },
+  {
+    "label": "the per-turn section goes ahead of the fixed core, breaking the stable prefix",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            lines += [f\"   {widget_relevance.full_line(name)}\" for name in picked]",
+    "replace": "            lines[1:1] = [f\"   {widget_relevance.full_line(name)}\" for name in picked]",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_prompt_is_byte_stable_and_the_core_comes_first"
+    ]
+  },
+  {
+    "label": "the picked widgets never reach the paragraph",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        picked = widget_relevance.pick_widgets(message, history)\n",
+    "replace": "        picked = []\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_chip_prompt_gets_its_widget_with_props",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_prompt_carries_the_map_hint"
+    ]
+  }
+]

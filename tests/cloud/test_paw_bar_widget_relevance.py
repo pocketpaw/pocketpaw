@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import pytest
-
 from pocketpaw_ee.paw_bar import widget_relevance
 from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
 from pocketpaw_ee.paw_bar.concierge_runtime import _cards_paragraph
