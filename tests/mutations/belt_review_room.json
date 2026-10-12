@@ -1,0 +1,182 @@
+[
+  {
+    "label": "the frame count cap is gone",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if self._frames > REVIEW_FRAMES:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_review_limits_are_413"
+    ]
+  },
+  {
+    "label": "the video and frame byte caps are gone",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if self._bytes > cap:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_review_limits_are_413"
+    ]
+  },
+  {
+    "label": "a frame is held to the video's cap",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "cap = REVIEW_VIDEO_BYTES if video else REVIEW_FRAME_BYTES",
+    "replace": "cap = REVIEW_VIDEO_BYTES",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_review_limits_are_413"
+    ]
+  },
+  {
+    "label": "a chunked body is never counted",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if seen > REVIEW_REQUEST_BYTES:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_a_chunked_body_is_cut_off_mid_stream"
+    ]
+  },
+  {
+    "label": "a declared oversize body is read anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if declared.isdigit() and int(declared) > REVIEW_REQUEST_BYTES:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_a_declared_oversize_body_is_refused_before_reading"
+    ]
+  },
+  {
+    "label": "the contract limits drift",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "REVIEW_FRAMES = 60",
+    "replace": "REVIEW_FRAMES = 600",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_review_limits_hold_at_the_contract_numbers"
+    ]
+  },
+  {
+    "label": "a frame's bytes are not checked for PNG",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if await _head(frame, 8) != _PNG:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_bad_reviews_are_refused"
+    ]
+  },
+  {
+    "label": "the video's bytes are not checked for webm",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if await _head(video, 4) != _WEBM:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_bad_reviews_are_refused"
+    ]
+  },
+  {
+    "label": "a frame need not match a note",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if not named or int(named.group(1)) not in noted:",
+    "replace": "if not named:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_bad_reviews_are_refused"
+    ]
+  },
+  {
+    "label": "the media route serves a name the review does not list",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "    if name in listed:\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_review_media_refuse_unknown_names_and_traversal"
+    ]
+  },
+  {
+    "label": "the media route follows a link out of the review dir",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "if path.parent != base or not path.is_file():",
+    "replace": "if not path.is_file():",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_review_media_refuse_unknown_names_and_traversal"
+    ]
+  },
+  {
+    "label": "an Idempotency-Key never replays",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if key and isinstance(old, dict) and old.get(\"key\") == key:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_an_idempotency_key_replays_the_stored_review"
+    ]
+  },
+  {
+    "label": "the review issue loses the line label the patrol watches",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "labels = list(dict.fromkeys([\"review\", \"gap\", \"bug\", *line]))",
+    "replace": "labels = [\"review\", \"gap\", \"bug\"]",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_needs_changes_is_stored_and_files_an_issue"
+    ]
+  },
+  {
+    "label": "a try runs off a Mac",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if sys.platform != \"darwin\":",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_try_is_501_off_a_mac"
+    ]
+  },
+  {
+    "label": "an unscreened tarball is unpacked",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if tgz.is_symlink() or not _safe_tar(tgz):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_a_tarball_with_traversal_is_refused"
+    ]
+  },
+  {
+    "label": "a tar member with .. or an absolute path passes the screen",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if name.startswith(\"/\") or \"..\" in Path(name).parts:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_a_tarball_with_traversal_is_refused"
+    ]
+  },
+  {
+    "label": "a tar link leading out passes the screen",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if m.linkname.startswith(\"/\") or norm == \"..\" or norm.startswith(\"../\"):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_a_tarball_with_traversal_is_refused"
+    ]
+  },
+  {
+    "label": "an ambiguous build opens its first app",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "            return found[0]\n    return None\n",
+    "replace": "            return found[0]\n    return apps[0]\n",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_an_ambiguous_app_opens_nothing_and_lists_them"
+    ]
+  },
+  {
+    "label": "quarantine is left on the bundle",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "[\"xattr\", \"-dr\", \"com.apple.quarantine\", str(app)]",
+    "replace": "[\"true\"]",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_try_opens_the_lines_app_on_a_mac"
+    ]
+  },
+  {
+    "label": "a try left preparing never times out",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if state[\"state\"] == \"preparing\" and time.time() - state[\"_t\"] > TRY_TIMEOUT:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_review_room.py::test_a_try_preparing_too_long_reads_failed"
+    ]
+  }
+]

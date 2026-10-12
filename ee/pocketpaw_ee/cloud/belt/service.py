@@ -12,9 +12,11 @@
 #     validate-then-persist a root, and git-init a new repo with a seed commit
 #     (optionally a GitHub remote via the injectable ``RepoCreator``; a remote
 #     failure keeps the local repo and returns ``remote_error``).
-#   * ``screenshot_dir`` / ``get_run_screenshot`` — where the cloud station keeps
-#     a run's snapshot PNGs (``POCKETPAW_FACTORY_SCREENSHOT_DIR``), and the read
-#     that serves one: tenancy 404, listed on the blob, straight inside its dir.
+#   * ``factory_dir`` / ``screenshot_dir`` / ``kept_file`` / ``get_run_screenshot``
+#     — a run's folder of factory files (snapshot PNGs under
+#     ``POCKETPAW_FACTORY_SCREENSHOT_DIR``; ``belt/review.py`` keeps reviews and
+#     apps the same way), and the read that serves one: tenancy 404, listed on
+#     the blob, straight inside its dir.
 #   * ``list_runs`` / ``get_run`` — the runs read model over ``code_change``
 #     Instinct Actions, newest-first. Status/stage derive from the Action
 #     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``,
@@ -165,9 +167,11 @@ class BeltConsoleError(Exception):
     The router maps this to the cloud error envelope. The message is safe to
     show the user (no path content beyond what they submitted, no stack)."""
 
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(self, status_code: int, message: str, code: str | None = None) -> None:
         self.status_code = status_code
         self.message = message
+        # The wire code when the status alone does not name it (``belt.no_artifact``).
+        self.code = code
         super().__init__(message)
 
 
@@ -760,6 +764,8 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "headless_state": str(blob.get("headless_state") or "") or None,
         # How many times the executor sent it back to re-develop on a moved base.
         "redevelop": int(blob.get("redevelop") or 0),
+        # The GitHub issue the run works, when it came from one.
+        "issue_url": blob.get("issue_url") or None,
         # The cloud station's kept snapshot PNGs, served one by one by
         # ``get_run_screenshot`` (the list's thumbnails).
         "screenshots": [
@@ -845,20 +851,36 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
 
-def screenshot_dir(action_id: str) -> Path:
-    """``<POCKETPAW_FACTORY_SCREENSHOT_DIR>/<action_id>/`` (default root
-    ``~/.pocketpaw/belt/screenshots``): where the cloud station keeps a run's
-    snapshot PNGs. Raises ``ValueError`` on an id that is not a plain name."""
+def factory_dir(env: str, sub: str, action_id: str) -> Path:
+    """``<$env>/<action_id>/`` (default root ``~/.pocketpaw/belt/<sub>``): one
+    run's folder of factory files. Raises ``ValueError`` on an id that is not a
+    plain name."""
     if not _SAFE_RUN_ID.match(action_id):
         raise ValueError(f"unsafe run id {action_id!r}")
-    raw = (os.environ.get("POCKETPAW_FACTORY_SCREENSHOT_DIR") or "").strip()
+    raw = (os.environ.get(env) or "").strip()
     if raw:
         root = Path(raw).expanduser()
     else:
         from pocketpaw.config import get_config_dir
 
-        root = get_config_dir() / "belt" / "screenshots"
+        root = get_config_dir() / "belt" / sub
     return root / action_id
+
+
+def screenshot_dir(action_id: str) -> Path:
+    """Where the cloud station keeps a run's snapshot PNGs
+    (``POCKETPAW_FACTORY_SCREENSHOT_DIR``)."""
+    return factory_dir("POCKETPAW_FACTORY_SCREENSHOT_DIR", "screenshots", action_id)
+
+
+def kept_file(base: Path, name: str) -> Path | None:
+    """``base/name`` when it resolves to a regular file straight inside
+    ``base`` (no traversal, no symlink leading out), else ``None``."""
+    base = base.resolve()
+    path = (base / name).resolve()
+    if path.parent != base or not path.is_file():
+        return None
+    return path
 
 
 async def get_run_screenshot(workspace_id: str, action_id: str, name: str) -> Path:
@@ -870,11 +892,10 @@ async def get_run_screenshot(workspace_id: str, action_id: str, name: str) -> Pa
     if name not in listed:
         raise BeltConsoleError(404, "Screenshot not found.")
     try:
-        base = screenshot_dir(action_id).resolve()
+        path = kept_file(screenshot_dir(action_id), name)
     except ValueError:
-        raise BeltConsoleError(404, "Screenshot not found.") from None
-    path = (base / name).resolve()
-    if path.parent != base or not path.is_file():
+        path = None
+    if path is None:
         raise BeltConsoleError(404, "Screenshot not found.")
     return path
 

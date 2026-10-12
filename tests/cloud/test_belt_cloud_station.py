@@ -258,6 +258,8 @@ async def test_merged_pr_lands_the_run(store, dirs, monkeypatch):
     assert cc["commit_sha"] == "abc123"
     assert cc["branch"] == "claude/g41-text"
     assert cc["files_changed"] == 2
+    # The task's #93 is the run's issue (the Review Room's run detail reads it).
+    assert cc["issue_url"] == f"https://github.com/{SLUG}/issues/93"
     assert cc["cloud"]["session_url"] == "https://claude.ai/code/session_ABC123"
     assert cc["cloud"]["pr"] == 9
     assert cc["cloud"]["launched_at"] <= time.time()  # the run timeout counts from it

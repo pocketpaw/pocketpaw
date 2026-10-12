@@ -16,11 +16,11 @@
 #           <base> with ``Closes #<issue>`` and ``Belt-Run: <run id>``, label it
 #           (``POCKETPAW_FACTORY_CLOUD_PR_LABEL``, default ``fast-lane``), no AI
 #           attribution, stop; the seated dev's instructions ride fenced as data.
-#           One launch at a time (``_LAUNCH_LOCK``), worker, fixer or tester.
+#           One launch at a time (``_LAUNCH_LOCK``), any seat; the task's #n -> ``issue_url``.
 #   TRACK   ``gh`` finds the PR by its ``Belt-Run`` line and polls it; the repo's
 #           fast lane + CI is the diff gate; the PR's diff goes to Clef's shadow
 #           scorer (gates nothing). SCREENSHOTS (PR known, and on land): the head's
-#           CI ``snapshots`` PNGs, capped, as the blob's ``screenshots``; never fatal.
+#           CI ``snapshots`` PNGs (``ci_artifact_run``), capped; never fatal.
 #           NUDGE: a labelled PR green + MERGEABLE for LANE_NUDGE s still open gets
 #           ``gh workflow run <LANE_WORKFLOW>``, once per interval per repo (the
 #           lane's cron is unreliable); ``lane_nudges`` on the blob; never fatal.
@@ -237,7 +237,9 @@ class CloudTaskDispatcher:
             async with _LAUNCH_LOCK:
                 slug, session = await self._launch(run_ref, blob, worker)
             cloud = {"session_url": session, "launched_at": time.time()}
-            await _patch(store, run_ref, headless_state="cloud", cloud=cloud)
+            issue = _ISSUE.search(str(blob.get("task") or ""))
+            url = f"https://github.com/{slug}/issues/{issue.group(1)}" if issue else None
+            await _patch(store, run_ref, headless_state="cloud", cloud=cloud, issue_url=url)
             await _emit_run_updated(
                 workspace_id=workspace_id, action_id=run_ref, status="running", stage="cloud"
             )
@@ -676,23 +678,9 @@ class CloudTaskDispatcher:
         from pocketpaw_ee.cloud.belt.service import screenshot_dir
 
         try:
-            if not _HEX_SHA.match(head):
-                return ""
-            runs_url = f"repos/{slug}/actions/runs?head_sha={head}"
-            runs = json.loads(await self._ok(["gh", "api", runs_url], cwd, "SHOTS: runs"))
-            ci = ""
-            for run in (runs.get("workflow_runs") or [])[:_SHOT_RUNS]:
-                rid = str(run.get("id") or "")
-                if not rid.isdigit():
-                    continue
-                arts_url = f"repos/{slug}/actions/runs/{rid}/artifacts"
-                arts = json.loads(await self._ok(["gh", "api", arts_url], cwd, "SHOTS: artifacts"))
-                if any(
-                    a.get("name") == "snapshots" and not a.get("expired")
-                    for a in arts.get("artifacts") or []
-                ):
-                    ci = rid
-                    break
+            ci = await ci_artifact_run(
+                lambda argv: self._ok(argv, cwd, "SHOTS: CI"), slug, head, "snapshots"
+            )
             if not ci:
                 return ""
             with tempfile.TemporaryDirectory(prefix="belt-shots-") as tmp:
@@ -945,6 +933,25 @@ def _test_brief(
         "line, no Generated with Claude Code footer, in commits, issues, the PR or comments.\n"
         "7. Then stop. Never merge."
     )
+
+
+async def ci_artifact_run(
+    ok: Callable[[list[str]], Awaitable[str]], slug: str, head: str, name: str
+) -> str:
+    """The id of the newest of ``head``'s CI runs (the first ``_SHOT_RUNS``)
+    holding an unexpired artifact ``name``, else "". ``ok`` runs a gh argv and
+    returns its stdout (raising on failure)."""
+    if not _HEX_SHA.match(head):
+        return ""
+    runs = json.loads(await ok(["gh", "api", f"repos/{slug}/actions/runs?head_sha={head}"]))
+    for run in (runs.get("workflow_runs") or [])[:_SHOT_RUNS]:
+        rid = str(run.get("id") or "")
+        if not rid.isdigit():
+            continue
+        arts = json.loads(await ok(["gh", "api", f"repos/{slug}/actions/runs/{rid}/artifacts"]))
+        if any(a.get("name") == name and not a.get("expired") for a in arts.get("artifacts") or []):
+            return rid
+    return ""
 
 
 def _keep_pngs(src: Path, dest: Path) -> list[dict[str, Any]]:

@@ -1281,6 +1281,91 @@ also returns `tester` (`{session_url, at}`, `{error, at}`, or `null`). `GET /api
 resolves anywhere but straight inside the run's dir (a symlink out included),
 is a 404.
 
+### The Review Room: try the app, review it
+
+The fast lane merges green PRs with no human, so taste and behaviour are
+reviewed after the merge, in paw-enterprise's Review Room. The wire contract is
+paw-enterprise `docs/design/belt-review-room.md`; the code is
+`belt/review.py` behind `belt/router.py`. Every route takes `belt.read` and the
+run routes' tenancy 404; errors carry the cloud envelope plus `detail`.
+
+Run detail rows also carry `issue_url`: the GitHub issue the run works. The
+cloud station sets it at launch from the task's `#n` and the repo's slug;
+other runs read `null`.
+
+**Try it.** `POST /api/v1/belt/runs/{id}/try` opens the run's CI-built app on
+the station's Mac; `GET .../try` polls the `TryState` (`idle`, `preparing`
+with a `step`, `opened`, or `failed` with a `reason`). The state is
+process-local, so a restart reads `idle`.
+
+- macOS only: elsewhere 501 `belt.try_unsupported`. So is a `gh` that cannot
+  read the PR or its CI (not logged in, offline).
+- The commits come from the run's PR (`pr_url`, else `cloud.pr`): the merge
+  commit when merged, then the PR head. The newest CI run of either with an
+  unexpired `app-builds` artifact is found before the 202; none is 409
+  `belt.no_artifact`, and so is a run with no PR.
+- A try already `preparing` or `opened` is joined (200); a `failed` one is
+  replaced (202). `preparing` for more than 10 minutes reads `failed`.
+- In the background: `gh run download` into
+  `POCKETPAW_FACTORY_APP_DIR/<run id>/artifact/`, then each `*.tar.gz` there
+  (creative-apps ships one, `app-builds.tar.gz`, because upload-artifact drops
+  the +x bit) is screened with `tarfile` (any absolute or `..` member, link
+  leading out of the archive, or device/fifo member refuses the whole archive)
+  and unpacked with `tar xzf` into `.../apps/`.
+- Which bundle: the only one; else the one the mandate charter's `line:<x>`
+  label names (`line:flare` is `FlareApp.app`); else the one the run title
+  names. Otherwise nothing opens: the state is `failed`, its reason lists the
+  bundles, and `apps` carries their names. `line:suiteui` (the shared UI kit)
+  has no app of its own, so it lands here rather than guessing a host app.
+- Then `xattr -dr com.apple.quarantine <bundle>` (ad-hoc signed builds; an
+  absent attribute is fine) and `open <bundle>`, both through the scrubbed
+  runner. `open` failing reads `failed` with "Gatekeeper refused the app" or
+  "The app did not launch".
+
+**Reviews.** `POST /api/v1/belt/runs/{id}/reviews` takes multipart `verdict`
+(`looks_good` / `needs_changes`), `notes` (JSON `[{t_ms, text}]`, at most 200,
+`t_ms` 0 to 7,200,000, text trimmed to 1 to 2000 chars, at least one for
+`needs_changes`), an optional `video` (webm) and up to 60 `frames`, each
+`<t_ms>.png` of a note.
+
+- Limits are enforced while the body streams (`_ReviewParser`, a subclass of
+  Starlette's parser): the video at 200 MB, a frame at 5 MB, the 61st frame,
+  and the whole body at 512 MB (a declared `Content-Length` over it is refused
+  before reading). Each is 413 `belt.review_too_large`. The global request
+  ceiling (`security/body_limit.py`, ~1.27 GB by default) sits above it.
+- A video must be declared `video/webm` and start with the EBML magic; a frame
+  `image/png` and the PNG magic; else 415 `belt.review_bad_media`. Anything
+  else malformed is 400 `belt.review_invalid`.
+- Media land under `POCKETPAW_FACTORY_REVIEW_DIR/<run id>/<review id>/`
+  (`video.webm`, `<t_ms>.png`). The record goes on the run blob's `reviews`:
+  `{id, by, verdict, notes, video, frames, issue_url, issue_error, at, key}`,
+  where `video` is a flag, `frames` the `t_ms` list and `key` the request's
+  `Idempotency-Key`. A repeat with a stored key returns 200 with that review
+  and does nothing else.
+- `by` is `user:<email>` (the user id when there is no email). Cloud routes
+  have no agent identity today, so `agent:<name>` is never minted.
+- `needs_changes` then files an issue on the run's GitHub repo: title
+  `Review: <run title> needs changes`; labels `review`, `gap`, `bug` and the
+  line's (the charter's `issue_labels`, which is what the `issues` patrol
+  watches, else the source issue's `line:*` labels), each created first; body
+  with the reviewer's display name (never the email), the time, a link to
+  `<POCKETPAW_FRONTEND_BASE_URL>/belt-next/runs/<id>/review`, the PR and
+  commit, and each note as `**mm:ss** text` followed by its frame. `gh` cannot
+  attach images, so frames are committed with `gh api` contents PUT to the
+  repo's `belt-review-assets` branch (created off the default branch the first
+  time) under `reviews/<review id>/<t_ms>.png` and linked by
+  `https://github.com/<slug>/raw/belt-review-assets/...`, which renders for
+  anyone who can read the repo. A failed upload leaves the frames out; a
+  failed issue keeps the review with `issue_url: null` and `issue_error` set.
+- `GET .../reviews` lists them newest first in the contract's `Review` shape
+  (`video_url` and `frames` are API paths). `GET .../reviews/{review id}/video`
+  (`video/webm`, `Range` answers 206) and `.../frames/{t_ms}.png` serve the
+  media with `Cache-Control: private, max-age=31536000, immutable`, only for a
+  review and file the blob lists, through the screenshot route's guard
+  (`service.kept_file`: straight inside the dir, no symlink out).
+- Not built: the optional `belt_run_review` bus event; the client refetches on
+  open and after its own submit.
+
 ## Security posture
 
 The develop station runs code the agent wrote, on the host, **before** a human
@@ -1414,6 +1499,9 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_CLOUD_LANE_WORKFLOW` | `Fast Lane` | The workflow the lane nudge runs with `gh workflow run` (it needs a `workflow_dispatch` trigger) |
 | `POCKETPAW_FACTORY_CLOUD_TESTER` | off | `1` (or `true`/`yes`/`on`) launches one tester cloud session per landed cloud run on a mandate with a `tester` crew seat |
 | `POCKETPAW_FACTORY_SCREENSHOT_DIR` | `~/.pocketpaw/belt/screenshots` | Where the cloud station keeps each run's snapshot PNGs, one `<run id>/` dir per run |
+| `POCKETPAW_FACTORY_APP_DIR` | `~/.pocketpaw/belt/apps` | Where a Review Room try downloads and unpacks a run's CI app build, one `<run id>/` dir per run (replaced by each new try) |
+| `POCKETPAW_FACTORY_REVIEW_DIR` | `~/.pocketpaw/belt/reviews` | Where Review Room reviews keep their video and frames, `<run id>/<review id>/` |
+| `POCKETPAW_FRONTEND_BASE_URL` | `http://localhost:1420` | The app origin a review issue links back to (`/belt-next/runs/<id>/review`) |
 | `POCKETPAW_FACTORY_DEDICATED_HOST` | unset | `1` lets the station wire in a process serving cloud tenants; set it only on a dedicated single-tenant host |
 | `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,belt,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
 | `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
@@ -1495,6 +1583,10 @@ fallback, unsafe slugs, gh failure, the cross-patrol dedup through
 `tests/cloud/test_belt_cloud_station.py` also covers the tester and the
 screenshots, `tests/cloud/test_belt_console.py` the screenshot route, and
 `tests/mutations/belt_crew_testers.json` holds their mutations.
+`tests/cloud/test_belt_review_room.py` covers the Review Room (try on and off
+a Mac, artifact fallback, ambiguous apps, tar traversal, review limits and
+media, the issue's labels, idempotency, tenancy); `tests/mutations/belt_review_room.json`
+holds its mutations.
 `tests/cloud/test_belt_upstream_patrol.py` runs the upstream patrol against a
 tmp repo's Cargo.toml with a fake `gh`: summary and area sightings, the
 severity scale, every failure path as one severity-1 sighting, DTO validation,
