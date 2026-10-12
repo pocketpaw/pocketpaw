@@ -607,7 +607,10 @@ async def _run_with_screenshots(store, root: Path, workspace_id: str = "w1"):
     params = dict(action.parameters)
     params["_code_change"] = {
         **params["_code_change"],
-        "screenshots": [{"name": "home-dark.png", "bytes": len(PNG), "sha": "f" * 64}],
+        "screenshots": [
+            {"name": "home-dark.png", "bytes": len(PNG), "sha": "f" * 64},
+            {"name": "link.png", "bytes": len(PNG), "sha": "f" * 64},
+        ],
         "tester": {"session_url": "https://claude.ai/code/session_T", "at": 1.0},
     }
     await store.update_parameters(action.id, params)
@@ -616,6 +619,7 @@ async def _run_with_screenshots(store, root: Path, workspace_id: str = "w1"):
     (run_dir / "home-dark.png").write_bytes(PNG)
     (run_dir / "unlisted.png").write_bytes(PNG)  # on disk, but not on the blob
     (root / "secret.png").write_bytes(PNG)
+    (run_dir / "link.png").symlink_to(root / "secret.png")  # listed, but leads out
     return action
 
 
@@ -629,15 +633,20 @@ async def test_run_screenshots_are_listed_and_served(store, tmp_path, monkeypatc
         png = client.get(f"{base}/screenshots/home-dark.png")
         unlisted = client.get(f"{base}/screenshots/unlisted.png")
         escape = client.get(f"{base}/screenshots/..%2Fsecret.png")
+        link = client.get(f"{base}/screenshots/link.png")
         missing = client.get("/api/v1/belt/runs/act-nope/screenshots/home-dark.png")
 
-    assert detail["screenshots"] == [{"name": "home-dark.png", "bytes": len(PNG)}]
+    assert detail["screenshots"] == [
+        {"name": "home-dark.png", "bytes": len(PNG)},
+        {"name": "link.png", "bytes": len(PNG)},
+    ]
     assert detail["tester"] == {"session_url": "https://claude.ai/code/session_T", "at": 1.0}
     assert png.status_code == 200, png.text
     assert png.headers["content-type"] == "image/png"
     assert png.content == PNG
     assert unlisted.status_code == 404
     assert escape.status_code == 404
+    assert link.status_code == 404
     assert missing.status_code == 404
 
 

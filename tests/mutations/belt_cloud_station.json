@@ -111,8 +111,8 @@
   {
     "label": "the seated dev's instructions are left out of the brief",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "f\"{_task_block(request)}\\n\\n{_worker_block(request)}\"",
-    "replace": "f\"{_task_block(request)}\\n\\n\"",
+    "find": "f\"You are a Belt cloud worker on {slug}. Do the one task below, then stop.\\n\\n\"\n        f\"{_task_block(request)}\\n\\n{_worker_block(request)}\"",
+    "replace": "f\"You are a Belt cloud worker on {slug}. Do the one task below, then stop.\\n\\n\"\n        f\"{_task_block(request)}\\n\\n\"",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_seated_dev_instructions_ride_the_brief"
     ]
