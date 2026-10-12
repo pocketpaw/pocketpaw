@@ -1991,12 +1991,12 @@ def _slip_fix(text: str) -> tuple[str, tuple[str, ...]] | None:
             after_value = True
             if not stack:
                 out.append(ch)
-                rest = text[i:].strip(_JSON_SPACE)
-                if rest.strip("}]"):
+                rest = text[i:]
+                if set(rest) - set("}]" + _JSON_SPACE):
                     return None
-                if rest:
+                if extra := sum(c in "}]" for c in rest):
                     kinds.add("surplus_closer")
-                    edits += len(rest)
+                    edits += extra
                 break
         elif ch not in _JSON_SPACE:
             key_next = after_value = False

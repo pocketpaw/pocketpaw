@@ -2838,6 +2838,7 @@ _HI = '{"ui":{"type":"text","props":{"text":"hi"}}'
         (_HI + ',"state":{"a":1 ,\n }}', "trailing_comma"),
         (_HI + "}}", "surplus_closer"),
         (_HI + "}}]\n", "surplus_closer"),
+        (_HI + "}} ]\n", "surplus_closer"),
         (_HI + '}]},"state":{}}', "surplus_closer"),
         (_HI + '} ] },"state":{}}', "surplus_closer"),
         (_HI + '}]},"state":{}', "surplus_closer,missing_closer"),
