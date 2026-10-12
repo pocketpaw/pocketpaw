@@ -101,7 +101,7 @@ def test_the_core_widgets_carry_their_steering_hints_on_every_turn():
 
 
 _PICKED = "I'd like to book Dental cleaning on Tue, Oct 20 at 10:00 AM."
-_NOTE = "already picked this slot"
+_NOTE = "already picked and confirmed this slot on the card"
 
 
 @pytest.mark.parametrize(
@@ -119,8 +119,9 @@ def test_a_picked_slot_gets_a_confirm_note_not_another_booking_card(message):
     text = _paragraph(message)
     tail = text[len(_paragraph()) :]
     assert _NOTE in tail and "no booking card" in tail
+    assert "never send them back to the card" in tail and "a reminder note" in tail
     assert "Dental" not in tail and "Teeth" not in tail and "Haircut" not in tail
-    assert "already names a picked slot" in _section(text)
+    assert "the visitor confirmed it on the card" in _section(text)
 
 
 @pytest.mark.parametrize(

@@ -1558,9 +1558,10 @@ _RIPPLE_RULES = (
 # fixed note reaches the prompt, never the matched text.
 _PICKED_SLOT = re.compile(r"I['\u2019]d like to book .+ at \d")
 _PICKED_SLOT_NOTE = (
-    "   The visitor already picked this slot: confirm the service, day and time in a "
-    "sentence or two, say it is a demo so nothing is booked, offer one next step; "
-    "no booking card."
+    "   The visitor already picked and confirmed this slot on the card: restate the "
+    "service, day and time in a sentence or two, say it is a demo so nothing is "
+    "booked, and offer one other next step (a reminder note, what to bring, another "
+    "appointment); never send them back to the card, no booking card."
 )
 
 
