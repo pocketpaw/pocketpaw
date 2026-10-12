@@ -9,8 +9,8 @@
      branch (base sync, landing, re-develop, one PR, its state on the wire and
      the UI surfaces), the run feed (live over SSE and stored per stage, with
      its wire contract), the run on its blueprint (C4 `paths`, the file join,
-     `file_touched`), endpoints (incl. the digest), env vars, and the
-     remaining demo-bar concessions. -->
+     `file_touched`), the auto plan gate and the continuous cadence, endpoints
+     (incl. the digest), env vars, and the remaining demo-bar concessions. -->
 
 # Belt Mandates — the standing JOB primitive
 
@@ -24,8 +24,11 @@ The **craft factory** is mandates running unattended: a cadence scheduler fires
 shifts, patrols (including `upstream`, which watches pinned GitHub engines)
 feed the foreman, and the headless develop station turns each approved task into
 a checked diff (reviewed by an LLM seat too, unless it came from a recipe) that
-still waits at the per-diff Instinct gate. A digest route reports the day. Nothing lands on its own: every plan and every
-diff passes a human gate, and nothing merges.
+still waits at the per-diff Instinct gate. A digest route reports the day. Every
+diff passes a gate and nothing merges on its own. Every plan passes a human
+gate too, unless the auto plan gate is on (`POCKETPAW_BELT_PLAN_GATE=auto`, see
+*The auto plan gate*), which lets a plan Clef scores as safe through and leaves
+the rest for a human.
 
 ## Anatomy
 
@@ -41,7 +44,8 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
    │     • upstream  — commits on each pinned GitHub dep since its pin
    │     • feedback  — human intake (POST .../feedback)
    │
-   └── SHIFT (manual trigger, or the cadence scheduler: daily / weekly)
+   └── SHIFT (manual trigger, or the cadence scheduler: daily / weekly /
+             continuous)
          1. sense   — run patrols, persist new sightings (deduped)
          2. judge   — the FOREMAN makes ONE LLM call over:
                       charter (verbatim, BOUNDARIES first) + the OPEN
@@ -59,7 +63,8 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
                       (the third blob peer of `_pocket_write`/`_code_change`)
             ── or ── stood_down: empty plan, a SUCCESS state; the chain opens
                       and closes in the trigger, no human gate for a no-op
-         5. dispatch — on human APPROVE, the plan executor re-validates
+         5. dispatch — on APPROVE (a human, or the auto plan gate as
+                      `system:belt-policy`), the plan executor re-validates
                       (mandate active, budget unchanged) and dispatches each
                       task as a Belt run; on REJECT the router closes the
                       chain and the shift records the reason
@@ -71,13 +76,32 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
 
 ### The charter: cadence, checks, recipes
 
-- **`cadence`** is `daily`, `weekly` or `manual`. The cadence scheduler
-  (`mandates/scheduler.py`, one sweeper loop, every
+- **`cadence`** is `daily`, `weekly`, `continuous` or `manual`. The cadence
+  scheduler (`mandates/scheduler.py`, one sweeper loop, every
   `POCKETPAW_MANDATE_SCHEDULER_INTERVAL` seconds, default 3600) fires a shift
   for each ACTIVE mandate whose last shift is older than 1 day (`daily`) or 7
   days (`weekly`); a mandate that never shifted is due at once, and `manual`
-  is never fired. It starts under `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`,
-  through the lease, like the other background loops.
+  is never fired. A **`continuous`** mandate is due when all of these hold
+  (`service._continuous_due`):
+  - at least `POCKETPAW_MANDATE_CONTINUOUS_MIN_GAP_MINUTES` (default 5) have
+    passed since its last shift;
+  - that shift is finished: `done`, or `stood_down` with a sighting filed since
+    (a foreman that planned nothing is not asked again about the same backlog).
+    A plan waiting `in_gate` for a human always holds the next shift;
+  - none of that shift's runs is still in flight (queued, developing, pending at
+    the diff gate). A shift older than `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS`
+    (default 3) stops holding the next one this way, and also releases a shift
+    stuck in `planning` (a failed foreman call) or `executing`;
+  - it has an open sighting that no landed or in-flight task covers.
+
+  While any ACTIVE continuous mandate exists, the loop ticks every
+  `POCKETPAW_MANDATE_SCHEDULER_CONTINUOUS_INTERVAL` seconds (default 60)
+  instead. A due mandate fires through the same `trigger_shift` as the shift
+  route, as `system:scheduler`. The scheduler starts under
+  `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true` with every other background loop, or
+  alone under `POCKETPAW_MANDATE_SCHEDULER_ENABLED=true`, through the lease
+  either way. Pair `continuous` with the auto plan gate, or every shift waits
+  for a human at the plan gate.
 - **`checks`** are commands that must pass before a headless diff is attached,
   e.g. `["uv run pytest -q", "uv run ruff check ."]`.
 - **`recipes`** map a name to a deterministic command, e.g.
@@ -97,6 +121,42 @@ pnpm, python, python3, pytest, cargo, make, go`: no shells, `env`, `sudo`,
 `curl`, `wget` or `git`. Create also rejects (422) a `surface.repo_id` that does
 not resolve inside the workspace's belt allowlist roots. Only `belt.manage`
 (admin) can write a charter.
+
+### The auto plan gate
+
+With `POCKETPAW_BELT_PLAN_GATE=auto` (default `manual`: unchanged), the shift
+trigger does not hand the plan to Clef in the background. It awaits Clef's plan
+score inline (`belt/clef.score_and_record_plan`, up to
+`POCKETPAW_BELT_PLAN_GATE_CLEF_TIMEOUT` seconds, default 45; the verdict is
+still recorded on the blob as `clef`), then asks the pure
+`mandates/plan_policy.decide`. The plan is approved only when all of these hold:
+
+- every task cites at least one evidence ref that is an open sighting of this
+  mandate;
+- the plan fits the charter budget (`max_tasks_per_shift`);
+- Clef scores `in_scope` >= 0.80 and `low_risk` >= 0.75.
+
+It escalates the whole plan, leaving it pending for a human exactly as with the
+gate off, when Clef is off, fails, times out or truncated the plan,
+`tasks_independent` < 0.40, `too_big` > 0.65, or any task fails a rule above.
+The policy never rejects: a rejection would file a teaching sighting no human
+wrote. Auto mode needs Clef on (`POCKETPAW_BELT_CLEF=shadow` plus its token and
+account id); without it every plan escalates.
+
+An approval runs `service.resolve_plan`, the function the `plan/resolve` route
+calls, with `system:belt-policy` as the actor, so the chain reads
+`agent.proposed → human.corrected → decision.completed` like a console approval.
+Either way the decision goes on the `_belt_plan` blob as `policy`
+(`decision`, `rule`, `reason` with Clef's four numbers, `approver`, the
+thresholds, `at`), and an escalation is logged with its reason.
+
+The thresholds come from the supervisor's gate log of the first unattended
+pilot (seven plan decisions, pinned in `tests/cloud/test_belt_plan_policy.py`).
+Six match. The miss is a plan the supervisor trimmed for a file overlap Clef
+does not score (independence .52, above a plan approved in full at .50), which
+the policy approves as proposed. Each threshold has an env override:
+`POCKETPAW_BELT_POLICY_MIN_IN_SCOPE`, `..._MIN_LOW_RISK`,
+`..._MIN_INDEPENDENT`, `..._MAX_TOO_BIG`.
 
 ### Pulley blocks through recipes
 
@@ -1145,6 +1205,16 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_CHECK_TIMEOUT` | `600` | Seconds per check or recipe command |
 | `POCKETPAW_MANDATE_LLM` | `claude` | Foreman / autopilot transport: `claude` or `mock` |
 | `POCKETPAW_MANDATE_SCHEDULER_INTERVAL` | `3600` | Cadence sweep interval, seconds |
+| `POCKETPAW_MANDATE_SCHEDULER_CONTINUOUS_INTERVAL` | `60` | Sweep interval while any active `continuous` mandate exists, seconds |
+| `POCKETPAW_MANDATE_SCHEDULER_ENABLED` | off | `true` starts the cadence scheduler alone, without the other background loops |
+| `POCKETPAW_MANDATE_CONTINUOUS_MIN_GAP_MINUTES` | `5` | Minimum time between two shifts of a `continuous` mandate |
+| `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS` | `3` | Age after which a `continuous` mandate's last shift stops holding the next one (in-flight runs, a stuck `planning`/`executing` state; never `in_gate`) |
+| `POCKETPAW_BELT_PLAN_GATE` | `manual` | `auto` runs the auto plan gate (needs Clef on) |
+| `POCKETPAW_BELT_PLAN_GATE_CLEF_TIMEOUT` | `45` | Seconds the auto gate waits for Clef's plan score |
+| `POCKETPAW_BELT_POLICY_MIN_IN_SCOPE` | `0.80` | Auto gate: lowest Clef `in_scope` that approves |
+| `POCKETPAW_BELT_POLICY_MIN_LOW_RISK` | `0.75` | Auto gate: lowest Clef `low_risk` that approves |
+| `POCKETPAW_BELT_POLICY_MIN_INDEPENDENT` | `0.40` | Auto gate: below this `tasks_independent` the plan escalates |
+| `POCKETPAW_BELT_POLICY_MAX_TOO_BIG` | `0.65` | Auto gate: above this `too_big` the plan escalates |
 | `POCKETPAW_MANDATE_AUTOPILOT_INTERVAL` | `300` | Autopilot cycle interval, seconds |
 | `POCKETPAW_CLOUD_SCHEDULER_ENABLED` | off | Starts the cadence scheduler and autopilot loops |
 
@@ -1221,7 +1291,11 @@ diff);
 `test_belt_pulley_c4.py` maps the seven real Pulley manifests through
 `block_component` and reads the result back with `c4_lines`;
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
-cadence scheduler; the headless file also lands a run (commit subject from the
+cadence scheduler; `test_belt_continuous_cadence.py` pins each `continuous` due
+rule and the loop's tick interval; `test_belt_plan_policy.py` pins the auto plan
+gate against the pilot's gate log and drives it through the real trigger, store
+and executor (approve as `system:belt-policy` with one chain, escalate on a Clef
+outage or low independence, unchanged with the flag off); the headless file also lands a run (commit subject from the
 title) and drives the re-develop against a real tmp repo: two diffs from one
 base, the first landed and merged, the second re-developed once and back at the
 gate, a second conflict failing with "base moved twice", and no develop loop
