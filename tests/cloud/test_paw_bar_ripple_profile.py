@@ -33,6 +33,9 @@
 # (``_check_bill_split``); a button's choice-card icon is a key and its description
 # short plain text (``_check_choice``). Mutation plans: tests/mutations/concierge_ripple_rules.json,
 # tests/mutations/concierge_bill_split.json, tests/mutations/concierge_choice_buttons.json.
+# A ``map`` keeps OSM tiles, plain-text pins, ask-only marker clicks and capped sizes,
+# in parity with ripple's card-policy.ts rule 14; tests/fixtures/ripple_map_route_card.json
+# is a live Haiku card (2026-10-12, a walking route in Lisbon) that must pass.
 
 # ruff: noqa: F811 — pytest fixtures imported by name
 
@@ -3080,3 +3083,79 @@ def test_the_prompt_lists_the_model_library_with_its_anchors():
     assert "plane(nose,cockpit,left-wing,right-wing,engine,tail)" in text
     assert "heart(aorta," in text and "never a src, poster or URL" in text
     assert "a model-viewer's on_select" in text
+
+
+# --------------------------------------------------------------------------- #
+# map: OSM tiles, plain-text pins, ask-only clicks, capped sizes
+# --------------------------------------------------------------------------- #
+
+_MAP_FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_map_route_card.json"
+
+
+def _pin(**extra) -> dict:
+    return {"lat": 38.71, "lng": -9.13, "label": "Rossio", **extra}
+
+
+def _map(**props) -> dict:
+    node = {"type": "map", "props": {"center": [38.71, -9.13], "zoom": 15, **props}}
+    return {"ui": {"type": "card", "children": [node]}, "state": {}}
+
+
+def _ask(text: str = "Tell me about Rossio.") -> dict:
+    return {"action": "emit", "target": "ask", "value": {"text": text}}
+
+
+def test_the_live_lisbon_map_card_passes():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    card = json.loads(_MAP_FIXTURE.read_text(encoding="utf-8"))
+    assert render_card(_body(card), [], profile=RIPPLE_PROFILE) is not None
+
+
+def test_a_documented_osm_map_with_an_asking_marker_passes():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    paths = [{"id": "r", "points": [[38.71, -9.13], [38.72, -9.12]]}]
+    markers = [_pin(id="a", popup="The station", actions=_ask())]
+    assert render_card(_body(_map(tiles="osm", paths=paths, markers=markers)), [], profile=RIPPLE_PROFILE)
+    assert render_card(_body(_map(markers=[_pin(actions=[_ask("More")])])), [], profile=RIPPLE_PROFILE)
+
+
+@pytest.mark.parametrize(
+    "why, props",
+    [
+        ("a carto preset", {"tiles": "carto-voyager"}),
+        ("custom tiles", {"tiles": "custom"}),
+        ("a tile url", {"tileUrl": "https://tiles.example/{z}/{x}/{y}.png"}),
+        ("a tile attribution", {"tileAttribution": "Tiles"}),
+        ("an html label", {"markers": [_pin(label="<b>Rossio</b>")]}),
+        ("an expression label", {"markers": [_pin(label="{state.x}")]}),
+        ("an html popup", {"markers": [_pin(popup="<i>hi</i>")]}),
+        ("a marker icon", {"markers": [_pin(icon="building")]}),
+        ("a marker set action", {"markers": [_pin(actions={"action": "set", "target": "x", "value": 1})]}),
+        ("a marker emitting checkout", {"markers": [_pin(actions={"action": "emit", "target": "checkout", "value": {}})]}),
+        ("a marker that is not an object", {"markers": ["Rossio"]}),
+        ("31 markers", {"markers": [_pin()] * 31}),
+        ("501 route points", {"route": [{"lat": 1, "lng": 2}] * 501}),
+        ("501 points across paths", {"paths": [{"id": "a", "points": [[1, 2]] * 300}, {"id": "b", "points": [[1, 2]] * 201}]}),
+    ],
+)
+def test_a_map_holds_to_osm_tiles_and_plain_pins(why, props):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    assert render_card(_body(_map(**props)), [], profile=RIPPLE_PROFILE) is None, why
+
+
+def test_a_streamed_map_tile_url_is_refused_before_the_card_closes():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, scan_partial
+
+    head = '{"ui":{"type":"map","props":{'
+    assert scan_partial(head + '"tileUrl":"https://x/{z}"', RIPPLE_PROFILE)
+    assert scan_partial(head + '"zoom":3,"tileAttribution":"x"', RIPPLE_PROFILE)
+    assert not scan_partial(head + '"tiles":"osm","zoom":3', RIPPLE_PROFILE)
+
+
+def test_the_prompt_carries_the_map_hint():
+    text = _ripple_paragraph()
+    assert "map: center [lat,lng], zoom, markers[{id,lat,lng,label}], paths[{id,points:[[lat,lng]...]}]" in text
+    assert 'tiles "osm"' in text and "approximate" in text
