@@ -587,6 +587,12 @@ TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
         it every POCKETPAW_FACTORY_CLOUD_POLL seconds:
           merged   -> approved as `system:fast-lane` (audited), mark_executed:
                       the run is landed, with pr_url, head branch, merge sha
+                      and the PR's diff (so the UI can show touched files;
+                      the diff Clef scored is reused if the head has not
+                      moved since); then `git fetch -q origin` in the bound
+                      repo, since nothing else refreshes its origin/<base>
+                      in cloud mode and the blueprint reads the C4 model
+                      there (a failed fetch is logged, never fails the land)
           refused  -> closed unmerged, or a `Fast lane: not eligible` comment:
                       `gh pr diff` is attached as the run's diff, which waits
                       at the per-diff Instinct gate (approving it lands it on
