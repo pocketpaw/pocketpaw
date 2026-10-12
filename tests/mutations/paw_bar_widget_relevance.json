@@ -2,8 +2,8 @@
   {
     "label": "the intents table is dropped, so chip prompts lose their widget",
     "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
-    "find": "    intents = {\" \".join(_words(i)) for i in INTENTS.get(name, {}).get(\"intents\", ())}",
-    "replace": "    intents = set()",
+    "find": "    phrases |= {\" \".join(_words(i)) for i in INTENTS.get(name, {}).get(\"intents\", ())}",
+    "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_widget_relevance.py::test_a_chip_prompt_gets_its_widget_with_props"
     ]

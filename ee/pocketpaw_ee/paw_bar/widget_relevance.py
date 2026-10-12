@@ -5,8 +5,8 @@
 # parts; concierge_runtime._cards_paragraph stitches them around the rules.
 #
 # Picking is deterministic keyword overlap, no model call: the visitor message
-# (weight 2) and the last two history turns (weight 1) against each widget's name
-# parts and aliases, its intent keywords from ripple_widget_intents.json (kept
+# (weight 2) and the last two history turns (weight 1) against each widget's name,
+# aliases and name parts, its intent keywords from ripple_widget_intents.json (kept
 # here so a new steering keyword does not wait on a ripple release), and its
 # description words. A table entry may also carry a ``hint`` (steering appended to
 # the widget's line) or a ``line`` (a curated line in its place). Widgets a card
@@ -75,20 +75,18 @@ def _phrase(text: str) -> str:
 
 
 def _keywords(widget: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
-    """(name terms, intent phrases, description words) for one widget."""
+    """(phrases, name parts, description words) for one widget. Phrases are its
+    whole name, its aliases and its intents; a lone part of a hyphenated name
+    ("table" of pricing-table) counts for less, so generic parts add noise only."""
     name = widget["type"]
-    names = {_stem(p) for p in name.split("-")} | {name.replace("-", " ")}
-    names |= {
-        _stem(p)
-        for alias, target in RIPPLE_ALIASES.items()
-        if target == name
-        for p in alias.split("-")
-    }
-    intents = {" ".join(_words(i)) for i in INTENTS.get(name, {}).get("intents", ())}
+    aliases = [a for a, target in RIPPLE_ALIASES.items() if target == name]
+    phrases = {" ".join(_words(n.replace("-", " "))) for n in [name, *aliases]}
+    phrases |= {" ".join(_words(i)) for i in INTENTS.get(name, {}).get("intents", ())}
     if name == "model-viewer":
-        intents |= {" ".join(_words(k)) for k in RIPPLE_MODELS}
+        phrases |= {" ".join(_words(k)) for k in RIPPLE_MODELS}
+    parts = {_stem(p) for n in [name, *aliases] if "-" in n for p in n.split("-")}
     desc = {w for w in _words(str(widget.get("description", ""))) if w not in _STOP}
-    return names - {""}, intents - {""}, desc
+    return phrases - {""}, parts - {""}, desc
 
 
 _WIDGETS: dict[str, dict[str, Any]] = {
@@ -98,9 +96,9 @@ _KEYWORDS = {name: _keywords(w) for name, w in _WIDGETS.items()}
 
 
 def _score(name: str, text: str, words: set[str]) -> float:
-    names, intents, desc = _KEYWORDS[name]
-    score = 3.0 * sum(1 for n in names if (f" {n} " in text if " " in n else n in words))
-    score += 3.0 * sum(1 for i in intents if f" {i} " in text)
+    phrases, parts, desc = _KEYWORDS[name]
+    score = 3.0 * sum(1 for phrase in phrases if f" {phrase} " in text)
+    score += 1.0 * len(parts & words)
     score += 0.5 * len(desc & words)
     return score
 
