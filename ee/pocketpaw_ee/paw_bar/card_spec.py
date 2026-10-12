@@ -12,7 +12,10 @@
 # ``notes`` to plain-text notes, ``music-player`` to preset sounds, a model-written booking
 # and the six catalog widgets (weather-forecast to place-results, ``_CATALOG_CHECKS``) to
 # plain data within the widget's enums and caps (``_DATA_CHECKS``), a
-# button's choice-card ``icon`` and ``description`` to a key and short plain text), and
+# button's choice-card ``icon`` and ``description`` to a key and short plain text, the
+# drawing widgets to literal data: ``iso-scene`` to the iso kit's part kinds, colour roles
+# and bounds with speeds and readouts over its own param keys (``_check_iso_scene``), and
+# ``figure`` to an id, sliders and anchors from ripple-figures.json (``_check_figure``)), and
 # is ``strict``:
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
 # actions, URLs, CSS, expressions, flow cards and ``ask`` to the rules its docstrings
@@ -1763,7 +1766,7 @@ def _check_iso_scene(node: dict[str, Any], props: dict[str, Any]) -> None:
     ):
         raise _Reject("iso-scene params outside the widget's caps or their own range")
     keys = frozenset(p["key"] for p in params)
-    size, coord = _num(0.5, ISO_SIZE), _num(-ISO_COORD, ISO_COORD)
+    size = _num(0.5, ISO_SIZE)
     checks: dict[str, Any] = {
         "title": _txt(80),
         "caption": _txt(200),

@@ -1,0 +1,164 @@
+[
+  {
+    "label": "DRAW-1: the iso-scene check never runs",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_DATA_CHECKS[ISO_SCENE] = _check_iso_scene",
+    "replace": "_DATA_CHECKS[ISO_SCENE] = lambda node, props: None",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-2: the figure check never runs",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_DATA_CHECKS[FIGURE] = _check_figure",
+    "replace": "_DATA_CHECKS[FIGURE] = lambda node, props: None",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-3: any part kind passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                \"kind\": _one_of(ISO_KINDS),",
+    "replace": "                \"kind\": lambda v: True,",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-4: any color passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                \"color\": _one_of(ISO_ROLES),",
+    "replace": "                \"color\": lambda v: True,",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-5: the part cap widens",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "ISO_PARTS, ISO_MOTIONS_MAX, ISO_PARAMS, ISO_READOUTS, ISO_LABELS = 150, 20, 6, 4, 10",
+    "replace": "ISO_PARTS, ISO_MOTIONS_MAX, ISO_PARAMS, ISO_READOUTS, ISO_LABELS = 151, 21, 7, 5, 11",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-6: references to missing parts pass",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if len(known) < len(ids) or not {r for r in refs if r is not None} <= known:",
+    "replace": "    if len(known) < len(ids):",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-7: an expression may name anything",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            and set(_ISO_NAME.findall(v)) <= keys",
+    "replace": "            and True",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-8: an expression may call or read through a name",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            and not re.search(r\"[A-Za-z_]\\w*\\s*[.(]\", v)",
+    "replace": "            and True",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-9: an expression may hold any character",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            and bool(_ISO_EXPR_CHARS.fullmatch(v))",
+    "replace": "            and True",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-10: a param may shadow state",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_ISO_RESERVED: frozenset[str] = frozenset({\"state\", \"params\", \"item\", \"index\"})",
+    "replace": "_ISO_RESERVED: frozenset[str] = frozenset()",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-11: a param value may leave its range",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        p[\"min\"] < p[\"max\"] and p[\"min\"] <= p[\"value\"] <= p[\"max\"] for p in params",
+    "replace": "        True for p in params",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-12: a coordinate is unbounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    return isinstance(v, list) and len(v) == 3 and all(map(_num(-ISO_COORD, ISO_COORD), v))",
+    "replace": "    return isinstance(v, list) and len(v) == 3 and all(map(_num(), v))",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-13: any figure id passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if props.get(\"figure\") not in RIPPLE_FIGURES:\n        raise _Reject(\"a figure that is not in the figure catalog\")\n    figure = RIPPLE_FIGURES[props[\"figure\"]]",
+    "replace": "    figure = RIPPLE_FIGURES.get(props.get(\"figure\"), {\"params\": [], \"anchors\": []})",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-14: any figure anchor passes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            \"anchor\": _one_of(frozenset(figure[\"anchors\"])),",
+    "replace": "            \"anchor\": lambda v: True,",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-15: figure params skip their ranges",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        k in ranges and ranges[k](v) for k, v in params.items()",
+    "replace": "        True for k, v in params.items()",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-16: iso-scene labels skip the plain-text caps",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "                \"label\": _txt(ANNOTATION_LABEL_MAX),\n                \"note\": _txt(ANNOTATION_NOTE_MAX),\n            },\n            {\"label\"},",
+    "replace": "                \"label\": lambda v: True,\n                \"note\": lambda v: True,\n            },\n            {\"label\"},",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-17: the figure line is the manifest's",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    if name == \"figure\":\n        return _hinted(name, _figure_line())\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py"
+    ]
+  },
+  {
+    "label": "DRAW-18: the iso-scene line is the manifest's",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    if name == \"iso-scene\":\n        return _hinted(name, _iso_scene_line())\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py"
+    ]
+  }
+]

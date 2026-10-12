@@ -36,6 +36,10 @@
 # A ``map`` keeps OSM tiles, plain-text pins, ask-only marker clicks and capped sizes,
 # in parity with ripple's card-policy.ts rule 14; tests/fixtures/ripple_map_route_card.json
 # is a live Haiku card (2026-10-12, a walking route in Lisbon) that must pass.
+# The drawing widgets: ripple's hand-written iso-scene gallery cards and its heart-pump
+# figure (tests/fixtures/ripple_drawing_cards.json) must pass, and each rule of
+# ``_check_iso_scene`` and ``_check_figure`` has a refusal
+# (tests/mutations/concierge_drawings.json).
 
 # ruff: noqa: F811 — pytest fixtures imported by name
 
@@ -3647,7 +3651,10 @@ def _iso(**change) -> dict:
         at = card["ui"]["props"]
         for step in head:
             at = at[int(step)] if step.isdigit() else at[step]
-        at[int(last) if last.isdigit() else last] = value
+        if isinstance(at, list) and int(last) == len(at):
+            at.append(value)  # one past the end adds a row
+        else:
+            at[int(last) if last.isdigit() else last] = value
     return card
 
 
@@ -3673,6 +3680,7 @@ _PART = {"id": "x", "kind": "box", "at": [0, 0, 0], "w": 4, "d": 4, "h": 4}
         ("21 motions", {"motions": [{"part": "ring", "kind": "spin", "speed": 1}] * 21}),
         ("a speed past 20", {"motions.0.speed": 50}),
         ("a speed calling a function", {"motions.0.speed": "max(cadence, 60)"}),
+        ("a speed calling a param", {"motions.0.speed": "cadence (60)"}),
         ("a speed naming no param", {"motions.0.speed": "window / 60"}),
         ("a speed reading state", {"motions.0.speed": "state.x / 60"}),
         ("a speed in braces", {"motions.0.speed": "{cadence / 60}"}),
@@ -3681,7 +3689,10 @@ _PART = {"id": "x", "kind": "box", "at": [0, 0, 0], "w": 4, "d": 4, "h": 4}
         ("a readout over a function", {"readouts.0.value": "Math.round(cadence)"}),
         ("5 readouts", {"readouts": [{"label": "a", "value": 1}] * 5}),
         ("a param key that is not an identifier", {"params.0.key": "ca-dence"}),
-        ("a param named state", {"params.0.key": "state"}),
+        (
+            "a param named state",
+            {"params.1": {"key": "state", "label": "s", "min": 0, "max": 1, "value": 0}},
+        ),
         ("a param value outside its range", {"params.0.value": 500}),
         ("a param min above its max", {"params.0.min": 200}),
         (
@@ -3729,7 +3740,7 @@ def _figure(**props) -> dict:
 @pytest.mark.parametrize(
     "why, props",
     [
-        ("an unknown figure id", {"figure": "lungs"}),
+        ("an unknown figure id", {"figure": "lungs", "params": {}, "labels": []}),
         ("a figure expression", {"figure": "{state.figure}"}),
         ("an unknown param", {"params": {"rpm": 72}}),
         ("a param outside its range", {"params": {"bpm": 400}}),

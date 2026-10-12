@@ -10,7 +10,9 @@
 # here so a new steering keyword does not wait on a ripple release), and its
 # description words. A table entry may also carry a ``hint`` (steering appended to
 # the widget's line; a core widget's hint rides every turn) or a ``line`` (a
-# curated line in its place). Widgets a card earlier in the conversation used are
+# curated line in its place). figure's and iso-scene's lines are built here (the
+# figure catalog's ids, sliders and anchors; iso-scene's part shape and a two-gear
+# example card). Widgets a card earlier in the conversation used are
 # always kept, so an edit to that card still has its props.
 #
 # Invariants: same input, same output (sorted, no set iteration in output); only
