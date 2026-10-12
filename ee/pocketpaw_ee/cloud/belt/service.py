@@ -12,6 +12,9 @@
 #     validate-then-persist a root, and git-init a new repo with a seed commit
 #     (optionally a GitHub remote via the injectable ``RepoCreator``; a remote
 #     failure keeps the local repo and returns ``remote_error``).
+#   * ``screenshot_dir`` / ``get_run_screenshot`` — where the cloud station keeps
+#     a run's snapshot PNGs (``POCKETPAW_FACTORY_SCREENSHOT_DIR``), and the read
+#     that serves one: tenancy 404, listed on the blob, straight inside its dir.
 #   * ``list_runs`` / ``get_run`` — the runs read model over ``code_change``
 #     Instinct Actions, newest-first. Status/stage derive from the Action
 #     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``,
@@ -45,6 +48,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -809,7 +813,9 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
 
     A foreign or non-belt Action is a 404 (``_owned_run``). The diff is read off
     the blob and truncated to ``MAX_DIFF_BYTES``; a ``diff_truncated`` flag tells
-    the UI when it was cut.
+    the UI when it was cut. ``screenshots`` lists the run's kept snapshot PNGs
+    (``{name, bytes}``, served by ``get_run_screenshot``) and ``tester`` is the
+    cloud tester session, when one ran.
     """
     action, blob = await _owned_run(workspace_id, action_id)
     summary = _run_summary(action, blob)
@@ -822,7 +828,54 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
         truncated = True
     summary["diff"] = diff_text
     summary["diff_truncated"] = truncated
+    summary["screenshots"] = [
+        {"name": str(s.get("name")), "bytes": int(s.get("bytes") or 0)}
+        for s in blob.get("screenshots") or []
+        if isinstance(s, dict)
+    ]
+    summary["tester"] = blob.get("tester") or None
     return summary
+
+
+# ---------------------------------------------------------------------------
+# run screenshots — the cloud station's kept snapshot PNGs, one dir per run
+# ---------------------------------------------------------------------------
+
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+
+
+def screenshot_dir(action_id: str) -> Path:
+    """``<POCKETPAW_FACTORY_SCREENSHOT_DIR>/<action_id>/`` (default root
+    ``~/.pocketpaw/belt/screenshots``): where the cloud station keeps a run's
+    snapshot PNGs. Raises ``ValueError`` on an id that is not a plain name."""
+    if not _SAFE_RUN_ID.match(action_id):
+        raise ValueError(f"unsafe run id {action_id!r}")
+    raw = (os.environ.get("POCKETPAW_FACTORY_SCREENSHOT_DIR") or "").strip()
+    if raw:
+        root = Path(raw).expanduser()
+    else:
+        from pocketpaw.config import get_config_dir
+
+        root = get_config_dir() / "belt" / "screenshots"
+    return root / action_id
+
+
+async def get_run_screenshot(workspace_id: str, action_id: str, name: str) -> Path:
+    """The path of one of the run's kept screenshots. A foreign run (the
+    ``_owned_run`` 404), a name the blob does not list, or a path that resolves
+    anywhere but straight inside the run's dir is a 404."""
+    _, blob = await _owned_run(workspace_id, action_id)
+    listed = {str(s.get("name")) for s in blob.get("screenshots") or [] if isinstance(s, dict)}
+    if name not in listed:
+        raise BeltConsoleError(404, "Screenshot not found.")
+    try:
+        base = screenshot_dir(action_id).resolve()
+    except ValueError:
+        raise BeltConsoleError(404, "Screenshot not found.") from None
+    path = (base / name).resolve()
+    if path.parent != base or not path.is_file():
+        raise BeltConsoleError(404, "Screenshot not found.")
+    return path
 
 
 # ---------------------------------------------------------------------------

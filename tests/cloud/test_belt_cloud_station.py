@@ -27,7 +27,10 @@
 # tester seat, a landed run launches ONE tester (engine brief: fuzz; app brief,
 # a ``Sources/*App`` in the clone: snapshots against docs/design.md), recorded as
 # ``tester`` with a landed/test update; off by default, none without a seat, one
-# per run, and a failed launch is recorded while the land stands.
+# per run, and a failed launch is recorded while the land stands. Screenshots:
+# the head's CI run with a ``snapshots`` artifact is found through gh api, its
+# real PNGs kept (sanitized, 40 files / 20 MB caps, sha on the blob) once the PR
+# is known and on land, and no artifact or a failed download never fails a land.
 # ``pty_run.py`` itself runs for real:
 # it streams the child's output as it lands and exits on the folder-trust
 # prompt instead of waiting; ``wire_from_env`` wires the cloud dispatcher only
@@ -120,6 +123,8 @@ class FakeRunner:
         launch_code: int = 0,
         launch_lines: tuple[str, ...] = (),
         repo_fetch_code: int = 0,
+        snapshots: dict[str, bytes] | None = None,
+        download_code: int = 0,
     ):
         self.calls: list[tuple[list[str], Path]] = []
         # A list is consumed one entry per launch / per ``gh pr view``, holding the last.
@@ -131,6 +136,9 @@ class FakeRunner:
         self.repo_fetch_code = repo_fetch_code  # ``git fetch`` in the bound repo
         self.prs = pr if isinstance(pr, list) else [pr]
         self.run_ref = ""
+        # The PR head's CI runs: 502 carries the ``snapshots`` artifact, 501 does not.
+        self.snapshots = snapshots
+        self.download_code = download_code
 
     @staticmethod
     def _next(seq: list):
@@ -159,6 +167,18 @@ class FakeRunner:
             return 0, "".join(f"build\tstep\tL{i:03d}\n" for i in range(1, 51)), ""
         if argv[:3] == ["gh", "pr", "diff"]:
             return 0, DIFF, ""
+        if argv[:2] == ["gh", "api"] and argv[2].endswith("/artifacts"):
+            names = ["snapshots"] if "/runs/502/" in argv[2] else ["coverage"]
+            return 0, json.dumps({"artifacts": [{"name": n, "expired": False} for n in names]}), ""
+        if argv[:2] == ["gh", "api"] and "/actions/runs?head_sha=" in argv[2]:
+            runs = [{"id": 501}, {"id": 502}] if self.snapshots is not None else []
+            return 0, json.dumps({"total_count": len(runs), "workflow_runs": runs}), ""
+        if argv[:3] == ["gh", "run", "download"]:
+            out = Path(argv[argv.index("-D") + 1])
+            for rel, data in (self.snapshots or {}).items():
+                (out / rel).parent.mkdir(parents=True, exist_ok=True)
+                (out / rel).write_bytes(data)
+            return self.download_code, "", "no artifact" if self.download_code else ""
         if "fetch" in argv and cwd.name == "repo":
             return self.repo_fetch_code, "", "fatal: unable to access origin"
         return 0, "", ""  # git fetch / checkout
@@ -732,6 +752,116 @@ def test_wire_cloud_reads_the_tester_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_TESTER", "1")
     assert cloud_station.wire_cloud() is True
     assert headless.resolve_headless_dispatcher().tester is True
+
+
+# -- screenshots: the PR head's ``snapshots`` artifact, kept on the run ---------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+HEAD = "abc1234def5678"
+LANDED = {**_open(HEAD), "state": "MERGED", "mergeCommit": {"oid": "abc123"}}
+
+
+@pytest.fixture
+def shots(tmp_path, monkeypatch) -> Path:
+    root = tmp_path / "shots"
+    monkeypatch.setenv("POCKETPAW_FACTORY_SCREENSHOT_DIR", str(root))
+    return root
+
+
+async def test_a_landed_run_keeps_its_snapshot_pngs(store, dirs, shots):
+    import hashlib
+
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(
+        launch_out=SESSION,
+        pr=LANDED,
+        snapshots={
+            "flare-empty-light.png": PNG + b"L",
+            "dark/flare empty (dark).png": PNG + b"D",
+            "notes.txt": b"not an image",
+            "fake.png": b"<html>not a png</html>",
+            ".hidden.png": PNG,
+        },
+    )
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    kept = action.parameters["_code_change"]["screenshots"]
+    assert [k["name"] for k in kept] == ["flare-empty-light.png", "flare_empty__dark_.png"]
+    assert kept[0] == {
+        "name": "flare-empty-light.png",
+        "bytes": len(PNG) + 1,
+        "sha": hashlib.sha256(PNG + b"L").hexdigest(),
+    }
+    assert sorted(p.name for p in (shots / run_ref).iterdir()) == [k["name"] for k in kept]
+    assert (shots / run_ref / "flare_empty__dark_.png").read_bytes() == PNG + b"D"
+    api = [a[2] for a, _ in runner.calls if a[:2] == ["gh", "api"]]
+    assert api[0] == f"repos/{SLUG}/actions/runs?head_sha={HEAD}"
+    (download,) = [a for a, _ in runner.calls if a[:3] == ["gh", "run", "download"]]
+    assert download[3:8] == ["502", "-R", SLUG, "-n", "snapshots"]
+    assert not Path(download[-1]).exists()  # the temp download dir is gone
+
+
+async def test_screenshots_are_capped_by_count_and_bytes(store, dirs, shots, monkeypatch):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    many = {f"s{i:02d}.png": PNG for i in range(45)}
+    runner = FakeRunner(launch_out=SESSION, pr=LANDED, snapshots=many)
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+    kept = (await store.get_action(run_ref)).parameters["_code_change"]["screenshots"]
+    assert len(kept) == 40 and len(list((shots / run_ref).iterdir())) == 40
+
+    run_ref = await _queue(store, repo)
+    runner.run_ref = run_ref
+    monkeypatch.setattr(cloud_station, "_SHOT_BYTES", len(PNG) * 3)
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+    kept = (await store.get_action(run_ref)).parameters["_code_change"]["screenshots"]
+    assert len(kept) == 3
+
+
+async def test_screenshots_are_fetched_once_the_pr_is_known(store, dirs, shots):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=_open(HEAD), snapshots={"a.png": PNG})
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch, timeout_seconds=0).run(run_ref, workspace_id=WS)
+
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert [k["name"] for k in cc["screenshots"]] == ["a.png"]
+    assert "no PR" not in cc["headless_error"]  # it timed out on the open PR
+
+
+async def test_no_snapshots_artifact_and_a_failed_download_never_fail_the_land(store, dirs, shots):
+    repo, launch = dirs
+    for runner in (
+        FakeRunner(launch_out=SESSION, pr=LANDED),
+        FakeRunner(launch_out=SESSION, pr=LANDED, snapshots={"a.png": PNG}, download_code=1),
+    ):
+        run_ref = await _queue(store, repo)
+        runner.run_ref = run_ref
+        await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+        action = await store.get_action(run_ref)
+        assert action.status == ActionStatus.EXECUTED
+        assert "screenshots" not in action.parameters["_code_change"]
+
+
+async def test_the_app_tester_brief_names_the_snapshots_run(store, dirs, shots, updates):
+    repo, launch = dirs
+    (launch / "Sources" / "FlareApp").mkdir(parents=True)
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=LANDED, snapshots={"a.png": PNG})
+    runner.run_ref = run_ref
+
+    await _tester(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert f"gh run download 502 -R {SLUG} -n snapshots" in _briefs(runner)[1]
 
 
 def _pty_child(script: str) -> list[str]:

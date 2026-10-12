@@ -14,6 +14,9 @@
 #                                 (``service.open_run_stream`` has the replay rules)
 #   * GET  /belt/runs/{action_id}/blueprint — the bound repo's C4 model where the
 #                                 run starts, with the run's files joined to it
+#   * GET  /belt/runs/{action_id}/screenshots/{name} — one of the run's kept
+#                                 snapshot PNGs (``image/png``), only a name the
+#                                 run lists
 #
 # Routes are THIN: they read identity (workspace + user) from the cloud deps,
 # delegate to ``ee.cloud.belt.service``, and return what the service built. RBAC
@@ -29,7 +32,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud._core.deps import (
@@ -251,6 +254,26 @@ async def get_run_blueprint(
         return await belt_service.get_run_blueprint(workspace_id, action_id)
     except belt_service.BeltConsoleError as exc:
         raise _to_cloud_error(exc) from exc
+
+
+@router.get("/runs/{action_id}/screenshots/{name}")
+async def get_run_screenshot(
+    action_id: str,
+    name: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> FileResponse:
+    """One of the run's snapshot PNGs, as listed in its ``screenshots``. A
+    foreign or non-belt run, or any name the run does not list, is a 404."""
+    try:
+        path = await belt_service.get_run_screenshot(workspace_id, action_id, name)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"},
+    )
 
 
 __all__ = ["router"]

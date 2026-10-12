@@ -19,7 +19,10 @@
 #           One launch at a time (``_LAUNCH_LOCK``), worker, fixer or tester.
 #   TRACK   ``gh`` finds the PR by its ``Belt-Run`` line and polls it; the repo's
 #           fast lane + CI is the diff gate; the PR's diff goes to Clef's shadow
-#           scorer (gates nothing):
+#           scorer (gates nothing). SCREENSHOTS once the PR is known and again on
+#           land: the head's newest CI run with a ``snapshots`` artifact is
+#           downloaded and its PNGs kept in ``service.screenshot_dir`` (40 files,
+#           20 MB, sanitized names) as the blob's ``screenshots``; never fatal.
 #             merged   -> approved as ``system:fast-lane`` and executed (landed)
 #                         with pr_url, head branch, merge sha and the PR's diff;
 #                         the bound repo is fetched for the blueprint; then the
@@ -40,19 +43,21 @@
 #           nothing. ``tester: {session_url | error, at}`` on the blob, a
 #           ``landed``/``test`` run update; never fails the land.
 #
-# Nothing builds or tests on this host: the only local processes are git, gh and
-# the launcher. Tracking is process-local (a restart leaves ``headless_state=
-# "cloud"``, which the digest shows as stuck). Approving an escalated diff lands
-# it on the mandate line like any run; the cloud PR is then the human's to close.
+# Nothing builds or tests here: the only local processes are git, gh and the
+# launcher. Tracking is process-local (a restart leaves ``headless_state="cloud"``,
+# shown as stuck); an approved escalated diff lands on the mandate line.
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -97,6 +102,14 @@ _RUN_URL = re.compile(r"/actions/runs/(\d+)(?:/job/(\d+))?")
 _CHECK_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _STATUS_NOT_RED = {"SUCCESS", "PENDING", "EXPECTED"}
 _LOG_TAIL_LINES = 40
+# Screenshots: the newest CI runs of a PR head probed for a ``snapshots``
+# artifact, and what a run keeps of it (real PNGs only, sanitized basenames).
+_SHOT_RUNS = 5
+_SHOT_FILES = 40
+_SHOT_BYTES = 20 * 1024 * 1024
+_PNG = b"\x89PNG\r\n\x1a\n"
+_HEX_SHA = re.compile(r"^[0-9a-f]{7,64}$")
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 _LAUNCH_LOCK = asyncio.Lock()
 _TRACKERS: set[asyncio.Task[None]] = set()
 
@@ -317,6 +330,7 @@ class CloudTaskDispatcher:
         stuck_since = 0.0
         fixed_head = ""  # the head a fixer was launched on; the next waits for a new one
         clef_diff, clef_head = "", None  # the diff Clef scored, and the head it was of
+        shot = False  # screenshots fetched once the PR is known, and again on land
         while True:
             if number is None:
                 number = await self._find_pr(slug, run_ref, cwd)
@@ -342,6 +356,9 @@ class CloudTaskDispatcher:
                     )
                 )
                 head = str(pr.get("headRefOid") or "")
+                if not shot and pr.get("state") != "MERGED":  # a merge fetches on land
+                    shot = True
+                    await self._screenshots(store, run_ref, slug, head, cwd)
                 if clef_diff and clef_head is None:
                     clef_head = head
                 if pr.get("state") == "MERGED":
@@ -529,9 +546,50 @@ class CloudTaskDispatcher:
             pr_url=url,
             branch=head,
         )
-        await self._test(store, run_ref, blob, url)
+        ci = await self._screenshots(store, run_ref, slug, str(pr.get("headRefOid") or ""), cwd)
+        await self._test(store, run_ref, blob, url, ci)
 
-    async def _test(self, store: Any, run_ref: str, blob: dict[str, Any], pr_url: str) -> None:
+    async def _screenshots(self, store: Any, run_ref: str, slug: str, head: str, cwd: Path) -> str:
+        """Keep the PR head's ``snapshots`` artifact on the run: the newest CI
+        run of ``head`` that has one is downloaded to a temp dir, its PNGs move
+        into the run's screenshot dir (``_keep_pngs``) and ``screenshots: [{name,
+        bytes, sha}]`` goes on the blob. Returns that CI run's id ("" when there
+        is none). Never raises: screenshots never fail a run."""
+        from pocketpaw_ee.cloud.belt.service import screenshot_dir
+
+        try:
+            if not _HEX_SHA.match(head):
+                return ""
+            runs_url = f"repos/{slug}/actions/runs?head_sha={head}"
+            runs = json.loads(await self._ok(["gh", "api", runs_url], cwd, "SHOTS: runs"))
+            ci = ""
+            for run in (runs.get("workflow_runs") or [])[:_SHOT_RUNS]:
+                rid = str(run.get("id") or "")
+                if not rid.isdigit():
+                    continue
+                arts_url = f"repos/{slug}/actions/runs/{rid}/artifacts"
+                arts = json.loads(await self._ok(["gh", "api", arts_url], cwd, "SHOTS: artifacts"))
+                if any(
+                    a.get("name") == "snapshots" and not a.get("expired")
+                    for a in arts.get("artifacts") or []
+                ):
+                    ci = rid
+                    break
+            if not ci:
+                return ""
+            with tempfile.TemporaryDirectory(prefix="belt-shots-") as tmp:
+                argv = ["gh", "run", "download", ci, "-R", slug, "-n", "snapshots", "-D", tmp]
+                await self._ok(argv, cwd, "SHOTS: download")
+                kept = _keep_pngs(Path(tmp), screenshot_dir(run_ref))
+            await _patch(store, run_ref, screenshots=kept)
+            return ci
+        except Exception:  # noqa: BLE001 — screenshots are for display; the run goes on
+            logger.info("belt cloud: no screenshots for %s", run_ref, exc_info=True)
+            return ""
+
+    async def _test(
+        self, store: Any, run_ref: str, blob: dict[str, Any], pr_url: str, ci: str = ""
+    ) -> None:
         """Launch ONE tester session for a landed run when the tester is on and
         the mandate seats one: ``tester: {session_url, at}`` (or ``{error, at}``)
         goes on the blob, with a ``landed``/``test`` run update. Never raises:
@@ -549,7 +607,8 @@ class CloudTaskDispatcher:
             entry: dict[str, Any] = {}
             try:
                 async with _LAUNCH_LOCK:
-                    _, url = await self._launch(run_ref, blob, worker, test={"pr": pr_url})
+                    test = {"pr": pr_url, "snapshots_run": ci}
+                    _, url = await self._launch(run_ref, blob, worker, test=test)
                 entry["session_url"] = url
             except Exception as exc:  # noqa: BLE001 — a failed tester is recorded, the land stands
                 entry["error"] = str(exc)[:600]
@@ -711,11 +770,13 @@ def _test_brief(
     gate = "; ".join(f"`{c}`" for c in checks) or "the repo's own CI script"
     line = ", ".join(f"`{label}`" for label in labels) or "its line label"
     if app:
+        run = test.get("snapshots_run") or "<run id>"
+        where = "" if test.get("snapshots_run") else ", the latest CI run of the PR's head"
         look = (
             "This is app UI. Download the merged PR's `snapshots` CI artifact "
-            f"(`gh run download <run id> -R {slug} -n snapshots`, the latest CI run of the "
-            "PR's head) and LOOK at every PNG against docs/design.md and the issue: text, "
-            "layout, spacing, light and dark, and each empty state.\n"
+            f"(`gh run download {run} -R {slug} -n snapshots`{where}) and LOOK at every "
+            "PNG against docs/design.md and the issue: text, layout, spacing, light and "
+            "dark, and each empty state.\n"
         )
     else:
         look = (
@@ -742,6 +803,38 @@ def _test_brief(
         "line, no Generated with Claude Code footer, in commits, issues, the PR or comments.\n"
         "7. Then stop. Never merge."
     )
+
+
+def _keep_pngs(src: Path, dest: Path) -> list[dict[str, Any]]:
+    """Copy the downloaded artifact's PNGs into ``dest`` (emptied first, so it
+    only ever holds what the blob lists): regular files only (no symlinks),
+    basename sanitized to ``[A-Za-z0-9._-]``, no dotfiles, first of a name
+    wins, real PNG bytes, at most ``_SHOT_FILES`` files and ``_SHOT_BYTES``."""
+    found: list[Path] = []
+    for root, dirs, files in os.walk(src):  # never follows symlinked dirs
+        dirs.sort()
+        found.extend(Path(root) / f for f in sorted(files))
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True)
+    kept: list[dict[str, Any]] = []
+    total = 0
+    for path in found:
+        name = _UNSAFE_NAME.sub("_", path.name)
+        if name.startswith(".") or not name.lower().endswith(".png"):
+            continue
+        if any(k["name"] == name for k in kept) or path.is_symlink() or not path.is_file():
+            continue
+        if total + path.stat().st_size > _SHOT_BYTES:
+            continue
+        data = path.read_bytes()
+        if not data.startswith(_PNG):
+            continue
+        (dest / name).write_bytes(data)
+        total += len(data)
+        kept.append({"name": name, "bytes": len(data), "sha": hashlib.sha256(data).hexdigest()})
+        if len(kept) >= _SHOT_FILES:
+            break
+    return kept
 
 
 async def _blob(store: Any, run_ref: str) -> dict[str, Any] | None:

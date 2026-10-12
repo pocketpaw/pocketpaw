@@ -599,6 +599,57 @@ async def test_get_run_missing_is_404(store):
     assert res.status_code == 404, res.text
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+async def _run_with_screenshots(store, root: Path, workspace_id: str = "w1"):
+    action = await _propose_run(store, workspace_id=workspace_id, task="shots")
+    params = dict(action.parameters)
+    params["_code_change"] = {
+        **params["_code_change"],
+        "screenshots": [{"name": "home-dark.png", "bytes": len(PNG), "sha": "f" * 64}],
+        "tester": {"session_url": "https://claude.ai/code/session_T", "at": 1.0},
+    }
+    await store.update_parameters(action.id, params)
+    run_dir = root / action.id
+    run_dir.mkdir(parents=True)
+    (run_dir / "home-dark.png").write_bytes(PNG)
+    (run_dir / "unlisted.png").write_bytes(PNG)  # on disk, but not on the blob
+    (root / "secret.png").write_bytes(PNG)
+    return action
+
+
+async def test_run_screenshots_are_listed_and_served(store, tmp_path, monkeypatch):
+    root = tmp_path / "shots"
+    monkeypatch.setenv("POCKETPAW_FACTORY_SCREENSHOT_DIR", str(root))
+    action = await _run_with_screenshots(store, root)
+    base = f"/api/v1/belt/runs/{action.id}"
+    with TestClient(_build_app(role="member")) as client:
+        detail = client.get(base).json()
+        png = client.get(f"{base}/screenshots/home-dark.png")
+        unlisted = client.get(f"{base}/screenshots/unlisted.png")
+        escape = client.get(f"{base}/screenshots/..%2Fsecret.png")
+        missing = client.get("/api/v1/belt/runs/act-nope/screenshots/home-dark.png")
+
+    assert detail["screenshots"] == [{"name": "home-dark.png", "bytes": len(PNG)}]
+    assert detail["tester"] == {"session_url": "https://claude.ai/code/session_T", "at": 1.0}
+    assert png.status_code == 200, png.text
+    assert png.headers["content-type"] == "image/png"
+    assert png.content == PNG
+    assert unlisted.status_code == 404
+    assert escape.status_code == 404
+    assert missing.status_code == 404
+
+
+async def test_run_screenshots_are_workspace_scoped(store, tmp_path, monkeypatch):
+    root = tmp_path / "shots"
+    monkeypatch.setenv("POCKETPAW_FACTORY_SCREENSHOT_DIR", str(root))
+    action = await _run_with_screenshots(store, root, workspace_id="w-other")
+    with TestClient(_build_app(role="member", workspace_id="w1")) as client:
+        res = client.get(f"/api/v1/belt/runs/{action.id}/screenshots/home-dark.png")
+    assert res.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Realtime — emit_belt_run_updated rides the WORKSPACE BUS (primary) + SSE
 # ---------------------------------------------------------------------------
