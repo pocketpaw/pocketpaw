@@ -717,7 +717,7 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
     Reads task/summary/repo/base_branch/correlation_id off the blob, and the
     landing fields — ``branch`` / ``pr_url`` / ``commit_sha`` — STRUCTURALLY off
     the blob (the executor back-writes them on success), and status/stage from the
-    Action lifecycle. ``created_at`` is ISO-8601.
+    Action lifecycle. ``created_at`` / ``updated_at`` are ISO-8601.
 
     Two landing shapes feed this row:
       * WITH-REMOTE — ``pr_url`` + ``branch`` are present; the page renders a PR
@@ -729,6 +729,7 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
     """
     status, stage = _derive_status_stage(action, blob)
     created = getattr(action, "created_at", None)
+    updated = getattr(action, "updated_at", None)
     repo_path = str(blob.get("repo") or "")
     return {
         "action_id": str(getattr(action, "id", "")),
@@ -750,6 +751,8 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         # Why the run failed: the executor's reason, else a failed develop's.
         "error": str(getattr(action, "error", None) or blob.get("headless_error") or "") or None,
         "created_at": created.isoformat() if hasattr(created, "isoformat") else None,
+        # The store's last write to the row (UTC): every status flip and blob write.
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else None,
         "correlation_id": str(blob.get("correlation_id") or "") or None,
         # Mandate provenance (None on a hand-driven run).
         "mandate_id": str(blob.get("mandate_id") or "") or None,

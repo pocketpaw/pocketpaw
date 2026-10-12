@@ -37,8 +37,9 @@
 # resume), executor_revalidate, mark_shift, has_continuous_mandate, and
 # list_cadence_due: the scheduler's cross-workspace read of ACTIVE mandates
 # that are due (daily / weekly by interval; continuous by ``_continuous_due``,
-# which first runs the ``issues`` patrol on a mandate that toggles it; manual
-# never; N+1 reads, fine at current mandate counts).
+# which first runs the ``issues`` patrol on a mandate that toggles it and wakes a
+# stood-down line on a new sighting or a run settled since; manual never; N+1
+# reads, fine at current mandate counts).
 #
 # Conventions (cloud entity rules): validate body at entry; tenant filter
 # ``workspace=...`` on EVERY request-path find; emit an event on every write (or
@@ -2375,8 +2376,10 @@ async def has_continuous_mandate() -> bool:
 async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime) -> bool:
     """A CONTINUOUS mandate is due when the minimum gap since its last shift has
     passed, that shift is finished (``done``; ``stood_down`` only once a sighting
-    arrived after it, so a foreman that planned nothing is not re-asked about the
-    same backlog), none of its runs is still in flight, and an open sighting no
+    arrived after it or one of the mandate's runs settled after it: landed,
+    rejected or released, failed. A foreman that planned nothing is not re-asked
+    about the same backlog, but one that waited on a run is woken when the run
+    resolves), none of its runs is still in flight, and an open sighting no
     task is working remains. A shift older than the stall timeout stops holding
     the next one through in-flight runs or a stuck ``planning`` / ``executing``
     state; a plan waiting ``in_gate`` for a human always holds it, and so do
@@ -2446,7 +2449,21 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
     )
     work = [o for o in backlog["open"] if not o["in_flight"]]
     if last is not None and last.state == "stood_down":
-        work = [o for o in work if o["new"]]
+        # ponytail: ``updated_at`` also moves on blob writes after a run settles
+        # (a tester's patches, lane nudges), so a stood-down line may be asked
+        # once more per write, at most once per min gap; a status-change stamp
+        # (or the settled run ids snapshotted at stand-down) would make it exact.
+        # The store stamps whole seconds, so the stand-down is cut to its second:
+        # a run settled in that same second wakes the line rather than being lost.
+        stood_down_at = _aware(last.createdAt).replace(microsecond=0)
+        settled = any(
+            _task_status(r) not in _IN_FLIGHT
+            and r.get("updated_at")
+            and _aware(datetime.fromisoformat(r["updated_at"])) >= stood_down_at
+            for r in runs
+        )
+        if not settled:
+            work = [o for o in work if o["new"]]
     return bool(work)
 
 

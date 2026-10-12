@@ -90,7 +90,14 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   - at least `POCKETPAW_MANDATE_CONTINUOUS_MIN_GAP_MINUTES` (default 5) have
     passed since its last shift;
   - that shift is finished: `done`, or `stood_down` with a sighting filed since
-    (a foreman that planned nothing is not asked again about the same backlog).
+    or one of the mandate's runs settled since (landed, rejected or released,
+    failed, develop failed). A foreman that planned nothing is not asked again
+    about the same backlog, but one that stood down waiting on a run wakes when
+    that run resolves. "Settled since" reads the run's `updated_at` (the store's
+    UTC stamp, whole seconds, so the stand-down is compared at its second).
+    `updated_at` also moves on blob writes after a run settles (the tester's
+    patches, lane nudges), so a stood-down line can be asked once more after
+    one; the minimum gap bounds that to one call per gap.
     A plan waiting `in_gate` for a human always holds the next shift;
   - none of that shift's runs is still in flight (queued, developing, pending at
     the diff gate). A shift older than `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS`
@@ -1690,7 +1697,8 @@ diff);
 `block_component` and reads the result back with `c4_lines`;
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
 cadence scheduler; `test_belt_continuous_cadence.py` pins each `continuous` due
-rule and the loop's tick interval; `test_belt_plan_policy.py` pins the auto plan
+rule (a stood-down line waking when a run settles after it included) and the
+loop's tick interval; `test_belt_plan_policy.py` pins the auto plan
 gate against the pilot's gate log and drives it through the real trigger, store
 and executor (approve as `system:belt-policy` with one chain, escalate on a Clef
 outage or low independence, unchanged with the flag off); the headless file also lands a run (commit subject from the

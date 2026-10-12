@@ -414,5 +414,23 @@
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
     ]
+  },
+  {
+    "label": "a stood-down line never wakes when a run it waited on settles",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        if not settled:\n",
+    "replace": "        if True:\n",
+    "tests": [
+      "tests/cloud/test_belt_continuous_cadence.py::test_a_stood_down_shift_wakes_when_a_run_settles_after_it"
+    ]
+  },
+  {
+    "label": "a run settled before the stand-down wakes the line",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "and _aware(datetime.fromisoformat(r[\"updated_at\"])) >= stood_down_at",
+    "replace": "and True",
+    "tests": [
+      "tests/cloud/test_belt_continuous_cadence.py::test_a_stood_down_shift_wakes_when_a_run_settles_after_it"
+    ]
   }
 ]

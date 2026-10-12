@@ -1,7 +1,8 @@
 # tests/cloud/test_belt_continuous_cadence.py — the ``continuous`` cadence.
 #
 # A continuous mandate is due when it is active, its latest shift is finished
-# (``done``, or ``stood_down`` with a sighting filed since), none of that
+# (``done``, or ``stood_down`` with a sighting filed or a run settled since:
+# landed, rejected, released or failed), none of that
 # shift's runs is still in flight (unless the shift is older than the stall
 # timeout), it has an open sighting no task is working, and the minimum gap
 # since the last shift has passed. A shift stuck in ``planning`` or
@@ -139,6 +140,30 @@ async def test_a_stood_down_shift_waits_for_a_new_sighting(mongo_db):
     assert not await _due(mid)
     await _sighting(mid, "new signal")
     assert await _due(mid)
+
+
+async def test_a_stood_down_shift_wakes_when_a_run_settles_after_it(mongo_db, store):  # noqa: F811
+    """The foreman stood down waiting on a run in flight. That run was later
+    released (rejected); its sighting is open again with nothing new filed, so
+    the line must wake instead of idling until the next sighting."""
+    import aiosqlite
+    from pocketpaw_ee.cloud.mandates.domain import SightingDoc
+
+    mid = await _mandate()
+    await _sighting(mid, "issue #10")
+    old = await SightingDoc.find_one(SightingDoc.mandate_id == mid)
+    await old.set({SightingDoc.ts: datetime.now(UTC) - timedelta(hours=1)})
+    run = await _seed_run(store, mid, "issue #10", station_pending=True)
+    await _shift(mid, "stood_down", timedelta(minutes=30))
+    assert not await _due(mid), "the run is still in flight"
+
+    await store.reject(run.id, reason="silent worker", rejector="system:belt-cloud")
+    assert await _due(mid), "the run it waited on settled after the stand-down"
+
+    async with aiosqlite.connect(store._db_path) as db:
+        await db.execute("UPDATE instinct_actions SET updated_at = datetime('now', '-1 hour')")
+        await db.commit()
+    assert not await _due(mid), "a run that settled before the stand-down was already seen"
 
 
 async def test_gate_teaching_alone_is_not_work(mongo_db):
