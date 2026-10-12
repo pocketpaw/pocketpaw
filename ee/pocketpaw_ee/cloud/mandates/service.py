@@ -19,7 +19,8 @@
 # belt runs list).
 #
 # The CREW (``MandateDoc.crew``): ``crew_seat_for_task`` seats a plan task on a
-# live dev (roster order, ``pick_dev`` round-robin); ``crew_worker`` reads that
+# live dev (roster order, ``pick_dev`` round-robin), or with ``role`` finds
+# another live seat (the cloud station's tester); ``crew_worker`` reads that
 # agent's CURRENT model + instructions at develop time. Every read is
 # ``agents.service.get_for_viewer`` as the seat's ``seated_by``, so an agent that
 # admin can no longer read is a gone seat.
@@ -784,12 +785,12 @@ async def _live_agent(workspace_id: str, agent_id: str, seated_by: str) -> Any |
 
 
 async def crew_seat_for_task(
-    workspace_id: str, mandate_id: str, index: int
+    workspace_id: str, mandate_id: str, index: int, *, role: str = "dev"
 ) -> dict[str, Any] | None:
-    """The dev seat plan task ``index`` runs on: ``{agent_id, name, setup,
-    seated_by}``,
-    or ``None`` (no crew, or no live dev) so the factory's env defaults apply.
-    Dead seats (deleted / disabled agents) are skipped before ``pick_dev``."""
+    """The ``role`` seat (a dev by default) plan task ``index`` runs on:
+    ``{agent_id, name, setup, seated_by}``, or ``None`` (no crew, or no live
+    seat in that role) so the factory's env defaults apply. Dead seats (deleted
+    / disabled agents) are skipped before ``pick_dev``."""
     # no-event: read-only path; emit only on writes.
     try:
         doc = await MandateDoc.find_one(
@@ -801,7 +802,7 @@ async def crew_seat_for_task(
         return None
     live = []
     for seat in doc.crew:
-        if seat.role != "dev":
+        if seat.role != role:
             continue
         agent = await _live_agent(workspace_id, seat.agent_id, seat.seated_by)
         if agent is not None:

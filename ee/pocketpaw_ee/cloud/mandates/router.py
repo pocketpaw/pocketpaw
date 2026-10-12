@@ -192,7 +192,7 @@ async def set_crew(
     user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     """Replace the mandate's CREW roster (admin-gated): the cloud Agents that
-    work its plan tasks. Body: ``{crew: [{agent_id, role: dev|reviewer|foreman,
+    work its plan tasks. Body: ``{crew: [{agent_id, role: dev|reviewer|foreman|tester,
     concurrency, setup?: owner|strict}]}``; every agent must be readable by the
     caller in this workspace (422 otherwise). Returns ``{"mandate": <detail>}``."""
     return await mandate_service.set_crew(workspace_id, user_id, mandate_id, body)

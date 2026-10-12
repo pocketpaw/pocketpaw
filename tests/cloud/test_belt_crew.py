@@ -3,7 +3,8 @@
 # Pins the BF-9 slice end to end: the roster round-trips through create, the
 # crew route and GET (and a reload from Mongo); the route refuses agents the
 # caller can't read or that live in another workspace; the seat rule (dev seats
-# in roster order, round-robin by task index, dead seats skipped); and the
+# in roster order, round-robin by task index, dead seats skipped; a ``tester``
+# seat is found by role and never takes dev work); and the
 # develop station running a seated worker with its Agent's model on the develop
 # and fix seats, its instructions in their prompts, and its seat's Claude setup,
 # with the factory env as the fallback. The station side reuses the develop
@@ -293,6 +294,21 @@ async def test_seat_picker_gives_two_tasks_two_different_devs(tmp_path, mongo_db
     assert seats[1]["setup"] == "strict"
     assert await mandate_service.crew_seat_for_task("w2", mid, 1) is None
     assert mandate_service.pick_dev([], 1) is None
+
+
+async def test_a_tester_seat_is_found_by_role_and_never_takes_dev_work(
+    tmp_path, mongo_db, monkeypatch
+):
+    dev = await _agent("Ada")
+    tester = await _agent("Tess")
+    client = _client(monkeypatch)
+    mid = _create(
+        client, tmp_path, crew=[{"agent_id": tester, "role": "tester"}, {"agent_id": dev}]
+    )["id"]
+
+    assert (await mandate_service.crew_seat_for_task(WS, mid, 1))["agent_id"] == dev
+    seat = await mandate_service.crew_seat_for_task(WS, mid, 1, role="tester")
+    assert seat == {"agent_id": tester, "name": "Tess", "setup": "", "seated_by": USER}
 
 
 # ---------------------------------------------------------------------------

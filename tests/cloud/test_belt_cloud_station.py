@@ -23,7 +23,12 @@
 # cap escalates like a refusal; a fixer that fails to launch is recorded on the
 # blob's ``fixes`` and tracking goes on. A landed run carries the PR's diff
 # (Clef's copy when the head has not moved, else fetched again) and fetches the
-# bound repo, whose failure never fails the land. ``pty_run.py`` itself runs for real:
+# bound repo, whose failure never fails the land. With the tester on and a
+# tester seat, a landed run launches ONE tester (engine brief: fuzz; app brief,
+# a ``Sources/*App`` in the clone: snapshots against docs/design.md), recorded as
+# ``tester`` with a landed/test update; off by default, none without a seat, one
+# per run, and a failed launch is recorded while the land stands.
+# ``pty_run.py`` itself runs for real:
 # it streams the child's output as it lands and exits on the folder-trust
 # prompt instead of waiting; ``wire_from_env`` wires the cloud dispatcher only
 # with a launch clone.
@@ -587,6 +592,146 @@ async def test_bound_repo_fetch_failure_never_fails_the_land(store, dirs):
     cc = action.parameters["_code_change"]
     assert cc["diff"] == DIFF and "headless_error" not in cc
     assert any(a[-3:] == ["fetch", "-q", "origin"] and c == repo for a, c in runner.calls)
+
+
+# -- the tester: one cloud session per landed run tries to break what it built --
+
+
+@pytest.fixture
+def updates(monkeypatch) -> list[tuple[str, str]]:
+    seen: list[tuple[str, str]] = []
+
+    async def emit(**kw) -> None:
+        seen.append((kw["status"], kw["stage"]))
+
+    monkeypatch.setattr(cloud_station, "_emit_run_updated", emit)
+    return seen
+
+
+TESTER_SEAT = {"agent_id": "t1", "name": "Tess", "setup": "", "seated_by": "u1"}
+
+
+def _tester(runner: FakeRunner, launch: Path, *, seat: dict | None = TESTER_SEAT, **kw):
+    d = _dispatcher(runner, launch, tester=True, **kw)
+
+    async def tester_for(workspace_id: str, mandate_id: str) -> dict | None:
+        assert (workspace_id, mandate_id) == (WS, "m1")
+        return seat
+
+    async def worker_for(workspace_id: str, agent_id: str, seated_by: str) -> dict:
+        assert agent_id == "t1"
+        return {"name": "Tess", "model": "", "instructions": "Be mean to edge cases."}
+
+    d.tester_for = tester_for
+    d._blobs.worker_for = worker_for
+    return d
+
+
+async def test_a_landed_run_launches_one_tester(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    await _tester(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    briefs = _briefs(runner)
+    assert len(briefs) == 2  # the worker, then the tester
+    brief = briefs[1]
+    assert "tester" in brief and "break" in brief
+    assert PR_URL in brief and "#93" in brief  # the merged PR and the source issue
+    assert f"{cloud_station.TEST_MARKER} {run_ref}" in brief
+    assert "`bug`" in brief and "`gap`" in brief and "`fast-lane`" in brief
+    assert "Do not fix" in brief and "Never merge" in brief
+    assert "fuzz" in brief  # engine code: no Sources/*App in the repo
+    assert "<untrusted>\nBe mean to edge cases.\n</untrusted>" in brief
+    tester = action.parameters["_code_change"]["tester"]
+    assert tester["session_url"] == "https://claude.ai/code/session_ABC123"
+    assert isinstance(tester["at"], float)
+    assert ("landed", "test") in updates
+
+
+async def test_the_tester_looks_at_snapshots_on_an_app_repo(store, dirs, updates):
+    repo, launch = dirs
+    (launch / "Sources" / "FlareApp").mkdir(parents=True)
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    await _tester(runner, launch).run(run_ref, workspace_id=WS)
+
+    brief = _briefs(runner)[1]
+    assert "snapshots" in brief and "gh run download" in brief
+    assert "docs/design.md" in brief and "dark" in brief and "empty state" in brief
+
+
+async def test_the_tester_is_off_by_default(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 1
+    assert "tester" not in (await store.get_action(run_ref)).parameters["_code_change"]
+    assert ("landed", "test") not in updates
+
+
+async def test_no_tester_seat_launches_no_tester(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    await _tester(runner, launch, seat=None).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 1
+    assert "tester" not in (await store.get_action(run_ref)).parameters["_code_change"]
+
+
+async def test_a_run_gets_one_tester_at_most(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    action = await store.get_action(run_ref)
+    params = dict(action.parameters)
+    params["_code_change"] = {**params["_code_change"], "tester": {"session_url": "x", "at": 1.0}}
+    await store.update_parameters(run_ref, params)
+    runner = FakeRunner(launch_out=SESSION, pr=MERGED)
+    runner.run_ref = run_ref
+
+    await _tester(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 1
+    assert (await store.get_action(run_ref)).parameters["_code_change"]["tester"]["at"] == 1.0
+
+
+async def test_a_failed_tester_launch_is_recorded_and_the_land_stands(store, dirs, updates):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=[SESSION, "Error: rate limited"], pr=MERGED)
+    runner.run_ref = run_ref
+
+    await _tester(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    cc = action.parameters["_code_change"]
+    assert "no cloud session started" in cc["tester"]["error"]
+    assert "session_url" not in cc["tester"] and "headless_error" not in cc
+
+
+def test_wire_cloud_reads_the_tester_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(headless, "_PRODUCTION_DISPATCHER", None)
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR", str(tmp_path))
+    monkeypatch.delenv("POCKETPAW_FACTORY_CLOUD_TESTER", raising=False)
+    assert cloud_station.wire_cloud() is True
+    assert headless.resolve_headless_dispatcher().tester is False
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_TESTER", "1")
+    assert cloud_station.wire_cloud() is True
+    assert headless.resolve_headless_dispatcher().tester is True
 
 
 def _pty_child(script: str) -> list[str]:
