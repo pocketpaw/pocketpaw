@@ -6474,6 +6474,33 @@
       }
     },
     {
+      "type": "notes",
+      "category": "composite",
+      "description": "Notepad app: the visitor writes notes straight in, #tags become filter chips, pin, edit, delete with undo. Seed notes[{title, text, tags}]. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"Ideas\"."
+        },
+        "notes": {
+          "type": "Array<{ id?: string; title?: string; text: string; tags?: string[]; pinned?: boolean; color?: \"plain\" | \"yellow\" | \"blue\" | \"green\" | \"pink\" }>",
+          "required": false,
+          "description": "Seed notes, plain text, up to 50 (title 80 chars, text 2000). Tags are single words without \"#\". Leave out for a blank pad."
+        },
+        "tags": {
+          "type": "string[]",
+          "required": false,
+          "description": "Suggested tags shown as chips, e.g. [\"idea\", \"todo\"]."
+        },
+        "placeholder": {
+          "type": "string",
+          "required": false,
+          "description": "The writing line prompt. Default \"Write a note…\"."
+        }
+      }
+    },
+    {
       "type": "focus-timer",
       "category": "composite",
       "description": "Pomodoro timer: focus, short break, a long break every Nth round; rounds toward goal_rounds, a log of finished rounds, an editable task. Use it, not separate timer widgets. Bind value.",
@@ -6522,6 +6549,38 @@
           "type": "{ phase: \"focus\" | \"short\" | \"long\"; remaining_s: number; running: boolean; rounds_done: number; task: string; log: string[] }",
           "required": false,
           "description": "Two-way bind with `bind: \"{state.focus}\"`. Written on start, pause, reset, skip, phase end and edits (not every second), so remaining_s is as of the last event. `log` holds the ISO time each focus round finished."
+        }
+      }
+    },
+    {
+      "type": "music-player",
+      "category": "composite",
+      "description": "Music player whose sounds are generated in the browser (no files or URLs): a playlist of preset tracks with play, skip, shuffle, repeat, seek and volume. Bind value.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "e.g. \"Focus mix\". Up to 80 characters."
+        },
+        "tracks": {
+          "type": "Array<{ id?: string; title: string; artist?: string; sound: \"rain\" | \"brown-noise\" | \"white-noise\" | \"ocean\" | \"forest\" | \"lofi\" | \"drone\" | \"piano\"; minutes?: number; color?: \"blue\" | \"violet\" | \"teal\" | \"green\" | \"amber\" | \"rose\" | \"orange\" | \"slate\" }>",
+          "required": true,
+          "description": "Up to 30 tracks. `sound` picks the generated preset (unknown falls back to drone); `minutes` is the track length, 1 to 60, default 3; `color` tints the cover."
+        },
+        "autoplay": {
+          "type": "boolean",
+          "required": false,
+          "description": "Highlights Play. Sound still starts only when the visitor presses it."
+        },
+        "volume": {
+          "type": "number",
+          "required": false,
+          "description": "Starting volume, 0 to 1. Default 0.7."
+        },
+        "value": {
+          "type": "{ index: number; playing: boolean; shuffle: boolean; repeat: boolean }",
+          "required": false,
+          "description": "Two-way bind with `bind: \"{state.music}\"`. Written on play, pause, track change and toggles. A restored value never starts sound."
         }
       }
     },

@@ -8,7 +8,16 @@ It is that commit's packages/svelte/static/manifest.json (generatedAt
 widget's "example" removed. One entry is newer: "model-viewer" is
 the one from branch feat/3d-widget at db6cd37 (its static/manifest.json, generatedAt
 2026-10-11T18:48:57.273Z: asset, annotations, focus and on_select), swapped in alone
-because a full refresh from there changes 35 other widgets this slice does not touch. The server never reads the examples, and one carries a
+because a full refresh from there changes 35 other widgets this slice does not touch.
+Two entries are added the same way, each alone: "notes" from branch feat/notes-widget
+at e402715 (qbtrix/ripple-iui#218, generatedAt 2026-10-12T04:44:27.731Z, upstream
+sha256 00823d14b2b5e92b4fbfe51b197b9fd42d53d35091214685be1e950a6cf5dbfa) and
+"music-player" from branch feat/music-player at 820fcbd (#217, generatedAt
+2026-10-12T04:42:27.975Z, upstream sha256
+a20b933cdaf41a27d081717e3017ab42969f5be93b3b9e8c9321ce1b2e71db30), each placed after
+the widget that precedes it upstream (207 widgets). interval-workout's optional
+per-exercise "figure" (#216) is not pulled: nothing here checks exercise rows, and the
+widget matches figures by name. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.
 
 Refresh (once the data widgets ship in a release, use the release asset):
