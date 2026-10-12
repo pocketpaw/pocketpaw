@@ -575,7 +575,8 @@ queued run, then in the background:
 ```
 LAUNCH  task text injection-screened; bound repo inside the allowlist; the
         launch clone (POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR, never the bound repo)
-        must share its GitHub origin; fetch + detach at origin/<base> (a cloud
+        is re-pointed at the bound repo's origin if it names another one (see
+        below); fetch + detach at origin/<base> (a cloud
         session starts from the local commit); `claude --cloud "<brief>"` under
         belt/pty_run.py (the CLI refuses a non-TTY), which streams the CLI's
         output, so a launch that times out (300 s) still shows what it printed;
@@ -604,6 +605,20 @@ TRACK   gh finds the PR whose body has the line `Belt-Run: <run id>`, then polls
                       PR escalates like a refusal
           timeout  -> headless_error, the run stays queued
 ```
+
+**One launch clone for every repo.** The claude CLI asks a folder-trust
+question the first time it runs in a new folder, and pty_run fails the launch
+there, so a per-repo launch folder would stall every new repo on that prompt.
+Belt keeps the one clone the CLI already trusts and re-points it instead: when
+the bound repo's GitHub slug differs from the clone's, `_launch` runs
+`git remote set-url origin https://github.com/<slug>.git` before the fetch and
+logs the switch (`launch clone origin <old> -> <new>`). The slug comes from the
+bound repo's origin through `_GH_SLUG` and is refused if a part is `.`, `..` or
+starts with `-`; git runs without a shell. The URL is always rebuilt from the
+slug, never copied, so credentials in the bound repo's remote never reach the
+clone. Every launch, worker or fixer, re-checks and re-points under the launch
+lock, so a fixer opens on the right repo even if another repo launched in
+between, and two launches never race on the remote.
 
 **Fixers.** A cloud worker stops once its PR is open, so a PR can get stuck
 after it: red CI on a runner the session never saw (an older Swift on macOS),
@@ -1230,7 +1245,7 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 |---|---|---|
 | `POCKETPAW_MANDATE_DISPATCHER` | `station` | `station` / `headless` / `bus` (above) |
 | `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`); `cloud` wires the cloud develop station instead (see *The cloud develop station*) |
-| `POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR` | unset | Cloud mode only, and required there: an existing clone of the bound repo's origin, already trusted by the claude CLI, that cloud sessions launch from |
+| `POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR` | unset | Cloud mode only, and required there: an existing git clone, already trusted by the claude CLI, that cloud sessions launch from; its origin is re-pointed to each bound repo per launch |
 | `POCKETPAW_FACTORY_CLOUD_PR_LABEL` | `fast-lane` | The label the cloud brief tells the session to put on its PR |
 | `POCKETPAW_FACTORY_CLOUD_POLL` | `60` | Seconds between `gh` polls of a cloud run's PR |
 | `POCKETPAW_FACTORY_CLOUD_TIMEOUT` | `14400` | Seconds a cloud run waits for its PR to merge or be refused before it fails back to queued |

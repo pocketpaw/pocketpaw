@@ -27,12 +27,22 @@
     ]
   },
   {
-    "label": "a launch clone on another origin still launches",
+    "label": "a launch clone on another repo is not re-pointed before the fetch",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "if await self._slug(launch) != slug:",
+    "find": "if was != slug:",
     "replace": "if False:",
     "tests": [
-      "tests/cloud/test_belt_cloud_station.py::test_launch_clone_on_another_origin_never_launches"
+      "tests/cloud/test_belt_cloud_station.py::test_launch_clone_on_another_origin_is_repointed_then_fetched",
+      "tests/cloud/test_belt_cloud_station.py::test_conflicting_pr_gets_one_rebase_fixer_then_merges"
+    ]
+  },
+  {
+    "label": "a dot or dash-led bound-repo slug reaches git",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "any(p in {\".\", \"..\"} or p.startswith(\"-\") for p in slug.split(\"/\"))",
+    "replace": "False",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_malformed_bound_repo_slug_is_refused"
     ]
   },
   {

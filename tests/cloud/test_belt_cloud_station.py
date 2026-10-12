@@ -10,8 +10,10 @@
 # launch clone detached at origin/<base> with a brief that names the issue, the
 # Belt-Run marker, the label and the charter check; a lane refusal attaches the
 # PR's diff and leaves the run PENDING at the per-diff gate; a launch with no
-# session URL, a launch clone on another origin, and a tracker timeout each leave
-# the run queued with ``headless_error`` (and the origin mismatch never launches);
+# session URL and a tracker timeout each leave the run queued with
+# ``headless_error``; a launch clone on another repo is re-pointed (``set-url``
+# before the fetch, for the worker and the fixer), one on the same repo is not,
+# and a malformed bound-repo slug is refused before any git runs in the clone;
 # the seated dev's instructions ride the brief, fenced; the PR's diff goes to
 # Clef's shadow scorer once the PR is known; a launch that times out keeps
 # the CLI output it streamed; a launch clone the CLI does not trust fails with
@@ -108,6 +110,7 @@ class FakeRunner:
         *,
         launch_out: str | list[str],
         launch_origin: str = SLUG,
+        repo_origin: str = SLUG,
         pr: dict | list[dict] | None = None,
         launch_code: int = 0,
         launch_lines: tuple[str, ...] = (),
@@ -119,6 +122,7 @@ class FakeRunner:
         self.launch_code = launch_code
         self.launch_lines = launch_lines  # streamed through on_line before returning
         self.launch_origin = launch_origin
+        self.repo_origin = repo_origin
         self.repo_fetch_code = repo_fetch_code  # ``git fetch`` in the bound repo
         self.prs = pr if isinstance(pr, list) else [pr]
         self.run_ref = ""
@@ -130,7 +134,7 @@ class FakeRunner:
     async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
         self.calls.append((list(argv), cwd))
         if "get-url" in argv:
-            slug = SLUG if cwd.name == "repo" else self.launch_origin
+            slug = self.repo_origin if cwd.name == "repo" else self.launch_origin
             return 0, f"https://github.com/{slug}.git\n", ""
         if "--cloud" in argv:
             for line in self.launch_lines:
@@ -267,15 +271,49 @@ async def test_no_session_url_leaves_the_run_queued(store, dirs):
     assert not any(a[0] == "gh" for a, _ in runner.calls)
 
 
-async def test_launch_clone_on_another_origin_never_launches(store, dirs):
+def _launch_git(runner: FakeRunner, launch: Path) -> list[list[str]]:
+    return [a for a, c in runner.calls if c == launch and "git" in a[0]]
+
+
+async def test_launch_clone_on_another_origin_is_repointed_then_fetched(store, dirs):
     repo, launch = dirs
     run_ref = await _queue(store, repo)
-    runner = FakeRunner(launch_out=SESSION, launch_origin="someone/else")
+    runner = FakeRunner(launch_out=SESSION, launch_origin="someone/else", pr=None)
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch, timeout_seconds=0).run(run_ref, workspace_id=WS)
+
+    git = _launch_git(runner, launch)
+    url = f"https://github.com/{SLUG}.git"
+    set_url = git.index([*cloud_station._GIT, "remote", "set-url", "origin", url])
+    fetch = next(i for i, a in enumerate(git) if a[-4:] == ["fetch", "-q", "origin", "main"])
+    assert set_url < fetch
+    assert any("--cloud" in a for a, _ in runner.calls)
+    assert any(a[:3] == ["gh", "pr", "list"] and SLUG in a for a, _ in runner.calls)
+
+
+async def test_launch_clone_on_the_same_origin_is_not_repointed(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, pr=None)
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch, timeout_seconds=0).run(run_ref, workspace_id=WS)
+
+    assert not any("set-url" in a for a in _launch_git(runner, launch))
+    assert any("--cloud" in a for a, _ in runner.calls)
+
+
+async def test_malformed_bound_repo_slug_is_refused(store, dirs):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = FakeRunner(launch_out=SESSION, launch_origin="someone/else", repo_origin="../evil")
 
     await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
     cc = (await store.get_action(run_ref)).parameters["_code_change"]
-    assert "origin is not" in cc["headless_error"]
+    assert "unsafe GitHub slug" in cc["headless_error"]
+    assert not any("set-url" in a or "fetch" in a for a in _launch_git(runner, launch))
     assert not any("--cloud" in a for a, _ in runner.calls)
 
 
@@ -420,13 +458,18 @@ async def test_conflicting_pr_gets_one_rebase_fixer_then_merges(store, dirs, sta
     repo, launch = dirs
     run_ref = await _queue(store, repo)
     stuck = _open(mergeable="CONFLICTING")
-    runner = FakeRunner(launch_out=SESSION, pr=[stuck, stuck, stuck, stuck, MERGED])
+    # The clone stays on another repo (as if another run used it in between).
+    runner = FakeRunner(
+        launch_out=SESSION, launch_origin="someone/else", pr=[stuck, stuck, stuck, stuck, MERGED]
+    )
     runner.run_ref = run_ref
 
     await _fixer(runner, launch).run(run_ref, workspace_id=WS)
 
     briefs = _briefs(runner)
     assert len(briefs) == 2  # the worker, then exactly one fixer
+    # The fixer re-points the clone too, so its session opens on the right repo.
+    assert sum("set-url" in a for a in _launch_git(runner, launch)) == 2
     fix = briefs[1]
     assert "#9" in fix and "`claude/g41-text`" in fix
     assert "rebase" in fix.lower() and "origin/main" in fix

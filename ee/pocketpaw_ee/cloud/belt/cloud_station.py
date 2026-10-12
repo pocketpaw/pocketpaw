@@ -5,10 +5,11 @@
 # ``CloudTaskDispatcher`` takes the headless dispatcher's seat: an approved plan
 # task is filed as the usual queued ``code_change`` run, then, in the background:
 #
-#   LAUNCH  the bound repo must be in the allowlist and its origin must be the
-#           launch clone's origin (``POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR``, a
-#           separate checkout the CLI already trusts). The task text is
-#           injection-screened. The launch clone is fetched and detached at
+#   LAUNCH  the bound repo must be in the allowlist with a GitHub origin. ONE
+#           launch clone (``POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR``, a checkout the
+#           CLI already trusts, never the bound repo) serves every repo: its
+#           origin is re-pointed to the bound repo's slug per launch (worker or
+#           fixer). The task text is injection-screened. It is fetched and detached at
 #           ``origin/<base>`` (a cloud session starts from the local commit), then
 #           ``claude --cloud "<brief>"`` runs under ``pty_run.py`` (the CLI refuses
 #           a non-TTY), which streams the CLI's output, so a launch that hits
@@ -219,11 +220,15 @@ class CloudTaskDispatcher:
         if launch == repo.resolve():
             raise CloudStationError("LAUNCH: the launch clone must not be the bound repo")
         slug = await self._slug(repo)
-        if await self._slug(launch) != slug:
-            raise CloudStationError(f"LAUNCH: the launch clone's origin is not {slug}")
         base = request.base_branch or "main"
         if not _SAFE_REF.match(base):
             raise CloudStationError(f"LAUNCH: unsafe base branch {base!r}")
+        was = await self._slug(launch, strict=False)
+        if was != slug:
+            # One trusted clone serves every repo: re-point it (we hold _LAUNCH_LOCK).
+            url = f"https://github.com/{slug}.git"
+            await self._ok([*_GIT, "remote", "set-url", "origin", url], launch, "LAUNCH: set-url")
+            logger.info("belt cloud: launch clone origin %s -> %s for run %s", was, slug, run_ref)
         await self._ok([*_GIT, "fetch", "-q", "origin", base], launch, "LAUNCH: git fetch")
         await self._ok(
             [*_GIT, "checkout", "-q", "--detach", f"origin/{base}"], launch, "LAUNCH: git checkout"
@@ -255,12 +260,21 @@ class CloudTaskDispatcher:
         logger.info("belt cloud: run %s launched %s", run_ref, session.group(0))
         return slug, session.group(0)
 
-    async def _slug(self, cwd: Path) -> str:
+    async def _slug(self, cwd: Path, *, strict: bool = True) -> str:
+        """``owner/repo`` of ``cwd``'s GitHub origin. Strict (the bound repo, whose
+        slug goes into git and gh argv) refuses ``.``/``..`` and dash-led parts;
+        the launch clone's current origin is only compared, so it reads "" when
+        it is not GitHub and gets re-pointed."""
         url = await self._ok([*_GIT, "remote", "get-url", "origin"], cwd, "LAUNCH: origin")
         found = _GH_SLUG.search(url.strip())
         if not found:
+            if not strict:
+                return ""
             raise CloudStationError(f"LAUNCH: {cwd.name} has no GitHub origin")
-        return found.group(1)
+        slug = found.group(1)
+        if strict and any(p in {".", ".."} or p.startswith("-") for p in slug.split("/")):
+            raise CloudStationError(f"LAUNCH: unsafe GitHub slug {slug!r}")
+        return slug
 
     async def _ok(self, argv: list[str], cwd: Path, step: str) -> str:
         code, out, err = await self.runner(argv, cwd=cwd, timeout=120.0)
@@ -663,7 +677,7 @@ def wire_cloud() -> bool:
     if not launch or not Path(launch).expanduser().is_dir():
         logger.error(
             "belt: NOT wiring the cloud develop station: POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR "
-            "must name an existing clone of the bound repo's origin."
+            "must name an existing git clone the claude CLI trusts."
         )
         return False
     set_production_dispatcher(
