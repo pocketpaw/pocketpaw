@@ -393,8 +393,15 @@ def test_only_the_data_widgets_list_typed_props():
         "comparison-layout {items: [{id,name,subtitle?,price?:number," in lines["comparison-layout"]
     )
     assert "winner?: {id,reason,runner_up?:{id,reason}}" in lines["comparison-layout"]
-    # booking and menu-order list only what the model writes; exec-dashboard its rows.
-    assert _fields(lines["booking"]) == "- booking {party?: number, preferred?: {date?,after?}"
+    # menu-order lists only what the model writes, booking its non-table fields too;
+    # exec-dashboard its rows.
+    booking = _fields(lines["booking"])
+    assert booking.startswith("- booking {services?: [{id,name,kind?:table|hair|")
+    assert booking.endswith(
+        "days?: [{date,date_label,slots:[{start,label,available:boolean}]}], "
+        "party?: number, preferred?: {date?,after?}"
+    )
+    assert "notice" not in booking and "confirmed" not in booking and "tz" not in booking
     menu = _fields(lines["menu-order"])
     assert menu.startswith("- menu-order {items: [{id?,product_id?,name?,")
     assert menu.endswith("featured?: {id,reason?}, preset?: [{id,qty:number}]")
@@ -445,6 +452,7 @@ def test_the_rules_point_each_answer_at_its_data_widget():
         "a menu-order: items by product_id",
         # booking's and growth-projection's fields are on their typed lines.
         "A booking is a booking.",
+        "for any other booking (a dentist, a haircut) write its services",
         "A meal plan is a meal-plan, one dish a recipe, a workout an interval-workout, "
         "study cards a flashcard-deck",
         "Savings or growth is a growth-projection.",

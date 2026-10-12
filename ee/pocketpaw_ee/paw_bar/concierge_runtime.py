@@ -1479,6 +1479,8 @@ _RIPPLE_RULES = (
     "widget holding only data. A trip "
     "is an itinerary. A menu or an order is a menu-order: items by product_id from the "
     "store-menu block (and name); the server fills the rest. A booking is a booking. "
+    "For a table leave out services and days (the server fills them); for any other "
+    "booking (a dentist, a haircut) write its services and a few days of slots. "
     "A meal plan is a meal-plan, one dish a recipe, a workout an "
     "interval-workout, study cards a flashcard-deck. Savings or growth is a "
     "growth-projection. Sales or report "

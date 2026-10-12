@@ -403,7 +403,7 @@ async def test_a_booking_gets_services_days_and_the_book_event():
             "party": 4,
             "preferred": {"date": data.today, "after": "18:00"},
             "days": [model_day],
-            "services": [{"id": "fake", "name": "Fake", "duration_min": 5}],
+            "services": [{"id": "fake", "name": "Fake", "kind": "table", "duration_min": 5}],
             "confirmed": {"booking_id": "BK-FAKE", "label": "now"},
             "notice": {"kind": "info", "text": "Booked!"},
         },
@@ -421,13 +421,88 @@ async def test_a_booking_gets_services_days_and_the_book_event():
     assert out["on_book"] == {"action": "emit", "target": "book"}
 
 
+_DENTIST = {
+    "type": "booking",
+    "props": {
+        "title": "Book a dentist appointment",
+        "services": [
+            {"id": "checkup", "name": "Checkup and clean", "kind": "health", "duration_min": 45},
+            {"id": "whitening", "name": "Whitening", "duration_min": 60, "price": 180},
+        ],
+        "days": [
+            {
+                "date": "2026-10-14",
+                "date_label": "Wed 14 Oct",
+                "slots": [
+                    {"start": "2026-10-14T09:00", "label": "9:00 AM", "available": True},
+                    {"start": "2026-10-14T11:30", "label": "11:30 AM", "available": False},
+                ],
+            }
+        ],
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_a_dentist_booking_keeps_its_own_services_and_is_never_wired():
+    """THE MUTATION THAT BREAKS THIS: fill every booking from the store again."""
+    data, _ = await _load()
+
+    out = _fill(_DENTIST, data)
+
+    assert out["props"]["services"] == _DENTIST["props"]["services"]
+    assert out["props"]["days"] == _DENTIST["props"]["days"]
+    assert "Table reservation" not in json.dumps(out)
+    assert "on_book" not in out and "notice" not in out["props"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "props",
+    [
+        {"party": 4},
+        {"party": 4, "services": [{"id": "dinner", "name": "Dinner table", "duration_min": 90}]},
+        {"services": [{"id": "x", "name": "Seats", "kind": "table", "duration_min": 60}]},
+        {"services": [{"id": "table", "name": "Our usual", "duration_min": 60}]},
+    ],
+)
+async def test_a_table_booking_still_gets_the_stores_table_service(props):
+    data, _ = await _load()
+
+    out = _fill({"type": "booking", "props": props}, data)
+
+    assert out["props"]["services"] == [dict(s) for s in data.services]
+    assert out["props"]["services"][0]["name"] == "Table reservation"
+    assert out["on_book"] == {"action": "emit", "target": "book"}
+
+
+@pytest.mark.parametrize(
+    ("why", "service", "day"),
+    [
+        ("html in a service name", {"id": "a", "name": "<b>Clean</b>", "duration_min": 30}, {}),
+        ("an unknown service kind", {"id": "a", "name": "A", "kind": "spa", "duration_min": 30}, {}),
+        ("a zero duration", {"id": "a", "name": "A", "duration_min": 0}, {}),
+        ("a bad date", {"id": "a", "name": "A", "duration_min": 30}, {"date": "Wednesday"}),
+        ("html in a day label", {"id": "a", "name": "A", "duration_min": 30}, {"date_label": "<i>"}),
+    ],
+)
+def test_a_model_written_booking_is_plain_data(why, service, day):
+    props = _DENTIST["props"]
+    ui = {
+        "type": "booking",
+        "props": {**props, "services": [service], "days": [{**props["days"][0], **day}]},
+    }
+    assert _fill(ui, None) is None, why
+
+
 @pytest.mark.asyncio
 async def test_with_no_slots_a_booking_says_times_are_unavailable():
     from pocketpaw_ee.paw_bar.card_spec import STORE_DOWN_NOTICE
 
     for fake in (_Store(_routes(day_count=0)), _Store(_routes(), fail=("/api",))):
         data, _ = await _load(fake=fake)
-        out = _fill({"type": "booking", "props": {"party": 2, "days": [{"date": "x"}]}}, data)
+        day = {"date": "2020-01-01", "date_label": "x", "slots": []}
+        out = _fill({"type": "booking", "props": {"party": 2, "days": [day]}}, data)
 
         assert "days" not in out["props"] and "tz" not in out["props"]
         assert out["props"]["notice"] == STORE_DOWN_NOTICE

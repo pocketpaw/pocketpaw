@@ -148,12 +148,13 @@ RIPPLE_CHROME: frozenset[str] = frozenset(
 )
 # The data widgets: the model writes a few lines of data and the widget draws the
 # card. Listed with typed props, minus the ones every data widget shares (the rules
-# teach those once). booking and menu-order list only what the model writes (the
-# server fills the rest); exec-dashboard its rows mode only, so the model writes
-# rows instead of prebuilt KPI tiles and charts.
+# teach those once). menu-order lists only what the model writes (the server fills
+# the rest); booking its services and days too, which the model writes only for a
+# booking that is not a table (``_fill_booking``); exec-dashboard its rows mode only,
+# so the model writes rows instead of prebuilt KPI tiles and charts.
 RIPPLE_DATA_WIDGETS: dict[str, frozenset[str] | None] = {
     "itinerary": None,
-    "booking": frozenset({"party", "preferred"}),
+    "booking": frozenset({"services", "days", "party", "preferred"}),
     "menu-order": frozenset({"items", "featured", "preset"}),
     "growth-projection": None,
     "recipe": None,
@@ -224,6 +225,15 @@ MUSIC_SOUNDS: frozenset[str] = frozenset(
 )
 TRACKS = (1, 30)
 TRACK_MINUTES = (1, 60)
+# A model-written booking (a dentist, a haircut; a table is the store's): services and
+# days as plain data within these caps, a service ``kind`` one of the widget's.
+BOOKING_KINDS: frozenset[str] = frozenset({"table", "hair", "beauty", "health", "class", "other"})
+BOOKING_SERVICES, BOOKING_DAYS, BOOKING_SLOTS = 20, 14, 48
+BOOKING_DURATION = (1, 1440)
+BOOKING_PARTY = (1, 100)
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# A service that reads as a table: the store's table service replaces the model's.
+_TABLE_SERVICE = re.compile(r"\b(table|dining|dinner|lunch|brunch|restaurant)\b", re.IGNORECASE)
 # Names ripple's registry also draws as one of these widgets, which its chat allowlist
 # refuses: a node by one is checked and sent under the widget's own name, a board-game
 # alias filling a missing ``game``.
@@ -1349,7 +1359,64 @@ def _check_music_player(node: dict[str, Any], props: dict[str, Any]) -> None:
             raise _Reject("a music track that is not a preset sound with plain text")
 
 
+def _check_booking(node: dict[str, Any], props: dict[str, Any]) -> None:
+    """A model-written ``services`` (at most ``BOOKING_SERVICES``, each a plain ``id``
+    and ``name``, whole ``duration_min``, a ``BOOKING_KINDS`` kind, a number ``price``,
+    a ``party`` range) and ``days`` (at most ``BOOKING_DAYS``, a YYYY-MM-DD ``date``, a
+    plain ``date_label`` and up to ``BOOKING_SLOTS`` plain slots) are plain data."""
+
+    def service_ok(s: Any) -> bool:
+        party = s.get("party") if isinstance(s, dict) else None
+        return (
+            isinstance(s, dict)
+            and _text_ok(s.get("id"), 60)
+            and _text_ok(s.get("name"), NOTE_TITLE_MAX)
+            and _is_int(s.get("duration_min"), BOOKING_DURATION)
+            and _optional(s, "kind", lambda v: v in BOOKING_KINDS)
+            and _optional(s, "price", lambda v: _is_number(v) and v >= 0)
+            and (
+                party is None
+                or isinstance(party, dict)
+                and _is_int(party.get("min"), BOOKING_PARTY)
+                and _is_int(party.get("max"), BOOKING_PARTY)
+            )
+        )
+
+    def slot_ok(s: Any) -> bool:
+        return (
+            isinstance(s, dict)
+            and _text_ok(s.get("start"), 40)
+            and _text_ok(s.get("label"), 20)
+            and isinstance(s.get("available"), bool)
+        )
+
+    def day_ok(d: Any) -> bool:
+        slots = d.get("slots") if isinstance(d, dict) else None
+        return (
+            isinstance(d, dict)
+            and isinstance(d.get("date"), str)
+            and bool(_DATE.fullmatch(d["date"]))
+            and _text_ok(d.get("date_label"), 40)
+            and isinstance(slots, list)
+            and len(slots) <= BOOKING_SLOTS
+            and all(map(slot_ok, slots))
+        )
+
+    services, days = props.get("services"), props.get("days")
+    if services is not None and not (
+        isinstance(services, list)
+        and len(services) <= BOOKING_SERVICES
+        and all(map(service_ok, services))
+    ):
+        raise _Reject("booking services that are not plain data within the widget's caps")
+    if days is not None and not (
+        isinstance(days, list) and len(days) <= BOOKING_DAYS and all(map(day_ok, days))
+    ):
+        raise _Reject("booking days that are not plain data within the widget's caps")
+
+
 _DATA_CHECKS = {"notes": _check_notes, "music-player": _check_music_player}
+_DATA_CHECKS["booking"] = _check_booking
 
 _PLAY_CHECKS = {
     "memory-match": _check_memory_match,
@@ -1572,16 +1639,20 @@ def _fill_store(value: Any, store: Any, profile: CardProfile) -> Any:
             wired
             and store is not None
             and wired[1] in profile.host_events
-            and _usable(out["props"])
+            and _usable(out["props"], store)
         ):
             out[wired[0]] = {"action": "emit", "target": wired[1]}
     return out
 
 
-def _usable(props: dict[str, Any]) -> bool:
+def _usable(props: dict[str, Any], store: Any) -> bool:
     """Whether a filled widget can fire: a menu that checks out, a booking with the
-    store's services and days. With no store nothing is wired: the card is display."""
-    return props.get("checkout") is True or bool(props.get("days") and props.get("services"))
+    store's services and days (a booking that kept the model's own services is
+    display). With no store nothing is wired: the card is display."""
+    services = getattr(store, "services", None)
+    return props.get("checkout") is True or bool(
+        props.get("days") and services and props.get("services") == list(services)
+    )
 
 
 def _store_items(items: Any, store: Any, *, menu: bool) -> tuple[list[Any], bool]:
@@ -1635,14 +1706,34 @@ def _fill_menu_order(props: dict[str, Any], store: Any) -> dict[str, Any]:
     return props
 
 
+def _table_booking(services: Any, store: Any) -> bool:
+    """Whether a booking is the store's: the model wrote no services, or one that
+    reads as a table (kind "table", a dining word in its name or id) or names one of
+    the store's service ids. A dentist or a haircut keeps the model's own."""
+    if not isinstance(services, list) or not services:
+        return True
+    ids = {s.get("id") for s in getattr(store, "services", None) or ()}
+    return any(
+        isinstance(s, dict)
+        and (
+            s.get("kind") == "table"
+            or s.get("id") in ids
+            or _TABLE_SERVICE.search(f"{s.get('name', '')} {s.get('id', '')}")
+        )
+        for s in services
+    )
+
+
 def _fill_booking(props: dict[str, Any], store: Any) -> dict[str, Any]:
-    """Services and 7 days of slots from the store; a calm notice when it is down.
-    ``confirmed`` and ``notice`` are the host's to write."""
+    """Services and 7 days of slots from the store for a table booking
+    (``_table_booking``); a calm notice when it is down. Any other booking keeps
+    the model's services and days and is display only (``_usable``). ``confirmed``
+    and ``notice`` are the host's to write."""
     import copy
 
     props.pop("confirmed", None)
     props.pop("notice", None)
-    if store is None:
+    if store is None or not _table_booking(props.get("services"), store):
         return props
     for key in ("services", "days", "tz"):
         props.pop(key, None)

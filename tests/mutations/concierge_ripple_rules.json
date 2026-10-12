@@ -1079,7 +1079,7 @@
   {
     "label": "DW-10: handlers are wired on a widget that cannot fire",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "and _usable(out[\"props\"])",
+    "find": "and _usable(out[\"props\"], store)",
     "replace": "",
     "tests": [
       "tests/cloud/test_paw_bar_store_hydration.py::test_with_no_slots_a_booking_says_times_are_unavailable",
@@ -1755,6 +1755,42 @@
     "replace": "            if False:\n",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_a_streamed_model_viewer_src_is_refused_before_the_card_closes"
+    ]
+  },
+  {
+    "label": "BK-1: every booking is filled from the store again",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "if store is None or not _table_booking(props.get(\"services\"), store):",
+    "replace": "if store is None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_dentist_booking_keeps_its_own_services_and_is_never_wired"
+    ]
+  },
+  {
+    "label": "BK-2: a booking with the model's own services is wired to the store",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "props.get(\"days\") and services and props.get(\"services\") == list(services)",
+    "replace": "props.get(\"days\") and props.get(\"services\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_dentist_booking_keeps_its_own_services_and_is_never_wired"
+    ]
+  },
+  {
+    "label": "BK-3: a model-written booking is not checked",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_DATA_CHECKS[\"booking\"] = _check_booking",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_model_written_booking_is_plain_data"
+    ]
+  },
+  {
+    "label": "BK-4: a dining word no longer reads as a table",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "or _TABLE_SERVICE.search(",
+    "replace": "or False and _TABLE_SERVICE.search(",
+    "tests": [
+      "tests/cloud/test_paw_bar_store_hydration.py::test_a_table_booking_still_gets_the_stores_table_service"
     ]
   }
 ]
