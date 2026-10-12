@@ -87,6 +87,8 @@ class CharterRequest(BaseModel):
     # Each argv[0] must be an operator-allowed command (``command_refusal``).
     checks: list[str] = Field(default_factory=list)
     recipes: dict[str, str] = Field(default_factory=dict)
+    # The GitHub ``issues`` patrol takes an open issue carrying one of these.
+    issue_labels: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("checks")
     @classmethod

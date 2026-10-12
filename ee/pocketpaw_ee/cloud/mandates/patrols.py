@@ -4,13 +4,20 @@
 # Sighting DRAFTS (plain dicts). ``service.run_patrols`` persists them, deduped
 # on ``service._dedup_signal``; patrols never touch the store, which keeps
 # service.py the sole Beanie importer. ``run_patrols`` passes ``workspace_id`` /
-# ``user_id`` / ``upstream`` only to patrols whose signature names them.
+# ``user_id`` / ``upstream`` / ``issue_labels`` only to patrols whose signature
+# names them.
 #
 #   * ``deps``     — the bound repo's manifest (pyproject.toml / package.json)
 #                    against ``KNOWN_STALE``, a hardcoded demo table (the parse
 #                    and sighting plumbing are real; the advisory data is not).
-#   * ``issues``   — OPEN issues on the bound repo's GitLab project through
-#                    ``connectors_service.execute``, one sighting per issue.
+#   * ``issues``   — OPEN issues on the bound repo's tracker, one sighting per
+#                    issue. A GitHub ``origin`` reads ``gh issue list`` and takes
+#                    issues carrying a charter ``issue_labels`` label (none =
+#                    nothing), keyed ``github:<owner>/<repo>#<n>`` (also the
+#                    source key hand-filed feedback sightings use, so the
+#                    service dedupes across both); closed issues are never
+#                    listed. Any other origin reads the GitLab project through
+#                    ``connectors_service.execute``.
 #   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
 #                    ``rev`` comes from a TOML pin file in the bound repo, the
 #                    delta from ``gh api repos/<repo>/compare/<pin>...HEAD``.
@@ -20,9 +27,10 @@
 #   * ``feedback`` — intake only (``service.file_feedback``); no callable here.
 #
 # Failure posture: a patrol never raises into the shift trigger. ``deps`` and
-# ``issues`` degrade to zero sightings; ``upstream`` files one severity-1
-# sighting naming the problem (gh missing, bad pin file, API error), since a
-# silent watch on a pinned engine is worse than a noisy one.
+# ``issues`` degrade to zero sightings (an unsafe GitHub slug never reaches gh);
+# ``upstream`` files one severity-1 sighting naming the problem (gh missing, bad
+# pin file, API error), since a silent watch on a pinned engine is worse than a
+# noisy one.
 #
 # Security: manifests and pin files are DATA, parsed with tomllib/json, never
 # executed. External calls go through injectable seams (``execute``, ``gh``) with
@@ -201,8 +209,14 @@ async def issues_patrol(
     project: str | None = None,
     connector: str = _ISSUES_CONNECTOR,
     execute: ConnectorExecuteFn | None = None,
+    issue_labels: list[str] | None = None,
+    gh: GhFn | None = None,
 ) -> list[SightingDraft]:
-    """The ``issues`` patrol — flag OPEN issues on the bound repo's GitLab project.
+    """The ``issues`` patrol — flag OPEN issues on the bound repo's tracker.
+
+    A bound repo whose ``origin`` is on GitHub goes to ``_github_issues``
+    (``gh issue list``, filtered on the charter's ``issue_labels``); any other
+    repo keeps the GitLab path below.
 
     Reads a LIVE signal: calls the ``gitlab`` connector's ``list_issues`` action
     through ``connectors_service.execute`` (a genuine httpx call in CLOUD mode),
@@ -220,6 +234,10 @@ async def issues_patrol(
     Resilience: a connector failure, an unbound connector, a non-success response,
     or a malformed payload all yield ZERO sightings — the patrol NEVER raises into
     the shift trigger (same contract as ``deps``)."""
+    runner_gh = gh or _default_gh
+    slug = await _github_slug(repo_id, runner_gh)
+    if slug is not None:
+        return await _github_issues(slug, issue_labels or [], runner_gh)
     proj = project
     if not proj:
         proj = Path(repo_id).expanduser().name
@@ -318,6 +336,100 @@ async def _default_execute(
     return await connectors_service.execute(
         workspace_id, name, ExecuteActionRequest.model_validate(body), user_id=user_id
     )
+
+
+# The GitHub half of ``issues``: open issues through ``gh issue list`` (argv,
+# scrubbed env), taken when they carry a charter ``issue_labels`` label. The
+# source key ``github:<owner>/<repo>#<n>`` is also the dedup key, so an issue a
+# human already filed through the feedback intake is not sighted twice.
+_GH_ISSUE_LIMIT = "100"
+
+
+async def _github_slug(repo_id: str, gh: GhFn) -> str | None:
+    """``owner/repo`` when the bound repo's ``origin`` is on GitHub, ``""`` when
+    it is but the slug is unsafe for ``-R`` (a ``.``/``..`` or dash-led part),
+    ``None`` when it is not GitHub (or unreadable): the GitLab path."""
+    from pocketpaw_ee.cloud.belt.cloud_station import _GH_SLUG
+
+    try:
+        code, out, _ = await gh(
+            ["git", "-C", str(Path(repo_id).expanduser()), "remote", "get-url", "origin"]
+        )
+    except Exception:  # noqa: BLE001 — no git, no origin: not a GitHub repo
+        return None
+    found = _GH_SLUG.search(out.strip()) if code == 0 else None
+    if not found:
+        return None
+    slug = found.group(1)
+    if any(p in {".", ".."} or p.startswith("-") for p in slug.split("/")):
+        logger.warning("issues patrol: unsafe GitHub slug %r — zero sightings", slug)
+        return ""
+    return slug
+
+
+async def _github_issues(slug: str, labels: list[str], gh: GhFn) -> list[SightingDraft]:
+    """One draft per OPEN issue on ``slug`` carrying a label in ``labels``
+    (case-insensitive). No labels = nothing (the charter opts in). A gh failure
+    or a malformed payload is zero sightings; closed issues are never listed."""
+    wanted = {label.strip().lower() for label in labels if label.strip()}
+    if not slug or not wanted:
+        return []
+    argv = [
+        "gh",
+        "issue",
+        "list",
+        "-R",
+        slug,
+        "--state",
+        "open",
+        "--limit",
+        _GH_ISSUE_LIMIT,
+        "--json",
+        "number,title,body,labels,url",
+    ]
+    try:
+        code, out, err = await gh(argv)
+        issues = json.loads(out) if code == 0 else None
+    except Exception:  # noqa: BLE001 — a gh failure must not wedge the shift
+        logger.warning("issues patrol: gh issue list failed for %s", slug, exc_info=True)
+        return []
+    if not isinstance(issues, list):
+        logger.info(
+            "issues patrol: gh issue list %s gave nothing (exit %s): %s",
+            slug,
+            code,
+            (err or "")[-200:],
+        )
+        return []
+    drafts: list[SightingDraft] = []
+    for issue in issues:
+        if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
+            continue
+        names = [
+            str(lb.get("name") or "") for lb in issue.get("labels") or [] if isinstance(lb, dict)
+        ]
+        if not wanted & {n.lower() for n in names}:
+            continue
+        n, title = issue["number"], str(issue.get("title") or "").strip()
+        body = str(issue.get("body") or "").strip()
+        key = f"github:{slug}#{n}"
+        drafts.append(
+            {
+                "patrol": "issues",
+                "severity": _issue_severity({"labels": names}),
+                "summary": f"GitHub issue #{n}: {title}\n{body}"[:280],
+                "evidence": {
+                    "number": n,
+                    "title": title,
+                    "labels": names,
+                    "url": issue.get("url"),
+                    "text": body[:4000],
+                    "source": key,
+                    "dedup_key": key,
+                },
+            }
+        )
+    return drafts
 
 
 # ---------------------------------------------------------------------------

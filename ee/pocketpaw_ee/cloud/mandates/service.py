@@ -4,55 +4,44 @@
 # that imports those Beanie classes, per the 4-file entity rule).
 #
 # Public API (module-level ``async def op(workspace_id, user_id, body) -> dict``):
-# create (the repo must sit inside the workspace's belt allowlist roots)/list/get
-# mandates; file_feedback, list_sightings, run_patrols (patrols
-# that accept ``workspace_id`` / ``user_id`` / ``upstream`` get them via
-# signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
-# (sense → foreman → plan gate; a proposed plan is also handed to
-# ``belt.clef.shadow_plan``, which scores it in the background and gates
-# nothing, unless ``POCKETPAW_BELT_PLAN_GATE=auto``: then the trigger awaits the
-# score and ``plan_policy.decide`` approves the plan as ``system:belt-policy`` or
-# leaves it for a human); prepare_plan_resolution + resolve_plan (the one
-# resolve path, shared by the ``plan/resolve`` route and the auto gate); get_pawprints;
-# set_autopilot; set_crew (the roster; each NEW agent must be one the caller can
-# read in this workspace, enabled); digest (the morning report, composed only
-# from the read functions above plus the belt runs list).
+# create (the repo must sit inside the workspace's belt allowlist roots) / list /
+# get mandates; file_feedback, list_sightings; run_patrols (each patrol gets the
+# ``workspace_id`` / ``user_id`` / ``upstream`` / ``issue_labels`` its signature
+# names; a draft is skipped when its patrol already filed the same
+# ``_dedup_signal``, or when its ``dedup_key`` is any sighting's ``source`` or
+# ``dedup_key``, so a hand-filed ``github:<owner>/<repo>#<n>`` is not re-sighted);
+# trigger_shift (sense → foreman → plan gate; Clef's ``shadow_plan`` scores the
+# plan in the background, or, under ``POCKETPAW_BELT_PLAN_GATE=auto``, inline for
+# ``plan_policy.decide``); prepare_plan_resolution + resolve_plan (the one resolve
+# path, shared by the ``plan/resolve`` route and the auto gate); get_pawprints;
+# set_autopilot; set_crew (each NEW agent must be readable by the caller, in this
+# workspace, enabled); digest (the morning report, from the reads above plus the
+# belt runs list).
 #
-# The CREW: a roster of cloud Agents on the mandate (``MandateDoc.crew``). The
-# dispatcher seats each plan task on a dev (``crew_seat_for_task``: live dev
-# seats in roster order, ``pick_dev`` round-robin by task index); the headless
-# runner then reads that agent's CURRENT model + instructions
-# (``crew_worker``) so an edit in the agent editor reaches the next develop.
-# Every read is ``agents.service.get_for_viewer`` as the seat's ``seated_by``
-# (the admin who seated that agent; a later roster save keeps it), so an agent
-# that admin can no longer read is a gone seat. Agents are read through
-# ``agents.service`` (never its Beanie doc).
+# The CREW (``MandateDoc.crew``): ``crew_seat_for_task`` seats a plan task on a
+# live dev (roster order, ``pick_dev`` round-robin); ``crew_worker`` reads that
+# agent's CURRENT model + instructions at develop time. Every read is
+# ``agents.service.get_for_viewer`` as the seat's ``seated_by``, so an agent that
+# admin can no longer read is a gone seat.
 #
-# The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands.
-# The foreman and the digest both read it by joining the mandate's belt run rows
-# (``plan_action_id`` + ``task_index``) to the ``belt_plan`` tasks' evidence refs;
-# the shift trigger persists what it finds resolved on the sighting
-# (``resolved_by_run``), because the runs list only reaches the newest actions.
-# A task landed on the mandate's line is built either way; its ``line`` says
-# whether the base holds it yet (``belt.executor.line_merged``). The detail's
-# ``line`` block and the Foreman's THE LINE read git (``line_status``).
+# The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands
+# (the mandate's run rows joined to the plan tasks' evidence refs). The shift
+# trigger persists what it finds resolved (``resolved_by_run``), since the runs
+# list only reaches the newest actions. The detail's ``line`` block and the
+# foreman's THE LINE read git (``belt.executor.line_status`` / ``line_merged``).
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
-# charter_for_mandate (the develop station's checks/recipes/goal read),
-# crew_seat_for_task, crew_worker, file_station_sighting (the develop station's
-# line conflict, deduped like a patrol's), list_autopilot_enabled,
-# executor_revalidate, mark_shift, has_continuous_mandate, and list_cadence_due —
-# the cadence scheduler's cross-workspace read of ACTIVE mandates that are due:
-# daily / weekly once that interval has elapsed since the last shift, continuous
-# once the last shift's work is finished and open work remains (``_continuous_due``),
-# manual never (N+1, one shift read per mandate; fine at current mandate counts).
+# charter_for_mandate, crew_seat_for_task, crew_worker, file_station_sighting,
+# list_autopilot_enabled, executor_revalidate, mark_shift, has_continuous_mandate,
+# and list_cadence_due: the scheduler's cross-workspace read of ACTIVE mandates
+# that are due (daily / weekly by interval; continuous by ``_continuous_due``,
+# which first runs the ``issues`` patrol on a mandate that toggles it; manual
+# never; N+1 reads, fine at current mandate counts).
 #
-# Conventions (cloud entity rules): validate body at entry
-# (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
-# request-path find; emit an event on every write (or ``# no-event: <reason>``);
-# errors via ``_core.errors`` CloudError subclasses (never HTTPException). The
-# Action-blob back-write goes through ``InstinctStore.update_parameters`` via the
-# shared ``cloud/_core/proposals.update_action_blob``.
+# Conventions (cloud entity rules): validate body at entry; tenant filter
+# ``workspace=...`` on EVERY request-path find; emit an event on every write (or
+# ``# no-event: <reason>``); errors via ``_core.errors`` CloudError subclasses.
+# Action-blob back-writes go through ``InstinctStore.update_parameters``.
 
 from __future__ import annotations
 
@@ -106,6 +95,7 @@ def _charter_from_request(req: CreateMandateRequest) -> Charter:
         cadence=req.charter.cadence,
         checks=list(req.charter.checks),
         recipes=dict(req.charter.recipes),
+        issue_labels=list(req.charter.issue_labels),
     )
 
 
@@ -124,6 +114,7 @@ def _charter_to_wire(charter: Charter) -> dict[str, Any]:
         "cadence": charter.cadence,
         "checks": list(charter.checks),
         "recipes": dict(charter.recipes),
+        "issue_labels": list(charter.issue_labels),
     }
 
 
@@ -477,14 +468,20 @@ def _dedup_signal(evidence: dict[str, Any] | None, summary: str | None) -> str:
     return str(signal)
 
 
-async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[str, Any]:
-    """Run every registered patrol over the mandate's surface and persist the
-    resulting Sightings.
+async def run_patrols(
+    workspace_id: str, user_id: str, mandate_id: str, *, only: frozenset[str] | None = None
+) -> dict[str, Any]:
+    """Run every registered patrol over the mandate's surface (or just the
+    toggled ones named in ``only``) and persist the resulting Sightings.
 
     Dedup: a draft whose dedup signal (``evidence.iid`` for issues,
     ``evidence.package`` for deps, else the summary) already has a sighting from
     the same patrol on this mandate is skipped — repeated shift triggers must not
-    spam the foreman with identical signals. Returns the NEW sightings only."""
+    spam the foreman with identical signals. A draft whose ``evidence.dedup_key``
+    is any existing sighting's ``source`` or ``dedup_key`` is skipped too,
+    whatever patrol filed it: a GitHub issue (``github:<owner>/<repo>#<n>``)
+    filed by hand through the feedback intake is not sighted again by the
+    ``issues`` patrol. Returns the NEW sightings only."""
     from pocketpaw_ee.cloud.mandates.patrols import PATROLS
 
     doc = await _fetch_mandate(workspace_id, mandate_id)
@@ -493,6 +490,12 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
         SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
     ).to_list()
     seen_keys = {(s.patrol, _dedup_signal(s.evidence, s.summary)) for s in existing}
+    seen_refs = {
+        str(ref)
+        for s in existing
+        for ref in ((s.evidence or {}).get("source"), (s.evidence or {}).get("dedup_key"))
+        if ref
+    }
 
     created: list[SightingDoc] = []
     enabled = set(doc.patrols or [])
@@ -500,7 +503,7 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
         # UI contract — the mandate's ``patrols`` toggles scope the sense loop;
         # an un-toggled patrol never runs. (The "feedback" intake endpoint is a
         # human channel and stays open regardless — it has no sense callable.)
-        if patrol_name not in enabled:
+        if patrol_name not in enabled or (only is not None and patrol_name not in only):
             continue
         try:
             # Patrols take ``repo_id`` positionally; a LIVE patrol (e.g. ``issues``)
@@ -516,6 +519,8 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
                 kwargs["user_id"] = user_id
             if "upstream" in params:
                 kwargs["upstream"] = [u.model_dump() for u in doc.upstream]
+            if "issue_labels" in params:
+                kwargs["issue_labels"] = list(doc.charter.issue_labels)
             drafts = await patrol(doc.surface.repo_id, **kwargs)
         except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
             logger.warning("mandate: patrol %r raised — skipping", patrol_name, exc_info=True)
@@ -525,9 +530,12 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
                 str(draft.get("patrol") or patrol_name),
                 _dedup_signal(draft.get("evidence"), draft.get("summary")),
             )
-            if key in seen_keys:
+            ref = str((draft.get("evidence") or {}).get("dedup_key") or "")
+            if key in seen_keys or (ref and ref in seen_refs):
                 continue
             seen_keys.add(key)
+            if ref:
+                seen_refs.add(ref)
             sighting = SightingDoc(
                 workspace=workspace_id,
                 mandate_id=mandate_id,
@@ -2293,7 +2301,9 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
     same backlog), none of its runs is still in flight, and an open sighting no
     task is working remains. A shift older than the stall timeout stops holding
     the next one through in-flight runs or a stuck ``planning`` / ``executing``
-    state; a plan waiting ``in_gate`` for a human always holds it."""
+    state; a plan waiting ``in_gate`` for a human always holds it. Past those
+    holds, a mandate that toggles the ``issues`` patrol runs it before the
+    backlog read, so a new GitHub issue is sighted without waiting for a shift."""
     from pocketpaw_ee.cloud.belt import service as belt_service
 
     gap = timedelta(
@@ -2328,6 +2338,16 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
             for r in runs
         ):
             return False
+
+    if "issues" in (doc.patrols or []):
+        # No shift senses a continuous mandate whose backlog is empty, so the
+        # due check runs its issues patrol itself (one ``gh issue list``).
+        try:
+            await run_patrols(
+                doc.workspace, _SCHEDULER_ACTOR, mandate_id, only=frozenset({"issues"})
+            )
+        except Exception:  # noqa: BLE001 — a failed sense never sinks the due check
+            logger.warning("mandate: issues patrol failed for %s", mandate_id, exc_info=True)
 
     backlog = await _backlog(
         doc.workspace, mandate_id, runs, since=last.createdAt if last else None

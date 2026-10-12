@@ -98,6 +98,10 @@ class Charter(BaseModel):
     deterministic command a plan task can run instead of an LLM develop (e.g.
     ``{"bump-photo": "node scripts/bump-craft-engine.mjs photo"}``). Both are
     argv strings split with ``shlex`` — never run through a shell.
+
+    ``issue_labels`` scopes the ``issues`` patrol on a GitHub-bound repo: an
+    open issue is sighted when it carries one of these labels (e.g.
+    ``["line:flare"]``). Empty = the GitHub patrol takes nothing.
     """
 
     goal: str
@@ -108,6 +112,7 @@ class Charter(BaseModel):
     cadence: Cadence = "weekly"
     checks: list[str] = Field(default_factory=list)
     recipes: dict[str, str] = Field(default_factory=dict)
+    issue_labels: list[str] = Field(default_factory=list)
 
 
 class Surface(BaseModel):

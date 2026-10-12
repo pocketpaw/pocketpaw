@@ -1,0 +1,227 @@
+# tests/cloud/test_belt_github_issues_patrol.py — the ``issues`` patrol on GitHub.
+#
+# A mandate whose bound repo has a GitHub origin reads its open issues through
+# ``gh issue list`` and files one sighting per issue that carries a label from
+# the charter's ``issue_labels``. ``gh`` (and the ``git remote get-url`` that
+# finds the slug) is a fake executor here; nothing touches the network.
+#
+# Pinned: label matching (case-insensitive, objects from ``--json labels``),
+# severity (p1 and bug 4, p2 3), an empty ``issue_labels`` takes nothing, a
+# GitLab-bound repo keeps the connector path, an unsafe slug never reaches gh, a
+# gh failure files nothing; through mongomock, ``run_patrols`` dedupes on
+# ``github:<owner>/<repo>#<n>`` across patrols (a hand-filed feedback sighting
+# with that source blocks the patrol's copy), and the continuous due check runs
+# the issues patrol first, only on mandates that toggle it.
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("pocketpaw_ee")
+pytest.importorskip("mongomock_motor")
+
+pytestmark = pytest.mark.usefixtures("any_repo_root")
+
+from pocketpaw_ee.cloud.mandates import patrols  # noqa: E402
+from pocketpaw_ee.cloud.mandates.patrols import issues_patrol  # noqa: E402
+
+SLUG = "qbtrix/creative-core"
+
+
+def _issue(n: int, *labels: str, title: str = "") -> dict:
+    return {
+        "number": n,
+        "title": title or f"Issue {n}",
+        "body": f"**Behavior**\nthing {n}\n\n**Acceptance test**\nit works",
+        "labels": [{"name": name, "color": "ffffff", "description": ""} for name in labels],
+        "url": f"https://github.com/{SLUG}/issues/{n}",
+    }
+
+
+class FakeGh:
+    """Answers ``git remote get-url`` with ``origin`` and ``gh issue list`` with
+    ``issues``; records every argv."""
+
+    def __init__(self, issues: list[dict], *, origin: str = SLUG, code: int = 0) -> None:
+        self.issues = issues
+        self.origin = origin
+        self.code = code
+        self.calls: list[list[str]] = []
+
+    async def __call__(self, argv: list[str]) -> tuple[int, str, str]:
+        self.calls.append(list(argv))
+        if "get-url" in argv:
+            return 0, f"https://github.com/{self.origin}.git\n", ""
+        if argv[:3] == ["gh", "issue", "list"]:
+            return self.code, json.dumps(self.issues), "HTTP 502" if self.code else ""
+        raise AssertionError(f"unexpected argv {argv}")
+
+
+def _issue_lists(gh: FakeGh) -> list[list[str]]:
+    return [a for a in gh.calls if a[:3] == ["gh", "issue", "list"]]
+
+
+async def _patrol(gh: FakeGh, labels: list[str], tmp_path: Path) -> list[dict]:
+    return await issues_patrol(str(tmp_path), workspace_id="w1", issue_labels=labels, gh=gh)
+
+
+async def test_labelled_open_issues_become_sightings(tmp_path):
+    gh = FakeGh(
+        [
+            _issue(115, "suite", "p2"),
+            _issue(116, "needs-core", "bug"),
+            _issue(117, "line:flare", "p1"),  # another line's issue
+            _issue(118, "Suite", "p1"),  # labels match case-insensitively
+            _issue(119, "suite"),
+        ]
+    )
+    drafts = await _patrol(gh, ["suite", "needs-core"], tmp_path)
+
+    by_n = {d["evidence"]["number"]: d for d in drafts}
+    assert sorted(by_n) == [115, 116, 118, 119]
+    assert {n: d["severity"] for n, d in by_n.items()} == {115: 3, 116: 4, 118: 4, 119: 2}
+    d = by_n[115]
+    assert d["patrol"] == "issues"
+    assert d["evidence"]["source"] == f"github:{SLUG}#115"
+    assert d["evidence"]["dedup_key"] == f"github:{SLUG}#115"
+    assert d["evidence"]["labels"] == ["suite", "p2"]
+    assert d["evidence"]["url"] == f"https://github.com/{SLUG}/issues/115"
+    assert d["summary"].startswith("GitHub issue #115: Issue 115")
+    (argv,) = _issue_lists(gh)
+    assert argv[:5] == ["gh", "issue", "list", "-R", SLUG]
+    assert "open" in argv and "--label" not in argv
+
+
+async def test_no_issue_labels_takes_nothing(tmp_path):
+    gh = FakeGh([_issue(115, "suite")])
+    assert await _patrol(gh, [], tmp_path) == []
+    assert _issue_lists(gh) == []
+
+
+async def test_gitlab_bound_repo_keeps_the_connector_path(tmp_path):
+    gh = FakeGh([], origin="unused")
+
+    async def git_url(argv):
+        gh.calls.append(list(argv))
+        return 0, "https://gitlab.com/acme/app.git\n", ""
+
+    calls: list[tuple] = []
+
+    async def execute(workspace_id, name, body, *, user_id=None):
+        calls.append((workspace_id, name, body))
+        return SimpleNamespace(success=True, data=[{"iid": 3, "title": "Bug", "state": "opened"}])
+
+    drafts = await issues_patrol(
+        str(tmp_path), workspace_id="w1", issue_labels=["suite"], gh=git_url, execute=execute
+    )
+    assert [d["evidence"]["iid"] for d in drafts] == [3]
+    assert calls and calls[0][1] == "gitlab"
+    assert _issue_lists(gh) == []
+
+
+@pytest.mark.parametrize("origin", ["../evil", "-x/repo", "owner/.."])
+async def test_unsafe_slug_never_reaches_gh(tmp_path, origin):
+    gh = FakeGh([_issue(115, "suite")], origin=origin)
+    assert await _patrol(gh, ["suite"], tmp_path) == []
+    assert _issue_lists(gh) == []
+
+
+async def test_gh_failure_files_nothing(tmp_path):
+    gh = FakeGh([_issue(115, "suite")], code=1)
+    assert await _patrol(gh, ["suite"], tmp_path) == []
+
+
+def test_dto_takes_issue_labels():
+    from pocketpaw_ee.cloud.mandates.dto import CharterRequest
+
+    charter = CharterRequest.model_validate({"goal": "g", "issue_labels": ["line:flare"]})
+    assert charter.issue_labels == ["line:flare"]
+    assert CharterRequest.model_validate({"goal": "g"}).issue_labels == []
+
+
+async def _github_mandate(tmp_path: Path, monkeypatch, gh: FakeGh, **charter) -> str:
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    async def patrol(repo_id, *, workspace_id, user_id=None, issue_labels=None):
+        return await issues_patrol(
+            repo_id, workspace_id=workspace_id, issue_labels=issue_labels, gh=gh
+        )
+
+    monkeypatch.setitem(patrols.PATROLS, "issues", patrol)
+    created = await mandate_service.create_mandate(
+        "w1",
+        "u1",
+        {
+            "name": "engines",
+            "surface": {"repo_id": str(tmp_path)},
+            "charter": {"goal": "ship the engines", "issue_labels": ["suite"], **charter},
+            "patrols": ["issues", "feedback"],
+        },
+    )
+    return created["mandate"]["id"]
+
+
+async def test_run_patrols_dedupes_on_the_issue_across_patrols(tmp_path, mongo_db, monkeypatch):
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    gh = FakeGh([_issue(115, "suite"), _issue(116, "suite", "p1")])
+    mandate_id = await _github_mandate(tmp_path, monkeypatch, gh)
+    detail = await mandate_service.get_mandate("w1", "u1", mandate_id)
+    assert detail["charter"]["issue_labels"] == ["suite"]
+    # The pilot filed #115 by hand through the feedback intake.
+    await mandate_service.file_feedback(
+        "w1",
+        "u1",
+        mandate_id,
+        {"text": "GitHub issue #115 ...", "severity": 3, "source": f"github:{SLUG}#115"},
+    )
+
+    first = (await mandate_service.run_patrols("w1", "u1", mandate_id))["sightings"]
+    assert [s["evidence"]["number"] for s in first] == [116]
+    assert first[0]["severity"] == 4
+
+    again = await mandate_service.run_patrols("w1", "u1", mandate_id)
+    assert again["sightings"] == []
+
+
+async def test_continuous_due_check_runs_the_issues_patrol_first(tmp_path, mongo_db, monkeypatch):
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    gh = FakeGh([_issue(120, "suite", "p2")])
+    mandate_id = await _github_mandate(tmp_path, monkeypatch, gh, cadence="continuous")
+
+    rows = await mandate_service.list_cadence_due(datetime.now(UTC))
+
+    assert mandate_id in {r["mandate_id"] for r in rows}
+    sightings = (await mandate_service.list_sightings("w1", "u1", mandate_id))["sightings"]
+    assert [s["evidence"]["number"] for s in sightings] == [120]
+
+
+async def test_continuous_due_check_skips_a_mandate_without_the_issues_toggle(
+    tmp_path, mongo_db, monkeypatch
+):
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    gh = FakeGh([_issue(120, "suite")])
+    await _github_mandate(tmp_path, monkeypatch, gh, cadence="continuous")
+    created = await mandate_service.create_mandate(
+        "w1",
+        "u1",
+        {
+            "name": "no issues toggle",
+            "surface": {"repo_id": str(tmp_path)},
+            "charter": {"goal": "g", "cadence": "continuous", "issue_labels": ["suite"]},
+            "patrols": ["feedback"],
+        },
+    )
+    await mandate_service.list_cadence_due(datetime.now(UTC))
+
+    # Only the toggled mandate listed issues (once); the other never did.
+    assert len(_issue_lists(gh)) == 1
+    other = created["mandate"]["id"]
+    assert (await mandate_service.list_sightings("w1", "u1", other))["sightings"] == []
