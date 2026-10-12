@@ -53,5 +53,23 @@
       "tests/cloud/test_paw_bar_widget_relevance.py::test_a_chip_prompt_gets_its_widget_with_props",
       "tests/cloud/test_paw_bar_ripple_profile.py::test_the_prompt_carries_the_map_hint"
     ]
+  },
+  {
+    "label": "a widget's steering hint never reaches its line",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    return f\"{line} {entry['hint']}\" if entry.get(\"hint\") else line",
+    "replace": "    return line",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_steering_hints_reach_the_section"
+    ]
+  },
+  {
+    "label": "a curated line is ignored",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    if entry.get(\"line\"):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_steering_hints_reach_the_section"
+    ]
   }
 ]

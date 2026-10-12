@@ -44,6 +44,16 @@ _CHIPS = [
     ("Make me a 5-letter word guessing game about space, with a hint", "word-guess"),
     ("Show me wireless headphones under $200 side by side so I can compare", "comparison-layout"),
     ("Plan a weekend getaway to the mountains with a rough budget", "itinerary"),
+    # The six data widgets from ripple #223 and #224, and the audit's unused widgets.
+    ("7-day weather forecast for Lisbon", "weather-forecast"),
+    ("coffee shops near me", "place-results"),
+    ("find deals on headphones", "product-grid"),
+    ("documentaries about the ocean", "media-grid"),
+    ("meeting agenda starting at 10", "agenda"),
+    ("weekly schedule", "week-schedule"),
+    ("create an invoice", "invoice-layout"),
+    ("due diligence checklist", "checklist-layout"),
+    ("order a pizza", "menu-order"),
 ]
 
 
@@ -62,6 +72,17 @@ def test_a_chip_prompt_gets_its_widget_with_props(message, widget):
     assert f"   - {widget} {{" in _section(_paragraph(message)) or (
         f"   - {widget}: " in _section(_paragraph(message))
     )
+
+
+def test_the_steering_hints_reach_the_section():
+    """THE MUTATION THAT BREAKS THIS: drop the hint from full_line."""
+    checklist = _section(_paragraph("due diligence checklist"))
+    assert "never a select per row" in checklist
+    assert "Food orders always use menu-order" in _section(_paragraph("order a pizza"))
+    weather = _section(_paragraph("7-day weather forecast for Lisbon"))
+    assert "rain|heavy-rain|thunder|snow|fog|wind|night-clear" in weather
+    dentist = _section(_paragraph("Book a dentist appointment"))
+    assert "only when it is not a table" in dentist
 
 
 def test_the_3d_line_carries_the_asset_library():

@@ -1,6 +1,12 @@
 {
-  "menu-order": {"intents": ["order", "burger", "pizza", "food", "menu", "takeaway", "delivery", "toppings", "crust"]},
-  "booking": {"intents": ["book", "booking", "table", "appointment", "reservation", "reserve", "slot", "slots", "dentist", "haircut"]},
+  "menu-order": {
+    "intents": ["order", "burger", "pizza", "food", "menu", "takeaway", "delivery", "toppings", "crust"],
+    "hint": "Food orders always use menu-order (pizza, burgers, takeaway), never a form."
+  },
+  "booking": {
+    "intents": ["book", "booking", "table", "appointment", "reservation", "reserve", "slot", "slots", "dentist", "haircut"],
+    "hint": "Write services and days only when it is not a table (a dentist, a haircut), slot start like \"2026-10-14T09:00\"."
+  },
   "comparison-layout": {"intents": ["compare", "comparison", "pick", "vs", "versus", "choose", "which", "laptop", "laptops", "headphones", "tablet", "tablets", "phone", "side by side"]},
   "notes": {"intents": ["notes", "note", "notepad", "jot", "ideas", "memo", "scratchpad"]},
   "music-player": {"intents": ["music", "playlist", "songs", "song", "sounds", "focus music", "tracks", "lofi", "rain", "calm"]},
@@ -23,18 +29,54 @@
   "bill-split": {"intents": ["split", "bill", "tip", "share the cost", "each person", "owe"]},
   "growth-projection": {"intents": ["savings", "save", "invest", "interest", "compound", "grow", "growth", "retirement", "deposit"]},
   "illustration": {"intents": ["draw", "drawing", "picture", "diagram", "illustrate", "animated", "how does", "how do", "explain"]},
-  "invoice-layout": {"intents": ["invoice", "bill client", "billing", "receipt", "hours of", "line items"]},
-  "checklist-layout": {"intents": ["checklist", "due diligence", "compliance", "packing", "study plan", "tick off", "audit", "privacy check"]},
-  "exec-dashboard": {"intents": ["dashboard", "financial summary", "sales", "kpis", "kpi", "revenue", "quarterly", "profit", "report"]},
-  "form-layout": {"intents": ["survey", "form", "feedback", "questionnaire", "signup", "sign up"]},
-  "todo-list": {"intents": ["todo", "to-do", "to do", "tasks", "task list", "agenda"]},
+  "invoice-layout": {
+    "intents": ["invoice", "bill client", "billing", "receipt", "hours of", "line items", "bill a client"],
+    "hint": "An invoice or quote is an invoice-layout (from, billTo, invoiceNumber, issueDate, lines [{description, quantity, unitPrice}], total), never a table of inputs."
+  },
+  "checklist-layout": {
+    "intents": ["checklist", "due diligence", "compliance", "packing", "study plan", "tick off", "audit", "privacy check", "packing list"],
+    "hint": "Use for any list of items with statuses and progress, never a select per row: items [{id, label, state: pending|in-progress|done|blocked|skipped, due?}], showProgress true."
+  },
+  "exec-dashboard": {
+    "intents": ["dashboard", "financial summary", "sales", "kpis", "kpi", "revenue", "quarterly", "profit", "report"],
+    "hint": "A financial summary, KPIs or revenue is an exec-dashboard of raw rows and measures, never hand-built stat tiles."
+  },
+  "form-layout": {
+    "intents": ["survey", "form", "feedback", "questionnaire", "signup", "sign up"],
+    "hint": "A survey, feedback form or questionnaire is a form-layout with sections [{id, title}] and a form inside holding the questions."
+  },
+  "todo-list": {"intents": ["todo", "to-do", "to do", "tasks", "task list"]},
   "timeline": {"intents": ["timeline", "milestones", "schedule", "roadmap", "phases", "history"]},
-  "calendar": {"intents": ["calendar", "month", "events", "weekly schedule", "dates"]},
+  "calendar": {"intents": ["calendar", "month", "events", "dates"]},
   "drawing-canvas": {"intents": ["drawing pad", "sketch", "canvas", "paint", "brush", "doodle"]},
   "rating": {"intents": ["rating", "ratings", "stars", "star"]},
   "pros-cons": {"intents": ["pros", "cons", "pros and cons", "tradeoffs"]},
   "kanban": {"intents": ["kanban", "board", "backlog", "columns"]},
   "data-grid": {"intents": ["filter", "sort", "sorted", "catalog", "spreadsheet"]},
   "steps": {"intents": ["step by step", "steps", "how to", "guide me"]},
-  "progress-ring": {"intents": ["goal", "progress", "percent done"]}
+  "progress-ring": {"intents": ["goal", "progress", "percent done"]},
+  "weather-forecast": {
+    "intents": ["weather", "forecast", "temperature", "rain"],
+    "line": "{place, unit?: C|F, now?: {temp, condition, feelsLike?, humidity?, wind?}, days: [{day, condition, high, low, rainChance?, sunrise?, sunset?}] (1 to 14, first is today), hourly?: [{time, temp, condition, rainChance?}] (up to 48), note?}: a weather forecast. condition is sunny|partly-cloudy|cloudy|rain|heavy-rain|thunder|snow|fog|wind|night-clear. Unless a tool gave the numbers, note \"Sample forecast\"."
+  },
+  "week-schedule": {
+    "intents": ["weekly schedule", "timetable", "week calendar", "classes"],
+    "hint": "events start and end \"HH:MM\", color one per kind of event; bind a state key."
+  },
+  "agenda": {
+    "intents": ["agenda", "meeting", "run of show"],
+    "hint": "start \"HH:MM\", minutes per item; bind a state key."
+  },
+  "place-results": {
+    "intents": ["restaurant", "cafe", "coffee", "places", "near me", "bars"],
+    "hint": "places rows also take reviews?, price? (1 to 4), distance? (\"350 m\"), walkMinutes?, open?, hours?, tags?, blurb?, lat?, lng? (lat/lng add a map). Generic sample names unless a tool found real places. on_choose may emit ask {text}."
+  },
+  "product-grid": {
+    "intents": ["deals", "products", "shopping", "browse", "buy"],
+    "hint": "products rows also take color? (blue|violet|teal|green|amber|rose|orange|slate) and up to 3 short specs, never an image. Generic names, never a real brand with a price. on_choose may emit ask {text}."
+  },
+  "media-grid": {
+    "intents": ["documentaries", "films", "movies", "podcasts", "books to read", "reading list", "novels", "watch", "listen"],
+    "hint": "items rows also take blurb? and color? (blue|violet|teal|green|amber|rose|orange|slate), never an image; bind a state key. on_choose may emit ask {text}."
+  }
 }

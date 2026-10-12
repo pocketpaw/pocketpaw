@@ -9,7 +9,9 @@
 # minus deferred widgets and page chrome (its ``illustration`` SVG is held to
 # illustration_svg's policy and its annotations to ids the widget keeps, ``bill-split``
 # to plain numbers, the games, habit-tracker and focus-timer to literal data (``_PLAY_CHECKS``),
-# ``notes`` to plain-text notes and ``music-player`` to preset sounds (``_DATA_CHECKS``), a
+# ``notes`` to plain-text notes, ``music-player`` to preset sounds, a model-written booking
+# and the six catalog widgets (weather-forecast to place-results, ``_CATALOG_CHECKS``) to
+# plain data within the widget's enums and caps (``_DATA_CHECKS``), a
 # button's choice-card ``icon`` and ``description`` to a key and short plain text), and
 # is ``strict``:
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
@@ -25,8 +27,9 @@
 #
 # Hydration runs after the checks and is not checked again: product data comes only
 # from the site catalog, and on the ripple profile ``_fill_store`` fills menu-order,
-# booking and comparison-layout nodes from the site's store and attaches the one
-# server-wired handler each may fire (a model-written one is refused). ``card_ids``
+# comparison-layout and table bookings (``_table_booking``; a dentist keeps the model's
+# services, display only) from the site's store and attaches the one server-wired
+# handler each may fire (a model-written one is refused). ``card_ids``
 # and ``has_lead_form`` read a body for the runner; ``PartialScan`` judges a body
 # still streaming, flagging only what the finished card is sure to fail.
 #
