@@ -574,7 +574,8 @@ def _fix_brief(
             f"1. Check out {branch} and fix the failure with the smallest change.\n"
             f"2. Run {gate} until it passes.\n"
             f"3. Push to the SAME branch {branch}. Do not open a new pull request.\n"
-            "4. Wait for CI on the new head; if it fails, fix and push again.\n"
+            "4. Then stop: if the new head goes red, Belt starts another fixer with "
+            "its log.\n"
         )
     return (
         f"You are a Belt cloud fixer on {slug}. The PR below was opened for this task:\n\n"

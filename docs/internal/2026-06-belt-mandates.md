@@ -616,7 +616,9 @@ one launch at a time) with a fix brief instead of the task brief:
   branch, comment on the PR;
 - red CI: the failing check's name and the last 40 lines of
   `gh run view <run> --job <job> --log-failed` (fenced as data); fix minimal,
-  run the charter checks, push to the same branch, wait for CI and retry.
+  run the charter checks, push to the same branch, stop (if the new head goes
+  red, the tracker starts the next fixer with the new log, so two fixers never
+  push to one branch at once).
 
 Both say: no new PR, keep the `Belt-Run` line, no AI attribution, never merge.
 The tracker keeps polling the same PR under the same overall timeout. A fixer
