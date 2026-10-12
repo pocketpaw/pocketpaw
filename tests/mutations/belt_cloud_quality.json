@@ -1,0 +1,48 @@
+[
+  {
+    "label": "the reviewer starts before CI has reported",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "return pr.get(\"state\") == \"OPEN\" and bool(checks) and all(_green(c) for c in checks)",
+    "replace": "return pr.get(\"state\") == \"OPEN\" and all(_green(c) for c in checks)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_no_review_before_ci_reports_or_while_it_is_red"
+    ]
+  },
+  {
+    "label": "the review gate posts no pending status at launch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "await self._review_status(slug, head, \"pending\", \"Belt review running\", cwd)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_green_pr_gets_one_reviewer_and_its_pass_is_recorded"
+    ]
+  },
+  {
+    "label": "a head is reviewed again at every poll",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "entry = next((r for r in reviews if r.get(\"sha\") == head), None)",
+    "replace": "entry = None",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_green_pr_gets_one_reviewer_and_its_pass_is_recorded",
+      "tests/cloud/test_belt_cloud_quality.py::test_a_resume_never_doubles_a_reviewer"
+    ]
+  },
+  {
+    "label": "a failed review gets a ci fixer, not the review comment",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "return (\"review\" if check.get(\"context\") == REVIEW_CONTEXT else \"ci\"), check",
+    "replace": "return \"ci\", check",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_failed_review_runs_a_fixer_then_reviews_the_new_head"
+    ]
+  },
+  {
+    "label": "a silent reviewer holds the line forever",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if self.clock() < deadline:\n                        return",
+    "replace": "if True:\n                        return",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_silent_reviewer_times_out_to_success"
+    ]
+  }
+]
