@@ -38,8 +38,8 @@
   {
     "label": "the per-turn section goes ahead of the fixed core, breaking the stable prefix",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "            lines += [f\"   {widget_relevance.full_line(name)}\" for name in picked]",
-    "replace": "            lines[1:1] = [f\"   {widget_relevance.full_line(name)}\" for name in picked]",
+    "find": "            lines += [f\"   {widget_relevance.full_line(name, message, history)}\" for name in picked]",
+    "replace": "            lines[1:1] = [f\"   {widget_relevance.full_line(name, message, history)}\" for name in picked]",
     "tests": [
       "tests/cloud/test_paw_bar_widget_relevance.py::test_the_prompt_is_byte_stable_and_the_core_comes_first"
     ]
@@ -107,6 +107,42 @@
     "replace": "",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_a_picked_slot_turn_is_text_only_end_to_end"
+    ]
+  },
+  {
+    "label": "a named figure no longer ranks ahead of iso-scene",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    if \"figure\" in top and \"iso-scene\" in top and named_figures(message, history):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_figure_subject_gets_its_figure_first_with_its_anchors_alone"
+    ]
+  },
+  {
+    "label": "every figure is listed with its sliders and anchors, so the line grows with the catalog",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "        return _hinted(name, _figure_line(named_figures(message, history)))\n",
+    "replace": "        return _hinted(name, _figure_line(list(RIPPLE_FIGURES)))\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_figure_subject_gets_its_figure_first_with_its_anchors_alone"
+    ]
+  },
+  {
+    "label": "a figure an earlier card used loses its anchors on a later turn",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "            if fid in RIPPLE_FIGURES and fid not in seen:\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_figure_an_earlier_card_used_stays_in_full"
+    ]
+  },
+  {
+    "label": "the full-figure cap is dropped, so a message naming every figure lists them all",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    return (seen + [fid for _, _, fid in sorted(scored)])[:MAX_FULL_FIGURES]\n",
+    "replace": "    return seen + [fid for _, _, fid in sorted(scored)]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_core_plus_the_worst_case_section_stays_under_the_cap"
     ]
   }
 ]

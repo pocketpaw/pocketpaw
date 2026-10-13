@@ -1630,7 +1630,7 @@ def _cards_paragraph(
         picked = widget_relevance.pick_widgets(message, history)
         if picked:
             lines.append("   Widgets for this message, with their props:")
-            lines += [f"   {widget_relevance.full_line(name)}" for name in picked]
+            lines += [f"   {widget_relevance.full_line(name, message, history)}" for name in picked]
         return "\n".join(lines)
 
     lines = [

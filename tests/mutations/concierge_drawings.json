@@ -146,7 +146,7 @@
   {
     "label": "DRAW-17: the figure line is the manifest's",
     "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
-    "find": "    if name == \"figure\":\n        return _hinted(name, _figure_line())\n",
+    "find": "    if name == \"figure\":\n        return _hinted(name, _figure_line(named_figures(message, history)))\n",
     "replace": "",
     "tests": [
       "tests/cloud/test_paw_bar_widget_relevance.py"

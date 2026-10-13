@@ -118,9 +118,11 @@ def test_the_drawing_lines_teach_the_shape_and_the_preference():
 
     heart = _section(_paragraph("How does the heart pump blood?"))
     assert "   - figure {figure" in heart and "   - iso-scene {" in heart
+    assert f"heart({RIPPLE_FIGURES['heart']['title']}; " in heart
+    assert ",".join(RIPPLE_FIGURES["heart"]["anchors"]) in heart
     for fid, figure in RIPPLE_FIGURES.items():
-        assert f"{fid}({figure['title']}; " in heart
-        assert ",".join(figure["anchors"]) in heart
+        if fid != "heart":
+            assert f"{fid} ({figure['title']})" in heart
     assert "bpm 40..180" in heart and "it is hand-built and best" in heart
     gears = _section(_paragraph("Show how the gears in a gearbox work"))
     iso = next(line for line in gears.splitlines() if line.startswith("   - iso-scene "))
@@ -135,6 +137,69 @@ def test_the_drawing_lines_teach_the_shape_and_the_preference():
     assert compact in iso
     card = {"ui": example, "state": {}}
     assert render_card(json.dumps(card), [], profile=RIPPLE_PROFILE) is not None
+
+
+@pytest.mark.parametrize(
+    ("message", "fid"),
+    [
+        ("How does a rocket engine work?", "rocket-engine"),
+        ("How does a fusion reactor work?", "tokamak"),
+        ("How does CERN's collider work?", "particle-collider"),
+        ("How do bike gears work?", "bike-gears"),
+    ],
+)
+def test_a_figure_subject_gets_its_figure_first_with_its_anchors_alone(message, fid):
+    """The figure ranks first (ahead of iso-scene, which "engine" and "gears" also
+    hit), and only the matched figure carries its sliders and anchors; the rest are
+    ids and titles, so seven figures do not cost seven anchor lists every turn.
+    THE MUTATION THAT BREAKS THIS: drop the figure-first move in pick_widgets, or
+    list every figure in full."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
+
+    assert widget_relevance.pick_widgets(message)[0] == "figure"
+    line = widget_relevance.full_line("figure", message)
+    for other, figure in RIPPLE_FIGURES.items():
+        full = ",".join(figure["anchors"])
+        assert (full in line) == (other == fid), other
+        if other != fid:
+            assert f"{other} ({figure['title']})" in line
+    assert line in _section(_paragraph(message))
+
+
+def test_a_message_naming_two_figures_lists_both_in_full():
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
+
+    line = widget_relevance.full_line(
+        "figure", "How is a fission reactor different from a fusion reactor?"
+    )
+    for fid in ("fission-reactor", "tokamak"):
+        assert ",".join(RIPPLE_FIGURES[fid]["anchors"]) in line
+    assert ",".join(RIPPLE_FIGURES["heart"]["anchors"]) not in line
+
+
+def test_a_figure_an_earlier_card_used_stays_in_full():
+    """THE MUTATION THAT BREAKS THIS: drop earlier_figures from _figure_line."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
+
+    card = {"ui": {"type": "figure", "props": {"figure": "heart"}}, "state": {}}
+    history = [
+        {"role": "user", "content": "Show me the heart"},
+        {"role": "assistant", "content": "```pawbar-card\n" + json.dumps(card) + "\n```"},
+        {"role": "user", "content": "thanks"},
+        {"role": "assistant", "content": "Any time."},
+    ]
+    message = "Now how does a rocket engine work?"
+    line = widget_relevance.full_line("figure", message, history)
+    for fid in ("heart", "rocket-engine"):
+        assert ",".join(RIPPLE_FIGURES[fid]["anchors"]) in line
+    assert line in _section(_paragraph(message, history))
+
+
+def test_every_figure_has_its_own_intents():
+    """A figures key that is not a catalog id would steer nothing."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
+
+    assert list(widget_relevance.INTENTS["figure"]["figures"]) == list(RIPPLE_FIGURES)
 
 
 @pytest.mark.parametrize(
@@ -305,16 +370,21 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
     """The fixed core is 18,583 chars (the drawing widgets added only their two
     names to the index); the worst per-turn section is the MAX_PICKED longest
-    candidate lines (about 13,190: iso-scene's 4,530 with its 15-part example, then
-    figure's 2,060 with seven figures' sliders and anchors), so the paragraph peaks
-    near 31,820, under the 32,000 cap. One more figure (about 290 chars) breaks it."""
+    candidate lines, figure's at its longest (MAX_FULL_FIGURES figures in full, the
+    rest ids and titles), so the paragraph stays well under the 32,000 cap."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
+
     core = _paragraph()
+    every_figure = " ".join(fid.replace("-", " ") for fid in RIPPLE_FIGURES)
     longest = sorted(
-        (len(widget_relevance.full_line(n)) + 4 for n in widget_relevance.CANDIDATES),
+        (
+            len(widget_relevance.full_line(n, every_figure if n == "figure" else "")) + 4
+            for n in widget_relevance.CANDIDATES
+        ),
         reverse=True,
     )
     worst = len(core) + 1 + len(_SECTION) + sum(longest[: widget_relevance.MAX_PICKED])
     assert len(core) < 20_000
-    assert worst < 32_000
+    assert worst < 31_200
     typical = sorted(len(_paragraph(m)) for m, _ in _CHIPS)[len(_CHIPS) // 2]
     assert len(core) < typical < worst

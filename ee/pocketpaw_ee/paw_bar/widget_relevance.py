@@ -10,10 +10,13 @@
 # here so a new steering keyword does not wait on a ripple release), and its
 # description words. A table entry may also carry a ``hint`` (steering appended to
 # the widget's line; a core widget's hint rides every turn) or a ``line`` (a
-# curated line in its place). figure's and iso-scene's lines are built here (the
-# figure catalog's ids, sliders and anchors; iso-scene's part shape and a hand
-# water pump example card). Widgets a card earlier in the conversation used are
-# always kept, so an edit to that card still has its props.
+# curated line in its place). figure's and iso-scene's lines are built here:
+# figure's from the figure catalog, the sliders and anchors only of the figures this
+# turn names (each figure's own intents, ``figures`` in the table) or an earlier card
+# used, at most MAX_FULL_FIGURES, the rest as ids and titles; figure ranks ahead of
+# iso-scene when one is named. iso-scene's line is its part shape and a hand water
+# pump example card. Widgets a card earlier in the conversation used are always
+# kept, so an edit to that card still has its props.
 #
 # Invariants: same input, same output (sorted, no set iteration in output); only
 # manifest and intents-table text reaches the prompt, never visitor text; at most
@@ -45,6 +48,7 @@ INTENTS: dict[str, dict[str, Any]] = json.loads(
 TOP_K = 8  # widgets picked by score
 MAX_EARLIER = 4  # widgets kept because an earlier card used them
 MAX_PICKED = TOP_K + MAX_EARLIER
+MAX_FULL_FIGURES = 2  # figures listed with sliders and anchors on one turn
 _HISTORY_TURNS = 2
 # The iso-scene line's example: a hand water pump of 15 parts (its barrel a ghost so
 # the piston shows) written the way the model should write one (short ids,
@@ -125,6 +129,7 @@ _STOP = frozenset(
     "string number boolean".split()
 )
 _TYPE_IN_CARD = re.compile(r'"type"\s*:\s*"([a-z0-9-]+)"')
+_FIGURE_IN_CARD = re.compile(r'"figure"\s*:\s*"([a-z0-9-]+)"')
 
 
 def _stem(word: str) -> str:
@@ -151,10 +156,19 @@ def _keywords(widget: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
     if name == "model-viewer":
         phrases |= {" ".join(_words(k)) for k in RIPPLE_MODELS}
     if name == "figure":
-        phrases |= {" ".join(_words(k.replace("-", " "))) for k in RIPPLE_FIGURES}
+        phrases |= {p for fid in RIPPLE_FIGURES for p in _figure_phrases(fid)}
     parts = {_stem(p) for n in [name, *aliases] if "-" in n for p in n.split("-")}
     desc = {w for w in _words(str(widget.get("description", ""))) if w not in _STOP}
     return phrases - {""}, parts - {""}, desc
+
+
+def _figure_phrases(fid: str) -> set[str]:
+    """One catalog figure's phrases: its id and its own intents."""
+    own = INTENTS.get("figure", {}).get("figures", {}).get(fid, ())
+    return {" ".join(_words(p)) for p in [fid.replace("-", " "), *own]} - {""}
+
+
+_FIGURE_PHRASES = {fid: _figure_phrases(fid) for fid in RIPPLE_FIGURES}
 
 
 _WIDGETS: dict[str, dict[str, Any]] = {
@@ -186,6 +200,24 @@ def earlier_widgets(history: Sequence[dict[str, Any]]) -> list[str]:
     return seen[:MAX_EARLIER]
 
 
+def named_figures(message: str, history: Sequence[dict[str, Any]] = ()) -> list[str]:
+    """Catalog figures to list in full: those an earlier card used, most recent
+    first, then those the message (weight 2) and last turns name, by score then
+    catalog order; at most MAX_FULL_FIGURES."""
+    seen: list[str] = []
+    for turn in reversed(list(history)):
+        for fid in reversed(_FIGURE_IN_CARD.findall(str(turn.get("content") or ""))):
+            if fid in RIPPLE_FIGURES and fid not in seen:
+                seen.append(fid)
+    now, past = _phrase(message), _phrase(" ".join(_history_texts(history)))
+    scored = []
+    for order, (fid, phrases) in enumerate(_FIGURE_PHRASES.items()):
+        score = sum(2 * (f" {p} " in now) + (f" {p} " in past) for p in phrases)
+        if score and fid not in seen:
+            scored.append((-score, order, fid))
+    return (seen + [fid for _, _, fid in sorted(scored)])[:MAX_FULL_FIGURES]
+
+
 def pick_widgets(message: str, history: Sequence[dict[str, Any]] = ()) -> list[str]:
     """The widgets whose full lines this turn gets: earlier-used ones first, then
     up to TOP_K by score (message counts double), ties broken by name."""
@@ -198,14 +230,20 @@ def pick_widgets(message: str, history: Sequence[dict[str, Any]] = ()) -> list[s
             scored.append((-score, name))
     earlier = earlier_widgets(history)
     top = [name for _, name in sorted(scored) if name not in earlier][:TOP_K]
+    # A named figure is hand-built: it goes ahead of iso-scene, which "engine" or
+    # "gears" also hit.
+    if "figure" in top and "iso-scene" in top and named_figures(message, history):
+        top.remove("figure")
+        top.insert(top.index("iso-scene"), "figure")
     return earlier + top
 
 
-def full_line(name: str) -> str:
+def full_line(name: str, message: str = "", history: Sequence[dict[str, Any]] = ()) -> str:
     """A widget's full manifest line (typed for data and play widgets) plus its
     ``hint``, or the intents table's own ``line`` instead (map: its refused tile
     props stay out). model-viewer's line is written here: the model library's ids
-    and anchors, and none of the URL props a card may not use."""
+    and anchors, and none of the URL props a card may not use. figure's depends on
+    the figures ``message`` and ``history`` name (``named_figures``)."""
     if name == "model-viewer":
         return (
             "- model-viewer {asset, annotations?: [{anchor, label?, note?}], focus?, "
@@ -215,7 +253,7 @@ def full_line(name: str) -> str:
             "URL. " + " ".join(f"{k}({','.join(v['anchors'])})" for k, v in RIPPLE_MODELS.items())
         )
     if name == "figure":
-        return _hinted(name, _figure_line())
+        return _hinted(name, _figure_line(named_figures(message, history)))
     if name == "iso-scene":
         return _hinted(name, _iso_scene_line())
     entry = INTENTS.get(name, {})
@@ -231,20 +269,26 @@ def full_line(name: str) -> str:
     return _hinted(name, line)
 
 
-def _figure_line() -> str:
-    """figure's line from the vendored catalog, so a new figure id rides along."""
-    figures = " ".join(
+def _figure_line(full: Sequence[str]) -> str:
+    """figure's line from the vendored catalog: the ``full`` figures with their
+    sliders and anchors, every other id with its title only."""
+    detailed = " ".join(
         f"{fid}({f['title']}; "
         + ", ".join(f"{p['key']} {p['min']}..{p['max']}" for p in f["params"])
         + f"; anchors {','.join(f['anchors'])})"
         for fid, f in RIPPLE_FIGURES.items()
+        if fid in full
     )
+    others = ", ".join(
+        f"{fid} ({f['title']})" for fid, f in RIPPLE_FIGURES.items() if fid not in full
+    )
+    listed = f"{detailed}. Also (no params or labels): {others}" if detailed else others
     return (
         "- figure {figure, params?, labels?: [{anchor, label?, note?}], caption?}, bind "
         '"{state.<key>}": a hand-built live isometric figure with sliders, readouts and '
         "numbered labels. figure is one of these ids, params a start value per slider "
         "key within its range, up to 10 labels each on one of its anchors with your own "
-        f"plain label and note. {figures}."
+        f"plain label and note. {listed}."
     )
 
 
