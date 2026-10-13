@@ -931,6 +931,19 @@ def _schedule_native_prewarm(
     )
 
 
+async def _turnstile_build_kwargs(workspace_id: str, pocket_id: str) -> dict[str, Any]:
+    """``{"turnstile_site_key": ...}`` when the site has the ``turnstile``
+    integration, else ``{}`` (so a build's kwargs stay as they were). Never raises."""
+    try:
+        from pocketpaw_ee.integrations.providers import turnstile
+
+        key = await turnstile.site_key_for_build(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001 - bot protection never blocks a publish
+        logger.warning("sites: turnstile sitekey lookup failed", exc_info=True)
+        key = ""
+    return {"turnstile_site_key": key} if key else {}
+
+
 async def _build_or_cloud_error(
     generator: GeneratorClient, *, map_smoke_gate: bool = True, **build_kwargs: Any
 ) -> Any:
@@ -3078,6 +3091,8 @@ async def _deploy_site_doc(
         # that already ran the engine's own gate inside the sandbox.
         build = BuildResult(project_dir=prebuilt_project_dir, ripple_version=None)
     else:
+        # Same rule for the site's Turnstile sitekey: present only when linked.
+        _asset_kwargs.update(await _turnstile_build_kwargs(workspace_id, pocket_id))
         build = await _build_or_cloud_error(
             gen,
             ripple_spec=ripple_spec,
@@ -5304,6 +5319,7 @@ async def _enqueue_static_build(
         assets=assets,
         builder_origin=builder_origin,
         keeps_client_bundle=keeps_client_bundle,
+        **await _turnstile_build_kwargs(workspace_id, pocket_id),
     )
     # The inputs the worker hands back to ``deploy_prebuilt_site`` so the deploy tail
     # runs with exactly what this publish captured, not with whatever the pocket's

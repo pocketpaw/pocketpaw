@@ -15,8 +15,10 @@
 #   3. provider registered, not an embed (embeds have no actions), action declared
 #      + public, site bound, action enabled, connect kinds have an active grant
 #                                              -> not_connected 409 / action_disabled 403
-#   4. Turnstile on write actions, site-key callers only, when a Turnstile secret
-#      is configured                                       -> turnstile_required 403
+#   4. Turnstile on write actions, site-key callers only. A site with the
+#      ``turnstile`` integration verifies against its own widget secret and the
+#      answer's hostname must be one of the site's hosts; otherwise the platform
+#      secret applies when one is configured               -> turnstile_required 403
 #   5. ``SiteRateCounter`` per (site, action) and per (site, action, IP hash)
 #                                                          -> rate_limited 429
 #   6. typed args (extra keys refused, string caps)        -> invalid_args 422
@@ -190,15 +192,29 @@ def _turnstile_configured() -> bool:
     return bool(str(get_settings().turnstile_secret or "").strip())
 
 
-async def _verify_turnstile(token: str, ip: str) -> None:
+async def _verify_turnstile(token: str, ip: str, widget: tuple[str, list[str]] | None = None):
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.cloud._core.turnstile import verify_turnstile
 
     if not token:
         raise GatewayError("turnstile_required")
+    kwargs: dict[str, Any] = {}
+    if widget is not None:
+        kwargs = {"secret": widget[0], "expected_hostnames": widget[1]}
     try:
-        await verify_turnstile(token, ip or None, code="turnstile_required")
+        await verify_turnstile(token, ip or None, code="turnstile_required", **kwargs)
     except CloudError:
+        raise GatewayError("turnstile_required") from None
+
+
+async def _site_widget(site: Any) -> tuple[str, list[str]] | None:
+    """The site's own Turnstile widget, if it has one. Fails closed on a broken row."""
+    from pocketpaw_ee.integrations.providers import turnstile
+
+    try:
+        return await turnstile.gateway_widget(site)
+    except Exception:
+        logger.warning("integrations: site Turnstile widget unreadable", exc_info=True)
         raise GatewayError("turnstile_required") from None
 
 
@@ -268,8 +284,12 @@ async def _call(request: Request, site_id: str, provider_id: str, action: str) -
             raise GatewayError("not_connected")
 
     args, turnstile_token = await _read_body(request)
-    if spec.write and caller == "site_key" and _turnstile_configured():
-        await _verify_turnstile(turnstile_token, ip)
+    if spec.write and caller == "site_key":
+        widget = await _site_widget(site)
+        if widget is not None:
+            await _verify_turnstile(turnstile_token, ip, widget)
+        elif _turnstile_configured():
+            await _verify_turnstile(turnstile_token, ip)
 
     await _rate_limit(site, provider.id, action, spec, caller, ip)
 

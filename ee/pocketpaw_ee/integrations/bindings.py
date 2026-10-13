@@ -29,6 +29,9 @@
 # failure or a required setting without a valid value; so an embed is
 # ``connected`` exactly when its link is valid), the provider's ``site_status``
 # hook, connected.
+#
+# Unlinking a site, or purging it, runs the provider's optional ``site_teardown``
+# hook (best effort) for state the provider created elsewhere (a Turnstile widget).
 
 from __future__ import annotations
 
@@ -416,7 +419,19 @@ async def unlink(*, workspace_id: str, user_id: str, pocket_id: str, provider_id
     if row is None:
         raise NotFound("site_integration", provider_id)
     await row.delete()
+    await run_teardown(row)
     await emit_changed(pocket, provider_id, "unlinked", user_id)
+
+
+async def run_teardown(row: Any) -> None:
+    """The provider's optional ``site_teardown(binding)``. Never raises."""
+    hook = getattr(get_provider(row.provider), "site_teardown", None)
+    if hook is None:
+        return
+    try:
+        await hook(row)
+    except Exception:  # noqa: BLE001 - an unlink never fails on provider cleanup
+        logger.info("integrations: %s site_teardown failed", row.provider, exc_info=True)
 
 
 async def ensure_gateway_token(workspace_id: str, pocket_id: str) -> None:
@@ -520,6 +535,10 @@ async def purge_for_pocket(*, workspace_id: str, pocket_id: str) -> int:
         SiteOrder,
     )
 
+    for row in await SiteIntegration.find(
+        SiteIntegration.workspace == workspace_id, SiteIntegration.pocket_id == pocket_id
+    ).to_list():
+        await run_teardown(row)
     removed = 0
     for doc in (SiteIntegration, NewsletterSubscriber, SiteOrder, IntegrationDemoRecord):
         result = await doc.find(doc.workspace == workspace_id, doc.pocket_id == pocket_id).delete()

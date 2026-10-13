@@ -1353,6 +1353,7 @@ def build_generator_input(
     builder_origin: str | None = None,
     d1_database_id: str = "",
     keeps_client_bundle: bool = False,
+    turnstile_site_key: str = "",
 ) -> dict[str, Any]:
     """The generator's STAGE-1/2 input payload — the exact dict handed to ``generate``.
 
@@ -1391,6 +1392,11 @@ def build_generator_input(
     # False so a plain static site's payload is byte-identical to before.
     if keeps_client_bundle:
         site_config["keepsClientBundle"] = True
+    # The site's own Turnstile widget (the ``turnstile`` integration). The generator
+    # puts it on paw.js as ``data-turnstile-sitekey`` so a write the gateway answers
+    # with ``turnstile_required`` can be retried with a token. Omitted when unset.
+    if turnstile_site_key:
+        site_config["turnstileSiteKey"] = turnstile_site_key
     # 2026-08-13 — resolve the capture tokens in AUTHORED source, public deploys only.
     #
     # The react and html tracks have no server route: there is no ``/api/submit`` to
@@ -1886,6 +1892,7 @@ class GeneratorClient:
         pocket_id: str | None = None,
         smoke: bool = True,
         static_build: bool = True,
+        turnstile_site_key: str = "",
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
 
@@ -1983,6 +1990,7 @@ class GeneratorClient:
                 pocket_id=None,
                 smoke=smoke,
                 static_build=static_build,
+                turnstile_site_key=turnstile_site_key,
             )
         async with self._lock_for(pocket_id):
             # The stamp says which content the on-disk build rendered. Drop it before
@@ -2007,6 +2015,7 @@ class GeneratorClient:
                 pocket_id=pocket_id,
                 smoke=smoke,
                 static_build=static_build,
+                turnstile_site_key=turnstile_site_key,
             )
             if static_build and stamp.parent.is_dir():
                 with contextlib.suppress(OSError):
@@ -2034,6 +2043,7 @@ class GeneratorClient:
         smoke: bool,
         static_build: bool = True,
         assets: dict[str, str] | None = None,
+        turnstile_site_key: str = "",
     ) -> BuildResult:
         # PP-1: author packages AND authored build-shell files (package.json,
         # vite.config.*, svelte.config.*, bunfig.toml, .npmrc) build ONLY in the
@@ -2075,6 +2085,7 @@ class GeneratorClient:
             builder_origin=builder_origin,
             d1_database_id=d1_database_id,
             keeps_client_bundle=keeps_client_bundle,
+            turnstile_site_key=turnstile_site_key,
         )
         gen = await self._runner.generate(input_json, out_dir)
         project_dir = gen["projectDir"]

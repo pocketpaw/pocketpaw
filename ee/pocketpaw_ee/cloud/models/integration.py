@@ -76,6 +76,9 @@ class SiteIntegration(TimestampedDocument):
     # Set when the provider's ``site_setup`` failed; the site reads setup_required
     # until a re-run succeeds. A short code, never provider output.
     setup_error: str = ""
+    # A credential the provider minted for this binding (the Turnstile widget
+    # secret), Fernet-encrypted with ``cloud._core.crypto``. Never in a view.
+    secret_ciphertext: str = ""
 
     class Settings:
         name = "site_integrations"

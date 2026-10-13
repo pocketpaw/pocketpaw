@@ -76,6 +76,7 @@ async def test_provider_views_carry_settings_fields_and_requires_connection(bean
         "newsletter": False,
         "calendly": False,
         "cal_com": False,
+        "turnstile": False,
         "demo": True,
     }
     calendly = providers["calendly"]

@@ -9,10 +9,15 @@
 # POCKETPAW_AUTH_COOKIE_SECURE=true), so a deploy that forgot the secret does not
 # accept bot submissions. A network error or a bad answer fails closed. The
 # caller names the error code so each route keeps its own ``<module>.turnstile_failed``.
+#
+# A caller with its own widget (a Paw Site's per-site widget, see
+# ``integrations.providers.turnstile``) passes ``secret`` and the hostnames the
+# challenge may have been solved on; the answer's ``hostname`` must be one of them.
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 
 import httpx
 
@@ -30,11 +35,21 @@ async def verify_turnstile(
     *,
     code: str,
     transport: httpx.AsyncBaseTransport | None = None,
+    secret: str | None = None,
+    expected_hostnames: Collection[str] | None = None,
 ) -> None:
-    """Raise 400 ``code`` unless Cloudflare accepts ``token``."""
+    """Raise 400 ``code`` unless Cloudflare accepts ``token``.
+
+    ``secret`` overrides the platform secret (never falls back to it);
+    ``expected_hostnames`` also requires the answer's ``hostname`` to be listed."""
     from pocketpaw.config import get_settings
 
-    secret = str(get_settings().turnstile_secret or "").strip()
+    if secret is not None:
+        secret = secret.strip()
+        if not secret:
+            raise BadRequest(code, "This form is not available right now. Try again later.")
+    else:
+        secret = str(get_settings().turnstile_secret or "").strip()
     if not secret:
         if _is_production():
             logger.error("turnstile: POCKETPAW_TURNSTILE_SECRET unset in production, refusing")
@@ -47,7 +62,11 @@ async def verify_turnstile(
     try:
         async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
             resp = await client.post(TURNSTILE_URL, data=data)
-            ok = resp.status_code == 200 and resp.json().get("success") is True
+            body = resp.json() if resp.status_code == 200 else {}
+            ok = body.get("success") is True
+            if ok and expected_hostnames is not None:
+                allowed = {h.strip().lower() for h in expected_hostnames if h}
+                ok = str(body.get("hostname") or "").strip().lower() in allowed
     except Exception as exc:  # network / bad JSON: fail closed, never log the secret
         logger.warning("turnstile: verify failed: %s", type(exc).__name__)
         ok = False
