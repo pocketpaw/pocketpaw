@@ -1760,9 +1760,10 @@ async def _patch(store: Any, run_ref: str, **fields: Any) -> None:
 
 
 async def _patch_tester(store: Any, run_ref: str, **fields: Any) -> None:
-    """Merge ``fields`` into the blob's ``tester`` record."""
+    """Merge ``fields`` into the blob's ``tester`` record (``None`` drops)."""
     tester = (await _blob(store, run_ref) or {}).get("tester") or {}
-    await _patch(store, run_ref, tester={**tester, **fields})
+    merged = {k: v for k, v in {**tester, **fields}.items() if v is not None}
+    await _patch(store, run_ref, tester=merged)
 
 
 def _epoch(stamp: Any) -> float:

@@ -511,6 +511,7 @@ async def test_the_tester_pr_is_reviewed_too(store, dirs, updates):
     assert len(briefs) == 3 and "#20" in briefs[2] and "reviewer" in briefs[2]
     cc = await _cc(store, run_ref)
     assert [r["verdict"] for r in cc["tester"]["reviews"]] == ["pass"]
+    assert "review_timeouts" not in cc["tester"]  # no timeout, no null count
     assert "reviews" not in cc
     assert ("landed", "review") in updates
 
