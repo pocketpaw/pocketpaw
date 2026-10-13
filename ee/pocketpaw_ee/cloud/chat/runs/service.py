@@ -271,6 +271,14 @@ async def record_card_audit(
     return result.matched_count == 1
 
 
+async def record_card_breaches(run_id: str, breaches: dict[str, int]) -> None:
+    """Store chat cards that streamed past the card ceiling as
+    ``card_breaches[card_id] = chars``. Bad card ids are dropped."""
+    rows = {f"card_breaches.{cid}": int(n) for cid, n in breaches.items() if _CARD_ID_RE.match(cid)}
+    if rows:
+        await ChatRunDoc.get_pymongo_collection().update_one({"run_id": run_id}, {"$set": rows})
+
+
 async def mark_billed(run_id: str) -> None:
     """Flag a run as billed (BC-3). The owner of ``ChatRunDoc`` makes this write
     so the metering service never writes a foreign entity's document (EE Rule 2).

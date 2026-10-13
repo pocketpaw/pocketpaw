@@ -1433,6 +1433,11 @@ _RIPPLE_ASK: dict[str, Any] = {
     "value": {"text": "Tell me more about the 5-day plan"},
 }
 
+# The chat card's soft size ceiling, in output chars: the stream runs about
+# 5.2 s + 4.0 s per 1,000 chars, so 10k is near 45 s. The rules state it; a card
+# that streams past it still renders, and the run records it (``card_breaches``).
+CARD_CEILING_CHARS = 10_000
+
 # How to write a good Ripple card, ported from ripple's record-scenario system
 # prompt (the rules that hold for an answer in a chat card) and sized for the
 # ripple landing's chat column (about 720px, still readable at 360px). The
@@ -1474,7 +1479,7 @@ _RIPPLE_RULES = (
     "most 2 fixed grid columns. Put number inputs and sliders "
     'on a full-width row or a 2-column grid, and set "wrap": true on a flex row with '
     "more than two children. Aim for about 25 to 90 nodes when building from "
-    "primitives.",
+    f"primitives, and keep a card under about {CARD_CEILING_CHARS:,} characters.",
     "   - Match the card to the answer. When a data widget fits, the card is that one "
     "widget holding only data. A trip "
     "is an itinerary. A menu or an order is a menu-order: items by product_id from the "
@@ -2341,6 +2346,8 @@ class FenceFilter:
         self._card_id = ""  # the open streamed card, "" when none
         self._parts: list[str] = []  # its body so far, as sent in card.delta
         self._size = 0  # their total length
+        # Every streamed card's body length so far, by card id (``ceiling_breaches``).
+        self.card_chars: dict[str, int] = {}
         self._partial: Any = None  # its card_spec.PartialScan
         self._swallow = False  # a rejected card's fence is still open
         self._in_str = self._esc = False  # the open card's body is mid JSON string
@@ -2513,12 +2520,18 @@ class FenceFilter:
         swallowed, unbuffered."""
         card_id = self._card_id
         self._size += len(piece)
+        self.card_chars[card_id] = self._size
         if self._size > self._profile.max_chars or self._partial.feed(piece):
             self._card_id, self._swallow, self._parts = "", True, []
             return CardEvent("card.rejected", {"card_id": card_id, "reason": "invalid"})
         self._parts.append(piece)
         self._track_strings(piece)
         return CardEvent("card.delta", {"card_id": card_id, "text": piece})
+
+    def ceiling_breaches(self) -> dict[str, int]:
+        """The streamed cards whose body ran past ``CARD_CEILING_CHARS``, rejected
+        ones included: card id -> chars."""
+        return {cid: n for cid, n in self.card_chars.items() if n > CARD_CEILING_CHARS}
 
     def close(self) -> list[Any]:
         # A held "pawbar-ca..." after a card, or a bare spec line, is never shown.
@@ -3143,6 +3156,11 @@ async def run_concierge_v2(
         async for frame in degrade_reply(widget, reason):
             yield frame
     finally:
+        # A card past the prompt's ceiling, whatever the outcome (the browser's
+        # audit row says how it rendered).
+        breaches = fences.ceiling_breaches() if fences is not None else {}
+        if breaches:
+            await _bookkeep(run_service.record_card_breaches, run_id, breaches)
         if not finished:
             # The visitor left mid-stream (generator closed or cancelled). Keep
             # what was produced so the owner's transcript shows the partial reply.

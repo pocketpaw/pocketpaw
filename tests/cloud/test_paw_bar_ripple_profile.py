@@ -299,6 +299,7 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     assert "720px" in text and "360px" in text
     assert '"columns": "repeat(auto-fit, minmax(150px, 1fr))"' in text
     assert "Aim for about 25 to 90 nodes" in text
+    assert "keep a card under about 10,000 characters" in text
     assert "Match the card to the answer" in text
     assert "starts with entity-detail (title, status, kpis, meta)" in text
     # The example is the last rule, as compact JSON.

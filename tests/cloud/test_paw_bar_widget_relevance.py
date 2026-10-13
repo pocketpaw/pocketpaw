@@ -368,7 +368,7 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
 
 
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
-    """The fixed core is 18,583 chars (the drawing widgets added only their two
+    """The fixed core is 18,630 chars (the drawing widgets added only their two
     names to the index); the worst per-turn section is the MAX_PICKED longest
     candidate lines, figure's at its longest (MAX_FULL_FIGURES figures in full, the
     rest ids and titles), so the paragraph stays well under the 32,000 cap."""
