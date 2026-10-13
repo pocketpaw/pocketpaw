@@ -217,6 +217,55 @@ shadow eval has real `spec_clear` numbers (`scripts/clef_verdicts.py` prints
 them). The flagged issue stays open, so the foreman can plan it again before a
 human rewrites it; the gate escalates it again without a new comment.
 
+### Clef on findings
+
+Clef also judges the FINDINGS Belt turns into verdicts and issues
+(`belt/clef.py`, the finding hooks). Each finding (its text, the run, the files
+and screenshots it names) is asked three questions against the run's task text:
+`blocking` (does it break the acceptance test or the review rubric, or is it
+polish), `mechanical` (could a lint rule, a test or the app audit's pixel and
+accessibility checks catch the whole class) and, when the repo has open issues
+sharing words with it, `duplicate` (a choice over the top 5 of them, read through
+`patrols.open_issues`, plus `none`). Three paths feed it:
+
+- the cloud reviewer's `Belt-Review: fail` comment, one finding per item line
+  (`clef.judge_review`, before Belt posts `belt/review`);
+- the bug issues the tester files after a land (`clef.judge_tester_bugs`, from
+  the list the lessons already read);
+- a Review Room `needs_changes` review, its notes as one finding
+  (`clef.judge_one`, before `gh issue create`).
+
+Scoring is awaited inline (all of a round's findings at once, up to 45 s) and
+needs Clef on (`POCKETPAW_BELT_CLEF=shadow` plus its credentials). Every verdict
+is appended to the run's `_code_change.clef_findings` with its source, what was
+done and the issue it touched; never the finding's text. In shadow, nothing
+else changes. With `POCKETPAW_BELT_CLEF_FINDINGS=live`:
+
+- a finding holds the run at `blocking` >= 0.5, or when it has no score;
+- a review finding that does not hold becomes a follow-up issue (labels
+  `review`, `gap` and the line's), or, over 0.8 `duplicate`, a comment on the
+  issue it duplicates. A review round where nothing holds posts `belt/review`
+  success ("its findings were filed as follow-ups") and launches no fixer;
+  otherwise it fails and the fixer's brief carries only the holding items and
+  the follow-ups' numbers. A finding Belt could not file holds;
+- over 0.7 `mechanical`, the issue Belt files gets `audit-rule`; a tester's bug
+  gets the label on its own issue;
+- a tester's bug over 0.8 `duplicate` gets a comment on the original and the
+  `duplicate` label (the tester filed it already); its `blocking` is recorded
+  only, since a tester never holds a landed run;
+- a Review Room duplicate is a comment on the original instead of a new issue,
+  and that issue's URL is the review's `issue_url`.
+
+`clef.round_clean` (no finding holds) and `clef.loop_decision` (done after 2
+clean rounds in a row, escalate at a cap) are the stop rule for a loop until
+clean. Belt's reviewer loop reviews each head once and merges on the first
+pass, so only `round_clean` has a caller there; the streak rule waits for a
+loop that re-reviews a clean head. The eval (`scripts/clef_verdicts.py`) prints
+finding rows beside what a human did with their issue (`gh issue list --state
+all`: open, fixed, wont_fix, duplicate) and agreement per decision kind
+(`blocking` against fixed vs won't-fix, `duplicate` against closed as
+duplicate; `mechanical` has no human signal on the issue yet).
+
 ### Pulley blocks through recipes
 
 Pulley (`qbtrix/pulley`) supplies certified copy-in building blocks (auth, org,
@@ -1816,6 +1865,7 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_MANDATE_CONTINUOUS_MIN_GAP_MINUTES` | `5` | Minimum time between two shifts of a `continuous` mandate |
 | `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS` | `3` | Age after which a `continuous` mandate's last shift stops holding the next one (in-flight runs, a stuck `planning`/`executing` state; never `in_gate`) |
 | `POCKETPAW_BELT_PLAN_GATE` | `manual` | `auto` runs the auto plan gate (needs Clef on) |
+| `POCKETPAW_BELT_CLEF_FINDINGS` | shadow | `live` lets Clef's finding verdicts hold a review round or file follow-ups, label `audit-rule` and comment on duplicates (needs Clef on) |
 | `POCKETPAW_BELT_PLAN_GATE_CLEF_TIMEOUT` | `45` | Seconds the auto gate waits for Clef's plan score |
 | `POCKETPAW_BELT_POLICY_MIN_IN_SCOPE` | `0.80` | Auto gate: lowest Clef `in_scope` that approves |
 | `POCKETPAW_BELT_POLICY_MIN_LOW_RISK` | `0.75` | Auto gate: lowest Clef `low_risk` that approves |

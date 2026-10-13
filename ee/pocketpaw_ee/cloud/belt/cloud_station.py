@@ -31,13 +31,14 @@
 #           the issue and docs/review-rubric.md, engineering.md, design.md, and
 #           posts ONE comment ``Belt-Review: pass|fail`` / ``Head: <sha>`` (fail:
 #           file:line items); never a status or a push. Belt reads it (after the
-#           launch, this head), posts the status; a fail is a ``review`` fixer fed
-#           it. No verdict by REVIEW_TIMEOUT or the run's deadline, no session, or
-#           a stale pending nobody owns: success "review timed out", counted.
+#           launch, this head) and posts the status; a fail's items go to Clef first
+#           (``clef.judge_review``; live, a round of only follow-ups passes) and the
+#           holding ones to a ``review`` fixer. No verdict by REVIEW_TIMEOUT or the
+#           deadline, no session or an unowned stale pending: success "review timed out".
 #   LESSONS a merged PR a ``ci``/``review`` fixer got through, and each bug the
-#           tester files on the line, become one deduplicated lesson in the
-#           mandate's soul (``soul_link.note_lesson``, tagged repo · line); a
-#           worker brief recalls the top 5, fenced, capped at 1,200 chars.
+#           tester files on the line (also judged: ``clef.judge_tester_bugs``),
+#           become one deduplicated lesson in the mandate's soul (tagged repo ·
+#           line); a worker brief recalls the top 5, fenced, capped at 1,200.
 #   TESTER  ``POCKETPAW_FACTORY_CLOUD_TESTER=1`` + a live ``tester`` seat: ONE
 #           session per landed run tries to break it, files bugs, puts tests in one
 #           ``Belt-Test`` PR (tracked like the worker's, its own fixer cap, into
@@ -51,6 +52,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -67,7 +69,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-from pocketpaw_ee.cloud.belt import orient
+from pocketpaw_ee.cloud.belt import clef, orient
 from pocketpaw_ee.cloud.belt.develop_station import (
     _GIT,
     ClaudeCodeDevelop,
@@ -109,6 +111,7 @@ _HEAD_LINE = "Head: "
 _VERDICT_STATUS = {
     "pass": ("success", "Belt review passed"),
     "fail": ("failure", "Belt review failed: see the Belt-Review comment"),
+    "followup": ("success", "Belt review passed: its findings were filed as follow-ups"),
 }
 _TIMED_OUT = "review timed out"
 _REVIEW_NOTE_CHARS = 3000
@@ -255,6 +258,9 @@ class CloudTaskDispatcher:
     # Reviews in flight: head sha -> due time on ``clock``. One past its due no
     # longer holds a slot; its tracker times it out at the next poll.
     _reviewing: dict[str, float] = field(default_factory=dict)
+    # Head sha -> the failed review's holding items, for that head's fixer
+    # (``clef.judge_review``, live); empty or missing = the whole comment.
+    _held: dict[str, str] = field(default_factory=dict)
 
     async def dispatch(
         self,
@@ -832,7 +838,7 @@ class CloudTaskDispatcher:
             "branch": str(pr.get("headRefName") or ""),
             "check": str((red or {}).get("name") or (red or {}).get("context") or ""),
             "log": (
-                _review_note(pr)
+                self._held.pop(str(pr.get("headRefOid") or ""), "") or _review_note(pr)
                 if kind == "review"
                 else await self._failed_log(slug, red, cwd)
                 if red
@@ -923,9 +929,20 @@ class CloudTaskDispatcher:
             elif entry.get("verdict") == "pending":
                 due = self._review_due(entry)
                 said = _review_verdict(pr, head, entry.get("at"))
+                if said == "fail" and "judged" not in entry:  # Clef judges its findings
+                    entry["judged"], self._held[head] = await clef.judge_review(
+                        run_ref,
+                        blob,
+                        _review_note(pr),
+                        slug=slug,
+                        pr_url=str(pr.get("url") or ""),
+                        gh=functools.partial(self.runner, cwd=cwd, timeout=60.0),
+                        line=await self._line(blob),
+                    )
+                said = entry.get("judged") if said == "fail" else said
                 if said:  # the reviewer's comment: Belt posts the status
                     await self._review_status(slug, head, *_VERDICT_STATUS[said], cwd)
-                    entry["verdict"] = said
+                    entry["verdict"] = "pass" if said == "followup" else said
                 elif state in {"SUCCESS", "FAILURE", "ERROR"}:  # by hand, or before a restart
                     entry["verdict"] = "pass" if state == "SUCCESS" else "fail"
                 elif final or self.clock() >= due:
@@ -1245,7 +1262,7 @@ class CloudTaskDispatcher:
                 repo = ClaudeCodeDevelop._resolve_repo(str(blob.get("repo") or ""))
                 slug = await self._slug(repo)
             await self._track(store, run_ref, blob, slug, cloud, worker, kind="tester")
-            await self._bug_lessons(blob, slug, tester.get("at"))
+            await self._bug_lessons(blob, slug, tester.get("at"), run_ref)
         except Exception as exc:  # noqa: BLE001 — the run has landed; its tester never fails it
             logger.warning("belt cloud: tester tracker for %s stopped: %s", run_ref, exc)
 
@@ -1274,16 +1291,18 @@ class CloudTaskDispatcher:
             what += f" Fixed by: {fixed}." if fixed else ""
             await soul_link.note_lesson(found["soul_path"], _lesson(slug, found, what))
 
-    async def _bug_lessons(self, blob: dict[str, Any], slug: str, since: Any) -> None:
+    async def _bug_lessons(
+        self, blob: dict[str, Any], slug: str, since: Any, run_ref: str = ""
+    ) -> None:
         """Each bug issue on the line (``bug`` + a charter ``issue_labels`` label,
-        when it has any) created since the tester launched: one lesson naming it.
-        Never raises."""
+        when it has any) created since the tester launched: one lesson naming it,
+        and all of them to Clef (``clef.judge_tester_bugs``). Never raises."""
         found = await self._line(blob)
-        if not found.get("soul_path") or not isinstance(since, int | float):
+        if not isinstance(since, int | float) or not (found.get("soul_path") or clef.from_env()):
             return
         lines = {str(lb).lower() for lb in (found.get("charter") or {}).get("issue_labels") or []}
         argv = ["gh", "issue", "list", "-R", slug, "--label", "bug", "--state", "all"]
-        argv += ["--limit", "30", "--json", "number,title,createdAt,labels"]
+        argv += ["--limit", "30", "--json", "number,title,body,createdAt,labels"]
         try:
             rows = json.loads(
                 await self._ok(argv, Path(self.launch_dir).expanduser(), "LESSON: gh issue list")
@@ -1292,13 +1311,21 @@ class CloudTaskDispatcher:
         except Exception:  # noqa: BLE001 — no bug list, no lessons
             logger.info("belt cloud: bug list on %s unreadable", slug, exc_info=True)
             return
+        bugs = []
         for row in rows if isinstance(rows, list) else []:
             names = {str(lb.get("name") or "").lower() for lb in row.get("labels") or []}
             if _epoch(row.get("createdAt")) <= since or (lines and not lines & names):
                 continue
+            bugs.append(row)
+            if not found.get("soul_path"):
+                continue
             bug = f"{str(row.get('title') or '')[:160]} (#{row.get('number')})"
             what = f"the tester found a bug after '{_title(blob)}': {bug}."
             await soul_link.note_lesson(found["soul_path"], _lesson(slug, found, what))
+        if bugs and run_ref:
+            cwd = Path(self.launch_dir).expanduser()
+            gh = functools.partial(self.runner, cwd=cwd, timeout=60.0)
+            await clef.judge_tester_bugs(run_ref, blob, bugs, slug=slug, gh=gh)
 
     async def _line(self, blob: dict[str, Any]) -> dict[str, Any]:
         """The mandate's ``charter_for`` read (name, soul_path, charter); {} on failure."""

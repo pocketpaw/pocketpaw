@@ -1,36 +1,40 @@
-# ee/pocketpaw_ee/cloud/belt/clef.py — Belt's SHADOW consult of Cloudflare's Clef.
+# ee/pocketpaw_ee/cloud/belt/clef.py — Belt's consult of Cloudflare's Clef.
 #
 # Clef (``@cf/cloudflare/clef`` on Workers AI) is a decision model: it takes a
 # ``state`` plus typed questions (``noul`` yes/no, ``choice``, ``score``) and
-# returns a probability per answer. Belt asks it about the foreman's PLANS and
-# the station's DIFFS and records the verdict on the Instinct Action blob it
-# judged (``_belt_plan`` / ``_code_change``, key ``clef``). Diff verdicts are
-# shadow only. A plan verdict decides nothing unless the plan gate runs its auto
-# policy; the eval lists verdicts beside what the human and the executor did
-# (``list_verdicts``, ``scripts/clef_verdicts.py``).
+# returns a probability per answer. Belt asks it about the foreman's PLANS, the
+# station's DIFFS and the FINDINGS of its reviewer, tester and Review Room, and
+# records each verdict on the run's or plan's Instinct Action blob (``clef`` on
+# ``_belt_plan`` / ``_code_change``; findings append to ``clef_findings``). Diff
+# verdicts are shadow only; a plan verdict decides only under the auto plan gate
+# (``mandates/plan_policy.py``); finding verdicts decide only with
+# ``POCKETPAW_BELT_CLEF_FINDINGS=live``. The eval lists verdicts beside what the
+# human, the executor or the issue's closer did (``list_verdicts``,
+# ``resolve_outcomes``, ``agreement``, ``scripts/clef_verdicts.py``).
 #
 #   * ``ClefClient.ask`` — one POST, 20 s timeout, one retry on a 5xx; returns
 #     ``None`` on any failure (timeout, 4xx, ``success:false``, bad JSON).
-#   * ``score_plan`` / ``score_diff`` — pure question builders plus one ask. The
-#     plan state carries the text of the issues its tasks cite (``evidence``),
-#     and one ``spec_clear_<i>`` question per task asks whether task i's issue
-#     states a concrete, testable acceptance criterion. The diff state is the
-#     file list plus the diff head (it says when it cut).
-#   * ``record_verdict`` / ``list_verdicts`` — the blob write and the eval read.
-#   * ``shadow_plan`` / ``shadow_diff`` — the hooks: a synchronous flag check,
-#     then a fire-and-forget task that scores and records, logging one line.
-#   * ``score_and_record_plan`` — the plan scoring + recording ``shadow_plan``
-#     runs. ``shadow_plan``'s task returns the verdict, so the plan gate's auto
-#     policy (``mandates/plan_policy.py``, ``POCKETPAW_BELT_PLAN_GATE=auto``)
-#     awaits that task inline (shielded: a timeout still records).
+#   * ``score_plan`` / ``score_diff`` / ``score_finding`` — question builders plus
+#     one ask. A plan state carries its cited issues' text and one ``spec_clear_<i>``
+#     per task; a diff state the file list plus the head (it says when it cut); a
+#     finding asks ``blocking``, ``mechanical`` and, with candidates (the open
+#     issues sharing most words, ``candidate_issues``), a ``duplicate`` choice.
+#   * ``shadow_plan`` / ``shadow_diff`` — fire-and-forget hooks; the auto plan
+#     gate awaits ``shadow_plan``'s task (shielded: a timeout still records).
+#   * ``judge_review`` / ``judge_tester_bugs`` / ``judge_one`` — the finding
+#     hooks, awaited inline (``FINDINGS_WAIT_S``). Live, ``decide`` holds a finding
+#     at ``blocking`` >= 0.5 or with no score, else it becomes a follow-up issue;
+#     ``audit-rule`` over 0.7 ``mechanical``; over 0.8 ``duplicate`` comments on
+#     that issue instead. ``round_clean`` / ``loop_decision`` are the stop rule
+#     for a loop until clean (2 clean rounds in a row, else escalate at a cap).
 #
 # Off unless ``POCKETPAW_BELT_CLEF=shadow`` and both ``POCKETPAW_CLEF_TOKEN`` and
 # ``POCKETPAW_CLEF_ACCOUNT_ID`` are set. INVARIANTS: nothing here raises into a
 # shift or a run; the token and the account id (it sits in the URL) never reach
 # a log line or a trace span (errors log the exception type and status only;
 # requests run under ``logfire.suppress_instrumentation``). The blob carries
-# only the verdict numbers, never the state, because ``list_runs`` reads every
-# ``_code_change`` blob in bulk.
+# only the verdict numbers, never the state or a finding's text, because
+# ``list_runs`` reads every ``_code_change`` blob in bulk.
 
 from __future__ import annotations
 
@@ -39,6 +43,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -372,6 +377,193 @@ async def score_diff(
 
 
 # ---------------------------------------------------------------------------
+# findings
+# ---------------------------------------------------------------------------
+
+FINDINGS_FLAG = "POCKETPAW_BELT_CLEF_FINDINGS"
+AUDIT_RULE = "audit-rule"
+BLOCKING_MIN = 0.5  # at or over: the finding holds the run
+MECHANICAL_MIN = 0.7  # over: the issue Belt files gets ``audit-rule``
+DUPLICATE_MIN = 0.8  # over: comment on that issue instead of filing one
+MAX_FINDINGS = 10  # scored per round; the rest go unscored (and hold, live)
+MAX_CANDIDATES = 5
+FINDINGS_WAIT_S = 45.0  # one round's scoring, all findings at once
+_FINDING_CHARS = 4_000
+_CONTEXT_CHARS = 6_000
+_CANDIDATE_CHARS = 600
+_FINDINGS_KEPT = 100  # ``clef_findings`` entries kept on one run's blob
+_FILE_LINE = re.compile(r"([\w./-]+\.[A-Za-z0-9]+):\d+")
+_PNG_NAME = re.compile(r"[\w.-]+\.png\b")
+_WORD = re.compile(r"[a-z0-9_]{4,}")
+_ISSUE_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/issues/(\d+)")
+_SOURCE_ISSUE = re.compile(r"(?<![\w/&])#(\d+)\b")  # the issue a run's task names
+_SOURCES = {
+    "review": "Belt's pre-merge code reviewer, judging the PR's diff",
+    "tester": "Belt's post-merge tester, trying to break the landed feature",
+    "room": "a human trying the built app in the Review Room",
+}
+
+# A gh runner: async (argv) -> (returncode, stdout, stderr).
+GhFn = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
+
+
+@dataclass(frozen=True)
+class Finding:
+    text: str
+    source: str  # "review" | "tester" | "room"
+    run_id: str
+    files: tuple[str, ...] = ()
+    screenshots: tuple[str, ...] = ()
+    issue: int = 0  # the issue this finding already is (a tester's bug), never its own dup
+
+
+@dataclass(frozen=True)
+class FindingVerdict:
+    blocking: float
+    mechanical: float
+    # P(it duplicates ``duplicate_of``): the ``duplicate`` choice's highest
+    # probability over the candidate issues (not "none"); -1 = not asked or
+    # unanswered, and then ``duplicate_of`` is 0.
+    duplicate: float
+    duplicate_of: int
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class FindingDecision:
+    holds: bool
+    audit_rule: bool
+    duplicate_of: int  # 0 = file it (or keep it) as its own issue
+
+
+def findings_live() -> bool:
+    """``POCKETPAW_BELT_CLEF_FINDINGS=live``: finding verdicts decide; else shadow."""
+    return os.environ.get(FINDINGS_FLAG, "").strip().lower() == "live"
+
+
+def finding_questions(candidates: Sequence[dict[str, Any]] = ()) -> dict[str, Question]:
+    """``blocking`` and ``mechanical``, plus ``duplicate`` when there are candidates."""
+    questions = {
+        "blocking": _noul(
+            "Does this finding break the feature's acceptance test or a review rubric item "
+            "(see context), rather than being polish?",
+            "it breaks the acceptance test or the rubric; the feature is not done until fixed",
+            "it is polish or a nice-to-have; it can be a follow-up",
+        ),
+        "mechanical": _noul(
+            "Could an automated check (a lint rule, a test, or the app audit's pixel and "
+            "accessibility checks) catch this whole class of bug, not just this instance?",
+            "an automated check could catch the whole class",
+            "it needs human judgement",
+        ),
+    }
+    if candidates:
+        options = {
+            f"issue_{c['number']}": f"it duplicates #{c['number']}: {(c.get('title') or '')[:120]}"
+            for c in candidates
+        }
+        options["none"] = "it duplicates none of the candidate issues"
+        questions["duplicate"] = Question(
+            "choice", "Which open issue in candidate_issues does this finding duplicate?", options
+        )
+    return questions
+
+
+def candidate_issues(
+    rows: list[dict[str, Any]], text: str, n: int = MAX_CANDIDATES, exclude: int = 0
+) -> list[dict[str, Any]]:
+    """The ``n`` open issues sharing the most words (4+ chars) with ``text``;
+    none that share no word, never ``exclude``."""
+    want = set(_WORD.findall(text.lower()))
+    scored = []
+    for row in rows:
+        number = row.get("number")
+        if not isinstance(number, int) or number == exclude:
+            continue
+        have = set(_WORD.findall(f"{row.get('title') or ''} {row.get('body') or ''}".lower()))
+        if shared := len(want & have):
+            scored.append((shared, number, row))
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    return [row for _s, _n, row in scored[:n]]
+
+
+async def score_finding(
+    client: ClefClient,
+    finding: Finding,
+    context: str,
+    candidates: Sequence[dict[str, Any]] = (),
+) -> FindingVerdict | None:
+    """One finding against the run's ``context`` (its task and acceptance test)."""
+    text, cut = _cap(finding.text, _FINDING_CHARS)
+    ctx, ctx_cut = _cap(context, _CONTEXT_CHARS)
+    state = {
+        "finding": text,
+        "source": _SOURCES.get(finding.source, finding.source),
+        "run": finding.run_id,
+        "files": "\n".join(finding.files) or "(none named)",
+        "screenshots": "\n".join(finding.screenshots) or "(none)",
+        "context": ctx or "(no task text)",
+        "candidate_issues": "\n\n".join(
+            f"#{c['number']} {c.get('title') or ''}\n{str(c.get('body') or '')[:_CANDIDATE_CHARS]}"
+            for c in candidates
+        )
+        or "(no candidates)",
+    }
+    answers = await client.ask(state, finding_questions(candidates))
+    if answers is None:
+        return None
+    dup, dup_of = -1.0, 0
+    picked = answers.get("duplicate")
+    if picked is not None:
+        probs = {k: float(v) for k, v in picked.probabilities.items() if k != "none"}
+        if not probs and picked.choice and picked.choice != "none":
+            probs = {picked.choice: float(picked.confidence or 0.0)}
+        if probs:
+            key = max(probs, key=lambda k: probs[k])
+            if key.removeprefix("issue_").isdigit():
+                dup, dup_of = probs[key], int(key.removeprefix("issue_"))
+        else:
+            dup = 0.0
+    return FindingVerdict(
+        blocking=_p(answers, "blocking"),
+        mechanical=_p(answers, "mechanical"),
+        duplicate=dup,
+        duplicate_of=dup_of,
+        truncated=cut or ctx_cut,
+    )
+
+
+def decide(verdict: FindingVerdict | None) -> FindingDecision:
+    """The live policy for one finding. No verdict, or an unanswered
+    ``blocking``, holds: Clef being down never waves a finding through."""
+    if verdict is None:
+        return FindingDecision(holds=True, audit_rule=False, duplicate_of=0)
+    return FindingDecision(
+        holds=not 0 <= verdict.blocking < BLOCKING_MIN,
+        audit_rule=verdict.mechanical > MECHANICAL_MIN,
+        duplicate_of=verdict.duplicate_of if verdict.duplicate > DUPLICATE_MIN else 0,
+    )
+
+
+def round_clean(verdicts: list[FindingVerdict | None]) -> bool:
+    """True when no finding in the round blocks (``decide``): every one scored
+    under ``BLOCKING_MIN``. A round with no findings is clean."""
+    return not any(decide(v).holds for v in verdicts)
+
+
+def loop_decision(
+    rounds: list[list[FindingVerdict | None]], cap: int, clean_needed: int = 2
+) -> str:
+    """The stop rule for a loop-until-clean review: ``done`` after
+    ``clean_needed`` clean rounds in a row, ``escalate`` (to the captain) once
+    ``cap`` rounds ran without that, else ``continue``."""
+    tail = rounds[-clean_needed:]
+    if len(tail) == clean_needed and all(round_clean(r) for r in tail):
+        return "done"
+    return "escalate" if len(rounds) >= cap else "continue"
+
+
+# ---------------------------------------------------------------------------
 # recording + the eval read
 # ---------------------------------------------------------------------------
 
@@ -410,6 +602,50 @@ async def record_verdict(
         return False
 
 
+def finding_entry(
+    finding: Finding, verdict: FindingVerdict, *, actions: Sequence[str] = (), issue: str = ""
+) -> dict[str, Any]:
+    """One ``clef_findings`` entry: the numbers, the source, what live mode
+    did (``actions``; empty in shadow) and the issue it touched (``owner/repo#n``).
+    Never the finding's text: ``list_runs`` reads these blobs in bulk."""
+    return {
+        "kind": "finding",
+        "model": MODEL,
+        "scored_at": datetime.now(UTC).isoformat(),
+        "source": finding.source,
+        "actions": list(actions),
+        "issue": issue or None,
+        "verdict": asdict(verdict),
+        "actual_outcome": None,
+    }
+
+
+async def record_findings(run_id: str, entries: list[dict[str, Any]], *, workspace_id: str) -> bool:
+    """Append ``entries`` to the run's ``_code_change.clef_findings`` (the newest
+    ``_FINDINGS_KEPT``). Never raises."""
+    if not entries:
+        return False
+    from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.cloud._core.proposals import update_action_blob
+
+    try:
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        action = await store.get_action(run_id)
+        blob = (getattr(action, "parameters", None) or {}).get(_PARAM_KEYS["diff"])
+        if not isinstance(blob, dict):
+            return False
+        kept = [*(blob.get("clef_findings") or []), *entries][-_FINDINGS_KEPT:]
+        return await update_action_blob(
+            store=store,
+            action_id=run_id,
+            param_key=_PARAM_KEYS["diff"],
+            updates={"clef_findings": kept},
+        )
+    except Exception as exc:  # noqa: BLE001 — a lost record never fails the caller
+        logger.warning("clef: could not record findings on %s (%s)", run_id, type(exc).__name__)
+        return False
+
+
 def _outcome(action: Any, blob: dict[str, Any], recorded: str | None) -> str:
     """What actually happened: the recorded outcome, else the Action's state
     (a diff that landed reads ``landed``)."""
@@ -422,7 +658,9 @@ def _outcome(action: Any, blob: dict[str, Any], recorded: str | None) -> str:
 
 
 async def list_verdicts(workspace_id: str, limit: int = 500) -> list[dict[str, Any]]:
-    """Every recorded verdict in the workspace beside its actual outcome, newest first."""
+    """Every recorded verdict in the workspace beside its actual outcome, newest
+    first. A finding row carries ``source``, ``actions`` and ``issue``; one tied
+    to an issue has outcome "" until ``resolve_outcomes`` reads the issue."""
     from pocketpaw.stores import get_instinct_store
 
     store = get_instinct_store(workspace_id=workspace_id or None)
@@ -431,20 +669,91 @@ async def list_verdicts(workspace_id: str, limit: int = 500) -> list[dict[str, A
         params = getattr(action, "parameters", None) or {}
         for kind, key in _PARAM_KEYS.items():
             blob = params.get(key)
-            if not isinstance(blob, dict) or not isinstance(blob.get("clef"), dict):
+            if not isinstance(blob, dict):
                 continue
-            rec = blob["clef"]
-            rows.append(
-                {
-                    "action_id": str(action.id),
-                    "kind": kind,
-                    "title": getattr(action, "title", ""),
-                    "scored_at": rec.get("scored_at"),
-                    "verdict": rec.get("verdict") or {},
-                    "outcome": _outcome(action, blob, rec.get("actual_outcome")),
-                }
-            )
+            base = {"action_id": str(action.id), "title": getattr(action, "title", "")}
+            rec = blob.get("clef")
+            if isinstance(rec, dict):
+                rows.append(
+                    {
+                        **base,
+                        "kind": kind,
+                        "scored_at": rec.get("scored_at"),
+                        "verdict": rec.get("verdict") or {},
+                        "outcome": _outcome(action, blob, rec.get("actual_outcome")),
+                    }
+                )
+            findings = blob.get("clef_findings") if kind == "diff" else None
+            for rec in findings if isinstance(findings, list) else []:
+                if not isinstance(rec, dict):
+                    continue
+                issue = rec.get("issue")
+                ran = "" if issue else _outcome(action, blob, None)
+                rows.append(
+                    {
+                        **base,
+                        "kind": "finding",
+                        "source": rec.get("source"),
+                        "scored_at": rec.get("scored_at"),
+                        "verdict": rec.get("verdict") or {},
+                        "actions": rec.get("actions") or [],
+                        "issue": issue,
+                        "outcome": rec.get("actual_outcome") or ran,
+                    }
+                )
     return rows
+
+
+def issue_outcome(state: str, reason: str) -> str:
+    """What the human did with an issue: ``open``, ``duplicate``, ``fixed``,
+    ``wont_fix`` (GitHub's ``state`` + ``stateReason``), else ``closed``."""
+    if state.upper() == "OPEN":
+        return "open"
+    return {"DUPLICATE": "duplicate", "COMPLETED": "fixed", "NOT_PLANNED": "wont_fix"}.get(
+        reason.upper(), "closed"
+    )
+
+
+async def resolve_outcomes(rows: list[dict[str, Any]], gh: GhFn) -> list[dict[str, Any]]:
+    """Fill the outcome of each finding row tied to an issue from GitHub: one
+    ``gh issue list --state all`` per repo. An unreadable repo leaves them ""."""
+    slugs = {str(r["issue"]).split("#")[0] for r in rows if r.get("issue") and not r["outcome"]}
+    states: dict[str, str] = {}
+    for slug in sorted(slugs):
+        argv = ["gh", "issue", "list", "-R", slug, "--state", "all", "--limit", "1000"]
+        try:
+            code, out, _ = await gh([*argv, "--json", "number,state,stateReason"])
+            for i in json.loads(out) if code == 0 else []:
+                states[f"{slug}#{i['number']}"] = issue_outcome(
+                    str(i.get("state") or ""), str(i.get("stateReason") or "")
+                )
+        except Exception:  # noqa: BLE001 — the eval prints what it could read
+            logger.warning("clef: issue states for %s unreadable", slug, exc_info=True)
+    for r in rows:
+        if r.get("issue") and not r["outcome"]:
+            r["outcome"] = states.get(str(r["issue"]), "")
+    return rows
+
+
+def agreement(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
+    """``{decision: (agreed, judged)}`` over finding rows whose issue a human
+    closed. ``blocking`` agrees when blocking matches "fixed" (not won't-fix);
+    ``duplicate`` when over ``DUPLICATE_MIN`` matches "closed as duplicate".
+    ``mechanical`` has no human signal on the issue yet, so it is not counted."""
+    out = {"blocking": (0, 0), "duplicate": (0, 0)}
+    for r in rows:
+        v, outcome = r.get("verdict") or {}, r.get("outcome")
+        if r.get("kind") != "finding":
+            continue
+        if outcome in ("fixed", "wont_fix") and v.get("blocking", -1) >= 0:
+            said = v["blocking"] >= BLOCKING_MIN
+            agreed, judged = out["blocking"]
+            out["blocking"] = (agreed + (said == (outcome == "fixed")), judged + 1)
+        if outcome in ("fixed", "wont_fix", "duplicate") and v.get("duplicate", -1) >= 0:
+            said = v["duplicate"] > DUPLICATE_MIN
+            agreed, judged = out["duplicate"]
+            out["duplicate"] = (agreed + (said == (outcome == "duplicate")), judged + 1)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -540,3 +849,219 @@ def shadow_diff(
         logger.info("clef: run %s scored %s", action_id, asdict(verdict))
 
     return _spawn("diff", go)
+
+
+# ---------------------------------------------------------------------------
+# finding hooks — awaited inline; shadow records, live (FINDINGS_FLAG) acts
+# ---------------------------------------------------------------------------
+
+_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
+
+
+async def judge(
+    findings: list[Finding],
+    *,
+    context: str,
+    repo: str,
+    gh: GhFn,
+    client: ClefClient | None = None,
+) -> list[FindingVerdict | None] | None:
+    """Score up to ``MAX_FINDINGS`` findings at once, each against its top open
+    issues (``patrols.open_issues``, ranked by ``candidate_issues``; never the
+    issue ``context`` names, which the run itself closes), within
+    ``FINDINGS_WAIT_S``. One verdict (or None) per finding; None when Clef is
+    off, there is nothing to score, or the wait ran out. Never raises."""
+    client = client or from_env()
+    if client is None or not findings:
+        return None
+    try:
+        from pocketpaw_ee.cloud.mandates.patrols import open_issues
+
+        own = _SOURCE_ISSUE.search(context)
+        rows = await open_issues(repo, gh) if repo else []
+        rows = [r for r in rows if not own or r.get("number") != int(own.group(1))]
+
+        async def one(finding: Finding) -> FindingVerdict | None:
+            try:
+                found = candidate_issues(rows, finding.text, exclude=finding.issue)
+                return await score_finding(client, finding, context, found)
+            except Exception as exc:  # noqa: BLE001 — one finding's failure is its own
+                logger.warning("clef: finding score failed (%s)", type(exc).__name__)
+                return None
+
+        scored = await asyncio.wait_for(
+            asyncio.gather(*(one(f) for f in findings[:MAX_FINDINGS])), FINDINGS_WAIT_S
+        )
+    except Exception as exc:  # noqa: BLE001 — Clef is advisory; never raise
+        logger.warning("clef: findings not scored (%s)", type(exc).__name__)
+        return None
+    return [*scored, *([None] * (len(findings) - len(scored)))]
+
+
+async def judge_one(finding: Finding, blob: dict[str, Any], gh: GhFn) -> FindingVerdict | None:
+    """``judge`` for one finding of the run ``blob``; None when Clef is off."""
+    verdicts = await judge([finding], context=_context(blob), repo=_repo(blob), gh=gh)
+    return verdicts[0] if verdicts else None
+
+
+def review_findings(note: str, run_id: str) -> list[Finding]:
+    """A ``Belt-Review: fail`` comment's items: each non-empty line after the
+    verdict and ``Head:`` lines, bullet stripped, with the files it names."""
+    out = []
+    for line in note.strip().splitlines()[2:]:
+        text = _BULLET.sub("", line).strip()
+        if text:
+            files = tuple(dict.fromkeys(_FILE_LINE.findall(text)))
+            out.append(Finding(text, "review", run_id, files=files))
+    return out
+
+
+async def judge_review(
+    run_id: str,
+    blob: dict[str, Any],
+    note: str,
+    *,
+    slug: str,
+    pr_url: str,
+    gh: GhFn,
+    line: dict[str, Any],
+) -> tuple[str, str]:
+    """The reviewer said ``fail``; ``note`` is its comment, ``line`` the
+    mandate's charter read. Returns the status to post and the fixer's note:
+    ``("fail", "")`` is today's path (shadow, Clef off, no items parsed). Live,
+    each finding that does not hold becomes a follow-up issue (labels
+    ``review``, ``gap``, the line's, ``audit-rule`` when mechanical) or a
+    comment on the open issue it duplicates; ``("followup", "")`` when none
+    holds (the round is clean), else ``("fail", <the note with only the holding
+    items>)``. A finding Belt could not file holds. Never raises."""
+    try:
+        findings = review_findings(note, run_id)
+        verdicts = await judge(findings, context=_context(blob), repo=_repo(blob), gh=gh)
+        if verdicts is None:
+            return "fail", ""
+        live = findings_live()
+        labels = ["review", "gap", *((line.get("charter") or {}).get("issue_labels") or [])]
+        made: set[str] = set()
+        held: list[str] = []  # the holding findings, then any Belt could not file
+        filed: list[str] = []
+        entries = []
+        for finding, verdict in zip(findings, verdicts, strict=True):
+            act, issue = decide(verdict), ""
+            actions: list[str] = []
+            if live and not act.holds:
+                actions, issue = await _follow_up(gh, slug, finding, act, labels, made, pr_url)
+            if live and not issue:
+                actions = ["held"]
+                held.append(finding.text)
+            filed += [issue] if issue else []
+            if verdict is not None:
+                entries.append(finding_entry(finding, verdict, actions=actions, issue=issue))
+        await record_findings(run_id, entries, workspace_id=str(blob.get("workspace_id") or ""))
+        if not live:
+            return "fail", ""
+        if round_clean(verdicts) and not held:  # every finding is a follow-up now
+            return "followup", ""
+        kept = [*note.strip().splitlines()[:2], *(f"- {text}" for text in held)]
+        if filed:
+            kept.append(f"Filed as follow-ups, not for this PR: {', '.join(filed)}")
+        return "fail", "\n".join(kept)
+    except Exception as exc:  # noqa: BLE001 — the review's own fail stands
+        logger.warning("clef: review findings of %s not judged (%s)", run_id, type(exc).__name__)
+        return "fail", ""
+
+
+async def judge_tester_bugs(
+    run_id: str, blob: dict[str, Any], bugs: list[dict[str, Any]], *, slug: str, gh: GhFn
+) -> None:
+    """The bug issues the run's tester filed (``number``, ``title``, ``body``).
+    Each is recorded with its issue; live, a mechanical one gets ``audit-rule``
+    and one duplicating an open issue gets a comment there and the ``duplicate``
+    label. ``blocking`` is recorded only: the run has landed and a tester never
+    holds it. Never raises."""
+    try:
+        findings = [
+            Finding(
+                text=f"{b.get('title') or ''}\n{b.get('body') or ''}".strip(),
+                source="tester",
+                run_id=run_id,
+                files=tuple(dict.fromkeys(_FILE_LINE.findall(str(b.get("body") or "")))),
+                screenshots=tuple(dict.fromkeys(_PNG_NAME.findall(str(b.get("body") or "")))),
+                issue=b["number"],
+            )
+            for b in bugs
+            if isinstance(b.get("number"), int)
+        ]
+        verdicts = await judge(findings, context=_context(blob), repo=_repo(blob), gh=gh)
+        live, entries = findings_live(), []
+        for finding, verdict in zip(findings, verdicts or [], strict=False):
+            if verdict is None:
+                continue
+            act, actions = decide(verdict), list[str]()
+            if live and act.audit_rule and await _add_label(gh, slug, finding.issue, AUDIT_RULE):
+                actions.append("audit_rule")
+            if live and act.duplicate_of:
+                said = f"Belt's tester filed this again as #{finding.issue}."
+                argv = ["gh", "issue", "comment", str(act.duplicate_of), "-R", slug, "--body", said]
+                if (await gh(argv))[0] == 0 and await _add_label(
+                    gh, slug, finding.issue, "duplicate"
+                ):
+                    actions.append("duplicate")
+            issue = f"{slug}#{finding.issue}"
+            entries.append(finding_entry(finding, verdict, actions=actions, issue=issue))
+        await record_findings(run_id, entries, workspace_id=str(blob.get("workspace_id") or ""))
+    except Exception as exc:  # noqa: BLE001 — the tester's bugs stand as filed
+        logger.warning("clef: tester bugs of %s not judged (%s)", run_id, type(exc).__name__)
+
+
+def _context(blob: dict[str, Any]) -> str:
+    return str(blob.get("task") or blob.get("title") or "")
+
+
+def _repo(blob: dict[str, Any]) -> str:
+    return str(blob.get("repo") or "")
+
+
+async def _add_label(gh: GhFn, slug: str, number: int, label: str) -> bool:
+    """Label issue ``number``, creating the label first (that fails harmlessly
+    when it exists)."""
+    await gh(["gh", "label", "create", label, "-R", slug])
+    argv = ["gh", "issue", "edit", str(number), "-R", slug, "--add-label", label]
+    return (await gh(argv))[0] == 0
+
+
+async def _follow_up(
+    gh: GhFn,
+    slug: str,
+    finding: Finding,
+    act: FindingDecision,
+    labels: list[str],
+    made: set[str],
+    pr_url: str,
+) -> tuple[list[str], str]:
+    """Comment on the issue a non-blocking review finding duplicates, else file
+    it as a follow-up issue. ``(actions, "owner/repo#n")``, or ``([], "")`` when
+    GitHub refused."""
+    if act.duplicate_of:
+        said = f"Belt's review of {pr_url} found this again:\n\n{finding.text}"
+        argv = ["gh", "issue", "comment", str(act.duplicate_of), "-R", slug, "--body", said]
+        ok = (await gh(argv))[0] == 0
+        return (["duplicate"], f"{slug}#{act.duplicate_of}") if ok else ([], "")
+    wanted = [*labels, *([AUDIT_RULE] if act.audit_rule else [])]
+    for label in wanted:
+        if label not in made:  # an existing label exits non-zero; that is fine
+            made.add(label)
+            await gh(["gh", "label", "create", label, "-R", slug])
+    body = (
+        f"Belt's review of {pr_url} found this and judged it non-blocking, so it did "
+        f"not hold the PR.\n\n{finding.text}"
+    )
+    title = f"Follow-up: {finding.text.splitlines()[0][:90]}"
+    argv = ["gh", "issue", "create", "-R", slug, "--title", title, "--body", body]
+    for label in wanted:
+        argv += ["--label", label]
+    code, out, _ = await gh(argv)
+    found = _ISSUE_URL.search(out or "")
+    if code != 0 or not found:
+        logger.warning("clef: follow-up issue on %s refused (exit %s)", slug, code)
+        return [], ""
+    return ["follow_up", *(["audit_rule"] if act.audit_rule else [])], f"{slug}#{found.group(1)}"

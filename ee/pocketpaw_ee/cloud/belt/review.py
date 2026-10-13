@@ -31,7 +31,10 @@
 #            frames committed to ``belt-review-assets`` under
 #            ``reviews/<review>/<t_ms>.png`` (gh cannot attach images) and linked
 #            by raw URL; the body names the reviewer by display name, never email.
-#            A filing failure keeps the review (``issue_error``).
+#            Clef judges the notes as one finding first (``clef.judge_one``, its
+#            verdict recorded with the issue); live, ``audit-rule`` when mechanical,
+#            and a duplicate of an open issue is a comment there instead (its URL
+#            is the ``issue_url``). A filing failure keeps the review (``issue_error``).
 #   MEDIA    ``review_media``: only a review and file the blob lists, through
 #            ``service.kept_file`` (straight inside the review's dir).
 #
@@ -62,6 +65,7 @@ from typing import Any
 from starlette.datastructures import Headers, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
+from pocketpaw_ee.cloud.belt import clef
 from pocketpaw_ee.cloud.belt.service import BeltConsoleError, _owned_run, factory_dir, kept_file
 
 logger = logging.getLogger(__name__)
@@ -612,6 +616,17 @@ class ReviewRoom:
                 names = [str(lb.get("name") or "") for lb in json.loads(out).get("labels") or []]
                 line = [n for n in names if n.lower().startswith("line:")]
         labels = list(dict.fromkeys(["review", "gap", "bug", *line]))
+
+        async def gh(argv: list[str]) -> tuple[int, str, str]:
+            return await self.runner(argv, cwd=folder, timeout=60.0)
+
+        notes = "\n".join(f"[{_clock(n['t_ms'])}] {n['text']}" for n in review["notes"])
+        frames = tuple(f"{t}.png" for t in review["frames"])
+        finding = clef.Finding(notes, "room", run_id, screenshots=frames)
+        verdict = await clef.judge_one(finding, blob, gh)
+        act = clef.decide(verdict) if verdict and clef.findings_live() else None
+        if act and act.audit_rule:
+            labels.append(clef.AUDIT_RULE)
         for label in labels:  # an existing label exits non-zero; that is fine
             await self.runner(
                 ["gh", "label", "create", label, "-R", slug], cwd=folder, timeout=60.0
@@ -630,15 +645,34 @@ class ReviewRoom:
             if note["t_ms"] in shots:
                 lines.append(f"![frame at {_clock(note['t_ms'])}]({shots[note['t_ms']]})")
             lines.append("")
-        title = f"Review: {_title(blob)} needs changes"
-        argv = ["gh", "issue", "create", "-R", slug, "--title", title, "--body-file", "-"]
-        for label in labels:
-            argv += ["--label", label]
-        code, out, err = await self.runner(argv, cwd=folder, timeout=120.0, stdin="\n".join(lines))
-        found = _ISSUE_URL.search(out or "")
-        if code != 0 or not found:
-            raise RuntimeError(f"GitHub refused the issue: {err.strip()[-200:] or 'no issue URL'}")
-        return found.group(0)
+        actions = ["audit_rule"] if act and act.audit_rule else []
+        if act and act.duplicate_of:  # live: say it on the issue this duplicates
+            argv = ["gh", "issue", "comment", str(act.duplicate_of), "-R", slug, "--body-file", "-"]
+            code, _, err = await self.runner(
+                argv, cwd=folder, timeout=120.0, stdin="\n".join(lines)
+            )
+            if code != 0:
+                raise RuntimeError(f"GitHub refused the comment: {err.strip()[-200:]}")
+            url, actions = f"https://github.com/{slug}/issues/{act.duplicate_of}", ["duplicate"]
+        else:
+            title = f"Review: {_title(blob)} needs changes"
+            argv = ["gh", "issue", "create", "-R", slug, "--title", title, "--body-file", "-"]
+            for label in labels:
+                argv += ["--label", label]
+            code, out, err = await self.runner(
+                argv, cwd=folder, timeout=120.0, stdin="\n".join(lines)
+            )
+            found = _ISSUE_URL.search(out or "")
+            if code != 0 or not found:
+                raise RuntimeError(
+                    f"GitHub refused the issue: {err.strip()[-200:] or 'no issue URL'}"
+                )
+            url = found.group(0)
+        if verdict is not None:
+            issue = f"{slug}#{url.rsplit('/', 1)[-1]}"
+            entry = clef.finding_entry(finding, verdict, actions=actions, issue=issue)
+            await clef.record_findings(run_id, [entry], workspace_id=workspace_id)
+        return url
 
     async def _upload_frames(
         self, slug: str, review: dict[str, Any], folder: Path

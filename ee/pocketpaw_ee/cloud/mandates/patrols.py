@@ -21,7 +21,8 @@
 #                    GitHub repo's issues to open / closed for the foreman's
 #                    ``Depends on:`` notes; ``open_pr_closes`` maps each issue an
 #                    OPEN PR closes to that PR, for the backlog's in-flight rule
-#                    (one cached gh list each per repo per tick, ``_gh_rows``).
+#                    (one cached gh list each per repo per tick, ``_gh_rows``);
+#                    ``open_issues`` lists the open ones for Clef's duplicate check.
 #                    ``flag_needs_spec`` comments on a ``github:`` source issue
 #                    and labels it ``needs-spec`` (once) for the auto plan gate.
 #   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
@@ -444,6 +445,7 @@ async def _github_issues(slug: str, labels: list[str], gh: GhFn) -> list[Sightin
 # the foreman's ``Depends on:`` notes; open PRs the in-flight rule.
 _ISSUE_STATES: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _OPEN_PRS: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_OPEN_ISSUES: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _GH_ROWS_TTL = 60.0
 _GH_STATE_LIMIT = "500"
 _GH_PR_LIMIT = "200"
@@ -488,6 +490,15 @@ async def issue_states(repo_id: str, gh: GhFn | None = None) -> dict[int, str]:
         for r in rows
         if isinstance(r.get("number"), int)
     }
+
+
+async def open_issues(repo_id: str, gh: GhFn | None = None) -> list[dict[str, Any]]:
+    """The bound repo's OPEN GitHub issues (``number``, ``title``, ``body``): the
+    candidates Clef checks a Belt finding against for a duplicate. [] when the
+    repo is not on GitHub or gh fails. Never raises."""
+    argv = ["gh", "issue", "list", "--state", "open", "--limit", _GH_PR_LIMIT]
+    _, rows = await _gh_rows(_OPEN_ISSUES, repo_id, [*argv, "--json", "number,title,body"], gh)
+    return rows
 
 
 async def open_pr_closes(repo_id: str, gh: GhFn | None = None) -> dict[str, int]:
