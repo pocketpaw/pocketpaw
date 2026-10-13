@@ -7,6 +7,9 @@
 #
 # The walk's refusals are free text, so the code comes from ``_CODES`` below, by
 # message prefix; a refusal no prefix names fails the test until it gets a code.
+# Some faults are core-only (an empty ``expect.python``): the walk does not resolve
+# expressions, read dates or measure the share link. A ``meta.sample`` card passes
+# the walk and validate_and_hydrate like any other.
 
 from __future__ import annotations
 
@@ -16,11 +19,12 @@ from pathlib import Path
 
 import pytest
 from pocketpaw_ee.paw_bar import card_spec
-from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, strict_audit
+from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, strict_audit, validate_and_hydrate
 
 CORPUS = Path(card_spec.__file__).with_name("ripple-audit-corpus")
 
 _CODES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"ui is not an object"), "noUi"),
     (re.compile(r"unknown widget type "), "unknownWidget"),
     (re.compile(r"an event runs an action the bar does not honour"), "badAction"),
     (re.compile(r"an emit names a host event"), "badAction"),
@@ -46,7 +50,7 @@ def test_the_vendored_corpus_holds_planted_faults_and_a_clean_control():
     assert len(ENTRIES) >= 3
     entries = [json.loads(p.read_text(encoding="utf-8")) for p in ENTRIES]
     assert any(not e["expect"]["python"] and not e["expect"]["core"] for e in entries)
-    assert all(e["expect"]["python"] for e in entries if e["expect"]["core"])
+    assert sum(bool(e["expect"]["python"]) for e in entries) >= 3
 
 
 @pytest.mark.parametrize("path", ENTRIES, ids=lambda p: p.stem)
@@ -68,3 +72,13 @@ def test_strict_audit_points_at_the_offending_value():
     bad["ui"]["children"][0]["props"]["on_click"] = {"action": "explode"}
     assert _audit(bad) == [{"code": "badAction", "path": "/ui/children/0/props/on_click"}]
     assert strict_audit({"ui": []}) == [{"path": "/ui", "message": "ui is not an object"}]
+
+
+def test_a_meta_sample_card_passes_the_walk_and_is_sent():
+    spec = json.loads((CORPUS / "sample-future-date.json").read_text(encoding="utf-8"))["spec"]
+    assert spec["meta"]["sample"] is True
+    assert strict_audit(spec) == []
+    assert validate_and_hydrate(spec, [], profile=RIPPLE_PROFILE) == {
+        "ui": spec["ui"],
+        "state": spec["state"],
+    }

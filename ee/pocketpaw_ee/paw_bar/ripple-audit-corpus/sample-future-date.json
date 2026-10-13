@@ -1,0 +1,26 @@
+{
+  "about": "The same made-up date on a card marked meta.sample: true. Both sides pass it.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "Sample: next check-in 2026-12-25"
+          }
+        }
+      ]
+    },
+    "state": {},
+    "meta": {
+      "title": "Check-ins",
+      "sample": true
+    }
+  },
+  "expect": {
+    "core": [],
+    "python": []
+  }
+}

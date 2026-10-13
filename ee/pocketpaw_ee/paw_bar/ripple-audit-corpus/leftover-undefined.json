@@ -1,0 +1,28 @@
+{
+  "about": "A prop reading state the spec never seeds; it renders as nothing. Core only (after resolveTree).",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "{state.price}"
+          }
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "leftover",
+        "path": "/ui/children/0/props/text",
+        "message": "this prop resolves to undefined; seed the state it reads"
+      }
+    ],
+    "python": []
+  }
+}
