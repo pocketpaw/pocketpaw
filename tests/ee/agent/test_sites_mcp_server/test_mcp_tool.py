@@ -154,7 +154,15 @@ class TestSitesMcpServerRegistration:
         from pocketpaw_ee.agent.mcp_servers.sites_project import SITES_PROJECT_TOOL_IDS
 
         assert set(SITES_PROJECT_TOOL_IDS) <= set(SITES_TOOL_IDS)
-        assert len(SITES_TOOL_IDS) == 29
+        # Sites integrations: list bindings, ask the owner to connect a provider.
+        from pocketpaw_ee.agent.mcp_servers.sites import (
+            CONNECT_SITE_INTEGRATION_TOOL_ID,
+            LIST_SITE_INTEGRATIONS_TOOL_ID,
+        )
+
+        assert LIST_SITE_INTEGRATIONS_TOOL_ID in SITES_TOOL_IDS
+        assert CONNECT_SITE_INTEGRATION_TOOL_ID in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 31
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

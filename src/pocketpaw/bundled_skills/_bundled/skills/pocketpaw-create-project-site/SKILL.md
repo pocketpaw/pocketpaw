@@ -71,6 +71,9 @@ refusal is the owner's call in the publish dialog.
    shows which are set. If those tools are missing, tell the user which secrets
    the site needs. Never write a secret value into any file, `.env` or
    `.dev.vars`; only names go in `.dev.vars.example`.
+   Payments, newsletter, CRM: call `connect_site_integration` (the owner taps
+   Connect), never `request_site_secret` for an API key. Server code calls the
+   gateway with `env.PAW_GATEWAY_TOKEN`.
 5. Design, before the first UI file. Run the research gate from the site
    preamble: search real sites, open about 3 references, fetch the one you lock,
    and state the locked direction (palette, type pairing, layout idea) in one

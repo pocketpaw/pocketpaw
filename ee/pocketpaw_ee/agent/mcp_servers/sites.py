@@ -133,6 +133,10 @@ PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
 # ride SITES_TOOL_IDS like every other tool on this server.
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
 LIST_SITE_SECRETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_secrets"
+# Sites integrations: list bindings, ask the owner to connect a provider. Must ride
+# SITES_TOOL_IDS like every other tool on this server.
+LIST_SITE_INTEGRATIONS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_integrations"
+CONNECT_SITE_INTEGRATION_TOOL_ID = f"mcp__{SERVER_NAME}__connect_site_integration"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -152,6 +156,8 @@ SITES_TOOL_IDS = (
     PREVIEW_SITE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
+    LIST_SITE_INTEGRATIONS_TOOL_ID,
+    CONNECT_SITE_INTEGRATION_TOOL_ID,
     # The project engine's tools (sites_project.py): base templates, backend
     # recipes, the generic file tools and the sandbox build. Must ride here too.
     *SITES_PROJECT_TOOL_IDS,
@@ -579,6 +585,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # separate create_sdk_mcp_server) because the claude_sdk registration loop
     # keys servers by name and a second server under this name would clobber it.
     from pocketpaw_ee.agent.mcp_servers.sites_create import (
+        make_connect_site_integration_tool,
         make_create_dynamic_site_tool,
         make_create_html_site_tool,
         make_create_landing_site_tool,
@@ -587,6 +594,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_edit_html_file_tool,
         make_edit_react_component_tool,
         make_edit_svelte_component_tool,
+        make_list_site_integrations_tool,
         make_list_site_secrets_tool,
         make_preview_site_tool,
         make_read_site_source_tool,
@@ -640,6 +648,9 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # Site secrets: ask the owner for one by name; list names + status. Same server.
     request_site_secret = make_request_site_secret_tool(tool)
     list_site_secrets = make_list_site_secrets_tool(tool)
+    # Site integrations: list bindings, ask the owner to connect one. Same server.
+    list_site_integrations = make_list_site_integrations_tool(tool)
+    connect_site_integration = make_connect_site_integration_tool(tool)
     # The project engine's twelve tools. Same server, so a project site's create,
     # recipes, file edits, builds and publish sit on one allow-listed server.
     from pocketpaw_ee.agent.mcp_servers.sites_project import make_project_tools
@@ -667,6 +678,8 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             preview_site,
             request_site_secret,
             list_site_secrets,
+            list_site_integrations,
+            connect_site_integration,
             *project_tools,
         ],
     )
@@ -674,8 +687,10 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
 
 
 __all__ = [
+    "CONNECT_SITE_INTEGRATION_TOOL_ID",
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "LIST_SITE_ASSETS_TOOL_ID",
+    "LIST_SITE_INTEGRATIONS_TOOL_ID",
     "LIST_SITE_SECRETS_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",

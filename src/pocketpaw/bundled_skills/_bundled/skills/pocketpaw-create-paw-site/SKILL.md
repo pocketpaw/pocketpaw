@@ -218,6 +218,19 @@ no submission to acknowledge, so it needs neither the token nor the extra page.
 No JavaScript: this is a plain native browser POST, so never add an onSubmit
 handler or a `fetch`.
 
+### Payments, newsletter and other services
+
+Third-party services are connected, never keyed. Call
+`connect_site_integration(pocket_id, provider, purpose)` (see
+`list_site_integrations` for provider ids): the owner taps Connect in chat, and
+built-ins like `newsletter` are on at once. Never ask for an API key and never
+use `request_site_secret` for one. The generator injects `paw.js`, so wire the
+markup and write no fetch code:
+
+- a buy button: `<button data-paw-checkout="<product ref>">Buy</button>`
+- a signup: `<form data-paw-subscribe>` with an `<input type="email" name="email">`
+- anything else: `Paw.call(provider, action, args)` in a small inline script
+
 ### Changing an html site that already exists
 
 When the user asks for a CHANGE to a site they already have — "shorten the

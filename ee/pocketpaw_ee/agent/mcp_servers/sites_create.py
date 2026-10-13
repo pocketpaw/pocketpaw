@@ -377,6 +377,11 @@ PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
 LIST_SITE_SECRETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_secrets"
 
+# Sites integrations: list what a site is linked to, ask the owner to connect one.
+# The agent never sees a credential; the owner taps Connect on the chat card.
+LIST_SITE_INTEGRATIONS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_integrations"
+CONNECT_SITE_INTEGRATION_TOOL_ID = f"mcp__{SERVER_NAME}__connect_site_integration"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
@@ -391,6 +396,8 @@ SITES_CREATE_TOOL_IDS = (
     PREVIEW_SITE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
+    LIST_SITE_INTEGRATIONS_TOOL_ID,
+    CONNECT_SITE_INTEGRATION_TOOL_ID,
 )
 
 
@@ -3971,7 +3978,184 @@ def make_list_site_secrets_tool(tool: Any) -> Any:
     return list_site_secrets
 
 
+# ── Site integrations ────────────────────────────────────────────────────────
+# One-click Connect for Sites (pocketpaw_ee.integrations). The agent asks; the
+# owner taps Connect on the chat card (SSE ``site_integration_requested``) and the
+# OAuth popup finishes it. No tool takes or returns a credential.
+
+_INTEGRATION_WIRING = (
+    "Wire it in the page, never with fetch code or keys: paw.js is injected by the "
+    'generator. Payments: <button data-paw-checkout="<product ref>">. Newsletter: '
+    "<form data-paw-subscribe> with an email input. Anything else: "
+    "Paw.call(provider, action, args). Project Workers call the gateway server-side "
+    "with env.PAW_GATEWAY_TOKEN."
+)
+
+
+async def _list_site_integrations_handler(args: dict) -> dict:
+    """MCP handler for ``list_site_integrations``: bindings + the provider catalog."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.integrations import bindings
+
+    pocket_id = args.get("pocket_id")
+    workspace_id, user_id, err = _secret_tool_identity("list_site_integrations", pocket_id)
+    if err is not None:
+        return err
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+    try:
+        linked = await bindings.list_for_pocket(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id.strip()
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": pocket_id.strip(),
+            "integrations": [v.model_dump(mode="json") for v in linked],
+            "providers": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "kind": p.kind,
+                    "category": p.category,
+                    "availability": p.availability,
+                    "public_actions": [a.name for a in p.actions if a.public],
+                }
+                for p in bindings.list_provider_views()
+            ],
+        }
+    )
+
+
+async def _connect_site_integration_handler(args: dict) -> dict:
+    """MCP handler for ``connect_site_integration``: binding + Connect card, no secrets."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.integrations import bindings
+
+    pocket_id = args.get("pocket_id")
+    workspace_id, user_id, err = _secret_tool_identity("connect_site_integration", pocket_id)
+    if err is not None:
+        return err
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+    pocket_id = pocket_id.strip()
+    provider_id = str(args.get("provider") or "").strip().lower()
+    purpose = str(args.get("purpose") or "")
+    try:
+        provider = bindings.provider_or_404(provider_id)
+        if provider.availability() != "available":
+            return _error_response(f"{provider.name} isn't available yet. Pick another option.")
+        view = await bindings.request_from_agent(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            provider_id=provider_id,
+            purpose=purpose,
+        )
+    except CloudError as exc:
+        known = ", ".join(p.id for p in bindings.list_provider_views())
+        return _error_response(f"{exc.code}: {exc.message} Known providers: {known}.")
+
+    _push_integration_request_sse(pocket_id, bindings.provider_view(provider), purpose, view)
+    if view.status == "connected":
+        message = f"{provider.name} is ready on this site. " + _INTEGRATION_WIRING
+    else:
+        message = (
+            f"Asked the owner to connect {provider.name}: they tap Connect on the card in "
+            "chat and approve on the provider's page. You never see or ask for "
+            "credentials or API keys. Keep building; calls answer `not_connected` until "
+            "they finish. " + _INTEGRATION_WIRING
+        )
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": pocket_id,
+            "site_integration": view.model_dump(mode="json"),
+            "message": message,
+        }
+    )
+
+
+def _push_integration_request_sse(pocket_id: str, provider: Any, purpose: str, view: Any) -> None:
+    """Per-run SSE so the chat renders the Connect card. Best effort, no secrets."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import push_sse_event
+
+        push_sse_event(
+            "site_integration_requested",
+            {
+                "pocket_id": pocket_id,
+                "provider": provider.model_dump(mode="json"),
+                "purpose": purpose,
+                "site_integration": view.model_dump(mode="json") if view is not None else None,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("connect_site_integration: SSE push failed (non-fatal)", exc_info=True)
+
+
+def make_list_site_integrations_tool(tool: Any) -> Any:
+    """Build the ``list_site_integrations`` SDK tool. Same server as the create tools."""
+
+    @tool(
+        "list_site_integrations",
+        (
+            "List the integrations a site is linked to (status connected, "
+            "needs_connection, needs_reconnect or disabled) and the providers it could "
+            "use, with their public actions. No credentials are ever returned."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Id of the site pocket."},
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def list_site_integrations(args):  # type: ignore[no-untyped-def]
+        return await _list_site_integrations_handler(args)
+
+    return list_site_integrations
+
+
+def make_connect_site_integration_tool(tool: Any) -> Any:
+    """Build the ``connect_site_integration`` SDK tool. Same server as the create tools."""
+
+    @tool(
+        "connect_site_integration",
+        (
+            "Link a third-party service (payments, newsletter, CRM, sheets...) to a Paw "
+            "Site the owner's way: one tap, no API keys. Shows the owner a Connect card in "
+            "chat; built-ins (like `newsletter`) are on at once. Use this, NEVER "
+            "request_site_secret, for a service the site needs. `provider` is a provider "
+            "id from list_site_integrations; `purpose` is one short sentence the owner "
+            "reads on the card (e.g. 'Take payments for the three course packages')."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Id of the site pocket."},
+                "provider": {"type": "string", "description": "Provider id, e.g. newsletter."},
+                "purpose": {
+                    "type": "string",
+                    "description": "Why the site needs it, in the owner's terms.",
+                },
+            },
+            "required": ["pocket_id", "provider", "purpose"],
+            "additionalProperties": False,
+        },
+    )
+    async def connect_site_integration(args):  # type: ignore[no-untyped-def]
+        return await _connect_site_integration_handler(args)
+
+    return connect_site_integration
+
+
 __all__ = [
+    "CONNECT_SITE_INTEGRATION_TOOL_ID",
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
@@ -3981,6 +4165,7 @@ __all__ = [
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "HTML_REQUIRED_KEYS",
+    "LIST_SITE_INTEGRATIONS_TOOL_ID",
     "LIST_SITE_SECRETS_TOOL_ID",
     "REACT_REQUIRED_KEYS",
     "REACT_RESERVED_FILES",
@@ -3991,6 +4176,7 @@ __all__ = [
     "SITES_CREATE_TOOL_IDS",
     "SVELTE_REQUIRED_EXACT_KEYS",
     "SVELTE_REQUIRED_PREFIXES",
+    "make_connect_site_integration_tool",
     "make_create_dynamic_site_tool",
     "make_create_html_site_tool",
     "make_create_landing_site_tool",
@@ -3999,6 +4185,7 @@ __all__ = [
     "make_edit_html_file_tool",
     "make_edit_react_component_tool",
     "make_edit_svelte_component_tool",
+    "make_list_site_integrations_tool",
     "make_list_site_secrets_tool",
     "make_read_site_source_tool",
     "make_request_site_secret_tool",
