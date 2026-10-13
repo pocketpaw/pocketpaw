@@ -2,8 +2,21 @@
   "about": "Control: a clean card. Neither side reports anything.",
   "spec": {
     "version": "1.0",
-    "ui": { "type": "card", "children": [{ "type": "text", "props": { "content": "Hello" } }] },
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "Hello"
+          }
+        }
+      ]
+    },
     "state": {}
   },
-  "expect": { "core": [], "python": [] }
+  "expect": {
+    "core": [],
+    "python": []
+  }
 }

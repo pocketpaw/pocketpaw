@@ -1,0 +1,38 @@
+{
+  "about": "The tree under `root` instead of `ui`. Core names the alias and the missing ui; the Python walk only sees no ui.",
+  "spec": {
+    "version": "1.0",
+    "root": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "Hello"
+          }
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "schema",
+        "path": "/ui",
+        "message": "Invalid input: expected object, received undefined"
+      },
+      {
+        "code": "envelopeAlias",
+        "path": "/root",
+        "message": "the node tree goes in `ui`, not `root`"
+      }
+    ],
+    "python": [
+      {
+        "code": "noUi",
+        "path": "/ui"
+      }
+    ]
+  }
+}

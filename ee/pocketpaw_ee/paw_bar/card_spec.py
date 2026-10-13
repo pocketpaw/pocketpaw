@@ -2348,7 +2348,8 @@ def validate_and_hydrate(
     widget's declared action verbs, of which only add_to_cart / checkout become a
     product's buttons (the action endpoint refuses an undeclared verb). The result
     holds only ``ui`` and ``state``: a spec's ``theme`` is dropped, as paw-bar
-    drops it. It is re-checked after hydration, since filling ids in makes it
+    drops it, and so is ``meta`` (a ``meta.sample`` card is accepted like any
+    other). It is re-checked after hydration, since filling ids in makes it
     longer and paw-bar measures what it receives. ``lead_capture`` (the site's
     ``concierge_lead_capture``) allows a ``send_to_team`` form; off by default.
     ``profile`` (the site's ``CardProfile``) gives the widget set and bounds. On a
