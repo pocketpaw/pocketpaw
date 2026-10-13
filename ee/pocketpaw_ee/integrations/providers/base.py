@@ -4,7 +4,9 @@
 # and registers it in ``providers/__init__.py``. A provider declares:
 #   * identity: id, name, kind (builtin | connect | embed), category, plan
 #   * availability(): available | coming_soon | unconfigured (no client id set)
-#   * the OAuth hooks for connect kinds: authorize_url / complete / refresh
+#   * the OAuth hooks for connect kinds: authorize_url / complete / refresh, and
+#     ``supports_pkce`` (then authorize_url gets an S256 challenge and complete the
+#     verifier, which the flow keeps in its server-side state)
 #   * actions: an allowlist of ``ActionSpec`` (typed args model, public, write)
 #   * verify_webhook(): signature check -> ``NormalizedEvent`` or None
 #
@@ -108,13 +110,18 @@ class IntegrationProvider(Protocol):
     kind: Kind
     category: str
     plan: Plan
+    supports_pkce: bool
     actions: dict[str, ActionSpec]
 
     def availability(self) -> Availability: ...
 
-    def authorize_url(self, state: str, redirect_uri: str) -> str: ...
+    def authorize_url(
+        self, state: str, redirect_uri: str, code_challenge: str | None = None
+    ) -> str: ...
 
-    async def complete(self, code: str, redirect_uri: str) -> TokenGrant: ...
+    async def complete(
+        self, code: str, redirect_uri: str, code_verifier: str | None = None
+    ) -> TokenGrant: ...
 
     async def refresh(self, refresh_token: str) -> TokenGrant: ...
 
@@ -129,15 +136,26 @@ class BaseProvider:
     kind: Kind = "builtin"
     category: str = ""
     plan: Plan = "free"
+    supports_pkce: bool = False
     actions: dict[str, ActionSpec] = {}
 
     def availability(self) -> Availability:
         return "available"
 
-    def authorize_url(self, state: str, redirect_uri: str) -> str:  # noqa: ARG002
+    def authorize_url(
+        self,
+        state: str,  # noqa: ARG002
+        redirect_uri: str,  # noqa: ARG002
+        code_challenge: str | None = None,  # noqa: ARG002
+    ) -> str:
         raise ProviderError(f"{self.id} has no connect flow")
 
-    async def complete(self, code: str, redirect_uri: str) -> TokenGrant:  # noqa: ARG002
+    async def complete(
+        self,
+        code: str,  # noqa: ARG002
+        redirect_uri: str,  # noqa: ARG002
+        code_verifier: str | None = None,  # noqa: ARG002
+    ) -> TokenGrant:
         raise ProviderError(f"{self.id} has no connect flow")
 
     async def refresh(self, refresh_token: str) -> TokenGrant:  # noqa: ARG002

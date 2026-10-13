@@ -38,6 +38,7 @@ def _env(monkeypatch):
 
     monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("POCKETPAW_INTEGRATIONS_DEMO", "1")
+    monkeypatch.setenv("POCKETPAW_INTEGRATIONS_DEMO_WEBHOOK_SECRET", "whsec-test")
     monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "https://app.example.com")
     monkeypatch.setenv("POCKETPAW_INTEGRATIONS_CALLBACK_BASE", "https://connect.example.com")
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
@@ -117,24 +118,42 @@ def _app(workspace_id: str, user_id: str) -> FastAPI:
 
 def _client(workspace_id: str = WS, user_id: str = OWNER) -> AsyncClient:
     return AsyncClient(
-        transport=ASGITransport(app=_app(workspace_id, user_id)), base_url="http://t"
+        transport=ASGITransport(app=_app(workspace_id, user_id)), base_url="https://t"
     )
 
 
-async def _connect_demo(c: AsyncClient, pocket_id: str | None = None) -> tuple[str, str]:
-    """Run the demo OAuth dance. Returns (callback html, state)."""
+async def _start(c: AsyncClient, pocket_id: str | None = None):
+    """connect -> /start. Returns (/start response, code, state)."""
     body = {"pocket_id": pocket_id} if pocket_id else {}
     started = await c.post("/api/v1/integrations/demo/connect", json=body)
     assert started.status_code == 200, started.text
     url = started.json()["authorize_url"]
-    assert url.startswith("https://connect.example.com/api/v1/integrations/demo/callback?")
-    query = parse_qs(urlsplit(url).query)
-    state = query["state"][0]
-    cb = await c.get(
-        "/api/v1/integrations/demo/callback", params={"code": query["code"][0], "state": state}
-    )
+    assert url.startswith("https://connect.example.com/api/v1/integrations/demo/start?t=")
+    split = urlsplit(url)
+    resp = await c.get(split.path, params=parse_qs(split.query))
+    assert resp.status_code == 302, resp.text
+    query = parse_qs(urlsplit(resp.headers["location"]).query)
+    return resp, query["code"][0], query["state"][0]
+
+
+async def _connect_demo(c: AsyncClient, pocket_id: str | None = None) -> tuple[str, str]:
+    """Run the demo OAuth dance in one browser. Returns (callback html, state)."""
+    _, code, state = await _start(c, pocket_id)
+    cb = await c.get("/api/v1/integrations/demo/callback", params={"code": code, "state": state})
     assert cb.status_code == 200
     return cb.text, state
+
+
+async def _connected(pocket_id: str | None = None) -> str:
+    async with _client() as c:
+        page, _ = await _connect_demo(c, pocket_id)
+    return _message(page)["connection_id"]
+
+
+def _cookie(state: str) -> dict:
+    from pocketpaw_ee.integrations.oauth import state_hash
+
+    return {"cookie": f"paw_int_demo={state_hash(state)}"}
 
 
 def _message(page: str) -> dict:
@@ -320,7 +339,9 @@ async def test_connect_callback_links_the_site_and_state_is_single_use(
         assert conns[0]["site_count"] == 1 and conns[0]["status"] == "active"
 
         replay = await c.get(
-            "/api/v1/integrations/demo/callback", params={"code": "demo_x", "state": state}
+            "/api/v1/integrations/demo/callback",
+            params={"code": "demo_x", "state": state},
+            headers=_cookie(state),
         )
     replayed = _message(replay.text)
     assert replayed["status"] == "error" and replayed["error"] == "invalid_state"
@@ -338,10 +359,67 @@ async def test_state_for_one_provider_cannot_finish_another(beanie_test_db, monk
     )
     async with _client() as c:
         page = await c.get(
-            "/api/v1/integrations/demo/callback", params={"code": "demo_x", "state": state}
+            "/api/v1/integrations/demo/callback",
+            params={"code": "demo_x", "state": state},
+            headers=_cookie(state),
         )
     assert _message(page.text)["error"] == "invalid_state"
     assert "script-src 'nonce-" in page.headers["content-security-policy"]
+
+
+@pytest.mark.asyncio
+async def test_start_sets_a_browser_bound_cookie_and_the_ticket_is_single_use(beanie_test_db):
+    async with _client() as c:
+        started = await c.post("/api/v1/integrations/demo/connect", json={})
+        split = urlsplit(started.json()["authorize_url"])
+        first = await c.get(split.path, params=parse_qs(split.query))
+        second = await c.get(split.path, params=parse_qs(split.query))
+    cookie = first.headers["set-cookie"].lower()
+    assert first.status_code == 302
+    for attr in (
+        "paw_int_demo=",
+        "httponly",
+        "secure",
+        "samesite=lax",
+        "path=/api/v1/integrations/",
+    ):
+        assert attr in cookie
+    assert _message(second.text)["error"] == "invalid_ticket"
+
+
+@pytest.mark.asyncio
+async def test_callback_in_another_browser_is_refused_and_does_not_burn_the_flow(beanie_test_db):
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection
+
+    pid = await _pocket()
+    async with _client() as owner_browser:
+        _, code, state = await _start(owner_browser, pid)
+        async with _client() as victim_browser:
+            stolen = await victim_browser.get(
+                "/api/v1/integrations/demo/callback", params={"code": code, "state": state}
+            )
+        assert _message(stolen.text)["error"] == "invalid_state"
+        assert await IntegrationConnection.find_all().count() == 0
+        ok = await owner_browser.get(
+            "/api/v1/integrations/demo/callback", params={"code": code, "state": state}
+        )
+    assert _message(ok.text)["status"] == "active"
+    assert "paw_int_demo=" in ok.headers["set-cookie"]  # cleared
+    assert "max-age=0" in ok.headers["set-cookie"].lower()
+
+
+@pytest.mark.asyncio
+async def test_pkce_verifier_rides_the_state_and_a_wrong_challenge_fails(beanie_test_db):
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection
+
+    async with _client() as c:
+        _, code, state = await _start(c)
+        tampered = code.rsplit(".", 1)[0] + ".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        page = await c.get(
+            "/api/v1/integrations/demo/callback", params={"code": tampered, "state": state}
+        )
+    assert _message(page.text)["error"] == "provider_error"
+    assert await IntegrationConnection.find_all().count() == 0
 
 
 @pytest.mark.asyncio
@@ -423,6 +501,22 @@ async def test_another_workspace_sees_404_and_cannot_revoke(beanie_test_db):
         404,
         404,
     )
+
+
+@pytest.mark.asyncio
+async def test_linking_someone_elses_grant_needs_its_creator_or_an_admin(beanie_test_db):
+    pid = await _pocket()
+    conn_id = await _connected()
+    url = f"/api/v1/sites/by-pocket/{pid}/integrations/demo"
+    async with _client(WS, EDITOR) as c:
+        denied = await c.put(url, json={"connection_id": conn_id})
+    async with _client() as c:
+        allowed = await c.put(url, json={"connection_id": conn_id})
+    assert (denied.status_code, denied.json()["error"]["code"]) == (
+        403,
+        "integrations.not_connection_owner",
+    )
+    assert allowed.status_code == 200 and allowed.json()["status"] == "connected"
 
 
 @pytest.mark.asyncio
@@ -669,11 +763,19 @@ async def test_gateway_cors_answers_preflight_for_the_gateway_path_only():
 # ---------------------------------------------------------- webhooks + orders
 
 
-def _event(event_id: str, site_id: str, **data) -> tuple[bytes, dict]:
+def _event(
+    event_id: str, site_id: str, account_ref: str = "demo-account", **data
+) -> tuple[bytes, dict]:
     from pocketpaw_ee.integrations.providers.demo import sign
 
     body = json.dumps(
-        {"id": event_id, "type": data.pop("type", "order.paid"), "site_id": site_id, "data": data}
+        {
+            "id": event_id,
+            "type": data.pop("type", "order.paid"),
+            "site_id": site_id,
+            "account_ref": account_ref,
+            "data": data,
+        }
     ).encode()
     return body, {"x-demo-signature": sign(body), "content-type": "application/json"}
 
@@ -692,7 +794,7 @@ async def test_webhooks_verify_dedupe_and_record_orders(beanie_test_db):
     try:
         pid = await _pocket()
         site = await _site(pid)
-        await _link(pid, "demo")
+        await _connected(pid)
         sid = str(site.id)
         url = "/api/v1/integrations/webhooks/demo"
         order = {
@@ -714,6 +816,8 @@ async def test_webhooks_verify_dedupe_and_record_orders(beanie_test_db):
             body3, headers3 = _event("evt_3", sid, type="order.pending", order_id="ord_1")
             late = await c.post(url, content=body3, headers=headers3)
             orders = (await c.get(f"/api/v1/sites/by-pocket/{pid}/orders")).json()
+        async with _client(WS, EDITOR) as c:
+            masked = (await c.get(f"/api/v1/sites/by-pocket/{pid}/orders")).json()
     finally:
         event_bus.unsubscribe("integrations.event", _on)
 
@@ -729,6 +833,9 @@ async def test_webhooks_verify_dedupe_and_record_orders(beanie_test_db):
     assert view["items"] == [{"ref": "sku_1", "name": "Mug", "qty": 1, "amount_minor": 2599}]
     assert {d["event_id"] for d in seen} == {"evt_1", "evt_2", "evt_3"}
     assert all("buyer@x.io" not in json.dumps(d) for d in seen)
+    # Owner sees the email; an editor gets it masked.
+    assert view["customer_email"] == "buyer@x.io"
+    assert masked["items"][0]["customer_email"] == "b***@x.io"
 
 
 @pytest.mark.asyncio
@@ -744,7 +851,7 @@ async def test_unbound_sites_get_no_orders_and_orders_paginate(beanie_test_db):
         assert unrouted.json() == {"ok": True, "routed": False}
         assert await SiteOrder.find_all().count() == 0
 
-        await _link(pid, "demo")
+        await _connected(pid)
         for i in range(3):
             body, headers = _event(f"evt_{i}", sid, order_id=f"o_{i}", amount_minor=i)
             await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
@@ -847,3 +954,111 @@ def test_integration_tools_ride_the_sites_allowlist():
 
     assert CONNECT_SITE_INTEGRATION_TOOL_ID in SITES_TOOL_IDS
     assert LIST_SITE_INTEGRATIONS_TOOL_ID in SITES_TOOL_IDS
+
+
+@pytest.mark.asyncio
+async def test_webhook_for_a_site_bound_to_another_account_is_refused(beanie_test_db):
+    from pocketpaw_ee.cloud.models.integration import SiteOrder
+
+    pid = await _pocket()
+    site = await _site(pid)
+    await _connected(pid)  # bound through account "demo-account"
+    async with _client() as c:
+        body, headers = _event("evt_a", str(site.id), account_ref="acct_attacker", order_id="o")
+        forged = await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
+        body, headers = _event("evt_b", str(site.id), account_ref="", order_id="o")
+        missing = await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
+    assert forged.json() == missing.json() == {"ok": True, "routed": False}
+    assert await SiteOrder.find_all().count() == 0
+
+
+@pytest.mark.asyncio
+async def test_account_ref_fallback_routes_one_match_and_refuses_ambiguity(beanie_test_db):
+    from pocketpaw_ee.cloud.models.integration import SiteOrder
+
+    pid_a = await _pocket()
+    await _site(pid_a)
+    await _connected(pid_a)
+    async with _client() as c:
+        body, headers = _event("evt_1", "", order_id="o_1")
+        one = await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
+    assert one.json() == {"ok": True}
+    assert (await SiteOrder.find_one(SiteOrder.external_id == "o_1")).pocket_id == pid_a
+
+    pid_b = await _pocket()
+    await _connected(pid_b)  # same demo account, now serving two sites
+    async with _client() as c:
+        body, headers = _event("evt_2", "", order_id="o_2")
+        two = await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
+    assert two.json() == {"ok": True, "routed": False}
+    assert await SiteOrder.find_one(SiteOrder.external_id == "o_2") is None
+
+
+@pytest.mark.asyncio
+async def test_demo_webhooks_need_an_explicit_secret(beanie_test_db, monkeypatch):
+    pid = await _pocket()
+    site = await _site(pid)
+    body, headers = _event("evt_s", str(site.id), order_id="o")
+    monkeypatch.delenv("POCKETPAW_INTEGRATIONS_DEMO_WEBHOOK_SECRET")
+    async with _client() as c:
+        resp = await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_a_failed_order_write_is_retried_not_acked_as_duplicate(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.models.integration import IntegrationWebhookEvent, SiteOrder
+    from pocketpaw_ee.integrations import webhooks
+
+    pid = await _pocket()
+    site = await _site(pid)
+    await _connected(pid)
+    real = webhooks._apply_order
+    calls = {"n": 0}
+
+    async def _flaky(event, binding, site):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("mongo blip")
+        await real(event, binding, site)
+
+    monkeypatch.setattr(webhooks, "_apply_order", _flaky)
+    async with _client() as c:
+        body, headers = _event("evt_r", str(site.id), order_id="o_r", amount_minor=5)
+        failed = await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
+        assert await IntegrationWebhookEvent.find_all().count() == 0
+        retried = await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
+        again = await c.post("/api/v1/integrations/webhooks/demo", content=body, headers=headers)
+    assert failed.status_code == 500 and "mongo" not in failed.text
+    assert retried.json() == {"ok": True}
+    assert again.json() == {"ok": True, "duplicate": True}
+    assert (await SiteOrder.find_one(SiteOrder.external_id == "o_r")).amount_minor == 5
+
+
+@pytest.mark.asyncio
+async def test_site_delete_cascade_purges_integration_rows(beanie_test_db):
+    from pocketpaw_ee.cloud.models.integration import (
+        IntegrationConnection,
+        IntegrationDemoRecord,
+        NewsletterSubscriber,
+        SiteIntegration,
+        SiteOrder,
+    )
+    from pocketpaw_ee.sites import delete_cascade
+
+    pid = await _pocket()
+    other = await _pocket()
+    site = await _site(pid)
+    await _connected(pid)
+    await _link(pid, "newsletter")
+    await _link(other, "newsletter")
+    await NewsletterSubscriber(workspace=WS, pocket_id=pid, email="a@b.co").insert()
+    await SiteOrder(workspace=WS, pocket_id=pid, provider="demo", external_id="o").insert()
+    await IntegrationDemoRecord(workspace=WS, pocket_id=pid, args={}).insert()
+
+    await delete_cascade._purge_integrations(site)
+
+    for doc in (SiteIntegration, NewsletterSubscriber, SiteOrder, IntegrationDemoRecord):
+        assert await doc.find(doc.pocket_id == pid).count() == 0
+    assert await SiteIntegration.find(SiteIntegration.pocket_id == other).count() == 1
+    assert await IntegrationConnection.find_all().count() == 1  # the grant survives

@@ -242,8 +242,13 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     ),
     "POST /lead-notifications/confirm/{token}": "confirms; the emailed 7-day token authorises",
     # --- Sites integrations: each carries its own credential ---
+    "GET /integrations/{provider}/start": (
+        "opens the connect popup; redeems a single-use, short-TTL ticket the "
+        "authenticated connect route minted, and binds this browser with a cookie"
+    ),
     "GET /integrations/{provider}/callback": (
-        "provider redirect; guarded by single-use server-side state (_oauth_state)"
+        "provider redirect; single-use server-side state (_oauth_state) plus the "
+        "matching browser cookie set by /start"
     ),
     "POST /sites/{site_id}/x/{provider}/{action}": (
         "site gateway; per-IP bucket, then the site's embed key + origin gate or its "

@@ -2,17 +2,18 @@
 #
 #   POST /integrations/webhooks/{provider}
 #     1. the provider verifies the signature -> NormalizedEvent, or 401
-#     2. route it to a site: by ``site_id`` when the event carries one, else by
-#        ``account_ref`` through the provider's connections and their bindings.
-#        A site that is not bound to the provider gets nothing.
-#     3. dedupe: insert into ``IntegrationWebhookEvent`` (unique provider + event
-#        id). A repeat answers 200 ``{ok, duplicate: true}`` and does nothing else,
-#        so provider retries are safe.
-#     4. ``order.*`` events upsert a ``SiteOrder`` (unique provider + external id)
-#     5. emit ``integrations.event`` on the in-process bus with identifiers only
+#     2. an event id already in ``IntegrationWebhookEvent`` answers 200 duplicate
+#     3. route to ONE site (see ``_site_for``): a named site must be bound through a
+#        connection with the event's ``account_ref``; the account_ref-only fallback
+#        refuses ambiguity. Unroutable events are acked 200 and not recorded.
+#     4. ``order.*`` events upsert a ``SiteOrder`` (unique provider + external id).
+#        A failure answers 500 and records nothing, so the provider retries.
+#     5. only then the event id is recorded (unique index), and
+#        ``integrations.event`` goes on the in-process bus with identifiers only
 #
 #   list_orders: GET /sites/by-pocket/{pocket_id}/orders, newest first, cursor = the
-#   last row's id. Amounts are ISO 4217 minor units.
+#   last row's id. Amounts are ISO 4217 minor units. Customer emails are masked
+#   unless the caller owns the pocket or is a workspace admin.
 
 from __future__ import annotations
 
@@ -48,30 +49,51 @@ def _err(code: str, status: int, message: str) -> JSONResponse:
 
 
 async def _site_for(event: NormalizedEvent):
-    """(site or None, binding) for an event, or (None, None) when it maps to no site."""
+    """(site, binding) for an event, or (None, None) when it maps to no single site.
+
+    Tenant safety: an event naming a ``site_id`` is only routed when that site's
+    binding uses a connection whose ``account_ref`` equals the event's, so a signed
+    event for account A cannot write orders into a site connected to account B. The
+    ``account_ref``-only fallback routes only when exactly one binding matches across
+    every workspace; an ambiguous match is refused."""
     from pocketpaw_ee.cloud.models.integration import IntegrationConnection as Conn
     from pocketpaw_ee.cloud.models.site import Site
     from pocketpaw_ee.integrations.gateway import _site_by_id
 
+    if not event.account_ref:
+        return None, None
     if event.site_id:
         site = await _site_by_id(event.site_id)
         if site is None:
             return None, None
         binding = await bindings.binding_for_site(site, event.provider)
-        return (site, binding) if binding is not None else (None, None)
-    if event.account_ref:
-        conns = await Conn.find(
-            Conn.provider == event.provider,
-            Conn.account_ref == event.account_ref,
-            Conn.status != "revoked",
-        ).to_list()
-        for conn in conns:
-            for binding in await bindings.bindings_for_connection(str(conn.id)):
-                site = await Site.find_one(
-                    {"workspace": binding.workspace, "pocket_id": binding.pocket_id}
-                )
-                return site, binding
-    return None, None
+        conn = await bindings.connection_for(binding) if binding is not None else None
+        if conn is None or conn.status == "revoked" or conn.account_ref != event.account_ref:
+            logger.warning(
+                "integrations: %s event %s names a site not bound to its account; refused",
+                event.provider,
+                event.id,
+            )
+            return None, None
+        return site, binding
+    conns = await Conn.find(
+        Conn.provider == event.provider,
+        Conn.account_ref == event.account_ref,
+        Conn.status != "revoked",
+    ).to_list()
+    matches = [b for conn in conns for b in await bindings.bindings_for_connection(str(conn.id))]
+    if len(matches) != 1:
+        if matches:
+            logger.warning(
+                "integrations: %s event %s matches %d sites; refused as ambiguous",
+                event.provider,
+                event.id,
+                len(matches),
+            )
+        return None, None
+    binding = matches[0]
+    site = await Site.find_one({"workspace": binding.workspace, "pocket_id": binding.pocket_id})
+    return site, binding
 
 
 async def ingest(provider_id: str, request: Request) -> JSONResponse:
@@ -94,24 +116,39 @@ async def ingest(provider_id: str, request: Request) -> JSONResponse:
     if event is None:
         return _err("unauthorized", 401, "Signature check failed.")
 
+    already = await IntegrationWebhookEvent.find_one(
+        IntegrationWebhookEvent.provider == provider.id,
+        IntegrationWebhookEvent.event_id == event.id,
+    )
+    if already is not None:
+        return JSONResponse({"ok": True, "duplicate": True})
+
     site, binding = await _site_for(event)
+    if binding is None:
+        # Acked so the provider stops, but NOT recorded: if the site is bound later,
+        # a redelivery is processed instead of being dropped as a duplicate.
+        logger.info("integrations: %s event %s maps to no site", provider_id, event.type)
+        return JSONResponse({"ok": True, "routed": False})
+
+    try:
+        if event.type in _ORDER_STATUS:
+            await _upsert_order(event, binding, site)
+    except Exception:  # noqa: BLE001 - unrecorded, so the provider's retry reprocesses
+        logger.exception("integrations: %s event %s failed to process", provider_id, event.id)
+        return _err("provider_error", 500, "Could not process the event. Retry later.")
+
+    # Recorded only after the work is done. A concurrent duplicate that got here too
+    # is harmless: the order upsert is keyed by (provider, external_id).
     try:
         await IntegrationWebhookEvent(
             provider=provider.id,
             event_id=event.id,
             event_type=event.type,
-            workspace=binding.workspace if binding else "",
-            pocket_id=binding.pocket_id if binding else "",
+            workspace=binding.workspace,
+            pocket_id=binding.pocket_id,
         ).insert()
     except DuplicateKeyError:
         return JSONResponse({"ok": True, "duplicate": True})
-
-    if binding is None:
-        logger.info("integrations: %s event %s maps to no site", provider_id, event.type)
-        return JSONResponse({"ok": True, "routed": False})
-
-    if event.type in _ORDER_STATUS:
-        await _upsert_order(event, binding, site)
     await _emit(event, binding, site)
     return JSONResponse({"ok": True})
 
@@ -144,6 +181,16 @@ def _items(raw: Any) -> list[dict]:
 
 
 async def _upsert_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
+    from pymongo.errors import DuplicateKeyError
+
+    try:
+        await _apply_order(event, binding, site)
+    except DuplicateKeyError:
+        # A concurrent delivery inserted the row first; apply onto it.
+        await _apply_order(event, binding, site)
+
+
+async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
     from pocketpaw_ee.cloud.models.integration import SiteOrder
 
     data = event.data
@@ -202,7 +249,15 @@ async def _emit(event: NormalizedEvent, binding: Any, site: Any) -> None:
 # ------------------------------------------------------------------- orders
 
 
-def _order_view(row: Any) -> OrderView:
+def mask_email(email: str | None) -> str | None:
+    """``jane@x.io`` -> ``j***@x.io``. Editors see this; owners and admins the full one."""
+    if not email:
+        return email
+    local, _, domain = email.partition("@")
+    return f"{local[:1]}***@{domain}" if domain else "***"
+
+
+def _order_view(row: Any, *, full_email: bool) -> OrderView:
     return OrderView(
         id=str(row.id),
         provider=row.provider,
@@ -210,21 +265,28 @@ def _order_view(row: Any) -> OrderView:
         status=row.status if row.status in ("pending", "paid", "refunded", "failed") else "pending",
         amount_minor=row.amount_minor,
         currency=row.currency,
-        customer_email=row.customer_email,
+        customer_email=row.customer_email if full_email else mask_email(row.customer_email),
         items=[i.model_dump() for i in row.items],
         created_at=vault._utc(row.createdAt),
     )
 
 
 async def list_orders(
-    *, workspace_id: str, user_id: str, pocket_id: str, limit: int, cursor: str | None
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    limit: int,
+    cursor: str | None,
+    is_admin: bool = False,
 ) -> OrdersPage:
     from beanie import PydanticObjectId
 
     from pocketpaw_ee.cloud._core.errors import ValidationError
     from pocketpaw_ee.cloud.models.integration import SiteOrder
 
-    await bindings.require_edit(workspace_id, user_id, pocket_id)
+    pocket = await bindings.require_edit(workspace_id, user_id, pocket_id)
+    full_email = is_admin or pocket.owner == user_id
     limit = max(1, min(int(limit or 50), MAX_ORDERS_PAGE))
     query: dict[str, Any] = {"workspace": workspace_id, "pocket_id": pocket_id}
     if cursor:
@@ -236,6 +298,6 @@ async def list_orders(
     more = len(rows) > limit
     rows = rows[:limit]
     return OrdersPage(
-        items=[_order_view(r) for r in rows],
+        items=[_order_view(r, full_email=full_email) for r in rows],
         next_cursor=str(rows[-1].id) if more and rows else None,
     )

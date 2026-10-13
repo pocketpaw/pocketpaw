@@ -12,7 +12,8 @@
 #   GET    /sites/by-pocket/{pocket_id}/orders?limit&cursor
 #
 # ``public_router`` (no session by design; each names its own credential):
-#   GET  /integrations/{provider}/callback   single-use server-side state
+#   GET  /integrations/{provider}/start      one-time ticket -> browser cookie -> provider
+#   GET  /integrations/{provider}/callback   single-use state + the matching cookie
 #   POST /sites/{site_id}/x/{provider}/{action}   site key or PAW_GATEWAY_TOKEN
 #   POST /integrations/webhooks/{provider}   provider signature
 #
@@ -22,7 +23,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import (
@@ -134,6 +135,7 @@ async def put_site_integration(
     body: SiteIntegrationPut,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
+    is_admin: bool = Depends(action_allowed_any_workspace("workspace.update")),
 ) -> SiteIntegrationView:
     return await bindings.upsert(
         workspace_id=ctx.workspace_id or "",
@@ -141,6 +143,7 @@ async def put_site_integration(
         pocket_id=pocket_id,
         provider_id=provider,
         body=body,
+        is_admin=is_admin,
     )
 
 
@@ -167,23 +170,24 @@ async def list_orders(
     cursor: str | None = None,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
+    is_admin: bool = Depends(action_allowed_any_workspace("workspace.update")),
 ) -> OrdersPage:
+    """Editors see customer emails masked; the pocket owner and admins see them whole
+    (the same PII rule as the owner-only newsletter CSV)."""
     return await webhooks.list_orders(
         workspace_id=ctx.workspace_id or "",
         user_id=ctx.user_id,
         pocket_id=pocket_id,
         limit=limit,
         cursor=cursor,
+        is_admin=is_admin,
     )
 
 
 # ------------------------------------------------------------------ public
 
 
-@public_router.get("/integrations/{provider}/callback", response_class=HTMLResponse)
-async def oauth_callback(provider: str, code: str = "", state: str = "") -> HTMLResponse:
-    """Provider redirect. Authenticated by the single-use state, nothing else."""
-    message = await oauth.finish_callback(provider, code, state)
+def _page(message: dict) -> HTMLResponse:
     page, nonce = oauth.callback_html(message)
     return HTMLResponse(
         page,
@@ -196,6 +200,52 @@ async def oauth_callback(provider: str, code: str = "", state: str = "") -> HTML
             "Referrer-Policy": "no-referrer",
         },
     )
+
+
+@public_router.get("/integrations/{provider}/start")
+async def oauth_start(provider: str, t: str = "") -> Response:
+    """Redeem the one-time ticket, bind this browser with a cookie, go to the provider."""
+    redeemed = await oauth.redeem_ticket(provider, t)
+    if redeemed is None:
+        return _page(
+            {
+                "type": oauth.MESSAGE_TYPE,
+                "provider": provider,
+                "connection_id": None,
+                "status": "error",
+                "error": "invalid_ticket",
+            }
+        )
+    url, state_hash = redeemed
+    resp = RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
+    resp.set_cookie(
+        oauth.cookie_name(provider),
+        state_hash,
+        max_age=oauth.COOKIE_MAX_AGE,
+        path=oauth.COOKIE_PATH,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return resp
+
+
+@public_router.get("/integrations/{provider}/callback", response_class=HTMLResponse)
+async def oauth_callback(
+    provider: str, request: Request, code: str = "", state: str = ""
+) -> HTMLResponse:
+    """Provider redirect. Needs the single-use state AND this browser's start cookie."""
+    cookie = request.cookies.get(oauth.cookie_name(provider))
+    message = await oauth.finish_callback(provider, code, state, cookie)
+    resp = _page(message)
+    resp.delete_cookie(
+        oauth.cookie_name(provider),
+        path=oauth.COOKIE_PATH,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return resp
 
 
 @public_router.post("/sites/{site_id}/x/{provider}/{action}")

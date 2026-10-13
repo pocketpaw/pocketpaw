@@ -7,8 +7,11 @@
 #
 # Authz copies ``sites.site_secrets``: a pocket outside the caller's workspace is a
 # 404 (ids cannot be probed), binding reads and writes need edit access to the pocket
-# (``pockets.service.has_edit_access``), and the newsletter CSV (visitor PII) is
-# owner only. Workspace RBAC and the ``sites`` plan feature run in the router.
+# (``pockets.service.has_edit_access``). Visitor PII is owner (or admin) only: the
+# newsletter CSV is owner only, and order customer emails are masked for editors
+# (``webhooks.list_orders``). Linking a grant needs its creator or a workspace admin.
+# The site delete cascade calls ``purge_for_pocket``. Workspace RBAC and the
+# ``sites`` plan feature run in the router.
 #
 # Every link / unlink / connect / reconnect emits ``site.integration_changed``
 # {pocket_id, provider, status}. Linking also mints the site's ``PAW_GATEWAY_TOKEN``
@@ -208,8 +211,21 @@ def _check_actions(provider: IntegrationProvider, names: list[str]) -> list[str]
     return list(dict.fromkeys(names))
 
 
-async def _link_connection(workspace_id: str, provider: IntegrationProvider, connection_id: str):
+async def _link_connection(
+    workspace_id: str,
+    provider: IntegrationProvider,
+    connection_id: str,
+    *,
+    user_id: str,
+    is_admin: bool,
+):
     conn = await vault.get_connection(workspace_id, connection_id)
+    if conn.created_by != user_id and not is_admin:
+        _deny(user_id, workspace_id, connection_id, "sites.integration.link", "not_grant_owner")
+        raise Forbidden(
+            "integrations.not_connection_owner",
+            "Only the person who connected this account or a workspace admin can link it.",
+        )
     if conn.provider != provider.id:
         raise ValidationError(
             "integrations.connection_mismatch", "That connection is for a different provider."
@@ -225,6 +241,7 @@ async def upsert(
     pocket_id: str,
     provider_id: str,
     body: SiteIntegrationPut,
+    is_admin: bool = False,
 ) -> SiteIntegrationView:
     """``PUT /sites/by-pocket/{pocket_id}/integrations/{provider}``."""
     provider = provider_or_404(provider_id)
@@ -240,7 +257,9 @@ async def upsert(
         )
     if "connection_id" in body.model_fields_set:
         if body.connection_id:
-            await _link_connection(workspace_id, provider, body.connection_id)
+            await _link_connection(
+                workspace_id, provider, body.connection_id, user_id=user_id, is_admin=is_admin
+            )
         row.connection_id = body.connection_id or None
     if body.settings is not None:
         row.settings = _check_settings(body.settings)
@@ -385,6 +404,28 @@ async def emit_changed(pocket: Any, provider_id: str, status: str, user_id: str)
         )
     except Exception:  # noqa: BLE001
         logger.debug("integrations: change event not emitted", exc_info=True)
+
+
+# ------------------------------------------------------------------ cascade
+
+
+async def purge_for_pocket(*, workspace_id: str, pocket_id: str) -> int:
+    """Delete one site's bindings, newsletter list, orders and demo records.
+
+    Called by the site delete cascade next to ``site_secrets.purge_for_pocket``.
+    Workspace grants survive: they may serve other sites."""
+    from pocketpaw_ee.cloud.models.integration import (
+        IntegrationDemoRecord,
+        NewsletterSubscriber,
+        SiteIntegration,
+        SiteOrder,
+    )
+
+    removed = 0
+    for doc in (SiteIntegration, NewsletterSubscriber, SiteOrder, IntegrationDemoRecord):
+        result = await doc.find(doc.workspace == workspace_id, doc.pocket_id == pocket_id).delete()
+        removed += int(getattr(result, "deleted_count", 0) or 0)
+    return removed
 
 
 # ------------------------------------------------------------ gateway reads

@@ -3,16 +3,19 @@
 # Registered only when ``POCKETPAW_INTEGRATIONS_DEMO=1`` (see providers/__init__.py).
 # It exercises every seam a real provider uses, with no network:
 #   * authorize_url points straight at our own callback with a fake ``demo_`` code
+#     that embeds the PKCE challenge; complete checks the verifier against it
 #   * complete / refresh mint fake tokens; refresh rotates the refresh token every
 #     time, and a refresh token ending in ``revoked`` raises InvalidGrant
 #   * actions: ``echo`` (public read) returns its args, ``record`` (public write)
 #     stores them in ``IntegrationDemoRecord``
 #   * webhooks: body signed with HMAC-SHA256 in ``X-Demo-Signature`` using
-#     ``POCKETPAW_INTEGRATIONS_DEMO_WEBHOOK_SECRET`` (default ``demo-webhook-secret``)
+#     ``POCKETPAW_INTEGRATIONS_DEMO_WEBHOOK_SECRET``. No default: without the demo
+#     switch AND an explicit secret every webhook is refused.
 # Not for production; nothing here is a credential.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -45,12 +48,21 @@ def demo_enabled() -> bool:
 
 
 def webhook_secret() -> str:
-    return os.environ.get(WEBHOOK_SECRET_ENV, "").strip() or "demo-webhook-secret"
+    """The configured demo webhook secret, or "" (then nothing verifies)."""
+    return os.environ.get(WEBHOOK_SECRET_ENV, "").strip()
 
 
 def sign(body: bytes) -> str:
     """The signature a demo webhook sender puts in ``X-Demo-Signature``."""
-    return hmac.new(webhook_secret().encode(), body, hashlib.sha256).hexdigest()
+    secret = webhook_secret()
+    if not secret:
+        raise ValueError(f"{WEBHOOK_SECRET_ENV} is not set")
+    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _s256(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 class EchoArgs(ActionArgs):
@@ -98,6 +110,7 @@ class DemoProvider(BaseProvider):
     kind = "connect"
     category = "developer"
     plan = "free"
+    supports_pkce = True
     actions = {
         "echo": ActionSpec(
             args=EchoArgs,
@@ -115,13 +128,28 @@ class DemoProvider(BaseProvider):
         ),
     }
 
-    def authorize_url(self, state: str, redirect_uri: str) -> str:
-        code = f"demo_{secrets.token_urlsafe(12)}"
+    def authorize_url(
+        self, state: str, redirect_uri: str, code_challenge: str | None = None
+    ) -> str:
+        # The fake "provider" remembers the challenge by carrying it in the code.
+        code = f"demo_{secrets.token_urlsafe(12)}.{code_challenge or ''}"
         return f"{redirect_uri}?{urlencode({'code': code, 'state': state})}"
 
-    async def complete(self, code: str, redirect_uri: str) -> TokenGrant:  # noqa: ARG002
-        if not code.startswith("demo_"):
+    async def complete(
+        self,
+        code: str,
+        redirect_uri: str,  # noqa: ARG002
+        code_verifier: str | None = None,
+    ) -> TokenGrant:
+        if not code.startswith("demo_") or "." not in code:
             raise ProviderError("demo: unknown authorization code")
+        challenge = code.rsplit(".", 1)[1]
+        if (
+            not challenge
+            or not code_verifier
+            or not hmac.compare_digest(challenge, _s256(code_verifier))
+        ):
+            raise ProviderError("demo: PKCE verification failed")
         return _grant()
 
     async def refresh(self, refresh_token: str) -> TokenGrant:
@@ -130,6 +158,8 @@ class DemoProvider(BaseProvider):
         return _grant()
 
     def verify_webhook(self, body: bytes, headers: Mapping[str, str]) -> NormalizedEvent | None:
+        if not demo_enabled() or not webhook_secret():
+            return None
         given = headers.get(SIGNATURE_HEADER, "")
         if not given or not hmac.compare_digest(given, sign(body)):
             return None
