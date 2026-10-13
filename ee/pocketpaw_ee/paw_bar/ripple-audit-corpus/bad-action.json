@@ -1,0 +1,18 @@
+{
+  "about": "A handler naming an action the engine does not have. Same path both sides; core reports it as a schema fault until the action grammar check lands.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        { "type": "text", "props": { "content": "Ready?" } },
+        { "type": "button", "props": { "label": "Go" }, "on_click": { "action": "explode" } }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [{ "code": "schema", "path": "/ui/children/1/on_click", "message": "Invalid input" }],
+    "python": [{ "code": "badAction", "path": "/ui/children/1/on_click" }]
+  }
+}

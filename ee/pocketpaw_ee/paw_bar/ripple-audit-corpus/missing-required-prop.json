@@ -1,0 +1,12 @@
+{
+  "about": "A quiz with no questions. Only the Python walk catches it today; core gains required props with the full spec audit.",
+  "spec": {
+    "version": "1.0",
+    "ui": { "type": "card", "children": [{ "type": "quiz", "props": { "title": "Capitals" } }] },
+    "state": {}
+  },
+  "expect": {
+    "core": [],
+    "python": [{ "code": "missingProp", "path": "/ui/children/0" }]
+  }
+}
