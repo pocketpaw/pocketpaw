@@ -69,7 +69,7 @@ _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
 # (vendored from ripple branch feat/play-wave pending a release; drop the widget examples,
 # update the pins below).
-_RIPPLE_MANIFEST_SHA256 = "11f01ddee912e1294f3c968872b12132c5476fc0caca6d6a8e9d6992a814af1c"
+_RIPPLE_MANIFEST_SHA256 = "448e63a011bc69ab38880cd605d95be525e604fd473ad7da58286979c2974070"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
