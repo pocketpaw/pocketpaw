@@ -40,6 +40,10 @@ class SettingsFieldView(BaseModel):
     required: bool = False
     options: list[SettingOptionView] | None = None
     readonly: bool = False
+    # Client mirrors of the server checks: comma-separated multi select, url hosts, length cap.
+    multi: bool = False
+    allowed_hosts: list[str] | None = None
+    max_length: int | None = None
 
 
 class ProviderView(BaseModel):

@@ -86,13 +86,27 @@ async def test_provider_views_carry_settings_fields_and_requires_connection(bean
     )
     assert calendly["actions"] == []
     [field] = calendly["settings_fields"]
-    assert set(field) == {"key", "label", "type", "help", "required", "options", "readonly"}
+    assert set(field) == {
+        "key",
+        "label",
+        "type",
+        "help",
+        "required",
+        "options",
+        "readonly",
+        "multi",
+        "allowed_hosts",
+        "max_length",
+    }
     assert (field["key"], field["type"], field["required"], field["readonly"]) == (
         "url",
         "url",
         True,
         False,
     )
+    assert field["multi"] is False
+    assert field["allowed_hosts"] == ["calendly.com"]
+    assert isinstance(field["max_length"], int)
     assert providers["cal_com"]["settings_fields"][0]["key"] == "url"
     assert providers["newsletter"]["settings_fields"] == []
     board = next(f for f in providers["demo"]["settings_fields"] if f["key"] == "board_url")

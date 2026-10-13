@@ -143,6 +143,9 @@ def field_views(provider: IntegrationProvider) -> list[dict[str, Any]]:
             "required": f.required,
             "options": [{"value": o.value, "label": o.label} for o in f.options] or None,
             "readonly": f.readonly,
+            "multi": f.multi,
+            "allowed_hosts": list(f.allowed_hosts) or None,
+            "max_length": f.max_length,
         }
         for f in _fields(provider).values()
         if not f.hidden
