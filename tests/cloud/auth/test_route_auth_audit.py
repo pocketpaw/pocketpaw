@@ -159,6 +159,9 @@ ROUTER_MODULES = [
     # Added with the router. Every route takes request_context; the pocket gate
     # (edit to list, owner to write) is asserted in tests/ee/sites/test_site_secrets.py.
     ("site_secrets", "pocketpaw_ee.sites.secrets_router"),
+    # Sites integrations. Owner routes take request_context; the three public ones
+    # are on the allowlist below. Authz is asserted in tests/ee/sites/test_integrations_*.
+    ("integrations", "pocketpaw_ee.integrations.router"),
 ]
 
 #: Modules that mount more than their ``router`` attribute. Anything not named
@@ -166,6 +169,7 @@ ROUTER_MODULES = [
 ROUTER_ATTRS: dict[str, tuple[str, ...]] = {
     "pocketpaw_ee.cloud.ai_visibility.router": ("router", "site_router"),
     "pocketpaw_ee.cloud.partners.router": ("router", "pros_router"),
+    "pocketpaw_ee.integrations.router": ("router", "public_router"),
 }
 
 #: Routes that are public BY DESIGN, each with the reason it has to be.
@@ -237,6 +241,15 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
         "emailed confirm link; the 7-day token is the credential, GET has no side effect"
     ),
     "POST /lead-notifications/confirm/{token}": "confirms; the emailed 7-day token authorises",
+    # --- Sites integrations: each carries its own credential ---
+    "GET /integrations/{provider}/callback": (
+        "provider redirect; guarded by single-use server-side state (_oauth_state)"
+    ),
+    "POST /sites/{site_id}/x/{provider}/{action}": (
+        "site gateway; per-IP bucket, then the site's embed key + origin gate or its "
+        "PAW_GATEWAY_TOKEN (constant-time), Turnstile on writes, SiteRateCounter"
+    ),
+    "POST /integrations/webhooks/{provider}": "provider webhook; provider signature verified",
     # --- git smart-HTTP: authenticates in-handler, not via a FastAPI dep ---
     "GET /codegit/{owner}/{repo}/info/refs": "git protocol; own token auth in-handler",
     "POST /codegit/{owner}/{repo}/git-upload-pack": "git protocol; own token auth in-handler",

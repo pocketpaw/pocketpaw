@@ -29,6 +29,7 @@
               {"id": "cloud-chat-surface", "name": "Cloud Chat + Surface engine", "description": "Cloud agent orchestration: resolves the chat surface (home/pockets/sites/code/studio/belt), injects per-surface preambles, and assembles scope/pocket/participant context. ee/cloud/chat (agent_service) + ee/cloud/surface.", "technology": "Python, claude_agent_sdk", "kb_article": ""},
               {"id": "pockets", "name": "Pockets + rippleSpec", "description": "Pocket workspace containers (agents+data+tools+KB+rules). The rippleSpec merge endpoint; data sources (read GETs) and write actions gated through Instinct. ee/cloud/pockets.", "technology": "Python", "kb_article": ""},
               {"id": "sites", "name": "Paw Sites", "description": "Publish pockets as edge sites. Two engines x two modes: {ripple,svelte} x {static,dynamic}; dynamic = per-tenant Cloudflare D1. ee/pocketpaw_ee/sites + the paw-sites generator.", "technology": "Python, Bun, SvelteKit", "kb_article": ""},
+              {"id": "integrations", "name": "Sites integrations", "description": "One-click integrations for Paw Sites: encrypted workspace connection vault with a leased token-refresh path, provider registry (built-in / connect / embed), hosted OAuth connect + callback, site bindings, the public site gateway (POST /sites/{id}/x/{provider}/{action}), provider webhook ingress and site orders. ee/pocketpaw_ee/integrations.", "technology": "Python, FastAPI", "kb_article": ""},
               {"id": "foresight", "name": "Foresight", "description": "Scenario simulation / rehearsal: soul-seeded personas run per-tick cognition loops with calibration and backtest gating. ee/pocketpaw_ee/foresight.", "technology": "Python", "kb_article": ""},
               {"id": "enterprise-ops", "name": "Enterprise Ops", "description": "Fleet install, Calendar (external sync + conflict detection), Guards (RBAC/ABAC), Audit (placeholder), and the Paw Bar customer decision loop. ee/pocketpaw_ee/{fleet,calendar,guards,audit,paw_bar}.", "technology": "Python", "kb_article": ""}
             ]
@@ -61,6 +62,10 @@
       {"source": "sites", "target": "ripple", "description": "compiles the ripple track", "technology": "", "style": "sync"},
       {"source": "sites", "target": "cloudflare", "description": "deploys worker + D1", "technology": "", "style": "sync"},
       {"source": "sites", "target": "cloudflare", "description": "owner lead email via the notification outbox", "technology": "Email Service REST", "style": "async"},
+      {"source": "sites", "target": "integrations", "description": "published pages and Workers call the gateway", "technology": "HTTPS", "style": "sync"},
+      {"source": "integrations", "target": "mongo", "description": "persists encrypted connections, bindings, orders", "technology": "", "style": "sync"},
+      {"source": "integrations", "target": "redis", "description": "single-use OAuth state", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "integrations", "description": "agent asks the owner to connect a provider", "technology": "SSE card", "style": "async"},
       {"source": "runtime", "target": "soul-protocol", "description": "loads / saves memory", "technology": "", "style": "sync"},
       {"source": "fabric", "target": "soul-protocol", "description": "writes the object journal", "technology": "", "style": "async"},
       {"source": "instinct", "target": "soul-protocol", "description": "emits Decision-Graph events", "technology": "", "style": "async"},

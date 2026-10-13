@@ -272,6 +272,13 @@ def mount_cloud(app: FastAPI) -> None:
     outermost = list(getattr(app.state, "outermost_middleware", ()))
     if PreviewHostDispatch not in outermost:
         outermost.append(PreviewHostDispatch)
+    # The integrations gateway is called by published sites from their own origins,
+    # which the app-wide CORS list cannot know; this answers CORS for that one path
+    # (no credentials) and leaves access control to the gateway's own origin gate.
+    from pocketpaw_ee.integrations.gateway import GatewayCors
+
+    if GatewayCors not in outermost:
+        outermost.append(GatewayCors)
     app.state.outermost_middleware = outermost
 
     # Global error handler — extracted to ee.cloud._core.http
@@ -538,6 +545,8 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.fabric.router import router as fabric_router
     from pocketpaw_ee.fleet.router import router as fleet_router
     from pocketpaw_ee.instinct.router import router as instinct_router
+    from pocketpaw_ee.integrations.router import public_router as integrations_public_router
+    from pocketpaw_ee.integrations.router import router as integrations_router
     from pocketpaw_ee.paw_bar.catalog_routes import router as paw_bar_catalog_router
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
@@ -615,6 +624,11 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(sites_router, prefix="/api/v1")
     # Per-site secrets: names + status out, owner-only writes, values never returned.
     app.include_router(site_secrets_router, prefix="/api/v1")
+    # Sites integrations: owner routes (connections, site bindings, orders) and the
+    # public ones (OAuth callback, the site gateway, provider webhooks), each with
+    # its own credential. See ``pocketpaw_ee.integrations.router``.
+    app.include_router(integrations_router, prefix="/api/v1")
+    app.include_router(integrations_public_router, prefix="/api/v1")
     # A project site's files (list / read / write / patch / delete) for the builder's
     # Code view; the same service functions the agent's project file tools call.
     app.include_router(site_files_router, prefix="/api/v1")
