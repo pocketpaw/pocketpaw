@@ -451,7 +451,7 @@ class AudienceResolver:
         # The pocket owner fills secrets in, and the acting user (whose agent asked,
         # or who set it) needs to see the card change. Nobody else: a secret's name
         # and purpose are the owner's business, not workspace news.
-        if t in {"site.secret_requested", "site.secret_updated"}:
+        if t in {"site.secret_requested", "site.secret_updated", "site.integration_changed"}:
             return list(dict.fromkeys(u for u in (d.get("owner"), d.get("user_id")) if u))
 
         # --- Site templates (user-saved; private, workspace or public) ----------

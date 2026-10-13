@@ -19,6 +19,10 @@
 #     access to the pocket (the same rule as ``pockets.service.has_edit_access``).
 #     A pocket outside the caller's workspace is a 404, so ids cannot be probed.
 #   * The site delete cascade calls ``purge_for_pocket``; it is best effort there.
+#   * ``ensure_generated_secret`` / ``secret_matches`` serve platform-minted secrets
+#     (the integrations gateway's ``PAW_GATEWAY_TOKEN``). The first skips the owner
+#     gate, so its callers authorize first; the second compares in constant time
+#     here, so the value still never leaves this module.
 """Per-site secret storage: request, set, delete, list names, resolve for deploy."""
 
 from __future__ import annotations
@@ -332,6 +336,46 @@ async def _check_cap(workspace_id: str, pocket_id: str) -> None:
             "sites.secret_cap",
             f"A site can hold at most {MAX_SECRETS_PER_SITE} secrets; delete one first.",
         )
+
+
+# ------------------------------------------- platform-minted secrets
+
+
+async def ensure_generated_secret(
+    *, workspace_id: str, pocket_id: str, name: str, description: str
+) -> bool:
+    """Mint a random value for ``name`` unless one is set. True when it minted.
+
+    For secrets the platform owns (a per-site gateway token), so it skips the owner
+    gate and the per-site cap: the caller has already authorized the action that
+    needs it. A pending row of the same name is filled in."""
+    import secrets as _secrets
+
+    name = validate_name(name)
+    row = await _row(workspace_id, pocket_id, name)
+    if row is not None and row.encrypted_value:
+        return False
+    if row is None:
+        row = _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name)
+    row.encrypted_value = crypto.encrypt(_secrets.token_urlsafe(32))
+    row.description = description[:MAX_DESCRIPTION_CHARS]
+    row.value_set_by = "system"
+    row.value_set_at = datetime.now(UTC)
+    await row.save()
+    logger.info("site_secrets: generated %s on pocket %s", name, pocket_id)
+    return True
+
+
+async def secret_matches(*, workspace_id: str, pocket_id: str, name: str, candidate: str) -> bool:
+    """Constant-time check of ``candidate`` against a set secret. False when unset."""
+    import hmac
+
+    if not isinstance(candidate, str) or not candidate:
+        return False
+    row = await _row(workspace_id, pocket_id, name)
+    if row is None or not row.encrypted_value:
+        return False
+    return hmac.compare_digest(candidate.encode(), crypto.decrypt(row.encrypted_value).encode())
 
 
 # ------------------------------------------------------- deploy + cascade

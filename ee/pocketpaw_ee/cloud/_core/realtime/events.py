@@ -578,6 +578,16 @@ class SiteSecretUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "site.secret_updated"
 
 
+# Sites integrations (``pocketpaw_ee.integrations``). A site's binding to a provider
+# changed: linked, unlinked, connected, reconnected, or its grant went stale.
+# data: {workspace_id, pocket_id, provider, status, owner, user_id}. ``status`` is
+# the SiteIntegrationView status, or "unlinked". Never a token. Routed like the
+# secret events: the pocket owner and the acting user.
+@dataclass
+class SiteIntegrationChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "site.integration_changed"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):
