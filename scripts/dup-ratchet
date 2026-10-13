@@ -146,7 +146,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"Soul\.(awaken|birth)\(",
         ("*",),
         ("src/pocketpaw/soul/*",),
-        6,
+        4,
         "pocketpaw.soul (SoulManager / a per-path open helper)",
     ),
     (

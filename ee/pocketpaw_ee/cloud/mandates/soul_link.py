@@ -14,11 +14,12 @@
 # the nearest lessons; a near-duplicate (SKIP) is not stored, a MERGE or CREATE
 # is.
 #
-# Implementation rides the real soul-protocol API (``Soul.awaken`` →
-# ``recall``/``remember``), saved back in the shape it was read from: a soul
-# directory with ``save_local``, a ``.soul`` archive with ``export`` (keys
-# kept so later shifts can still sign; written beside the file, then swapped
-# in). ``save_local`` on an archive path would mkdir over the file and fail.
+# Implementation opens the soul through ``pocketpaw.soul.open_soul`` (the
+# per-path awaken), then rides the soul-protocol API (``recall``/``remember``),
+# saved back in the shape it was read from: a soul directory with
+# ``save_local``, a ``.soul`` archive with ``export`` (keys kept so later
+# shifts can still sign; written beside the file, then swapped in).
+# ``save_local`` on an archive path would mkdir over the file and fail.
 # Writes to one path are serialized in-process (``_LOCKS``): awaken → save is a
 # read-modify-write, and concurrent trackers would drop each other's memories.
 # EVERYTHING is best-effort: a missing file, a corrupt soul, or a protocol
@@ -71,9 +72,9 @@ async def recall_for_planning(soul_path: str | None, query: str) -> list[str]:
     if path is None:
         return []
     try:
-        from soul_protocol import Soul
+        from pocketpaw.soul import open_soul
 
-        soul = await Soul.awaken(path)
+        soul = await open_soul(path)
         entries = await soul.recall(query, limit=_RECALL_LIMIT)
         return [str(e.content) for e in entries]
     except Exception:  # noqa: BLE001 — soul failures must never wedge a shift
@@ -88,10 +89,12 @@ async def remember_shift(soul_path: str | None, summary: str) -> bool:
     if path is None:
         return False
     try:
-        from soul_protocol import MemoryType, Soul
+        from soul_protocol import MemoryType
+
+        from pocketpaw.soul import open_soul
 
         async with _lock(path):
-            soul = await Soul.awaken(path)
+            soul = await open_soul(path)
             await soul.remember(summary.strip(), type=MemoryType.EPISODIC, importance=7)
             await _save(soul, path)
         return True
@@ -107,11 +110,13 @@ async def note_lesson(soul_path: str | None, text: str) -> bool:
     if path is None:
         return False
     try:
-        from soul_protocol import MemoryType, Soul
+        from soul_protocol import MemoryType
         from soul_protocol.runtime.memory.dedup import reconcile_fact
 
+        from pocketpaw.soul import open_soul
+
         async with _lock(path):
-            soul = await Soul.awaken(path)
+            soul = await open_soul(path)
             near = await soul.recall(
                 text,
                 limit=_DEDUP_NEIGHBOURS,
@@ -136,9 +141,11 @@ async def recall_lessons(soul_path: str | None, query: str, limit: int = 5) -> l
     if path is None:
         return []
     try:
-        from soul_protocol import MemoryType, Soul
+        from soul_protocol import MemoryType
 
-        soul = await Soul.awaken(path)
+        from pocketpaw.soul import open_soul
+
+        soul = await open_soul(path)
         entries = await soul.recall(
             query, limit=limit, types=[MemoryType.PROCEDURAL], domain=LESSON_DOMAIN
         )

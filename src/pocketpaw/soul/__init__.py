@@ -16,6 +16,7 @@ from pocketpaw.soul._cognitive import PocketPawCognitiveEngine
 from pocketpaw.soul._manager import (
     SoulManager,
     get_soul_manager,
+    open_soul,
     set_soul_manager,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "SoulBridge",
     "SoulManager",
     "get_soul_manager",
+    "open_soul",
     "set_soul_manager",
 ]
