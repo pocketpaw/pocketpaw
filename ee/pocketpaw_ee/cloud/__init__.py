@@ -275,10 +275,12 @@ def mount_cloud(app: FastAPI) -> None:
     # The integrations gateway is called by published sites from their own origins,
     # which the app-wide CORS list cannot know; this answers CORS for that one path
     # (no credentials) and leaves access control to the gateway's own origin gate.
+    # Listed before PreviewHostDispatch: the last one added is the outermost, and the
+    # preview host must stay outermost.
     from pocketpaw_ee.integrations.gateway import GatewayCors
 
     if GatewayCors not in outermost:
-        outermost.append(GatewayCors)
+        outermost.insert(outermost.index(PreviewHostDispatch), GatewayCors)
     app.state.outermost_middleware = outermost
 
     # Global error handler — extracted to ee.cloud._core.http
