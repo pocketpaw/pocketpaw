@@ -160,7 +160,15 @@ still recorded on the blob as `clef`, even when the wait times out), then asks t
 
 It escalates the whole plan, leaving it pending for a human exactly as with the
 gate off, when Clef is off, fails, times out or truncated the plan,
-`tasks_independent` < 0.40, `too_big` > 0.65, or any task fails a rule above.
+`tasks_independent` < 0.40, or any task fails a rule above. `too_big` > 0.65
+escalates (`task_too_big`) only when some task has no scored spec at or over
+the spec threshold. When every task cites an open sighting and Clef scored each
+task's issue testable, a big plan is only noted: the repo lane already refuses
+a PR over 400 lines and that refusal reaches the supervisor, so the decision's
+reason ends "too_big 0.77 > 0.65 noted, lane size cap guards" and the plan goes
+on to the scope and risk rules. This check runs after the evidence and spec
+checks, so a big plan with an unclear issue escalates as `spec_unclear` (and
+flags the issue) rather than `task_too_big`.
 The policy never rejects: a rejection would file a teaching sighting no human
 wrote. Auto mode needs Clef on (`POCKETPAW_BELT_CLEF=shadow` plus its token and
 account id); without it every plan escalates.
@@ -173,10 +181,13 @@ Either way the decision goes on the `_belt_plan` blob as `policy`
 thresholds, `at`, and `tasks` for a `spec_unclear` escalation), and an escalation is logged with its reason.
 
 The thresholds come from the supervisor's gate log of the first unattended
-pilot (seven plan decisions, pinned in `tests/cloud/test_belt_plan_policy.py`).
-Six match. The miss is a plan the supervisor trimmed for a file overlap Clef
-does not score (independence .52, above a plan approved in full at .50), which
-the policy approves as proposed. Each threshold has an env override:
+pilot (seven plan decisions, pinned in `tests/cloud/test_belt_plan_policy.py`),
+plus an eighth row: a one-task plan that waited all night on `too_big` .77
+alone. Six match. One miss is a plan the supervisor trimmed for a file overlap
+Clef does not score (independence .52, above a plan approved in full at .50),
+which the policy approves as proposed. The other is that eighth plan: the
+captain approved it the next morning, and with `too_big` now only noted it
+escalates on `low_risk` .70 < .75 instead. Each threshold has an env override:
 `POCKETPAW_BELT_POLICY_MIN_IN_SCOPE`, `..._MIN_LOW_RISK`,
 `..._MIN_INDEPENDENT`, `..._MAX_TOO_BIG`, `..._MIN_SPEC_CLEAR`.
 

@@ -13,6 +13,12 @@
 # as ``spec_unclear`` naming those tasks, and the auto gate comments on and labels
 # each one's GitHub source issue ``needs-spec`` (once). The gate log predates the
 # question: its rows carry no spec score ("no opinion") and decide as before.
+# TOO BIG: ``too_big`` over the threshold alone no longer escalates once every
+# task cites an open sighting whose issue Clef scored testable; the reason notes
+# it ("too_big noted, lane size cap guards", the repo lane refuses a PR over its
+# size cap). Without a scored, testable spec it still escalates. The gate log's
+# eighth row is the plan that waited all night on too_big alone; it now
+# escalates on its low_risk instead.
 
 from __future__ import annotations
 
@@ -79,21 +85,27 @@ GATE_LOG = [
     ("plan quality s4", 0.90, 0.79, 0.27, 0.71, 2, "approve Q7b, split Q8", True, False),
     ("plan engines s2", 0.91, 0.93, 0.50, 0.32, 3, "approve P1+P4+P7", False, True),
     ("plan quality s5", 0.93, 0.90, 0.74, 0.11, 2, "approve Q8a+Q8b", False, True),
+    ("plan apps s8", 0.9045, 0.6955, 0.7763, 0.7736, 1, "approve 1/1 next morning", False, False),
 ]
+# Rows where the policy and the supervisor disagree, each explained below.
+KNOWN_MISSES = {"plan s3", "plan apps s8"}
 
 
 @pytest.mark.parametrize("row", GATE_LOG, ids=[r[0] for r in GATE_LOG])
 def test_policy_against_the_supervisors_gate_log(row):
-    """Six of seven rows reproduce the supervisor's call. ``plan s3`` is the
-    known miss: the supervisor deferred Q8 for a FILE OVERLAP with Q3, a signal
-    Clef does not score, and its independence (.52) sits above ``engines s2``
-    (.50), which the supervisor approved in full, so no independence threshold
-    separates them. The policy approves s3 as proposed."""
+    """Six of eight rows reproduce the supervisor's call. ``plan s3``: the
+    supervisor deferred Q8 for a FILE OVERLAP with Q3, a signal Clef does not
+    score, and its independence (.52) sits above ``engines s2`` (.50), which
+    the supervisor approved in full, so no independence threshold separates
+    them; the policy approves s3 as proposed. ``plan apps s8`` escalated
+    overnight on too_big .77 alone and was approved by hand the next morning;
+    with its issue's spec scored (see ``test_the_overnight_plan_...``) too_big
+    is only noted, and low_risk .70 < .75 escalates it."""
     name, scope, risk, indep, big, n, _supervisor, changed, approves = row
     decision = plan_policy.decide(_tasks(n), {"s1"}, 4, _v(scope, risk, indep, big))
     assert decision.approve is approves, decision.reason
-    if name == "plan s3":
-        assert changed and decision.approve  # the documented disagreement
+    if name in KNOWN_MISSES:
+        assert decision.approve is changed  # the documented disagreement
     else:
         assert decision.approve is not changed
 
@@ -137,6 +149,42 @@ def test_spec_threshold_from_env(monkeypatch):
     t = plan_policy.thresholds_from_env()
     d = plan_policy.decide(_tasks(2), {"s1"}, 3, _v(0.9, 0.9, 0.7, 0.1, spec=(0.91, 0.96)), t)
     assert d.rule == "spec_unclear" and d.tasks == (0,)
+
+
+def test_too_big_alone_no_longer_escalates_a_testable_plan():
+    d = plan_policy.decide(_tasks(2), {"s1"}, 4, _v(0.93, 0.90, 0.74, 0.77, spec=(0.92, 0.6)))
+    assert d.approve and d.rule == "auto_approve", d.reason
+    assert "too_big 0.77 > 0.65 noted, lane size cap guards" in d.reason
+
+
+def test_the_overnight_plan_now_escalates_on_its_risk_with_too_big_noted(monkeypatch):
+    """Shift 8's plan (act-1a130dd65bd-1tpd), as Clef scored it, under the live
+    env (``MIN_IN_SCOPE=0.75``): one task, its issue testable (.92), too_big .77
+    the only rule that fired. Too big is now noted; low_risk .70 still escalates."""
+    monkeypatch.setenv("POCKETPAW_BELT_POLICY_MIN_IN_SCOPE", "0.75")
+    t = plan_policy.thresholds_from_env()
+    v = _v(0.9045, 0.6955, 0.7763, 0.7736, spec=(0.9207,))
+    d = plan_policy.decide(_tasks(1), {"s1"}, 4, v, t)
+    assert not d.approve and d.rule == "risky", d.reason
+    assert "low_risk 0.70 < 0.75" in d.reason
+    assert "too_big 0.77 > 0.65 noted, lane size cap guards" in d.reason
+
+
+@pytest.mark.parametrize(
+    "spec,refs,rule",
+    [
+        ((), ["s1"], "task_too_big"),  # no spec score: no opinion, not testable
+        ((-1.0,), ["s1"], "task_too_big"),  # unanswered
+        ((0.92,), ["s1", "s1"], "task_too_big"),  # task 2 unscored
+        ((0.92, 0.3), ["s1", "s1"], "spec_unclear"),
+        ((0.92,), ["gone"], "no_open_evidence"),
+    ],
+)
+def test_too_big_still_escalates_without_cited_testable_tasks(spec, refs, rule):
+    tasks = [{"title": f"t{i}", "evidence_refs": [ref]} for i, ref in enumerate(refs)]
+    d = plan_policy.decide(tasks, {"s1"}, 4, _v(0.93, 0.90, 0.74, 0.77, spec=spec))
+    assert not d.approve and d.rule == rule, d.reason
+    assert "noted" not in d.reason
 
 
 def test_s4_escalates_on_independence_first():

@@ -44,5 +44,43 @@
     "tests": [
       "tests/cloud/test_belt_plan_policy.py::test_auto_gate_flags_the_unclear_issue_needs_spec"
     ]
+  },
+  {
+    "label": "too_big still escalates a plan whose every task is testable",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "if len(spec) < len(tasks) or any(p < t.min_spec_clear for p in spec):",
+    "replace": "if True:",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_too_big_alone_no_longer_escalates_a_testable_plan",
+      "tests/cloud/test_belt_plan_policy.py::test_the_overnight_plan_now_escalates_on_its_risk_with_too_big_noted"
+    ]
+  },
+  {
+    "label": "too_big is waived for a task with no spec score",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "if len(spec) < len(tasks) or any(p < t.min_spec_clear for p in spec):",
+    "replace": "if any(p < t.min_spec_clear for p in spec):",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_too_big_still_escalates_without_cited_testable_tasks"
+    ]
+  },
+  {
+    "label": "an unanswered spec score waives too_big",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "if len(spec) < len(tasks) or any(p < t.min_spec_clear for p in spec):",
+    "replace": "if len(spec) < len(tasks) or any(0 <= p < t.min_spec_clear for p in spec):",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_too_big_still_escalates_without_cited_testable_tasks"
+    ]
+  },
+  {
+    "label": "the waived too_big is not noted in the reason",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "noted = f\"; too_big {verdict.too_big:.2f} > {t.max_too_big:.2f} noted, lane size cap guards\"",
+    "replace": "noted = \"\"",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_too_big_alone_no_longer_escalates_a_testable_plan",
+      "tests/cloud/test_belt_plan_policy.py::test_the_overnight_plan_now_escalates_on_its_risk_with_too_big_noted"
+    ]
   }
 ]

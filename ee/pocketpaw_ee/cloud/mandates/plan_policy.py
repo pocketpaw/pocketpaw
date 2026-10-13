@@ -9,19 +9,21 @@
 # sighting of this mandate, the plan fits the charter budget, and Clef is
 # confident it is in scope and low risk. Anything else ESCALATES the whole plan
 # (it stays pending for a human, as with the gate off): Clef unavailable or
-# truncated, tasks not independent enough, a task too big, or a per-task rule
-# failing. SPEC CLARITY is per task: a task whose ``spec_clear`` (its cited issue
-# states a concrete, testable acceptance criterion) is under the threshold
-# escalates the plan as ``spec_unclear`` and is named on ``Decision.tasks``, so
-# the caller can flag that issue ``needs-spec``; an unanswered or missing spec
-# score is no opinion (verdicts recorded before the question have none). The
-# policy never rejects; a rejection would file a teaching sighting that a human
-# did not write.
+# truncated, tasks not independent enough, or a per-task rule failing. SPEC
+# CLARITY is per task: a task whose ``spec_clear`` (its cited issue states a
+# concrete, testable acceptance criterion) is under the threshold escalates the
+# plan as ``spec_unclear`` and is named on ``Decision.tasks``, so the caller can
+# flag that issue ``needs-spec``; an unanswered or missing spec score is no
+# opinion. TOO BIG alone does not escalate a plan whose every task cites an open
+# sighting with a scored, testable spec: the repo lane refuses a PR over its
+# size cap and that refusal reaches the supervisor, so the reason only notes it
+# ("too_big noted, lane size cap guards"); without such specs it escalates as
+# ``task_too_big``. The policy never rejects; a rejection would file a teaching
+# sighting that a human did not write.
 #
 # Thresholds default to values calibrated on the supervisor's gate log of the
 # first unattended pilot (``tests/cloud/test_belt_plan_policy.py`` holds those
-# rows; the spec threshold flips none of them) and are overridable per env
-# (``thresholds_from_env``).
+# rows) and are overridable per env (``thresholds_from_env``).
 
 from __future__ import annotations
 
@@ -100,9 +102,10 @@ def decide(
     ``PlanVerdict`` (or ``None`` when Clef was off, failed or timed out); a
     negative score means Clef did not answer that question."""
     t = thresholds or Thresholds()
+    noted = ""  # set once too_big is waived: every later reason carries it
 
     def esc(rule: str, reason: str) -> Decision:
-        return Decision(False, rule, reason)
+        return Decision(False, rule, reason + noted)
 
     if verdict is None:
         return esc("clef_unavailable", "Clef gave no plan score (off, failed or timed out)")
@@ -116,11 +119,6 @@ def decide(
             "tasks_not_independent",
             f"tasks_independent {verdict.tasks_independent:.2f} < {t.min_independent:.2f} "
             f"({_numbers(verdict)})",
-        )
-    if verdict.too_big > t.max_too_big:
-        return esc(
-            "task_too_big",
-            f"too_big {verdict.too_big:.2f} > {t.max_too_big:.2f} ({_numbers(verdict)})",
         )
     if not tasks:
         return esc("empty_plan", "the plan has no tasks")
@@ -144,6 +142,15 @@ def decide(
             "testable acceptance criterion",
             unclear,
         )
+    if verdict.too_big > t.max_too_big:
+        # Every task cites an open sighting (above); without a scored, testable
+        # spec for each, too big still escalates.
+        if len(spec) < len(tasks) or any(p < t.min_spec_clear for p in spec):
+            return esc(
+                "task_too_big",
+                f"too_big {verdict.too_big:.2f} > {t.max_too_big:.2f} ({_numbers(verdict)})",
+            )
+        noted = f"; too_big {verdict.too_big:.2f} > {t.max_too_big:.2f} noted, lane size cap guards"
     if verdict.in_scope < t.min_in_scope:
         return esc(
             "out_of_scope",
@@ -161,7 +168,7 @@ def decide(
         f"{len(tasks)}/{budget_max} tasks within budget, Clef {_numbers(verdict)} "
         f"(needs in_scope >= {t.min_in_scope:.2f}, low_risk >= {t.min_low_risk:.2f}, "
         f"tasks_independent >= {t.min_independent:.2f}, too_big <= {t.max_too_big:.2f}, "
-        f"each task's spec_clear >= {t.min_spec_clear:.2f} where scored)",
+        f"each task's spec_clear >= {t.min_spec_clear:.2f} where scored){noted}",
     )
 
 
