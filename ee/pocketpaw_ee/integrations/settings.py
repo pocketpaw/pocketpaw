@@ -5,11 +5,15 @@
 #   missing_required(provider, settings)    required keys with no valid value
 #   field_views(provider)                   the ``settings_fields`` wire list
 #   visible(provider, settings)             stored settings minus hidden fields
+#   server_values(provider, written)        what a site_setup result may store
 #
 # PUT rules: an unknown key is a 422 ``invalid_settings``; a readonly (server-set)
 # key from a client is ignored and the stored value kept; "" or null clears an
-# editable key; values are strings. ``url`` must be http(s) with a host, and one of
-# the field's ``allowed_hosts`` exactly when it lists any. ``select`` must be one of
+# editable key; values are strings. ``url`` / ``link`` must be http(s) with an ASCII
+# host, no userinfo (no ``@`` in the authority), no port, and no backslash,
+# whitespace, control character, quote or angle bracket anywhere (so a browser
+# can't read a different host than ``urlsplit`` does), and one of the field's
+# ``allowed_hosts`` exactly when it lists any. ``select`` must be one of
 # the options (comma-separated for a ``multi`` field, normalised to "a,b"). Every
 # value is capped at the field's ``max_length``.
 
@@ -23,6 +27,26 @@ from pocketpaw_ee.integrations.providers.base import IntegrationProvider, Settin
 
 INVALID = "invalid_settings"
 MAX_URL = 2048
+_URL_BANNED = frozenset("\\\"'<>`")
+
+
+def _url_host(value: str) -> str | None:
+    """The lowercased host of a safe absolute http(s) URL, else None."""
+    if any(c in _URL_BANNED or c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        return None
+    if not value.isascii():
+        return None
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or "@" in parts.netloc or port is not None:
+        return None
+    if parts.username is not None or parts.password is not None:
+        return None
+    host = (parts.hostname or "").lower()
+    return host or None
 
 
 def _fields(provider: IntegrationProvider) -> dict[str, SettingsField]:
@@ -38,9 +62,8 @@ def check_value(spec: SettingsField, value: Any) -> str:
     if len(value) > cap:
         raise ValueError(f"{spec.label} is too long.")
     if spec.type in ("url", "link"):
-        parts = urlsplit(value)
-        host = (parts.hostname or "").lower()
-        if parts.scheme not in ("http", "https") or not host:
+        host = _url_host(value)
+        if host is None:
             raise ValueError(f"{spec.label} must be a web address starting with https://.")
         if spec.allowed_hosts and host not in spec.allowed_hosts:
             raise ValueError(f"{spec.label} must be a {' or '.join(spec.allowed_hosts)} link.")
@@ -90,8 +113,19 @@ def missing_required(provider: IntegrationProvider, settings: dict[str, Any]) ->
     return missing
 
 
-def readonly_keys(provider: IntegrationProvider) -> set[str]:
-    return {k for k, f in _fields(provider).items() if f.readonly or f.hidden}
+def server_values(provider: IntegrationProvider, written: dict[str, Any]) -> dict[str, Any]:
+    """What ``site_setup`` may store: declared readonly/hidden keys whose value passes
+    the field's check. Anything else is dropped."""
+    kept: dict[str, Any] = {}
+    for key, value in written.items():
+        spec = _fields(provider).get(key)
+        if spec is None or not (spec.readonly or spec.hidden):
+            continue
+        try:
+            kept[key] = check_value(spec, value)
+        except ValueError:
+            continue
+    return kept
 
 
 def visible(provider: IntegrationProvider, settings: dict[str, Any]) -> dict[str, Any]:

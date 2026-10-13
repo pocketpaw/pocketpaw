@@ -166,7 +166,7 @@ async def store_grant(
         conn = await get_connection(workspace_id, connection_id)
         if conn.provider != provider or conn.status == "revoked":
             raise ConflictError("integrations.resume_mismatch", "That connection can't resume.")
-        if conn.account_ref and grant.account_ref and conn.account_ref != grant.account_ref:
+        if conn.account_ref and conn.account_ref != grant.account_ref:
             raise ConflictError(
                 "integrations.resume_mismatch", "That is a different account. Connect it instead."
             )

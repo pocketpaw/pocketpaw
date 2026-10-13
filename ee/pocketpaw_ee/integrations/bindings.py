@@ -18,10 +18,11 @@
 # secret (once) so a project Worker gets it as a secret_text binding on deploy.
 #
 # Settings are validated against the provider's ``settings_fields`` (settings.py).
-# After every link / PUT / agent request, and for every bound site after a
+# On link, on enable, on a settings change, and for every bound site after a
 # reconnect, the provider's ``site_setup`` hook runs (idempotent; it may write
-# readonly settings). A failure is stored as ``setup_error`` and the site reads
-# ``setup_required``; it never fails the request.
+# readonly settings that pass their field's check; stored with an atomic $set).
+# A failure is stored as ``setup_error`` and the site reads ``setup_required``;
+# it never fails the request.
 #
 # Status (``binding_status``), first match wins: disabled (has actions, none on),
 # needs_connection / needs_reconnect (connect kinds), setup_required (a setup
@@ -176,9 +177,12 @@ def _setup_due(binding: Any, provider: IntegrationProvider, conn: Any | None) ->
 
 
 async def run_setup(binding: Any, provider: IntegrationProvider, conn: Any | None, user_id: str):
-    """Run the provider's ``site_setup`` and save the outcome. Never raises.
+    """Run the provider's ``site_setup`` and store the outcome. Never raises.
 
-    Only readonly (server-set) settings keys the provider declares are kept."""
+    Only readonly (server-set) keys the provider declares are kept, and only values
+    that pass the field's own check (a readonly link is still an http(s) URL).
+    Persists ``settings`` + ``setup_error`` with one atomic ``$set``, never the
+    whole loaded document, so a concurrent PUT's other fields survive."""
     hook = getattr(provider, "site_setup", None)
     if hook is None or not _setup_due(binding, provider, conn):
         return
@@ -192,14 +196,22 @@ async def run_setup(binding: Any, provider: IntegrationProvider, conn: Any | Non
     )
     try:
         written = await hook(binding, ctx) or {}
-        allowed = settings_rules.readonly_keys(provider)
-        kept = {k: v for k, v in dict(written).items() if k in allowed}
-        binding.settings = _check_settings({**dict(binding.settings or {}), **kept})
-        binding.setup_error = ""
+        kept = settings_rules.server_values(provider, dict(written))
+        settings = _check_settings({**dict(binding.settings or {}), **kept})
+        error = ""
     except Exception as exc:  # noqa: BLE001 - a setup failure is a status, not a crash
         logger.info("integrations: %s site_setup failed: %s", provider.id, type(exc).__name__)
-        binding.setup_error = "setup_failed"
-    await binding.save()
+        settings, error = dict(binding.settings or {}), "setup_failed"
+    update: dict[str, Any] = {}
+    if settings != dict(binding.settings or {}):
+        update["settings"] = settings
+    if error != (getattr(binding, "setup_error", "") or ""):
+        update["setup_error"] = error
+    if not update:
+        return
+    await _doc().get_pymongo_collection().update_one({"_id": binding.id}, {"$set": update})
+    for key, value in update.items():
+        setattr(binding, key, value)
 
 
 async def connection_for(binding: Any):
@@ -318,21 +330,30 @@ async def upsert(
             enabled_actions=list(provider.actions),
             created_by=user_id,
         )
+    # Setup re-runs on link, on enable (disabled -> any action on) and on a settings
+    # change; a pure enabled_actions toggle does not touch the provider.
+    setup = row.id is None
+    was_enabled = bool(row.enabled_actions) or not provider.actions
     if "connection_id" in body.model_fields_set:
         if body.connection_id:
             await _link_connection(
                 workspace_id, provider, body.connection_id, user_id=user_id, is_admin=is_admin
             )
+        setup = setup or (body.connection_id or None) != row.connection_id
         row.connection_id = body.connection_id or None
     if body.settings is not None:
-        row.settings = _check_settings(
+        merged = _check_settings(
             settings_rules.merge_put(provider, body.settings, dict(row.settings or {}))
         )
+        setup = setup or merged != dict(row.settings or {})
+        row.settings = merged
     if body.enabled_actions is not None:
         row.enabled_actions = _check_actions(provider, body.enabled_actions)
+        setup = setup or (not was_enabled and bool(row.enabled_actions))
     await row.save()
     await ensure_gateway_token(workspace_id, pocket_id)
-    await run_setup(row, provider, await connection_for(row), user_id)
+    if setup:
+        await run_setup(row, provider, await connection_for(row), user_id)
     view = await to_view(row)
     await emit_changed(pocket, provider.id, view.status, user_id)
     return view
@@ -380,7 +401,8 @@ async def request_from_agent(
     row.purpose = (purpose or "").strip()[:MAX_PURPOSE_CHARS]
     await row.save()
     await ensure_gateway_token(workspace_id, pocket_id)
-    await run_setup(row, provider, await connection_for(row), user_id)
+    if created:
+        await run_setup(row, provider, await connection_for(row), user_id)
     view = await to_view(row)
     if created:
         await emit_changed(pocket, provider.id, view.status, user_id)

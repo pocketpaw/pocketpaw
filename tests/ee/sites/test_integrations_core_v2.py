@@ -117,7 +117,25 @@ def test_settings_value_rules():
 
     url = SettingsField("url", "Link", "url", allowed_hosts=("cal.com", "app.cal.com"))
     assert check_value(url, " https://app.cal.com/x ") == "https://app.cal.com/x"
-    for bad in ("javascript:alert(1)", "https://cal.com.evil.test/x", "ftp://cal.com/x", "cal.com"):
+    for bad in (
+        "javascript:alert(1)",
+        "https://cal.com.evil.test/x",
+        "ftp://cal.com/x",
+        "cal.com",
+        "https://evil.com\\@cal.com/x",  # urlsplit sees cal.com, a browser evil.com
+        "https://evil.com@cal.com/x",
+        "https://user:pw@cal.com/x",
+        "https://cal.com:8443/x",
+        "https://cal.com/x y",
+        "https://cal.com/x\ty",
+        "https://cal.com/x\x00",
+        'https://cal.com/x"onload=1',
+        "https://cal.com/x'y",
+        "https://cal.com/<script>",
+        "https://cal.com/x>",
+        "https://c\u0430l.com/x",  # Cyrillic a: not ASCII
+        "https://cal.com:bad/x",
+    ):
         with pytest.raises(ValueError):
             check_value(url, bad)
     with pytest.raises(ValueError):
@@ -226,11 +244,45 @@ async def test_site_setup_writes_readonly_settings_and_is_rerun_idempotently(
         assert no_grant.json()["status"] == "needs_connection"
         await _demo_bound(c, pid)
         [view] = (await c.get(_sites_url(pid))).json()
+        linked = len(calls)
         again = await c.put(_sites_url(pid, "demo"), json={"enabled_actions": ["echo"]})
+        after_toggle = len(calls)
+        await c.put(_sites_url(pid, "demo"), json={"enabled_actions": []})
+        await c.put(_sites_url(pid, "demo"), json={"enabled_actions": ["echo"]})
+        after_enable = len(calls)
+        await c.put(_sites_url(pid, "demo"), json={"settings": {"note": "x"}})
+        after_settings = len(calls)
     assert view["status"] == "connected"
     assert view["settings"] == {"board_url": "https://board.example.com/1"}
     assert again.json()["settings"] == {"board_url": "https://board.example.com/1"}
-    assert len(calls) >= 2 and all(has_token for _, has_token in calls)
+    assert linked >= 1 and all(has_token for _, has_token in calls)
+    assert after_toggle == linked  # a pure enabled_actions toggle runs nothing
+    assert after_enable == linked + 1  # disabled -> enabled does
+    assert after_settings == after_enable + 1  # so does a settings change
+
+
+@pytest.mark.asyncio
+async def test_site_setup_values_are_checked_and_stored_with_an_atomic_set(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.cloud.models.integration import SiteIntegration
+    from pocketpaw_ee.integrations.providers.demo import DemoProvider
+
+    async def _setup(self, binding, ctx):
+        # A concurrent writer changes another field while setup runs.
+        await SiteIntegration.get_pymongo_collection().update_one(
+            {"_id": binding.id}, {"$set": {"purpose": "written meanwhile"}}
+        )
+        return {"board_url": "javascript:alert(1)"}
+
+    monkeypatch.setattr(DemoProvider, "site_setup", _setup)
+    pid = await _pocket()
+    async with _client() as c:
+        await _demo_bound(c, pid)
+        [view] = (await c.get(_sites_url(pid))).json()
+    row = await SiteIntegration.find_one(SiteIntegration.pocket_id == pid)
+    assert "board_url" not in row.settings and view["settings"] == {}
+    assert row.purpose == "written meanwhile"
 
 
 @pytest.mark.asyncio
@@ -251,7 +303,7 @@ async def test_a_failing_site_setup_reads_setup_required_and_recovers(beanie_tes
         await _demo_bound(c, pid)
         [failed] = (await c.get(_sites_url(pid))).json()
         state["fail"] = False
-        fixed = await c.put(_sites_url(pid, "demo"), json={})
+        fixed = await c.put(_sites_url(pid, "demo"), json={"settings": {"note": "retry"}})
     assert failed["status"] == "setup_required"
     assert fixed.status_code == 200 and fixed.json()["status"] == "connected"
 
@@ -426,6 +478,19 @@ async def test_grant_meta_lands_on_the_connection(beanie_test_db):
         connection_id=str(conn.id),
     )
     assert again.id == conn.id and again.meta == {"charges_enabled": True}
+
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+
+    for ref in ("other", ""):
+        with pytest.raises(ConflictError) as exc:
+            await vault.store_grant(
+                workspace_id=WS,
+                provider="demo",
+                grant=TokenGrant(access_token="c", account_ref=ref),
+                user_id=OWNER,
+                connection_id=str(conn.id),
+            )
+        assert exc.value.code == "integrations.resume_mismatch"
 
 
 # ------------------------------------------------------------ /start session
