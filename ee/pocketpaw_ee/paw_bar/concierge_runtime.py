@@ -56,6 +56,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pocketpaw_ee.paw_bar.card_spec import CRAFT_RULES
+
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
@@ -1438,26 +1440,44 @@ _RIPPLE_ASK: dict[str, Any] = {
 # that streams past it still renders, and the run records it (``card_breaches``).
 CARD_CEILING_CHARS = 10_000
 
+
+def _craft(rule_id: str, detail: str) -> str:
+    """An authoring rule led by the vendored manifest's craft rule text, so the
+    sentence ripple ships is the one the model reads. An id ripple drops fails
+    here at import."""
+    return f"   - {CRAFT_RULES[rule_id]} {detail}"
+
+
 # How to write a good Ripple card, ported from ripple's record-scenario system
 # prompt (the rules that hold for an answer in a chat card) and sized for the
-# ripple landing's chat column (about 720px, still readable at 360px). The
-# actions named are card_spec.RIPPLE_ACTIONS; the flow and ask rules carry
-# _RIPPLE_FLOW_EXAMPLE and _RIPPLE_ASK; the last line is _RIPPLE_EXAMPLE.
+# ripple landing's chat column (about 720px, still readable at 360px). A rule that
+# repeats one of ripple's craft rules leads with its manifest text (``_craft``);
+# the detail after it is pocketpaw's. The actions named are
+# card_spec.RIPPLE_ACTIONS; the flow and ask rules carry _RIPPLE_FLOW_EXAMPLE and
+# _RIPPLE_ASK; the last line is _RIPPLE_EXAMPLE.
 _RIPPLE_RULES = (
     "   Authoring rules:",
-    "   - Write every node's keys in this order: type, props, then bind and handlers, "
-    "then children. Seed state with the visitor's own numbers; keep numbers as numbers.",
-    "   - Make it interactive: bind inputs (number-input, slider, segmented, "
-    'switch, checkbox) to state with "bind": "{state.path}" and derive every output from '
-    'state with expressions, e.g. "{state.total / state.people}". Never hardcode a '
-    "copy of a state value: write state.items.length, not 4.",
+    _craft(
+        "keys-in-order",
+        "Seed state with the visitor's own numbers; keep numbers as numbers.",
+    ),
+    _craft(
+        "bind-derive",
+        "Inputs (number-input, slider, segmented, switch, checkbox) bind to state "
+        'with "bind": "{state.path}" and every output is an expression over state, '
+        'e.g. "{state.total / state.people}". Never hardcode a copy of a state value: '
+        "write state.items.length, not 4.",
+    ),
     "   - The only actions are set, toggle, push, remove, open, toast, validate, flow "
     "(steps run in order) and branch (if, then, else), and emit of add_to_cart, "
     "checkout, ask or, in a flow card, flow.next, flow.back and flow.submit (both "
     "below). There is no api, navigate, confirm, delay or other action; one drops the "
     "card, even as a step. A handler may be a list of actions.",
-    "   - Links and images use same-site paths only (/page, #section); never a full "
-    "URL, an expression or a CSS url().",
+    _craft(
+        "same-site-links",
+        "Links and images use /page or #section paths; never a full URL, an "
+        "expression or a CSS url().",
+    ),
     '   - Inside each (items "{state.list}"), bind a row field as "list.{index}.field" '
     'and remove a row with {"action":"remove","target":"list","value":"{item}"}. '
     'A data row never has a "type" naming a widget (text, number, date, image, '
@@ -1471,8 +1491,11 @@ _RIPPLE_RULES = (
     "and a ternary only as the whole expression. There is no exponent operator (no ** "
     "or ^) and no Math functions: write compound growth as repeated multiplication. "
     "Division by zero gives 0.",
-    "   - Show a number with decimals (a division, a rate, money) in a stat (format "
-    '"number", "currency" or "percent"), never in a text template.',
+    _craft(
+        "numbers-in-stat",
+        'A division, a rate or money takes format "number", "currency" or "percent", '
+        "never a text template.",
+    ),
     "   - The card is about 720px wide on a desktop and must still read on a 360px "
     'phone. For a row of tiles give the grid "columns": "repeat(auto-fit, '
     'minmax(150px, 1fr))" so it wraps (260px for cards side by side); otherwise at '

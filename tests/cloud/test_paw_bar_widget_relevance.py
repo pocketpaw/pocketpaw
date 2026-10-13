@@ -1,7 +1,9 @@
 # The ripple cards paragraph's per-turn widget section (paw_bar/widget_relevance):
-# the widget a landing chip prompt needs is picked, follow-ups and earlier cards
-# keep their widgets, the prompt is byte-stable per input with the fixed core
-# first, and core plus the worst-case section stays under the 32,000 cap.
+# the widget a landing chip prompt needs is picked (intents from the vendored
+# manifest plus the local overlay), follow-ups and earlier cards keep their
+# widgets, the prompt is byte-stable per input with the fixed core first, the
+# rules that repeat a ripple craft rule lead with its manifest text, and core plus
+# the worst-case section stays no larger than before and under the 32,000 cap.
 from __future__ import annotations
 
 import json
@@ -221,6 +223,23 @@ def test_a_widget_out_of_the_overlay_still_matches_through_the_manifest():
     assert merged["menu-order"]["intents"].count("burger") == 1
     assert merged["menu-order"]["intents"][-1] == "kebab"
     assert merged["map"]["line"] == "x" and "directions" in merged["map"]["intents"]
+
+
+@pytest.mark.parametrize(
+    "rule_id", ["keys-in-order", "bind-derive", "same-site-links", "numbers-in-stat"]
+)
+def test_a_rule_that_repeats_a_craft_rule_leads_with_the_manifest_text(rule_id):
+    """The authoring rules that duplicate ripple's craft rules say them in the
+    manifest's words, so one rule source feeds the prompt.
+    THE MUTATION THAT BREAKS THIS: drop the manifest text from _craft."""
+    from pocketpaw_ee.paw_bar.card_spec import CRAFT_RULES
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_RULES
+
+    craft = {r["id"]: r for r in RIPPLE_PROFILE.manifest["craft"]["rules"]}
+    assert CRAFT_RULES[rule_id] == craft[rule_id]["text"]
+    lead = f"   - {craft[rule_id]['text']} "
+    assert sum(line.startswith(lead) for line in _RIPPLE_RULES) == 1
+    assert lead in _paragraph()
 
 
 def test_every_figure_has_its_own_intents():

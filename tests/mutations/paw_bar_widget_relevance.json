@@ -162,5 +162,14 @@
     "tests": [
       "tests/cloud/test_paw_bar_widget_relevance.py::test_core_plus_the_worst_case_section_stays_under_the_cap"
     ]
+  },
+  {
+    "label": "the craft-backed authoring rules lose the manifest's rule text",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return f\"   - {CRAFT_RULES[rule_id]} {detail}\"\n",
+    "replace": "    return f\"   - {detail}\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_rule_that_repeats_a_craft_rule_leads_with_the_manifest_text"
+    ]
   }
 ]
