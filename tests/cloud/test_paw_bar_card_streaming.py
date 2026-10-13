@@ -10,6 +10,7 @@
 # unchanged. The realistic card is ripple's recorded explainer scenario
 # (tests/fixtures/ripple_explainer_card.json).
 # A flow card streams like any other and ends with the verdict the whole card gets.
+# A card past the prompt's ~10k char ceiling still renders; the run records it.
 # A card missing only closing brackets, or with one surplus closer before its
 # state, streams raw and is repaired at its close.
 #
