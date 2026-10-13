@@ -2,13 +2,19 @@
 #
 #   start_connect   POST /integrations/{provider}/connect -> {authorize_url}
 #                   authorize_url is OUR /start?t=<ticket>, not the provider's page
+#   start_resume    POST /integrations/connections/{id}/resume -> {authorize_url}
+#                   the same /start URL, to the provider's ``resume_url`` (an
+#                   unfinished setup) or, for needs_reconnect, its authorize_url
 #   redeem_ticket   GET  /integrations/{provider}/start?t   -> cookie + 302 to provider
 #   finish_callback GET  /integrations/{provider}/callback?code&state -> HTML page
 #
 # ``state`` lives in the single-use server-side store ``cloud.auth._oauth_state``
-# (namespace ``integrations``) with workspace, user, provider, optional pocket_id
-# and, for providers that support it, the PKCE S256 verifier. The callback trusts
-# only that payload, never its own query string beyond ``code`` and ``state``.
+# (namespace ``integrations``) with workspace, user, provider, optional pocket_id,
+# for a resume the connection id, and, for providers that support it, the PKCE
+# S256 verifier. The callback trusts only that payload, never its own query string
+# beyond ``code`` and ``state``. A resume updates its own connection row in place
+# (a different provider account is refused) and re-runs ``site_setup`` for every
+# site bound to it. A provider's authorize_url may be sync or async.
 #
 # BROWSER BINDING. ``/start`` redeems a one-time ticket (TTL ``TICKET_TTL_SECONDS``)
 # and sets an HttpOnly, Secure, SameSite=Lax cookie on the integrations path holding
@@ -16,8 +22,10 @@
 # clears it. So a callback URL finished with someone else's provider account and
 # replayed in a victim's browser (login CSRF) is refused there. Residual: a ticket
 # link forwarded unopened inside its short TTL still starts a flow in whatever
-# browser opens it; /start has no session to compare (Tauri opens it in the system
-# browser).
+# browser opens it, unless that browser carries a valid API session cookie for a
+# different user than the one who started the flow: then /start refuses
+# (``session_mismatch``). With no session cookie there is nothing to compare (Tauri
+# opens it in the system browser).
 #
 # The redirect URI base is ``POCKETPAW_INTEGRATIONS_CALLBACK_BASE`` (one platform
 # callback domain), falling back to the API's public base URL. The callback page
@@ -31,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import inspect
 import json
 import logging
 import os
@@ -38,7 +47,7 @@ import secrets
 from typing import Any
 from urllib.parse import urlencode
 
-from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, ValidationError
+from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, Forbidden, ValidationError
 from pocketpaw_ee.cloud._core.public_url import public_base_url
 from pocketpaw_ee.integrations import bindings, vault
 
@@ -51,6 +60,8 @@ COOKIE_PATH = "/api/v1/integrations/"
 COOKIE_MAX_AGE = 600
 CALLBACK_BASE_ENV = "POCKETPAW_INTEGRATIONS_CALLBACK_BASE"
 MESSAGE_TYPE = "paw:integration-connected"
+# The API session cookie (``cloud.auth.core.cookie_transport``).
+SESSION_COOKIE = "paw_auth"
 
 
 def callback_base() -> str:
@@ -69,6 +80,18 @@ def state_hash(state: str) -> str:
     return hashlib.sha256(state.encode("utf-8")).hexdigest()
 
 
+class StartRefused(Exception):
+    """``/start`` refused; ``code`` goes to the opener as the error."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+async def _resolve(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
+
+
 def message_origins() -> list[str]:
     """Where the callback page may post its result. Each is an origin we serve."""
     from pocketpaw.api.cors import BUILTIN_ORIGINS
@@ -78,13 +101,7 @@ def message_origins() -> list[str]:
     return [o for o in dict.fromkeys(origins) if o and o != "*"]
 
 
-async def start_connect(
-    *, workspace_id: str, user_id: str, provider_id: str, pocket_id: str | None
-) -> str:
-    """Issue single-use state + a one-time start ticket; return our /start URL."""
-    from pocketpaw_ee.cloud.auth import _oauth_state
-
-    provider = bindings.provider_or_404(provider_id)
+def _connectable(provider: Any) -> None:
     if provider.kind != "connect":
         raise ValidationError(
             "integrations.not_connectable", f"{provider.name} does not need connecting."
@@ -93,40 +110,138 @@ async def start_connect(
         raise ConflictError(
             "integrations.provider_unavailable", f"{provider.name} isn't available yet."
         )
-    if pocket_id:
-        await bindings.require_edit(workspace_id, user_id, pocket_id)
-    payload: dict[str, Any] = {
-        "workspace_id": workspace_id,
-        "user_id": user_id,
-        "provider": provider.id,
-        "pocket_id": pocket_id or "",
-    }
+
+
+async def _ticket_url(provider_id: str, state: str, user_id: str, provider_url: str) -> str:
+    from pocketpaw_ee.cloud.auth import _oauth_state
+
+    ticket = await _oauth_state.issue(
+        TICKET_NAMESPACE,
+        {"provider": provider_id, "state": state, "url": provider_url, "user_id": user_id},
+        ttl_seconds=TICKET_TTL_SECONDS,
+    )
+    return f"{callback_base()}/api/v1/integrations/{provider_id}/start?" + urlencode({"t": ticket})
+
+
+async def _issue_state(provider: Any, payload: dict[str, Any]) -> tuple[str, str | None]:
+    """(state, PKCE challenge or None) for one connect or resume flow."""
+    from pocketpaw_ee.cloud.auth import _oauth_state
+
     challenge = None
     if getattr(provider, "supports_pkce", False):
         verifier, challenge = _oauth_state.pkce_pair()
         payload["code_verifier"] = verifier
-    state = await _oauth_state.issue(STATE_NAMESPACE, payload)
-    provider_url = provider.authorize_url(
-        state, redirect_uri(provider.id), code_challenge=challenge
-    )
-    ticket = await _oauth_state.issue(
-        TICKET_NAMESPACE,
-        {"provider": provider.id, "state": state, "url": provider_url},
-        ttl_seconds=TICKET_TTL_SECONDS,
-    )
-    return f"{callback_base()}/api/v1/integrations/{provider.id}/start?" + urlencode({"t": ticket})
+    return await _oauth_state.issue(STATE_NAMESPACE, payload), challenge
 
 
-async def redeem_ticket(provider_id: str, ticket: str) -> tuple[str, str] | None:
-    """(provider authorize URL, state hash for the cookie), or None for a bad ticket."""
+async def start_connect(
+    *, workspace_id: str, user_id: str, provider_id: str, pocket_id: str | None
+) -> str:
+    """Issue single-use state + a one-time start ticket; return our /start URL."""
+    provider = bindings.provider_or_404(provider_id)
+    _connectable(provider)
+    if pocket_id:
+        await bindings.require_edit(workspace_id, user_id, pocket_id)
+    state, challenge = await _issue_state(
+        provider,
+        {
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "provider": provider.id,
+            "pocket_id": pocket_id or "",
+        },
+    )
+    provider_url = await _resolve(
+        provider.authorize_url(state, redirect_uri(provider.id), code_challenge=challenge)
+    )
+    return await _ticket_url(provider.id, state, user_id, provider_url)
+
+
+async def start_resume(
+    *, workspace_id: str, user_id: str, connection_id: str, is_admin: bool
+) -> str:
+    """``POST /integrations/connections/{id}/resume``: the provider's ``resume_url``
+    when it has one for this connection, else a fresh connect for needs_reconnect.
+    Same authz as linking (creator or admin) and the same state + cookie binding."""
+    from pocketpaw_ee.cloud.auth import _oauth_state
+
+    conn = await vault.get_connection(workspace_id, connection_id)
+    if conn.created_by != user_id and not is_admin:
+        raise Forbidden(
+            "integrations.not_connection_owner",
+            "Only the person who connected this account or a workspace admin can do that.",
+        )
+    vault.ensure_not_revoked(conn)
+    provider = bindings.provider_or_404(conn.provider)
+    _connectable(provider)
+    state, challenge = await _issue_state(
+        provider,
+        {
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "provider": provider.id,
+            "pocket_id": "",
+            "connection_id": str(conn.id),
+        },
+    )
+    hook = getattr(provider, "resume_url", None)
+    provider_url = None
+    if hook is not None:
+        provider_url = await _resolve(hook(conn, state, redirect_uri(provider.id)))
+    if not provider_url and conn.status == "needs_reconnect":
+        provider_url = await _resolve(
+            provider.authorize_url(state, redirect_uri(provider.id), code_challenge=challenge)
+        )
+    if not provider_url:
+        try:
+            await _oauth_state.consume(STATE_NAMESPACE, state)
+        except CloudError:
+            pass
+        raise ConflictError(
+            "integrations.nothing_to_resume", "This connection has nothing left to finish."
+        )
+    return await _ticket_url(provider.id, state, user_id, str(provider_url))
+
+
+def session_user_id(token: str | None) -> str | None:
+    """The user of a VALID API session cookie, else None (expired, forged, absent)."""
+    if not token:
+        return None
+    try:
+        import jwt as pyjwt
+
+        from pocketpaw_ee.cloud.auth.core import get_jwt_strategy
+
+        strategy = get_jwt_strategy()
+        key = strategy.decode_key
+        payload = pyjwt.decode(
+            token,
+            key if isinstance(key, str) else key.get_secret_value(),
+            audience=strategy.token_audience,
+            algorithms=[strategy.algorithm],
+        )
+    except Exception:  # noqa: BLE001 - an unreadable cookie is no session
+        return None
+    sub = payload.get("sub")
+    return sub if isinstance(sub, str) and sub else None
+
+
+async def redeem_ticket(
+    provider_id: str, ticket: str, session_token: str | None = None
+) -> tuple[str, str]:
+    """(provider authorize URL, state hash for the cookie). Raises ``StartRefused``
+    for a bad ticket, or when the browser's session belongs to someone else."""
     from pocketpaw_ee.cloud.auth import _oauth_state
 
     try:
         payload = await _oauth_state.consume(TICKET_NAMESPACE, ticket or "")
     except CloudError:
-        return None
+        raise StartRefused("invalid_ticket") from None
     if payload.get("provider") != provider_id or not payload.get("state"):
-        return None
+        raise StartRefused("invalid_ticket")
+    session_user = session_user_id(session_token)
+    if session_user and payload.get("user_id") and session_user != payload["user_id"]:
+        raise StartRefused("session_mismatch")
     return str(payload["url"]), state_hash(str(payload["state"]))
 
 
@@ -169,10 +284,12 @@ async def finish_callback(
             provider=provider_id,
             grant=grant,
             user_id=payload["user_id"],
+            connection_id=payload.get("connection_id") or "",
         )
     except Exception as exc:  # noqa: BLE001 - every failure becomes one safe message
         logger.warning("integrations: %s callback failed: %s", provider_id, type(exc).__name__)
-        message["error"] = "provider_error"
+        mismatch = isinstance(exc, CloudError) and exc.code == "integrations.resume_mismatch"
+        message["error"] = "account_mismatch" if mismatch else "provider_error"
         return message
 
     message["connection_id"] = str(conn.id)
@@ -189,7 +306,8 @@ async def finish_callback(
             # The grant is saved; only the site link failed (pocket gone, access lost).
             logger.info("integrations: callback could not link the site: %s", exc.code)
             message["error"] = "link_failed"
-    # A reconnect also revives every other site already bound to this grant.
+    # A reconnect / resume also revives every other site already bound to this grant.
+    await bindings.setup_bound_sites(conn, payload["user_id"])
     await bindings.notify_connection_status(conn, "connected")
     return message
 

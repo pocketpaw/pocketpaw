@@ -4,6 +4,7 @@
 #   GET    /integrations/providers                       ProviderView[]
 #   GET    /integrations/connections                     ConnectionView[]
 #   POST   /integrations/{provider}/connect              {pocket_id?} -> {authorize_url}
+#   POST   /integrations/connections/{id}/resume         {authorize_url} (creator or admin)
 #   DELETE /integrations/connections/{id}                revoke (creator or admin)
 #   GET    /sites/by-pocket/{pocket_id}/integrations     SiteIntegrationView[]
 #   PUT    /sites/by-pocket/{pocket_id}/integrations/{provider}
@@ -13,11 +14,13 @@
 #
 # ``public_router`` (no session by design; each names its own credential):
 #   GET  /integrations/{provider}/start      one-time ticket -> browser cookie -> provider
+#                                            (refused when the browser's API session
+#                                            is someone else's)
 #   GET  /integrations/{provider}/callback   single-use state + the matching cookie
 #   POST /sites/{site_id}/x/{provider}/{action}   site key or PAW_GATEWAY_TOKEN
 #   POST /integrations/webhooks/{provider}   provider signature
 #
-# Wire shapes are pinned by the Wave 0 contract; see dto.py. Mounted in
+# Wire shapes are pinned by the Wave 0 contract and its Wave 1 addendum; see dto.py. Mounted in
 # ``cloud.mount_cloud``; both routers are in tests/cloud/auth/test_route_auth_audit.py.
 
 from __future__ import annotations
@@ -77,6 +80,23 @@ async def connect(
         user_id=ctx.user_id,
         provider_id=provider,
         pocket_id=(body.pocket_id if body else None) or None,
+    )
+    return ConnectResponse(authorize_url=url)
+
+
+@router.post("/integrations/connections/{connection_id}/resume", response_model=ConnectResponse)
+async def resume_connection(
+    connection_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+    is_admin: bool = Depends(action_allowed_any_workspace("workspace.update")),
+) -> ConnectResponse:
+    """Finish an unfinished provider setup, or reconnect a needs_reconnect grant."""
+    url = await oauth.start_resume(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        connection_id=connection_id,
+        is_admin=is_admin,
     )
     return ConnectResponse(authorize_url=url)
 
@@ -203,20 +223,22 @@ def _page(message: dict) -> HTMLResponse:
 
 
 @public_router.get("/integrations/{provider}/start")
-async def oauth_start(provider: str, t: str = "") -> Response:
+async def oauth_start(provider: str, request: Request, t: str = "") -> Response:
     """Redeem the one-time ticket, bind this browser with a cookie, go to the provider."""
-    redeemed = await oauth.redeem_ticket(provider, t)
-    if redeemed is None:
+    try:
+        url, state_hash = await oauth.redeem_ticket(
+            provider, t, request.cookies.get(oauth.SESSION_COOKIE)
+        )
+    except oauth.StartRefused as refused:
         return _page(
             {
                 "type": oauth.MESSAGE_TYPE,
                 "provider": provider,
                 "connection_id": None,
                 "status": "error",
-                "error": "invalid_ticket",
+                "error": refused.code,
             }
         )
-    url, state_hash = redeemed
     resp = RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
     resp.set_cookie(
         oauth.cookie_name(provider),

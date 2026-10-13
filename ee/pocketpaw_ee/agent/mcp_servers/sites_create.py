@@ -4059,7 +4059,20 @@ async def _connect_site_integration_handler(args: dict) -> dict:
         return _error_response(f"{exc.code}: {exc.message} Known providers: {known}.")
 
     _push_integration_request_sse(pocket_id, bindings.provider_view(provider), purpose, view)
-    if view.status == "connected":
+    if provider.kind == "embed":
+        url = str(view.settings.get("url") or "")
+        message = (
+            f"{provider.name} is an embed: no account to connect and no gateway calls. "
+            + (
+                f"The owner's booking link is {url}. "
+                if url and view.status == "connected"
+                else "The card in chat asks the owner for their public booking link; "
+                "list_site_integrations shows it as settings.url once set. "
+            )
+            + f"Put {provider.name}'s standard inline embed markup in the page with that "
+            "link. Never invent a link."
+        )
+    elif view.status == "connected":
         message = f"{provider.name} is ready on this site. " + _INTEGRATION_WIRING
     else:
         message = (
@@ -4127,7 +4140,7 @@ def make_connect_site_integration_tool(tool: Any) -> Any:
     @tool(
         "connect_site_integration",
         (
-            "Link a third-party service (payments, newsletter, CRM, sheets...) to a Paw "
+            "Link a third-party service (payments, newsletter, CRM, booking...) to a Paw "
             "Site the owner's way: one tap, no API keys. Shows the owner a Connect card in "
             "chat; built-ins (like `newsletter`) are on at once. Use this, NEVER "
             "request_site_secret, for a service the site needs. `provider` is a provider "

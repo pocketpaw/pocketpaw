@@ -49,6 +49,9 @@ class IntegrationConnection(TimestampedDocument):
     refresh_lease_owner: str | None = None
     refresh_lease_until: datetime | None = None
     last_error: str = ""
+    # Non-secret provider state (``TokenGrant.meta``), e.g. a payments account's
+    # charges_enabled. Read by provider hooks for status and attention.
+    meta: dict[str, Any] = Field(default_factory=dict)
 
     class Settings:
         name = "integration_connections"
@@ -70,6 +73,9 @@ class SiteIntegration(TimestampedDocument):
     # Why the agent asked for it, shown on the chat Connect card.
     purpose: str = ""
     created_by: str = ""
+    # Set when the provider's ``site_setup`` failed; the site reads setup_required
+    # until a re-run succeeds. A short code, never provider output.
+    setup_error: str = ""
 
     class Settings:
         name = "site_integrations"

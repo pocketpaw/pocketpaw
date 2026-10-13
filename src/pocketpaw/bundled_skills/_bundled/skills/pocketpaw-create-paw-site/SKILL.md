@@ -231,6 +231,11 @@ markup and write no fetch code:
 - a signup: `<form data-paw-subscribe>` with an `<input type="email" name="email">`
 - anything else: `Paw.call(provider, action, args)` in a small inline script
 
+Booking pages: call `connect_site_integration(pocket_id, 'calendly' | 'cal_com',
+purpose)`. The card asks the owner for their public booking link (no account to
+connect); `list_site_integrations` shows it as `settings.url`. Embed that link with
+the provider's standard inline embed markup, and never invent one.
+
 ### Changing an html site that already exists
 
 When the user asks for a CHANGE to a site they already have — "shorten the

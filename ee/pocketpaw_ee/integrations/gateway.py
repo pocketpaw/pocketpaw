@@ -12,8 +12,9 @@
 #                                                          -> unauthorized 401 / origin_denied 403
 #        Authorization: Bearer <PAW_GATEWAY_TOKEN> (project Worker, server side),
 #          compared in constant time inside ``site_secrets``  -> unauthorized 401
-#   3. provider registered, action declared + public, site bound, action enabled,
-#      connect kinds have an active grant      -> not_connected 409 / action_disabled 403
+#   3. provider registered, not an embed (embeds have no actions), action declared
+#      + public, site bound, action enabled, connect kinds have an active grant
+#                                              -> not_connected 409 / action_disabled 403
 #   4. Turnstile on write actions, site-key callers only, when a Turnstile secret
 #      is configured                                       -> turnstile_required 403
 #   5. ``SiteRateCounter`` per (site, action) and per (site, action, IP hash)
@@ -249,6 +250,9 @@ async def _call(request: Request, site_id: str, provider_id: str, action: str) -
     provider = get_provider(provider_id)
     if provider is None:
         raise GatewayError("not_connected")
+    if provider.kind == "embed":
+        # An embed is markup in the page; it has nothing to call.
+        raise GatewayError("action_disabled")
     spec = provider.actions.get(action)
     if spec is None or not spec.public:
         raise GatewayError("action_disabled")

@@ -16,6 +16,18 @@
 # Every link / unlink / connect / reconnect emits ``site.integration_changed``
 # {pocket_id, provider, status}. Linking also mints the site's ``PAW_GATEWAY_TOKEN``
 # secret (once) so a project Worker gets it as a secret_text binding on deploy.
+#
+# Settings are validated against the provider's ``settings_fields`` (settings.py).
+# After every link / PUT / agent request, and for every bound site after a
+# reconnect, the provider's ``site_setup`` hook runs (idempotent; it may write
+# readonly settings). A failure is stored as ``setup_error`` and the site reads
+# ``setup_required``; it never fails the request.
+#
+# Status (``binding_status``), first match wins: disabled (has actions, none on),
+# needs_connection / needs_reconnect (connect kinds), setup_required (a setup
+# failure or a required setting without a valid value; so an embed is
+# ``connected`` exactly when its link is valid), the provider's ``site_status``
+# hook, connected.
 
 from __future__ import annotations
 
@@ -24,10 +36,11 @@ import logging
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.integrations import settings as settings_rules
 from pocketpaw_ee.integrations import vault
 from pocketpaw_ee.integrations.dto import ProviderView, SiteIntegrationPut, SiteIntegrationView
 from pocketpaw_ee.integrations.providers import all_providers, get_provider
-from pocketpaw_ee.integrations.providers.base import IntegrationProvider
+from pocketpaw_ee.integrations.providers.base import IntegrationProvider, SetupContext
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +133,8 @@ def provider_view(provider: IntegrationProvider) -> ProviderView:
             }
             for name, spec in provider.actions.items()
         ],
+        settings_fields=settings_rules.field_views(provider),
+        requires_connection=provider.kind == "connect",
     )
 
 
@@ -127,16 +142,64 @@ def list_provider_views() -> list[ProviderView]:
     return [provider_view(p) for p in all_providers()]
 
 
+_HOOK_STATUSES = {"connected", "needs_connection", "needs_reconnect", "setup_required"}
+
+
 def binding_status(binding: Any, provider: IntegrationProvider, conn: Any | None) -> str:
-    if not binding.enabled_actions:
+    if provider.actions and not binding.enabled_actions:
         return "disabled"
-    if provider.kind != "connect":
-        return "connected"
-    if conn is None or conn.status == "revoked":
-        return "needs_connection"
-    if conn.status == "needs_reconnect":
-        return "needs_reconnect"
+    if provider.kind == "connect":
+        if conn is None or conn.status == "revoked":
+            return "needs_connection"
+        if conn.status == "needs_reconnect":
+            return "needs_reconnect"
+    if getattr(binding, "setup_error", "") or settings_rules.missing_required(
+        provider, dict(binding.settings or {})
+    ):
+        return "setup_required"
+    hook = getattr(provider, "site_status", None)
+    if hook is not None:
+        try:
+            status = hook(binding, conn)
+        except Exception:  # noqa: BLE001 - a broken hook must not break the list
+            logger.debug("integrations: site_status hook failed", exc_info=True)
+            status = None
+        if status in _HOOK_STATUSES:
+            return status
     return "connected"
+
+
+def _setup_due(binding: Any, provider: IntegrationProvider, conn: Any | None) -> bool:
+    if provider.actions and not binding.enabled_actions:
+        return False
+    return provider.kind != "connect" or (conn is not None and conn.status == "active")
+
+
+async def run_setup(binding: Any, provider: IntegrationProvider, conn: Any | None, user_id: str):
+    """Run the provider's ``site_setup`` and save the outcome. Never raises.
+
+    Only readonly (server-set) settings keys the provider declares are kept."""
+    hook = getattr(provider, "site_setup", None)
+    if hook is None or not _setup_due(binding, provider, conn):
+        return
+    ctx = SetupContext(
+        workspace_id=binding.workspace,
+        pocket_id=binding.pocket_id,
+        user_id=user_id,
+        provider=provider.id,
+        connection=conn,
+        get_token=(lambda: vault.get_valid_token(conn)) if conn is not None else None,
+    )
+    try:
+        written = await hook(binding, ctx) or {}
+        allowed = settings_rules.readonly_keys(provider)
+        kept = {k: v for k, v in dict(written).items() if k in allowed}
+        binding.settings = _check_settings({**dict(binding.settings or {}), **kept})
+        binding.setup_error = ""
+    except Exception as exc:  # noqa: BLE001 - a setup failure is a status, not a crash
+        logger.info("integrations: %s site_setup failed: %s", provider.id, type(exc).__name__)
+        binding.setup_error = "setup_failed"
+    await binding.save()
 
 
 async def connection_for(binding: Any):
@@ -155,7 +218,7 @@ async def to_view(binding: Any) -> SiteIntegrationView:
         provider=binding.provider,
         connection_id=binding.connection_id if conn is not None else None,
         status=binding_status(binding, provider, conn),
-        settings=dict(binding.settings or {}),
+        settings=settings_rules.visible(provider, dict(binding.settings or {})),
         enabled_actions=list(binding.enabled_actions or []),
         updated_at=vault._utc(binding.updatedAt),
     )
@@ -262,11 +325,14 @@ async def upsert(
             )
         row.connection_id = body.connection_id or None
     if body.settings is not None:
-        row.settings = _check_settings(body.settings)
+        row.settings = _check_settings(
+            settings_rules.merge_put(provider, body.settings, dict(row.settings or {}))
+        )
     if body.enabled_actions is not None:
         row.enabled_actions = _check_actions(provider, body.enabled_actions)
     await row.save()
     await ensure_gateway_token(workspace_id, pocket_id)
+    await run_setup(row, provider, await connection_for(row), user_id)
     view = await to_view(row)
     await emit_changed(pocket, provider.id, view.status, user_id)
     return view
@@ -288,6 +354,7 @@ async def link_connection(*, workspace_id: str, user_id: str, pocket_id: str, co
     row.connection_id = str(conn.id)
     await row.save()
     await ensure_gateway_token(workspace_id, pocket_id)
+    await run_setup(row, provider, conn, user_id)
     view = await to_view(row)
     await emit_changed(pocket, provider.id, view.status, user_id)
     return view
@@ -313,6 +380,7 @@ async def request_from_agent(
     row.purpose = (purpose or "").strip()[:MAX_PURPOSE_CHARS]
     await row.save()
     await ensure_gateway_token(workspace_id, pocket_id)
+    await run_setup(row, provider, await connection_for(row), user_id)
     view = await to_view(row)
     if created:
         await emit_changed(pocket, provider.id, view.status, user_id)
@@ -352,6 +420,15 @@ async def ensure_gateway_token(workspace_id: str, pocket_id: str) -> None:
 async def bindings_for_connection(connection_id: str) -> list[Any]:
     doc = _doc()
     return await doc.find(doc.connection_id == connection_id).to_list()
+
+
+async def setup_bound_sites(conn: Any, user_id: str) -> None:
+    """After a connect / reconnect / resume: re-run setup for every bound site."""
+    provider = get_provider(conn.provider)
+    if provider is None:
+        return
+    for row in await bindings_for_connection(str(conn.id)):
+        await run_setup(row, provider, conn, user_id)
 
 
 async def notify_connection_status(conn: Any, status: str) -> None:

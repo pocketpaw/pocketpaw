@@ -1,8 +1,9 @@
 # ee/pocketpaw_ee/integrations/dto.py: the wire shapes of the integrations API.
 #
-# Pinned by the Wave 0 wire contract (docs/design/drafts/2026-10-13-sites-integrations.md
-# in paw-workspace): paw-enterprise and paw-sites' paw.js build against these field
-# names and enum values, so rename nothing. No view carries a token.
+# Pinned by the Wave 0 wire contract and its Wave 1 addendum
+# (docs/design/drafts/2026-10-13-sites-integrations.md in paw-workspace):
+# paw-enterprise and paw-sites' paw.js build against these field names and enum
+# values, so rename nothing; changes are additive. No view carries a token.
 
 from __future__ import annotations
 
@@ -11,7 +12,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-SiteIntegrationStatus = Literal["connected", "needs_connection", "needs_reconnect", "disabled"]
+SiteIntegrationStatus = Literal[
+    "connected", "needs_connection", "needs_reconnect", "setup_required", "disabled"
+]
 ConnectionStatus = Literal["active", "needs_reconnect", "revoked"]
 OrderStatus = Literal["pending", "paid", "refunded", "failed"]
 
@@ -23,6 +26,22 @@ class ActionView(BaseModel):
     description: str
 
 
+class SettingOptionView(BaseModel):
+    value: str
+    label: str
+
+
+class SettingsFieldView(BaseModel):
+    key: str
+    label: str
+    # "link" + readonly = a server-set address the client shows as an open link.
+    type: Literal["url", "text", "select", "link"]
+    help: str | None = None
+    required: bool = False
+    options: list[SettingOptionView] | None = None
+    readonly: bool = False
+
+
 class ProviderView(BaseModel):
     id: str
     name: str
@@ -31,6 +50,9 @@ class ProviderView(BaseModel):
     plan: Literal["free", "site"]
     availability: Literal["available", "coming_soon", "unconfigured"]
     actions: list[ActionView] = Field(default_factory=list)
+    settings_fields: list[SettingsFieldView] = Field(default_factory=list)
+    # False for builtin and embed kinds: nothing to connect, just link and configure.
+    requires_connection: bool = False
 
 
 class ConnectionView(BaseModel):
@@ -41,6 +63,8 @@ class ConnectionView(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     site_count: int = 0
+    # Owner-facing, e.g. "Finish setting up your Stripe account"; null when fine.
+    attention: str | None = None
 
 
 class SiteIntegrationView(BaseModel):

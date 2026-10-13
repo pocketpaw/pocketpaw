@@ -18,6 +18,12 @@
 #   * ``InvalidGrant`` flips the connection to ``needs_reconnect`` and notifies the
 #     bound sites. Nothing retries a dead grant.
 #   * No token in a view, an event, an exception message or a log line.
+#
+# ``store_grant`` saves a finished connect or resume flow. A resume names the
+# connection it continues and updates that row in place, refusing a different
+# provider account. Non-secret provider state rides ``TokenGrant.meta`` into
+# ``connection.meta``; the view's ``attention`` is the provider's
+# ``connection_attention`` hook over the stored row.
 
 from __future__ import annotations
 
@@ -92,6 +98,22 @@ def _fresh(conn: Any, now: datetime) -> bool:
 # ------------------------------------------------------------------ views
 
 
+def attention(conn: Any) -> str | None:
+    """The provider's owner-facing hint for ``conn``; a broken hook reads as none."""
+    if conn.status == "revoked":
+        return None
+    provider = get_provider(conn.provider)
+    hook = getattr(provider, "connection_attention", None)
+    if hook is None:
+        return None
+    try:
+        text = hook(conn)
+    except Exception:  # noqa: BLE001 - a hint must never break the list
+        logger.debug("integrations: attention hook failed for %s", conn.provider, exc_info=True)
+        return None
+    return str(text)[:200] if text else None
+
+
 def to_view(conn: Any, site_count: int = 0) -> ConnectionView:
     return ConnectionView(
         id=str(conn.id),
@@ -101,6 +123,7 @@ def to_view(conn: Any, site_count: int = 0) -> ConnectionView:
         scopes=list(conn.scopes or []),
         created_at=_utc(conn.createdAt),
         site_count=site_count,
+        attention=attention(conn),
     )
 
 
@@ -126,12 +149,28 @@ async def list_connections(workspace_id: str) -> list[Any]:
 # ----------------------------------------------------------------- writes
 
 
-async def store_grant(*, workspace_id: str, provider: str, grant: TokenGrant, user_id: str):
-    """Save a fresh grant. Reconnecting the same account updates its row."""
+async def store_grant(
+    *,
+    workspace_id: str,
+    provider: str,
+    grant: TokenGrant,
+    user_id: str,
+    connection_id: str = "",
+):
+    """Save a fresh grant. Reconnecting the same account updates its row; a resume
+    (``connection_id``) updates that row and refuses another account."""
     doc = _doc()
     now = _now()
     conn = None
-    if grant.account_ref:
+    if connection_id:
+        conn = await get_connection(workspace_id, connection_id)
+        if conn.provider != provider or conn.status == "revoked":
+            raise ConflictError("integrations.resume_mismatch", "That connection can't resume.")
+        if conn.account_ref and grant.account_ref and conn.account_ref != grant.account_ref:
+            raise ConflictError(
+                "integrations.resume_mismatch", "That is a different account. Connect it instead."
+            )
+    elif grant.account_ref:
         conn = await doc.find_one(
             doc.workspace == workspace_id,
             doc.provider == provider,
@@ -145,6 +184,7 @@ async def store_grant(*, workspace_id: str, provider: str, grant: TokenGrant, us
     conn.scopes = list(grant.scopes)
     conn.token_ciphertext = _bundle(grant)
     conn.expires_at = _expires_at(grant, now)
+    conn.meta = {**(getattr(conn, "meta", None) or {}), **dict(grant.meta or {})}
     conn.status = "active"
     conn.last_error = ""
     conn.refresh_lease_owner = None

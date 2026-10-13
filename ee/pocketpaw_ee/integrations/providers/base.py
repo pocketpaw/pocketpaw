@@ -4,11 +4,26 @@
 # and registers it in ``providers/__init__.py``. A provider declares:
 #   * identity: id, name, kind (builtin | connect | embed), category, plan
 #   * availability(): available | coming_soon | unconfigured (no client id set)
-#   * the OAuth hooks for connect kinds: authorize_url / complete / refresh, and
-#     ``supports_pkce`` (then authorize_url gets an S256 challenge and complete the
-#     verifier, which the flow keeps in its server-side state)
+#   * settings_fields: the owner-editable (and server-set readonly) settings, a
+#     tuple of ``SettingsField``; PUT settings are validated against it
+#   * the connect hooks for connect kinds: authorize_url (may be async) / complete /
+#     refresh, and ``supports_pkce`` (then authorize_url gets an S256 challenge and
+#     complete the verifier, which the flow keeps in its server-side state)
 #   * actions: an allowlist of ``ActionSpec`` (typed args model, public, write)
 #   * verify_webhook(): signature check -> ``NormalizedEvent`` or None
+#
+# Optional hooks (``BaseProvider`` has no-op defaults; callers use getattr so a
+# bare Protocol implementer still works):
+#   * site_setup(binding, ctx) -> dict      runs on link/enable and on reconnect;
+#     must be idempotent; returns readonly settings to merge; raising leaves the
+#     site ``setup_required`` (nothing crashes)
+#   * site_status(binding, connection) -> str | None   override the computed status
+#     (e.g. "setup_required" while the provider account can't take charges)
+#   * connection_attention(connection) -> str | None   owner-facing hint on the
+#     ConnectionView, read from the stored connection (``connection.meta``)
+#   * resume_url(connection, state, redirect_uri) -> str | None   (async) the
+#     provider page that continues an unfinished setup; it must send the browser
+#     back to ``redirect_uri`` with ``state`` (and a ``code`` for ``complete``)
 #
 # Handlers receive an ``ActionContext`` and return a JSON-safe dict that goes to a
 # public caller as ``result``. They must never return a token or a secret.
@@ -24,6 +39,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict
 
 Kind = Literal["builtin", "connect", "embed"]
+FieldType = Literal["url", "text", "select", "link"]
 Plan = Literal["free", "site"]
 Availability = Literal["available", "coming_soon", "unconfigured"]
 
@@ -53,6 +69,47 @@ class TokenGrant:
     account_label: str = ""
     account_ref: str = ""
     token_type: str = "bearer"
+    # Non-secret provider state kept on the connection (``connection.meta``), e.g.
+    # whether a payments account can take charges yet. Never a credential.
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SettingOption:
+    value: str
+    label: str
+
+
+@dataclass(frozen=True)
+class SettingsField:
+    """One per-site setting. ``readonly`` ones are server-set (``site_setup``) and
+    ignored when a client sends them; ``hidden`` ones (readonly too) never reach a
+    view. ``multi`` selects take comma-separated values. A ``url`` must be http(s)
+    and, when ``allowed_hosts`` is set, have one of those hosts exactly."""
+
+    key: str
+    label: str
+    type: FieldType = "text"
+    help: str = ""
+    required: bool = False
+    options: tuple[SettingOption, ...] = ()
+    readonly: bool = False
+    hidden: bool = False
+    multi: bool = False
+    allowed_hosts: tuple[str, ...] = ()
+    max_length: int = 500
+
+
+@dataclass
+class SetupContext:
+    """What ``site_setup`` may use. ``get_token`` is None for kinds with no grant."""
+
+    workspace_id: str
+    pocket_id: str
+    user_id: str
+    provider: str
+    connection: Any | None = None
+    get_token: Callable[[], Awaitable[str]] | None = None
 
 
 @dataclass
@@ -112,12 +169,13 @@ class IntegrationProvider(Protocol):
     plan: Plan
     supports_pkce: bool
     actions: dict[str, ActionSpec]
+    settings_fields: tuple[SettingsField, ...]
 
     def availability(self) -> Availability: ...
 
     def authorize_url(
         self, state: str, redirect_uri: str, code_challenge: str | None = None
-    ) -> str: ...
+    ) -> str | Awaitable[str]: ...
 
     async def complete(
         self, code: str, redirect_uri: str, code_verifier: str | None = None
@@ -129,7 +187,7 @@ class IntegrationProvider(Protocol):
 
 
 class BaseProvider:
-    """Defaults for providers that have no OAuth or no webhooks (built-ins)."""
+    """Defaults for providers that have no OAuth, no webhooks, no setup (built-ins)."""
 
     id: str = ""
     name: str = ""
@@ -138,6 +196,7 @@ class BaseProvider:
     plan: Plan = "free"
     supports_pkce: bool = False
     actions: dict[str, ActionSpec] = {}
+    settings_fields: tuple[SettingsField, ...] = ()
 
     def availability(self) -> Availability:
         return "available"
@@ -162,4 +221,21 @@ class BaseProvider:
         raise ProviderError(f"{self.id} has no refresh flow")
 
     def verify_webhook(self, body: bytes, headers: Mapping[str, str]) -> NormalizedEvent | None:  # noqa: ARG002
+        return None
+
+    async def site_setup(self, binding: Any, ctx: SetupContext) -> dict[str, Any]:  # noqa: ARG002
+        return {}
+
+    def site_status(self, binding: Any, connection: Any | None) -> str | None:  # noqa: ARG002
+        return None
+
+    def connection_attention(self, connection: Any) -> str | None:  # noqa: ARG002
+        return None
+
+    async def resume_url(
+        self,
+        connection: Any,  # noqa: ARG002
+        state: str,  # noqa: ARG002
+        redirect_uri: str,  # noqa: ARG002
+    ) -> str | None:
         return None

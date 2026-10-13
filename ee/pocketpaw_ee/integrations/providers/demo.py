@@ -8,6 +8,8 @@
 #     time, and a refresh token ending in ``revoked`` raises InvalidGrant
 #   * actions: ``echo`` (public read) returns its args, ``record`` (public write)
 #     stores them in ``IntegrationDemoRecord``
+#   * settings: ``note`` (text) and ``board_url`` (readonly link, server-set) so
+#     the settings validation and ``site_setup`` seams have a fixture
 #   * webhooks: body signed with HMAC-SHA256 in ``X-Demo-Signature`` using
 #     ``POCKETPAW_INTEGRATIONS_DEMO_WEBHOOK_SECRET``. No default: without the demo
 #     switch AND an explicit secret every webhook is refused.
@@ -35,6 +37,7 @@ from pocketpaw_ee.integrations.providers.base import (
     InvalidGrant,
     NormalizedEvent,
     ProviderError,
+    SettingsField,
     TokenGrant,
 )
 
@@ -111,6 +114,10 @@ class DemoProvider(BaseProvider):
     category = "developer"
     plan = "free"
     supports_pkce = True
+    settings_fields = (
+        SettingsField(key="note", label="Note", type="text", max_length=120),
+        SettingsField(key="board_url", label="Board", type="link", readonly=True),
+    )
     actions = {
         "echo": ActionSpec(
             args=EchoArgs,
