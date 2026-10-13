@@ -1451,8 +1451,9 @@ def _craft(rule_id: str, detail: str) -> str:
 # How to write a good Ripple card, ported from ripple's record-scenario system
 # prompt (the rules that hold for an answer in a chat card) and sized for the
 # ripple landing's chat column (about 720px, still readable at 360px). A rule that
-# repeats one of ripple's craft rules leads with its manifest text (``_craft``);
-# the detail after it is pocketpaw's. The actions named are
+# repeats one of ripple's craft rules leads with its manifest text (``_craft``),
+# and the width line also quotes tile-rows-wrap and inputs-full-row; the detail
+# is pocketpaw's. The other lines have no craft rule. The actions named are
 # card_spec.RIPPLE_ACTIONS; the flow and ask rules carry _RIPPLE_FLOW_EXAMPLE and
 # _RIPPLE_ASK; the last line is _RIPPLE_EXAMPLE.
 _RIPPLE_RULES = (
@@ -1468,11 +1469,14 @@ _RIPPLE_RULES = (
         'e.g. "{state.total / state.people}". Never hardcode a copy of a state value: '
         "write state.items.length, not 4.",
     ),
-    "   - The only actions are set, toggle, push, remove, open, toast, validate, flow "
-    "(steps run in order) and branch (if, then, else), and emit of add_to_cart, "
-    "checkout, ask or, in a flow card, flow.next, flow.back and flow.submit (both "
-    "below). There is no api, navigate, confirm, delay or other action; one drops the "
-    "card, even as a step. A handler may be a list of actions.",
+    _craft(
+        "real-actions",
+        "They are set, toggle, push, remove, open, toast, validate, flow (steps run in "
+        "order) and branch (if, then, else), and emit of add_to_cart, checkout, ask or, "
+        "in a flow card, flow.next, flow.back and flow.submit (both below). There is no "
+        "api, navigate, confirm, delay or other action; one drops the card, even as a "
+        "step. A handler may be a list of actions.",
+    ),
     _craft(
         "same-site-links",
         "Links and images use /page or #section paths; never a full URL, an "
@@ -1482,11 +1486,14 @@ _RIPPLE_RULES = (
     'and remove a row with {"action":"remove","target":"list","value":"{item}"}. '
     'A data row never has a "type" naming a widget (text, number, date, image, '
     'color, rating, icon): call that field "kind".',
-    "   - When a number depends on a list (its count or sum), keep it in state and "
-    "refresh it with a set whose value is the expression, e.g. "
-    "\"{state.items.sum('price')}\", after every push or remove and in the on_change "
-    "of any input that edits a row; refresh every number an edit feeds. Seed each "
-    "kept number with exactly what its expression gives for the seeded list.",
+    _craft(
+        "lists-fresh",
+        "Keep a list's count or sum in state and refresh it with a set whose value is "
+        "the expression, e.g. \"{state.items.sum('price')}\", after every push or "
+        "remove and in the on_change of any input that edits a row; refresh every "
+        "number an edit feeds. Seed each kept number with exactly what its expression "
+        "gives for the seeded list.",
+    ),
     "   - Expressions: state paths, + - * / % with parentheses, comparisons, || and ??, "
     "and a ternary only as the whole expression. There is no exponent operator (no ** "
     "or ^) and no Math functions: write compound growth as repeated multiplication. "
@@ -1496,13 +1503,15 @@ _RIPPLE_RULES = (
         'A division, a rate or money takes format "number", "currency" or "percent", '
         "never a text template.",
     ),
-    "   - The card is about 720px wide on a desktop and must still read on a 360px "
-    'phone. For a row of tiles give the grid "columns": "repeat(auto-fit, '
-    'minmax(150px, 1fr))" so it wraps (260px for cards side by side); otherwise at '
-    "most 2 fixed grid columns. Put number inputs and sliders "
-    'on a full-width row or a 2-column grid, and set "wrap": true on a flex row with '
-    "more than two children. Aim for about 25 to 90 nodes when building from "
-    f"primitives, and keep a card under about {CARD_CEILING_CHARS:,} characters.",
+    _craft(
+        "reads-at-phone",
+        f'{CRAFT_RULES["tile-rows-wrap"]} Give a row of tiles the grid "columns": '
+        '"repeat(auto-fit, minmax(150px, 1fr))" (260px for cards side by side); '
+        f"otherwise at most 2 fixed grid columns. {CRAFT_RULES['inputs-full-row']} Set "
+        '"wrap": true on a flex row with more than two children. Aim for about 25 to '
+        "90 nodes when building from primitives, and keep a card under about "
+        f"{CARD_CEILING_CHARS:,} characters.",
+    ),
     "   - Match the card to the answer. When a data widget fits, the card is that one "
     "widget holding only data. A trip "
     "is an itinerary. A menu or an order is a menu-order: items by product_id from the "
@@ -1536,10 +1545,13 @@ _RIPPLE_RULES = (
     "titled card, most important first; colour status with "
     "badge variants (success, warning, destructive, secondary, outline, default).",
     "   - A 1-based position or counter never runs past its total.",
-    "   - Never attach a price, rating, opening hours or any other claim to a real "
-    "named business, venue or brand; a named real place costs 0, any cost goes on "
-    "a separate unnamed item with a round estimate. Placeholders are generic words, "
-    "never brands; no lorem ipsum.",
+    _craft(
+        "fictional-names",
+        "Never attach a price, rating, opening hours or any other claim to a real "
+        "named business, venue or brand; a named real place costs 0, any cost goes on "
+        "a separate unnamed item with a round estimate. Placeholders are generic "
+        "words, never brands; no lorem ipsum.",
+    ),
     '   - Flow cards: when the visitor wants to be guided ("step by step", "ask me '
     'first") or you need 2 to 4 of their choices to answer well (never '
     "for a one-shot answer), write a flow: steps the browser runs with "

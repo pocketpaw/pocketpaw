@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from pocketpaw_ee.paw_bar import widget_relevance
@@ -226,7 +227,17 @@ def test_a_widget_out_of_the_overlay_still_matches_through_the_manifest():
 
 
 @pytest.mark.parametrize(
-    "rule_id", ["keys-in-order", "bind-derive", "same-site-links", "numbers-in-stat"]
+    "rule_id",
+    [
+        "keys-in-order",
+        "bind-derive",
+        "real-actions",
+        "same-site-links",
+        "lists-fresh",
+        "numbers-in-stat",
+        "reads-at-phone",
+        "fictional-names",
+    ],
 )
 def test_a_rule_that_repeats_a_craft_rule_leads_with_the_manifest_text(rule_id):
     """The authoring rules that duplicate ripple's craft rules say them in the
@@ -240,6 +251,25 @@ def test_a_rule_that_repeats_a_craft_rule_leads_with_the_manifest_text(rule_id):
     lead = f"   - {craft[rule_id]['text']} "
     assert sum(line.startswith(lead) for line in _RIPPLE_RULES) == 1
     assert lead in _paragraph()
+
+
+def test_every_craft_rule_the_prompt_cites_is_in_the_manifest():
+    """concierge_runtime reads CRAFT_RULES at import, so a re-vendor that drops a
+    cited id would break the import; this names the missing id instead. It reads
+    the source, not the module, and the manifest file, not card_spec.
+    THE MUTATION THAT BREAKS THIS: cite an id the manifest does not have."""
+    from pathlib import Path
+
+    import pocketpaw_ee.paw_bar as paw_bar
+
+    here = Path(paw_bar.__file__).parent
+    source = (here / "concierge_runtime.py").read_text()
+    cited = set(re.findall(r'_craft\(\s*"([\w-]+)"', source))
+    cited |= set(re.findall(r"CRAFT_RULES\[[\"']([\w-]+)[\"']\]", source))
+    manifest = json.loads((here / "ripple-manifest.json").read_text())
+    known = {r["id"] for r in manifest["craft"]["rules"]}
+    assert {"reads-at-phone", "tile-rows-wrap", "inputs-full-row"} <= cited
+    assert cited <= known, sorted(cited - known)
 
 
 def test_every_figure_has_its_own_intents():
