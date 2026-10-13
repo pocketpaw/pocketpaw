@@ -11,8 +11,8 @@
 # description words. A table entry may also carry a ``hint`` (steering appended to
 # the widget's line; a core widget's hint rides every turn) or a ``line`` (a
 # curated line in its place). figure's and iso-scene's lines are built here (the
-# figure catalog's ids, sliders and anchors; iso-scene's part shape and a two-gear
-# example card). Widgets a card earlier in the conversation used are
+# figure catalog's ids, sliders and anchors; iso-scene's part shape and a hand
+# water pump example card). Widgets a card earlier in the conversation used are
 # always kept, so an edit to that card still has its props.
 #
 # Invariants: same input, same output (sorted, no set iteration in output); only
@@ -46,34 +46,61 @@ TOP_K = 8  # widgets picked by score
 MAX_EARLIER = 4  # widgets kept because an earlier card used them
 MAX_PICKED = TOP_K + MAX_EARLIER
 _HISTORY_TURNS = 2
-# The iso-scene line's example: ripple's manifest example for the widget
-# (manifest/entries/iso-scene.ts, two meshed gears), which the vendored manifest
-# drops, so a small model sees the parts/motions/params shape once. It must pass
-# the ripple checks as a card (tests/cloud/test_paw_bar_widget_relevance.py).
+# The iso-scene line's example: a hand water pump of 15 parts written the way the
+# model should write one (short ids, integers, no restated defaults: axis z, color
+# neutral, rods and gears metal, no ``at`` on a rod or tube so their points are
+# world points). Coordinates follow ripple's scene model (core/src/iso/scene.ts):
+# x across, y depth, z up, a rod swings about its ``from``. It must pass the ripple
+# checks as a card (tests/cloud/test_paw_bar_widget_relevance.py).
 ISO_SCENE_EXAMPLE: dict[str, Any] = {
     "type": "iso-scene",
-    "bind": "{state.gears}",
+    "bind": "{state.pump}",
     "props": {
-        "title": "Two gears",
+        "title": "Hand water pump",
         "params": [
-            {"key": "speed", "label": "Input speed", "min": 10, "max": 120, "step": 5,
-             "unit": "rpm", "value": 40}
+            {"key": "rate", "label": "Strokes", "min": 10, "max": 60, "unit": "/min",
+             "value": 30}
         ],
         "parts": [
-            {"id": "base", "kind": "slab", "at": [20, 0, -4], "w": 120, "d": 60, "h": 4, "r": 6},
-            {"id": "big", "kind": "gear", "at": [0, 0, 6], "r": 30, "h": 6, "teeth": 30,
-             "color": "metal"},
-            {"id": "small", "kind": "gear", "at": [44, 0, 6], "r": 15, "h": 6, "teeth": 15,
+            {"id": "base", "kind": "slab", "at": [10, 0, -2], "w": 180, "d": 90, "h": 4},
+            {"id": "well", "kind": "cylinder", "at": [-66, 30, 4], "r": 10, "h": 8,
+             "color": "blue"},
+            {"id": "pipe", "kind": "tube", "path": [[-60, 30, 4], [0, 30, 4], [0, 20, 6]],
+             "r": 3, "color": "blue"},
+            {"id": "plinth", "kind": "box", "at": [0, 0, 6], "w": 40, "d": 40, "h": 12},
+            {"id": "barrel", "kind": "cylinder", "at": [0, 0, 40], "r": 13, "h": 56,
              "color": "accent"},
+            {"id": "cap", "kind": "disc", "at": [0, 0, 70], "r": 15, "h": 4, "color": "metal"},
+            {"id": "post", "kind": "rod", "from": [-15, 0, 70], "to": [-15, 0, 94], "r": 3},
+            {"id": "lever", "kind": "rod", "from": [-15, 0, 94], "to": [-90, 0, 108], "r": 3},
+            {"id": "nose", "kind": "rod", "from": [-15, 0, 94], "to": [0, 0, 94], "r": 3,
+             "on": "lever"},
+            {"id": "grip", "kind": "cylinder", "at": [-90, 0, 108], "r": 4, "h": 16,
+             "axis": "y", "on": "lever"},
+            {"id": "shaft", "kind": "rod", "from": [0, 0, 94], "to": [0, 0, 72], "r": 2},
+            {"id": "spout", "kind": "tube", "path": [[12, 0, 60], [36, 0, 60], [44, 0, 52]],
+             "r": 4, "color": "metal"},
+            {"id": "jet", "kind": "tube", "path": [[44, 0, 50], [44, 0, 22]], "r": 2,
+             "color": "blue"},
+            {"id": "pail", "kind": "cylinder", "at": [44, 0, 10], "r": 14, "h": 20},
+            {"id": "water", "kind": "disc", "at": [44, 0, 21], "r": 12, "color": "blue"},
         ],
         "motions": [
-            {"part": "big", "kind": "spin", "speed": "speed / 60"},
-            {"part": "small", "kind": "spin", "speed": "speed / 60 * -2", "phase": 0.03},
+            {"part": "lever", "kind": "swing", "axis": "y", "speed": "rate / 60", "range": 15},
+            {"part": "shaft", "kind": "slide", "speed": "rate / 60", "range": 4, "phase": 0.5},
+            {"part": "pipe", "kind": "flow", "speed": "rate / 60"},
+            {"part": "spout", "kind": "flow", "speed": "rate / 60"},
+            {"part": "jet", "kind": "flow", "speed": "rate / 60"},
         ],
-        "readouts": [{"label": "Output speed", "value": "speed * 2", "unit": "rpm", "decimals": 0}],
+        "readouts": [
+            {"label": "Flow", "value": "rate * 0.5", "unit": "L/min", "decimals": 1},
+            {"label": "10 L pail in", "value": "20 / rate", "unit": "min", "decimals": 1},
+        ],
         "labels": [
-            {"part": "big", "label": "Driver", "note": "30 teeth"},
-            {"part": "small", "label": "Driven", "note": "15 teeth, twice as fast"},
+            {"part": "lever", "label": "Handle", "note": "lifts the piston"},
+            {"part": "barrel", "label": "Cylinder", "note": "piston and valves inside"},
+            {"part": "pipe", "label": "Suction pipe", "note": "from the well"},
+            {"part": "spout", "label": "Spout", "note": "0.5 L a stroke"},
         ],
     },
 }  # fmt: skip
@@ -226,11 +253,12 @@ def _iso_scene_line() -> str:
         "- iso-scene {title?, caption?, params?, parts, motions?, readouts?, labels?}, "
         'bind "{state.<key>}": a live isometric drawing of a machine or mechanism that '
         "ripple draws and animates from your parts list (never SVG). parts (up to 150): "
-        f"{{id, kind: {'|'.join(sorted(ISO_KINDS))}, at: [x,y,z] (centre, z up, the "
-        "scene about 300 across), w,d,h (slab, box, plate) or r,h (cylinder, disc, gear "
-        "with teeth, cone; axis x|y|z) or path [[x,y,z]...] and r (tube) or from, to "
-        f"and r (rod, arrow), color?: {'|'.join(sorted(ISO_ROLES))}, on?: a parent part "
-        "id it moves with}. motions (up to 20): {part, kind: "
+        f"{{id, kind: {'|'.join(sorted(ISO_KINDS))}, at: [x,y,z] (centre; x across, y "
+        "depth, z up, the scene about 200 across), w,d,h (slab, box, plate) or r,h "
+        "(cylinder, disc, gear with teeth, cone; axis x|y|z, default z) or path "
+        "[[x,y,z]...] and r (tube) or from, to and r (rod, arrow; it swings about from), "
+        f"color?: {'|'.join(sorted(ISO_ROLES))} (default neutral, rod and gear metal), on?: "
+        "a parent part id it moves with}. motions (up to 20): {part, kind: "
         f"{'|'.join(sorted(ISO_MOTIONS))}, axis?, speed (turns a second), range?, "
         "phase?}. params (up to 6): {key, label, min, max, step?, unit?, value}. "
         "readouts (up to 4): {label, value, unit?, decimals?}. labels (up to 10): "

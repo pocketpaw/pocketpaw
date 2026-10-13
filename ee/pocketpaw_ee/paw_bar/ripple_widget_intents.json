@@ -37,7 +37,7 @@
   },
   "iso-scene": {
     "intents": ["how does", "how do", "how it works", "show how", "machine", "mechanism", "gears", "gear", "engine", "pump", "piston", "drivetrain", "animated drawing", "animated diagram"],
-    "hint": "Build the object from parts (base plate, solids, gears, tubes), give moving parts motions driven by 1-3 params, 2-3 readouts computed from the params, 3-6 labels; keep it under ~40 parts. Use it over an illustration for a machine or mechanism (an illustration stays for flat diagrams), and use a figure instead when one exists for the subject."
+    "hint": "Draw the real machine in 12-30 parts, like the example: a base plate, the frame or body that holds it (posts, casing, stays), each moving part of the mechanism (gears, cranks, levers, pistons, valves), the rods and tubes that connect them, motions on the moving parts driven by 1-3 params, 2-3 readouts computed from the params, 3-6 labels. ripple adds rims, bevels, corner screws on plates, gear spokes and tube highlights itself, so spend no parts on bolts, screws or trim. Write it compact: short ids, whole numbers, no default restated, no at on a rod or tube (their points are then world points), no comments. Use it over an illustration for a machine or mechanism (an illustration stays for flat diagrams), and use a figure instead when one exists for the subject."
   },
   "illustration": {"intents": ["draw", "drawing", "picture", "diagram", "illustrate", "animated", "how does", "how do", "explain"]},
   "invoice-layout": {

@@ -120,11 +120,39 @@ def test_the_drawing_lines_teach_the_shape_and_the_preference():
     gears = _section(_paragraph("Show how the gears in a gearbox work"))
     iso = next(line for line in gears.splitlines() if line.startswith("   - iso-scene "))
     assert "arrow|box|cone|cylinder|disc|gear|plate|rod|slab|sphere|tube" in iso
-    assert "no braces, no functions" in iso and "keep it under ~40 parts" in iso
+    assert "no braces, no functions" in iso and "12-30 parts" in iso
+    assert "spend no parts on bolts" in iso and "short ids" in iso
     assert "an illustration stays for flat diagrams" in iso
-    assert '"speed":"speed / 60"' in iso
-    card = {"ui": widget_relevance.ISO_SCENE_EXAMPLE, "state": {}}
+    example = widget_relevance.ISO_SCENE_EXAMPLE
+    compact = json.dumps(example, separators=(",", ":"))
+    assert compact in iso
+    card = {"ui": example, "state": {}}
     assert render_card(json.dumps(card), [], profile=RIPPLE_PROFILE) is not None
+
+
+def test_the_iso_scene_example_is_a_rich_compact_machine():
+    """The example is the shape the model copies: a real machine of 12-30 parts with
+    a frame, moving parts tied to a param, connectors, 2-3 readouts and 3-6 labels,
+    written without restating ripple's defaults so the model's card stays short.
+    THE MUTATION THAT BREAKS THIS: swap the example back to the two-gear card."""
+    props = widget_relevance.ISO_SCENE_EXAMPLE["props"]
+    parts, motions = props["parts"], props["motions"]
+    assert 12 <= len(parts) <= 30
+    kinds = {p["kind"] for p in parts}
+    assert {"slab", "rod", "tube"} <= kinds
+    keys = {p["key"] for p in props["params"]}
+    assert 1 <= len(keys) <= 3 and len(motions) >= 3
+    assert all(any(k in str(m["speed"]) for k in keys) for m in motions)
+    assert {m["kind"] for m in motions} >= {"swing", "slide", "flow"}
+    assert 2 <= len(props["readouts"]) <= 3 and 3 <= len(props["labels"]) <= 6
+    for p in parts:
+        assert len(p["id"]) <= 6
+        assert p.get("color") != "neutral" and p.get("axis") != "z"
+        assert not (p["kind"] in ("rod", "gear") and p.get("color") == "metal")
+        assert "at" not in p or p["kind"] not in ("rod", "arrow", "tube")
+        for v in (p.get("at"), p.get("from"), p.get("to"), *(p.get("path") or [])):
+            assert v is None or all(isinstance(c, int) for c in v)
+    assert len(json.dumps(widget_relevance.ISO_SCENE_EXAMPLE, separators=(",", ":"))) < 2_000
 
 
 def test_the_core_widgets_carry_their_steering_hints_on_every_turn():
@@ -245,8 +273,8 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
     """The fixed core is 18,583 chars (the drawing widgets added only their two
     names to the index); the worst per-turn section is the MAX_PICKED longest
-    candidate lines (about 9,450, iso-scene's 2,136 the longest), so the paragraph
-    peaks near 28,100, under the 32,000 cap."""
+    candidate lines (about 11,210, iso-scene's 3,884 with its 15-part example the
+    longest), so the paragraph peaks near 29,840, under the 32,000 cap."""
     core = _paragraph()
     longest = sorted(
         (len(widget_relevance.full_line(n)) + 4 for n in widget_relevance.CANDIDATES),
