@@ -508,8 +508,8 @@
   {
     "label": "FL-1: a step's ui is walked as data, not as a root node",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False, False))",
-    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False, False))",
+    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False, False, here))",
+    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False, False, here))",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
     ]
@@ -517,7 +517,7 @@
   {
     "label": "FL-1: step values other than ui skip the walk (no text checks)",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
+    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False, False, here))",
     "replace": "            else:\n                pass",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
@@ -526,7 +526,7 @@
   {
     "label": "FL-1 streamed: step values other than ui skip the walk",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
+    "find": "            else:\n                out.append((v, level + 1, 0, k, False, False, False, False, False, False, here))",
     "replace": "            else:\n                pass",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_streamed_flow_refusal_matches_the_whole_card"
@@ -535,7 +535,7 @@
   {
     "label": "FL-1: chain is not followed",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                steps.append((v, level + 1))",
+    "find": "                steps.append((v, level + 1, here))",
     "replace": "                pass",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
@@ -544,7 +544,7 @@
   {
     "label": "FL-1 streamed: chain is not followed (step 3 goes unchecked)",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                steps.append((v, level + 1))",
+    "find": "                steps.append((v, level + 1, here))",
     "replace": "                pass",
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_full_url_in_step_3_is_rejected_before_the_fence_closes",
@@ -554,7 +554,7 @@
   {
     "label": "FL-1: chain_map values are not followed",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                steps.extend((branch, level + 2) for branch in v.values())",
+    "find": "                steps.extend((b, level + 2, _pointer(here, name)) for name, b in v.items())",
     "replace": "                pass",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
@@ -834,8 +834,8 @@
   {
     "label": "FL-1 ask: step values other than ui start undecided",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                out.append((v, level + 1, 0, k, False, False, False, False, False, False))",
-    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False, False))",
+    "find": "                out.append((v, level + 1, 0, k, False, False, False, False, False, False, here))",
+    "replace": "                out.append((v, level + 1, 0, k, False, None, False, False, False, False, here))",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_flow_and_ask_refusals"
     ]
@@ -888,8 +888,8 @@
   {
     "label": "FL-1 ask: flow step ui starts decided-no",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False, False))",
-    "replace": "                out.append((v, level + 1, 1, k, False, False, True, False, False, False))",
+    "find": "                out.append((v, level + 1, 1, k, False, None, True, False, False, False, here))",
+    "replace": "                out.append((v, level + 1, 1, k, False, False, True, False, False, False, here))",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_fl1_an_ask_passes_on_an_explicit_visitor_action_and_only_on_ripple"
     ]
@@ -1622,7 +1622,7 @@
   {
     "label": "SPEC-CRASH: an unforeseen error in the strict walk escapes as an exception",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "    except Exception as exc:  # noqa: BLE001 — an unforeseen shape is refused\n        _log_dropped(exc)\n        raise _Reject(\"a shape the checks could not read\") from exc\n",
+    "find": "    except Exception as exc:  # noqa: BLE001 — an unforeseen shape is refused\n        _log_dropped(exc)\n        refused = _Reject(\"a shape the checks could not read\")\n        refused.path = where[0]\n        raise refused from exc\n",
     "replace": "",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_an_unexpected_error_in_the_strict_walk_is_a_logged_refusal"
@@ -1631,8 +1631,8 @@
   {
     "label": "SPEC-CRASH: an unforeseen error in the strict walk is refused silently",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        _log_dropped(exc)\n        raise _Reject(\"a shape the checks could not read\") from exc\n",
-    "replace": "        raise _Reject(\"a shape the checks could not read\") from exc\n",
+    "find": "        _log_dropped(exc)\n        refused = _Reject(",
+    "replace": "        refused = _Reject(",
     "tests": [
       "tests/cloud/test_paw_bar_ripple_profile.py::test_an_unexpected_error_in_the_strict_walk_is_a_logged_refusal"
     ]

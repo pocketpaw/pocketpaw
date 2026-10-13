@@ -20,6 +20,9 @@
 # ``_check_strict`` walks all of ``ui`` and ``state`` iteratively, holding nodes,
 # actions, URLs, CSS, expressions, flow cards and ``ask`` to the rules its docstrings
 # name. Any error the walk did not foresee is a logged refusal, never an exception.
+# A refusal carries the JSON Pointer of the value it names; ``strict_audit`` reports
+# it as an audit item for the planted-fault corpus vendored from ripple
+# (``ripple-audit-corpus/``, ``.source`` beside it).
 # A ripple body that is not JSON only for missing closers, surplus closers, a
 # trailing or missing comma, or a raw control character in a string (``_repair``,
 # never inside a string or past the root) is repaired once and then checked like
@@ -544,7 +547,17 @@ _FENCE = "```"
 
 
 class _Reject(Exception):
-    """The card breaks a rule; it is dropped whole."""
+    """The card breaks a rule; it is dropped whole. ``path`` is the JSON Pointer of
+    the value the strict walk was on when it refused (``strict_audit``), else None;
+    ``at`` is a pointer below that value a check names (a node's ``/on_click``)."""
+
+    path: str | None = None
+    at: str = ""
+
+
+def _pointer(path: str, key: Any) -> str:
+    """``path`` extended by one JSON Pointer token (RFC 6901 escapes)."""
+    return f"{path}/{str(key).replace('~', '~0').replace('/', '~1')}"
 
 
 def _serialize(value: Any) -> str:
@@ -645,10 +658,14 @@ def _check_events(
     ask: bool = False,
 ) -> None:
     props = node.get("props")
-    for holder in (node, props if isinstance(props, dict) else {}):
+    for holder, at in ((node, ""), (props if isinstance(props, dict) else {}, "/props")):
         for key, value in holder.items():
             if isinstance(key, str) and key.startswith("on_"):
-                _check_actions(value, events, allowed, ask)
+                try:
+                    _check_actions(value, events, allowed, ask)
+                except _Reject as exc:
+                    exc.at = _pointer(at, key)
+                    raise
 
 
 def _is_handler_key(key: Any) -> bool:
@@ -774,23 +791,49 @@ def _check_strict(
     spec: dict[str, Any], events: list[str], lead_capture: bool, profile: CardProfile
 ) -> None:
     """``_strict_walk``, where any error the rules did not foresee (a JSON shape
-    a check assumed away) is a logged refusal, never an exception."""
+    a check assumed away) is a logged refusal, never an exception. The refusal
+    carries the pointer of the value the walk was on (``_Reject.path``)."""
+    where = [""]
     try:
-        _strict_walk(spec, events, lead_capture, profile)
-    except _Reject:
+        _strict_walk(spec, events, lead_capture, profile, where)
+    except _Reject as exc:
+        exc.path = where[0] + exc.at
         raise
     except Exception as exc:  # noqa: BLE001 — an unforeseen shape is refused
         _log_dropped(exc)
-        raise _Reject("a shape the checks could not read") from exc
+        refused = _Reject("a shape the checks could not read")
+        refused.path = where[0]
+        raise refused from exc
+
+
+def strict_audit(spec: Any, profile: CardProfile = RIPPLE_PROFILE) -> list[dict[str, str]]:
+    """The strict walk's verdict on ``spec`` as audit items, for the corpus ripple
+    shares (``ripple-audit-corpus/``): ``[]`` when it passes, else the refusal as
+    ``{"path", "message"}``, ``path`` a JSON Pointer from the spec root. The walk
+    stops at its first fault, so there is at most one item. No host events, no
+    lead capture."""
+    try:
+        if not isinstance(spec, dict) or not isinstance(spec.get("ui"), dict):
+            raise _Reject("ui is not an object")
+        _check_strict(spec, [], False, profile)
+    except _Reject as exc:
+        return [{"path": exc.path if exc.path is not None else "/ui", "message": str(exc)}]
+    return []
 
 
 def _strict_walk(
-    spec: dict[str, Any], events: list[str], lead_capture: bool, profile: CardProfile
+    spec: dict[str, Any],
+    events: list[str],
+    lead_capture: bool,
+    profile: CardProfile,
+    where: list[str] | None = None,
 ) -> None:
     """The ``strict`` profile's walk over ``ui`` and ``state`` (see the header).
     Iterative, so no card can exhaust the stack; past ``_MAX_SCAN_LEVELS`` of
     nesting the card is refused. A flow card's steps (``_flow_steps``) share one
-    node budget; ``emit ask`` passes only under one of ``ASK_HANDLERS``."""
+    node budget; ``emit ask`` passes only under one of ``ASK_HANDLERS``. Each entry
+    carries its JSON Pointer, written to ``where[0]`` as it is checked."""
+    where = where if where is not None else [""]
     allowed, hosts = profile.actions, profile.url_hosts
     nodes = 0
     ui = spec["ui"]
@@ -799,13 +842,14 @@ def _strict_walk(
     events = [*events, *FLOW_EVENTS] if flow else events
     # (value, json level, node depth, key it sits under, under a handler, may ask
     # (``_ask_from``; False in state), is a node, is a data row whose "action" is
-    # its own, inside a style, in state)
-    stack: list[tuple[Any, int, int, str, bool, bool | None, bool, bool, bool, bool]] = (
-        _flow_steps(ui) if flow else [(ui, 1, 1, "", False, None, True, False, False, False)]
+    # its own, inside a style, in state, JSON Pointer)
+    stack: list[tuple[Any, int, int, str, bool, bool | None, bool, bool, bool, bool, str]] = (
+        _flow_steps(ui) if flow else [(ui, 1, 1, "", False, None, True, False, False, False, "/ui")]
     )
-    stack.append((spec.get("state"), 1, 0, "", False, False, False, False, False, True))
+    stack.append((spec.get("state"), 1, 0, "", False, False, False, False, False, True, "/state"))
     while stack:
-        value, level, depth, key, handler, ask, is_node, data_row, css, in_state = stack.pop()
+        value, level, depth, key, handler, ask, is_node, data_row, css, in_state, path = stack.pop()
+        where[0] = path
         if level > _MAX_SCAN_LEVELS:
             raise _Reject("nested too deeply")
         if isinstance(value, str):
@@ -819,8 +863,20 @@ def _strict_walk(
             continue
         if isinstance(value, list):
             stack.extend(
-                (v, level + 1, depth, key, handler, ask, False, data_row, css, in_state)
-                for v in value
+                (
+                    v,
+                    level + 1,
+                    depth,
+                    key,
+                    handler,
+                    ask,
+                    False,
+                    data_row,
+                    css,
+                    in_state,
+                    f"{path}/{i}",
+                )
+                for i, v in enumerate(value)
             )
             continue
         if not isinstance(value, dict):
@@ -883,8 +939,20 @@ def _strict_walk(
                     if not isinstance(v, list):
                         raise _Reject(f"{k} is not a list")
                     stack.extend(
-                        (kid, level + 2, depth + 1, k, False, base, True, False, False, in_state)
-                        for kid in v
+                        (
+                            kid,
+                            level + 2,
+                            depth + 1,
+                            k,
+                            False,
+                            base,
+                            True,
+                            False,
+                            False,
+                            in_state,
+                            f"{path}/{k}/{i}",
+                        )
+                        for i, kid in enumerate(v)
                     )
                 elif k == "props" and isinstance(v, dict):
                     node_props = _NODE_PROPS.get(kind, frozenset())
@@ -907,6 +975,7 @@ def _strict_walk(
                                 (kind, pk) in _DATA_ACTION_ROWS and not in_state,
                                 pk == "style",
                                 in_state,
+                                _pointer(f"{path}/props", pk),
                             )
                         )
                 elif k != "type":
@@ -922,6 +991,7 @@ def _strict_walk(
                             False,
                             k == "style",
                             in_state,
+                            _pointer(path, k),
                         )
                     )
             continue
@@ -947,6 +1017,7 @@ def _strict_walk(
                 False,
                 css or k == "style",
                 in_state,
+                _pointer(path, k),
             )
             for k, v in value.items()
         )
@@ -1981,10 +2052,10 @@ def _flow_steps(root: dict[str, Any]) -> list[tuple[Any, ...]]:
     an object of ``FLOW_STEP_KEYS`` with a ``ui`` node, more than
     ``MAX_FLOW_STEPS`` steps, and any ``onComplete`` but a chat message."""
     out: list[tuple[Any, ...]] = []
-    steps: list[tuple[Any, int]] = [(root, 1)]
+    steps: list[tuple[Any, int, str]] = [(root, 1, "/ui")]
     count = 0
     while steps:
-        step, level = steps.pop()
+        step, level, path = steps.pop()
         count += 1
         if count > MAX_FLOW_STEPS:
             raise _Reject(f"more than {MAX_FLOW_STEPS} flow steps")
@@ -1995,16 +2066,17 @@ def _flow_steps(root: dict[str, Any]) -> list[tuple[Any, ...]]:
         if "onComplete" in step:
             _check_on_complete(step["onComplete"])
         for k, v in step.items():
+            here = _pointer(path, k)
             if k == "chain":
-                steps.append((v, level + 1))
+                steps.append((v, level + 1, here))
             elif k == "chain_map":
                 if not isinstance(v, dict):
                     raise _Reject("a chain_map that is not an object")
-                steps.extend((branch, level + 2) for branch in v.values())
+                steps.extend((b, level + 2, _pointer(here, name)) for name, b in v.items())
             elif k == "ui":
-                out.append((v, level + 1, 1, k, False, None, True, False, False, False))
+                out.append((v, level + 1, 1, k, False, None, True, False, False, False, here))
             else:
-                out.append((v, level + 1, 0, k, False, False, False, False, False, False))
+                out.append((v, level + 1, 0, k, False, False, False, False, False, False, here))
     return out
 
 

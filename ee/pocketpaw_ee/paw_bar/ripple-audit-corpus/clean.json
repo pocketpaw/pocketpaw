@@ -1,0 +1,9 @@
+{
+  "about": "Control: a clean card. Neither side reports anything.",
+  "spec": {
+    "version": "1.0",
+    "ui": { "type": "card", "children": [{ "type": "text", "props": { "content": "Hello" } }] },
+    "state": {}
+  },
+  "expect": { "core": [], "python": [] }
+}
