@@ -39,8 +39,8 @@
   {
     "label": "a silent reviewer holds the line forever",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "if self.clock() < deadline:\n                        return",
-    "replace": "if True:\n                        return",
+    "find": "elif final or self.clock() >= due:",
+    "replace": "elif final:",
     "tests": [
       "tests/cloud/test_belt_cloud_quality.py::test_a_silent_reviewer_times_out_to_success"
     ]
@@ -106,6 +106,134 @@
     "replace": "if False:",
     "tests": [
       "tests/cloud/test_belt_cloud_quality.py::test_note_lesson_dedups_and_recall_reads_only_lessons"
+    ]
+  },
+  {
+    "label": "a pass verdict comment is not read",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "_VERDICT = re.compile(r\"Belt-Review: (pass|fail)\")",
+    "replace": "_VERDICT = re.compile(r\"Belt-Review: (fail)\")",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_green_pr_gets_one_reviewer_and_belt_posts_its_pass"
+    ]
+  },
+  {
+    "label": "a fail verdict posts success",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "\"fail\": (\"failure\", \"Belt review failed: see the Belt-Review comment\"),",
+    "replace": "\"fail\": (\"success\", \"Belt review failed: see the Belt-Review comment\"),",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_failed_review_runs_a_fixer_then_reviews_the_new_head"
+    ]
+  },
+  {
+    "label": "a verdict naming another head is accepted",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and lines[1].strip() == f\"{_HEAD_LINE}{head}\"",
+    "replace": "and lines[1].strip().startswith(_HEAD_LINE)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_verdict_counts_only_for_this_head_after_the_launch"
+    ]
+  },
+  {
+    "label": "a verdict from before the launch is accepted",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and _epoch(comment.get(\"createdAt\")) > after",
+    "replace": "and after >= 0",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_verdict_counts_only_for_this_head_after_the_launch"
+    ]
+  },
+  {
+    "label": "a verdict line need not be exact",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "said = _VERDICT.fullmatch(lines[0].strip()) if lines else None",
+    "replace": "said = _VERDICT.match(lines[0].strip()) if lines else None",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_verdict_counts_only_for_this_head_after_the_launch"
+    ]
+  },
+  {
+    "label": "a stale pending status nobody owns is never replaced",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if entry is None and state == \"PENDING\":",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_stale_pending_status_nobody_owns_is_replaced",
+      "tests/cloud/test_belt_cloud_quality.py::test_a_live_pending_status_is_adopted_not_doubled"
+    ]
+  },
+  {
+    "label": "the run's own deadline leaves the review pending",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "final=expired,",
+    "replace": "final=False,",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_the_runs_own_deadline_settles_a_pending_review"
+    ]
+  },
+  {
+    "label": "a review timeout is not counted on the blob",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "timeouts = sum(r.get(\"verdict\") == \"timeout\" for r in reviews) or None",
+    "replace": "timeouts = None",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_silent_reviewer_times_out_to_success",
+      "tests/cloud/test_belt_cloud_quality.py::test_a_stale_pending_status_nobody_owns_is_replaced"
+    ]
+  },
+  {
+    "label": "the concurrent reviewer cap is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": " or self._live_reviews() >= self.review_cap:",
+    "replace": ":",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_reviewers_wait_for_a_free_slot"
+    ]
+  },
+  {
+    "label": "an empty rollup never reads the head commit's check runs",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if pr.get(\"state\") == \"OPEN\" and not _ci_checks(pr):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_green_pr_with_an_empty_rollup_is_reviewed"
+    ]
+  },
+  {
+    "label": "a parked action_required run counts as a check",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if run.get(\"conclusion\") != \"action_required\"",
+    "replace": "if True",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_green_pr_with_an_empty_rollup_is_reviewed"
+    ]
+  },
+  {
+    "label": "an older check run outranks the newest of its name",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "sorted(runs, key=_started)",
+    "replace": "sorted(runs, key=_started, reverse=True)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_green_pr_with_an_empty_rollup_is_reviewed"
+    ]
+  },
+  {
+    "label": "a resume leaves an ended tracker's review pending",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if _orphaned_review(blob):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_resume_settles_a_review_an_ended_tracker_left_pending"
+    ]
+  },
+  {
+    "label": "a lesson's failure line is the verdict's Head line",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "_NOT_FAILURES = (REVIEW_MARK, _HEAD_LINE)",
+    "replace": "_NOT_FAILURES = (REVIEW_MARK,)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_quality.py::test_a_merged_review_fix_becomes_a_lesson_and_a_rebase_does_not"
     ]
   }
 ]

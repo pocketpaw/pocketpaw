@@ -957,34 +957,59 @@ would re-queue the run. No screenshots are fetched for a tester PR: they would
 replace the run's.
 
 **The pre-merge reviewer.** With `POCKETPAW_FACTORY_CLOUD_REVIEWER=1` (off by
-default), a tracked PR, the worker's or the tester's, gets ONE reviewer cloud
-session per head: the first poll that sees every counted check except
-`belt/review` finished green (at least one; never before CI reports) posts a
-`belt/review` commit status `pending` on that head, so the lane sees the PR as
-not ready, then launches the reviewer through the same `_launch`. Its brief
-says: read the diff (`gh pr diff`), the issue and its acceptance test, and
-`docs/review-rubric.md`, `docs/engineering.md` and `docs/design.md` from the
-latest base (each if present); judge every rubric item; post `belt/review`
-`success` or `failure` with `gh api repos/<slug>/statuses/<sha>` and a
-description of at most 140 characters; on failure post ONE comment whose first
-line is `Belt-Review: <sha>`, then one line per failed item with file:line;
-never push, approve or merge. The tracker records `reviews: [{sha, verdict,
-session_url, at}]` on the blob (`tester.reviews` for a tester PR) and emits
-stage `review` (status `running`, or `landed` for a tester PR). The verdict is
-read off the head's rollup: `pass` or `fail`. A failed `belt/review` is a stuck
-PR of kind `review`: after the fix grace, the usual fixer launches with the
-newest `Belt-Review:` comment, fenced, as its brief, on the same `fixes` list
-and cap (past the cap the diff escalates, "did not get ... through review"),
-and the new head it pushes is reviewed again once its CI is green. If no verdict
-lands within `POCKETPAW_FACTORY_CLOUD_REVIEW_TIMEOUT` seconds of the launch, or
-the reviewer session never starts, Belt posts `belt/review` `success` ("review
-timed out" / "review skipped: the reviewer did not start") with verdict
-`timeout` / `error`, and logs the run's timeout count, so the line never
-stalls. A resumed tracker reads `reviews` and never launches a second reviewer
-for a head. The gate only holds a merge when the repo's lane counts commit
-statuses: `_lane_ready` here does, but a lane script that reads only check runs
-(`/commits/<sha>/check-runs`) does not see `belt/review` and needs that change
-in the repo.
+default), every tracked open PR (the worker's, an adopted one, or the
+tester's) whose current head has no review verdict gets ONE reviewer cloud
+session for that head, including after a resume, once every counted check
+except `belt/review` has finished green (at least one; never before CI
+reports). When the PR's rollup holds no such check, the tracker reads the head
+commit's own check runs (newest per name, `action_required` dropped) and
+statuses, as `scripts/fast-lane.sh` does: CI the lane dispatches on a refreshed
+branch has no PR association, and GitHub parks a bot push's PR run as
+`action_required`, so those PRs had an empty rollup and were never reviewed.
+At most `POCKETPAW_FACTORY_CLOUD_REVIEW_CAP` reviewers (default 2) are in
+flight per dispatcher; a green head over the cap waits for a slot. Belt posts
+`belt/review` `pending` on the head, so the lane sees the PR as not ready,
+then launches the reviewer through the same `_launch`.
+
+The reviewer reports through a PR comment, never a commit status: on the first
+night no reviewer's status landed (all timed out), while the one reviewer that
+failed a PR did get its comment posted, so a cloud session's GitHub access is
+taken to stop at comments. Its brief says: read the diff (`gh pr diff`),
+the issue and its acceptance test, and `docs/review-rubric.md`,
+`docs/engineering.md` and `docs/design.md` from the latest base (each if
+present); judge every rubric item; then, as its last action, post ONE comment
+whose first line is exactly `Belt-Review: pass` or `Belt-Review: fail` and
+whose second line is exactly `Head: <sha>`, followed on fail by one line per
+failed item with file:line; never post a status, push, approve or merge. Belt's
+tracker reads the PR's comments each poll, takes the newest one with that exact
+first line, the current head on the second, created after the review launch,
+and posts `belt/review` itself with the host's `gh`: `success` ("Belt review
+passed") or `failure`. A `belt/review` already final on the head (posted by
+hand, say) counts as the verdict too. The tracker records `reviews: [{sha,
+verdict, session_url, at}]` on the blob (`tester.reviews` for a tester PR) and
+emits stage `review` (status `running`, or `landed` for a tester PR). A failed
+`belt/review` is a stuck PR of kind `review`: after the fix grace, the usual
+fixer launches with the newest `Belt-Review:` comment, fenced, as its brief, on
+the same `fixes` list and cap (past the cap the diff escalates, "did not get
+... through review"), and the new head it pushes is reviewed again once its CI
+is green.
+
+The line never stalls on a review. Belt posts `belt/review` `success`, verdict
+`timeout`, "review timed out", when no verdict lands within
+`POCKETPAW_FACTORY_CLOUD_REVIEW_TIMEOUT` seconds of the launch, when the run's
+own tracker deadline arrives first (its last poll settles the review before the
+run times out), and when the head carries a `pending` `belt/review` that no
+review entry owns (an ended tracker's) once it is older than the timeout; a
+younger one is adopted and timed from when it was posted, never doubled. If the
+reviewer session never starts it posts "review skipped: the reviewer did not
+start", verdict `error`. Timeouts are counted on the blob (`review_timeouts`)
+and logged with the run's count. A resumed tracker reads `reviews` and never
+launches a second reviewer for a head; at startup `resume_all` also settles a
+review still `pending` on a run that is no longer tracked (one `gh pr view`,
+then the same settle). The gate only holds a merge when the repo's lane counts
+commit statuses: `_lane_ready` here does, and the creative-apps lane reads
+`belt/review` from `/commits/<sha>/status` behind its `REQUIRE_BELT_REVIEW`
+switch.
 
 The brief tells the session to do the task, follow the repo's CLAUDE.md, run
 the charter checks until they pass, open ONE PR to the base that says
@@ -1752,8 +1777,9 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_CLOUD_LANE_NUDGE` | `300` | Seconds a cloud run's labelled PR must stay green and mergeable but unmerged before the tracker dispatches the lane workflow; also the minimum gap between dispatches per repo |
 | `POCKETPAW_FACTORY_CLOUD_LANE_WORKFLOW` | `Fast Lane` | The workflow the lane nudge runs with `gh workflow run` (it needs a `workflow_dispatch` trigger) |
 | `POCKETPAW_FACTORY_CLOUD_TESTER` | off | `1` (or `true`/`yes`/`on`) launches one tester cloud session per landed cloud run on a mandate with a `tester` crew seat, and tracks its PR |
-| `POCKETPAW_FACTORY_CLOUD_REVIEWER` | off | `1` (or `true`/`yes`/`on`) launches one reviewer cloud session per green head of a tracked cloud PR (worker's or tester's); it posts the `belt/review` status |
-| `POCKETPAW_FACTORY_CLOUD_REVIEW_TIMEOUT` | `1800` | Seconds a reviewer has to post `belt/review` before Belt posts success ("review timed out") so the line never stalls |
+| `POCKETPAW_FACTORY_CLOUD_REVIEWER` | off | `1` (or `true`/`yes`/`on`) launches one reviewer cloud session per green head of a tracked cloud PR (worker's, adopted or tester's); it comments `Belt-Review: pass\|fail` + `Head: <sha>` and Belt posts the `belt/review` status |
+| `POCKETPAW_FACTORY_CLOUD_REVIEW_TIMEOUT` | `1800` | Seconds a reviewer has to comment its verdict before Belt posts success ("review timed out") so the line never stalls; also the age at which a `pending` `belt/review` nobody owns is replaced |
+| `POCKETPAW_FACTORY_CLOUD_REVIEW_CAP` | `2` | Reviewer sessions in flight at once per dispatcher; a green head over the cap waits for a slot |
 | `POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT` | `3600` | Seconds after a cloud run's newest launch with no `Belt-Run` PR before the tracker relaunches a worker or releases (rejects) the run; for a tester, the seconds after which no `Belt-Test` PR means it is done |
 | `POCKETPAW_FACTORY_CLOUD_RELAUNCHES` | `1` | Fresh workers launched per cloud run that opened no PR; past it the run is released (rejected) so the mandate's line moves |
 | `POCKETPAW_FACTORY_SCREENSHOT_DIR` | `~/.pocketpaw/belt/screenshots` | Where the cloud station keeps each run's snapshot PNGs, one `<run id>/` dir per run |

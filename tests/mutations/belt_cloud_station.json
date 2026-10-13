@@ -57,8 +57,8 @@
   {
     "label": "the tracker never gives up",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "if self.clock() >= deadline:",
-    "replace": "if self.clock() >= deadline and False:",
+    "find": "            if expired:\n",
+    "replace": "            if expired and False:\n",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_tracker_timeout_without_a_pr"
     ]
@@ -228,8 +228,8 @@
   {
     "label": "the lane label is never read from gh",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "\"mergeable,statusCheckRollup,labels\",",
-    "replace": "\"mergeable,statusCheckRollup\",",
+    "find": "\"state,url,headRefName,headRefOid,mergeCommit,comments,files,mergeable,statusCheckRollup,labels\"",
+    "replace": "\"state,url,headRefName,headRefOid,mergeCommit,comments,files,mergeable,statusCheckRollup\"",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_a_green_pr_left_open_gets_one_lane_nudge"
     ]

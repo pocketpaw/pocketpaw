@@ -1,13 +1,16 @@
 # tests/cloud/test_belt_cloud_quality.py — the cloud station's quality loop.
 #
-# REVIEW: with the reviewer on, a tracked PR (worker's or tester's) whose CI first
-# goes green on a head gets ONE reviewer session for that head: ``belt/review``
-# goes pending on it, the brief names the diff, issue and rubric docs, the status
-# call and "never push"; the verdict the reviewer posts is recorded on
-# ``reviews``; a failure runs the fixer with the review comment (kind
-# ``review``, the shared cap) and the new head is reviewed again; no verdict by
-# the timeout (or no reviewer session) posts success so the line never stalls;
-# off by default; a resume never doubles a reviewer.
+# REVIEW: with the reviewer on, a tracked PR (worker's, adopted or tester's) whose
+# head has no verdict and whose CI is green (the head commit's own check runs when
+# the PR rollup has none) gets ONE reviewer session, under the concurrent cap:
+# ``belt/review`` goes pending, the brief asks for ONE comment ``Belt-Review:
+# pass|fail`` + ``Head: <sha>`` and never a status or a push; Belt reads that
+# comment (after the launch, for this head) and posts the status itself; a fail
+# runs the fixer with the comment (kind ``review``, the shared cap) and the new
+# head is reviewed again; no verdict by the timeout, no reviewer session, the run's
+# own deadline, or a stale pending status nobody owns posts success ("review timed
+# out"), counted on ``review_timeouts``; a resume never doubles a reviewer and
+# settles one an ended tracker left pending; off by default.
 # ORIENT: every worker and fixer brief carries an Orientation block built from the
 # launch clone's docs/c4/model.json (at origin/<base>): the components the
 # issue's "Files likely involved" or its title words match, their paths and
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -55,14 +59,22 @@ from tests.cloud.test_belt_cloud_station import (  # noqa: E402
 store, dirs, stages, updates = base.store, base.dirs, base.stages, base.updates
 
 H1, H2 = "a1b2c3d4e5f6", "f6e5d4c3b2a1"
-REVIEW_NOTE = (
-    "Belt-Review: a1b2c3d4e5f6\n- Sources/FlareCore/Text.swift:12 duplicates Geometry.clamp"
-)
+
+
+def _verdict(word: str, head: str, *notes: str) -> str:
+    """A reviewer's verdict comment: ``Belt-Review: <word>``, ``Head: <head>``, notes."""
+    return "\n".join([f"Belt-Review: {word}", f"Head: {head}", *notes])
+
+
+REVIEW_NOTE = _verdict("fail", H1, "- Sources/FlareCore/Text.swift:12 duplicates Geometry.clamp")
+PASSED = "Belt review passed"
+TIMED_OUT = "review timed out"
 
 
 class Runner(FakeRunner):
     """``FakeRunner`` plus the commit-status POSTs (kept on ``statuses``), the
-    source issue's title and body, and ``git grep``'s output."""
+    head commit's own check runs and statuses, the source issue's title and
+    body, and ``git grep``'s output."""
 
     def __init__(
         self,
@@ -72,10 +84,12 @@ class Runner(FakeRunner):
         log: str = "",
         commits: list[dict] | None = None,
         bugs: list[dict] | None = None,
+        head_runs: list[dict] | None = None,
         **kw,
     ):
         super().__init__(**kw)
         self.statuses: list[dict[str, str]] = []
+        self.head_runs = head_runs or []  # ``gh api .../commits/<sha>/check-runs``
         self.issue = issue or {}
         self.grep = grep
         self.log = log  # ``gh run view --log-failed``
@@ -88,6 +102,12 @@ class Runner(FakeRunner):
             fields = dict(a.split("=", 1) for a in argv[3:] if "=" in a)
             self.statuses.append({"sha": argv[2].rsplit("/", 1)[-1], **fields})
             return 0, "{}", ""
+        if argv[:2] == ["gh", "api"] and "/check-runs" in argv[2]:
+            self.calls.append((list(argv), cwd))
+            return 0, json.dumps({"total_count": 9, "check_runs": self.head_runs}), ""
+        if argv[:2] == ["gh", "api"] and argv[2].endswith("/status"):
+            self.calls.append((list(argv), cwd))
+            return 0, json.dumps({"state": "pending", "statuses": []}), ""
         if argv[:3] == ["gh", "issue", "view"] and "title,body" in argv:
             self.calls.append((list(argv), cwd))
             return 0, json.dumps(self.issue), ""
@@ -106,11 +126,16 @@ class Runner(FakeRunner):
         return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin, on_line=on_line)
 
 
-def _review(head: str, state: str | None = None, *, comments=(), **kw) -> dict:
-    """An open, green PR on ``head``; ``state`` adds its ``belt/review`` status."""
+def _review(
+    head: str, state: str | None = None, *, comments=(), started: str | None = None, **kw
+) -> dict:
+    """An open, green PR on ``head``; ``state`` adds its ``belt/review`` status,
+    posted at ``started``."""
     pr = _open(head, **kw)
     if state:
         status = {"__typename": "StatusContext", "context": "belt/review", "state": state}
+        if started:
+            status["startedAt"] = started
         pr["statusCheckRollup"] = [*pr["statusCheckRollup"], status]
     pr["comments"] = [{"body": c, "createdAt": "2030-01-01T00:00:00Z"} for c in comments]
     return pr
@@ -122,10 +147,22 @@ def _reviewer(runner: FakeRunner, launch: Path, **kw):
     return _dispatcher(runner, launch, **{"reviewer": True, **kw})
 
 
-async def test_a_green_pr_gets_one_reviewer_and_its_pass_is_recorded(store, dirs, stages):
+def _status(state: str, description: str, sha: str = H1) -> dict:
+    return {"sha": sha, "state": state, "context": "belt/review", "description": description}
+
+
+RUNNING = _status("pending", "Belt review running")
+
+
+async def _cc(store, run_ref: str) -> dict:
+    return (await store.get_action(run_ref)).parameters["_code_change"]
+
+
+async def test_a_green_pr_gets_one_reviewer_and_belt_posts_its_pass(store, dirs, stages):
     repo, launch = dirs
     run_ref = await _queue(store, repo)
-    seq = [_review(H1), _review(H1, "PENDING"), _review(H1, "SUCCESS"), MERGED]
+    passed = _review(H1, "PENDING", comments=[_verdict("pass", H1)])
+    seq = [_review(H1), _review(H1, "PENDING"), passed, MERGED]
     runner = Runner(launch_out=SESSION, pr=seq)
     runner.run_ref = run_ref
 
@@ -138,18 +175,14 @@ async def test_a_green_pr_gets_one_reviewer_and_its_pass_is_recorded(store, dirs
     assert f"gh pr diff 9 -R {SLUG}" in brief and "#93" in brief
     for doc in ("docs/review-rubric.md", "docs/engineering.md", "docs/design.md"):
         assert doc in brief
-    assert f"gh api repos/{SLUG}/statuses/{H1}" in brief and "context=belt/review" in brief
-    assert "140" in brief and "Belt-Review:" in brief and "file:line" in brief
-    assert "never push" in brief.lower()
-    # Pending on the head at launch: the lane waits for the verdict.
-    assert runner.statuses == [
-        {
-            "sha": H1,
-            "state": "pending",
-            "context": "belt/review",
-            "description": "Belt review running",
-        }
-    ]
+    # The reviewer reports through ONE comment, never a status.
+    assert f"gh pr comment 9 -R {SLUG}" in brief
+    assert "`Belt-Review: pass`" in brief and "`Belt-Review: fail`" in brief
+    assert f"`Head: {H1}`" in brief and "file:line" in brief
+    assert "statuses" not in brief and "gh api" not in brief
+    assert "never post a commit status" in brief.lower() and "never push" in brief.lower()
+    # Belt posts both statuses with its own gh: pending at launch, then the verdict.
+    assert runner.statuses == [RUNNING, _status("success", PASSED)]
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.EXECUTED
     (review,) = action.parameters["_code_change"]["reviews"]
@@ -161,8 +194,10 @@ async def test_a_green_pr_gets_one_reviewer_and_its_pass_is_recorded(store, dirs
 async def test_a_failed_review_runs_a_fixer_then_reviews_the_new_head(store, dirs, stages):
     repo, launch = dirs
     run_ref = await _queue(store, repo)
+    said = _review(H1, "PENDING", comments=["Looks off.", REVIEW_NOTE])
     failed = _review(H1, "FAILURE", comments=["Looks off.", REVIEW_NOTE])
-    seq = [_review(H1), failed, failed, failed, _review(H2), _review(H2, "SUCCESS"), MERGED]
+    passed = _review(H2, "PENDING", comments=[REVIEW_NOTE, _verdict("pass", H2)])
+    seq = [_review(H1), said, failed, failed, failed, _review(H2), passed, MERGED]
     runner = Runner(launch_out=SESSION, pr=seq)
     runner.run_ref = run_ref
 
@@ -176,24 +211,47 @@ async def test_a_failed_review_runs_a_fixer_then_reviews_the_new_head(store, dir
     assert "Looks off." not in fix  # only the marked review comment
     assert "SAME branch" in fix and "Never merge" in fix
     assert H2 in briefs[3]
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    cc = await _cc(store, run_ref)
     assert [f["kind"] for f in cc["fixes"]] == ["review"]
     assert [(r["sha"], r["verdict"]) for r in cc["reviews"]] == [(H1, "fail"), (H2, "pass")]
-    assert [s["sha"] for s in runner.statuses] == [H1, H2]
+    assert [(s["sha"], s["state"]) for s in runner.statuses] == [
+        (H1, "pending"),
+        (H1, "failure"),  # Belt posts the fail it read off the comment
+        (H2, "pending"),
+        (H2, "success"),
+    ]
+
+
+async def test_a_verdict_counts_only_for_this_head_after_the_launch(store, dirs, stages):
+    """Ignored: a comment from before the launch, one naming another head, and
+    one whose first line is not exactly the verdict; so the review times out."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    pr = _review(
+        H1, "PENDING", comments=[_verdict("pass", H2), f"Belt-Review: pass, mostly\nHead: {H1}"]
+    )
+    pr["comments"].insert(0, {"body": _verdict("pass", H1), "createdAt": "2020-01-01T00:00:00Z"})
+    runner = Runner(launch_out=SESSION, pr=[_review(H1), pr, pr, pr, MERGED])
+    runner.run_ref = run_ref
+
+    await _reviewer(runner, launch, review_timeout_seconds=150).run(run_ref, workspace_id=WS)
+
+    assert runner.statuses == [RUNNING, _status("success", TIMED_OUT)]
+    cc = await _cc(store, run_ref)
+    assert [r["verdict"] for r in cc["reviews"]] == ["timeout"]
 
 
 async def test_the_review_fixer_shares_the_fix_cap(store, dirs, stages):
     repo, launch = dirs
     run_ref = await _queue(store, repo)
-    note = ["Belt-Review: x\n- A.swift:1 bad"]
-    seq = [_review(H1), *[_review(H1, "FAILURE", comments=note)] * 3]
-    seq += [_review(H2), *[_review(H2, "FAILURE", comments=note)] * 4]
+    seq = [_review(H1), *[_review(H1, "FAILURE", comments=[REVIEW_NOTE])] * 3]
+    seq += [_review(H2), *[_review(H2, "FAILURE", comments=[_verdict("fail", H2, "- A:1")])] * 4]
     runner = Runner(launch_out=SESSION, pr=seq)
     runner.run_ref = run_ref
 
     await _reviewer(runner, launch, fix_attempts=1).run(run_ref, workspace_id=WS)
 
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    cc = await _cc(store, run_ref)
     assert [f["kind"] for f in cc["fixes"]] == ["review"]
     assert "1 fixer" in cc["summary"] and "review" in cc["summary"]
     assert (await store.get_action(run_ref)).status == ActionStatus.PENDING
@@ -208,11 +266,60 @@ async def test_a_silent_reviewer_times_out_to_success(store, dirs, stages):
 
     await _reviewer(runner, launch, review_timeout_seconds=150).run(run_ref, workspace_id=WS)
 
-    assert [s["state"] for s in runner.statuses] == ["pending", "success"]
-    assert runner.statuses[1]["description"] == "review timed out"
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert runner.statuses == [RUNNING, _status("success", TIMED_OUT)]
+    cc = await _cc(store, run_ref)
     assert [r["verdict"] for r in cc["reviews"]] == ["timeout"]
+    assert cc["review_timeouts"] == 1  # counted on the blob
     assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+
+
+async def test_the_runs_own_deadline_settles_a_pending_review(store, dirs, stages):
+    """#163: the reviewer launched minutes before the run's TRACK deadline; the
+    tracker ended with ``belt/review`` pending and nothing ever replaced it."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    runner = Runner(launch_out=SESSION, pr=[_review(H1), _review(H1, "PENDING")])
+    runner.run_ref = run_ref
+
+    await _reviewer(runner, launch, timeout_seconds=150).run(run_ref, workspace_id=WS)
+
+    assert runner.statuses == [RUNNING, _status("success", TIMED_OUT)]
+    cc = await _cc(store, run_ref)
+    assert cc["headless_error"].startswith("TRACK: PR #9 unresolved")
+    assert [r["verdict"] for r in cc["reviews"]] == ["timeout"]
+
+
+async def test_a_stale_pending_status_nobody_owns_is_replaced(store, dirs, stages):
+    """A pending ``belt/review`` older than the timeout, with no review entry here
+    (an ended tracker's): Belt replaces it with success and launches no reviewer."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    stale = _review(H1, "PENDING", started="2020-01-01T00:00:00Z")
+    runner = Runner(launch_out=SESSION, pr=[stale, MERGED])
+    runner.run_ref = run_ref
+
+    await _reviewer(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 1 and runner.statuses == [_status("success", TIMED_OUT)]
+    cc = await _cc(store, run_ref)
+    assert [(r["sha"], r["verdict"]) for r in cc["reviews"]] == [(H1, "timeout")]
+    assert cc["review_timeouts"] == 1
+
+
+async def test_a_live_pending_status_is_adopted_not_doubled(store, dirs, stages):
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    now = datetime.now(UTC).isoformat()
+    live = _review(H1, "PENDING", started=now)
+    passed = _review(H1, "PENDING", started=now, comments=[_verdict("pass", H1)])
+    runner = Runner(launch_out=SESSION, pr=[live, passed, MERGED])
+    runner.run_ref = run_ref
+
+    await _reviewer(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 1  # no second reviewer for the head
+    assert runner.statuses == [_status("success", PASSED)]
+    assert [r["verdict"] for r in (await _cc(store, run_ref))["reviews"]] == ["pass"]
 
 
 async def test_a_reviewer_that_does_not_start_never_holds_the_line(store, dirs, stages):
@@ -224,7 +331,7 @@ async def test_a_reviewer_that_does_not_start_never_holds_the_line(store, dirs, 
     await _reviewer(runner, launch).run(run_ref, workspace_id=WS)
 
     assert [s["state"] for s in runner.statuses] == ["pending", "success"]
-    (review,) = (await store.get_action(run_ref)).parameters["_code_change"]["reviews"]
+    (review,) = (await _cc(store, run_ref))["reviews"]
     assert review["verdict"] == "error" and "no cloud session started" in review["error"]
 
 
@@ -237,14 +344,20 @@ async def test_the_reviewer_is_off_by_default(store, dirs):
     await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
     assert len(_briefs(runner)) == 1 and runner.statuses == []
-    assert "reviews" not in (await store.get_action(run_ref)).parameters["_code_change"]
+    assert "reviews" not in await _cc(store, run_ref)
 
 
-async def test_no_review_before_ci_reports_or_while_it_is_red(store, dirs, stages):
+@pytest.mark.parametrize(
+    "head_runs",
+    [[], [{"name": "Linux", "status": "in_progress", "conclusion": None}]],
+    ids=["no CI on the head yet", "CI still running on the head"],
+)
+async def test_no_review_before_ci_reports_or_while_it_is_red(store, dirs, stages, head_runs):
     repo, launch = dirs
     run_ref = await _queue(store, repo)
     empty = {**_review(H1), "statusCheckRollup": []}
-    runner = Runner(launch_out=SESSION, pr=[empty, _review(H1, red=True), MERGED])
+    seq = [empty, empty, _review(H1, red=True), MERGED]
+    runner = Runner(launch_out=SESSION, pr=seq, head_runs=head_runs)
     runner.run_ref = run_ref
 
     await _reviewer(runner, launch, fix_grace_seconds=10**9).run(run_ref, workspace_id=WS)
@@ -252,12 +365,89 @@ async def test_no_review_before_ci_reports_or_while_it_is_red(store, dirs, stage
     assert len(_briefs(runner)) == 1 and runner.statuses == []
 
 
+async def test_a_green_pr_with_an_empty_rollup_is_reviewed(store, dirs, stages):
+    """#174: CI the lane dispatched on a refreshed branch has no PR association,
+    and the PR-event run is parked ``action_required``, so the PR rollup is empty
+    while the head commit's own check runs are green, as the lane reads them."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    bare = {**_review(H1), "statusCheckRollup": []}
+    runs = [
+        {
+            "name": "Linux",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-10-12T15:00:00Z",
+        },
+        {
+            "name": "Linux",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-10-12T15:03:20Z",
+        },
+        {
+            "name": "macOS",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-10-12T15:03:28Z",
+        },
+        {
+            "name": "CI",
+            "status": "completed",
+            "conclusion": "action_required",
+            "started_at": "2026-10-12T15:03:09Z",
+        },
+    ]
+    passed = {
+        **bare,
+        "comments": [{"body": _verdict("pass", H1), "createdAt": "2030-01-01T00:00:00Z"}],
+    }
+    runner = Runner(launch_out=SESSION, pr=[bare, passed, MERGED], head_runs=runs)
+    runner.run_ref = run_ref
+
+    await _reviewer(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 2  # the worker, then the reviewer
+    assert runner.statuses == [RUNNING, _status("success", PASSED)]
+    api = [a[2] for a, _ in runner.calls if a[:2] == ["gh", "api"]]
+    assert f"repos/{SLUG}/commits/{H1}/check-runs?per_page=100" in api
+
+
+async def test_reviewers_wait_for_a_free_slot(store, dirs, stages):
+    """At most ``review_cap`` reviewers in flight: a green head waits while the
+    slots are held, and launches once one frees (here, a review past its due)."""
+    repo, launch = dirs
+    held = await _queue(store, repo)
+    runner = Runner(launch_out=SESSION, pr=[_review(H1)] * 3 + [MERGED])
+    runner.run_ref = held
+    d = _reviewer(runner, launch)
+    assert d.review_cap == 2
+    d._reviewing.update({"a" * 12: 10.0**9, "b" * 12: 10.0**9})
+
+    await d.run(held, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 1 and runner.statuses == []
+
+    freed = await _queue(store, repo, plan_action_id="plan-2")
+    passed = _review(H1, "PENDING", comments=[_verdict("pass", H1)])
+    runner = Runner(launch_out=SESSION, pr=[_review(H1)] * 3 + [passed, MERGED])
+    runner.run_ref = freed
+    d = _reviewer(runner, launch)
+    d._reviewing.update({"a" * 12: 10.0**9, "b" * 12: 90.0})  # due at t=90
+
+    await d.run(freed, workspace_id=WS)
+
+    assert len(_briefs(runner)) == 2 and runner.statuses == [RUNNING, _status("success", PASSED)]
+    assert H1 not in d._reviewing  # its slot is free again once the verdict is in
+
+
 async def test_a_resume_never_doubles_a_reviewer(store, dirs, stages):
     repo, launch = dirs
     run_ref = await _launched(store, repo, launched_at=time.time())
     pending = {"sha": H1, "verdict": "pending", "session_url": CLOUD_URL, "at": time.time()}
     await cloud_station._patch(store, run_ref, reviews=[pending])
-    runner = Runner(launch_out=SESSION, pr=[_review(H1, "PENDING"), _review(H1, "SUCCESS"), MERGED])
+    passed = _review(H1, "PENDING", comments=[_verdict("pass", H1)])
+    runner = Runner(launch_out=SESSION, pr=[_review(H1, "PENDING"), passed, MERGED])
     runner.run_ref = run_ref
 
     async def workspaces() -> list[str]:
@@ -265,18 +455,51 @@ async def test_a_resume_never_doubles_a_reviewer(store, dirs, stages):
 
     await _reviewer(runner, launch, workspaces_for=workspaces).resume_all()
 
-    assert not _briefs(runner) and runner.statuses == []
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
-    assert [r["verdict"] for r in cc["reviews"]] == ["pass"]
+    assert not _briefs(runner) and runner.statuses == [_status("success", PASSED)]
+    assert [r["verdict"] for r in (await _cc(store, run_ref))["reviews"]] == ["pass"]
+
+
+async def test_a_resume_settles_a_review_an_ended_tracker_left_pending(store, dirs, stages):
+    """#163's run: its tracker hit the TRACK deadline with the review pending, so
+    it is not resumable. The resume settles that review from one look at the PR,
+    and ignores the old-format ``Belt-Review: <sha>`` comment on it."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo)
+    pending = {"sha": H1, "verdict": "pending", "session_url": CLOUD_URL, "at": time.time() - 9000}
+    await cloud_station._patch(
+        store,
+        run_ref,
+        cloud={"session_url": CLOUD_URL, "launched_at": time.time() - 20000, "pr": 9},
+        reviews=[pending],
+        headless_error="TRACK: PR #9 unresolved after 14400s",
+    )
+    old = _review(
+        H1, "PENDING", started="2026-10-12T15:44:42Z", comments=[f"Belt-Review: {H1}\n- A:1"]
+    )
+    runner = Runner(launch_out=SESSION, pr=[old])
+    runner.run_ref = run_ref
+
+    async def workspaces() -> list[str]:
+        return [WS]
+
+    assert await _reviewer(runner, launch, workspaces_for=workspaces).resume_all() == 0
+
+    assert not _briefs(runner) and runner.statuses == [_status("success", TIMED_OUT)]
+    cc = await _cc(store, run_ref)
+    assert [r["verdict"] for r in cc["reviews"]] == ["timeout"] and cc["review_timeouts"] == 1
+    assert cc["headless_error"].startswith("TRACK:")  # still a failed run, not re-tracked
 
 
 async def test_the_tester_pr_is_reviewed_too(store, dirs, updates):
     repo, launch = dirs
     run_ref = await _queue(store, repo)
     green = _tester_pr(head=H2)
-    passed = {**green, "statusCheckRollup": _review(H2, "SUCCESS")["statusCheckRollup"]}
+    said = {
+        **green,
+        "comments": [{"body": _verdict("pass", H2), "createdAt": "2030-01-01T00:00:00Z"}],
+    }
     runner = Runner(
-        launch_out=SESSION, pr=MERGED, tester_pr=[green, passed, {**passed, "state": "MERGED"}]
+        launch_out=SESSION, pr=MERGED, tester_pr=[green, said, {**said, "state": "MERGED"}]
     )
     runner.run_ref = run_ref
     d = _tester(runner, launch, poll_seconds=60, lane_nudge_seconds=10**9)
@@ -286,7 +509,7 @@ async def test_the_tester_pr_is_reviewed_too(store, dirs, updates):
 
     briefs = _briefs(runner)
     assert len(briefs) == 3 and "#20" in briefs[2] and "reviewer" in briefs[2]
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    cc = await _cc(store, run_ref)
     assert [r["verdict"] for r in cc["tester"]["reviews"]] == ["pass"]
     assert "reviews" not in cc
     assert ("landed", "review") in updates
@@ -295,16 +518,17 @@ async def test_the_tester_pr_is_reviewed_too(store, dirs, updates):
 def test_wire_cloud_reads_the_reviewer_env(tmp_path, monkeypatch):
     monkeypatch.setattr(headless, "_PRODUCTION_DISPATCHER", None)
     monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR", str(tmp_path))
-    monkeypatch.delenv("POCKETPAW_FACTORY_CLOUD_REVIEWER", raising=False)
-    monkeypatch.delenv("POCKETPAW_FACTORY_CLOUD_REVIEW_TIMEOUT", raising=False)
+    for var in ("REVIEWER", "REVIEW_TIMEOUT", "REVIEW_CAP"):
+        monkeypatch.delenv(f"POCKETPAW_FACTORY_CLOUD_{var}", raising=False)
     assert cloud_station.wire_cloud() is True
     d = headless.resolve_headless_dispatcher()
-    assert d.reviewer is False and d.review_timeout_seconds == 1800.0
+    assert (d.reviewer, d.review_timeout_seconds, d.review_cap) == (False, 1800.0, 2)
     monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_REVIEWER", "1")
     monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_REVIEW_TIMEOUT", "600")
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_REVIEW_CAP", "5")
     assert cloud_station.wire_cloud() is True
     d = headless.resolve_headless_dispatcher()
-    assert d.reviewer is True and d.review_timeout_seconds == 600.0
+    assert (d.reviewer, d.review_timeout_seconds, d.review_cap) == (True, 600.0, 5)
 
 
 # -- orientation: the C4 components a task touches, and what they already offer --
