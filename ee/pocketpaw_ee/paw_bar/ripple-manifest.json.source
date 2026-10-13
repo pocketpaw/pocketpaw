@@ -28,7 +28,14 @@ figures, generatedAt 2026-10-13T06:42:11.500Z, upstream sha256
 019ffb6ecc67b08c657425fceaaa1f97cfb6e4d880ce3147bd7abb7aabc93e4a) and "iso-scene"
 from branch feat/iso-scene at cc1dd8c (#236, generatedAt 2026-10-12T14:43:17.980Z,
 upstream sha256 54bc615ec08001f282db7a535d597d30bbeb13712e701e35aec617180e0f08cc)
-(215 widgets). interval-workout's optional
+(215 widgets). Three top-level keys are added the same way, alone, after widgets:
+"waivers", "intents" and "craft" (the build loop's waivers, intent map, craft
+rules and critic lenses, from packages/core/src/manifest/craft.ts) from branch
+feat/core-loop at 0420fdd (generatedAt 2026-10-13T15:33:48.272Z, upstream sha256
+d6e7ce5f9ce33f6732230dce683ce7ed51f41c18a341cd53894538ebd0d28904); no widget
+changes, because a full refresh from there changes 56 widgets this slice does not
+touch. widget_relevance reads "intents" and concierge_runtime renders rule text
+from "craft". interval-workout's optional
 per-exercise "figure" (#216) is not pulled: nothing here checks exercise rows, and the
 widget matches figures by name. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.

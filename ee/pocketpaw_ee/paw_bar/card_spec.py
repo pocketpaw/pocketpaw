@@ -127,6 +127,9 @@ PAWBAR_PROFILE = CardProfile(
 
 RIPPLE_MANIFEST_PATH = Path(__file__).with_name("ripple-manifest.json")
 RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(encoding="utf-8"))
+# Craft rule id to its one-sentence text, from the manifest's ``craft`` (ripple's
+# craft.ts); the concierge's authoring rules that repeat a craft rule lead with it.
+CRAFT_RULES: dict[str, str] = {r["id"]: r["text"] for r in RIPPLE_MANIFEST["craft"]["rules"]}
 # Kept out of ripple cards: ``ripple-frame`` mounts a whole nested spec the bounds
 # don't see, ``embed`` frames any third-party URL, ``richtext`` renders trusted HTML
 # and ``rich-text`` (a Tiptap editor) seeds its ``value`` into the editor as HTML.

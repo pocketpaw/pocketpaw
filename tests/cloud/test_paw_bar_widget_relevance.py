@@ -1,10 +1,13 @@
 # The ripple cards paragraph's per-turn widget section (paw_bar/widget_relevance):
-# the widget a landing chip prompt needs is picked, follow-ups and earlier cards
-# keep their widgets, the prompt is byte-stable per input with the fixed core
-# first, and core plus the worst-case section stays under the 32,000 cap.
+# the widget a landing chip prompt needs is picked (intents from the vendored
+# manifest plus the local overlay), follow-ups and earlier cards keep their
+# widgets, the prompt is byte-stable per input with the fixed core first, the
+# rules that repeat a ripple craft rule lead with its manifest text, and core plus
+# the worst-case section stays no larger than before and under the 32,000 cap.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from pocketpaw_ee.paw_bar import widget_relevance
@@ -195,6 +198,80 @@ def test_a_figure_an_earlier_card_used_stays_in_full():
     assert line in _section(_paragraph(message, history))
 
 
+def test_the_overlay_holds_only_what_the_manifest_does_not_ship():
+    """Keywords and hints come from the manifest's intents; the local overlay keeps
+    extra keywords, figure's per-figure keywords and curated lines, never a keyword
+    the manifest already carries for that widget."""
+    manifest = {i["widget"]: i for i in RIPPLE_PROFILE.manifest["intents"]}
+    for name, entry in widget_relevance.OVERLAY.items():
+        assert set(entry) <= {"intents", "figures", "line"}, name
+        ask = set(manifest.get(name, {}).get("ask", ()))
+        assert not ask & set(entry.get("intents", ())), name
+
+
+def test_a_widget_out_of_the_overlay_still_matches_through_the_manifest():
+    """THE MUTATION THAT BREAKS THIS: build INTENTS from the overlay alone, or drop
+    the overlay's extra keywords in the merge."""
+    assert "menu-order" not in widget_relevance.OVERLAY
+    assert "menu-order" in widget_relevance.pick_widgets("I want a burger")
+    intents = RIPPLE_PROFILE.manifest["intents"]
+    alone = widget_relevance.intents_table(intents, {})
+    assert "burger" in alone["menu-order"]["intents"]
+    assert alone["growth-projection"]["hint"].startswith("It has its own deposit")
+    merged = widget_relevance.intents_table(
+        intents, {"menu-order": {"intents": ["burger", "kebab"]}, "map": {"line": "x"}}
+    )
+    assert merged["menu-order"]["intents"].count("burger") == 1
+    assert merged["menu-order"]["intents"][-1] == "kebab"
+    assert merged["map"]["line"] == "x" and "directions" in merged["map"]["intents"]
+
+
+@pytest.mark.parametrize(
+    "rule_id",
+    [
+        "keys-in-order",
+        "bind-derive",
+        "real-actions",
+        "same-site-links",
+        "lists-fresh",
+        "numbers-in-stat",
+        "reads-at-phone",
+        "fictional-names",
+    ],
+)
+def test_a_rule_that_repeats_a_craft_rule_leads_with_the_manifest_text(rule_id):
+    """The authoring rules that duplicate ripple's craft rules say them in the
+    manifest's words, so one rule source feeds the prompt.
+    THE MUTATION THAT BREAKS THIS: drop the manifest text from _craft."""
+    from pocketpaw_ee.paw_bar.card_spec import CRAFT_RULES
+    from pocketpaw_ee.paw_bar.concierge_runtime import _RIPPLE_RULES
+
+    craft = {r["id"]: r for r in RIPPLE_PROFILE.manifest["craft"]["rules"]}
+    assert CRAFT_RULES[rule_id] == craft[rule_id]["text"]
+    lead = f"   - {craft[rule_id]['text']} "
+    assert sum(line.startswith(lead) for line in _RIPPLE_RULES) == 1
+    assert lead in _paragraph()
+
+
+def test_every_craft_rule_the_prompt_cites_is_in_the_manifest():
+    """concierge_runtime reads CRAFT_RULES at import, so a re-vendor that drops a
+    cited id would break the import; this names the missing id instead. It reads
+    the source, not the module, and the manifest file, not card_spec.
+    THE MUTATION THAT BREAKS THIS: cite an id the manifest does not have."""
+    from pathlib import Path
+
+    import pocketpaw_ee.paw_bar as paw_bar
+
+    here = Path(paw_bar.__file__).parent
+    source = (here / "concierge_runtime.py").read_text()
+    cited = set(re.findall(r'_craft\(\s*"([\w-]+)"', source))
+    cited |= set(re.findall(r"CRAFT_RULES\[[\"']([\w-]+)[\"']\]", source))
+    manifest = json.loads((here / "ripple-manifest.json").read_text())
+    known = {r["id"] for r in manifest["craft"]["rules"]}
+    assert {"reads-at-phone", "tile-rows-wrap", "inputs-full-row"} <= cited
+    assert cited <= known, sorted(cited - known)
+
+
 def test_every_figure_has_its_own_intents():
     """A figures key that is not a catalog id would steer nothing."""
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
@@ -219,7 +296,7 @@ def test_a_how_does_it_work_question_about_a_machine_gets_the_drawing(message):
     The drawing must be offered for every such question, and its hint must say the
     card is the drawing, a calculator only after it and only when asked.
     THE MUTATION THAT BREAKS THIS: drop the machine intents or the never-a-calculator
-    sentence from the iso-scene entry in ripple_widget_intents.json."""
+    sentence from the manifest's iso-scene intent."""
     assert "iso-scene" in widget_relevance.pick_widgets(message)
     iso = widget_relevance.full_line("iso-scene")
     assert "never a calculator, form or number inputs" in iso
@@ -367,11 +444,19 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
     assert _paragraph("Show me a plane in 3D").startswith(core)
 
 
+# The chat prompt as it stood before its intents and craft lines came from the
+# ripple manifest: the net prompt may not grow past it (build-loop GC 9), and
+# the worst case keeps the 800-char margin under the 32,000 cap.
+_CORE_CHARS = 18_630
+_WORST_CHARS = 31_056
+
+
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
-    """The fixed core is 18,630 chars (the drawing widgets added only their two
-    names to the index); the worst per-turn section is the MAX_PICKED longest
-    candidate lines, figure's at its longest (MAX_FULL_FIGURES figures in full, the
-    rest ids and titles), so the paragraph stays well under the 32,000 cap."""
+    """The fixed core is at most _CORE_CHARS; the worst per-turn section is the
+    MAX_PICKED longest candidate lines, figure's at its longest (MAX_FULL_FIGURES
+    figures in full, the rest ids and titles), so the paragraph is no larger than
+    _WORST_CHARS and stays 800 chars under the 32,000 cap. THE MUTATION THAT
+    BREAKS THIS: lengthen any rule or hint the prompt carries."""
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
 
     core = _paragraph()
@@ -384,7 +469,7 @@ def test_core_plus_the_worst_case_section_stays_under_the_cap():
         reverse=True,
     )
     worst = len(core) + 1 + len(_SECTION) + sum(longest[: widget_relevance.MAX_PICKED])
-    assert len(core) < 20_000
-    assert worst < 31_200
+    assert len(core) <= _CORE_CHARS
+    assert worst <= _WORST_CHARS < 32_000 - 800
     typical = sorted(len(_paragraph(m)) for m, _ in _CHIPS)[len(_CHIPS) // 2]
     assert len(core) < typical < worst

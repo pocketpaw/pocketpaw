@@ -69,7 +69,7 @@ _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
 # (vendored from ripple branch feat/play-wave pending a release; drop the widget examples,
 # update the pins below).
-_RIPPLE_MANIFEST_SHA256 = "11f01ddee912e1294f3c968872b12132c5476fc0caca6d6a8e9d6992a814af1c"
+_RIPPLE_MANIFEST_SHA256 = "448e63a011bc69ab38880cd605d95be525e604fd473ad7da58286979c2974070"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
@@ -296,7 +296,7 @@ def test_the_ripple_paragraph_details_the_data_widgets_at_the_landings_width():
     entity = next(line for line in text.splitlines() if line.startswith("   - entity-detail {"))
     assert "kpis?" in entity and "meta?" in entity and "status?" in entity
     assert "300px" not in text
-    assert "720px" in text and "360px" in text
+    assert "720 px" in text and "360 px" in text
     assert '"columns": "repeat(auto-fit, minmax(150px, 1fr))"' in text
     assert "Aim for about 25 to 90 nodes" in text
     assert "keep a card under about 10,000 characters" in text
@@ -547,7 +547,7 @@ def test_the_flow_rule_teaches_the_steps_the_collected_answers_and_ask():
         assert phrase in rule, phrase
     assert rule.endswith(json.dumps(_RIPPLE_FLOW_EXAMPLE, separators=(",", ":")))
     # The allowed-actions rule names these emits, so it never reads as dropping them.
-    actions = next(r for r in _RIPPLE_RULES if "The only actions are" in r)
+    actions = next(r for r in _RIPPLE_RULES if "Only real actions." in r)
     assert "emit of add_to_cart, checkout, ask or, in a flow card, flow.next" in actions
     ask = json.dumps(_RIPPLE_ASK, separators=(",", ":"))
     assert f"{ask} (plain text" in text and "a comparison item's actions list" in text

@@ -9,6 +9,24 @@
     ]
   },
   {
+    "label": "the intents table is built from the overlay alone, so the manifest's keywords and hints are lost",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "INTENTS = intents_table(RIPPLE_PROFILE.manifest[\"intents\"], OVERLAY)",
+    "replace": "INTENTS = intents_table([], OVERLAY)",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_widget_out_of_the_overlay_still_matches_through_the_manifest"
+    ]
+  },
+  {
+    "label": "the overlay's extra keywords are dropped in the merge",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "        entry[\"intents\"] = asks + [k for k in extra.get(\"intents\", ()) if k not in asks]\n",
+    "replace": "        entry[\"intents\"] = asks\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_widget_out_of_the_overlay_still_matches_through_the_manifest"
+    ]
+  },
+  {
     "label": "history is not scored, so a follow-up loses its widget",
     "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
     "find": "        score = 2 * _score(name, now, now_words) + _score(name, past, past_words)",
@@ -143,6 +161,15 @@
     "replace": "    return seen + [fid for _, _, fid in sorted(scored)]\n",
     "tests": [
       "tests/cloud/test_paw_bar_widget_relevance.py::test_core_plus_the_worst_case_section_stays_under_the_cap"
+    ]
+  },
+  {
+    "label": "the craft-backed authoring rules lose the manifest's rule text",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return f\"   - {CRAFT_RULES[rule_id]} {detail}\"\n",
+    "replace": "    return f\"   - {detail}\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_rule_that_repeats_a_craft_rule_leads_with_the_manifest_text"
     ]
   }
 ]
