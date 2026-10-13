@@ -15,6 +15,8 @@ the lifecycle fields it carries:
   judges running runs by it.
 - ``card_audits``: the browser's audit counts per chat card, keyed by the
   stream's card id. Integers and widget type names only, never spec or text.
+- ``card_breaches``: chat cards that streamed past the prompt's card ceiling,
+  card id -> output chars.
 """
 
 from __future__ import annotations
@@ -74,6 +76,9 @@ class ChatRunDoc(Document):
     # ``{counts: {check: int}, waived, widget_types, ms, seen_ms, at}``. Written
     # by ``record_card_audit``; a repeat post for the same card replaces its row.
     card_audits: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Per chat card: its body length in chars when it streamed past
+    # ``concierge_runtime.CARD_CEILING_CHARS``. Written by ``record_card_breaches``.
+    card_breaches: dict[str, int] = Field(default_factory=dict)
     createdAt: datetime = Field(default_factory=_utcnow)
     started_at: datetime | None = None
     # Liveness stamp from the worker driving this run. Refreshed on a timer, not

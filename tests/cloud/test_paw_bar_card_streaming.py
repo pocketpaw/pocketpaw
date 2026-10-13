@@ -10,6 +10,7 @@
 # unchanged. The realistic card is ripple's recorded explainer scenario
 # (tests/fixtures/ripple_explainer_card.json).
 # A flow card streams like any other and ends with the verdict the whole card gets.
+# A card past the prompt's ~10k char ceiling still renders; the run records it.
 # A card missing only closing brackets, or with one surplus closer before its
 # state, streams raw and is repaired at its close.
 #
@@ -536,6 +537,49 @@ async def test_a_ripple_site_streams_the_card_and_keeps_it_in_the_transcript(
     # The transcript keeps the validated fence, as it did before streaming.
     fence = render_card(body, [], profile=RIPPLE_PROFILE)
     assert await _transcript() == f"Gears, briefly.\n{fence}\nAsk me more."
+
+
+async def _breaches() -> dict:
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    runs = await ChatRunDoc.find(ChatRunDoc.context_type == "concierge").to_list()
+    return runs[0].card_breaches
+
+
+def _long_card() -> str:
+    """A valid card well past the prompt's 10,000-char ceiling (about 14k)."""
+    line = "turn the small gear slowly and watch the big one follow along. " * 3
+    kids = [{"type": "text", "props": {"text": f"Step {i}: {line}"}} for i in range(60)]
+    return json.dumps({"ui": {"type": "flex", "props": {"direction": "column"}, "children": kids}})
+
+
+@pytest.mark.asyncio
+async def test_a_card_past_the_ceiling_still_renders_and_the_run_records_one_breach(
+    concierge_client, model, monkeypatch
+):
+    from pocketpaw_ee.paw_bar.concierge_runtime import CARD_CEILING_CHARS
+
+    client, store = concierge_client
+    body = _long_card() + "\n"
+    assert len(body) > CARD_CEILING_CHARS
+    reply = f"Gears, at length.\n{_fence(body)}\nThat is all."
+    model.reply = [reply[i : i + 500] for i in range(0, len(reply), 500)]
+
+    frames = await _ripple_turn(client, store, monkeypatch)
+
+    assert "card.final" in [e for e, _ in frames]
+    assert await _breaches() == {"c1": len(body)}
+
+
+@pytest.mark.asyncio
+async def test_a_card_under_the_ceiling_records_no_breach(concierge_client, model, monkeypatch):
+    client, store = concierge_client
+    model.reply = [f"Gears.\n{_fence(json.dumps(_explainer()) + chr(10))}\nDone."]
+
+    frames = await _ripple_turn(client, store, monkeypatch)
+
+    assert "card.final" in [e for e, _ in frames]
+    assert await _breaches() == {}
 
 
 @pytest.mark.asyncio
