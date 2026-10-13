@@ -199,13 +199,17 @@ def _make_client(monkeypatch, *, workspace_id: str = WS, user_id: str = USER) ->
     return TestClient(app)
 
 
-def _charter(budget: int = 3, says_no=None, boundaries=None) -> dict:
+def _charter(budget: int = 3, says_no=None, boundaries=None, max_in_flight=None) -> dict:
     return {
         "goal": "keep dependencies fresh and CVE-free",
         "kpis": [{"name": "open_cves", "target": 0, "direction": "down"}],
         "says_no": says_no if says_no is not None else ["major version bumps"],
         "boundaries": boundaries if boundaries is not None else ["never touch auth code"],
-        "budget": {"max_tasks_per_shift": budget, "gate_minutes_per_week": 15},
+        "budget": {
+            "max_tasks_per_shift": budget,
+            "max_in_flight": max_in_flight,
+            "gate_minutes_per_week": 15,
+        },
         "cadence": "manual",
     }
 
@@ -1275,14 +1279,15 @@ async def test_backlog_carries_open_sightings_and_resolves_landed_ones(
     fails. Shift 2 must still see the 2 unaddressed sightings AND the failed
     task's sighting (with its attempt), and not the landed one, which is
     recorded resolved. Shift 3 sees shift 2's still-running tasks as IN FLIGHT
-    and the mock plans only what is not."""
+    and the mock plans only what is not. A cap of 4 runs in flight leaves shift
+    3 room for 2 more while shift 2's two run."""
     from pocketpaw_ee.cloud.mandates.domain import SightingDoc
 
     monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "station")
     client = _make_client(monkeypatch)
     repo = tmp_path / "toy"
     repo.mkdir()
-    mandate_id = _create_mandate(client, repo, budget=2)
+    mandate_id = _create_mandate(client, repo, budget=2, max_in_flight=4)
     ids = {}
     for key, text, sev in (
         ("customer", "can't add a customer", 5),
@@ -1357,7 +1362,13 @@ async def test_backlog_carries_open_sightings_and_resolves_landed_ones(
     )
     shift3 = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
     call = foreman_calls[-1]
-    open3 = {s["summary"]: s for s in call.context.sightings}
+    open3 = {s["summary"]: s for s in [*call.context.sightings, *call.context.in_flight]}
+    # The in-flight ones ride apart from the work the foreman may plan.
+    assert {s["summary"] for s in call.context.in_flight} == {
+        "buy button does nothing",
+        "tabs reset on reload",
+    }
+    assert not any(s["in_flight"] for s in call.context.sightings)
     assert open3["buy button does nothing"]["in_flight"]
     assert [t["status"] for t in open3["buy button does nothing"]["tasks"]] == [
         "failed",
@@ -1463,9 +1474,10 @@ async def test_gate_rejection_is_shift_history_not_backlog(
 
     shift2 = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
     call = foreman_calls[-1]
-    summaries = {s["summary"]: s for s in call.context.sightings}
+    summaries = {s["summary"]: s for s in [*call.context.sightings, *call.context.in_flight]}
     assert set(summaries) == {"export is broken", "dark mode please"}
     assert summaries["export is broken"]["in_flight"]  # its station run is queued
+    assert [s["summary"] for s in call.context.in_flight] == ["export is broken"]
     assert summaries["dark mode please"]["tasks"] == []  # the rejected task was dropped
     (h1,) = call.context.history
     assert h1["gate"] == ['reject "Address: dark mode please": not this quarter']
@@ -1477,7 +1489,7 @@ async def test_gate_rejection_is_shift_history_not_backlog(
     h2 = call.context.history[-1]
     assert h2["no"] == shift2["no"] and h2["state"] == "in_gate"
     assert [(t["status"], t["in_flight"]) for t in h2["tasks"]] == [("pending at plan gate", True)]
-    assert all(s["in_flight"] for s in call.context.sightings)
+    assert call.context.sightings == [] and len(call.context.in_flight) == 2
 
 
 # ---------------------------------------------------------------------------

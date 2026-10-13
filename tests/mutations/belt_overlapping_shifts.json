@@ -1,0 +1,86 @@
+[
+  {
+    "label": "the headroom ignores the runs in flight (no cap at all)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "headroom = max(0, min(cap - in_flight, budget.max_tasks_per_shift))",
+    "replace": "headroom = max(0, budget.max_tasks_per_shift)",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_scheduler_starts_a_shift_while_runs_are_in_flight_until_the_cap",
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_shift_budget_is_the_headroom"
+    ]
+  },
+  {
+    "label": "the headroom is not capped by max_tasks_per_shift",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "headroom = max(0, min(cap - in_flight, budget.max_tasks_per_shift))",
+    "replace": "headroom = max(0, cap - in_flight)",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_shift_budget_is_the_headroom"
+    ]
+  },
+  {
+    "label": "a charter without max_in_flight gets a wide cap instead of max_tasks_per_shift",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "cap = budget.max_in_flight or budget.max_tasks_per_shift",
+    "replace": "cap = budget.max_in_flight or 20",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_an_old_charter_without_max_in_flight_behaves_as_before"
+    ]
+  },
+  {
+    "label": "an orphan with no store write holds its slot forever",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "not stamp or _aware(datetime.fromisoformat(stamp)) > stale",
+    "replace": "True",
+    "tests": [
+      "tests/cloud/test_belt_continuous_cadence.py::test_a_full_line_waits_until_an_idle_orphan_stops_counting"
+    ]
+  },
+  {
+    "label": "the continuous due check ignores the cap",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if _headroom(doc.charter.budget, runs, now)[\"budget\"] < 1:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_scheduler_starts_a_shift_while_runs_are_in_flight_until_the_cap",
+      "tests/cloud/test_belt_overlapping_shifts.py::test_a_settling_run_wakes_a_full_line_for_a_top_up"
+    ]
+  },
+  {
+    "label": "a full line still opens a shift",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if capacity[\"budget\"] < 1:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_a_full_line_refuses_a_shift_without_opening_one"
+    ]
+  },
+  {
+    "label": "the foreman plans from in-flight sightings too",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "shown = free[:_BACKLOG_CAP]",
+    "replace": "shown = backlog[\"open\"][:_BACKLOG_CAP]",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_foreman_context_excludes_in_flight_issues"
+    ]
+  },
+  {
+    "label": "a task citing an in-flight sighting is kept",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "kept = [t for t in plan.tasks if not in_flight_ids & {str(r) for r in t.evidence_refs}]",
+    "replace": "kept = list(plan.tasks)",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_foreman_context_excludes_in_flight_issues",
+      "tests/cloud/test_belt_overlapping_shifts.py::test_a_plan_of_only_in_flight_work_stands_down"
+    ]
+  },
+  {
+    "label": "the auto plan gate checks the charter max, not the shift budget",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "budget_max=capacity[\"budget\"],",
+    "replace": "budget_max=doc.charter.budget.max_tasks_per_shift,",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_auto_plan_gate_uses_the_shift_budget"
+    ]
+  }
+]

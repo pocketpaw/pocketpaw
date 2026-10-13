@@ -1279,14 +1279,15 @@ def test_wire_cloud_reads_the_lane_nudge_env(tmp_path, monkeypatch):
 
 async def _mandate_world(store: InstinctStore, repo: Path) -> tuple[str, str, str]:
     """A continuous mandate with two open sightings and a done shift whose plan's
-    task 1 cites the first, plus that task's queued run: (mandate, run, cited)."""
+    task 1 cites the first, plus that task's queued run: (mandate, run, cited).
+    Its in-flight cap is 1, so the run in flight is what holds the line."""
     created = await mandate_service.create_mandate(
         WS,
         "u1",
         {
             "name": "m",
             "surface": {"repo_id": str(repo)},
-            "charter": {"goal": "g", "cadence": "continuous"},
+            "charter": {"goal": "g", "cadence": "continuous", "budget": {"max_in_flight": 1}},
         },
     )
     mid = created["mandate"]["id"]

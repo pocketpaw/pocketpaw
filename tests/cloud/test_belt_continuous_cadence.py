@@ -2,12 +2,13 @@
 #
 # A continuous mandate is due when it is active, its latest shift is finished
 # (``done``, or ``stood_down`` with a sighting filed or a run settled since:
-# landed, rejected, released or failed), none of that
-# shift's runs is still in flight (unless the shift is older than the stall
-# timeout), it has an open sighting no task is working, and the minimum gap
-# since the last shift has passed. A shift stuck in ``planning`` or
+# landed, rejected, released or failed), the line has headroom under its
+# in-flight cap (a run with no store write for the stall timeout no longer
+# counts), it has an open sighting no task is working, and the minimum gap
+# since the last shift started has passed. A shift stuck in ``planning`` or
 # ``executing`` is released by the stall timeout; one waiting ``in_gate`` for a
-# human never is. Also pinned: the scheduler loop ticks at the continuous
+# human never is. Overlapping shifts and the shift budget have their own file
+# (``test_belt_overlapping_shifts.py``). Also pinned: the scheduler loop ticks at the continuous
 # interval while any continuous mandate exists, and the hourly one otherwise.
 # The clock is injected; the instinct store is an isolated file.
 
@@ -29,17 +30,28 @@ from tests.cloud.test_belt_mandates import USER, WS, _seed_run, store  # noqa: E
 pytestmark = pytest.mark.usefixtures("any_repo_root", "store")
 
 
-async def _mandate(cadence: str = "continuous", status: str | None = None) -> str:
+async def _mandate(cadence: str = "continuous", budget: dict | None = None) -> str:
     created = await mandate_service.create_mandate(
         WS,
         USER,
         {
             "name": f"m-{cadence}",
             "surface": {"repo_id": "/tmp/x"},
-            "charter": {"goal": "keep it healthy", "cadence": cadence},
+            "charter": {"goal": "keep it healthy", "cadence": cadence, "budget": budget or {}},
         },
     )
     return created["mandate"]["id"]
+
+
+async def _age_runs(store, hours: float) -> None:  # noqa: F811
+    """Backdate every run's last store write: an orphan nothing touches."""
+    import aiosqlite
+
+    async with aiosqlite.connect(store._db_path) as db:
+        await db.execute(
+            "UPDATE instinct_actions SET updated_at = datetime('now', ?)", (f"-{hours} hours",)
+        )
+        await db.commit()
 
 
 async def _sighting(mandate_id: str, text: str = "buy button does nothing") -> None:
@@ -92,26 +104,26 @@ async def test_a_plan_waiting_for_a_human_is_never_released(mongo_db):
     assert not await _due(mid)
 
 
-async def test_runs_in_flight_hold_the_next_shift_until_the_stall_timeout(mongo_db, store):  # noqa: F811
-    mid = await _mandate()
+async def test_a_full_line_waits_until_an_idle_orphan_stops_counting(mongo_db, store):  # noqa: F811
+    mid = await _mandate(budget={"max_in_flight": 1})
     await _sighting(mid)
     plan_id = "plan-1"
     await _seed_run(
         store, mid, "fix the buy button", plan_action_id=plan_id, task_index=1, station_pending=True
     )
     await _shift(mid, "done", timedelta(minutes=30), plan_action_id=plan_id)
-    assert not await _due(mid), "the shift's run is still queued"
+    assert not await _due(mid), "the line's one slot is taken by a queued run"
 
-    await ShiftDoc.find(ShiftDoc.mandate_id == mid).delete()
-    await _shift(mid, "done", timedelta(hours=4), plan_action_id=plan_id)
-    assert await _due(mid), "past the 3 h stall timeout"
+    await _age_runs(store, 4)
+    assert await _due(mid), "no store write for the 3 h stall timeout: an orphan"
 
 
 async def test_stall_timeout_is_env_overridable(mongo_db, store, monkeypatch):  # noqa: F811
-    mid = await _mandate()
+    mid = await _mandate(budget={"max_in_flight": 1})
     await _sighting(mid)
     await _seed_run(store, mid, "t", plan_action_id="p", task_index=1, station_pending=True)
-    await _shift(mid, "done", timedelta(minutes=90), plan_action_id="p")
+    await _shift(mid, "done", timedelta(minutes=30), plan_action_id="p")
+    await _age_runs(store, 1.5)
     assert not await _due(mid)
     monkeypatch.setenv("POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS", "1")
     assert await _due(mid)

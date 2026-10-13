@@ -261,8 +261,8 @@ async def test_continuous_due_check_skips_a_mandate_without_the_issues_toggle(
 
 
 async def test_a_busy_line_still_sights_new_issues(tmp_path, mongo_db, monkeypatch, store):  # noqa: F811
-    """A run in flight holds the next shift, but never the patrol: a tester's bug
-    filed while the line is building must reach the backlog right away."""
+    """A line at its in-flight cap holds the next shift, but never the patrol: a
+    tester's bug filed while the line is building must reach the backlog."""
     from datetime import timedelta
 
     from pocketpaw_ee.cloud.mandates import service as mandate_service
@@ -271,7 +271,9 @@ async def test_a_busy_line_still_sights_new_issues(tmp_path, mongo_db, monkeypat
     from tests.cloud.test_belt_mandates import _seed_run
 
     gh = FakeGh([_issue(121, "suite", "bug")])
-    mandate_id = await _github_mandate(tmp_path, monkeypatch, gh, cadence="continuous")
+    mandate_id = await _github_mandate(
+        tmp_path, monkeypatch, gh, cadence="continuous", budget={"max_in_flight": 1}
+    )
     await _seed_run(
         store, mandate_id, "in flight", plan_action_id="plan-1", task_index=1, station_pending=True
     )
@@ -283,7 +285,7 @@ async def test_a_busy_line_still_sights_new_issues(tmp_path, mongo_db, monkeypat
 
     rows = await mandate_service.list_cadence_due(datetime.now(UTC))
 
-    assert mandate_id not in {r["mandate_id"] for r in rows}, "the run in flight holds the shift"
+    assert mandate_id not in {r["mandate_id"] for r in rows}, "the line is at its cap of 1"
     sightings = (await mandate_service.list_sightings("w1", "u1", mandate_id))["sightings"]
     assert [s["evidence"]["number"] for s in sightings] == [121]
 

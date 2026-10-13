@@ -70,15 +70,19 @@ class Kpi(BaseModel):
 
 
 class Budget(BaseModel):
-    """Per-shift + per-week budget caps on a mandate charter.
+    """Per-shift, in-flight + per-week budget caps on a mandate charter.
 
-    ``max_tasks_per_shift`` is the hard cap the foreman MUST respect and the
-    plan-gate executor RE-validates at approval time. ``gate_minutes_per_week``
-    is the human-review time budget the mandate is allowed to consume (advisory
-    at demo bar).
+    ``max_tasks_per_shift`` is the hard cap on one plan: machine validation
+    refuses more and the plan-gate executor RE-validates it at approval time.
+    ``max_in_flight`` caps the line's runs in flight at once; a shift's budget is
+    the headroom under it (``service._headroom``). ``None`` (every charter that
+    predates the field) reads as ``max_tasks_per_shift``.
+    ``gate_minutes_per_week`` is the human-review time budget the mandate is
+    allowed to consume (advisory at demo bar).
     """
 
     max_tasks_per_shift: int = 3
+    max_in_flight: int | None = None
     gate_minutes_per_week: int = 15
 
 
@@ -89,8 +93,9 @@ class Charter(BaseModel):
     ``says_no`` + ``boundaries`` are hard constraints the foreman must honor
     (a boundary OVERRIDES a KPI opportunity). ``budget`` caps the per-shift
     task count + weekly gate minutes. ``cadence`` is ``"daily"``, ``"weekly"``,
-    ``"continuous"`` (the next shift fires once the last one's work is finished
-    and open sightings remain; ``service.list_cadence_due`` has the rules) or
+    ``"continuous"`` (a shift fires while the line has headroom under its
+    in-flight cap and unworked open sightings remain; ``service.list_cadence_due``
+    has the rules) or
     ``"manual"`` (the scheduler never fires a manual mandate).
 
     ``checks`` are commands that must pass before a headless develop run's diff

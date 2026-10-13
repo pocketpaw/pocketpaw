@@ -1,53 +1,47 @@
 # ee/pocketpaw_ee/cloud/mandates/foreman.py — the FOREMAN, a mandate's LLM seat.
 #
-# Once per SHIFT it reads the charter, the OPEN sightings (the backlog: every
-# sighting no landed task has resolved, capped, each marked new or carried over,
-# annotated with the tasks that cite it, ``IN FLIGHT`` (and the open PR closing
-# its issue, if that is why) and its full ``Depends on:`` line if any, with the
-# named issues' open / closed states, capped per sighting and per prompt), the
-# last 3 shifts' outcomes (each task's run result: landed, failed with its
-# reason, rejected, or in flight; and what a human said at the gate), the
-# mandate's LINE as git has it (the subjects of its commits not in the base yet,
-# awaiting the captain's merge; built either way), the bound repo's C4
-# components, and (when a soul is bound) the soul recall, then makes EXACTLY ONE
-# LLM call that returns a strict-JSON PlanProposal: a FEW tasks (≤ the charter's
-# budget) or an explicit empty plan with a reason. A task may name a charter
-# ``recipe`` (a deterministic command) instead of LLM develop work.
+# Once per SHIFT it reads the charter; the OPEN sightings no task is working
+# (capped; each new or carried over, with the tasks citing it and its full
+# ``Depends on:`` line plus the named issues' states); the IN FLIGHT ones apart
+# (a task or an open PR closing the issue works them: never planned again) with
+# the line's runs in flight against its cap; the last 3 shifts' outcomes (each
+# task's run result and what a human said at the gate); the mandate's LINE as
+# git has it (built, awaiting the captain's merge); the bound repo's C4
+# components; and the soul recall. Then it makes EXACTLY ONE LLM call that
+# returns a strict-JSON PlanProposal: a FEW tasks (at most ``shift_budget``, the
+# line's headroom under its in-flight cap, never over the charter's
+# ``max_tasks_per_shift``) or an explicit empty plan with a reason. A task may
+# name a charter ``recipe`` (a deterministic command) instead of develop work.
 #
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
 # runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
-# prompt on stdin, in an empty temp dir with the factory's scrubbed env — the
-# prompt carries third-party sighting text — timing out after
-# ``POCKETPAW_MANDATE_FOREMAN_TIMEOUT`` s, default 300) and reads the envelope's
-# ``result``; ``mock`` is deterministic (one task per open sighting not already
-# in flight, highest severity first; ``set_mock_plan()`` overrides it in tests).
-# ``claude_cli_argv`` / ``claude_result_text`` (``claude_result_envelope``
-# underneath, ``json`` and ``stream-json`` alike) are the ONE place the factory
+# prompt on stdin, in an empty temp dir with the factory's scrubbed env, timing
+# out after ``POCKETPAW_MANDATE_FOREMAN_TIMEOUT`` s, default 300); ``mock`` is
+# deterministic (one task per open sighting not in flight, highest severity
+# first, up to the shift budget; ``set_mock_plan()`` overrides it in tests).
+# ``claude_cli_argv`` / ``claude_result_text`` are the ONE place the factory
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
-# and model (a crew worker's own model when the caller passes one, else
-# ``POCKETPAW_FACTORY_CLAUDE_MODEL``; ``--model`` only when either is set), and
-# they pin every seat to no settings files, no MCP and no hooks (only
-# the develop station's owner setup opts out) and no persisted session (no seat
-# opts out). ``run_claude_no_tools`` is the sandboxed
-# tool-less call the foreman and the autopilot personas share. Prompts ride
-# stdin, never argv or a shell.
+# and model (a crew worker's own, else ``POCKETPAW_FACTORY_CLAUDE_MODEL``), and
+# they pin every seat to no settings files, MCP, hooks or persisted session
+# (only the develop station's owner setup opts out of the first three).
+# ``run_claude_no_tools`` is the sandboxed tool-less call the foreman and the
+# autopilot personas share. Prompts ride stdin, never argv or a shell.
 #
-# Validation discipline (sim-proven — do not weaken): machine validation runs on
-# ACTION fields (title, expected_outcome) and structural fields (task count vs
-# budget, evidence_refs non-empty, recipe names exist in the charter) ONLY. The
-# ``why`` narration is NEVER scanned — a well-behaved foreman names forbidden
-# things precisely when REFUSING them.
+# Validation discipline (sim-proven — do not weaken): ``validate_plan`` checks
+# ACTION fields (title, expected_outcome) and structure (task count vs the
+# charter's max, evidence_refs non-empty, recipe names declared) ONLY; the
+# ``why`` narration is NEVER scanned, since a good foreman names forbidden
+# things when REFUSING them. ``drop_in_flight`` then drops any task citing an
+# in-flight sighting (dropping, not refusing: a refused plan holds the line).
 #
 # Prompt rules (sim-validated — keep them in ``build_prompt``): charter verbatim
-# with BOUNDARIES first; ≤ budget tasks; every task cites sighting ids + names an
-# expected KPI direction; an EMPTY plan with a reason is correct when signals are
-# quiet or all in flight; boundaries override KPI opportunities; never repeat a
-# failed approach without saying what changed; tasks in one shift are independent
-# of each other (they develop from the same line tip and land separately;
-# dependent follow-up waits for a later shift, which validation cannot detect);
-# work on the line is built and never re-planned; an
-# in-flight task is never planned again; a task extends the repo's existing C4
-# components (listed in the prompt) and never plans a duplicate; strict JSON only.
+# with BOUNDARIES first; at most the shift budget; every task cites sighting ids
+# and names an expected KPI direction; an EMPTY plan with a reason is correct
+# when signals are quiet or all in flight; boundaries override KPI
+# opportunities; never repeat a failed approach without saying what changed;
+# tasks in one shift are independent (each develops from the same line tip);
+# work on the line and in-flight work are never planned again; a task extends
+# the repo's existing C4 components, never duplicates one; strict JSON only.
 
 from __future__ import annotations
 
@@ -128,6 +122,13 @@ class ForemanContext:
     issue_states: dict[int, str] = field(default_factory=dict)
     # How many sightings were open before the cap (0 = same as ``sightings``).
     open_total: int = 0
+    # The open sightings already being worked (same shape, ``in_flight`` true):
+    # a task citing one is in flight, or an open PR closes its issue. Shown so
+    # the foreman never plans them again; ``drop_in_flight`` enforces it.
+    in_flight: list[dict[str, Any]] = field(default_factory=list)
+    # The line's capacity (``service._headroom``): ``in_flight`` runs, ``cap``
+    # and this shift's task ``budget``. Empty = the charter's max_tasks_per_shift.
+    capacity: dict[str, int] = field(default_factory=dict)
     # Last 3 shifts, oldest-first: {no, state, outcome, tasks, gate} — outcome
     # is the free-text result of the shift; tasks are its planned tasks with
     # their run results ({title, evidence_refs, status, in_flight, error});
@@ -321,7 +322,7 @@ class MockLlm:
         if _MOCK_PLAN is not None:
             return _MOCK_PLAN if isinstance(_MOCK_PLAN, str) else json.dumps(_MOCK_PLAN)
 
-        budget = int((context.charter.get("budget") or {}).get("max_tasks_per_shift") or 3)
+        budget = shift_budget(context)
         kpis = context.charter.get("kpis") or []
         kpi_hint = f"{kpis[0]['name']} {kpis[0]['direction']}" if kpis else "surface health up"
         ranked = sorted(
@@ -357,6 +358,13 @@ class MockLlm:
                 "tasks": tasks,
             }
         )
+
+
+def shift_budget(context: ForemanContext) -> int:
+    """This shift's task budget: the line's headroom when the caller measured
+    it, else the charter's ``max_tasks_per_shift``."""
+    charter_max = int((context.charter.get("budget") or {}).get("max_tasks_per_shift") or 3)
+    return int(context.capacity.get("budget", charter_max))
 
 
 def resolve_llm() -> PlanLlm:
@@ -434,7 +442,7 @@ def build_prompt(context: ForemanContext) -> str:
     charter = context.charter
     boundaries = list(charter.get("boundaries") or [])
     says_no = list(charter.get("says_no") or [])
-    budget = (charter.get("budget") or {}).get("max_tasks_per_shift", 3)
+    budget = shift_budget(context)
 
     rows, room = [], _DEPENDS_PROMPT_CAP
     for s in context.sightings:
@@ -444,8 +452,16 @@ def build_prompt(context: ForemanContext) -> str:
         rows.append(_sighting_line(s) + note)
     sighting_lines = (
         "\n".join(rows)
-        or "(none — every sighting is resolved by a landed task, or the surface is quiet)"
+        or "(none — every sighting is resolved by a landed task or IN FLIGHT below, "
+        "or the surface is quiet)"
     )
+    in_flight_lines = "\n".join(_sighting_line(s) for s in context.in_flight) or "(none)"
+    cap = context.capacity
+    if cap:
+        in_flight_lines += (
+            f"\nRuns in flight on this line: {cap.get('in_flight', 0)} of a cap of "
+            f"{cap.get('cap', budget)}, so this shift may start at most {budget} more."
+        )
     if context.open_total > len(context.sightings):
         sighting_lines += (
             f"\n(showing {len(context.sightings)} of {context.open_total} open sightings: "
@@ -489,6 +505,9 @@ A sighting stays open until a task citing it LANDS. "new" arrived since the last
 "carried over" is older and still unresolved. A task marked failed, develop failed or \
 rejected did not resolve its sighting. A "Depends on:" line under a sighting names the \
 issues it needs, with their state when known: plan it only once those are closed.
+
+== IN FLIGHT (already being worked: never plan these again) ==
+{in_flight_lines}
 
 == LAST SHIFTS' OUTCOMES (oldest first) ==
 {history_lines}
@@ -560,6 +579,30 @@ def parse_plan(raw: str) -> PlanProposal:
         if start >= 0 and end > start:
             return PlanProposal.model_validate(json.loads(text[start : end + 1]))
         raise
+
+
+def drop_in_flight(plan: PlanProposal, in_flight_ids: set[str]) -> PlanProposal:
+    """The plan without any task that cites an in-flight sighting (a task or an
+    open PR already works it). A plan left empty stands down. Dropping, not
+    refusing: a refused plan leaves the shift in ``planning``, which holds a
+    continuous line until the stall timeout."""
+    kept = [t for t in plan.tasks if not in_flight_ids & {str(r) for r in t.evidence_refs}]
+    if len(kept) == len(plan.tasks):
+        return plan
+    logger.info(
+        "foreman: dropped %d task(s) of shift %s citing in-flight sightings",
+        len(plan.tasks) - len(kept),
+        plan.shift_no,
+    )
+    if kept:
+        return plan.model_copy(update={"tasks": kept})
+    return plan.model_copy(
+        update={
+            "tasks": [],
+            "no_action": True,
+            "no_action_reason": "every planned task cites a sighting already in flight",
+        }
+    )
 
 
 def validate_plan(plan: PlanProposal, charter: dict[str, Any]) -> list[str]:
@@ -647,10 +690,12 @@ __all__ = [
     "claude_cli_argv",
     "claude_result_text",
     "cli_model",
+    "drop_in_flight",
     "parse_plan",
     "plan_shift",
     "resolve_llm",
     "run_claude_no_tools",
     "set_mock_plan",
+    "shift_budget",
     "validate_plan",
 ]

@@ -6,7 +6,8 @@
 # resolve through the same path the console's ``plan/resolve`` route uses.
 #
 # All or nothing. The plan is APPROVED only when every task cites an open
-# sighting of this mandate, the plan fits the charter budget, and Clef is
+# sighting of this mandate, the plan fits the shift's budget (``budget_max``:
+# the line's headroom under its in-flight cap, ``service._headroom``), and Clef is
 # confident it is in scope and low risk. Anything else ESCALATES the whole plan
 # (it stays pending for a human, as with the gate off): Clef unavailable or
 # truncated, tasks not independent enough, or a per-task rule failing. SPEC
@@ -123,7 +124,7 @@ def decide(
     if not tasks:
         return esc("empty_plan", "the plan has no tasks")
     if len(tasks) > budget_max:
-        return esc("over_budget", f"{len(tasks)} tasks > the charter budget of {budget_max}")
+        return esc("over_budget", f"{len(tasks)} tasks > the shift budget of {budget_max}")
     for i, task in enumerate(tasks):
         refs = {str(r) for r in task.get("evidence_refs") or []}
         if not refs & open_sighting_ids:

@@ -11,7 +11,8 @@
      branch (base sync, landing, re-develop, one PR, its state on the wire and
      the UI surfaces), the run feed (live over SSE and stored per stage, with
      its wire contract), the run on its blueprint (C4 `paths`, the file join,
-     `file_touched`), the auto plan gate and the continuous cadence, endpoints
+     `file_touched`), the auto plan gate, the continuous cadence and its
+     in-flight cap (overlapping shifts), endpoints
      (incl. the digest), env vars, and the remaining demo-bar concessions. -->
 
 # Belt Mandates — the standing JOB primitive
@@ -88,7 +89,9 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   is never fired. A **`continuous`** mandate is due when all of these hold
   (`service._continuous_due`):
   - at least `POCKETPAW_MANDATE_CONTINUOUS_MIN_GAP_MINUTES` (default 5) have
-    passed since its last shift;
+    passed since its last shift STARTED. This is the only floor between shift
+    starts, so a burst of runs settling at once starts at most one shift per
+    line per gap;
   - that shift is finished: `done`, or `stood_down` with a sighting filed since
     or one of the mandate's runs settled since (landed, rejected or released,
     failed, develop failed). A foreman that planned nothing is not asked again
@@ -98,11 +101,12 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
     `updated_at` also moves on blob writes after a run settles (the tester's
     patches, lane nudges), so a stood-down line can be asked once more after
     one; the minimum gap bounds that to one call per gap.
-    A plan waiting `in_gate` for a human always holds the next shift;
-  - none of that shift's runs is still in flight (queued, developing, pending at
-    the diff gate). A shift older than `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS`
-    (default 3) stops holding the next one this way, and also releases a shift
-    stuck in `planning` (a plan machine validation refused) or `executing`;
+    A plan waiting `in_gate` for a human always holds the next shift, and a
+    shift stuck in `planning` (a plan machine validation refused) or
+    `executing` holds it until it is `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS`
+    (default 3) old;
+  - the line has headroom under its in-flight cap (see *Overlapping shifts*
+    below): runs of earlier shifts may still be in flight;
   - the foreman did not fail 3 shifts in a row. A failed foreman call
     (timeout, CLI error, unparseable plan) finishes its shift as `done` with
     no plan and the outcome `foreman call failed: <reason>`, so the mandate is
@@ -119,6 +123,24 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   alone under `POCKETPAW_MANDATE_SCHEDULER_ENABLED=true`, through the lease
   either way. Pair `continuous` with the auto plan gate, or every shift waits
   for a human at the plan gate.
+- **Overlapping shifts.** `budget.max_in_flight` (optional, 1 to 20) caps the
+  line's runs in flight at once (queued, developing, pending at the diff gate,
+  approved); unset, it reads as `max_tasks_per_shift`, so a charter written
+  before the field keeps its meaning. A shift may start whenever the line is
+  under its cap, and its task budget is the headroom, `cap - in_flight`, never
+  over `max_tasks_per_shift` (`service._headroom`). A run with no store write
+  for the stall timeout no longer counts, so an orphan a restart left behind
+  frees its slot. The budget reaches the foreman's prompt (`Plan AT MOST <n>`,
+  and `Runs in flight on this line: a of a cap of b`) and the auto plan gate;
+  machine validation and the plan executor still check `max_tasks_per_shift`.
+  A line at its cap refuses a shift (`422 mandate.at_capacity`, from the route
+  or the scheduler) before it opens a shift row, so nothing is left holding
+  it. When a run settles the line has headroom again and the next tick (60 s)
+  starts a shift, subject to the minimum gap. Each shift start logs
+  `line <name> shift <n>: in_flight=a cap=b budget=c`; the digest carries each
+  line's `capacity`. With 8 lines and the 60 s tick, a tick can start up to 8
+  shifts, one per line, each within its own headroom; the cap, not the tick,
+  bounds the runs in flight.
 - **`issue_labels`** (optional, at most 20) scopes the `issues` patrol on a
   GitHub-bound repo: an open issue is sighted when it carries one of these
   labels, compared case-insensitively (see *The `issues` patrol on GitHub*).
@@ -154,7 +176,8 @@ still recorded on the blob as `clef`, even when the wait times out), then asks t
 
 - every task cites at least one evidence ref that is an open sighting of this
   mandate;
-- the plan fits the charter budget (`max_tasks_per_shift`);
+- the plan fits the shift's budget: the line's headroom under its in-flight
+  cap, at most `max_tasks_per_shift` (see *Overlapping shifts*);
 - Clef scores `in_scope` >= 0.80 and `low_risk` >= 0.75;
 - every task's `spec_clear` that Clef answered is >= 0.60 (below).
 
@@ -367,11 +390,12 @@ through a pluggable `PlanLlm` protocol, selected by `POCKETPAW_MANDATE_LLM`:
   shows in pawprints as `failed`, and the shift route answers 502
   `mandate.foreman_failed`.
 - `mock` — deterministic (one task per open sighting that is not in flight,
-  severity-ranked, budget-capped; `no_action` when nothing is left to plan).
+  severity-ranked, capped at the shift budget; `no_action` when nothing is left
+  to plan).
   Tests script it via `foreman.set_mock_plan`.
 
 The prompt encodes every sim-validated rule: charter verbatim with BOUNDARIES
-prominent; at most `budget.max_tasks_per_shift` tasks; every task cites
+prominent; at most the shift budget of tasks; every task cites
 sighting ids and names an expected KPI direction; an empty plan with a reason
 is correct and respected; boundaries override KPI opportunities; never repeat
 a failed approach without stating what changed; tasks in one shift are
@@ -412,15 +436,23 @@ architecture.
 A sighting is **open** until a task that cites it (its `evidence_refs`)
 **lands**. A failed, rejected or still-running task leaves it open. The
 foreman gets every open sighting, not just the ones filed since the last
-shift, so work it skipped or that failed comes back on the next shift:
+shift, so work it skipped or that failed comes back on the next shift. Open
+sightings already being worked are split out: `OPEN SIGHTINGS` lists only what
+the foreman may plan, and a separate `IN FLIGHT` block lists the rest
+(`ForemanContext.in_flight`) with the line's runs in flight against its cap.
+After machine validation, `foreman.drop_in_flight` drops any task that still
+cites an in-flight sighting; a plan left empty stands down ("every planned task
+cites a sighting already in flight"). It drops rather than refuses because a
+refused plan leaves the shift in `planning`, which holds the line.
 
-- **Order and cap.** Highest severity first, then oldest; at most 30
-  (`_BACKLOG_CAP` in `mandates/service.py`). Past the cap the prompt says
+- **Order and cap.** Highest severity first, then oldest; at most 30 in each
+  block (`_BACKLOG_CAP` in `mandates/service.py`). Past the cap the prompt says
   `(showing 30 of N open sightings: ...)`.
 - **Per sighting.** `new` (filed since the last shift) or `carried over`, the
-  tasks that cited it (`shift N "<title>" <status>`), and `IN FLIGHT` when one
-  of them is still being worked, or `IN FLIGHT | open PR #<n>` when an open PR
-  closes the sighting's GitHub issue (see *One PR per issue*).
+  tasks that cited it (`shift N "<title>" <status>`), and, in the `IN FLIGHT`
+  block, `IN FLIGHT` when one of them is still being worked, or
+  `IN FLIGHT | open PR #<n>` when an open PR closes the sighting's GitHub issue
+  (see *One PR per issue*).
 - **Task status.** From the task's run row: `landed`, `failed`, `rejected`,
   `pending at gate` (diff waiting on a human), `approved` (landing),
   `developing` (headless develop running), `queued` (waiting for the develop
@@ -615,9 +647,11 @@ GitLab path.
   open until a task citing it lands.
 - **Schedule:** a daily or weekly shift senses at its start as before. A
   `continuous` mandate that toggles `issues` also runs it inside its due check
-  (`_continuous_due`, after the gap, gate and in-flight holds, before the
-  backlog read), so a new issue makes the mandate due without waiting for a
-  shift: one `gh issue list` per mandate per tick.
+  (`_continuous_due`, after the gap and gate holds, before the in-flight cap
+  check and the backlog read), so a new issue makes the mandate due without
+  waiting for a shift: one `gh issue list` per mandate per tick. The dedup
+  against every sighting on the line, resolved or not, means an issue a run or
+  an open PR is working is never sighted again.
 - **Cross-line requests:** a line picks up any label it lists, so the engines
   line on `qbtrix/creative-core` lists `needs-core` and sees requests the app
   lines file there. They must be filed on creative-core.
@@ -895,10 +929,8 @@ per-diff gate, with a summary saying how many fixers ran.
 
 **Silent workers.** A cloud worker can stop without opening a PR: it decided
 the issue cannot be done as written, or it simply stalled. Its run would then
-sit in flight until the run timeout, and the continuous scheduler holds a
-mandate's next shift while any of its runs is in flight (up to the stall
-timeout), so one silent worker held the whole line for hours. The tracker now
-watches for that. When no PR with the run's `Belt-Run` line exists, and no open
+sit in flight until the run timeout, holding one of the line's in-flight slots
+(see *Overlapping shifts*) for hours. The tracker watches for that. When no PR with the run's `Belt-Run` line exists, and no open
 PR closes the task's issue (that one is adopted instead; see *One PR per issue*),
 `POCKETPAW_FACTORY_CLOUD_NO_PR_TIMEOUT` seconds (default 3600) after the newest
 launch (`cloud.launched_at`, or the last relaunch; a resumed run without
@@ -1010,9 +1042,9 @@ never starves its tester's PR, and a fixer's update reads `landed`/`test`, never
 for a human: there is nothing to escalate. The tracker's timeout is the run
 timeout counted from `tester.at`; a failure or timeout is logged and ends it.
 Lane nudges for the tester's PR go on the run's `lane_nudges` like the
-worker's. Tester tracking never holds the line: it starts only after the land
-is marked executed, so the run already reads `landed` (not in flight) to the
-mandate's due check, and it never runs under the worker's failure guard, which
+worker's. Tester tracking never takes an in-flight slot: it starts only after
+the land is marked executed, so the run already reads `landed` (not in flight)
+to the mandate's due check, and it never runs under the worker's failure guard, which
 would re-queue the run. No screenshots are fetched for a tester PR: they would
 replace the run's.
 
@@ -1790,6 +1822,8 @@ reads as UTC) returns:
              sightings: {count, top: [{title, severity, patrol}]},   # top 5
              backlog:   {count, top: [{title, severity, patrol,
                                        in_flight}]},     # open, any age, top 5
+             capacity:  {in_flight, cap, budget},        # runs in flight vs the
+                                                         # cap; next shift's budget
              shifts: [{no, state, outcome, task_count}],             # since
              runs:   [{action_id, status, title, pr_url, branch,
                        commit_sha, headless_error, headless_state,
@@ -1862,8 +1896,8 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_MANDATE_SCHEDULER_INTERVAL` | `3600` | Cadence sweep interval, seconds |
 | `POCKETPAW_MANDATE_SCHEDULER_CONTINUOUS_INTERVAL` | `60` | Sweep interval while any active `continuous` mandate exists, seconds |
 | `POCKETPAW_MANDATE_SCHEDULER_ENABLED` | off | `true` starts the cadence scheduler alone, without the other background loops |
-| `POCKETPAW_MANDATE_CONTINUOUS_MIN_GAP_MINUTES` | `5` | Minimum time between two shifts of a `continuous` mandate |
-| `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS` | `3` | Age after which a `continuous` mandate's last shift stops holding the next one (in-flight runs, a stuck `planning`/`executing` state; never `in_gate`) |
+| `POCKETPAW_MANDATE_CONTINUOUS_MIN_GAP_MINUTES` | `5` | Minimum time between two shift starts of a `continuous` mandate |
+| `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS` | `3` | How long a stuck `planning`/`executing` shift holds a `continuous` mandate's next one (never `in_gate`), and how long a run with no store write still counts against the in-flight cap |
 | `POCKETPAW_BELT_PLAN_GATE` | `manual` | `auto` runs the auto plan gate (needs Clef on) |
 | `POCKETPAW_BELT_CLEF_FINDINGS` | shadow | `live` lets Clef's finding verdicts hold a review round or file follow-ups, label `audit-rule` and comment on duplicates (needs Clef on) |
 | `POCKETPAW_BELT_PLAN_GATE_CLEF_TIMEOUT` | `45` | Seconds the auto gate waits for Clef's plan score |
@@ -1968,7 +2002,13 @@ diff);
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
 cadence scheduler; `test_belt_continuous_cadence.py` pins each `continuous` due
 rule (a stood-down line waking when a run settles after it included) and the
-loop's tick interval; `test_belt_plan_policy.py` pins the auto plan
+loop's tick interval; `test_belt_overlapping_shifts.py` pins the in-flight cap
+(a shift starts under the cap and not at it, the budget is the headroom, a
+settling run tops the line up, the minimum gap still floors starts, the
+foreman's context and plan leave in-flight issues out, the auto gate checks the
+shift budget, a charter without `max_in_flight` behaves as before), with
+`tests/mutations/belt_overlapping_shifts.json` breaking the headroom math;
+`test_belt_plan_policy.py` pins the auto plan
 gate against the pilot's gate log and drives it through the real trigger, store
 and executor (approve as `system:belt-policy` with one chain, escalate on a Clef
 outage or low independence, unchanged with the flag off); the headless file also lands a run (commit subject from the
