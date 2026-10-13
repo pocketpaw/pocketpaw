@@ -29,5 +29,190 @@
       "lungs",
       "body"
     ]
+  },
+  "bike-gears": {
+    "title": "How bike gears work",
+    "params": [
+      {
+        "key": "cadence",
+        "min": 40,
+        "max": 120
+      },
+      {
+        "key": "ring",
+        "min": 34,
+        "max": 50
+      },
+      {
+        "key": "gear",
+        "min": 1,
+        "max": 7
+      }
+    ],
+    "anchors": [
+      "chainring",
+      "crank",
+      "pedal",
+      "chain",
+      "cassette",
+      "rear-derailleur",
+      "front-derailleur",
+      "jockey-wheels",
+      "rear-hub",
+      "wheel"
+    ]
+  },
+  "rocket-engine": {
+    "title": "Inside a rocket engine",
+    "params": [
+      {
+        "key": "throttle",
+        "min": 40,
+        "max": 100
+      },
+      {
+        "key": "mixture",
+        "min": 2.2,
+        "max": 3
+      }
+    ],
+    "anchors": [
+      "oxidiser-tank",
+      "fuel-tank",
+      "turbopump",
+      "turbine",
+      "oxidiser-pump",
+      "fuel-pump",
+      "preburner",
+      "injector",
+      "combustion-chamber",
+      "throat",
+      "nozzle",
+      "cooling-channels",
+      "gimbal",
+      "load-cell",
+      "plume",
+      "pressure-gauge"
+    ]
+  },
+  "ion-thruster": {
+    "title": "How a plasma thruster works",
+    "params": [
+      {
+        "key": "voltage",
+        "min": 600,
+        "max": 1800
+      },
+      {
+        "key": "flow",
+        "min": 0.5,
+        "max": 3
+      }
+    ],
+    "anchors": [
+      "xenon-tank",
+      "flow-controller",
+      "power-unit",
+      "discharge-chamber",
+      "magnets",
+      "cathode",
+      "plasma",
+      "screen-grid",
+      "accel-grid",
+      "neutraliser",
+      "ion-beam",
+      "thrust-dial"
+    ]
+  },
+  "tokamak": {
+    "title": "How a fusion reactor works",
+    "params": [
+      {
+        "key": "current",
+        "min": 5,
+        "max": 17
+      },
+      {
+        "key": "heating",
+        "min": 10,
+        "max": 75
+      }
+    ],
+    "anchors": [
+      "plasma",
+      "central-solenoid",
+      "tf-coil",
+      "pf-coil",
+      "vacuum-vessel",
+      "blanket",
+      "divertor",
+      "heating-beam",
+      "port"
+    ]
+  },
+  "fission-reactor": {
+    "title": "How a nuclear fission reactor works",
+    "params": [
+      {
+        "key": "rods",
+        "min": 0,
+        "max": 100
+      },
+      {
+        "key": "pump",
+        "min": 40,
+        "max": 100
+      }
+    ],
+    "anchors": [
+      "reactor-vessel",
+      "fuel",
+      "control-rods",
+      "pressuriser",
+      "steam-generator",
+      "coolant-pump",
+      "hot-leg",
+      "cold-leg",
+      "containment",
+      "steam-line",
+      "turbine",
+      "generator",
+      "condenser",
+      "feedwater-pump",
+      "cooling-tower",
+      "transformer"
+    ]
+  },
+  "particle-collider": {
+    "title": "How a particle collider works",
+    "params": [
+      {
+        "key": "energy",
+        "min": 0.5,
+        "max": 7
+      },
+      {
+        "key": "rate",
+        "min": 5,
+        "max": 40
+      }
+    ],
+    "anchors": [
+      "collision-point",
+      "detector",
+      "tracker",
+      "ecal",
+      "hcal",
+      "solenoid",
+      "muon-chambers",
+      "beam-pipes",
+      "dipole",
+      "quadrupole",
+      "final-focus",
+      "separation-magnet",
+      "rf-cavities",
+      "magnet-coils",
+      "field-gauge"
+    ]
   }
 }

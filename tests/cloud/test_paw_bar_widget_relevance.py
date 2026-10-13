@@ -69,6 +69,11 @@ _CHIPS = [
         "change the heart rate.",
         "figure",
     ),
+    # The hand-built figures (ripple #248): each subject gets its figure.
+    ("How does a rocket engine work?", "figure"),
+    ("How does a fusion reactor work?", "figure"),
+    ("How does CERN's collider work?", "figure"),
+    ("How do bike gears work?", "figure"),
 ]
 
 
@@ -300,8 +305,9 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
     """The fixed core is 18,583 chars (the drawing widgets added only their two
     names to the index); the worst per-turn section is the MAX_PICKED longest
-    candidate lines (about 11,860, iso-scene's 4,530 with its 15-part example the
-    longest), so the paragraph peaks near 30,490, under the 32,000 cap."""
+    candidate lines (about 13,190: iso-scene's 4,530 with its 15-part example, then
+    figure's 2,060 with seven figures' sliders and anchors), so the paragraph peaks
+    near 31,820, under the 32,000 cap. One more figure (about 290 chars) breaks it."""
     core = _paragraph()
     longest = sorted(
         (len(widget_relevance.full_line(n)) + 4 for n in widget_relevance.CANDIDATES),

@@ -69,7 +69,7 @@ _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
 # (vendored from ripple branch feat/play-wave pending a release; drop the widget examples,
 # update the pins below).
-_RIPPLE_MANIFEST_SHA256 = "a4c8fb9dfce333624a848d3df285e35c4668cbb36a47f52cbfdfd7448e1182c6"
+_RIPPLE_MANIFEST_SHA256 = "11f01ddee912e1294f3c968872b12132c5476fc0caca6d6a8e9d6992a814af1c"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
@@ -3627,12 +3627,83 @@ def _drawing(key: str) -> dict:
 def test_the_vendored_ripple_figures_parse():
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
 
-    assert list(RIPPLE_FIGURES) == ["heart"]
+    assert list(RIPPLE_FIGURES) == [
+        "heart",
+        "bike-gears",
+        "rocket-engine",
+        "ion-thruster",
+        "tokamak",
+        "fission-reactor",
+        "particle-collider",
+    ]
     heart = RIPPLE_FIGURES["heart"]
     assert [p["key"] for p in heart["params"]] == ["bpm", "stroke"]
     assert heart["params"][0] == {"key": "bpm", "min": 40, "max": 180}
     assert len(heart["anchors"]) == 14
     assert heart["anchors"][:2] == ["right-atrium", "right-ventricle"]
+    assert RIPPLE_FIGURES["rocket-engine"]["params"][1] == {"key": "mixture", "min": 2.2, "max": 3}
+    assert sum(len(f["anchors"]) for f in RIPPLE_FIGURES.values()) == 92
+
+
+# A card the concierge might write for each hand-built figure ripple #248 added:
+# (id, params, anchors), anchors and slider values taken by hand from ripple's
+# figure modules, so a regenerated catalog that drops or renames one fails here.
+_NEW_FIGURES = [
+    (
+        "bike-gears",
+        {"cadence": 90, "ring": 50, "gear": 5},
+        ["chainring", "cassette", "rear-derailleur"],
+    ),
+    (
+        "rocket-engine",
+        {"throttle": 80, "mixture": 2.6},
+        ["turbopump", "combustion-chamber", "nozzle"],
+    ),
+    ("ion-thruster", {"voltage": 1200, "flow": 1.5}, ["xenon-tank", "screen-grid", "ion-beam"]),
+    ("tokamak", {"current": 15, "heating": 50}, ["plasma", "tf-coil", "divertor"]),
+    ("fission-reactor", {"rods": 30, "pump": 90}, ["fuel", "control-rods", "steam-generator"]),
+    (
+        "particle-collider",
+        {"energy": 6.8, "rate": 40},
+        ["collision-point", "dipole", "rf-cavities"],
+    ),
+]
+
+
+def _new_figure_card(fid: str, params: dict, anchors: list[str]) -> dict:
+    return {
+        "state": {"figure": None},
+        "ui": {
+            "type": "figure",
+            "bind": "{state.figure}",
+            "props": {
+                "figure": fid,
+                "params": params,
+                "labels": [{"anchor": a, "note": f"What the {a} does."} for a in anchors],
+                "caption": "Move the sliders and watch the readouts change.",
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(("fid", "params", "anchors"), _NEW_FIGURES)
+def test_a_card_for_each_new_figure_passes(fid, params, anchors):
+    """THE MUTATION THAT BREAKS THIS: ripple-figures.json back to heart alone."""
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    card = _new_figure_card(fid, params, anchors)
+    assert render_card(_body(card), [], profile=RIPPLE_PROFILE) is not None
+
+
+@pytest.mark.parametrize(
+    ("fid", "params", "anchors", "stray"),
+    [(*row, "aorta") for row in _NEW_FIGURES] + [("tokamak", {}, [], "nozzle")],
+)
+def test_a_new_figure_refuses_another_figures_anchor(fid, params, anchors, stray):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    card = _new_figure_card(fid, params, [*anchors, stray])
+    assert render_card(_body(card), [], profile=RIPPLE_PROFILE) is None
 
 
 @pytest.mark.parametrize("key", ["iso-bike", "iso-heart", "iso-engine", "heart-pump"])

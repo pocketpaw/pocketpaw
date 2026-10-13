@@ -32,7 +32,7 @@
     "hint": "It has its own deposit, rate and years controls; never add inputs around it."
   },
   "figure": {
-    "intents": ["heart", "heartbeat", "heart pump", "how the heart pumps", "cardiac"],
+    "intents": ["heart", "heartbeat", "heart pump", "how the heart pumps", "cardiac", "rocket engine", "rocket", "thrust", "nozzle", "turbopump", "ion thruster", "plasma thruster", "electric propulsion", "spacecraft engine", "fusion", "tokamak", "fusion reactor", "iter", "fission", "nuclear reactor", "nuclear power plant", "control rods", "particle collider", "collider", "particle accelerator", "lhc", "cern", "higgs", "proton collisions", "bike gears", "bicycle gears", "derailleur"],
     "hint": "When a figure exists for the subject, use it: pick anchors and write notes; it is hand-built and best, ahead of an iso-scene, a model-viewer or an illustration."
   },
   "iso-scene": {
