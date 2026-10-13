@@ -41,7 +41,8 @@ class KpiRequest(BaseModel):
 
 class BudgetRequest(BaseModel):
     max_tasks_per_shift: int = Field(default=3, ge=1, le=20)
-    # Runs in flight on the line at once; unset = ``max_tasks_per_shift``.
+    # Tasks in flight on the line at once (runs and plan-gate tasks); unset =
+    # ``max_tasks_per_shift``.
     max_in_flight: int | None = Field(default=None, ge=1, le=20)
     gate_minutes_per_week: int = Field(default=15, ge=0)
 

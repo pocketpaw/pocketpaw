@@ -1453,7 +1453,8 @@ async def test_gate_rejection_is_shift_history_not_backlog(
     client = _make_client(monkeypatch)
     repo = tmp_path / "repo"
     repo.mkdir()
-    mandate_id = _create_mandate(client, repo, budget=2)
+    # A cap of 3: shift 2's gated task and shift 1's run leave one slot for shift 3.
+    mandate_id = _create_mandate(client, repo, budget=2, max_in_flight=3)
     for text in ("export is broken", "dark mode please"):
         client.post(
             f"/belt/mandates/{mandate_id}/feedback",

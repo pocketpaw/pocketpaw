@@ -6,8 +6,9 @@
 # in-flight cap (a run with no store write for the stall timeout no longer
 # counts), it has an open sighting no task is working, and the minimum gap
 # since the last shift started has passed. A shift stuck in ``planning`` or
-# ``executing`` is released by the stall timeout; one waiting ``in_gate`` for a
-# human never is. Overlapping shifts and the shift budget have their own file
+# ``executing`` is released by the stall timeout; a plan waiting ``in_gate`` for
+# a human holds its tasks' slots under the cap (never released by the stall
+# timeout), not the line. Overlapping shifts and the shift budget have their own file
 # (``test_belt_overlapping_shifts.py``). Also pinned: the scheduler loop ticks at the continuous
 # interval while any continuous mandate exists, and the hourly one otherwise.
 # The clock is injected; the instinct store is an isolated file.
@@ -25,7 +26,15 @@ from pocketpaw_ee.cloud.mandates import scheduler as scheduler_mod  # noqa: E402
 from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
 from pocketpaw_ee.cloud.mandates.domain import ShiftDoc  # noqa: E402
 
-from tests.cloud.test_belt_mandates import USER, WS, _seed_run, store  # noqa: E402,F401
+from tests.cloud.test_belt_mandates import (  # noqa: E402,F401
+    USER,
+    WS,
+    _seed_run,
+    graph,
+    journal,
+    mock_llm,
+    store,
+)
 
 pytestmark = pytest.mark.usefixtures("any_repo_root", "store")
 
@@ -97,11 +106,17 @@ async def test_done_shift_past_the_gap_is_due(mongo_db):
     assert await _due(mid)
 
 
-async def test_a_plan_waiting_for_a_human_is_never_released(mongo_db):
-    mid = await _mandate()
+@pytest.mark.usefixtures("journal", "graph")
+async def test_a_plan_holding_every_slot_at_the_gate_is_never_released(mongo_db):
+    mid = await _mandate(budget={"max_tasks_per_shift": 1})
     await _sighting(mid)
-    await _shift(mid, "in_gate", timedelta(hours=10))
-    assert not await _due(mid)
+    out = await mandate_service.trigger_shift(WS, USER, mid)
+    assert out["shift"]["state"] == "in_gate", "the one slot waits on a human"
+    await _sighting(mid, "checkout times out")
+    await ShiftDoc.find(ShiftDoc.mandate_id == mid).update(
+        {"$set": {"createdAt": datetime.now(UTC) - timedelta(hours=10)}}
+    )
+    assert not await _due(mid), "past the stall timeout, the gated task still holds its slot"
 
 
 async def test_a_full_line_waits_until_an_idle_orphan_stops_counting(mongo_db, store):  # noqa: F811

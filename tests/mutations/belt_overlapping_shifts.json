@@ -39,7 +39,7 @@
   {
     "label": "the continuous due check ignores the cap",
     "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
-    "find": "if _headroom(doc.charter.budget, runs, now)[\"budget\"] < 1:",
+    "find": "if _headroom(doc.charter.budget, runs, now, gated)[\"budget\"] < 1:",
     "replace": "if False:",
     "tests": [
       "tests/cloud/test_belt_overlapping_shifts.py::test_the_scheduler_starts_a_shift_while_runs_are_in_flight_until_the_cap",
@@ -81,6 +81,43 @@
     "replace": "budget_max=doc.charter.budget.max_tasks_per_shift,",
     "tests": [
       "tests/cloud/test_belt_overlapping_shifts.py::test_the_auto_plan_gate_uses_the_shift_budget"
+    ]
+  },
+  {
+    "label": "a task waiting at the plan gate holds no slot under the cap",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "in_flight = gated_tasks",
+    "replace": "in_flight = 0",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_a_plan_waiting_for_a_human_holds_its_slots_not_the_line",
+      "tests/cloud/test_belt_continuous_cadence.py::test_a_plan_holding_every_slot_at_the_gate_is_never_released"
+    ]
+  },
+  {
+    "label": "a plan waiting at the plan gate parks the whole line",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if last.state in (\"planning\", \"executing\") and not stalled:",
+    "replace": "if last.state == \"in_gate\" or (last.state in (\"planning\", \"executing\") and not stalled):",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_a_plan_waiting_for_a_human_holds_its_slots_not_the_line"
+    ]
+  },
+  {
+    "label": "the foreman is told fewer tasks is better instead of filling the shift",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "1. Plan AT MOST {budget} task(s) this shift, and FILL the shift up to {budget}.",
+    "replace": "1. Plan AT MOST {budget} task(s) this shift. Fewer is better.",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_foreman_fills_the_shift_by_priority_and_says_why_when_short"
+    ]
+  },
+  {
+    "label": "the plan drops the foreman's shortfall reason",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "    shortfall_reason: str | None = None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_overlapping_shifts.py::test_the_foreman_fills_the_shift_by_priority_and_says_why_when_short"
     ]
   }
 ]

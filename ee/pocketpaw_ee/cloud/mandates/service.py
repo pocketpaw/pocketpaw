@@ -28,10 +28,11 @@
 # (``patrols.open_pr_closes``). Each entry carries its ``Depends on:`` line; the
 # trigger adds those issues' states. THE LINE reads git (``line_status``).
 #
-# CAPACITY (``_headroom``): a line's runs in flight are capped by the charter's
+# CAPACITY (``_headroom``): a line's tasks in flight (its runs, plus the tasks of
+# plans waiting at the plan gate, ``_gated_tasks``) are capped by the charter's
 # ``max_in_flight`` (unset = ``max_tasks_per_shift``). Shifts overlap: one starts
-# while earlier runs are in flight, its task budget the headroom under the cap,
-# never over ``max_tasks_per_shift``; a full line refuses a shift.
+# while earlier work is in flight or at a gate, its task budget the headroom
+# under the cap, never over ``max_tasks_per_shift``; a full line refuses a shift.
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
 # charter_for_mandate, crew_seat_for_task, crew_worker, file_station_sighting,
@@ -931,20 +932,23 @@ def _task_status(run: dict[str, Any]) -> str:
     return "pending at gate" if status == "proposed" else status
 
 
-def _headroom(budget: Budget, runs: list[dict[str, Any]], now: datetime) -> dict[str, int]:
-    """The line's capacity from its run rows (``list_runs``, this mandate's):
-    ``in_flight`` runs, the ``cap`` (``max_in_flight``, else
-    ``max_tasks_per_shift``), and the next shift's task ``budget``, the headroom
-    under the cap and never over ``max_tasks_per_shift``. A run with no store
-    write for the stall timeout is not counted: an orphan a restart left
-    behind must not hold a slot forever."""
+def _headroom(
+    budget: Budget, runs: list[dict[str, Any]], now: datetime, gated_tasks: int = 0
+) -> dict[str, int]:
+    """The line's capacity from its run rows (``list_runs``, this mandate's) and
+    its ``gated_tasks`` (``_gated_tasks``): ``in_flight`` runs plus tasks at the
+    plan gate, the ``cap`` (``max_in_flight``, else ``max_tasks_per_shift``),
+    and the next shift's task ``budget``, the headroom under the cap and never
+    over ``max_tasks_per_shift``. A run with no store write for the stall
+    timeout is not counted: an orphan a restart left behind must not hold a
+    slot forever."""
     # ponytail: list_runs reads the workspace's newest 200 actions, so a run in
     # flight past that window stops counting; a per-mandate store query once
     # lines times history outgrow it.
     stale = now - timedelta(
         hours=_env_float("POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS", _CONTINUOUS_STALL_HOURS)
     )
-    in_flight = 0
+    in_flight = gated_tasks
     for r in runs:
         stamp = r.get("updated_at") or r.get("created_at")
         if _task_status(r) in _IN_FLIGHT and (
@@ -954,6 +958,21 @@ def _headroom(budget: Budget, runs: list[dict[str, Any]], now: datetime) -> dict
     cap = budget.max_in_flight or budget.max_tasks_per_shift
     headroom = max(0, min(cap - in_flight, budget.max_tasks_per_shift))
     return {"in_flight": in_flight, "cap": cap, "budget": headroom}
+
+
+async def _gated_tasks(workspace_id: str, mandate_id: str) -> int:
+    """How many tasks of the line's plans wait at the plan gate. Like a diff at
+    the diff gate, each holds a slot under the in-flight cap: a plan escalated
+    to a human never parks the whole line, and approving it later never takes
+    the line over its cap."""
+    gated = await ShiftDoc.find(
+        ShiftDoc.workspace == workspace_id,
+        ShiftDoc.mandate_id == mandate_id,
+        ShiftDoc.state == "in_gate",
+    ).to_list()
+    plan_ids = [g.plan_action_id for g in gated if g.plan_action_id]
+    tasks = await _planned_tasks(workspace_id, plan_ids, [])
+    return sum(t["status"] == "pending at plan gate" for t in tasks)
 
 
 async def _line_state(run: dict[str, Any] | None, line_merged: Any) -> str | None:
@@ -1195,11 +1214,12 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         for r in (await belt_service.list_runs(workspace_id))["runs"]
         if r.get("mandate_id") == mandate_id
     ]
-    capacity = _headroom(doc.charter.budget, runs, _utcnow())
+    gated = await _gated_tasks(workspace_id, mandate_id)
+    capacity = _headroom(doc.charter.budget, runs, _utcnow(), gated)
     if capacity["budget"] < 1:
         raise ValidationError(
             "mandate.at_capacity",
-            f"This line has {capacity['in_flight']} run(s) in flight, its cap of "
+            f"This line has {capacity['in_flight']} task(s) in flight, its cap of "
             f"{capacity['cap']}; a shift can start once one settles",
         )
 
@@ -1504,12 +1524,15 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         )
     )
     logger.info(
-        "mandate: shift %s of %s proposed %d task(s) via belt_plan action %s (correlation_id=%s)",
+        "mandate: shift %s of %s proposed %d of %d task(s) via belt_plan action %s "
+        "(correlation_id=%s)%s",
         shift_no,
         mandate_id,
         len(plan.tasks),
+        capacity["budget"],
         action.id,
         correlation_id,
+        f"; short because: {plan.shortfall_reason}" if plan.shortfall_reason else "",
     )
     state = "in_gate"
     if auto_gate:
@@ -2372,7 +2395,12 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
 
         mine = [r for r in runs if r.get("mandate_id") == mandate_id]
         backlog = (await _backlog(workspace_id, mandate_id, mine, repo_id=m["repo_id"]))["open"]
-        capacity = _headroom(Budget(**detail["charter"]["budget"]), mine, now)
+        capacity = _headroom(
+            Budget(**detail["charter"]["budget"]),
+            mine,
+            now,
+            await _gated_tasks(workspace_id, mandate_id),
+        )
         new_runs = [_run_digest_row(r) for r in mine if _since(r.get("created_at"), since)]
         diff_gates = [_run_digest_row(r) for r in mine if r.get("status") == "proposed"]
         # A headless develop that failed (or never finished: a restart drops
@@ -2558,18 +2586,18 @@ async def has_continuous_mandate() -> bool:
 async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime) -> bool:
     """A CONTINUOUS mandate is due when the minimum gap since its last shift
     STARTED has passed (the floor that keeps a burst of settling runs from
-    starting a flood of shifts), that shift is finished (``done``; ``stood_down``
-    only once a sighting arrived after it or one of the mandate's runs settled
-    after it: landed, rejected or released, failed. A foreman that planned
-    nothing is not re-asked about the same backlog, but one that waited on a run
-    is woken when the run resolves), the line has headroom under its in-flight
-    cap (``_headroom``: runs of earlier shifts may still be in flight), and an
-    open sighting no task is working remains. A ``planning`` / ``executing``
-    shift holds the next one until the stall timeout; a plan waiting
-    ``in_gate`` for a human always holds it, and so do ``_FOREMAN_FAILURE_RUN``
-    failed foreman calls in a row. A mandate that toggles the ``issues`` patrol
-    runs it before the cap check, so a new GitHub issue (work, or a tester's
-    bug) is sighted even while the line is full."""
+    starting a flood of shifts), that shift is past planning (``done`` or
+    ``in_gate``; ``stood_down`` only once a sighting arrived after it or one of
+    the mandate's runs settled after it: landed, rejected or released, failed.
+    A foreman that planned nothing is not re-asked about the same backlog, but
+    one that waited on a run is woken when the run resolves), the line has
+    headroom under its in-flight cap (``_headroom``: runs of earlier shifts and
+    tasks of plans waiting at the plan gate hold slots, never the whole line),
+    and an open sighting no task is working remains. A ``planning`` /
+    ``executing`` shift holds the next one until the stall timeout, and so do
+    ``_FOREMAN_FAILURE_RUN`` failed foreman calls in a row. A mandate that
+    toggles the ``issues`` patrol runs it before the cap check, so a new GitHub
+    issue (work, or a tester's bug) is sighted even while the line is full."""
     from pocketpaw_ee.cloud.belt import service as belt_service
 
     gap = timedelta(
@@ -2586,8 +2614,6 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
         if age < gap:
             return False
         stalled = age >= stall
-        if last.state == "in_gate":
-            return False
         if last.state in ("planning", "executing") and not stalled:
             return False
         if not stalled and (last.outcome or "").startswith(_FOREMAN_FAILED):
@@ -2620,8 +2646,9 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
         for r in (await belt_service.list_runs(doc.workspace))["runs"]
         if r.get("mandate_id") == mandate_id
     ]
-    if _headroom(doc.charter.budget, runs, now)["budget"] < 1:
-        return False  # at its in-flight cap: a run settling frees a slot
+    gated = await _gated_tasks(doc.workspace, mandate_id)
+    if _headroom(doc.charter.budget, runs, now, gated)["budget"] < 1:
+        return False  # at its in-flight cap: a run settling or a plan resolving frees a slot
 
     backlog = await _backlog(
         doc.workspace,

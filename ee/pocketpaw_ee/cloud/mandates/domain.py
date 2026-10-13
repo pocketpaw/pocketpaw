@@ -1,7 +1,7 @@
 # ee/pocketpaw_ee/cloud/mandates/domain.py — MANDATE persistence + value objects.
 #
 # A MANDATE is a standing JOB the Belt holds over time: it senses its surface via
-# PATROLS, plans a FEW tasks per SHIFT via a FOREMAN (LLM judgment), routes the
+# PATROLS, plans each SHIFT's tasks via a FOREMAN (LLM judgment), routes the
 # plan through a PLAN GATE (Instinct ``belt_plan`` proposal), and dispatches
 # approved tasks as normal Belt runs.
 #
@@ -74,8 +74,9 @@ class Budget(BaseModel):
 
     ``max_tasks_per_shift`` is the hard cap on one plan: machine validation
     refuses more and the plan-gate executor RE-validates it at approval time.
-    ``max_in_flight`` caps the line's runs in flight at once; a shift's budget is
-    the headroom under it (``service._headroom``). ``None`` (every charter that
+    ``max_in_flight`` caps the line's tasks in flight at once (runs, plus tasks
+    of plans waiting at the plan gate); a shift's budget is the headroom under
+    it (``service._headroom``). ``None`` (every charter that
     predates the field) reads as ``max_tasks_per_shift``.
     ``gate_minutes_per_week`` is the human-review time budget the mandate is
     allowed to consume (advisory at demo bar).

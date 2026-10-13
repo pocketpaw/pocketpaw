@@ -8,10 +8,12 @@
 # task's run result and what a human said at the gate); the mandate's LINE as
 # git has it (built, awaiting the captain's merge); the bound repo's C4
 # components; and the soul recall. Then it makes EXACTLY ONE LLM call that
-# returns a strict-JSON PlanProposal: a FEW tasks (at most ``shift_budget``, the
-# line's headroom under its in-flight cap, never over the charter's
-# ``max_tasks_per_shift``) or an explicit empty plan with a reason. A task may
-# name a charter ``recipe`` (a deterministic command) instead of develop work.
+# returns a strict-JSON PlanProposal: the shift filled up to ``shift_budget``
+# (the line's headroom under its in-flight cap, never over the charter's
+# ``max_tasks_per_shift``) with the highest-severity independent sightings,
+# fewer only with a ``shortfall_reason``, or an explicit empty plan with a
+# reason. A task may name a charter ``recipe`` (a deterministic command)
+# instead of develop work.
 #
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
 # runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
@@ -35,7 +37,8 @@
 # in-flight sighting (dropping, not refusing: a refused plan holds the line).
 #
 # Prompt rules (sim-validated — keep them in ``build_prompt``): charter verbatim
-# with BOUNDARIES first; at most the shift budget; every task cites sighting ids
+# with BOUNDARIES first; fill the shift budget by severity, respecting
+# ``Depends on:`` (fewer only with a shortfall_reason); every task cites sighting ids
 # and names an expected KPI direction; an EMPTY plan with a reason is correct
 # when signals are quiet or all in flight; boundaries override KPI
 # opportunities; never repeat a failed approach without saying what changed;
@@ -97,6 +100,9 @@ class PlanProposal(BaseModel):
     shift_no: int
     no_action: bool = False
     no_action_reason: str | None = None
+    # Why a plan leaves budget unused (blocked dependencies, work that is not
+    # independent of this shift's tasks, boundaries); None when it fills it.
+    shortfall_reason: str | None = None
     tasks: list[PlannedTask] = Field(default_factory=list)
 
 
@@ -459,7 +465,8 @@ def build_prompt(context: ForemanContext) -> str:
     cap = context.capacity
     if cap:
         in_flight_lines += (
-            f"\nRuns in flight on this line: {cap.get('in_flight', 0)} of a cap of "
+            "\nTasks in flight on this line (runs, and plans waiting at the plan gate): "
+            f"{cap.get('in_flight', 0)} of a cap of "
             f"{cap.get('cap', budget)}, so this shift may start at most {budget} more."
         )
     if context.open_total > len(context.sightings):
@@ -486,8 +493,9 @@ def build_prompt(context: ForemanContext) -> str:
     recipe_lines = "\n".join(f"- {name}" for name in recipe_names) or "(none)"
     architecture_lines = "\n".join(context.architecture) or "(no C4 model for this repo)"
 
-    return f"""You are the FOREMAN of a standing engineering mandate. Once per shift you decide \
-what FEW tasks (if any) the crew should run. You are judged on judgment, not output volume.
+    return f"""You are the FOREMAN of a standing engineering mandate. Once per shift you fill \
+the crew's free slots with the most important plannable work in the backlog, or plan nothing \
+when nothing is plannable. You are judged on judgment: the right work, and no idle slots.
 
 == BOUNDARIES (ABSOLUTE — these override every KPI opportunity) ==
 {json.dumps(boundaries, indent=2)}
@@ -531,7 +539,12 @@ When a task is exactly what a recipe does, set its "recipe" to that name and the
 the command instead of writing code. Use ONLY a name listed above; otherwise "recipe": null.
 
 == YOUR RULES ==
-1. Plan AT MOST {budget} task(s) this shift. Fewer is better. Pick only what moves a KPI.
+1. Plan AT MOST {budget} task(s) this shift, and FILL the shift up to {budget}. Take the open \
+sightings in priority order: higher severity first (p1 before p2 before p3), then oldest. \
+Skip a sighting whose "Depends on:" issues are still open, and one that is not independent \
+of a task you already picked (rule 6). Plan fewer than {budget} only when no more \
+independent, plannable work remains, and then say why in "shortfall_reason": which \
+sightings you skipped and why (an open dependency, not independent, a boundary).
 2. Every task MUST cite at least one sighting id in "evidence_refs" and MUST name an \
 expected KPI and its direction in "expected_outcome" (e.g. "open_cves down").
 3. An EMPTY plan is a correct, respected outcome: if the signals are quiet (or every open \
@@ -552,7 +565,8 @@ component, module or service that duplicates one listed there.
 
 == OUTPUT (STRICT) ==
 Reply with STRICT JSON only — no prose, no markdown fences, no commentary:
-{{"shift_no": {context.shift_no}, "no_action": false, "no_action_reason": null, "tasks": \
+{{"shift_no": {context.shift_no}, "no_action": false, "no_action_reason": null, \
+"shortfall_reason": null, "tasks": \
 [{{"title": "...", "why": "...", "evidence_refs": ["<sighting id>"], "expected_outcome": \
 "<kpi> <up|down>; ...", "est_cost_hours": 1.0, "recipe": null}}]}}"""
 

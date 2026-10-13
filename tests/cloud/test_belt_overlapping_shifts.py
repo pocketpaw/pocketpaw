@@ -6,9 +6,11 @@
 # meaning). The shift's task budget is that headroom, never over
 # ``max_tasks_per_shift``, and it is what the foreman is told and what the auto
 # plan gate checks. A run settling frees a slot and wakes the line; the
-# minimum gap still floors shift starts. The foreman plans only from sightings
+# minimum gap still floors shift starts. A plan waiting at the plan gate holds
+# its tasks' slots, never the whole line. The foreman plans only from sightings
 # nothing works yet: the in-flight ones ride apart in its context, and a task
-# citing one is dropped. The ``issues`` patrol never sights an issue twice.
+# citing one is dropped. It is told to fill the budget by severity and to say
+# why when it plans fewer. The ``issues`` patrol never sights an issue twice.
 # Real store, real trigger, mock foreman; the clock and gh are injected.
 
 from __future__ import annotations
@@ -173,7 +175,8 @@ async def test_the_shift_budget_is_the_headroom(
     n = expected["budget"]
     assert f"Plan AT MOST {n} task(s) this shift" in call.prompt
     assert (
-        f"Runs in flight on this line: {in_flight} of a cap of {expected['cap']}, "
+        "Tasks in flight on this line (runs, and plans waiting at the plan gate): "
+        f"{in_flight} of a cap of {expected['cap']}, "
         f"so this shift may start at most {n} more." in call.prompt
     )
     assert out["shift"]["task_count"] == n
@@ -353,3 +356,96 @@ async def test_an_old_charter_without_max_in_flight_behaves_as_before(mongo_db, 
     )
     await _runs(mid, 2)
     assert not await _fired(mid)
+
+
+# ---------------------------------------------------------------------------
+# A plan waiting at the plan gate holds its slots, not the line
+# ---------------------------------------------------------------------------
+
+
+async def _backdate_shifts(mandate_id: str, age: timedelta) -> None:
+    await ShiftDoc.find(ShiftDoc.mandate_id == mandate_id).update(
+        {"$set": {"createdAt": datetime.now(UTC) - age}}
+    )
+
+
+@pytest.mark.usefixtures("journal", "graph")
+async def test_a_plan_waiting_for_a_human_holds_its_slots_not_the_line(
+    mongo_db,
+    foreman_calls,  # noqa: F811
+):
+    """The pilot's Photo, Library and Halo lines: the auto gate escalated a plan
+    to a human and the line started no shift for hours, with free slots and
+    open work. The gated plan's tasks take their slots under the cap; the free
+    slot starts a shift for the work no plan claims, and a line whose slots
+    are all held at the gate waits."""
+    mid = await _mandate(max_tasks_per_shift=2, max_in_flight=3)
+    await _sightings(mid, 5)
+    first = await mandate_service.trigger_shift(WS, USER, mid)
+    assert first["shift"]["state"] == "in_gate", "the manual plan gate holds 2 tasks"
+    await _backdate_shifts(mid, timedelta(minutes=30))
+
+    assert await _fired(mid), "2 of 3 slots held at the plan gate: one is free"
+    digest = await mandate_service.digest(WS, USER)
+    (line,) = digest["mandates"]
+    assert line["capacity"] == {"in_flight": 2, "cap": 3, "budget": 1}
+
+    await mandate_service.trigger_shift(WS, USER, mid)
+    ctx = foreman_calls[-1].context
+    assert ctx.capacity == {"in_flight": 2, "cap": 3, "budget": 1}
+    gated = (
+        await stores.get_instinct_store().get_action(first["shift"]["plan_action_id"])
+    ).parameters["_belt_plan"]["plan"]["tasks"]
+    claimed = {ref for t in gated for ref in t["evidence_refs"]}
+    assert claimed == {s["id"] for s in ctx.in_flight}
+    assert not claimed & {s["id"] for s in ctx.sightings}, "gated work is never planned again"
+
+    await _backdate_shifts(mid, timedelta(minutes=30))
+    assert not await _fired(mid), "3 of 3 slots held at the plan gate"
+
+
+# ---------------------------------------------------------------------------
+# The foreman fills the shift budget by priority
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("journal", "graph")
+async def test_the_foreman_fills_the_shift_by_priority_and_says_why_when_short(
+    mongo_db,
+    foreman_calls,  # noqa: F811
+    caplog,
+):
+    """The pilot's foreman planned 1 or 2 tasks on a budget of 3 with dozens of
+    open sightings: its prompt said "Fewer is better". It is now told to fill
+    the budget by severity, respecting Depends on, and a shorter plan carries
+    its reason through to the stored plan and the log."""
+    mid = await _mandate("manual", max_tasks_per_shift=3)
+    await _sightings(mid, 4)
+    sid = (await mandate_service.list_sightings(WS, USER, mid))["sightings"][0]["id"]
+    why = "the other three depend on open #4"
+    foreman.set_mock_plan(
+        {
+            "shift_no": 1,
+            "shortfall_reason": why,
+            "tasks": [
+                {"title": "t", "why": "w", "evidence_refs": [sid], "expected_outcome": "x up"}
+            ],
+        }
+    )
+
+    with caplog.at_level(logging.INFO, logger="pocketpaw_ee.cloud.mandates.service"):
+        out = await mandate_service.trigger_shift(WS, USER, mid)
+
+    prompt = foreman_calls[-1].prompt
+    assert "Fewer is better" not in prompt
+    assert "what FEW tasks" not in prompt
+    assert "Plan AT MOST 3 task(s) this shift, and FILL the shift up to 3." in prompt
+    assert "higher severity first (p1 before p2 before p3), then oldest" in prompt
+    assert 'Skip a sighting whose "Depends on:" issues are still open' in prompt
+    assert '"shortfall_reason": null' in prompt
+    blob = (
+        await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
+    ).parameters["_belt_plan"]
+    assert blob["plan"]["shortfall_reason"] == why
+    assert "proposed 1 of 3 task(s)" in caplog.text
+    assert f"short because: {why}" in caplog.text

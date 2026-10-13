@@ -92,7 +92,7 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
     passed since its last shift STARTED. This is the only floor between shift
     starts, so a burst of runs settling at once starts at most one shift per
     line per gap;
-  - that shift is finished: `done`, or `stood_down` with a sighting filed since
+  - that shift is past planning: `done`, `in_gate`, or `stood_down` with a sighting filed since
     or one of the mandate's runs settled since (landed, rejected or released,
     failed, develop failed). A foreman that planned nothing is not asked again
     about the same backlog, but one that stood down waiting on a run wakes when
@@ -101,12 +101,14 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
     `updated_at` also moves on blob writes after a run settles (the tester's
     patches, lane nudges), so a stood-down line can be asked once more after
     one; the minimum gap bounds that to one call per gap.
-    A plan waiting `in_gate` for a human always holds the next shift, and a
+    A plan waiting `in_gate` for a human holds only its tasks' slots under the
+    in-flight cap (below), never the whole line. A
     shift stuck in `planning` (a plan machine validation refused) or
     `executing` holds it until it is `POCKETPAW_MANDATE_CONTINUOUS_STALL_HOURS`
     (default 3) old;
   - the line has headroom under its in-flight cap (see *Overlapping shifts*
-    below): runs of earlier shifts may still be in flight;
+    below): runs of earlier shifts may still be in flight, and plans of
+    earlier shifts may still wait at the plan gate;
   - the foreman did not fail 3 shifts in a row. A failed foreman call
     (timeout, CLI error, unparseable plan) finishes its shift as `done` with
     no plan and the outcome `foreman call failed: <reason>`, so the mandate is
@@ -124,14 +126,20 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   either way. Pair `continuous` with the auto plan gate, or every shift waits
   for a human at the plan gate.
 - **Overlapping shifts.** `budget.max_in_flight` (optional, 1 to 20) caps the
-  line's runs in flight at once (queued, developing, pending at the diff gate,
-  approved); unset, it reads as `max_tasks_per_shift`, so a charter written
+  line's tasks in flight at once: its runs (queued, developing, pending at the
+  diff gate, approved) plus the tasks of its plans still waiting at the plan
+  gate (`service._gated_tasks`). A plan the auto gate escalated to a human
+  holds its slots, not the line, so the line keeps working the backlog no plan
+  claims, and approving the plan later never takes the line over its cap.
+  Unset, the cap reads as `max_tasks_per_shift`, so a charter written
   before the field keeps its meaning. A shift may start whenever the line is
   under its cap, and its task budget is the headroom, `cap - in_flight`, never
   over `max_tasks_per_shift` (`service._headroom`). A run with no store write
   for the stall timeout no longer counts, so an orphan a restart left behind
-  frees its slot. The budget reaches the foreman's prompt (`Plan AT MOST <n>`,
-  and `Runs in flight on this line: a of a cap of b`) and the auto plan gate;
+  frees its slot. The budget reaches the foreman's prompt (`Plan AT MOST <n>
+  task(s) this shift, and FILL the shift up to <n>`, and `Tasks in flight on
+  this line (runs, and plans waiting at the plan gate): a of a cap of b`) and
+  the auto plan gate;
   machine validation and the plan executor still check `max_tasks_per_shift`.
   A line at its cap refuses a shift (`422 mandate.at_capacity`, from the route
   or the scheduler) before it opens a shift row, so nothing is left holding
@@ -395,7 +403,12 @@ through a pluggable `PlanLlm` protocol, selected by `POCKETPAW_MANDATE_LLM`:
   Tests script it via `foreman.set_mock_plan`.
 
 The prompt encodes every sim-validated rule: charter verbatim with BOUNDARIES
-prominent; at most the shift budget of tasks; every task cites
+prominent; fill the shift budget with the open sightings in priority order
+(higher severity first, so p1 before p2 before p3, then oldest), skipping one
+whose `Depends on:` issues are open or that is not independent of a task
+already picked, and plan fewer only when no more independent, plannable work
+remains, naming why in the plan's `shortfall_reason` (stored on the plan, and
+logged as `proposed <k> of <n> task(s) ... short because: <reason>`); every task cites
 sighting ids and names an expected KPI direction; an empty plan with a reason
 is correct and respected; boundaries override KPI opportunities; never repeat
 a failed approach without stating what changed; tasks in one shift are
