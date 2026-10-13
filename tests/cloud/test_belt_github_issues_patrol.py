@@ -54,8 +54,9 @@ def _issue(n: int, *labels: str, title: str = "") -> dict:
 class FakeGh:
     """Answers ``git remote get-url`` with ``origin``, ``gh issue list --state
     all`` with ``states`` (``{number: "OPEN"|"CLOSED"}``), any other ``gh
-    issue list`` with ``issues`` and ``gh pr list`` with ``prs`` (exit
-    ``pr_code``); records every argv."""
+    issue list`` with ``issues``, ``gh pr list`` with ``prs`` (exit
+    ``pr_code``) and ``gh issue view <n> -R <slug>`` with ``views[n]`` or
+    ``views["<slug>#<n>"]`` (exit 1 when absent); records every argv."""
 
     def __init__(
         self,
@@ -66,8 +67,10 @@ class FakeGh:
         states: dict[int, str] | None = None,
         prs: list[dict] | None = None,
         pr_code: int = 0,
+        views: dict | None = None,
     ) -> None:
         self.issues = issues
+        self.views = views or {}
         self.prs = prs or []
         self.pr_code = pr_code
         self.origin = origin
@@ -85,6 +88,10 @@ class FakeGh:
             return self.code, json.dumps(self.issues), "HTTP 502" if self.code else ""
         if argv[:3] == ["gh", "pr", "list"]:
             return self.pr_code, json.dumps(self.prs), "HTTP 502" if self.pr_code else ""
+        if argv[:3] == ["gh", "issue", "view"]:
+            n, slug = argv[3], argv[5]
+            view = self.views.get(f"{slug}#{n}", self.views.get(int(n)))
+            return (0, json.dumps(view), "") if view is not None else (1, "", "not found")
         raise AssertionError(f"unexpected argv {argv}")
 
 
@@ -93,6 +100,8 @@ def _fresh_gh_caches(monkeypatch) -> None:
     """The gh reads are cached per repo for a scheduler tick, across tests too."""
     monkeypatch.setattr(patrols, "_ISSUE_STATES", {})
     monkeypatch.setattr(patrols, "_OPEN_PRS", {})
+    monkeypatch.setattr(patrols, "_OPEN_ISSUES", {})
+    monkeypatch.setattr(patrols, "_ISSUE_VIEWS", {})
 
 
 def _issue_lists(gh: FakeGh) -> list[list[str]]:
@@ -180,9 +189,9 @@ def test_dto_takes_issue_labels():
 async def _github_mandate(tmp_path: Path, monkeypatch, gh: FakeGh, **charter) -> str:
     from pocketpaw_ee.cloud.mandates import service as mandate_service
 
-    async def patrol(repo_id, *, workspace_id, user_id=None, issue_labels=None):
+    async def patrol(repo_id, *, workspace_id, user_id=None, issue_labels=None, sighted=None):
         return await issues_patrol(
-            repo_id, workspace_id=workspace_id, issue_labels=issue_labels, gh=gh
+            repo_id, workspace_id=workspace_id, issue_labels=issue_labels, gh=gh, sighted=sighted
         )
 
     monkeypatch.setitem(patrols.PATROLS, "issues", patrol)
@@ -318,7 +327,7 @@ async def test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states(
     issue = _issue(12, "suite")
     filler = "the export panel drops frames " * 30
     issue["body"] = f"**Behavior**\n{filler}\n\nDepends on: #4, #5"
-    gh = FakeGh([issue], states={4: "CLOSED", 5: "OPEN", 12: "OPEN"})
+    gh = FakeGh([issue], states={4: "CLOSED", 5: "CLOSED", 12: "OPEN"})
     monkeypatch.setattr(patrols, "_default_gh", gh)
     monkeypatch.setattr(patrols, "_ISSUE_STATES", {})
     monkeypatch.setenv("POCKETPAW_MANDATE_LLM", "mock")
@@ -338,7 +347,7 @@ async def test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states(
     (sighting,) = (await mandate_service.list_sightings("w1", "u1", mandate_id))["sightings"]
     assert "Depends on" not in sighting["summary"], "the summary cut drops the line"
     assert "Depends on: #4, #5" in prompt
-    assert "#4 closed, #5 open" in prompt
+    assert "#4 closed, #5 closed" in prompt
     assert len([a for a in gh.calls if a[:3] == ["gh", "issue", "list"] and "all" in a]) == 1
 
 

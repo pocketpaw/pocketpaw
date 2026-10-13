@@ -15,14 +15,17 @@
 #                    issues carrying a charter ``issue_labels`` label (none =
 #                    nothing), keyed ``github:<owner>/<repo>#<n>`` (also the
 #                    source key hand-filed feedback sightings use, so the
-#                    service dedupes across both); closed issues are never
-#                    listed. Any other origin reads the GitLab project through
-#                    ``connectors_service.execute``. ``issue_states`` maps a
-#                    GitHub repo's issues to open / closed for the foreman's
-#                    ``Depends on:`` notes; ``open_pr_closes`` maps each issue an
-#                    OPEN PR closes to that PR, for the backlog's in-flight rule
-#                    (one cached gh list each per repo per tick, ``_gh_rows``);
-#                    ``open_issues`` lists the open ones for Clef's duplicate check.
+#                    service dedupes across both). Each ``sighted`` issue that
+#                    closed or left the line comes back as a resolve marker
+#                    (``_departures``; one cached ``gh issue view`` when it is
+#                    not on the open list). Any other origin reads the GitLab
+#                    project through ``connectors_service.execute``. Backlog
+#                    reads, one cached gh list each per repo per tick
+#                    (``_gh_rows``): ``issue_states`` / ``closed_issues``,
+#                    ``open_pr_closes`` (each issue an OPEN PR closes),
+#                    ``open_issues`` (also Clef's duplicate check), and
+#                    ``open_dependencies``: an issue whose live body names a
+#                    ``Depends on`` issue still open is blocked (fail safe).
 #                    ``flag_needs_spec`` comments on a ``github:`` source issue
 #                    and labels it ``needs-spec`` (once) for the auto plan gate.
 #   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
@@ -219,12 +222,14 @@ async def issues_patrol(
     execute: ConnectorExecuteFn | None = None,
     issue_labels: list[str] | None = None,
     gh: GhFn | None = None,
+    sighted: list[str] | None = None,
 ) -> list[SightingDraft]:
     """The ``issues`` patrol — flag OPEN issues on the bound repo's tracker.
 
     A bound repo whose ``origin`` is on GitHub goes to ``_github_issues``
-    (``gh issue list``, filtered on the charter's ``issue_labels``); any other
-    repo keeps the GitLab path below.
+    (``gh issue list``, filtered on the charter's ``issue_labels``), which also
+    marks each ``sighted`` issue (the line's unresolved ``github:`` sources) that
+    closed or left the line; any other repo keeps the GitLab path below.
 
     Reads a LIVE signal: calls the ``gitlab`` connector's ``list_issues`` action
     through ``connectors_service.execute`` (a genuine httpx call in CLOUD mode),
@@ -245,7 +250,7 @@ async def issues_patrol(
     runner_gh = gh or _default_gh
     slug = await _github_slug(repo_id, runner_gh)
     if slug is not None:
-        return await _github_issues(slug, issue_labels or [], runner_gh)
+        return await _github_issues(slug, issue_labels or [], runner_gh, sighted)
     proj = project
     if not proj:
         proj = Path(repo_id).expanduser().name
@@ -375,10 +380,13 @@ async def _github_slug(repo_id: str, gh: GhFn) -> str | None:
     return slug
 
 
-async def _github_issues(slug: str, labels: list[str], gh: GhFn) -> list[SightingDraft]:
+async def _github_issues(
+    slug: str, labels: list[str], gh: GhFn, sighted: list[str] | None = None
+) -> list[SightingDraft]:
     """One draft per OPEN issue on ``slug`` carrying a label in ``labels``
-    (case-insensitive). No labels = nothing (the charter opts in). A gh failure
-    or a malformed payload is zero sightings; closed issues are never listed."""
+    (case-insensitive), plus a resolve marker per ``sighted`` issue that left
+    the line (``_departures``). No labels = nothing (the charter opts in). A gh
+    failure or a malformed payload is zero drafts and resolves nothing."""
     wanted = {label.strip().lower() for label in labels if label.strip()}
     if not slug or not wanted:
         return []
@@ -410,12 +418,14 @@ async def _github_issues(slug: str, labels: list[str], gh: GhFn) -> list[Sightin
         )
         return []
     drafts: list[SightingDraft] = []
+    open_labels: dict[int, set[str]] = {}
     for issue in issues:
         if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
             continue
         names = [
             str(lb.get("name") or "") for lb in issue.get("labels") or [] if isinstance(lb, dict)
         ]
+        open_labels[issue["number"]] = {n.lower() for n in names}
         if not wanted & {n.lower() for n in names}:
             continue
         n, title = issue["number"], str(issue.get("title") or "").strip()
@@ -437,7 +447,73 @@ async def _github_issues(slug: str, labels: list[str], gh: GhFn) -> list[Sightin
                 },
             }
         )
-    return drafts
+    return drafts + await _departures(slug, wanted, open_labels, sighted or [], gh)
+
+
+# A pass views at most this many issues it could not read off a list; the views
+# are cached per issue for a tick (``_GH_ROWS_TTL``), a failed one included.
+_MAX_ISSUE_VIEWS = 20
+_ISSUE_VIEWS: dict[tuple[str, int], tuple[float, dict[str, Any] | None]] = {}
+
+
+async def _issue_view(slug: str, n: int, gh: GhFn, budget: list[int]) -> dict[str, Any] | None:
+    """``gh issue view <n> -R <slug> --json state,labels,body`` (PRs answer too),
+    cached per tick. ``budget`` is the pass's remaining views (``[k]``); a cache
+    hit spends none. None when the slug is unsafe, the budget is spent or gh
+    fails: the caller reads that as unknown. Never raises."""
+    slug = slug.lower()
+    hit = _ISSUE_VIEWS.get((slug, n))
+    if hit is not None and time.monotonic() - hit[0] < _GH_ROWS_TTL:
+        return hit[1]
+    if budget[0] < 1 or any(p in {".", ".."} or p.startswith("-") for p in slug.split("/")):
+        return None
+    budget[0] -= 1
+    try:
+        code, out, _ = await gh(
+            ["gh", "issue", "view", str(n), "-R", slug, "--json", "state,labels,body"]
+        )
+        row = json.loads(out) if code == 0 else None
+    except Exception:  # noqa: BLE001 — an unread issue is unknown, never a crash
+        logger.warning("mandate: gh issue view %s#%s failed", slug, n, exc_info=True)
+        row = None
+    row = row if isinstance(row, dict) else None
+    _ISSUE_VIEWS[(slug, n)] = (time.monotonic(), row)
+    return row
+
+
+async def _departures(
+    slug: str, wanted: set[str], open_labels: dict[int, set[str]], sighted: list[str], gh: GhFn
+) -> list[SightingDraft]:
+    """A resolve marker ``{"patrol": "issues", "resolve": <source>, "reason":
+    ...}`` per ``sighted`` ``github:<slug>#<n>`` no longer open on this line:
+    ``issue-closed``, or ``issue-left-line`` when it is open without a line
+    label. ``open_labels`` is the open list; a number missing from it costs one
+    ``gh issue view``. Open and still labelled (past the list's limit), or a
+    failed view, moves nothing."""
+    out: list[SightingDraft] = []
+    budget = [_MAX_ISSUE_VIEWS]
+    for source in dict.fromkeys(sighted):
+        found = _SPEC_SOURCE.match(source)
+        if not found or found[1].lower() != slug.lower():
+            continue
+        n = int(found[2])
+        labels = open_labels.get(n)
+        if labels is None:
+            view = await _issue_view(slug, n, gh, budget) or {}
+            state = str(view.get("state") or "").lower()
+            if not state:
+                continue
+            if state != "open":
+                out.append({"patrol": "issues", "resolve": source, "reason": "issue-closed"})
+                continue
+            labels = {
+                str(lb.get("name") or "").lower()
+                for lb in view.get("labels") or []
+                if isinstance(lb, dict)
+            }
+        if not wanted & labels:
+            out.append({"patrol": "issues", "resolve": source, "reason": "issue-left-line"})
+    return out
 
 
 # The bound repo's gh lists the backlog reads: rows cached per slug for a
@@ -479,17 +555,116 @@ async def _gh_rows(
     return slug, rows
 
 
-async def issue_states(repo_id: str, gh: GhFn | None = None) -> dict[int, str]:
-    """``{number: "open"|"closed"}`` for the bound repo's GitHub issues; empty
-    when the repo is not on GitHub (or its slug is unsafe) or gh fails. Never
-    raises."""
+async def _slug_states(repo_id: str, gh: GhFn | None) -> tuple[str, dict[int, str]]:
+    """``(slug, {number: "open"|"closed"})``: one cached ``gh issue list --state
+    all`` on the bound repo. ``("", {})`` off GitHub; a gh failure, no states."""
     argv = ["gh", "issue", "list", "--state", "all", "--limit", _GH_STATE_LIMIT]
-    _, rows = await _gh_rows(_ISSUE_STATES, repo_id, [*argv, "--json", "number,state"], gh)
-    return {
+    slug, rows = await _gh_rows(_ISSUE_STATES, repo_id, [*argv, "--json", "number,state"], gh)
+    states = {
         r["number"]: str(r.get("state") or "").lower()
         for r in rows
         if isinstance(r.get("number"), int)
     }
+    return slug, states
+
+
+async def issue_states(repo_id: str, gh: GhFn | None = None) -> dict[int, str]:
+    """``{number: "open"|"closed"}`` for the bound repo's GitHub issues; empty
+    when the repo is not on GitHub (or its slug is unsafe) or gh fails. Never
+    raises."""
+    return (await _slug_states(repo_id, gh))[1]
+
+
+async def closed_issues(repo_id: str, gh: GhFn | None = None) -> set[str]:
+    """``{"github:<slug>#<n>"}`` for each CLOSED issue on the bound repo, keyed
+    like an issue sighting's ``source``. Empty off GitHub or when gh fails (an
+    issue past the list's limit reads as not closed). Never raises."""
+    slug, states = await _slug_states(repo_id, gh)
+    return {f"github:{slug}#{n}" for n, state in states.items() if state == "closed"}
+
+
+# An issue's ``Depends on`` section: the line (``**Depends on:** #4``, ``Depends
+# on #412``, a ``## Depends on`` heading) and the lines under it, up to a blank
+# line or a heading; a heading with no reference may sit a blank line above its
+# list. A reference is ``#N`` (the issue's own repo), ``owner/repo#N`` or an
+# issue / PR URL; the first ``_DEPENDS_REFS_CAP`` count.
+_DEPENDS_HEAD = re.compile(r"^[\s>*_#-]*depends\s+on\b[\s*_:]*(.*)$", re.IGNORECASE)
+_DEPENDS_REF = re.compile(
+    r"(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/|([\w.-]+/[\w.-]+)?#)(\d+)"
+)
+_SECTION_END = re.compile(r"^(?:#{1,6}\s|\*\*[^*]+\*\*:?$)")
+_DEPENDS_REFS_CAP = 10
+
+
+def depends_on_refs(body: str, slug: str) -> list[str]:
+    """Every ``owner/repo#N`` the ``Depends on`` sections of ``body`` name,
+    lowercased, in order; a bare ``#N`` is ``slug``'s."""
+    refs: list[str] = []
+    lines = body.splitlines()
+    for i, line in enumerate(lines):
+        head = _DEPENDS_HEAD.match(line)
+        if not head:
+            continue
+        section, rest = [head[1]], lines[i + 1 :]
+        if not _DEPENDS_REF.search(head[1]):
+            while rest and not rest[0].strip():
+                rest = rest[1:]
+        for nxt in rest:
+            if not nxt.strip() or _SECTION_END.match(nxt.strip()) or _DEPENDS_HEAD.match(nxt):
+                break
+            section.append(nxt)
+        for m in _DEPENDS_REF.finditer("\n".join(section)):
+            refs.append(f"{(m[1] or m[2] or slug).lower()}#{m[3]}")
+    return list(dict.fromkeys(refs))[:_DEPENDS_REFS_CAP]
+
+
+async def open_dependencies(
+    repo_id: str, sources: list[str], gh: GhFn | None = None
+) -> dict[str, list[str]]:
+    """``{source: refs}`` for each ``github:<owner>/<repo>#<n>`` in ``sources``
+    whose LIVE issue body names a ``Depends on`` issue that is not closed yet.
+
+    The body comes off the bound repo's cached open-issue list, else one cached
+    ``gh issue view``; a bound-repo ref's state off the cached ``--state all``
+    list, else a view (a cross-repo ref always). Empty when the bound repo is
+    not on GitHub. Fail safe: an unreadable body blocks as ``["?"]`` and an
+    unknown ref state counts as open. Never raises."""
+    runner = gh or _default_gh
+    bound, states = await _slug_states(repo_id, runner)
+    bound = bound.lower()
+    if not bound:
+        return {}
+    bodies = {
+        r["number"]: str(r.get("body") or "")
+        for r in await open_issues(repo_id, runner)
+        if isinstance(r.get("number"), int)
+    }
+    budget = [_MAX_ISSUE_VIEWS]
+    blocked: dict[str, list[str]] = {}
+    for source in dict.fromkeys(sources):
+        found = _SPEC_SOURCE.match(source)
+        if not found:
+            continue
+        slug, n = found[1].lower(), int(found[2])
+        body = bodies.get(n) if slug == bound else None
+        if body is None:
+            view = await _issue_view(slug, n, runner, budget)
+            body = None if view is None else str(view.get("body") or "")
+        if body is None:
+            blocked[source] = ["?"]
+            continue
+        waiting = []
+        for ref in depends_on_refs(body, slug):
+            ref_slug, ref_n = ref.rsplit("#", 1)
+            state = states.get(int(ref_n)) if ref_slug == bound else None
+            if state is None:
+                view = await _issue_view(ref_slug, int(ref_n), runner, budget) or {}
+                state = str(view.get("state") or "").lower()
+            if state not in ("closed", "merged"):
+                waiting.append(ref)
+        if waiting:
+            blocked[source] = waiting
+    return blocked
 
 
 async def open_issues(repo_id: str, gh: GhFn | None = None) -> list[dict[str, Any]]:

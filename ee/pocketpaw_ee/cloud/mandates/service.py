@@ -8,7 +8,8 @@
 # mandates; file_feedback, list_sightings; run_patrols (each patrol gets the
 # kwargs its signature names; a draft is skipped when its patrol already filed
 # the same ``_dedup_signal``, or its ``dedup_key`` is any sighting's ``source``
-# or ``dedup_key``, so an issue is never sighted twice on a line); trigger_shift
+# or ``dedup_key``, so an issue is never sighted twice on a line, until it closes
+# or leaves the line and resolves as ``patrol:<reason>``); trigger_shift
 # (capacity → sense → foreman → plan gate; Clef scores the plan in the
 # background, or inline for ``plan_policy.decide`` under ``..._PLAN_GATE=auto``,
 # whose ``spec_unclear`` flags issues ``needs-spec``); prepare_plan_resolution +
@@ -25,8 +26,8 @@
 # the trigger persists that (``resolved_by_run``), since the runs list only
 # reaches the newest actions. A sighting is in flight while a task citing it is,
 # or while an OPEN PR on the bound repo closes its ``github:`` source issue
-# (``patrols.open_pr_closes``). Each entry carries its ``Depends on:`` line; the
-# trigger adds those issues' states. THE LINE reads git (``line_status``).
+# (``patrols.open_pr_closes``). A closed issue is no work; one whose live body
+# names an open ``Depends on`` issue is blocked. THE LINE reads git (``line_status``).
 #
 # CAPACITY (``_headroom``): a line's tasks in flight (its runs, plus the tasks of
 # plans waiting at the plan gate, ``_gated_tasks``) are capped by the charter's
@@ -513,7 +514,14 @@ async def run_patrols(
     is any existing sighting's ``source`` or ``dedup_key`` is skipped too,
     whatever patrol filed it: a GitHub issue (``github:<owner>/<repo>#<n>``)
     filed by hand through the feedback intake is not sighted again by the
-    ``issues`` patrol. Returns the NEW sightings only."""
+    ``issues`` patrol. A sighting the patrol resolved (``patrol:...``) blocks
+    nothing, so a reopened or relabelled-back issue is sighted again.
+
+    Resolve: the ``issues`` patrol gets the line's unresolved ``github:``
+    sources as ``sighted`` and answers a ``{"resolve": source, "reason": ...}``
+    marker for each issue that closed or left the line; that sighting is resolved
+    as ``patrol:<reason>``. A hand-filed one is on the line by choice, not by
+    label, so only ``issue-closed`` resolves it. Returns the NEW sightings only."""
     from pocketpaw_ee.cloud.mandates.patrols import PATROLS
 
     doc = await _fetch_mandate(workspace_id, mandate_id)
@@ -521,13 +529,24 @@ async def run_patrols(
     existing = await SightingDoc.find(
         SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
     ).to_list()
-    seen_keys = {(s.patrol, _dedup_signal(s.evidence, s.summary)) for s in existing}
+    blocking = [s for s in existing if not (s.resolved_by_run or "").startswith("patrol:")]
+    seen_keys = {(s.patrol, _dedup_signal(s.evidence, s.summary)) for s in blocking}
     seen_refs = {
         str(ref)
-        for s in existing
+        for s in blocking
         for ref in ((s.evidence or {}).get("source"), (s.evidence or {}).get("dedup_key"))
         if ref
     }
+    unresolved = [s for s in existing if not s.resolved_by_run]
+    sighted = sorted(
+        {
+            str(ref)
+            for s in unresolved
+            for ref in ((s.evidence or {}).get("source"), (s.evidence or {}).get("dedup_key"))
+            if str(ref or "").startswith("github:")
+        }
+    )
+    departed: dict[str, str] = {}
 
     created: list[SightingDoc] = []
     enabled = set(doc.patrols or [])
@@ -553,11 +572,16 @@ async def run_patrols(
                 kwargs["upstream"] = [u.model_dump() for u in doc.upstream]
             if "issue_labels" in params:
                 kwargs["issue_labels"] = list(doc.charter.issue_labels)
+            if "sighted" in params:
+                kwargs["sighted"] = sighted
             drafts = await patrol(doc.surface.repo_id, **kwargs)
         except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
             logger.warning("mandate: patrol %r raised — skipping", patrol_name, exc_info=True)
             continue
         for draft in drafts:
+            if draft.get("resolve"):
+                departed[str(draft["resolve"])] = str(draft.get("reason") or "")
+                continue
             key = (
                 str(draft.get("patrol") or patrol_name),
                 _dedup_signal(draft.get("evidence"), draft.get("summary")),
@@ -578,6 +602,20 @@ async def run_patrols(
             )
             await sighting.insert()
             created.append(sighting)
+
+    for s in unresolved:
+        ev = s.evidence or {}
+        reason = departed.get(str(ev.get("source") or "")) or departed.get(
+            str(ev.get("dedup_key") or "")
+        )
+        if not reason or (reason == "issue-left-line" and s.patrol != "issues"):
+            continue
+        # no-event: bookkeeping on the sighting row, like a landed resolution;
+        # the issue's own close or relabel already happened on GitHub.
+        s.resolved_by_run = f"patrol:{reason}"
+        s.resolved_at = _utcnow()
+        await s.save()
+        logger.info("mandate %s: sighting %s resolved (%s)", mandate_id, s.id, reason)
 
     for sighting in created:
         await emit(
@@ -1079,11 +1117,16 @@ async def _backlog(
     With the bound ``repo_id``, a sighting whose ``github:<slug>#<n>`` source
     issue an OPEN PR closes is in flight too (``open_pr``): another run's PR,
     still in the fast lane, works it. One cached ``gh pr list``, only when a
-    sighting has such a source; a gh failure marks nothing.
+    sighting has such a source; a gh failure marks nothing. A sighting whose
+    issue is CLOSED (``patrols.closed_issues``) is left out even before the
+    patrol resolves it, and one whose live issue body names a ``Depends on``
+    issue still open is ``blocked`` (``patrols.open_dependencies``, fail safe:
+    an unreadable body or ref blocks), so neither the foreman nor the due check
+    takes it as work.
 
     Returns ``{"open": [...], "tasks": [...], "teaching": [...]}``: open entries
     (highest severity, then oldest) are ``{id, patrol, severity, summary, new,
-    in_flight, open_pr, tasks, depends_on}``, where ``new`` means filed after
+    in_flight, open_pr, blocked, tasks, depends_on}``, where ``new`` means filed after
     ``since``, ``tasks`` lists the citing tasks (``{shift_no, title, status}``) and
     ``depends_on`` is the full text's ``Depends on:`` line (or None); ``tasks`` covers the
     plans behind this mandate's runs, every plan still at the plan gate (in
@@ -1134,12 +1177,20 @@ async def _backlog(
     open_docs.sort(key=lambda s: (-int(s.severity), _aware(s.ts)))
 
     closing: dict[str, int] = {}
+    blocked: dict[str, list[str]] = {}
     if repo_id and any(
         str(s.evidence.get("source") or "").startswith("github:") for s in open_docs
     ):
         from pocketpaw_ee.cloud.mandates import patrols as mandate_patrols
 
         closing = await mandate_patrols.open_pr_closes(repo_id)
+        # Belt and braces: an issue that closed before the patrol resolved its
+        # sighting is no work; one waiting on an open dependency is blocked.
+        closed = await mandate_patrols.closed_issues(repo_id)
+        open_docs = [s for s in open_docs if str(s.evidence.get("source") or "") not in closed]
+        blocked = await mandate_patrols.open_dependencies(
+            repo_id, [str(s.evidence.get("source") or "") for s in open_docs]
+        )
 
     entries = []
     for s in open_docs:
@@ -1157,6 +1208,7 @@ async def _backlog(
                 "new": since is None or _aware(s.ts) > _aware(since),
                 "in_flight": open_pr is not None or any(c["status"] in _IN_FLIGHT for c in cites),
                 "open_pr": open_pr,
+                "blocked": blocked.get(str(s.evidence.get("source") or ""), []),
                 "tasks": cites,
                 "depends_on": _depends_on(str(s.evidence.get("text") or s.summary)),
             }
@@ -1299,7 +1351,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
 
     # The foreman plans from the open sightings nothing works yet; the in-flight
     # ones ride apart so it never plans them again (``drop_in_flight`` enforces).
-    free = [o for o in backlog["open"] if not o["in_flight"]]
+    free = [o for o in backlog["open"] if not o["in_flight"] and not o["blocked"]]
     claimed = [o for o in backlog["open"] if o["in_flight"]]
     shown = free[:_BACKLOG_CAP]
     # One cached ``gh issue list --state all``, and only when a sighting names
@@ -2657,7 +2709,7 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
         since=last.createdAt if last else None,
         repo_id=doc.surface.repo_id,
     )
-    work = [o for o in backlog["open"] if not o["in_flight"]]
+    work = [o for o in backlog["open"] if not o["in_flight"] and not o["blocked"]]
     if last is not None and last.state == "stood_down":
         # ponytail: ``updated_at`` also moves on blob writes after a run settles
         # (a tester's patches, lane nudges), so a stood-down line may be asked

@@ -433,6 +433,22 @@ tick) so lines on the same repo share it. A non-GitHub repo or a gh failure
 shows the line without states. At most 10 states per sighting, and the notes in
 one prompt stop at 3000 characters.
 
+That note is advice. The rule is enforced before the foreman sees anything:
+`_backlog` (shared by the shift trigger, the due check and the digest) leaves
+out a sighting whose `github:` issue is closed (`patrols.closed_issues`, the
+same cached `--state all` list), even before the patrol resolves it, and marks
+one `blocked` when its LIVE issue body names a `Depends on` issue that is not
+closed (`patrols.open_dependencies`). Blocked sightings never reach the
+foreman, and a line whose only work is blocked is not due. The body comes off
+the cached open-issue list (`open_issues`), else one cached `gh issue view`.
+The section is the `Depends on` line, colon or not, bold or a heading, plus
+the lines under it up to a blank line or the next heading (a bare heading may
+sit a blank line above its list). It counts `#N` (the issue's own repo),
+`owner/repo#N` and issue or PR URLs, at most 10. A bound-repo reference's state
+comes off the `--state all` list, else a view; a cross-repo one always takes a
+view. Fail safe: an unreadable body blocks as `["?"]`, and a reference whose
+state cannot be read counts as open. A line not bound to GitHub is not checked.
+
 The foreman also gets the bound repo's architecture: the shift trigger reads
 `<repo>/docs/c4/model.json` (`belt/orient.c4_lines`) and the prompt lists the
 repo's own containers and components, one line each with the first sentence of
@@ -654,17 +670,27 @@ GitLab path.
 - **Dedup:** `run_patrols` skips a draft whose `dedup_key` is any existing
   sighting's `source` or `dedup_key`, whichever patrol filed it, so an issue
   already filed by hand through the feedback intake (the pilot files them with
-  `source: github:<owner>/<repo>#<n>`) is not sighted again.
-- **Closing:** sightings have no close path besides a landed run, so closed
-  issues are simply never listed; a sighting whose issue a human closed stays
-  open until a task citing it lands.
+  `source: github:<owner>/<repo>#<n>`) is not sighted again. A sighting the
+  patrol resolved (below) is left out of the dedup, so an issue that reopens,
+  or is relabelled back onto the line, is sighted again.
+- **Closing:** `run_patrols` hands the patrol the line's unresolved `github:`
+  sources (`sighted`). Each one missing from the line's open set comes back as
+  a resolve marker, and its sighting is resolved with `resolved_by_run =
+  patrol:issue-closed` (the issue closed) or `patrol:issue-left-line` (still
+  open, no line label). An issue still on the open list needs no further call;
+  one missing from it costs one `gh issue view <n> --json state,labels,body`,
+  at most 20 a pass, cached per issue for the 60 s tick. An open issue that
+  still carries a line label (past the list's 100) is left alone, as is any
+  issue whose view fails. A failed `gh issue list` resolves nothing. A
+  hand-filed sighting is on the line by choice, so only `issue-closed`
+  resolves it.
 - **Schedule:** a daily or weekly shift senses at its start as before. A
   `continuous` mandate that toggles `issues` also runs it inside its due check
   (`_continuous_due`, after the gap and gate holds, before the in-flight cap
   check and the backlog read), so a new issue makes the mandate due without
   waiting for a shift: one `gh issue list` per mandate per tick. The dedup
-  against every sighting on the line, resolved or not, means an issue a run or
-  an open PR is working is never sighted again.
+  against every sighting on the line, resolved by a run or not, means an issue
+  a run or an open PR is working is never sighted again.
 - **Cross-line requests:** a line picks up any label it lists, so the engines
   line on `qbtrix/creative-core` lists `needs-core` and sees requests the app
   lines file there. They must be filed on creative-core.
