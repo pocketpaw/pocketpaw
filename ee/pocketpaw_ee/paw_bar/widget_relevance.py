@@ -17,8 +17,8 @@
 # lines are built here: figure's from the figure catalog, the sliders and anchors
 # only of the figures this turn names (each figure's own intents, ``figures`` in
 # the overlay) or an earlier card used, at most MAX_FULL_FIGURES, the rest as ids
-# and titles; figure ranks ahead of iso-scene when one is named. iso-scene's line is its part shape and a hand water
-# pump example card. Widgets a card earlier in the conversation used are always
+# and titles; figure ranks ahead of iso-scene when one is named. iso-scene's line
+# is its part shape and a hand water pump example card. Widgets a card earlier in the conversation used are always
 # kept, so an edit to that card still has its props.
 #
 # Invariants: same input, same output (sorted, no set iteration in output); only
