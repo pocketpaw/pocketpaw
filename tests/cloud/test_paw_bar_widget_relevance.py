@@ -119,7 +119,9 @@ def test_the_drawing_lines_teach_the_shape_and_the_preference():
     assert "bpm 40..180" in heart and "it is hand-built and best" in heart
     gears = _section(_paragraph("Show how the gears in a gearbox work"))
     iso = next(line for line in gears.splitlines() if line.startswith("   - iso-scene "))
-    assert "arrow|box|cone|cylinder|disc|gear|plate|rod|slab|sphere|tube" in iso
+    assert "arrow|box|chain|cone|cylinder|disc|gear|plate|rod|slab|sphere|tube" in iso
+    assert "flow|link|pulse|slide|spin|swing" in iso and "ghost" in iso
+    assert "around [id,id]" in iso and "[min,max]" in iso
     assert "no braces, no functions" in iso and "12-30 parts" in iso
     assert "spend no parts on bolts" in iso and "short ids" in iso
     assert "an illustration stays for flat diagrams" in iso
@@ -128,6 +130,30 @@ def test_the_drawing_lines_teach_the_shape_and_the_preference():
     assert compact in iso
     card = {"ui": example, "state": {}}
     assert render_card(json.dumps(card), [], profile=RIPPLE_PROFILE) is not None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "How does a pulley system make lifting easier?",
+        "How does a car jack work?",
+        "Show how a crane lifts a load",
+        "How does a lever work?",
+        "Show how a lock works",
+        "How does a clock work?",
+        "How does a hand water pump work?",
+    ],
+)
+def test_a_how_does_it_work_question_about_a_machine_gets_the_drawing(message):
+    """A live Haiku eval answered the pulley question with a number-input calculator.
+    The drawing must be offered for every such question, and its hint must say the
+    card is the drawing, a calculator only after it and only when asked.
+    THE MUTATION THAT BREAKS THIS: drop the machine intents or the never-a-calculator
+    sentence from the iso-scene entry in ripple_widget_intents.json."""
+    assert "iso-scene" in widget_relevance.pick_widgets(message)
+    iso = widget_relevance.full_line("iso-scene")
+    assert "never a calculator, form or number inputs" in iso
+    assert "only if they ask for one" in iso
 
 
 def test_the_iso_scene_example_is_a_rich_compact_machine():
@@ -140,6 +166,7 @@ def test_the_iso_scene_example_is_a_rich_compact_machine():
     assert 12 <= len(parts) <= 30
     kinds = {p["kind"] for p in parts}
     assert {"slab", "rod", "tube"} <= kinds
+    assert any(p.get("ghost") for p in parts)  # a housing the inside shows through
     keys = {p["key"] for p in props["params"]}
     assert 1 <= len(keys) <= 3 and len(motions) >= 3
     assert all(any(k in str(m["speed"]) for k in keys) for m in motions)
@@ -273,8 +300,8 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
     """The fixed core is 18,583 chars (the drawing widgets added only their two
     names to the index); the worst per-turn section is the MAX_PICKED longest
-    candidate lines (about 11,210, iso-scene's 3,884 with its 15-part example the
-    longest), so the paragraph peaks near 29,840, under the 32,000 cap."""
+    candidate lines (about 11,860, iso-scene's 4,530 with its 15-part example the
+    longest), so the paragraph peaks near 30,490, under the 32,000 cap."""
     core = _paragraph()
     longest = sorted(
         (len(widget_relevance.full_line(n)) + 4 for n in widget_relevance.CANDIDATES),

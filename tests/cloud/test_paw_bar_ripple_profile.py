@@ -3659,6 +3659,36 @@ def _iso(**change) -> dict:
 
 
 _PART = {"id": "x", "kind": "box", "at": [0, 0, 0], "w": 4, "d": 4, "h": 4}
+# The renderer's newer contract: a chain around two gears or discs, a link motion
+# between two parts, a slide driven by another part with a throw.
+_CHAIN = {"id": "links", "kind": "chain", "around": ["ring", "cog"], "r": 1.5}
+_LINK = {"part": "crank-back", "kind": "link", "from": "ring", "to": "pedal"}
+_SLIDE = {"part": "pedal", "kind": "slide", "speed": 1, "driven": "ring", "throw": 10}
+
+
+@pytest.mark.parametrize(
+    "why, change",
+    [
+        ("a range as a min,max pair (a live Haiku card)", {"motions.0.range": [0, 30]}),
+        ("a swing range either side of zero", {"motions.0.range": [-30, 30]}),
+        ("a ghost housing", {"parts.11.ghost": True}),
+        ("a chain around two gears", {"parts.12": _CHAIN}),
+        (
+            "a chain with no r",
+            {"parts.12": {"id": "links", "kind": "chain", "around": ["ring", "cog"]}},
+        ),
+        ("a link motion", {"motions.3": _LINK}),
+        (
+            "a link motion with no part or speed",
+            {"motions.3": {"kind": "link", "from": "ring", "to": "pedal"}},
+        ),
+        ("a driven slide with a throw", {"motions.3": _SLIDE}),
+    ],
+)
+def test_an_iso_scene_takes_the_renderers_newer_shapes(why, change):
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, render_card
+
+    assert render_card(_body(_iso(**change)), [], profile=RIPPLE_PROFILE) is not None, why
 
 
 @pytest.mark.parametrize(
@@ -3715,6 +3745,25 @@ _PART = {"id": "x", "kind": "box", "at": [0, 0, 0], "w": 4, "d": 4, "h": 4}
         ("a scale of 10", {"scale": 10}),
         ("an unknown look", {"look": "neon"}),
         ("no parts", {"parts": []}),
+        ("a range pair the wrong way round", {"motions.0.range": [30, 0]}),
+        ("a range of three numbers", {"motions.0.range": [0, 10, 20]}),
+        ("a range pair of strings", {"motions.0.range": ["0", "30"]}),
+        ("a range pair past 400", {"motions.0.range": [0, 9999]}),
+        ("a ghost that is not a boolean", {"parts.11.ghost": "yes"}),
+        ("a chain without around", {"parts.12": {"id": "links", "kind": "chain"}}),
+        (
+            "a chain around one part",
+            {"parts.12": {"id": "links", "kind": "chain", "around": ["ring"]}},
+        ),
+        ("a chain around a missing part", {"parts.12": _CHAIN | {"around": ["ring", "wheel"]}}),
+        ("a chain around a slab", {"parts.12": _CHAIN | {"around": ["ground", "cog"]}}),
+        ("a link from a missing part", {"motions.3": _LINK | {"from": "flywheel"}}),
+        ("a link without a to", {"motions.3": {"kind": "link", "from": "ring"}}),
+        ("a spin without a speed", {"motions.0": {"part": "ring", "kind": "spin"}}),
+        ("a spin without a part", {"motions.0": {"kind": "spin", "speed": 1}}),
+        ("a slide driven by no part", {"motions.3": _SLIDE | {"driven": "flywheel"}}),
+        ("a throw that is a string", {"motions.3": _SLIDE | {"throw": "10"}}),
+        ("a throw past 400", {"motions.3": _SLIDE | {"throw": 9999}}),
     ],
 )
 def test_an_iso_scene_holds_to_its_parts_motions_and_plain_text(why, change):

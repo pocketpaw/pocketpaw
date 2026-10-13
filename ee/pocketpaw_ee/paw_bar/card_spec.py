@@ -282,12 +282,15 @@ MODEL_URL_PROPS: frozenset[str] = frozenset({"src", "poster", "environmentImage"
 ISO_SCENE = "iso-scene"
 ISO_KINDS: frozenset[str] = frozenset(
     {"slab", "box", "cylinder", "disc", "gear", "tube", "sphere", "cone", "rod", "arrow"}
-    | {"plate"}
+    | {"plate", "chain"}
 )
 ISO_ROLES: frozenset[str] = frozenset(
     {"neutral", "accent", "red", "blue", "green", "amber", "metal"}
 )
-ISO_MOTIONS: frozenset[str] = frozenset({"spin", "slide", "swing", "pulse", "flow"})
+ISO_MOTIONS: frozenset[str] = frozenset({"spin", "slide", "swing", "pulse", "flow", "link"})
+# A chain runs ``around`` two of these; every other motion than ``link`` needs a part
+# and a speed, a link its ``from`` and ``to`` parts.
+ISO_CHAIN_HUBS: frozenset[str] = frozenset({"gear", "disc"})
 ISO_PARTS, ISO_MOTIONS_MAX, ISO_PARAMS, ISO_READOUTS, ISO_LABELS = 150, 20, 6, 4, 10
 ISO_COORD, ISO_SIZE, ISO_SPEED, ISO_PATH_POINTS = 500, 400, 20, 64
 ISO_EXPRESSION_MAX = 80
@@ -1737,13 +1740,26 @@ def _iso_expression(keys: frozenset[str], low: float, high: float) -> Any:
     return ok
 
 
+def _iso_range_pair(v: Any) -> bool:
+    """A motion ``range`` written as ``[min, max]``: two finite numbers within
+    ``ISO_SIZE`` either side of zero, min not above max."""
+    return (
+        isinstance(v, list)
+        and len(v) == 2
+        and all(map(_num(-ISO_SIZE, ISO_SIZE), v))
+        and v[0] <= v[1]
+    )
+
+
 def _check_iso_scene(node: dict[str, Any], props: dict[str, Any]) -> None:
     """No handler; ``parts`` 1 to ``ISO_PARTS`` rows of the kit's kinds, colour roles
-    and bounds, unique ids, each ``on`` an id; ``params`` up to ``ISO_PARAMS``
-    sliders keyed by ``_ISO_KEY`` (not ``_ISO_RESERVED``) with min < max and the
-    value between; ``motions`` and ``readouts`` over those keys
-    (``_iso_expression``), each motion ``part`` an id; ``labels`` plain text within
-    the annotation caps, each ``part`` an id. Every text field is plain."""
+    and bounds, unique ids, each ``on`` an id, a ``chain`` ``around`` two gear or
+    disc ids; ``params`` up to ``ISO_PARAMS`` sliders keyed by ``_ISO_KEY`` (not
+    ``_ISO_RESERVED``) with min < max and the value between; ``motions`` and
+    ``readouts`` over those keys (``_iso_expression``), a motion's ``range`` a number
+    or a ``[min, max]`` pair, its ``part``, ``from``, ``to`` and ``driven`` ids (a
+    ``link`` needs from and to, any other kind a part and a speed); ``labels`` plain
+    text within the annotation caps, each ``part`` an id. Every text field is plain."""
     _play_basics(ISO_SCENE, node, props, None, ())
     params = props.get("params") or []
     param_ok = _rows_of(
@@ -1790,6 +1806,10 @@ def _check_iso_scene(node: dict[str, Any], props: dict[str, Any]) -> None:
                 "from": _point,
                 "to": _point,
                 "label": _txt(24),
+                "ghost": _flag,
+                "around": lambda v: (
+                    isinstance(v, list) and len(v) == 2 and all(isinstance(i, str) for i in v)
+                ),
                 "detail": _one_of(frozenset({"knurl"})),
                 "texture": _one_of(frozenset({"guilloche", "ribs"})),
                 "color": _one_of(ISO_ROLES),
@@ -1804,10 +1824,14 @@ def _check_iso_scene(node: dict[str, Any], props: dict[str, Any]) -> None:
                 "kind": _one_of(ISO_MOTIONS),
                 "axis": _one_of(frozenset("xyz")),
                 "speed": _iso_expression(keys, -ISO_SPEED, ISO_SPEED),
-                "range": _num(0, ISO_SIZE),
+                "range": lambda v: _num(0, ISO_SIZE)(v) or _iso_range_pair(v),
                 "phase": _num(-1, 1),
+                "from": _txt(40),
+                "to": _txt(40),
+                "driven": _txt(40),
+                "throw": _num(-ISO_SIZE, ISO_SIZE),
             },
-            {"part", "kind", "speed"},
+            {"kind"},
         ),
         "readouts": _rows_of(
             (0, ISO_READOUTS),
@@ -1835,13 +1859,26 @@ def _check_iso_scene(node: dict[str, Any], props: dict[str, Any]) -> None:
     for key, ok in checks.items():
         if not _optional(props, key, ok):
             raise _Reject(f"an iso-scene {key} outside the widget's kinds, caps or plain text")
+    motions = props.get("motions") or []
+    if not all(
+        {"from", "to"} <= m.keys() if m["kind"] == "link" else {"part", "speed"} <= m.keys()
+        for m in motions
+    ):
+        raise _Reject("an iso-scene link without from and to, or a motion without part and speed")
     ids = [p["id"] for p in props["parts"]]
     known = set(ids)
     refs = [p.get("on") for p in props["parts"]]
-    refs += [m["part"] for m in props.get("motions") or []]
+    refs += [m.get(k) for m in motions for k in ("part", "from", "to", "driven")]
     refs += [lab.get("part") for lab in props.get("labels") or []]
     if len(known) < len(ids) or not {r for r in refs if r is not None} <= known:
         raise _Reject("an iso-scene part id that repeats, or a reference to no part")
+    kinds = {p["id"]: p["kind"] for p in props["parts"]}
+    if not all(
+        p.get("around") and all(kinds.get(i) in ISO_CHAIN_HUBS for i in p["around"])
+        for p in props["parts"]
+        if p["kind"] == "chain"
+    ):
+        raise _Reject("an iso-scene chain not around two gears or discs")
 
 
 def _check_figure(node: dict[str, Any], props: dict[str, Any]) -> None:

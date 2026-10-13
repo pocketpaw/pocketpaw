@@ -160,5 +160,32 @@
     "tests": [
       "tests/cloud/test_paw_bar_widget_relevance.py"
     ]
+  },
+  {
+    "label": "DRAW-19: a chain may run around any part",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        p.get(\"around\") and all(kinds.get(i) in ISO_CHAIN_HUBS for i in p[\"around\"])",
+    "replace": "        True",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-20: a link or driven slide may name no part",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    refs += [m.get(k) for m in motions for k in (\"part\", \"from\", \"to\", \"driven\")]",
+    "replace": "    refs += [m.get(\"part\") for m in motions]",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
+  },
+  {
+    "label": "DRAW-21: a range pair need not be ordered or bounded",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        and all(map(_num(-ISO_SIZE, ISO_SIZE), v))\n        and v[0] <= v[1]",
+    "replace": "        and True",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py"
+    ]
   }
 ]
