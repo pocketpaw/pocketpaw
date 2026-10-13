@@ -9,6 +9,24 @@
     ]
   },
   {
+    "label": "the intents table is built from the overlay alone, so the manifest's keywords and hints are lost",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "INTENTS = intents_table(RIPPLE_PROFILE.manifest[\"intents\"], OVERLAY)",
+    "replace": "INTENTS = intents_table([], OVERLAY)",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_widget_out_of_the_overlay_still_matches_through_the_manifest"
+    ]
+  },
+  {
+    "label": "the overlay's extra keywords are dropped in the merge",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "        entry[\"intents\"] = asks + [k for k in extra.get(\"intents\", ()) if k not in asks]\n",
+    "replace": "        entry[\"intents\"] = asks\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_widget_out_of_the_overlay_still_matches_through_the_manifest"
+    ]
+  },
+  {
     "label": "history is not scored, so a follow-up loses its widget",
     "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
     "find": "        score = 2 * _score(name, now, now_words) + _score(name, past, past_words)",

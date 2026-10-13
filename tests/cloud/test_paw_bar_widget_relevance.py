@@ -195,6 +195,34 @@ def test_a_figure_an_earlier_card_used_stays_in_full():
     assert line in _section(_paragraph(message, history))
 
 
+def test_the_overlay_holds_only_what_the_manifest_does_not_ship():
+    """Keywords and hints come from the manifest's intents; the local overlay keeps
+    extra keywords, figure's per-figure keywords and curated lines, never a keyword
+    the manifest already carries for that widget."""
+    manifest = {i["widget"]: i for i in RIPPLE_PROFILE.manifest["intents"]}
+    for name, entry in widget_relevance.OVERLAY.items():
+        assert set(entry) <= {"intents", "figures", "line"}, name
+        ask = set(manifest.get(name, {}).get("ask", ()))
+        assert not ask & set(entry.get("intents", ())), name
+
+
+def test_a_widget_out_of_the_overlay_still_matches_through_the_manifest():
+    """THE MUTATION THAT BREAKS THIS: build INTENTS from the overlay alone, or drop
+    the overlay's extra keywords in the merge."""
+    assert "menu-order" not in widget_relevance.OVERLAY
+    assert "menu-order" in widget_relevance.pick_widgets("I want a burger")
+    intents = RIPPLE_PROFILE.manifest["intents"]
+    alone = widget_relevance.intents_table(intents, {})
+    assert "burger" in alone["menu-order"]["intents"]
+    assert alone["growth-projection"]["hint"].startswith("It has its own deposit")
+    merged = widget_relevance.intents_table(
+        intents, {"menu-order": {"intents": ["burger", "kebab"]}, "map": {"line": "x"}}
+    )
+    assert merged["menu-order"]["intents"].count("burger") == 1
+    assert merged["menu-order"]["intents"][-1] == "kebab"
+    assert merged["map"]["line"] == "x" and "directions" in merged["map"]["intents"]
+
+
 def test_every_figure_has_its_own_intents():
     """A figures key that is not a catalog id would steer nothing."""
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
@@ -219,7 +247,7 @@ def test_a_how_does_it_work_question_about_a_machine_gets_the_drawing(message):
     The drawing must be offered for every such question, and its hint must say the
     card is the drawing, a calculator only after it and only when asked.
     THE MUTATION THAT BREAKS THIS: drop the machine intents or the never-a-calculator
-    sentence from the iso-scene entry in ripple_widget_intents.json."""
+    sentence from the manifest's iso-scene intent."""
     assert "iso-scene" in widget_relevance.pick_widgets(message)
     iso = widget_relevance.full_line("iso-scene")
     assert "never a calculator, form or number inputs" in iso

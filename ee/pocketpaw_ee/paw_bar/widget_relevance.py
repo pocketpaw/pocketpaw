@@ -6,20 +6,24 @@
 #
 # Picking is deterministic keyword overlap, no model call: the visitor message
 # (weight 2) and the last two history turns (weight 1) against each widget's name,
-# aliases and name parts, its intent keywords from ripple_widget_intents.json (kept
-# here so a new steering keyword does not wait on a ripple release), and its
-# description words. A table entry may also carry a ``hint`` (steering appended to
-# the widget's line; a core widget's hint rides every turn) or a ``line`` (a
-# curated line in its place). figure's and iso-scene's lines are built here:
-# figure's from the figure catalog, the sliders and anchors only of the figures this
-# turn names (each figure's own intents, ``figures`` in the table) or an earlier card
+# aliases and name parts, its intent keywords, and its description words. The
+# intents table (``INTENTS``) is the vendored manifest's ``intents`` (ripple's
+# craft.ts: ``ask`` keywords and ``hints``) with ripple_widget_intents.json merged
+# on top, a local overlay so a new steering keyword does not wait on a ripple
+# release: extra ``intents`` keywords per widget, figure's per-figure keywords
+# (``figures``) and a curated ``line`` for map and weather-forecast. An entry's
+# ``hint`` is steering appended to the widget's line (a core widget's hint rides
+# every turn); a ``line`` replaces the manifest line. figure's and iso-scene's
+# lines are built here: figure's from the figure catalog, the sliders and anchors
+# only of the figures this turn names (each figure's own intents, ``figures`` in
+# the overlay) or an earlier card
 # used, at most MAX_FULL_FIGURES, the rest as ids and titles; figure ranks ahead of
 # iso-scene when one is named. iso-scene's line is its part shape and a hand water
 # pump example card. Widgets a card earlier in the conversation used are always
 # kept, so an edit to that card still has its props.
 #
 # Invariants: same input, same output (sorted, no set iteration in output); only
-# manifest and intents-table text reaches the prompt, never visitor text; at most
+# manifest and overlay text reaches the prompt, never visitor text; at most
 # MAX_PICKED widgets, so the worst case is bounded (the cap test sums it).
 from __future__ import annotations
 
@@ -42,9 +46,31 @@ from pocketpaw_ee.paw_bar.card_spec import (
     _widget_line,
 )
 
-INTENTS: dict[str, dict[str, Any]] = json.loads(
+
+def intents_table(
+    manifest_intents: Sequence[dict[str, Any]], overlay: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """The manifest's intents as ``{widget: {intents, hint}}`` with ``overlay`` on
+    top: its ``intents`` keywords add to the manifest's, any other key replaces."""
+    table: dict[str, dict[str, Any]] = {}
+    for intent in manifest_intents:
+        entry = table.setdefault(intent["widget"], {})
+        if intent["ask"]:
+            entry["intents"] = list(intent["ask"])
+        if intent["hints"]:
+            entry["hint"] = " ".join(intent["hints"])
+    for name, extra in overlay.items():
+        entry = table.setdefault(name, {})
+        asks = entry.get("intents", [])
+        entry.update(extra)
+        entry["intents"] = asks + [k for k in extra.get("intents", ()) if k not in asks]
+    return table
+
+
+OVERLAY: dict[str, dict[str, Any]] = json.loads(
     Path(__file__).with_name("ripple_widget_intents.json").read_text(encoding="utf-8")
 )
+INTENTS = intents_table(RIPPLE_PROFILE.manifest["intents"], OVERLAY)
 TOP_K = 8  # widgets picked by score
 MAX_EARLIER = 4  # widgets kept because an earlier card used them
 MAX_PICKED = TOP_K + MAX_EARLIER
