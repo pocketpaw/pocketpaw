@@ -367,11 +367,19 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
     assert _paragraph("Show me a plane in 3D").startswith(core)
 
 
+# The chat prompt as it stood before its intents and craft lines came from the
+# ripple manifest: the net prompt may not grow past it (build-loop GC 9), and
+# the worst case keeps the 800-char margin under the 32,000 cap.
+_CORE_CHARS = 18_630
+_WORST_CHARS = 31_056
+
+
 def test_core_plus_the_worst_case_section_stays_under_the_cap():
-    """The fixed core is 18,630 chars (the drawing widgets added only their two
-    names to the index); the worst per-turn section is the MAX_PICKED longest
-    candidate lines, figure's at its longest (MAX_FULL_FIGURES figures in full, the
-    rest ids and titles), so the paragraph stays well under the 32,000 cap."""
+    """The fixed core is at most _CORE_CHARS; the worst per-turn section is the
+    MAX_PICKED longest candidate lines, figure's at its longest (MAX_FULL_FIGURES
+    figures in full, the rest ids and titles), so the paragraph is no larger than
+    _WORST_CHARS and stays 800 chars under the 32,000 cap. THE MUTATION THAT
+    BREAKS THIS: lengthen any rule or hint the prompt carries."""
     from pocketpaw_ee.paw_bar.card_spec import RIPPLE_FIGURES
 
     core = _paragraph()
@@ -384,7 +392,7 @@ def test_core_plus_the_worst_case_section_stays_under_the_cap():
         reverse=True,
     )
     worst = len(core) + 1 + len(_SECTION) + sum(longest[: widget_relevance.MAX_PICKED])
-    assert len(core) < 20_000
-    assert worst < 31_200
+    assert len(core) <= _CORE_CHARS
+    assert worst <= _WORST_CHARS < 32_000 - 800
     typical = sorted(len(_paragraph(m)) for m, _ in _CHIPS)[len(_CHIPS) // 2]
     assert len(core) < typical < worst
