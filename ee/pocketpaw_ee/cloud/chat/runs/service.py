@@ -1,62 +1,31 @@
-"""Chat-run service — the only module that touches ``ChatRunDoc``.
+"""Chat-run service: the only module that touches ``ChatRunDoc``.
 
 Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
 ``RunSpec`` value object rather than the standard ``(workspace_id, user_id, body)``.
 
-Changes:
-- 2026-09-27 (fix/chat-run-heartbeat) — ``mark_running`` is now a conditional
-  atomic ``queued -> running`` transition that returns whether it won. It used to
-  load and ``save()`` the whole doc unconditionally, so a queued run the sweeper
-  had already interrupted (and whose client had already been sent the terminal
-  frame) was flipped straight back to ``running`` and driven for nobody. It also
-  seeds ``last_heartbeat_at``, and ``touch_heartbeat`` refreshes it — conditional
-  on ``running`` so a late tick can never resurrect a finished run. The sweeper
-  judges running runs by that stamp instead of ``createdAt``.
-  ``find_stranded_replies`` now skips runs whose ``assistant_message_id`` is set:
-  ``execute_run`` persists a non-completed run's partial as a real ``Message``,
-  and counting it here too would replay the same reply twice.
-- 2026-09-28 (feat/concierge-spend-cap, CR-5) — added ``find_run_usage_since``,
-  the per-site daily spend read behind the v2 Paw Bar concierge's spend cap. It
-  returns ``(usage, createdAt)`` pairs for one scope's runs, projected to those two
-  fields, so the caller prices them with the meter (``metering.resolve_cost``)
-  without importing ``ChatRunDoc`` (EE Rule 2).
-- 2026-09-14 (fix/partial-reply-survives-failed-run) — added
-  ``STRANDED_REPLY_STATUSES`` + ``find_stranded_replies``. ``execute_run`` writes
-  an assistant ``Message`` from exactly one place, and the failed / cancelled /
-  interrupted branches return before it, leaving the text the model had already
-  produced on ``partial_text`` and nowhere else. ``load_history_for_scope`` reads
-  the ``Message`` collection alone, so that reply was durable and unreachable at
-  the same time: the next turn was answered cold and the user paid twice for the
-  same tokens. This read is how the history reader gets at it WITHOUT importing
-  ``ChatRunDoc`` (EE Rule 2) — it returns ``StrandedReply`` value objects, the
-  same Beanie-free shape ``find_*_for_workspace`` returns ``RunActivityRow`` in.
-- 2026-06-10 (sov/w3a-igw — per-run token metering) — ``mark_completed`` and
-  ``mark_terminal`` now accept an optional ``usage: dict[str, Any] | None`` and
-  persist it onto ``ChatRunDoc.usage`` when provided. ``run_core`` passes the
-  token-usage dict it assembles from the backend's ``token_usage`` event, so
-  each finished run carries its real prompt / completion / cached token counts.
-  ``None`` leaves the stored usage untouched (legacy callers / no-usage runs).
-- 2026-06-24 (B3 review fix — metering boundary) — added ``mark_billed(run_id)``.
-  The metering service (BC-3) previously wrote ``run_doc.billed=True`` +
-  ``run_doc.save()`` directly, a FOREIGN write across the chat.runs entity
-  boundary (EE Rule 2 — only this module touches ``ChatRunDoc``). ``bill_run`` now
-  calls ``mark_billed`` instead. Reading ``run_doc.usage`` in metering stays fine;
-  only the WRITE moves here, the owner of the document.
-- 2026-07-28 (HR-12a, feat/cockpit-agent-activity) — the ``queued``/``running``
-  pair that three functions each spelled inline is now the named
-  ``ACTIVE_RUN_STATUSES`` constant, and two workspace-scoped reads were added
-  (``find_active_runs_for_workspace`` / ``find_recent_runs_for_workspace``) for
-  the agent-activity board. They return ``RunActivityRow`` value objects, not
-  ``ChatRunDoc``, so the caller never sees a Beanie document.
-- 2026-07-26 (concierge transcripts) — ``create_run`` copies
-  ``RunSpec.persist_user_text`` onto ``ChatRunDoc.user_text``. Only the concierge
-  surface ever sets it (its anonymous visitor has no Message row to point
-  ``user_message_id`` at), so every other caller writes "" and is unchanged.
+- ``create_run`` is idempotent on ``(workspace, client_message_id)``; it copies
+  ``RunSpec.persist_user_text`` onto ``user_text`` (only the concierge surface
+  sets it).
+- Lifecycle writes are conditional where a race matters: ``mark_running`` is an
+  atomic ``queued -> running`` move that seeds ``last_heartbeat_at``, and
+  ``touch_heartbeat`` only stamps a run still ``running``, so neither can revive
+  a run the sweeper already ended. ``mark_completed`` / ``mark_terminal`` record
+  the backend's ``usage`` and trigger a spend ingest; ``mark_billed`` is the
+  metering service's write, made here so metering never writes this document.
+- Reads for other modules return value objects, never the Beanie document:
+  ``RunActivityRow`` for the agent-activity board, ``StrandedReply`` for a
+  failed / cancelled / interrupted run's partial text (runs with an
+  ``assistant_message_id`` are skipped, their text is already a Message), and
+  ``(usage, createdAt)`` pairs for the concierge spend cap.
+- ``record_card_audit`` stores one chat card's browser audit counts on a
+  concierge run, matched on the visitor, workspace and pocket so a caller can only
+  write to its own runs.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
@@ -266,6 +235,40 @@ async def mark_terminal(
     # priced them. Billing only completed runs would serve every interrupted one
     # free — which is why the metering sweeper bills all four terminal states too.
     _trigger_spend_ingest(doc)
+
+
+# A concierge stream's card ids ("c1", "c2", ...). Also a Mongo field-path guard.
+_CARD_ID_RE = re.compile(r"^c[1-9][0-9]?$")
+
+
+async def record_card_audit(
+    run_id: str,
+    card_id: str,
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    customer_ref: str,
+    row: dict[str, Any],
+) -> bool:
+    """Store ``row`` as ``card_audits[card_id]`` on a concierge run. True when it landed.
+
+    One conditional update: the run must be a concierge run of ``workspace_id``
+    and ``pocket_id`` whose ``user_id`` is ``customer_ref``, so a visitor can only write audit rows
+    onto its own turns. False (nothing written) for any other run or a bad card id.
+    """
+    if not _CARD_ID_RE.match(card_id):
+        return False
+    result = await ChatRunDoc.get_pymongo_collection().update_one(
+        {
+            "run_id": run_id,
+            "workspace": workspace_id,
+            "scope_id": pocket_id,
+            "user_id": customer_ref,
+            "context_type": "concierge",
+        },
+        {"$set": {f"card_audits.{card_id}": {**row, "at": _utcnow()}}},
+    )
+    return result.matched_count == 1
 
 
 async def mark_billed(run_id: str) -> None:
