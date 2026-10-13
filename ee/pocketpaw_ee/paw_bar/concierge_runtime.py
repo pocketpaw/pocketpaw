@@ -1453,7 +1453,9 @@ def _craft(rule_id: str, detail: str) -> str:
 # ripple landing's chat column (about 720px, still readable at 360px). A rule that
 # repeats one of ripple's craft rules leads with its manifest text (``_craft``),
 # and the width line also quotes tile-rows-wrap and inputs-full-row; the detail
-# is pocketpaw's. The other lines have no craft rule. The actions named are
+# is pocketpaw's. The "Match the card to the answer" line overlaps
+# archetype-first, data-widget-alone and booking-widget but stays in pocketpaw's
+# words: it is a widget-by-widget map, not a restated rule. The actions named are
 # card_spec.RIPPLE_ACTIONS; the flow and ask rules carry _RIPPLE_FLOW_EXAMPLE and
 # _RIPPLE_ASK; the last line is _RIPPLE_EXAMPLE.
 _RIPPLE_RULES = (
