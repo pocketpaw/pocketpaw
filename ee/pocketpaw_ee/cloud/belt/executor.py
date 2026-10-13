@@ -240,6 +240,14 @@ async def commit_of(git: GitFn, ref: str) -> str:
     return out.strip() if code == 0 else ""
 
 
+async def checked_out_branch(git: GitFn) -> str:
+    """The repo's checked-out branch: the base of a run that names none (the
+    develop and cloud stations' rule). "" on a detached HEAD or a failed read."""
+    code, out, _err = await git("rev-parse", "--abbrev-ref", "HEAD")
+    branch = out.strip() if code == 0 else ""
+    return "" if branch == "HEAD" else branch
+
+
 async def is_ancestor(git: GitFn, older: str, newer: str) -> bool:
     code, _out, _err = await git("merge-base", "--is-ancestor", older, newer)
     return code == 0
@@ -317,9 +325,8 @@ async def line_status(repo: str, mandate_id: str) -> dict[str, Any]:
             return out
         git = _git_in(repo_path)
         tip = await commit_of(git, f"refs/heads/{branch}")
-        code, head, _err = await git("rev-parse", "--abbrev-ref", "HEAD")
-        base = head.strip()
-        if not tip or code != 0 or base in ("", "HEAD", branch):
+        base = await checked_out_branch(git)
+        if not tip or base in ("", branch):
             return out
         bases = [
             ref

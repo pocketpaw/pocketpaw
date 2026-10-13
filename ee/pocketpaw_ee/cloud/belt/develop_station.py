@@ -72,6 +72,7 @@ from pocketpaw.security.redact import REDACT_PATTERNS, redact_output
 from pocketpaw_ee.cloud.belt.executor import (
     GitFn,
     LineError,
+    checked_out_branch,
     commit_of,
     is_ancestor,
     line_branch,
@@ -580,21 +581,20 @@ class ClaudeCodeDevelop:
         it) moves to the base; a base with commits the line lacks is merged into
         it (``_merge_base_into``); history is never rewritten. The note says
         which. The base commit is where owner setup restores agent config from."""
-        base = request.base_branch.strip()
+
+        async def git(*args: str) -> tuple[int, str, str]:
+            return await self.run([*_GIT, *args], cwd=repo, timeout=_GIT_TIMEOUT)
+
+        base = request.base_branch.strip() or await checked_out_branch(git)
         if not base:
-            base = (await self._git(repo, "rev-parse", "--abbrev-ref", "HEAD")).strip()
-            if base == "HEAD":
-                raise DevelopStationError("PREPARE: repo is on a detached HEAD; no base branch")
-        code, _out, _err = await self.run(
-            [*_GIT, "remote", "get-url", "origin"], cwd=repo, timeout=_GIT_TIMEOUT
-        )
+            raise DevelopStationError(
+                "PREPARE: no base branch: the repo is on a detached HEAD or git can't read it"
+            )
+        code, _out, _err = await git("remote", "get-url", "origin")
         has_origin = code == 0
         if has_origin:
             await self._git(repo, "fetch", "origin", base)
         base_ref = f"origin/{base}" if has_origin else base
-
-        async def git(*args: str) -> tuple[int, str, str]:
-            return await self.run([*_GIT, *args], cwd=repo, timeout=_GIT_TIMEOUT)
 
         base_sha = await commit_of(git, base_ref)
         if not base_sha:

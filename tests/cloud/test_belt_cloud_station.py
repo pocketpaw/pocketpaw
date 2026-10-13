@@ -14,6 +14,8 @@
 # ``headless_error``; the launch clone is re-pointed to another repo's origin
 # (never a malformed slug), keeps streamed output on a timeout, and fails clearly
 # when the CLI does not trust it; Clef shadow-scores the PR's diff.
+# BASE: a run with no base launches from the bound repo's checked-out branch
+# (main when detached) and stores it for the brief, land and escalation; its own wins.
 # FIXERS: a conflicting PR gets a rebase brief, a red one the failed job's last
 # 40 log lines, after the grace period; green within grace gets none; the cap
 # escalates; a failed fixer launch is recorded and tracking goes on.
@@ -95,7 +97,11 @@ def dirs(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
 
 
 async def _queue(
-    store: InstinctStore, repo: Path, mandate_id: str = "m1", plan_action_id: str = "plan-1"
+    store: InstinctStore,
+    repo: Path,
+    mandate_id: str = "m1",
+    plan_action_id: str = "plan-1",
+    base: str = "main",
 ) -> str:
     import pocketpaw_ee.cloud.mandates.executor as ex
 
@@ -103,7 +109,7 @@ async def _queue(
         return str(repo)
 
     async def fake_base(repo: str) -> str:
-        return "main"
+        return base  # "" = the bound repo was detached when the run was queued
 
     orig = ex._repo_for_mandate
     ex._repo_for_mandate = fake_repo  # type: ignore[assignment]
@@ -153,8 +159,10 @@ class FakeRunner:
         tester_pr: dict | list[dict] | None = None,
         issue_comments: list[dict] | None = None,
         closing: list[list[dict]] | None = None,
+        repo_head: str = "",
     ):
         self.calls: list[tuple[list[str], Path]] = []
+        self.repo_head = repo_head  # ``rev-parse --abbrev-ref HEAD`` in the bound repo
         # A list is consumed one entry per launch / per ``gh pr view``, holding the last.
         self.launch_outs = [launch_out] if isinstance(launch_out, str) else list(launch_out)
         self.launch_code = launch_code
@@ -232,6 +240,8 @@ class FakeRunner:
             return self.download_code, "", "no artifact" if self.download_code else ""
         if "fetch" in argv and cwd.name == "repo":
             return self.repo_fetch_code, "", "fatal: unable to access origin"
+        if "--abbrev-ref" in argv and cwd.name == "repo":
+            return 0, f"{self.repo_head}\n", ""
         return 0, "", ""  # git fetch / checkout
 
 
@@ -395,6 +405,76 @@ async def test_malformed_bound_repo_slug_is_refused(store, dirs):
     assert "unsafe GitHub slug" in cc["headless_error"]
     assert not any("set-url" in a or "fetch" in a for a in _launch_git(runner, launch))
     assert not any("--cloud" in a for a, _ in runner.calls)
+
+
+@pytest.mark.parametrize(("head", "base"), [("dev", "dev"), ("HEAD", "main")])
+async def test_run_with_no_base_takes_the_bound_repos_branch(store, dirs, head, base):
+    """A run queued with no base (its bound repo was detached then) launches from
+    the bound repo's checked-out branch, the develop station's rule, and keeps
+    it: the brief, the run record and the land all name it. ``main`` only when
+    the bound repo is detached at launch too. Breaks if the launch hard-defaults
+    to main or the resolved base is not stored on the run."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo, base="")
+    pr = {
+        "state": "MERGED",
+        "url": f"https://github.com/{SLUG}/pull/9",
+        "headRefName": "claude/g41-text",
+        "mergeCommit": {"oid": "abc123"},
+        "comments": [],
+        "files": [],
+    }
+    runner = FakeRunner(launch_out=SESSION, pr=pr, repo_head=head)
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    git = _launch_git(runner, launch)
+    assert any(a[-4:] == ["fetch", "-q", "origin", base] for a in git)
+    assert any(a[-3:] == ["-q", "--detach", f"origin/{base}"] for a in git)
+    brief = next(a for a, _ in runner.calls if "--cloud" in a)[-1]
+    assert f"Open ONE pull request to {base}." in brief
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert action.parameters["_code_change"]["base_branch"] == base
+    assert f"into {base} through the fast lane" in str(action.outcome)
+
+
+async def test_escalated_run_with_no_base_carries_the_bound_repos_branch(store, dirs):
+    """A lane refusal escalates the diff on the base the launch resolved, so the
+    approved diff's line PR opens into dev, not main."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo, base="")
+    pr = {
+        "state": "OPEN",
+        "url": f"https://github.com/{SLUG}/pull/9",
+        "comments": [{"body": "Fast lane: not eligible. 512 lines > 400."}],
+        "files": [],
+    }
+    runner = FakeRunner(launch_out=SESSION, pr=pr, repo_head="dev")
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert cc["diff"] == DIFF
+    assert cc["base_branch"] == "dev"
+
+
+async def test_run_with_a_base_keeps_it_over_the_bound_repos_branch(store, dirs):
+    """An explicit base wins: the bound repo's branch is never read."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo, base="release/2")
+    runner = FakeRunner(launch_out=SESSION, pr=None, repo_head="dev")
+    runner.run_ref = run_ref
+
+    await _dispatcher(runner, launch, timeout_seconds=0).run(run_ref, workspace_id=WS)
+
+    git = _launch_git(runner, launch)
+    assert any(a[-3:] == ["-q", "--detach", "origin/release/2"] for a in git)
+    assert not any("--abbrev-ref" in a for a, c in runner.calls if c == repo)
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert cc["base_branch"] == "release/2"
 
 
 async def test_tracker_timeout_without_a_pr(store, dirs):

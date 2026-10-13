@@ -5,9 +5,10 @@
 # ``CloudTaskDispatcher`` files an approved task as the usual queued run, then:
 #   LAUNCH  ONE trusted launch clone (``POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR``, never
 #           the bound repo) serves every allowlisted GitHub repo, re-pointed and
-#           detached at ``origin/<base>``; task text is injection-screened;
-#           ``claude --cloud "<brief>"`` runs under ``pty_run.py`` (a folder-trust
-#           prompt fails fast). The worker brief: one PR to <base> with ``Closes
+#           detached at ``origin/<base>`` (the run's base, else the bound repo's
+#           checked-out branch, stored on the run); task text is injection-
+#           screened; ``claude --cloud "<brief>"`` runs under ``pty_run.py`` (a
+#           folder-trust prompt fails fast). Worker brief: one PR to <base>, ``Closes
 #           #<issue>`` + ``Belt-Run: <run id>`` (or a comment on an open PR already
 #           closing it), the label, the charter checks, no AI attribution, the
 #           seat's instructions fenced; with a fixer's, ``orient.reuse_block`` (the
@@ -45,8 +46,7 @@
 #           with ``headless_state="cloud"`` and no diff, carrying ``fixes``,
 #           ``reviews``, ``relaunches``, ``adopted_pr``; settles a review an ended
 #           tracker left pending; with the tester on, each open tester PR too.
-# Only git, gh and the launcher run locally; an approved escalated diff lands on
-# the mandate line.
+# Only git, gh and the launcher run locally; an approved escalated diff lands on the line.
 
 from __future__ import annotations
 
@@ -80,7 +80,11 @@ from pocketpaw_ee.cloud.belt.develop_station import (
     _worker_block,
     run_subprocess,
 )
-from pocketpaw_ee.cloud.belt.executor import _emit_run_updated, _persist_run_result
+from pocketpaw_ee.cloud.belt.executor import (
+    _emit_run_updated,
+    _persist_run_result,
+    checked_out_branch,
+)
 from pocketpaw_ee.cloud.belt.headless import (
     _CODE_CHANGE_PARAM_KEY,
     DevelopFn,
@@ -304,7 +308,10 @@ class CloudTaskDispatcher:
             cloud = {"session_url": session, "launched_at": time.time()}
             issue = _ISSUE.search(str(blob.get("task") or ""))
             url = f"https://github.com/{slug}/issues/{issue.group(1)}" if issue else None
-            await _patch(store, run_ref, headless_state="cloud", cloud=cloud, issue_url=url)
+            base = blob["base_branch"]  # resolved by the launch
+            await _patch(
+                store, run_ref, headless_state="cloud", cloud=cloud, issue_url=url, base_branch=base
+            )
             await _emit_run_updated(
                 workspace_id=workspace_id, action_id=run_ref, status="running", stage="cloud"
             )
@@ -425,7 +432,9 @@ class CloudTaskDispatcher:
         """Launch one cloud session: the worker (``retry``: again, after one that
         opened no PR), a fixer for its PR (``fix``), the tester of its landed PR
         (``test``) or a reviewer of a PR head (``review``). The caller holds
-        ``_LAUNCH_LOCK``."""
+        ``_LAUNCH_LOCK``. A run with no ``base_branch`` takes the bound repo's
+        checked-out branch (``main`` only when that is unreadable), set on
+        ``blob`` so every later launch, track and land of the run uses it."""
         request = DevelopRequest(
             task=str(blob.get("task") or ""),
             summary=str(blob.get("expected_outcome") or blob.get("summary") or ""),
@@ -444,9 +453,14 @@ class CloudTaskDispatcher:
         if launch == repo.resolve():
             raise CloudStationError("LAUNCH: the launch clone must not be the bound repo")
         slug = await self._slug(repo)
-        base = request.base_branch or "main"
+
+        async def git(*args: str) -> tuple[int, str, str]:
+            return await self.runner([*_GIT, *args], cwd=repo, timeout=120.0)
+
+        base = request.base_branch or await checked_out_branch(git) or "main"
         if not _SAFE_REF.match(base):
             raise CloudStationError(f"LAUNCH: unsafe base branch {base!r}")
+        blob["base_branch"] = base
         was = await self._slug(launch, strict=False)
         if was != slug:
             # One trusted clone serves every repo: re-point it (we hold _LAUNCH_LOCK).

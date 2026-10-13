@@ -308,5 +308,43 @@
       "tests/cloud/test_belt_cloud_station.py::test_a_silent_worker_is_relaunched_once_then_released",
       "tests/cloud/test_belt_cloud_station.py::test_a_worker_that_says_impossible_is_released_without_a_relaunch"
     ]
+  },
+  {
+    "label": "a run with no base launches from main, not the bound repo's branch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "base = request.base_branch or await checked_out_branch(git) or \"main\"",
+    "replace": "base = request.base_branch or \"main\"",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_run_with_no_base_takes_the_bound_repos_branch",
+      "tests/cloud/test_belt_cloud_station.py::test_escalated_run_with_no_base_carries_the_bound_repos_branch"
+    ]
+  },
+  {
+    "label": "the bound repo's branch overrides a run's own base",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "base = request.base_branch or await checked_out_branch(git) or \"main\"",
+    "replace": "base = await checked_out_branch(git) or request.base_branch or \"main\"",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_run_with_a_base_keeps_it_over_the_bound_repos_branch"
+    ]
+  },
+  {
+    "label": "the resolved base is not kept on the blob for later launches and the land",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        blob[\"base_branch\"] = base\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_run_with_no_base_takes_the_bound_repos_branch",
+      "tests/cloud/test_belt_cloud_station.py::test_escalated_run_with_no_base_carries_the_bound_repos_branch"
+    ]
+  },
+  {
+    "label": "the resolved base is not stored on the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "issue_url=url, base_branch=base",
+    "replace": "issue_url=url",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_run_with_no_base_takes_the_bound_repos_branch"
+    ]
   }
 ]
