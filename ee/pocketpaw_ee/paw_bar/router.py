@@ -10,7 +10,10 @@
 #   /paw-bar/actions.js (the opt-in page-actions host script, same caching), POST
 #   /paw-bar/chat (SSE), POST /paw-bar/action and GET /paw-bar/cart, POST
 #   /paw-bar/request-human, POST /paw-bar/decision-contact, the decision and messages
-#   polls, articles, the visitor's own conversations, and the legacy spec + event ingest.
+#   polls, articles, the visitor's own conversations, the legacy spec + event ingest, and
+#   POST /paw-bar/cards/{run_id}/{card_id}/audit (a chat card's browser audit counts:
+#   at most 1 KB, integers and widget type names only, its own rate bucket, stored on
+#   the visitor's own concierge run).
 #   ``_front_gate_for_key`` is the shared gate, cheapest first: per-IP bucket ->
 #   customer_ref charset/length (400) -> widget exists (404) -> rate limit (429)
 #   -> key + dual-mode origin (401/403; an iframe request from our frame origin was
@@ -68,9 +71,19 @@ from typing import Annotated, Any, Literal
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import Path as PathParam
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import AfterValidator, BaseModel, Field, StrictInt, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+)
 
 from pocketpaw.money import (
     DEFAULT_EXPONENT,
@@ -6547,6 +6560,93 @@ async def post_action(body: PawBarActionRequest, request: Request) -> JSONRespon
     if not outcome.ok:
         raise HTTPException(outcome.http_status, outcome.detail or outcome.error)
     return JSONResponse({"ok": True, "result": outcome.result, "cart": outcome.cart})
+
+
+# A chat card's browser audit counts. The body is integers and widget type names
+# only (no spec, no text), capped at _CARD_AUDIT_BODY_MAX bytes before parsing,
+# and it spends its OWN rate bucket so a page full of cards can never 429 the chat.
+_CARD_AUDIT_BODY_MAX = 1024
+_CARD_AUDIT_BUCKET = "card_audit"
+_AuditCount = Annotated[StrictInt, Field(ge=0, le=100_000)]
+_AuditCheck = Annotated[str, StringConstraints(pattern=r"^[A-Za-z]{1,32}$")]
+_AuditWidgetType = Annotated[str, StringConstraints(pattern=r"^[a-z0-9-]{1,40}$")]
+
+
+class CardAuditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    widget_id: str = Field(max_length=64)
+    signed_key: str = Field(max_length=256)
+    customer_ref: str
+    # Check name -> failing item count, e.g. {"schema": 0, "leftover": 2}.
+    counts: dict[_AuditCheck, _AuditCount] = Field(max_length=24)
+    waived: _AuditCount = 0
+    widget_types: list[_AuditWidgetType] = Field(default_factory=list, max_length=32)
+    # How long the audit took, and how long the card had been on screen when posted.
+    ms: Annotated[StrictInt, Field(ge=0, le=60_000)]
+    seen_ms: Annotated[StrictInt, Field(ge=0, le=86_400_000)]
+
+
+@router.post("/paw-bar/cards/{run_id}/{card_id}/audit", status_code=204)
+async def post_card_audit(
+    request: Request,
+    run_id: Annotated[str, PathParam(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+    card_id: Annotated[str, PathParam(pattern=r"^c[1-9][0-9]?$")],
+) -> Response:
+    """Store one chat card's audit counts on the visitor's own run (204).
+
+    Order, cheapest first, none touching a DB: raw body over
+    ``_CARD_AUDIT_BODY_MAX`` (413) -> strict parse, any non-integer count or
+    unknown field (422) -> per-IP limit (429) -> customer_ref format (400) -> widget exists (404) ->
+    key + origin + widget binding (401/403) -> the ``card_audit`` rate bucket
+    (429) -> the run must be a concierge run of this workspace, pocket and
+    visitor (404, the same answer as a run that does not exist). The browser
+    posts fire-and-forget; nothing here is read back on the chat path.
+    """
+    raw = await request.body()
+    if len(raw) > _CARD_AUDIT_BODY_MAX:
+        raise HTTPException(413, "audit_body_too_large")
+    try:
+        body = CardAuditRequest.model_validate_json(raw, strict=True)
+    except ValidationError:
+        raise HTTPException(422, "invalid_audit_body") from None
+    _public_ip_gate(request, body.widget_id)
+    if not _CUSTOMER_REF_RE.match(body.customer_ref):
+        raise HTTPException(400, "invalid_customer_ref")
+    store = _store()
+    widget = await store.get_widget(body.widget_id)
+    if widget is None:
+        raise HTTPException(404, "Widget not found")
+    ctx, _site = await _authenticate_widget_key(
+        widget,
+        signed_key=body.signed_key,
+        customer_ref=body.customer_ref,
+        origin=request.headers.get("origin"),
+        request=request,
+    )
+    marker = PawBarEvent(
+        widget_id=widget.id, type="card_audit", payload={}, customer_ref=body.customer_ref
+    )
+    try:
+        admitted = await admit_event(store, marker, widget, bucket=_CARD_AUDIT_BUCKET)
+    except sqlite3.OperationalError:
+        raise HTTPException(503, "Busy, try again") from None
+    if not admitted:
+        raise HTTPException(429, "Rate limit exceeded")
+
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+
+    stored = await run_service.record_card_audit(
+        run_id,
+        card_id,
+        workspace_id=ctx.workspace_id,
+        pocket_id=ctx.pocket_id or "",
+        customer_ref=body.customer_ref,
+        row=body.model_dump(include={"counts", "waived", "widget_types", "ms", "seen_ms"}),
+    )
+    if not stored:
+        raise HTTPException(404, "Run not found")
+    return Response(status_code=204)
 
 
 @router.get("/paw-bar/cart")

@@ -1,0 +1,44 @@
+[
+  {
+    "label": "drop the 1 KB body cap",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if len(raw) > _CARD_AUDIT_BODY_MAX:\n        raise HTTPException(413, \"audit_body_too_large\")\n",
+    "replace": "",
+    "tests": ["tests/cloud/test_paw_bar_card_audit.py::test_a_body_over_1kb_is_rejected"]
+  },
+  {
+    "label": "parse the audit body in lax mode",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "CardAuditRequest.model_validate_json(raw, strict=True)",
+    "replace": "CardAuditRequest.model_validate_json(raw, strict=False)",
+    "tests": ["tests/cloud/test_paw_bar_card_audit.py::test_a_non_integer_count_is_rejected"]
+  },
+  {
+    "label": "let unknown fields ride along",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "class CardAuditRequest(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")",
+    "replace": "class CardAuditRequest(BaseModel):\n    model_config = ConfigDict(extra=\"ignore\")",
+    "tests": ["tests/cloud/test_paw_bar_card_audit.py::test_no_spec_and_no_text_ride_along"]
+  },
+  {
+    "label": "skip the embed key check",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    ctx, _site = await _authenticate_widget_key(\n        widget,\n        signed_key=body.signed_key,",
+    "replace": "    ctx, _site = SimpleNamespace(workspace_id=widget.workspace_id, pocket_id=widget.pocket_id), None\n    _unused = dict(\n        signed_key=body.signed_key,",
+    "tests": ["tests/cloud/test_paw_bar_card_audit.py::test_an_unsigned_post_is_rejected"]
+  },
+  {
+    "label": "spend the chat's bucket instead of its own",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "admitted = await admit_event(store, marker, widget, bucket=_CARD_AUDIT_BUCKET)",
+    "replace": "admitted = await admit_event(store, marker, widget)",
+    "tests": ["tests/cloud/test_paw_bar_card_audit.py::test_audits_spend_their_own_bucket_not_the_chats"]
+  },
+  {
+    "label": "write onto any visitor's run",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/service.py",
+    "find": "            \"user_id\": customer_ref,\n            \"context_type\": \"concierge\",",
+    "replace": "            \"context_type\": \"concierge\",",
+    "tests": ["tests/cloud/test_paw_bar_card_audit.py::test_another_visitors_run_is_not_found"]
+  }
+]
