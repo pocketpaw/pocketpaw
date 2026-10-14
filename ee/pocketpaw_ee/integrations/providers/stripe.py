@@ -24,7 +24,8 @@
 # Webhooks (Connect endpoint, ``POCKETPAW_STRIPE_CONNECT_WEBHOOK_SECRET``): the
 # ``Stripe-Signature`` header is checked (HMAC-SHA256, 5 min tolerance) before
 # anything is read. Orders are keyed by PaymentIntent id so refunds and failures
-# land on the order checkout created. ``account.updated`` becomes
+# land on the order checkout created; a refund never creates one (one that arrives
+# first is redelivered until it can apply). ``account.updated`` becomes
 # ``connection.updated`` with fresh meta.
 
 from __future__ import annotations
@@ -468,7 +469,8 @@ def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]
         )
     if kind == "charge.refunded" and obj.get("payment_intent") and _fully_refunded(obj):
         # No site_id on a charge is fine: the ingest finds the order by its id.
-        return "order.refunded", {"order_id": str(obj["payment_intent"])}, site_id
+        data = {"order_id": str(obj["payment_intent"]), "only_if_exists": True}
+        return "order.refunded", data, site_id
     return "ignored", {}, ""
 
 

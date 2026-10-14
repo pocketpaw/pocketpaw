@@ -10,7 +10,9 @@
 #     4. ``order.*`` events upsert a ``SiteOrder`` (unique provider + external id).
 #        A failure answers 500 and records nothing, so the provider retries. With
 #        ``data.only_if_exists`` an event updates an existing order and never makes
-#        one (a failed card attempt is not an order). Status moves by
+#        one (a failed card attempt is not an order); a miss is acked and recorded,
+#        except for a REFUND, which answers 500 unrecorded so the provider redelivers
+#        it until the paid event that makes the order has landed. Status moves by
 #        ``_NEXT_STATUS``: refunded is terminal, only a refund replaces paid.
 #     5. only then the event id is recorded (unique index), and
 #        ``integrations.event`` goes on the in-process bus with identifiers only
@@ -62,6 +64,10 @@ MAX_ORDERS_PAGE = 100
 IGNORED = "ignored"
 CONNECTION_UPDATED = "connection.updated"
 _META_VALUE = (str, int, float, bool, type(None))
+
+
+class _OrderNotYet(Exception):
+    """An update-only event arrived before the order it updates."""
 
 
 def _err(code: str, status: int, message: str) -> JSONResponse:
@@ -173,6 +179,9 @@ async def ingest(provider_id: str, request: Request) -> JSONResponse:
     try:
         if event.type in _ORDER_STATUS:
             await _upsert_order(event, binding, site)
+    except _OrderNotYet:
+        logger.info("integrations: %s refund %s before its order; retry", provider_id, event.id)
+        return _err("provider_error", 500, "The order is not recorded yet. Retry later.")
     except Exception:  # noqa: BLE001 - unrecorded, so the provider's retry reprocesses
         logger.exception("integrations: %s event %s failed to process", provider_id, event.id)
         return _err("provider_error", 500, "Could not process the event. Retry later.")
@@ -240,6 +249,9 @@ async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
         SiteOrder.provider == event.provider, SiteOrder.external_id == external_id
     )
     if row is None and data.get("only_if_exists"):
+        if event.type == "order.refunded":
+            # Refund before paid (out-of-order delivery): unrecorded, so it's retried.
+            raise _OrderNotYet(external_id)
         return
     if row is None:
         row = SiteOrder(

@@ -4,9 +4,12 @@
 # authorize endpoint takes none, so the flow rests on the cookie-bound single-use
 # state). App config: ``POCKETPAW_INTEGRATIONS_RAZORPAY_CLIENT_ID`` / ``_SECRET``;
 # without both it is ``unconfigured``. ``_MODE=test`` sends ``mode: test`` on the
-# code exchange (a development client). Scope ``read_write``. The token response
-# names the merchant (``razorpay_account_id``) = ``account_ref``. Access tokens
-# live ~90 days (``expires_in`` is read), refresh tokens 180 days and ROTATE: each
+# code exchange (a development client); in production (``POCKETPAW_ENV`` / secure
+# cookies, see ``cloud.auth.core._is_production``) test mode makes the provider
+# ``unconfigured`` with a warning, so live sellers never get test-mode links.
+# Scope ``read_write``. The token response names the merchant
+# (``razorpay_account_id``) = ``account_ref``. Access tokens live ~90 days
+# (``expires_in`` is read), refresh tokens 180 days and ROTATE: each
 # refresh returns a new one and kills the old, which the vault persists under its
 # lease. A refresh Razorpay refuses as revoked / undecryptable / not linked raises
 # InvalidGrant.
@@ -22,12 +25,16 @@
 #
 # Webhooks: one application webhook for every merchant, signed with
 # ``POCKETPAW_INTEGRATIONS_RAZORPAY_WEBHOOK_SECRET`` (``X-Razorpay-Signature`` =
-# hex HMAC-SHA256 of the raw body), checked before anything is parsed. The event id
-# is the ``X-Razorpay-Event-Id`` header. Orders are keyed by the Razorpay order id
-# (``order_...``) the link created, which payments and refunds also carry:
+# hex HMAC-SHA256 of the raw body), checked before anything is parsed. An event
+# whose signed ``created_at`` is over ``MAX_EVENT_AGE_SECONDS`` old is refused
+# (Razorpay retries for 24 h). The dedupe id is the unsigned ``X-Razorpay-Event-Id``
+# header bound to the body's sha256, so a forged header can't shadow a real event.
+# Orders are keyed by the Razorpay order id (``order_...``) the link created, which
+# payments and refunds also carry:
 # ``payment_link.paid`` -> order.paid (only for links we made: notes.site_id),
 # a full ``refund.processed`` -> order.refunded, ``payment.failed`` -> order.failed;
-# the last two only touch an order that already exists. ``account_ref`` =
+# the last two only touch an order that already exists (an early refund is
+# answered 500 by webhooks.py, so Razorpay redelivers it). ``account_ref`` =
 # ``account_id``, so webhooks.py refuses an event whose account isn't the site's.
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
@@ -67,6 +75,8 @@ from pocketpaw_ee.integrations.providers.base import (
     TokenGrant,
 )
 
+logger = logging.getLogger(__name__)
+
 ENV_PREFIX = "POCKETPAW_INTEGRATIONS_RAZORPAY"
 WEBHOOK_SECRET_ENV = f"{ENV_PREFIX}_WEBHOOK_SECRET"
 MODE_ENV = f"{ENV_PREFIX}_MODE"
@@ -80,6 +90,8 @@ MIN_AMOUNT_MINOR = 100
 MAX_AMOUNT_MINOR = 99_999_999
 # Payment Links must live >= 15 min; a checkout link that sits unpaid for a day is dead.
 LINK_TTL_SECONDS = 24 * 3600
+# Razorpay retries a failed delivery for 24 h; anything older is a replay.
+MAX_EVENT_AGE_SECONDS = 24 * 3600
 _NOTE_MAX = 255
 # Razorpay's refresh-token refusals (its error page); any of them means reconnect.
 _DEAD_REFRESH = ("refresh token", "revoked", "not linked to client", "invalid_grant")
@@ -93,6 +105,19 @@ _EXPONENTS = {
 }  # fmt: skip
 CURRENCIES = tuple(normalize_currency(c) for c in _EXPONENTS)
 assert all(exponent(c) == e for c, e in _EXPONENTS.items()), "razorpay currency exponent drift"
+
+
+def _is_test_mode() -> bool:
+    return os.environ.get(MODE_ENV, "").strip().lower() == "test"
+
+
+def _test_mode_in_production() -> bool:
+    from pocketpaw_ee.cloud.auth.core import _is_production
+
+    if _is_test_mode() and _is_production():
+        logger.warning("razorpay: %s=test in production; provider disabled", MODE_ENV)
+        return True
+    return False
 
 
 def webhook_secret() -> str:
@@ -317,11 +342,13 @@ class RazorpayProvider(BaseProvider):
 
     def availability(self) -> Availability:
         client_id, secret = oauth_http.client_credentials(ENV_PREFIX)
-        return "available" if client_id and secret else "unconfigured"
+        if not client_id or not secret or _test_mode_in_production():
+            return "unconfigured"
+        return "available"
 
     def _credentials(self) -> tuple[str, str]:
         client_id, secret = oauth_http.client_credentials(ENV_PREFIX)
-        if not client_id or not secret:
+        if not client_id or not secret or _test_mode_in_production():
             raise ProviderError("razorpay: not configured")
         return client_id, secret
 
@@ -355,7 +382,7 @@ class RazorpayProvider(BaseProvider):
             "redirect_uri": redirect_uri,
             "code": code,
         }
-        if os.environ.get(MODE_ENV, "").strip().lower() == "test":
+        if _is_test_mode():
             payload["mode"] = "test"
         body = await _token_call(payload, refreshing=False)
         account_id = str(body.get("razorpay_account_id") or "")
@@ -396,11 +423,19 @@ class RazorpayProvider(BaseProvider):
             return None
         if not isinstance(event, dict):
             return None
-        event_id = headers.get("x-razorpay-event-id", "").strip()[:200]
+        created = event.get("created_at")
+        if (
+            not isinstance(created, int)
+            or isinstance(created, bool)
+            or time.time() - created > MAX_EVENT_AGE_SECONDS
+        ):
+            return None
+        # The header is unsigned: bound to the signed body so a redelivery (same
+        # header, same bytes) dedupes and nothing else can collide with it.
+        header_id = headers.get("x-razorpay-event-id", "").strip()[:100]
         kind, data, site_id = normalize_event(event)
         return NormalizedEvent(
-            # Redeliveries carry the same id header; without one the body itself is.
-            id=event_id or "sha256:" + hashlib.sha256(body).hexdigest(),
+            id=f"{header_id}:{hashlib.sha256(body).hexdigest()}",
             type=kind,
             provider=self.id,
             data=data,

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 
@@ -468,7 +469,7 @@ def _paid(sid: str, *, order_id: str = "order_A", acct: str = ACCOUNT, notes=Non
             "payment": {"entity": _payment(order_id, notes)},
             "order": {"entity": {"id": order_id, "notes": notes}},
         },
-        "created_at": 1749618314,
+        "created_at": int(time.time()),
     }
 
 
@@ -483,6 +484,7 @@ def _refund(order_id: str, *, refunded: int, status: str, acct: str = ACCOUNT) -
             "refund": {"entity": {"id": "rfnd_1", "payment_id": "pay_1", "amount": refunded}},
             "payment": {"entity": payment},
         },
+        "created_at": int(time.time()),
     }
 
 
@@ -494,6 +496,7 @@ def _failed(order_id: str, notes) -> dict:
         "event": "payment.failed",
         "contains": ["payment"],
         "payload": {"payment": {"entity": payment}},
+        "created_at": int(time.time()),
     }
 
 
@@ -512,10 +515,16 @@ def test_signature_check():
 async def test_webhook_signature_valid_invalid_and_ignored(beanie_test_db, rzp, monkeypatch):
     async with _client() as c:
         forged = await _post(c, {"event": "payment.captured"}, eid="e1", secret="nope")
-        ignored = await _post(c, {"event": "payment.captured", "payload": {}}, eid="e2")
+        now = int(time.time())
+        ignored = await _post(
+            c, {"event": "payment.captured", "payload": {}, "created_at": now}, eid="e2"
+        )
+        stale = await _post(c, {"event": "payment.captured", "created_at": now - 90000}, eid="e4")
+        undated = await _post(c, {"event": "payment.captured", "payload": {}}, eid="e5")
         monkeypatch.delenv("POCKETPAW_INTEGRATIONS_RAZORPAY_WEBHOOK_SECRET")
         unset = await _post(c, {"event": "payment.captured"}, eid="e3", secret="")
     assert forged.status_code == 401 and unset.status_code == 401
+    assert stale.status_code == 401 and undated.status_code == 401
     assert ignored.status_code == 200 and ignored.json().get("ignored") is True
 
 
@@ -557,7 +566,8 @@ async def test_orders_paid_refunded_failed_and_deduped(beanie_test_db, rzp, cata
         # A failure or refund for an order we never recorded makes no row, and the
         # merchant's own payment links (no site id in notes) are not site orders.
         await _post(c, _failed("order_B", {"site_id": sid}), eid="evt_6")
-        await _post(c, _refund("order_C", refunded=375000, status="full"), eid="evt_7")
+        early = await _post(c, _refund("order_C", refunded=375000, status="full"), eid="evt_7")
+        assert early.status_code == 500
         own = await _post(c, _paid(sid, order_id="order_D", notes=[]), eid="evt_8")
         assert own.json()["ignored"] is True
         orders = [o.external_id for o in await SiteOrder.find_all().to_list()]
@@ -579,3 +589,52 @@ async def test_an_event_from_another_account_is_refused(beanie_test_db, rzp, cat
     assert resp.json() == {"ok": True, "routed": False}
     assert refund.json() == {"ok": True, "routed": False}
     assert status == "paid"
+
+
+@pytest.mark.asyncio
+async def test_event_id_is_bound_to_the_body(beanie_test_db, rzp, catalog):
+    from pocketpaw_ee.cloud.models.integration import SiteOrder
+
+    async with _client() as c:
+        _, sid, _ = await _ready_site(c, catalog)
+        first = await _post(c, _paid(sid, order_id="order_A"), eid="evt_same")
+        # A forged/reused header on another (signed) body is not a duplicate of it.
+        other = await _post(c, _paid(sid, order_id="order_B"), eid="evt_same")
+        orders = sorted(o.external_id for o in await SiteOrder.find_all().to_list())
+    assert first.json() == {"ok": True} and other.json() == {"ok": True}
+    assert orders == ["order_A", "order_B"]
+
+
+@pytest.mark.asyncio
+async def test_an_early_refund_is_retried_and_applies_after_paid(beanie_test_db, rzp, catalog):
+    from pocketpaw_ee.cloud.models.integration import IntegrationWebhookEvent, SiteOrder
+
+    refund = _refund("order_A", refunded=375000, status="full")
+    async with _client() as c:
+        _, sid, _ = await _ready_site(c, catalog)
+        early = await _post(c, refund, eid="evt_r")
+        assert early.status_code == 500
+        assert await IntegrationWebhookEvent.find_all().count() == 0
+        assert await SiteOrder.find_all().count() == 0
+        await _post(c, _paid(sid), eid="evt_p")
+        again = await _post(c, refund, eid="evt_r")  # Razorpay's redelivery
+        status = (await SiteOrder.find_one()).status
+    assert again.json() == {"ok": True} and status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_test_mode_is_refused_in_production(beanie_test_db, rzp, monkeypatch, caplog):
+    from pocketpaw_ee.integrations.providers.razorpay import RazorpayProvider
+
+    monkeypatch.delenv("POCKETPAW_ENV", raising=False)
+    monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+    monkeypatch.setenv("POCKETPAW_INTEGRATIONS_RAZORPAY_MODE", "test")
+    assert RazorpayProvider().availability() == "available"  # dev: fine
+    monkeypatch.setenv("POCKETPAW_ENV", "production")
+    assert RazorpayProvider().availability() == "unconfigured"
+    assert "provider disabled" in caplog.text
+    async with _client() as c:
+        refused = await c.post("/api/v1/integrations/razorpay/connect", json={})
+    assert refused.status_code == 409
+    monkeypatch.delenv("POCKETPAW_INTEGRATIONS_RAZORPAY_MODE")
+    assert RazorpayProvider().availability() == "available"

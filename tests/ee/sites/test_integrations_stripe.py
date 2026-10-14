@@ -681,3 +681,21 @@ async def test_a_bad_catalog_currency_is_invalid_args(beanie_test_db, stripe, ca
         resp = await _gw(c, sid, "stripe", "create_checkout", args={"product_ref": "m"})
     assert resp.status_code == 422 and _code(resp) == "invalid_args"
     assert stripe.sessions == []
+
+
+@pytest.mark.asyncio
+async def test_an_early_refund_is_retried_and_applies_after_paid(beanie_test_db, stripe, catalog):
+    from pocketpaw_ee.cloud.models.integration import IntegrationWebhookEvent, SiteOrder
+
+    full = {"id": "ch_1", "payment_intent": "pi_1", "metadata": {}, "amount": 3750}
+    refund = _evt("evt_r", "charge.refunded", {**full, "amount_refunded": 3750})
+    async with _client() as c:
+        _, sid, _ = await _ready_site(c, stripe, catalog)
+        early = await _post(c, refund)
+        assert early.status_code == 500
+        assert await IntegrationWebhookEvent.find_all().count() == 0
+        assert await SiteOrder.find_all().count() == 0
+        await _post(c, _session_event("evt_p", sid, "acct_0001"))
+        again = await _post(c, refund)  # Stripe's redelivery
+        status = (await SiteOrder.find_one()).status
+    assert again.json() == {"ok": True} and status == "refunded"
