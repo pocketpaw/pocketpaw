@@ -252,6 +252,8 @@ Shopify stores (`connect_site_integration(pocket_id, 'shopify', purpose)`): prod
 buy buttons call `Paw.call('shopify', 'create_cart_checkout', {variant_id, qty})` and open `result.url`.
 Signups into the owner's Mailchimp or Brevo: `connect_site_integration(pocket_id, 'mailchimp' | 'brevo', purpose)`,
 then `Paw.call('mailchimp' | 'brevo', 'subscribe', {email, first_name, last_name})`; no such account: built-in `newsletter`.
+Blog/news fed from the owner's Notion: `connect_site_integration(pocket_id, 'notion', purpose)`, then render `Paw.call('notion', 'list_entries', {limit, cursor})`
+and `Paw.call('notion', 'get_entry', {id})` client-side, setting text with `textContent` (never `innerHTML`).
 
 ### Changing an html site that already exists
 

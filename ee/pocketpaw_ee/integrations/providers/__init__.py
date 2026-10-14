@@ -18,6 +18,7 @@ from pocketpaw_ee.integrations.providers.google_sheets import GoogleSheetsProvid
 from pocketpaw_ee.integrations.providers.hubspot import HubSpotProvider
 from pocketpaw_ee.integrations.providers.mailchimp import MailchimpProvider
 from pocketpaw_ee.integrations.providers.newsletter import NewsletterProvider
+from pocketpaw_ee.integrations.providers.notion import NotionProvider
 from pocketpaw_ee.integrations.providers.razorpay import RazorpayProvider
 from pocketpaw_ee.integrations.providers.scheduling import CalComProvider, CalendlyProvider
 from pocketpaw_ee.integrations.providers.shopify import ShopifyProvider
@@ -41,6 +42,7 @@ _PROVIDERS: tuple[IntegrationProvider, ...] = (
     ShopifyProvider(),
     MailchimpProvider(),
     BrevoProvider(),
+    NotionProvider(),
 )
 
 _DEMO = DemoProvider()
