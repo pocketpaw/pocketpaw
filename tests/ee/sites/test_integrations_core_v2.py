@@ -72,7 +72,8 @@ async def _follow(c, authorize_url: str, provider: str = "demo"):
 async def test_provider_views_carry_settings_fields_and_requires_connection(beanie_test_db):
     async with _client() as c:
         providers = {p["id"]: p for p in (await c.get("/api/v1/integrations/providers")).json()}
-    assert {k: p["requires_connection"] for k, p in providers.items()} == {
+    wave0 = ("newsletter", "calendly", "cal_com", "turnstile", "demo")
+    assert {k: providers[k]["requires_connection"] for k in wave0} == {
         "newsletter": False,
         "calendly": False,
         "cal_com": False,

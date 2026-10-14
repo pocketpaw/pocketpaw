@@ -22,7 +22,9 @@
 #   5. ``SiteRateCounter`` per (site, action) and per (site, action, IP hash)
 #                                                          -> rate_limited 429
 #   6. typed args (extra keys refused, string caps)        -> invalid_args 422
-#   7. handler, with a token from ``vault.get_valid_token`` -> provider_error 502
+#   7. handler, with a token from ``vault.get_valid_token`` -> provider_error 502;
+#      a handler's ``ActionRefused`` passes its own code through (invalid_args 422,
+#      rate_limited 429, setup_required 409, the last also marks the binding)
 #
 # The site-key path does NOT use ``resolve_site_key_with_site``: that resolver also
 # refuses sites without a live concierge, which would switch integrations off for
@@ -45,7 +47,11 @@ from pydantic import ValidationError as PydanticValidationError
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.integrations import bindings, vault
 from pocketpaw_ee.integrations.providers import get_provider
-from pocketpaw_ee.integrations.providers.base import ActionContext, ProviderError
+from pocketpaw_ee.integrations.providers.base import (
+    ActionContext,
+    ActionRefused,
+    ProviderError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +63,7 @@ STATUS = {
     "turnstile_required": 403,
     "rate_limited": 429,
     "invalid_args": 422,
+    "setup_required": 409,
     "provider_error": 502,
 }
 MESSAGES = {
@@ -67,6 +74,7 @@ MESSAGES = {
     "turnstile_required": "Please confirm you're a person and try again.",
     "rate_limited": "Too many requests. Wait a moment and try again.",
     "invalid_args": "Some of the details sent aren't valid.",
+    "setup_required": "This integration needs the site owner to finish setting it up.",
     "provider_error": "The service didn't respond. Try again in a moment.",
 }
 
@@ -301,8 +309,8 @@ async def _call(request: Request, site_id: str, provider_id: str, action: str) -
         where = ".".join(str(p) for p in first.get("loc", ())) or "args"
         raise GatewayError("invalid_args", f"`{where}` is not valid.") from None
 
-    async def _token() -> str:
-        return await vault.get_valid_token(conn)
+    async def _token(rejected: str = "") -> str:
+        return await vault.get_valid_token(conn, rejected=rejected)
 
     ctx = ActionContext(
         workspace_id=site.workspace,
@@ -318,6 +326,11 @@ async def _call(request: Request, site_id: str, provider_id: str, action: str) -
         result = await spec.handler(ctx, parsed)
     except vault.NotConnected:
         raise GatewayError("not_connected") from None
+    except ActionRefused as exc:
+        logger.info("integrations: %s/%s refused: %s", provider.id, action, exc.code)
+        if exc.code == "setup_required":
+            await bindings.mark_setup_error(binding, exc.setup_error)
+        raise GatewayError(exc.code, exc.message or None) from None
     except ProviderError as exc:
         logger.info("integrations: %s/%s provider error: %s", provider.id, action, exc)
         raise GatewayError("provider_error") from None

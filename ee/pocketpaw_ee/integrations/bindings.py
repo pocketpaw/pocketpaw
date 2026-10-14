@@ -22,7 +22,8 @@
 # reconnect, the provider's ``site_setup`` hook runs (idempotent; it may write
 # readonly settings that pass their field's check; stored with an atomic $set).
 # A failure is stored as ``setup_error`` and the site reads ``setup_required``;
-# it never fails the request.
+# it never fails the request. The gateway also stores one (``mark_setup_error``)
+# when a handler finds the provider-side setup gone (a deleted sheet).
 #
 # Status (``binding_status``), first match wins: disabled (has actions, none on),
 # needs_connection / needs_reconnect (connect kinds), setup_required (a setup
@@ -199,7 +200,11 @@ async def run_setup(binding: Any, provider: IntegrationProvider, conn: Any | Non
         user_id=user_id,
         provider=provider.id,
         connection=conn,
-        get_token=(lambda: vault.get_valid_token(conn)) if conn is not None else None,
+        get_token=(
+            (lambda rejected="": vault.get_valid_token(conn, rejected=rejected))
+            if conn is not None
+            else None
+        ),
     )
     try:
         written = await hook(binding, ctx) or {}
@@ -588,3 +593,17 @@ async def binding_for_site(site: Any, provider_id: str):
     if not site.pocket_id:
         return None
     return await _row(site.workspace, site.pocket_id, provider_id)
+
+
+async def mark_setup_error(binding: Any, error: str) -> None:
+    """A handler found the provider-side setup broken (a deleted sheet): the site
+    reads ``setup_required`` until a settings change or reconnect re-runs setup."""
+    error = (error or "setup_failed")[:80]
+    if (getattr(binding, "setup_error", "") or "") == error:
+        return
+    await (
+        _doc()
+        .get_pymongo_collection()
+        .update_one({"_id": binding.id}, {"$set": {"setup_error": error}})
+    )
+    binding.setup_error = error

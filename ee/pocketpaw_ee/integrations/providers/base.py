@@ -27,8 +27,13 @@
 #
 # Handlers receive an ``ActionContext`` and return a JSON-safe dict that goes to a
 # public caller as ``result``. They must never return a token or a secret.
-# ``ProviderError`` is the one failure a handler raises; the gateway maps it to 502.
-# ``InvalidGrant`` from ``refresh`` means the grant is dead (owner must reconnect).
+# ``ProviderError`` is the failure a handler raises; the gateway maps it to 502.
+# ``ActionRefused(code)`` is a handler refusal with a gateway code instead
+# (``invalid_args``, ``rate_limited``, ``setup_required``); ``setup_required`` also
+# marks the site's binding so the owner sees it. ``InvalidGrant`` from ``refresh``
+# means the grant is dead (owner must reconnect).
+# ``get_token(rejected=token)`` forces one refresh when the provider refused
+# ``token`` (a 401 before its stated expiry); without it the cached token comes back.
 
 from __future__ import annotations
 
@@ -50,6 +55,22 @@ class ProviderError(Exception):
 
 class InvalidGrant(ProviderError):
     """The refresh token is dead (``invalid_grant`` / ``BAD_REFRESH_TOKEN``)."""
+
+
+class ActionRefused(ProviderError):
+    """A handler refusal the gateway passes through as ``code``. ``message`` is
+    caller-facing (no secrets); ``setup_error`` is stored on the binding when the
+    code is ``setup_required``."""
+
+    CODES = frozenset({"invalid_args", "rate_limited", "setup_required"})
+
+    def __init__(self, code: str, message: str = "", *, setup_error: str = "") -> None:
+        if code not in self.CODES:
+            raise ValueError(f"unknown refusal code {code!r}")
+        self.code = code
+        self.message = message
+        self.setup_error = setup_error or "setup_failed"
+        super().__init__(f"{code}: {message}" if message else code)
 
 
 class ActionArgs(BaseModel):
@@ -109,7 +130,7 @@ class SetupContext:
     user_id: str
     provider: str
     connection: Any | None = None
-    get_token: Callable[[], Awaitable[str]] | None = None
+    get_token: Callable[..., Awaitable[str]] | None = None
 
 
 @dataclass
@@ -123,7 +144,7 @@ class ActionContext:
     action: str
     settings: Mapping[str, Any]
     caller: Literal["site_key", "gateway_token", "owner"]
-    get_token: Callable[[], Awaitable[str]] | None = None
+    get_token: Callable[..., Awaitable[str]] | None = None
 
 
 @dataclass(frozen=True)

@@ -430,12 +430,8 @@ async def test_builtins_cannot_be_connected_and_unknown_providers_404(beanie_tes
         providers = (await c.get("/api/v1/integrations/providers")).json()
     assert builtin.status_code == 422
     assert unknown.status_code == 404
-    assert {p["id"] for p in providers} == {
-        "newsletter",
-        "calendly",
-        "cal_com",
-        "turnstile",
-        "demo",
+    assert {"newsletter", "calendly", "cal_com", "turnstile", "demo"} <= {
+        p["id"] for p in providers
     }
     demo = next(p for p in providers if p["id"] == "demo")
     assert demo["kind"] == "connect" and demo["availability"] == "available"
@@ -451,7 +447,8 @@ async def test_demo_is_absent_without_the_env_switch(beanie_test_db, monkeypatch
     async with _client() as c:
         providers = (await c.get("/api/v1/integrations/providers")).json()
         connect = await c.post("/api/v1/integrations/demo/connect", json={})
-    assert [p["id"] for p in providers] == ["newsletter", "calendly", "cal_com", "turnstile"]
+    ids = [p["id"] for p in providers]
+    assert ids[:4] == ["newsletter", "calendly", "cal_com", "turnstile"] and "demo" not in ids
     assert connect.status_code == 404
 
 
@@ -939,12 +936,8 @@ async def test_connect_tool_pushes_the_card_and_creates_the_binding(beanie_test_
 
     listed = _payload(await sites_create._list_site_integrations_handler({"pocket_id": pid}))
     assert [i["provider"] for i in listed["integrations"]] == ["demo"]
-    assert {p["id"] for p in listed["providers"]} == {
-        "newsletter",
-        "calendly",
-        "cal_com",
-        "turnstile",
-        "demo",
+    assert {"newsletter", "calendly", "cal_com", "turnstile", "demo"} <= {
+        p["id"] for p in listed["providers"]
     }
 
     builtin = _payload(

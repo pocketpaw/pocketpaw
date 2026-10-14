@@ -236,6 +236,11 @@ purpose)`. The card asks the owner for their public booking link (no account to
 connect); `list_site_integrations` shows it as `settings.url`. Embed that link with
 the provider's standard inline embed markup, and never invent one.
 
+Forms into a spreadsheet: `connect_site_integration(pocket_id, 'google_sheets', purpose)`,
+then submit with `Paw.call('google_sheets', 'append_row', {fields})` (string values).
+Lead forms into a CRM: `connect_site_integration(pocket_id, 'hubspot', purpose)`, then
+`Paw.call('hubspot', 'create_contact', {email, firstname, lastname, phone, company, message})`.
+
 ### Changing an html site that already exists
 
 When the user asks for a CHANGE to a site they already have — "shorten the

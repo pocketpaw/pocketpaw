@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pocketpaw_ee.integrations.providers.base import IntegrationProvider
 from pocketpaw_ee.integrations.providers.demo import DemoProvider, demo_enabled
+from pocketpaw_ee.integrations.providers.google_sheets import GoogleSheetsProvider
+from pocketpaw_ee.integrations.providers.hubspot import HubSpotProvider
 from pocketpaw_ee.integrations.providers.newsletter import NewsletterProvider
 from pocketpaw_ee.integrations.providers.scheduling import CalComProvider, CalendlyProvider
 from pocketpaw_ee.integrations.providers.turnstile import TurnstileProvider
@@ -23,6 +25,8 @@ _PROVIDERS: tuple[IntegrationProvider, ...] = (
     CalComProvider(),
     # ---- add new providers below, one per line ----
     TurnstileProvider(),
+    GoogleSheetsProvider(),
+    HubSpotProvider(),
 )
 
 _DEMO = DemoProvider()

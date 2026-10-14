@@ -5,10 +5,11 @@
 # ``sites.site_secrets`` uses) and is only ever decrypted inside this module.
 #
 # ``get_valid_token`` is THE one refresh path. When the access token is near
-# expiry it takes a per-connection lease with one atomic ``find_one_and_update``
-# (lease owner + expiry, the outbox claim pattern), re-checks the row (a sibling
-# may have just refreshed), refreshes, and writes the new bundle only while it
-# still holds the lease. A caller that loses the race waits for the holder's
+# expiry (or the caller names a token the provider just refused) it takes a
+# per-connection lease with one atomic ``find_one_and_update`` (lease owner +
+# expiry, the outbox claim pattern), re-checks the row (a sibling may have just
+# refreshed), refreshes, and writes the new bundle only while it still holds the
+# lease. A caller that loses the race waits for the holder's
 # result instead of refreshing with a refresh token that is about to be spent.
 #
 # INVARIANTS A READER MUST NOT BREAK:
@@ -28,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -237,15 +239,28 @@ async def _reload(conn_id: Any):
     return await _doc().get(conn_id)
 
 
-async def get_valid_token(conn: Any) -> str:
+def _usable(conn: Any, now: datetime, rejected: str) -> bool:
+    if not _fresh(conn, now):
+        return False
+    if not rejected:
+        return True
+    current = _tokens(conn).get("access_token", "")
+    return not hmac.compare_digest(current.encode(), rejected.encode())
+
+
+async def get_valid_token(conn: Any, *, rejected: str = "") -> str:
     """A usable access token for ``conn``, refreshing it under the lease if needed.
+
+    ``rejected`` is a token the provider just refused (a 401): it forces one refresh
+    unless a sibling already replaced that token, in which case the newer one wins.
 
     Raises ``NotConnected`` for a revoked / needs_reconnect / missing connection,
     ``ProviderError`` when the provider fails or the lease holder never finishes."""
     if conn is None or conn.status != "active":
         raise NotConnected("connection is not active")
     now = _now()
-    if _fresh(conn, now):
+    # A rejected token skips the in-memory fast path: ``conn`` may be stale.
+    if not rejected and _fresh(conn, now):
         return _tokens(conn).get("access_token", "")
 
     owner = uuid.uuid4().hex
@@ -256,7 +271,7 @@ async def get_valid_token(conn: Any) -> str:
     current = await _reload(conn.id)
     if current is None or current.status != "active":
         raise NotConnected("connection is not active")
-    if _fresh(current, _now()):
+    if _usable(current, _now(), rejected):
         # A sibling refreshed between our read and our claim.
         await _finish(conn.id, owner, {})
         return _tokens(current).get("access_token", "")
