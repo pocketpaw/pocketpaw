@@ -3,19 +3,26 @@
 # ``/api/v1/growth/social/...``). A thin shell over ``growth.social.service``.
 # Every route carries the license gate, ``request_context`` and a per-route
 # RBAC guard (pinned by the guard-coverage test in tests/cloud/growth/
-# test_gate.py): the two GETs ``growth.read``, everything else
-# ``growth.write``. Nothing here reaches outside the workspace — no posting, no
-# account connections — so there is no ``growth.manage`` verb.
+# test_gate.py): GETs ``growth.read``, workspace-internal writes
+# ``growth.write``, and connecting or disconnecting a social account (which
+# reaches an outside platform) ``growth.manage``. The connect route builds the
+# OAuth return URL from the caller's origin, validated against the CORS
+# allowlist; it is never taken from the request body.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Depends, Query, Request, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
+from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
+    ConnectSocialAccountRequest,
+    ConnectSocialAccountResponse,
     CreateCharacterRequest,
     GenerateIdeasRequest,
     MakeMediaRequest,
@@ -23,6 +30,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     MemeFormatListResponse,
     RefreshPulseRequest,
     ScheduleIdeasRequest,
+    SocialAccountListResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
     SocialProfileListResponse,
@@ -305,3 +313,56 @@ async def use_pulse_suggestion(
 ) -> SocialIdeaResponse:
     """File a theme's post suggestion as an idea: to Blitz (new) or straight to Content."""
     return await social_service.use_pulse_suggestion(ctx, body, profile_id)
+
+
+def _caller_origin(request: Request) -> str:
+    origin = (request.headers.get("origin") or "").strip()
+    if origin and origin != "null":
+        return origin.rstrip("/")
+    parsed = urlsplit(request.headers.get("referer") or "")
+    return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+
+
+@router.get(
+    "/accounts",
+    response_model=SocialAccountListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_accounts(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SocialAccountListResponse:
+    """The social's connected accounts and the platforms it can connect.
+    ``configured`` is false when this deployment has no Postiz."""
+    return await social_service.list_accounts(ctx, profile_id)
+
+
+@router.post(
+    "/accounts/connect",
+    response_model=ConnectSocialAccountResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def connect_account(
+    body: ConnectSocialAccountRequest,
+    request: Request,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> ConnectSocialAccountResponse:
+    """The platform's authorize URL; the browser returns to /growth/social/accounts.
+    503 with no Postiz, 422 for an unsupported or unset-up platform."""
+    origin = safe_frontend_origin(_caller_origin(request)) or frontend_base_url()
+    return await social_service.connect_account(ctx, profile_id, body, origin)
+
+
+@router.delete(
+    "/accounts/{account_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def disconnect_account(
+    account_id: str,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Disconnect one account. 404 when it isn't this social's."""
+    await social_service.disconnect_account(ctx, profile_id, account_id)
+    return Response(status_code=204)

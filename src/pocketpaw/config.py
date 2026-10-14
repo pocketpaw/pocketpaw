@@ -2588,6 +2588,24 @@ class Settings(BaseSettings):
         description="Language code of that template. POCKETPAW_MSG91_PLATFORM_LANGUAGE.",
     )
 
+    # Growth › Social accounts — the self-hosted Postiz instance that holds each
+    # brand's connected social accounts (ee/pocketpaw_ee/cloud/growth/social/postiz.py).
+    # Connections stay off until both are set.
+    postiz_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of the self-hosted Postiz instance, e.g. http://127.0.0.1:4007. "
+            "Set via POCKETPAW_POSTIZ_URL."
+        ),
+    )
+    postiz_jwt_secret: str | None = Field(
+        default=None,
+        description=(
+            "Postiz's JWT_SECRET, used to sign its enterprise API calls. Set via "
+            "POCKETPAW_POSTIZ_JWT_SECRET. NEVER logged."
+        ),
+    )
+
     # AI visibility checks (AV-3) — the platform's OWN provider accounts that ask
     # AI search engines about a business (ee/pocketpaw_ee/cloud/ai_visibility).
     # An engine whose key is unset is skipped. All secrets, NEVER logged.

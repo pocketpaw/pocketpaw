@@ -373,3 +373,31 @@ class AddPulseCompaniesRequest(BaseModel):
 class AddPulseCompaniesResponse(BaseModel):
     added: list[str]
     skipped: list[str]
+
+
+class SocialAccountResponse(BaseModel):
+    id: str
+    platform: str
+    name: str
+    username: str | None
+    picture: str | None
+    disabled: bool
+
+
+class SocialAccountPlatformResponse(BaseModel):
+    id: str
+    label: str
+
+
+class SocialAccountListResponse(BaseModel):
+    items: list[SocialAccountResponse]
+    platforms: list[SocialAccountPlatformResponse]
+    configured: bool
+
+
+class ConnectSocialAccountRequest(BaseModel):
+    platform: str = Field(max_length=64)
+
+
+class ConnectSocialAccountResponse(BaseModel):
+    url: str

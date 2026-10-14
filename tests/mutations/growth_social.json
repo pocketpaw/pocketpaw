@@ -70,5 +70,14 @@
     "tests": [
       "tests/cloud/growth/test_gate.py"
     ]
+  },
+  {
+    "label": "tenancy: the Postiz org lookup drops its workspace filter (one workspace reads another's accounts)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    return await _PostizOrgDoc.find_one({\"workspace\": workspace_id, \"profile\": profile})",
+    "replace": "    return await _PostizOrgDoc.find_one({\"profile\": profile})",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
   }
 ]

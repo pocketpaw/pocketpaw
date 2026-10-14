@@ -75,6 +75,19 @@ COMPLETE_REQUIRED_FIELDS: tuple[str, ...] = (
     "category",
 )
 
+SOCIAL_ACCOUNT_PLATFORMS: tuple[tuple[str, str], ...] = (
+    ("x", "X"),
+    ("linkedin", "LinkedIn"),
+    ("linkedin-page", "LinkedIn Page"),
+    ("facebook", "Facebook Page"),
+    ("instagram-standalone", "Instagram"),
+    ("threads", "Threads"),
+    ("youtube", "YouTube"),
+    ("tiktok", "TikTok"),
+    ("reddit", "Reddit"),
+    ("pinterest", "Pinterest"),
+)
+
 DEFAULT_IDEA_COUNT = 6
 MAX_IDEA_COUNT = 12
 

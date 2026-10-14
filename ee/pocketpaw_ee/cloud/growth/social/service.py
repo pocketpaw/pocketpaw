@@ -1,7 +1,8 @@
 # ee/pocketpaw_ee/cloud/growth/social/service.py — the Growth › Social service
-# and the SOLE owner of the SocialProfile and SocialIdea doc writes
-# (service-is-repo; the import-linter "Growth" contract keeps the router, DTOs,
-# domain and both agents off the doc classes).
+# and the SOLE owner of the SocialProfile, SocialIdea, SocialPulse and
+# SocialPostizOrg doc writes (service-is-repo; the import-linter "Growth"
+# contract keeps the router, DTOs, domain, the agents and the Postiz client off
+# the doc classes).
 #
 # Tenancy: every read filters on ``workspace``; malformed, missing and
 # cross-tenant profile and idea ids raise the same NotFound so existence never
@@ -27,6 +28,11 @@
 # Recent hooks are passed so the agent does not repeat itself. Writes carry
 # ``# no-event:`` markers: Growth › Social has no realtime subscriber; the
 # dashboard re-fetches.
+#
+# Accounts: each profile's social accounts live in its own Postiz org, created
+# on the first connect and never on a read. Its API key is stored encrypted, and
+# the key is checked before Postiz is called, because org creation is not
+# idempotent. A disconnect first confirms the id is in that profile's org.
 
 from __future__ import annotations
 
@@ -35,8 +41,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.context import RequestContext
+from pocketpaw_ee.cloud._core.crypto import decrypt, encrypt
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
     ConflictError,
@@ -47,6 +55,7 @@ from pocketpaw_ee.cloud._core.errors import (
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.social.domain import (
     DESCRIPTION_FIELDS,
+    SOCIAL_ACCOUNT_PLATFORMS,
     AnalysisOutcome,
     AnalysisRequest,
     SocialAnalysis,
@@ -58,6 +67,8 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     AddPulseCompaniesResponse,
     AnalysisPatch,
     CharacterResponse,
+    ConnectSocialAccountRequest,
+    ConnectSocialAccountResponse,
     CreateCharacterRequest,
     DescriptionResponse,
     GenerateIdeasRequest,
@@ -69,6 +80,9 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     PulseThemeResponse,
     RefreshPulseRequest,
     ScheduleIdeasRequest,
+    SocialAccountListResponse,
+    SocialAccountPlatformResponse,
+    SocialAccountResponse,
     SocialAnalysisResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
@@ -79,7 +93,14 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
 )
+from pocketpaw_ee.cloud.growth.social.postiz import (
+    PostizClient,
+    PostizError,
+    PostizPlatformUnavailable,
+    resolve_postiz,
+)
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
+from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as _ProfileDoc
 from pocketpaw_ee.cloud.models.social_pulse import SocialPulse as _PulseDoc
 
@@ -1081,7 +1102,158 @@ async def unschedule_idea(ctx: RequestContext, idea_id: str) -> SocialIdeaRespon
     return _idea_to_response(_idea_to_domain(doc))
 
 
+# ---------------------------------------------------------------------------
+# Accounts (Postiz)
+# ---------------------------------------------------------------------------
+
+
+def _account_platforms() -> list[SocialAccountPlatformResponse]:
+    return [
+        SocialAccountPlatformResponse(id=i, label=label) for i, label in SOCIAL_ACCOUNT_PLATFORMS
+    ]
+
+
+def _account_response(raw: dict[str, Any]) -> SocialAccountResponse | None:
+    account_id = str(raw.get("id") or "")
+    if not account_id:
+        return None
+    username = raw.get("profile")
+    picture = raw.get("picture")
+    return SocialAccountResponse(
+        id=account_id,
+        platform=str(raw.get("identifier") or ""),
+        name=str(raw.get("name") or ""),
+        username=username if isinstance(username, str) and username else None,
+        picture=picture if isinstance(picture, str) and picture else None,
+        disabled=bool(raw.get("disabled")),
+    )
+
+
+def _upstream(exc: PostizError) -> CloudError:
+    logger.warning("social accounts: postiz failed (%s): %s", exc.code, exc.message)
+    return CloudError(
+        502, "social.accounts_upstream", "The social account service didn't respond. Try again."
+    )
+
+
+def _require_encryption() -> None:
+    """Fail before Postiz makes an org whose key could not be stored."""
+    encrypt("")
+
+
+async def _postiz_org(workspace_id: str, profile: str) -> _PostizOrgDoc | None:
+    return await _PostizOrgDoc.find_one({"workspace": workspace_id, "profile": profile})
+
+
+async def _ensure_postiz_org(
+    postiz: PostizClient, workspace_id: str, profile: _ProfileDoc
+) -> _PostizOrgDoc:
+    profile_key = str(profile.id)
+    org = await _postiz_org(workspace_id, profile_key)
+    if org is not None:
+        return org
+    _require_encryption()
+    try:
+        org_id, api_key = await postiz.create_org(
+            f"{workspace_id}:{profile_key}", profile.company_name or "PocketPaw"
+        )
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    doc = _PostizOrgDoc(
+        workspace=workspace_id,
+        profile=profile_key,
+        postiz_org_id=org_id,
+        api_key_enc=encrypt(api_key),
+    )
+    try:
+        await doc.insert()
+    except DuplicateKeyError:
+        winner = await _postiz_org(workspace_id, profile_key)
+        if winner is None:
+            raise
+        return winner
+    # no-event: Growth › Social has no realtime subscriber; the Accounts page re-fetches.
+    return doc
+
+
+async def _integrations(postiz: PostizClient, org: _PostizOrgDoc) -> list[dict[str, Any]]:
+    try:
+        return await postiz.list_integrations(decrypt(org.api_key_enc))
+    except PostizError as exc:
+        raise _upstream(exc) from None
+
+
+async def list_accounts(
+    ctx: RequestContext, profile_id: str | None = None
+) -> SocialAccountListResponse:
+    workspace_id = _require_workspace(ctx)
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    platforms = _account_platforms()
+    postiz = resolve_postiz()
+    if postiz is None:
+        return SocialAccountListResponse(items=[], platforms=platforms, configured=False)
+    org = await _postiz_org(workspace_id, str(profile.id))
+    if org is None:
+        return SocialAccountListResponse(items=[], platforms=platforms, configured=True)
+    items = [a for a in map(_account_response, await _integrations(postiz, org)) if a]
+    return SocialAccountListResponse(items=items, platforms=platforms, configured=True)
+
+
+async def connect_account(
+    ctx: RequestContext,
+    profile_id: str | None,
+    body: ConnectSocialAccountRequest,
+    origin: str,
+) -> ConnectSocialAccountResponse:
+    body = ConnectSocialAccountRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    label = dict(SOCIAL_ACCOUNT_PLATFORMS).get(body.platform)
+    if label is None:
+        raise ValidationError(
+            "social.platform_not_supported", f"Connecting {body.platform!r} isn't supported."
+        )
+    postiz = resolve_postiz()
+    if postiz is None:
+        raise CloudError(
+            503,
+            "social.accounts_unavailable",
+            "Social account connections aren't set up on this deployment.",
+        )
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    org = await _ensure_postiz_org(postiz, workspace_id, profile)
+    try:
+        url = await postiz.connect_url(
+            decrypt(org.api_key_enc), body.platform, f"{origin.rstrip('/')}/growth/social/accounts"
+        )
+    except PostizPlatformUnavailable:
+        raise ValidationError(
+            "social.platform_unavailable", f"{label} isn't set up on this deployment yet."
+        ) from None
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    return ConnectSocialAccountResponse(url=url)
+
+
+async def disconnect_account(ctx: RequestContext, profile_id: str | None, account_id: str) -> None:
+    workspace_id = _require_workspace(ctx)
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    postiz = resolve_postiz()
+    org = await _postiz_org(workspace_id, str(profile.id)) if postiz else None
+    if postiz is None or org is None:
+        raise NotFound("social_account", account_id)
+    if not any(str(i.get("id")) == account_id for i in await _integrations(postiz, org)):
+        raise NotFound("social_account", account_id)
+    try:
+        await postiz.delete_integration(decrypt(org.api_key_enc), account_id)
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    # no-event: Growth › Social has no realtime subscriber; the Accounts page re-fetches.
+
+
 __all__ = [
+    "connect_account",
+    "disconnect_account",
+    "list_accounts",
     "analyze_profile",
     "complete_onboarding",
     "create_profile",

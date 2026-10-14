@@ -7623,10 +7623,12 @@ The setup wizard, website analysis and post ideas behind `/growth` › Social.
 A workspace can hold several profiles, one per brand it posts for. Every
 `/profile…` and `/ideas` route takes an optional `?profile_id=`; without it
 the route acts on the most recently updated profile, and the first `PUT`
-creates one. Ideas belong to one profile. Nothing here leaves
-the workspace: there is no posting, scheduling or account connection. Every
-route is license-gated and workspace-scoped; reads need `growth.read`, every
-other route `growth.write` (both MEMBER).
+creates one. Ideas belong to one profile. Nothing is posted yet: scheduling
+only dates ideas on `/calendar`, and the only thing that reaches an outside
+platform is connecting a social account (see Accounts below). Every route is
+license-gated and workspace-scoped; reads need `growth.read` (MEMBER), the
+account connect and disconnect routes `growth.manage` (ADMIN), every other
+route `growth.write` (MEMBER).
 
 | Route | What it does |
 |---|---|
@@ -7805,6 +7807,35 @@ items dropped, then the first 12 beats and 15 tags kept). At least one is requir
 generator's and cannot be edited. Returns the idea. A malformed id, an
 unknown id and another workspace's id all return
 `404 social_idea.not_found`.
+
+### Accounts — `/api/v1/growth/social/accounts`
+
+Each profile connects its own social accounts through a self-hosted Postiz
+instance. The profile gets its own Postiz organisation on its first connect
+(never on a read); the org's API key is stored encrypted with
+`CLOUD_ENCRYPTION_KEY`. Connections are off until both
+`POCKETPAW_POSTIZ_URL` (the instance's base URL) and
+`POCKETPAW_POSTIZ_JWT_SECRET` (Postiz's `JWT_SECRET`) are set. All three
+routes take `?profile_id=` like the rest.
+
+| Route | What it does |
+|---|---|
+| `GET /accounts` (`growth.read`) | `{items: [{id, platform, name, username, picture, disabled}], platforms: [{id, label}], configured}`. `platform` is the Postiz provider id, `username` the account handle (or `null`). `configured: false` means this deployment has no Postiz; `items` is empty then. |
+| `POST /accounts/connect` (`growth.manage`) | `{platform}` → `{url}`: the platform's authorize URL. Open it in the browser; after consent it returns to `<origin>/growth/social/accounts?added=<platform>`. The origin is the caller's (`Origin`, then `Referer`) when it is on the CORS allowlist, else `POCKETPAW_FRONTEND_BASE_URL`; it is never read from the body. |
+| `DELETE /accounts/{account_id}` (`growth.manage`) | Disconnect one account. `204`. |
+
+`platforms` (in order): `x`, `linkedin`, `linkedin-page`, `facebook`,
+`instagram-standalone`, `threads`, `youtube`, `tiktok`, `reddit`, `pinterest`.
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `social.accounts_unavailable` | Connect with no Postiz configured. |
+| 422 | `social.platform_not_supported` | `platform` is not in the list above. |
+| 422 | `social.platform_unavailable` | Postiz has no app set up for that platform ("X isn't set up on this deployment yet."). |
+| 422 | `cloud.encryption_key_missing` | Connect with no `CLOUD_ENCRYPTION_KEY`; checked before Postiz is called. |
+| 404 | `social_profile.not_found` | No profile (or an unknown `profile_id`). |
+| 404 | `social_account.not_found` | Disconnect of an id that is not one of this profile's accounts. |
+| 502 | `social.accounts_upstream` | Postiz failed or answered something unexpected. |
 
 ## Growth — the agent surface (`pocketpaw_growth` MCP)
 

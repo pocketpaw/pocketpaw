@@ -1033,6 +1033,9 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/pulse/refresh"): "growth.write",
             ("POST", "/growth/social/pulse/use"): "growth.write",
             ("POST", "/growth/social/ideas/{idea_id}/unschedule"): "growth.write",
+            ("GET", "/growth/social/accounts"): "growth.read",
+            ("POST", "/growth/social/accounts/connect"): "growth.manage",
+            ("DELETE", "/growth/social/accounts/{account_id}"): "growth.manage",
         }
 
         seen: dict[tuple[str, str], str] = {}

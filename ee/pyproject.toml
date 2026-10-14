@@ -1170,6 +1170,7 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.social.ideas",
     "pocketpaw_ee.cloud.growth.social.memes",
     "pocketpaw_ee.cloud.growth.social.pulse",
+    "pocketpaw_ee.cloud.growth.social.postiz",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
@@ -1179,6 +1180,7 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.social_profile",
     "pocketpaw_ee.cloud.models.social_idea",
     "pocketpaw_ee.cloud.models.social_pulse",
+    "pocketpaw_ee.cloud.models.social_postiz_org",
 ]
 
 [[tool.importlinter.contracts]]
