@@ -250,6 +250,8 @@ Indian sellers (INR, UPI): `connect_site_integration(pocket_id, 'razorpay', purp
 is Stripe-only, so the button runs `Paw.call('razorpay', 'create_checkout', {product_ref, qty})` and opens `result.url`.
 Shopify stores (`connect_site_integration(pocket_id, 'shopify', purpose)`): product grids from `Paw.call('shopify', 'list_products', {limit, cursor})` (prices in minor units);
 buy buttons call `Paw.call('shopify', 'create_cart_checkout', {variant_id, qty})` and open `result.url`.
+Signups into the owner's Mailchimp or Brevo: `connect_site_integration(pocket_id, 'mailchimp' | 'brevo', purpose)`,
+then `Paw.call('mailchimp' | 'brevo', 'subscribe', {email, first_name, last_name})`; no such account: built-in `newsletter`.
 
 ### Changing an html site that already exists
 

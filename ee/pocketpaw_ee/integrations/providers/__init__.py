@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 from pocketpaw_ee.integrations.providers.base import IntegrationProvider
+from pocketpaw_ee.integrations.providers.brevo import BrevoProvider
 from pocketpaw_ee.integrations.providers.demo import DemoProvider, demo_enabled
 from pocketpaw_ee.integrations.providers.google_sheets import GoogleSheetsProvider
 from pocketpaw_ee.integrations.providers.hubspot import HubSpotProvider
+from pocketpaw_ee.integrations.providers.mailchimp import MailchimpProvider
 from pocketpaw_ee.integrations.providers.newsletter import NewsletterProvider
 from pocketpaw_ee.integrations.providers.razorpay import RazorpayProvider
 from pocketpaw_ee.integrations.providers.scheduling import CalComProvider, CalendlyProvider
@@ -37,6 +39,8 @@ _PROVIDERS: tuple[IntegrationProvider, ...] = (
     ZohoCrmProvider(),
     RazorpayProvider(),
     ShopifyProvider(),
+    MailchimpProvider(),
+    BrevoProvider(),
 )
 
 _DEMO = DemoProvider()
