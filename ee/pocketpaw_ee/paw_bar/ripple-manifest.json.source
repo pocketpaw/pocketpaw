@@ -45,7 +45,13 @@ feat/widget-polish at 539fa99 (generatedAt 2026-10-14T09:34:15.214Z, upstream sh
 4c4abed755b48f9cc8f117d9fa433a952c51d0b6e9b450580a6c0c068a9c0bbd): "gantt" (shorter
 height description), "progress" (new optional label), "treemap" (no per-node color),
 "virtual-list" (shorter row and height descriptions) and "color-picker" (brand blue in
-its pocket). gantt's and progress's data flags come along with them. interval-workout's optional
+its pocket). gantt's and progress's data flags come along with them. Four more are
+swapped the same way, each alone, from branch feat/widget-polish-2 at 834b73a
+(generatedAt 2026-10-14T17:18:56.770Z, upstream sha256
+a539662b6f3b9c40344a8fe770bed7f57082b44eca7034bb3002aedcbe5e4aa4): "audit-log"
+(shorter groupBy description), "funnel" (fitted height, colors ignored), "heatmap"
+(max height, colorRange ignored) and "saved-views" (chips, shorter descriptions);
+funnel's and heatmap's data flags come along with them. interval-workout's optional
 per-exercise "figure" (#216) is not pulled: nothing here checks exercise rows, and the
 widget matches figures by name. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.

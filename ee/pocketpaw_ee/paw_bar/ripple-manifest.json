@@ -979,7 +979,7 @@
         "groupBy": {
           "type": "\"none\" | \"day\" | \"week\"",
           "required": false,
-          "description": "Group entries by their timestamp granularity. Default \"none\". Requires parsable `timestamp` strings."
+          "description": "Group by timestamp day or week. Default \"none\"."
         },
         "showFilters": {
           "type": "boolean",
@@ -4042,12 +4042,13 @@
         "data": {
           "type": "Array<{ label: string; value: number }>",
           "required": true,
-          "description": "Funnel stages."
+          "description": "Funnel stages.",
+          "data": true
         },
         "height": {
           "type": "number",
           "required": false,
-          "description": "Height in px. Default 240."
+          "description": "Max height px; else fits."
         },
         "title": {
           "type": "string",
@@ -4057,7 +4058,7 @@
         "colors": {
           "type": "string[]",
           "required": false,
-          "description": "Custom palette per stage."
+          "description": "Ignored."
         },
         "sort": {
           "type": "\"descending\" | \"ascending\" | \"none\"",
@@ -4210,7 +4211,8 @@
         "cells": {
           "type": "Array<{ x: string | number; y: string | number; value: number }>",
           "required": true,
-          "description": "Cell data."
+          "description": "Cell data.",
+          "data": true
         },
         "xLabels": {
           "type": "(string | number)[]",
@@ -4225,7 +4227,7 @@
         "height": {
           "type": "number",
           "required": false,
-          "description": "Height in px. Default 280."
+          "description": "Max height. Default 280."
         },
         "title": {
           "type": "string",
@@ -4235,7 +4237,7 @@
         "colorRange": {
           "type": "[string, string]",
           "required": false,
-          "description": "Low-to-high gradient. Default [\"#dbeafe\", \"#1d4ed8\"]."
+          "description": "Ignored."
         },
         "showLabels": {
           "type": "boolean",
@@ -8211,12 +8213,12 @@
     {
       "type": "saved-views",
       "category": "vertical",
-      "description": "Tabbed view selector for saved filters/sorts. Renders as tab bar with optional count badges and pin stars.",
+      "description": "Saved filter views as chips with optional counts.",
       "props": {
         "views": {
           "type": "Array<{ id: string; label: string; icon?: string; pinned?: boolean; count?: number }>",
           "required": true,
-          "description": "Saved view tabs."
+          "description": "Saved views."
         },
         "value": {
           "type": "string | null",
