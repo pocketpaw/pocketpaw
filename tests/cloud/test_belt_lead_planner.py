@@ -10,6 +10,14 @@
 # approved with no human and no Clef, as ``system:lead-planner``, through the
 # auto gate's approve path, with the gate flag off or on. A task mandate (the
 # default) still goes to the foreman and the manual plan gate.
+# NEVER TWICE: an issue labelled ``needs-human`` (live, off the open issue list:
+# the stall ladder and the lead timeout label it after the sighting was filed)
+# or with a rejected or failed lead task is not planned again, and neither is
+# one whose lead run is still in flight. A title naming another issue (``#12``)
+# is prefixed with its own number, so the lead is briefed on the right issue.
+# CLOUD ONLY: a lead mandate is refused (422) at create and at trigger unless
+# the cloud develop station is the wired dispatcher; the local station has no
+# command for the ``feature-lead`` recipe.
 # Real store (mongomock), real trigger and executor, recorder dispatcher; gh is
 # a fake executor.
 
@@ -23,10 +31,11 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 pytest.importorskip("mongomock_motor")
 
-from pocketpaw_ee.cloud.belt import cloud_station  # noqa: E402
+from pocketpaw_ee.cloud._core.errors import ValidationError  # noqa: E402
+from pocketpaw_ee.cloud.belt import cloud_station, headless  # noqa: E402
 from pocketpaw_ee.cloud.mandates import lead_planner, patrols  # noqa: E402
 from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
-from pocketpaw_ee.cloud.mandates.domain import LEAD_RUN_KIND, SightingDoc  # noqa: E402
+from pocketpaw_ee.cloud.mandates.domain import LEAD_RUN_KIND, ShiftDoc, SightingDoc  # noqa: E402
 from pocketpaw_ee.cloud.mandates.dto import CharterRequest  # noqa: E402
 from pydantic import ValidationError as PydanticValidationError  # noqa: E402
 
@@ -54,6 +63,20 @@ from tests.cloud.test_belt_mandates import (  # noqa: E402,F401
 )
 
 pytestmark = pytest.mark.usefixtures("any_repo_root")
+
+
+class LeadRecorder(RecorderDispatcher):
+    """The recorder standing in for the wired cloud station."""
+
+    runs_leads = True
+
+
+@pytest.fixture
+def cloud_station_wired(monkeypatch, dispatcher):  # noqa: F811
+    """Approved tasks reach the cloud station (a recorder that runs leads)."""
+    monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "headless")
+    monkeypatch.setattr(headless, "_PRODUCTION_DISPATCHER", LeadRecorder())
+
 
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 
@@ -130,6 +153,36 @@ def test_a_hand_filed_issue_falls_back_to_its_number():
     assert (task.title, task.why) == ("Feature issue #9", "Feature issue #9")
 
 
+def test_an_issue_labelled_needs_human_is_not_planned_again():
+    """The live labels (``labels``) win over the ones filed with the sighting."""
+    held = _s(1, "p1", age_h=5)
+    held["labels"] = ["feature-lead", "p1", "Needs-Human"]
+    cleared = _s(2, "p1", age_h=4)
+    cleared["evidence"]["labels"].append("needs-human")
+    cleared["labels"] = ["feature-lead", "p1"]  # a human took the label off
+    stale = _s(3, "p2", "needs-human", age_h=3)  # no live row: the filed labels
+    assert _numbers(lead_planner.plan(1, [held, cleared, stale], 5)) == ["s2"]
+
+
+@pytest.mark.parametrize("status", ["rejected", "develop failed", "failed"])
+def test_an_issue_with_a_failed_lead_task_is_not_planned_again(status):
+    failed = _s(1, "p1", age_h=5)
+    failed["tasks"] = [{"shift_no": 1, "title": "Feature 1", "status": status}]
+    landed_earlier = _s(2, "p2", age_h=4)
+    landed_earlier["tasks"] = [{"shift_no": 1, "title": "Feature 2", "status": "dispatched"}]
+    assert _numbers(lead_planner.plan(2, [failed, landed_earlier], 5)) == ["s2"]
+
+
+def test_a_title_naming_another_issue_leads_with_its_own_number():
+    s = _s(40, "p1")
+    s["evidence"]["title"] = "Follow-up to #12: brushes"
+    (task,) = lead_planner.plan(1, [s], 3).tasks
+    assert task.title == "#40 Follow-up to #12: brushes"
+    assert cloud_station._ISSUE.search(f"{task.title}\n\n{task.why}").group(1) == "40"
+    plain = lead_planner.plan(1, [_s(41)], 3).tasks[0]
+    assert plain.title == "Feature 41"  # no other issue named: the title as filed
+
+
 def test_the_run_kind_is_the_cloud_stations_lead_recipe():
     assert LEAD_RUN_KIND == cloud_station.LEAD_RECIPE
 
@@ -195,7 +248,7 @@ async def _lead_mandate(tmp_path, monkeypatch, gh: FakeGh, **charter) -> tuple[s
     return mid, ids
 
 
-@pytest.mark.usefixtures("store", "graph")
+@pytest.mark.usefixtures("store", "graph", "cloud_station_wired")
 @pytest.mark.parametrize("gate", [None, "auto"])
 async def test_a_lead_shift_plans_one_run_per_free_issue_and_approves_itself(
     tmp_path,
@@ -244,7 +297,7 @@ async def test_a_lead_shift_plans_one_run_per_free_issue_and_approves_itself(
     assert shift["policy"]["decision"] == "approved"
 
 
-@pytest.mark.usefixtures("graph", "journal")
+@pytest.mark.usefixtures("graph", "journal", "cloud_station_wired")
 async def test_a_lead_shift_plans_within_the_lines_headroom(
     tmp_path,
     mongo_db,
@@ -269,7 +322,7 @@ async def test_a_lead_shift_plans_within_the_lines_headroom(
     assert [t["evidence_refs"] for t in blob["plan"]["tasks"]] == [[ids[16]], [ids[11]]]
 
 
-@pytest.mark.usefixtures("store", "graph", "journal")
+@pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
 async def test_a_lead_line_with_no_free_issue_stands_down(
     tmp_path,
     mongo_db,
@@ -287,7 +340,7 @@ async def test_a_lead_line_with_no_free_issue_stands_down(
 
     assert out["shift"]["state"] == "stood_down"
     assert out["shift"]["no_action_reason"] == "no free feature issue"
-    assert foreman_calls == [] and RecorderDispatcher.instances == []
+    assert foreman_calls == [] and RecorderDispatcher.instances[0].calls == []
 
 
 @pytest.mark.usefixtures("store", "graph", "journal")
@@ -313,3 +366,195 @@ async def test_a_task_mandate_still_goes_to_the_foreman_and_the_manual_gate(
     assert RecorderDispatcher.instances == []
     detail = await mandate_service.get_mandate(WS, USER, mid)
     assert detail["charter"]["run_kind"] == "task"
+
+
+# ---------------------------------------------------------------------------
+# never twice: in flight, needs-human, failed
+# ---------------------------------------------------------------------------
+
+
+async def _run_for(store, mid: str, plan_id: str, index: int, **blob):  # noqa: F811
+    """A lead run row for task ``index`` of plan ``plan_id``, as the station files it."""
+    return await _seed_run(
+        store,
+        mid,
+        f"lead {index}",
+        plan_action_id=plan_id,
+        task_index=index,
+        station_pending=True,
+        diff="",
+        recipe="feature-lead",
+        **blob,
+    )
+
+
+def _refs(blob: dict) -> list:
+    return [t["evidence_refs"] for t in blob["plan"]["tasks"]]
+
+
+@pytest.mark.usefixtures("graph", "journal", "cloud_station_wired")
+async def test_a_lead_whose_run_is_in_flight_is_not_planned_again(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    store,  # noqa: F811
+):
+    """No ``Fixes #N`` PR yet: the run row alone keeps the issue in flight."""
+    mid, ids = await _lead_mandate(
+        tmp_path,
+        monkeypatch,
+        _lead_gh(),
+        run_kind="feature-lead",
+        budget={"max_tasks_per_shift": 2, "max_in_flight": 10},
+    )
+    first = await mandate_service.trigger_shift(WS, USER, mid)
+    plan_id = first["shift"]["plan_action_id"]
+    assert _refs((await store.get_action(plan_id)).parameters["_belt_plan"]) == [
+        [ids[16]],
+        [ids[11]],
+    ]
+    await _run_for(store, mid, plan_id, 1, headless_state="cloud")
+    await _run_for(store, mid, plan_id, 2, headless_state="cloud")
+
+    second = await mandate_service.trigger_shift(WS, USER, mid)
+
+    blob = (await store.get_action(second["shift"]["plan_action_id"])).parameters["_belt_plan"]
+    assert _refs(blob) == [[ids[10]], [ids[15]]]
+
+
+@pytest.mark.usefixtures("graph", "journal", "cloud_station_wired")
+async def test_a_released_or_failed_lead_is_not_planned_again(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    store,  # noqa: F811
+):
+    """#16's lead was released (rejected), #11's failed: the next shift plans
+    neither, though both sightings are open and neither run is in flight."""
+    mid, ids = await _lead_mandate(
+        tmp_path,
+        monkeypatch,
+        _lead_gh(),
+        run_kind="feature-lead",
+        budget={"max_tasks_per_shift": 2, "max_in_flight": 10},
+    )
+    first = await mandate_service.trigger_shift(WS, USER, mid)
+    plan_id = first["shift"]["plan_action_id"]
+    released = await _run_for(store, mid, plan_id, 1, headless_state=None)
+    await store.reject(released.id, reason="feature lead silent 30m after two nudges")
+    await _run_for(store, mid, plan_id, 2, headless_error="TRACK: gh pr list failed")
+
+    second = await mandate_service.trigger_shift(WS, USER, mid)
+
+    blob = (await store.get_action(second["shift"]["plan_action_id"])).parameters["_belt_plan"]
+    assert _refs(blob) == [[ids[10]], [ids[15]]]
+
+
+@pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
+async def test_an_issue_labelled_needs_human_after_its_sighting_is_skipped(
+    tmp_path, mongo_db, monkeypatch
+):
+    gh = _lead_gh()
+    mid, ids = await _lead_mandate(tmp_path, monkeypatch, gh, run_kind="feature-lead")
+    # The stall ladder labels #16 after the patrol filed it; the next shift's
+    # open issue list carries the label.
+    (sixteen,) = [i for i in gh.issues if i["number"] == 16]
+    sixteen["labels"].append({"name": "needs-human", "color": "d93f0b", "description": ""})
+    monkeypatch.setattr(patrols, "_OPEN_ISSUES", {})
+
+    out = await mandate_service.trigger_shift(WS, USER, mid)
+
+    blob = (
+        await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
+    ).parameters["_belt_plan"]
+    assert _refs(blob) == [[ids[n]] for n in (11, 10, 15, 17)]
+
+
+@pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
+async def test_a_lead_plan_whose_policy_record_fails_waits_at_the_gate(
+    tmp_path, mongo_db, monkeypatch
+):
+    """The audit write failing must not approve blind: the plan stays pending."""
+    from pocketpaw_ee.cloud._core import proposals
+
+    real = proposals.update_action_blob
+
+    async def failing(*, store, action_id, param_key, updates):  # noqa: F811
+        if "policy" in updates:
+            raise RuntimeError("store down")
+        return await real(store=store, action_id=action_id, param_key=param_key, updates=updates)
+
+    monkeypatch.setattr(proposals, "update_action_blob", failing)
+    mid, _ids = await _lead_mandate(tmp_path, monkeypatch, _lead_gh(), run_kind="feature-lead")
+
+    out = await mandate_service.trigger_shift(WS, USER, mid)
+
+    assert out["shift"]["state"] == "in_gate"
+    action = await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
+    assert action.status == ActionStatus.PENDING and action.approved_by is None
+    assert "policy" not in action.parameters["_belt_plan"]
+    assert RecorderDispatcher.instances[0].calls == []
+
+
+# ---------------------------------------------------------------------------
+# cloud only: a lead mandate needs the cloud develop station
+# ---------------------------------------------------------------------------
+
+
+def _lead_body(tmp_path) -> dict:
+    return {
+        "name": "flare leads",
+        "surface": {"repo_id": str(tmp_path)},
+        "charter": {
+            "goal": "ship flare",
+            "run_kind": "feature-lead",
+            "issue_labels": ["feature-lead"],
+        },
+        "patrols": ["issues"],
+    }
+
+
+@pytest.mark.parametrize(
+    "env,wired",
+    [
+        ("bus", LeadRecorder),  # approvals never reach the wired station
+        ("headless", None),  # nothing wired
+        ("headless", RecorderDispatcher),  # a station that runs no leads
+    ],
+)
+async def test_a_lead_mandate_is_refused_without_the_cloud_station(
+    tmp_path, mongo_db, monkeypatch, env, wired
+):
+    monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", env)
+    monkeypatch.setattr(headless, "_PRODUCTION_DISPATCHER", wired() if wired else None)
+
+    with pytest.raises(ValidationError) as err:
+        await mandate_service.create_mandate(WS, USER, _lead_body(tmp_path))
+
+    assert err.value.status_code == 422
+    assert err.value.code == "mandate.lead_needs_cloud_station"
+    # A task mandate is untouched by the rule.
+    body = _lead_body(tmp_path)
+    body["charter"]["run_kind"] = "task"
+    assert (await mandate_service.create_mandate(WS, USER, body))["mandate"]["id"]
+
+
+@pytest.mark.usefixtures("store", "graph", "journal")
+async def test_a_lead_shift_is_refused_once_the_cloud_station_is_gone(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    cloud_station_wired,
+):
+    mid = (await mandate_service.create_mandate(WS, USER, _lead_body(tmp_path)))["mandate"]["id"]
+    monkeypatch.setattr(headless, "_PRODUCTION_DISPATCHER", None)
+
+    with pytest.raises(ValidationError) as err:
+        await mandate_service.trigger_shift(WS, USER, mid)
+
+    assert err.value.code == "mandate.lead_needs_cloud_station"
+    assert await ShiftDoc.find(ShiftDoc.mandate_id == mid).count() == 0  # no half-open shift
+
+
+def test_the_cloud_station_runs_leads():
+    assert cloud_station.CloudTaskDispatcher.runs_leads is True
