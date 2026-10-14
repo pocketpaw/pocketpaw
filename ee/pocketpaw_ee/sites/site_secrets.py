@@ -25,9 +25,11 @@
 #     here, so the value still never leaves this module.
 #   * ``set_managed_secret`` / ``delete_managed_secrets`` serve integration-written
 #     secrets (Supabase's project keys), tagged ``managed_by``. They skip the owner
-#     gate too (the caller is an integration hook the owner set up), and deletes only
-#     ever touch rows carrying that tag. An owner ``set_secret`` clears the tag: the
-#     value is the owner's from then on and an unlink leaves it alone.
+#     gate too (the caller is an integration hook the owner set up) but are audited
+#     (names only). A managed write never replaces a value it does not own (an
+#     owner-set or another integration's); it only fills an empty / pending row or
+#     its own. Deletes only touch rows carrying the tag. An owner ``set_secret``
+#     clears the tag: the value is the owner's from then on.
 """Per-site secret storage: request, set, delete, list names, resolve for deploy."""
 
 from __future__ import annotations
@@ -377,12 +379,13 @@ async def ensure_generated_secret(
 
 async def set_managed_secret(
     *, workspace_id: str, pocket_id: str, name: str, value: str, managed_by: str, description: str
-) -> None:
+) -> bool:
     """Write ``value`` for ``name`` on behalf of an integration, tagged ``managed_by``.
 
-    Overwrites whatever is there (an owner-set value of the same name included: the
-    owner linked the integration to provide it). Skips the owner gate and the cap;
-    the caller authorized the link that needs it."""
+    True when written. False (nothing changes) when the row already holds a value
+    that ``managed_by`` does not own: an owner's value is never replaced. A pending
+    request is filled. Skips the owner gate and the cap; the caller authorized the
+    link that needs it."""
     name = validate_name(name)
     if not managed_by:
         raise ValueError("managed_by is required")
@@ -393,13 +396,18 @@ async def set_managed_secret(
     row = await _row(workspace_id, pocket_id, name)
     if row is None:
         row = _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name)
+    elif row.encrypted_value and getattr(row, "managed_by", None) != managed_by:
+        logger.info("site_secrets: %s kept on pocket %s (not %s's)", name, pocket_id, managed_by)
+        return False
     row.encrypted_value = crypto.encrypt(value)
     row.description = description[:MAX_DESCRIPTION_CHARS]
     row.value_set_by = "system"
     row.value_set_at = datetime.now(UTC)
     row.managed_by = managed_by
     await row.save()
+    _audit(managed_by, workspace_id, pocket_id, "sites.secret.set_managed", name)
     logger.info("site_secrets: %s set by %s on pocket %s", name, managed_by, pocket_id)
+    return True
 
 
 async def delete_managed_secrets(
@@ -416,6 +424,7 @@ async def delete_managed_secrets(
         if getattr(row, "managed_by", None) == managed_by and row.name not in keep:
             await row.delete()
             gone.append(row.name)
+            _audit(managed_by, workspace_id, pocket_id, "sites.secret.delete_managed", row.name)
     if gone:
         logger.info(
             "site_secrets: %s removed %s from pocket %s", managed_by, ",".join(gone), pocket_id

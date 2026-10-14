@@ -9,17 +9,20 @@
 # (``GET /v1/organizations``).
 #
 # Settings: ``project_ref`` (remote select over ``GET /v1/projects``, label
-# "name (region)", required) and the readonly link ``project_url``.
+# "name (region)", required), ``admin_key`` (off | on, off when unset), and the
+# readonly ``project_url`` link and ``kept_secrets`` note.
 #
 # No actions: the site talks to Supabase itself through the paw-sites ``supabase``
 # recipe. ``site_setup`` (idempotent) reads the project's keys with
 # ``GET /v1/projects/{ref}/api-keys?reveal=true`` and writes them into the SITE's
 # secret store, tagged ``managed_by="integration:supabase"``: ``SUPABASE_URL``,
-# ``SUPABASE_ANON_KEY`` (the publishable key, else the legacy ``anon``) and
-# ``SUPABASE_SERVICE_ROLE_KEY`` (a secret key, else the legacy ``service_role``; left
-# out when the project has neither). A project change overwrites them and drops a
-# managed name the new project lacks; ``site_teardown`` deletes only managed rows,
-# never an owner-set secret. A 403 on the keys is ``setup_required``
+# ``SUPABASE_ANON_KEY`` (the publishable key, else the legacy ``anon``) and, only
+# with ``admin_key`` on, ``SUPABASE_SERVICE_ROLE_KEY`` (a secret key, else the legacy
+# ``service_role``). A secret the owner set is never replaced; its name lands in
+# ``kept_secrets``. A project change overwrites managed rows and drops any the new
+# setup doesn't want; no project drops them all; a setup that finds its binding
+# unlinked or relinked when it finishes undoes its writes. ``site_teardown`` deletes
+# only managed rows. A 403 on the keys is ``setup_required``
 # (``supabase_keys_forbidden``), a 404 ``supabase_project_not_found``; a 401
 # refreshes once. Key values never reach settings, a view, a log or an error.
 
@@ -50,6 +53,8 @@ TOKEN_URL = f"{API}/v1/oauth/token"
 MANAGED_BY = "integration:supabase"
 PROJECT_REF = "project_ref"
 PROJECT_URL = "project_url"
+ADMIN_KEY = "admin_key"
+KEPT_SECRETS = "kept_secrets"
 URL_SECRET = "SUPABASE_URL"
 ANON_SECRET = "SUPABASE_ANON_KEY"
 SERVICE_SECRET = "SUPABASE_SERVICE_ROLE_KEY"
@@ -132,6 +137,24 @@ class SupabaseProvider(BaseProvider):
             type="link",
             readonly=True,
             help="Its keys are added to the site's secrets when you pick a project.",
+        ),
+        SettingsField(
+            key=ADMIN_KEY,
+            label="Admin access",
+            type="select",
+            options=(
+                SettingOption("off", "Off (recommended)"),
+                SettingOption("on", "On — server admin access, bypasses row level security"),
+            ),
+            help="Adds the project's secret key as SUPABASE_SERVICE_ROLE_KEY, for "
+            "server-side admin jobs only. Off unless set.",
+        ),
+        SettingsField(
+            key=KEPT_SECRETS,
+            label="Kept your own values",
+            type="text",
+            readonly=True,
+            help="Site secrets you set yourself. Supabase leaves them as they are.",
         ),
     )
 
@@ -241,9 +264,13 @@ class SupabaseProvider(BaseProvider):
         """Write the chosen project's URL and keys into the site's secrets."""
         from pocketpaw_ee.sites import site_secrets
 
-        ref = str(dict(binding.settings or {}).get(PROJECT_REF) or "")
+        settings = dict(binding.settings or {})
+        ref = str(settings.get(PROJECT_REF) or "")
         if not ref:
-            return {}  # the required select reads setup_required until it is picked
+            # No project (never picked, or dropped on a relink): nothing of ours may
+            # linger. The required select reads setup_required until one is picked.
+            await self._drop(ctx)
+            return {KEPT_SECRETS: ""}
         if not REF_RE.fullmatch(ref):
             raise ActionRefused(
                 "setup_required", "Pick the project again.", setup_error="supabase_bad_project"
@@ -273,31 +300,45 @@ class SupabaseProvider(BaseProvider):
         values = {
             URL_SECRET: project_url(ref),
             ANON_SECRET: _key(keys, kind="publishable", legacy="anon"),
-            SERVICE_SECRET: _key(keys, kind="secret", legacy="service_role"),
         }
+        if settings.get(ADMIN_KEY) == "on":
+            values[SERVICE_SECRET] = _key(keys, kind="secret", legacy="service_role")
         if not values[ANON_SECRET]:
             raise ActionRefused(
                 "setup_required",
                 "This Supabase project has no publishable key.",
                 setup_error="supabase_no_publishable_key",
             )
-        written = {name: value for name, value in values.items() if value}
-        for name, value in written.items():
-            await site_secrets.set_managed_secret(
+        wanted = {name: value for name, value in values.items() if value}
+        kept: list[str] = []
+        for name, value in wanted.items():
+            if not await site_secrets.set_managed_secret(
                 workspace_id=ctx.workspace_id,
                 pocket_id=ctx.pocket_id,
                 name=name,
                 value=value,
                 managed_by=MANAGED_BY,
                 description=_DESCRIPTIONS[name],
-            )
+            ):
+                kept.append(name)
         await site_secrets.delete_managed_secrets(
             workspace_id=ctx.workspace_id,
             pocket_id=ctx.pocket_id,
             managed_by=MANAGED_BY,
-            keep=frozenset(written),
+            keep=frozenset(wanted),
         )
-        return {PROJECT_URL: project_url(ref)}
+        if not await _still_linked(binding):
+            # Unlinked (or relinked) while this ran: undo what it just wrote.
+            await self._drop(ctx)
+            return {}
+        return {PROJECT_URL: project_url(ref), KEPT_SECRETS: ", ".join(kept)}
+
+    async def _drop(self, ctx: SetupContext) -> None:
+        from pocketpaw_ee.sites import site_secrets
+
+        await site_secrets.delete_managed_secrets(
+            workspace_id=ctx.workspace_id, pocket_id=ctx.pocket_id, managed_by=MANAGED_BY
+        )
 
     async def site_teardown(self, binding: Any) -> None:
         """Unlinked or deleted: drop the secrets this provider wrote, nothing else."""
@@ -308,3 +349,15 @@ class SupabaseProvider(BaseProvider):
             pocket_id=str(binding.pocket_id),
             managed_by=MANAGED_BY,
         )
+
+
+async def _still_linked(binding: Any) -> bool:
+    """The binding row still exists and still points at the same connection."""
+    from pocketpaw_ee.cloud.models.integration import SiteIntegration as Row
+
+    row = await Row.find_one(
+        Row.workspace == str(binding.workspace),
+        Row.pocket_id == str(binding.pocket_id),
+        Row.provider == "supabase",
+    )
+    return row is not None and row.connection_id == getattr(binding, "connection_id", None)

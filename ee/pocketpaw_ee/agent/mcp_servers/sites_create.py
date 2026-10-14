@@ -3993,9 +3993,11 @@ _INTEGRATION_WIRING = (
 # Providers wired another way than paw.js / the gateway: their next step replaces
 # ``_INTEGRATION_WIRING`` in the connect_site_integration message.
 _INTEGRATION_NEXT_STEPS = {
-    "supabase": "Its keys are provisioned as SUPABASE_URL, SUPABASE_ANON_KEY and "
-    "SUPABASE_SERVICE_ROLE_KEY site secrets once the owner picks a project; apply the "
-    "supabase recipe and skip its step that requests them.",
+    "supabase": "Once the owner picks a project, its URL and publishable key are "
+    "provisioned as the SUPABASE_URL and SUPABASE_ANON_KEY site secrets; apply the "
+    "supabase recipe and skip its step that requests them. SUPABASE_SERVICE_ROLE_KEY "
+    "is off by default: only if an admin job needs it, ask the owner to turn on Admin "
+    "access for Supabase in Connections.",
 }
 
 

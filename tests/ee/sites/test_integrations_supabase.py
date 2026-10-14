@@ -205,7 +205,12 @@ async def test_connect_uses_pkce_and_the_organization_is_the_account(beanie_test
     q = result["authorize"]
     assert view["kind"] == "connect" and view["category"] == "database"
     assert view["plan"] == "site" and view["actions"] == []
-    assert [f["key"] for f in view["settings_fields"]] == ["project_ref", "project_url"]
+    assert [f["key"] for f in view["settings_fields"]] == [
+        "project_ref",
+        "project_url",
+        "admin_key",
+        "kept_secrets",
+    ]
     assert q["client_id"] == CLIENT_ID and q["response_type"] == "code"
     assert q["code_challenge_method"] == "S256" and q["code_challenge"]
     [exchange] = supa.token_forms
@@ -262,9 +267,7 @@ async def test_project_options_come_from_the_owners_projects(beanie_test_db, sup
 
 
 @pytest.mark.asyncio
-async def test_setup_writes_exactly_the_three_secrets_and_never_shows_them(
-    beanie_test_db, supa, caplog
-):
+async def test_setup_writes_the_url_and_anon_key_and_never_shows_them(beanie_test_db, supa, caplog):
     from pocketpaw_ee.sites import site_secrets
 
     caplog.set_level(logging.DEBUG)
@@ -277,17 +280,17 @@ async def test_setup_writes_exactly_the_three_secrets_and_never_shows_them(
     assert view["settings"] == {
         "project_ref": REF_A,
         "project_url": f"https://{REF_A}.supabase.co",
+        "kept_secrets": "",
     }
     assert supa.key_calls[-1] == {"ref": REF_A, "reveal": "true"}
+    # Admin access is off by default: no service role key.
     assert await _deployed(pid) == {
         "SUPABASE_URL": f"https://{REF_A}.supabase.co",
         "SUPABASE_ANON_KEY": PUBLISHABLE_A,
-        "SUPABASE_SERVICE_ROLE_KEY": SECRET_A,
     }
     listed = await site_secrets.list_secrets(workspace_id=WS, user_id=OWNER, pocket_id=pid)
     assert {s.name: s.managed_by for s in listed.secrets if s.managed_by} == {
         "SUPABASE_ANON_KEY": "integration:supabase",
-        "SUPABASE_SERVICE_ROLE_KEY": "integration:supabase",
         "SUPABASE_URL": "integration:supabase",
     }
     shown = json.dumps([view, listed.model_dump(mode="json"), saved.json()])
@@ -297,12 +300,135 @@ async def test_setup_writes_exactly_the_three_secrets_and_never_shows_them(
 
 
 @pytest.mark.asyncio
+async def test_admin_access_is_opt_in_and_switching_it_off_removes_the_key(
+    beanie_test_db, supa, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    async with _client() as c:
+        pid = await _linked_site(c, supa)
+        await c.put(_put(pid), json={"settings": {"project_ref": REF_A}})
+        on = await c.put(_put(pid), json={"settings": {"admin_key": "on"}})
+        assert on.status_code == 200, on.text
+        assert await _deployed(pid) == {
+            "SUPABASE_URL": f"https://{REF_A}.supabase.co",
+            "SUPABASE_ANON_KEY": PUBLISHABLE_A,
+            "SUPABASE_SERVICE_ROLE_KEY": SECRET_A,
+        }
+        bad = await c.put(_put(pid), json={"settings": {"admin_key": "maybe"}})
+        off = await c.put(_put(pid), json={"settings": {"admin_key": "off"}})
+    assert bad.status_code == 422
+    assert off.status_code == 200, off.text
+    assert "SUPABASE_SERVICE_ROLE_KEY" not in await _deployed(pid)
+    assert SECRET_A not in json.dumps([on.json(), off.json()]) and SECRET_A not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_owner_value_is_never_overwritten_and_survives_unlink(beanie_test_db, supa):
+    from pocketpaw_ee.sites import site_secrets
+
+    async with _client() as c:
+        pid = await _linked_site(c, supa)
+        await site_secrets.set_secret(
+            workspace_id=WS,
+            user_id=OWNER,
+            pocket_id=pid,
+            name="SUPABASE_URL",
+            value="https://db.example.com",
+        )
+        # The agent asked for the anon key before the project was picked: filled.
+        await site_secrets.request_secret(
+            workspace_id=WS,
+            user_id=OWNER,
+            pocket_id=pid,
+            name="SUPABASE_ANON_KEY",
+            description="anon key",
+        )
+        saved = await c.put(_put(pid), json={"settings": {"project_ref": REF_A}})
+        # A settings change re-runs setup: the owner's value still stands.
+        rerun = await c.put(_put(pid), json={"settings": {"admin_key": "on"}})
+        assert await _deployed(pid) == {
+            "SUPABASE_URL": "https://db.example.com",
+            "SUPABASE_ANON_KEY": PUBLISHABLE_A,
+            "SUPABASE_SERVICE_ROLE_KEY": SECRET_A,
+        }
+        gone = await c.delete(_put(pid))
+    assert saved.json()["settings"]["kept_secrets"] == "SUPABASE_URL"
+    assert rerun.json()["settings"]["kept_secrets"] == "SUPABASE_URL"
+    assert gone.status_code == 204
+    assert await _deployed(pid) == {"SUPABASE_URL": "https://db.example.com"}
+
+
+async def _setup_direct(pid: str):
+    """The bound row, its provider and a setup context, to call the hook directly."""
+    from pocketpaw_ee.cloud.models.integration import SiteIntegration
+    from pocketpaw_ee.integrations import field_options
+    from pocketpaw_ee.integrations.providers import get_provider
+
+    row = await SiteIntegration.find_one(
+        SiteIntegration.pocket_id == pid, SiteIntegration.provider == "supabase"
+    )
+    ctx = field_options.setup_context(
+        workspace_id=WS, pocket_id=pid, user_id=OWNER, provider="supabase", conn=await _conn()
+    )
+    return row, get_provider("supabase"), ctx
+
+
+@pytest.mark.asyncio
+async def test_no_project_drops_the_managed_secrets(beanie_test_db, supa):
+    async with _client() as c:
+        pid = await _linked_site(c, supa)
+        await c.put(_put(pid), json={"settings": {"project_ref": REF_A}})
+    row, provider, ctx = await _setup_direct(pid)
+    row.settings = {}  # what a relink's drop_remote leaves
+    assert await provider.site_setup(row, ctx) == {"kept_secrets": ""}
+    assert await _deployed(pid) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_setup_that_outlives_its_binding_undoes_its_writes(beanie_test_db, supa):
+    async with _client() as c:
+        pid = await _linked_site(c, supa)
+        await c.put(_put(pid), json={"settings": {"project_ref": REF_A}})
+    row, provider, ctx = await _setup_direct(pid)
+    stale = row.model_copy()
+    row.connection_id = "another-connection"  # relinked mid-setup
+    await row.save()
+    assert await provider.site_setup(stale, ctx) == {}
+    assert await _deployed(pid) == {}
+
+    await row.delete()  # unlinked mid-setup
+    assert await provider.site_setup(stale, ctx) == {}
+    assert await _deployed(pid) == {}
+
+
+@pytest.mark.asyncio
+async def test_managed_writes_and_deletes_are_audited_by_name(beanie_test_db, supa, monkeypatch):
+    from pocketpaw_ee.guards import audit
+
+    seen: list[dict] = []
+    monkeypatch.setattr(audit, "log_privileged_action", lambda **kw: seen.append(kw))
+    async with _client() as c:
+        pid = await _linked_site(c, supa)
+        await c.put(_put(pid), json={"settings": {"project_ref": REF_A}})
+        await c.delete(_put(pid))
+    managed = [e for e in seen if "managed" in e["action"]]
+    assert sorted((e["action"], e["secret_name"]) for e in managed) == [
+        ("sites.secret.delete_managed", "SUPABASE_ANON_KEY"),
+        ("sites.secret.delete_managed", "SUPABASE_URL"),
+        ("sites.secret.set_managed", "SUPABASE_ANON_KEY"),
+        ("sites.secret.set_managed", "SUPABASE_URL"),
+    ]
+    assert all(e["actor"] == "integration:supabase" for e in managed)
+    assert PUBLISHABLE_A not in json.dumps(seen, default=str)
+
+
+@pytest.mark.asyncio
 async def test_a_project_change_overwrites_and_drops_what_the_new_project_lacks(
     beanie_test_db, supa
 ):
     async with _client() as c:
         pid = await _linked_site(c, supa)
-        await c.put(_put(pid), json={"settings": {"project_ref": REF_A}})
+        await c.put(_put(pid), json={"settings": {"project_ref": REF_A, "admin_key": "on"}})
         again = await c.put(_put(pid), json={"settings": {"project_ref": REF_A}})
         assert again.status_code == 200 and await _deployed(pid) == {
             "SUPABASE_URL": f"https://{REF_A}.supabase.co",
@@ -385,4 +511,4 @@ async def test_the_agent_tool_points_at_the_recipe(beanie_test_db, supa, monkeyp
     )
     text = result["content"][0]["text"]
     assert "SUPABASE_ANON_KEY" in text and "supabase recipe" in text
-    assert "Paw.call" not in text
+    assert "Admin access" in text and "Paw.call" not in text
