@@ -11,8 +11,10 @@
 # ``state`` lives in the single-use server-side store ``cloud.auth._oauth_state``
 # (namespace ``integrations``) with workspace, user, provider, optional pocket_id,
 # for a resume the connection id, and, for providers that support it, the PKCE
-# S256 verifier. The callback trusts only that payload, never its own query string
-# beyond ``code`` and ``state``. A resume updates its own connection row in place
+# S256 verifier. Its TTL is the provider's ``state_ttl_seconds`` when it sets one
+# (Stripe onboarding can take an hour), else the store default; the browser
+# cookie lives as long. The callback trusts only that payload, never its own query
+# string beyond ``code`` and ``state``. A resume updates its own connection row in place
 # (a different provider account is refused) and re-runs ``site_setup`` for every
 # site bound to it. A provider's authorize_url may be sync or async.
 #
@@ -70,6 +72,21 @@ def callback_base() -> str:
 
 def redirect_uri(provider_id: str) -> str:
     return f"{callback_base()}/api/v1/integrations/{provider_id}/callback"
+
+
+def state_ttl(provider: Any) -> int:
+    """How long a started flow stays redeemable for ``provider``."""
+    from pocketpaw_ee.cloud.auth import _oauth_state
+
+    ttl = getattr(provider, "state_ttl_seconds", None)
+    return int(ttl) if isinstance(ttl, int) and ttl > 0 else _oauth_state.STATE_TTL_SECONDS
+
+
+def cookie_max_age(provider_id: str) -> int:
+    from pocketpaw_ee.integrations.providers import get_provider
+
+    provider = get_provider(provider_id)
+    return max(COOKIE_MAX_AGE, state_ttl(provider) if provider else 0)
 
 
 def cookie_name(provider_id: str) -> str:
@@ -131,7 +148,8 @@ async def _issue_state(provider: Any, payload: dict[str, Any]) -> tuple[str, str
     if getattr(provider, "supports_pkce", False):
         verifier, challenge = _oauth_state.pkce_pair()
         payload["code_verifier"] = verifier
-    return await _oauth_state.issue(STATE_NAMESPACE, payload), challenge
+    state = await _oauth_state.issue(STATE_NAMESPACE, payload, ttl_seconds=state_ttl(provider))
+    return state, challenge
 
 
 async def start_connect(

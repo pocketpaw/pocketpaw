@@ -52,6 +52,11 @@ class _FakeStripe:
                 "details_submitted": False,
                 "email": "owner@shop.test",
                 "requirements": {"currently_due": ["external_account"]},
+                "metadata": {
+                    k[len("metadata[") : -1]: v
+                    for k, v in form.items()
+                    if k.startswith("metadata[")
+                },
                 "form": form,
             }
             return httpx.Response(200, json=self.accounts[acct])
@@ -229,8 +234,62 @@ async def test_restarting_connect_reuses_the_pending_account(beanie_test_db, str
         await _start(c)
         assert len(stripe.accounts) == 1
         assert stripe.links[0]["account"] == stripe.links[1]["account"]
-        # Once onboarding is submitted, a new connect makes a new account.
-        stripe.accounts["acct_0001"]["details_submitted"] = True
+        # Fully onboarded but never connected: still theirs, still reused.
+        stripe.accounts["acct_0001"].update(details_submitted=True, charges_enabled=True)
+        await _start(c)
+        assert len(stripe.accounts) == 1
+        msg = await _return(c, stripe.links[-1])
+        assert msg["status"] == "active"
+        # Once a connection holds it, the next connect makes a new account.
+        await _start(c)
+    assert len(stripe.accounts) == 2
+
+
+@pytest.mark.asyncio
+async def test_onboarding_past_the_default_ttl_still_completes(beanie_test_db, stripe):
+    from pocketpaw_ee.cloud._core import redis_client
+    from pocketpaw_ee.integrations import oauth
+
+    redis = redis_client.get_redis()
+    async with _client() as c:
+        started = await c.post("/api/v1/integrations/stripe/connect", json={})
+        split = urlsplit(started.json()["authorize_url"])
+        start = await c.get(split.path, params=parse_qs(split.query))
+        state = dict(parse_qsl(urlsplit(stripe.links[-1]["return_url"]).query))["state"]
+        assert 7000 < await redis.ttl(f"integrations_state:{state}") <= 7200
+        assert "Max-Age=7200" in start.headers["set-cookie"]
+        bind_keys = await redis.keys("integrations_stripe_bind:*")
+        assert [7000 < await redis.ttl(k) <= 7200 for k in bind_keys] == [True]
+        assert oauth.cookie_max_age("demo") == oauth.COOKIE_MAX_AGE == 600
+
+        # Even past 2 h: the state is gone, the callback fails, and the next
+        # connect picks the same (now verified) account back up.
+        await redis.delete(f"integrations_state:{state}")
+        stripe.accounts["acct_0001"].update(details_submitted=True, charges_enabled=True)
+        lost = await _return(c, stripe.links[-1])
+        assert lost["error"] == "invalid_state"
+        await _start(c)
+        msg = await _return(c, stripe.links[-1])
+    assert msg["status"] == "active" and len(stripe.accounts) == 1
+    conn = await _conn(msg["connection_id"])
+    assert conn.account_ref == "acct_0001" and conn.meta["charges_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_account_metadata_must_match_the_flow(beanie_test_db, stripe):
+    from pocketpaw_ee.cloud._core import redis_client
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection
+
+    async with _client() as c:
+        await _start(c)
+        # The account now claims another workspace: complete() refuses it ...
+        stripe.accounts["acct_0001"]["metadata"]["workspace_id"] = "ws_other"
+        refused = await _return(c, stripe.links[-1])
+        assert refused["error"] == "provider_error"
+        assert await IntegrationConnection.find_all().count() == 0
+        # ... and a pending pointer to it is not reused.
+        keys = await redis_client.get_redis().keys("integrations_stripe_pending:*")
+        assert len(keys) == 1
         await _start(c)
     assert len(stripe.accounts) == 2
 
@@ -465,7 +524,12 @@ async def test_orders_paid_refunded_failed_and_deduped(beanie_test_db, stripe, c
     from pocketpaw_ee.cloud.models.integration import SiteOrder
 
     async with _client() as c:
-        pid, sid, _ = await _ready_site(c, stripe, catalog)
+        pid, sid, conn_id = await _ready_site(c, stripe, catalog)
+        # A second site on the same Stripe account: account-only routing is ambiguous.
+        pid2 = await _pocket()
+        await _site(pid2)
+        url2 = f"/api/v1/sites/by-pocket/{pid2}/integrations/stripe"
+        assert (await c.put(url2, json={"connection_id": conn_id})).status_code == 200
         paid = await _post(c, _session_event("evt_1", sid, "acct_0001"))
         dup = await _post(c, _session_event("evt_1", sid, "acct_0001"))
         assert paid.json() == {"ok": True} and dup.json()["duplicate"] is True
@@ -483,10 +547,23 @@ async def test_orders_paid_refunded_failed_and_deduped(beanie_test_db, stripe, c
         failed = {"id": "pi_1", "metadata": {"site_id": sid}}
         await _post(c, _evt("evt_2", "payment_intent.payment_failed", failed))
         assert (await SiteOrder.find_one()).status == "paid"
-        charge = {"id": "ch_1", "payment_intent": "pi_1", "refunded": True, "metadata": {}}
-        refund = await _post(c, _evt("evt_3", "charge.refunded", charge))
+        # A partial refund leaves the order paid.
+        charge = {"id": "ch_1", "payment_intent": "pi_1", "metadata": {}, "amount": 3750}
+        part = {**charge, "amount_refunded": 50}
+        partial = await _post(c, _evt("evt_3a", "charge.refunded", part))
+        assert partial.json()["ignored"] is True
+        assert (await SiteOrder.find_one()).status == "paid"
+        # A full refund with no site metadata routes by the order's PaymentIntent.
+        full = {**charge, "amount_refunded": 3750, "refunded": True}
+        refund = await _post(c, _evt("evt_3", "charge.refunded", full))
         assert refund.json() == {"ok": True}
         assert (await SiteOrder.find_one()).status == "refunded"
+        # Refunded is terminal: a late "paid" redelivery doesn't undo it.
+        await _post(c, _session_event("evt_3b", sid, "acct_0001"))
+        assert (await SiteOrder.find_one()).status == "refunded"
+        # The same refund from another account finds the order but is refused.
+        other = await _post(c, _evt("evt_3c", "charge.refunded", full, acct="acct_x"))
+        assert other.json() == {"ok": True, "routed": False}
 
         # Failure for an order that never existed makes no row; an async failure
         # of a pending order marks it failed.
@@ -544,3 +621,63 @@ async def test_account_updated_refreshes_meta_and_tells_bound_sites(
     assert seen == [(pid, "stripe", "connected")]
     assert [s["status"] for s in sites if s["provider"] == "stripe"] == ["connected"]
     assert listed[0]["attention"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_older_account_updated_does_not_undo_a_newer_one(beanie_test_db, stripe, catalog):
+    async with _client() as c:
+        _, _, conn_id = await _ready_site(c, stripe, catalog)
+        ready = {"id": "acct_0001", "charges_enabled": True, "details_submitted": True}
+        blocked = {"id": "acct_0001", "charges_enabled": False, "details_submitted": True}
+        new = await _post(c, {**_evt("evt_new", "account.updated", ready), "created": 2000})
+        old = await _post(c, {**_evt("evt_old", "account.updated", blocked), "created": 1000})
+    assert new.json() == {"ok": True} and old.json() == {"ok": True, "stale": True}
+    conn = await _conn(conn_id)
+    assert conn.meta["charges_enabled"] is True and conn.meta["as_of"] == 2000
+
+
+@pytest.mark.asyncio
+async def test_catalog_lookup_is_strictly_this_workspace_across_its_widgets(
+    beanie_test_db, tmp_path, monkeypatch
+):
+    from pocketpaw_ee.integrations.providers.stripe import catalog_product
+
+    from pocketpaw.paw_bar.models import PawBarSpec, PawBarWidget
+    from pocketpaw.paw_bar.store import PawBarStore
+
+    store = PawBarStore(tmp_path / "pb2.db")
+    monkeypatch.setattr("pocketpaw.stores.get_paw_bar_store", lambda: store)
+
+    async def _widget(ws: str, item: dict) -> None:
+        spec = PawBarSpec(widget_id="w", pocket_id="p1")
+        w = await store.create_widget(
+            PawBarWidget(pocket_id="p1", owner=OWNER, workspace_id=ws, spec=spec)
+        )
+        await store.upsert_catalog_items(w.id, [item], workspace_id=ws)
+
+    await _widget("", {"id": "legacy", "name": "Legacy", "price_cents": 100})
+    await _widget(WS, {"id": "first", "name": "First", "price_cents": 200})
+    await _widget(WS, {"id": "second", "name": "Second", "price_cents": 300})
+    assert await catalog_product(WS, "p1", "legacy") is None
+    assert (await catalog_product(WS, "p1", "first")).price_cents == 200
+    assert (await catalog_product(WS, "p1", "second")).price_cents == 300
+    assert await catalog_product("ws_other", "p1", "first") is None
+
+
+@pytest.mark.asyncio
+async def test_a_bad_catalog_currency_is_invalid_args(beanie_test_db, stripe, catalog, monkeypatch):
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.integrations.providers import stripe as mod
+
+    async with _client() as c:
+        _, sid, _ = await _ready_site(c, stripe, catalog)
+        bad = SimpleNamespace(id="m", name="M", price_cents=100, currency="U1", in_stock=True)
+
+        async def _bad(*_a):
+            return bad
+
+        monkeypatch.setattr(mod, "catalog_product", _bad)
+        resp = await _gw(c, sid, "stripe", "create_checkout", args={"product_ref": "m"})
+    assert resp.status_code == 422 and _code(resp) == "invalid_args"
+    assert stripe.sessions == []

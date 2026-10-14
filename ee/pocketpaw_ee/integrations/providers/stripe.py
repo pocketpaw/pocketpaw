@@ -11,11 +11,13 @@
 # resume_url store ``acct`` under the flow's PKCE challenge (the verifier lives in
 # the single-use state payload), and ``complete`` refuses unless the returned code
 # equals the bound id. The query-string ``code`` is never trusted alone. An owner
-# who restarts connect before finishing reuses their pending account (keyed per
-# workspace + user) instead of creating orphans.
+# who restarts connect, or whose callback came back after the 2 h flow expired,
+# gets their pending account back (keyed per workspace + user; reused whatever its
+# onboarding state while no connection holds it). Accounts carry metadata
+# {workspace_id, user_id}, checked on reuse and in ``complete``.
 #
 # ``create_checkout {product_ref, qty}`` prices server-side from the site's Paw
-# Bar catalog (``PawBarStore`` rows of the site pocket's widget), in ISO 4217 minor
+# Bar catalog (``PawBarStore`` rows of the site pocket's widgets), in ISO 4217 minor
 # units; success/cancel URLs are the site's own origin + the owner's paths. The
 # platform fee is ``PLATFORM_FEE_BPS`` (0: off).
 #
@@ -66,7 +68,10 @@ PLATFORM_FEE_BPS = 0
 # Stripe's per-charge ceiling for most currencies (8 digits of minor units).
 MAX_AMOUNT_MINOR = 99_999_999
 MAX_PATH = 200
-BIND_TTL_SECONDS = 600
+# Onboarding (identity, bank details) easily outlasts the default 10 minute flow,
+# so the flow state, the browser cookie and the account binding all live this long.
+FLOW_TTL_SECONDS = 2 * 3600
+BIND_TTL_SECONDS = FLOW_TTL_SECONDS
 PENDING_TTL_SECONDS = 30 * 24 * 3600
 _BIND_KEY = "integrations_stripe_bind:"
 _PENDING_KEY = "integrations_stripe_pending:"
@@ -173,39 +178,61 @@ async def _flow(state: str) -> dict[str, Any]:
     return payload
 
 
-async def _bind(flow: dict[str, Any], account_id: str) -> None:
+async def _bind(flow: dict[str, Any], account_id: str, *, owner: str = "") -> None:
+    """Bind ``account_id`` (and who must own it) to this flow. ``owner`` is the
+    account's creator when it differs from the flow's user (an admin's resume)."""
     challenge = _s256(str(flow["code_verifier"]))
-    await _redis().setex(_BIND_KEY + challenge, BIND_TTL_SECONDS, account_id)
+    bound = {
+        "account": account_id,
+        "workspace_id": str(flow.get("workspace_id") or ""),
+        "user_id": owner or str(flow.get("user_id") or ""),
+    }
+    await _redis().setex(_BIND_KEY + challenge, BIND_TTL_SECONDS, json.dumps(bound))
 
 
-async def _take_bound(code_verifier: str) -> str:
+async def _take_bound(code_verifier: str) -> dict[str, str]:
     key = _BIND_KEY + _s256(code_verifier)
     redis = _redis()
-    bound = await redis.get(key)
+    raw = await redis.get(key)
     await redis.delete(key)
-    return str(bound or "")
+    try:
+        bound = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        bound = {}
+    return {k: str(v) for k, v in bound.items()} if isinstance(bound, dict) else {}
+
+
+def _owned_by(account: Mapping[str, Any], workspace_id: str, user_id: str) -> bool:
+    """The account was created by this flow's workspace + user (metadata we stamp)."""
+    meta = account.get("metadata") or {}
+    return (
+        bool(workspace_id)
+        and bool(user_id)
+        and meta.get("workspace_id") == workspace_id
+        and meta.get("user_id") == user_id
+    )
 
 
 def _pending_key(workspace_id: str, user_id: str) -> str:
     return f"{_PENDING_KEY}{workspace_id}:{user_id}"
 
 
-async def _connected_elsewhere(account_id: str) -> bool:
+async def _has_connection(account_id: str) -> bool:
     from pocketpaw_ee.cloud.models.integration import IntegrationConnection as Conn
 
-    row = await Conn.find_one(
-        Conn.provider == "stripe", Conn.account_ref == account_id, Conn.status != "revoked"
-    )
+    row = await Conn.find_one(Conn.provider == "stripe", Conn.account_ref == account_id)
     return row is not None
 
 
 async def _pending_account(workspace_id: str, user_id: str) -> str:
-    """The caller's unfinished account from an earlier connect, else ""."""
+    """The caller's account from an earlier connect that never became a connection
+    (abandoned, or onboarded but its callback came back too late), else "". Its
+    onboarding state does not matter: a verified account is still theirs."""
     account_id = str(await _redis().get(_pending_key(workspace_id, user_id)) or "")
-    if not account_id.startswith("acct_") or await _connected_elsewhere(account_id):
+    if not account_id.startswith("acct_") or await _has_connection(account_id):
         return ""
     account = await _stripe("GET", f"/v1/accounts/{account_id}", missing_ok=True)
-    if not account or account.get("details_submitted") or account.get("charges_enabled"):
+    if not account or not _owned_by(account, workspace_id, user_id):
         return ""
     return account_id
 
@@ -319,17 +346,23 @@ async def site_origin(site_id: str) -> str:
 
 
 async def catalog_product(workspace_id: str, pocket_id: str, ref: str):
-    """The site's catalog row for ``ref`` (its Paw Bar widget's catalog), or None."""
+    """The catalog row for ``ref`` across the site pocket's Paw Bar widgets, or None.
+
+    Only widgets stamped with THIS workspace count: the store's scoped read also
+    matches legacy ''/NULL rows, which must never price a checkout."""
     from pocketpaw.stores import get_paw_bar_store
 
     if not pocket_id or not workspace_id:
         return None
     store = get_paw_bar_store()
-    widgets = await store.list_widgets(pocket_id=pocket_id, workspace_id=workspace_id, limit=1)
-    if not widgets or widgets[0].pocket_id != pocket_id:
-        return None
-    rows = await store.get_catalog_items(widgets[0].id, [ref], workspace_id=workspace_id)
-    return rows[0] if rows else None
+    widgets = await store.list_widgets(pocket_id=pocket_id, workspace_id=workspace_id)
+    for widget in widgets:
+        if widget.pocket_id != pocket_id or widget.workspace_id != workspace_id:
+            continue
+        rows = await store.get_catalog_items(widget.id, [ref], workspace_id=workspace_id)
+        if rows:
+            return rows[0]
+    return None
 
 
 def platform_fee_minor(total_minor: int, currency: str) -> int:  # noqa: ARG001
@@ -349,7 +382,10 @@ async def _create_checkout(ctx: ActionContext, args: CheckoutArgs) -> dict[str, 
     product = await catalog_product(ctx.workspace_id, ctx.pocket_id, args.product_ref)
     if product is None or product.in_stock is False or product.price_cents <= 0:
         raise ActionRefused("invalid_args", "That product isn't available.")
-    currency = product.currency.upper()
+    try:
+        currency = normalize_currency(product.currency)
+    except ValueError:
+        raise ActionRefused("invalid_args", "That product has no valid currency.") from None
     wanted = str(ctx.settings.get("currency") or "").upper()
     if wanted and wanted != currency:
         raise ActionRefused("invalid_args", "That product is priced in another currency.")
@@ -457,6 +493,14 @@ def _session_order(obj: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _fully_refunded(charge: Mapping[str, Any]) -> bool:
+    """Only a full refund settles an order as refunded; a partial one leaves it paid."""
+    amount, refunded = charge.get("amount"), charge.get("amount_refunded")
+    if not isinstance(amount, int) or not isinstance(refunded, int):
+        return False
+    return amount > 0 and refunded >= amount
+
+
 def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
     """(our type, data, site_id) for a verified Stripe event."""
     kind = str(event.get("type") or "")
@@ -465,7 +509,9 @@ def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]
         return "ignored", {}, ""
     site_id = str((obj.get("metadata") or {}).get("site_id") or "")
     if kind == "account.updated":
-        return "connection.updated", {"meta": _meta(obj)}, ""
+        created = event.get("created")
+        as_of = created if isinstance(created, int) and not isinstance(created, bool) else 0
+        return "connection.updated", {"meta": _meta(obj), "as_of": as_of}, ""
     if kind == "checkout.session.completed":
         paid = obj.get("payment_status") in ("paid", "no_payment_required")
         return ("order.paid" if paid else "order.pending"), _session_order(obj), site_id
@@ -482,7 +528,8 @@ def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]
             {"order_id": str(obj.get("id") or ""), "only_if_exists": True},
             (site_id),
         )
-    if kind == "charge.refunded" and obj.get("refunded") and obj.get("payment_intent"):
+    if kind == "charge.refunded" and obj.get("payment_intent") and _fully_refunded(obj):
+        # No site_id on a charge is fine: the ingest finds the order by its id.
         return "order.refunded", {"order_id": str(obj["payment_intent"])}, site_id
     return "ignored", {}, ""
 
@@ -497,6 +544,7 @@ class StripeProvider(BaseProvider):
     category = "payments"
     plan = "site"
     supports_pkce = True
+    state_ttl_seconds = FLOW_TTL_SECONDS
     actions = {
         "create_checkout": ActionSpec(
             args=CheckoutArgs,
@@ -550,13 +598,16 @@ class StripeProvider(BaseProvider):
     ) -> TokenGrant:
         if not code_verifier:
             raise ProviderError("stripe flow has no verifier")
-        bound = await _take_bound(code_verifier)
+        binding = await _take_bound(code_verifier)
+        bound = binding.get("account", "")
         if not bound or not hmac.compare_digest(bound.encode(), (code or "").encode()):
             raise ProviderError("stripe account does not match this flow")
         account = await _stripe("GET", f"/v1/accounts/{bound}")
         account = account or {}
         if account.get("id") != bound:
             raise ProviderError("stripe returned another account")
+        if not _owned_by(account, binding.get("workspace_id", ""), binding.get("user_id", "")):
+            raise ProviderError("stripe account belongs to another workspace")
         return TokenGrant(
             access_token=bound,
             account_ref=bound,
@@ -572,7 +623,10 @@ class StripeProvider(BaseProvider):
             return None
         if meta.get("charges_enabled") and not meta.get("requirements_due_count"):
             return None
-        await _bind(await _flow(state), account_id)
+        flow = await _flow(state)
+        if str(flow.get("workspace_id") or "") != connection.workspace:
+            raise ProviderError("stripe resume for another workspace")
+        await _bind(flow, account_id, owner=str(connection.created_by or ""))
         return await _account_link(account_id, state, redirect_uri)
 
     def connection_attention(self, connection: Any) -> str | None:

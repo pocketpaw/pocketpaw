@@ -10,14 +10,15 @@
 #     4. ``order.*`` events upsert a ``SiteOrder`` (unique provider + external id).
 #        A failure answers 500 and records nothing, so the provider retries. With
 #        ``data.only_if_exists`` an event updates an existing order and never makes
-#        one (a failed card attempt is not an order). A late pending never undoes a
-#        settled order, and a late failed never undoes a paid or refunded one.
+#        one (a failed card attempt is not an order). Status moves by
+#        ``_NEXT_STATUS``: refunded is terminal, only a refund replaces paid.
 #     5. only then the event id is recorded (unique index), and
 #        ``integrations.event`` goes on the in-process bus with identifiers only
 #
 #   ``connection.updated`` is account-level, not site-level: it skips step 3, merges
 #   ``data.meta`` into every live connection with that provider + account_ref, and
 #   tells each bound site its recomputed status (``site.integration_changed``).
+#   ``data.as_of`` (event time) is kept as ``meta.as_of``; an older event is skipped.
 #
 #   list_orders: GET /sites/by-pocket/{pocket_id}/orders, newest first, cursor = the
 #   last row's id. Amounts are ISO 4217 minor units. Customer emails are masked
@@ -48,6 +49,14 @@ _ORDER_STATUS = {
     "order.refunded": "refunded",
     "order.failed": "failed",
 }
+# Which status may replace which. Refunded is terminal; only a refund replaces
+# paid; failed never replaces paid; pending never replaces a settled order.
+_NEXT_STATUS: dict[str, frozenset[str]] = {
+    "pending": frozenset({"pending", "paid", "failed", "refunded"}),
+    "failed": frozenset({"failed", "paid", "refunded"}),
+    "paid": frozenset({"paid", "refunded"}),
+    "refunded": frozenset({"refunded"}),
+}
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 MAX_ORDERS_PAGE = 100
 IGNORED = "ignored"
@@ -64,29 +73,28 @@ async def _site_for(event: NormalizedEvent):
 
     Tenant safety: an event naming a ``site_id`` is only routed when that site's
     binding uses a connection whose ``account_ref`` equals the event's, so a signed
-    event for account A cannot write orders into a site connected to account B. The
-    ``account_ref``-only fallback routes only when exactly one binding matches across
-    every workspace; an ambiguous match is refused."""
+    event for account A cannot write orders into a site connected to account B. With
+    no ``site_id``, an event naming an existing order (``data.order_id``) goes to that
+    order's site under the same account check (a refund carries no site metadata).
+    The ``account_ref``-only fallback routes only when exactly one binding matches
+    across every workspace; an ambiguous match is refused."""
     from pocketpaw_ee.cloud.models.integration import IntegrationConnection as Conn
+    from pocketpaw_ee.cloud.models.integration import SiteOrder
     from pocketpaw_ee.cloud.models.site import Site
     from pocketpaw_ee.integrations.gateway import _site_by_id
 
     if not event.account_ref:
         return None, None
     if event.site_id:
-        site = await _site_by_id(event.site_id)
-        if site is None:
-            return None, None
-        binding = await bindings.binding_for_site(site, event.provider)
-        conn = await bindings.connection_for(binding) if binding is not None else None
-        if conn is None or conn.status == "revoked" or conn.account_ref != event.account_ref:
-            logger.warning(
-                "integrations: %s event %s names a site not bound to its account; refused",
-                event.provider,
-                event.id,
-            )
-            return None, None
-        return site, binding
+        return await _bound_to_account(await _site_by_id(event.site_id), event)
+    order_id = str(event.data.get("order_id") or "")[:200]
+    if order_id:
+        row = await SiteOrder.find_one(
+            SiteOrder.provider == event.provider, SiteOrder.external_id == order_id
+        )
+        if row is not None:
+            site = await Site.find_one({"workspace": row.workspace, "pocket_id": row.pocket_id})
+            return await _bound_to_account(site, event)
     conns = await Conn.find(
         Conn.provider == event.provider,
         Conn.account_ref == event.account_ref,
@@ -104,6 +112,22 @@ async def _site_for(event: NormalizedEvent):
         return None, None
     binding = matches[0]
     site = await Site.find_one({"workspace": binding.workspace, "pocket_id": binding.pocket_id})
+    return site, binding
+
+
+async def _bound_to_account(site: Any, event: NormalizedEvent):
+    """(site, binding) when ``site`` is bound to the event's account, else Nones."""
+    if site is None:
+        return None, None
+    binding = await bindings.binding_for_site(site, event.provider)
+    conn = await bindings.connection_for(binding) if binding is not None else None
+    if conn is None or conn.status == "revoked" or conn.account_ref != event.account_ref:
+        logger.warning(
+            "integrations: %s event %s names a site not bound to its account; refused",
+            event.provider,
+            event.id,
+        )
+        return None, None
     return site, binding
 
 
@@ -228,10 +252,8 @@ async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
     elif row.workspace != binding.workspace or row.pocket_id != binding.pocket_id:
         logger.warning("integrations: order %s belongs to another site, ignored", row.id)
         return
-    # A late "pending" never undoes a settled order, a late "failed" never a paid one.
-    late_pending = status == "pending" and row.status != "pending"
-    late_failed = status == "failed" and row.status in ("paid", "refunded")
-    if not (late_pending or late_failed):
+    # Out-of-order deliveries: see ``_NEXT_STATUS``. Data still merges either way.
+    if status in _NEXT_STATUS.get(row.status, frozenset(_NEXT_STATUS)):
         row.status = status
     if "amount_minor" in data:
         row.amount_minor = _int(data.get("amount_minor"))
@@ -263,20 +285,25 @@ async def _connection_updated(event: NormalizedEvent) -> JSONResponse:
         for k, v in (raw.items() if isinstance(raw, dict) else ())
         if isinstance(v, _META_VALUE)
     }
+    as_of = event.data.get("as_of")
+    as_of = as_of if isinstance(as_of, int) and not isinstance(as_of, bool) else 0
     try:
         conns = await Conn.find(
             Conn.provider == event.provider,
             Conn.account_ref == event.account_ref,
             Conn.status != "revoked",
         ).to_list()
+        found = len(conns)
+        conns = [c for c in conns if _int((c.meta or {}).get("as_of")) <= as_of]
         for conn in conns:
-            conn.meta = {**(conn.meta or {}), **meta}
+            conn.meta = {**(conn.meta or {}), **meta, "as_of": as_of}
             await conn.save()
     except Exception:  # noqa: BLE001 - unrecorded, so the provider's retry reprocesses
         logger.exception("integrations: %s event %s failed to process", event.provider, event.id)
         return _err("provider_error", 500, "Could not process the event. Retry later.")
     if not conns:
-        return JSONResponse({"ok": True, "routed": False})
+        # Every match already holds newer state: an out-of-order redelivery.
+        return JSONResponse({"ok": True, "stale": True} if found else {"ok": True, "routed": False})
     try:
         await IntegrationWebhookEvent(
             provider=event.provider,

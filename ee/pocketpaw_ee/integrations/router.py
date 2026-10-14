@@ -243,7 +243,7 @@ async def oauth_start(provider: str, request: Request, t: str = "") -> Response:
     resp.set_cookie(
         oauth.cookie_name(provider),
         state_hash,
-        max_age=oauth.COOKIE_MAX_AGE,
+        max_age=oauth.cookie_max_age(provider),
         path=oauth.COOKIE_PATH,
         httponly=True,
         secure=True,
