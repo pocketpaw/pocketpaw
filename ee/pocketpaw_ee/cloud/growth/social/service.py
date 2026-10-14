@@ -33,11 +33,16 @@
 # on the first connect and never on a read. Its API key is stored encrypted, and
 # the key is checked before Postiz is called, because org creation is not
 # idempotent. A disconnect first confirms the id is in that profile's org.
+# Telegram connects by code: ``connect_account`` stores Postiz's state on the
+# org row, and ``check_telegram`` sweeps the bot's pending ``/connect`` messages
+# onto every unexpired row whose code they name (across workspaces, so confirming
+# the batch never drops another tenant's) before finishing the caller's connect.
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -67,6 +72,8 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     AddPulseCompaniesResponse,
     AnalysisPatch,
     CharacterResponse,
+    CheckTelegramRequest,
+    CheckTelegramResponse,
     ConnectSocialAccountRequest,
     ConnectSocialAccountResponse,
     CreateCharacterRequest,
@@ -89,6 +96,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialProfileListResponse,
     SocialProfileResponse,
     SocialPulseResponse,
+    TelegramConnectCode,
     UpdateIdeaRequest,
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
@@ -98,6 +106,7 @@ from pocketpaw_ee.cloud.growth.social.postiz import (
     PostizError,
     PostizPlatformUnavailable,
     resolve_postiz,
+    resolve_telegram_updates,
 )
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
@@ -1107,6 +1116,10 @@ async def unschedule_idea(ctx: RequestContext, idea_id: str) -> SocialIdeaRespon
 # ---------------------------------------------------------------------------
 
 
+TELEGRAM_CODE_TTL = timedelta(minutes=55)
+_TELEGRAM_CONNECT = re.compile(r"^/connect(?:@\w+)?\s+(\S+)\s*$")
+
+
 def _enabled_platforms() -> set[str]:
     from pocketpaw.config import get_settings
 
@@ -1234,19 +1247,140 @@ async def connect_account(
         raise ValidationError(
             "social.platform_unavailable", f"{label} isn't set up on this deployment yet."
         )
+    bot_name = ""
+    if body.platform == "telegram":
+        _, bot_name = _telegram_bot()
     profile = await _require_profile_doc(workspace_id, profile_id)
     org = await _ensure_postiz_org(postiz, workspace_id, profile)
+    redirect = f"{origin.rstrip('/')}/growth/social/accounts"
     try:
-        url = await postiz.connect_url(
-            decrypt(org.api_key_enc), body.platform, f"{origin.rstrip('/')}/growth/social/accounts"
-        )
+        if body.platform == "telegram":
+            code = await postiz.connect_state(decrypt(org.api_key_enc), body.platform, redirect)
+        else:
+            url = await postiz.connect_url(decrypt(org.api_key_enc), body.platform, redirect)
     except PostizPlatformUnavailable:
         raise ValidationError(
             "social.platform_unavailable", f"{label} isn't set up on this deployment yet."
         ) from None
     except PostizError as exc:
         raise _upstream(exc) from None
-    return ConnectSocialAccountResponse(url=url)
+    if body.platform != "telegram":
+        return ConnectSocialAccountResponse(url=url)
+    await org.set(
+        {
+            "telegram_code": code,
+            "telegram_code_expires_at": datetime.now(UTC) + TELEGRAM_CODE_TTL,
+            "telegram_chat_id": None,
+        }
+    )
+    # no-event: Growth › Social has no realtime subscriber; the Accounts page polls the check.
+    return ConnectSocialAccountResponse(
+        url=None,
+        telegram=TelegramConnectCode(
+            code=code, bot_name=bot_name, expires_at=iso_utc(org.telegram_code_expires_at) or ""
+        ),
+    )
+
+
+def _telegram_bot() -> tuple[str, str]:
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    token = (settings.postiz_telegram_bot_token or "").strip()
+    name = (settings.postiz_telegram_bot_name or "").strip().lstrip("@")
+    if not (token and name):
+        raise CloudError(
+            503, "social.telegram_unavailable", "Telegram isn't set up on this deployment yet."
+        )
+    return token, name
+
+
+async def _pending_telegram(workspace_id: str, profile: str, code: str) -> _PostizOrgDoc | None:
+    return await _PostizOrgDoc.find_one(
+        {
+            "workspace": workspace_id,
+            "profile": profile,
+            "telegram_code": code,
+            "telegram_code_expires_at": {"$gt": datetime.now(UTC)},
+        }
+    )
+
+
+def _telegram_connects(updates: list[dict[str, Any]]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for update in updates:
+        message = update.get("message") or update.get("channel_post")
+        if not isinstance(message, dict):
+            continue
+        match = _TELEGRAM_CONNECT.match(str(message.get("text") or ""))
+        chat = message.get("chat")
+        if match and isinstance(chat, dict) and chat.get("id") is not None:
+            found[match.group(1)] = str(chat["id"])
+    return found
+
+
+async def _sweep_telegram(token: str) -> None:
+    fetch = resolve_telegram_updates()
+    try:
+        updates = await fetch(token)
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    now = datetime.now(UTC)
+    collection = _PostizOrgDoc.get_pymongo_collection()
+    for code, chat_id in _telegram_connects(updates).items():
+        # global-read: telegram sweep records every pending code so confirming
+        # updates can't drop another tenant's
+        await collection.update_many(
+            {"telegram_code": code, "telegram_code_expires_at": {"$gt": now}},
+            {"$set": {"telegram_chat_id": chat_id}},
+        )
+    # no-event: Growth › Social has no realtime subscriber; the Accounts page polls the check.
+    ids = [u["update_id"] for u in updates if isinstance(u.get("update_id"), int)]
+    if not ids:
+        return
+    try:
+        await fetch(token, offset=max(ids) + 1)
+    except PostizError as exc:
+        logger.warning("social accounts: telegram confirm failed (%s): %s", exc.code, exc.message)
+
+
+async def check_telegram(
+    ctx: RequestContext, profile_id: str | None, body: CheckTelegramRequest
+) -> CheckTelegramResponse:
+    body = CheckTelegramRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    profile_key = str(profile.id)
+    org = await _pending_telegram(workspace_id, profile_key, body.code)
+    if org is None:
+        raise NotFound("telegram_code", body.code)
+    token, _ = _telegram_bot()
+    postiz = resolve_postiz()
+    if postiz is None:
+        raise CloudError(
+            503,
+            "social.accounts_unavailable",
+            "Social account connections aren't set up on this deployment.",
+        )
+    if not org.telegram_chat_id:
+        await _sweep_telegram(token)
+        org = await _pending_telegram(workspace_id, profile_key, body.code)
+        if org is None:
+            raise NotFound("telegram_code", body.code)
+    if not org.telegram_chat_id:
+        return CheckTelegramResponse(status="pending", account=None)
+    try:
+        raw = await postiz.complete_connect("telegram", body.code, org.telegram_chat_id)
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    await org.set(
+        {"telegram_code": None, "telegram_code_expires_at": None, "telegram_chat_id": None}
+    )
+    # no-event: Growth › Social has no realtime subscriber; the Accounts page re-fetches.
+    account = _account_response(
+        {**raw, "identifier": raw.get("identifier") or raw.get("providerIdentifier")}
+    )
+    return CheckTelegramResponse(status="connected", account=account)
 
 
 async def disconnect_account(ctx: RequestContext, profile_id: str | None, account_id: str) -> None:
@@ -1266,6 +1400,7 @@ async def disconnect_account(ctx: RequestContext, profile_id: str | None, accoun
 
 
 __all__ = [
+    "check_telegram",
     "connect_account",
     "disconnect_account",
     "list_accounts",

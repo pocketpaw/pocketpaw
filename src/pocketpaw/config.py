@@ -2613,6 +2613,20 @@ class Settings(BaseSettings):
             "POCKETPAW_POSTIZ_PLATFORMS."
         ),
     )
+    postiz_telegram_bot_token: str | None = Field(
+        default=None,
+        description=(
+            "Token of the Telegram bot Postiz posts with (its TELEGRAM_TOKEN); read here to "
+            "find /connect messages. Set via POCKETPAW_POSTIZ_TELEGRAM_BOT_TOKEN. NEVER logged."
+        ),
+    )
+    postiz_telegram_bot_name: str | None = Field(
+        default=None,
+        description=(
+            "That bot's username without the @, shown to users connecting Telegram. "
+            "Set via POCKETPAW_POSTIZ_TELEGRAM_BOT_NAME."
+        ),
+    )
 
     # AI visibility checks (AV-3) — the platform's OWN provider accounts that ask
     # AI search engines about a business (ee/pocketpaw_ee/cloud/ai_visibility).

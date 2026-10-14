@@ -1035,6 +1035,7 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/ideas/{idea_id}/unschedule"): "growth.write",
             ("GET", "/growth/social/accounts"): "growth.read",
             ("POST", "/growth/social/accounts/connect"): "growth.manage",
+            ("POST", "/growth/social/accounts/telegram/check"): "growth.manage",
             ("DELETE", "/growth/social/accounts/{account_id}"): "growth.manage",
         }
 

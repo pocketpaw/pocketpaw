@@ -7815,30 +7815,48 @@ instance. The profile gets its own Postiz organisation on its first connect
 (never on a read); the org's API key is stored encrypted with
 `CLOUD_ENCRYPTION_KEY`. Connections are off until both
 `POCKETPAW_POSTIZ_URL` (the instance's base URL) and
-`POCKETPAW_POSTIZ_JWT_SECRET` (Postiz's `JWT_SECRET`) are set. All three
+`POCKETPAW_POSTIZ_JWT_SECRET` (Postiz's `JWT_SECRET`) are set. All four
 routes take `?profile_id=` like the rest.
 
 | Route | What it does |
 |---|---|
 | `GET /accounts` (`growth.read`) | `{items: [{id, platform, name, username, picture, disabled}], platforms: [{id, label}], configured}`. `platform` is the Postiz provider id, `username` the account handle (or `null`). `configured: false` means this deployment has no Postiz; `items` is empty then. |
-| `POST /accounts/connect` (`growth.manage`) | `{platform}` → `{url}`: the platform's authorize URL. Open it in the browser; after consent it returns to `<origin>/growth/social/accounts?added=<platform>`. The origin is the caller's (`Origin`, then `Referer`) when it is on the CORS allowlist, else `POCKETPAW_FRONTEND_BASE_URL`; it is never read from the body. |
+| `POST /accounts/connect` (`growth.manage`) | `{platform}` → `{url, telegram}`. For every platform but Telegram, `url` is the platform's authorize URL and `telegram` is `null`: open the URL in the browser; after consent it returns to `<origin>/growth/social/accounts?added=<platform>`. The origin is the caller's (`Origin`, then `Referer`) when it is on the CORS allowlist, else `POCKETPAW_FRONTEND_BASE_URL`; it is never read from the body. For `telegram`, `url` is `null` and `telegram` is `{code, bot_name, expires_at}` (see Telegram below). |
+| `POST /accounts/telegram/check` (`growth.manage`) | `{code}` → `{status: "pending" \| "connected", account}`. `account` is the new account (shape as in `items`) once connected, else `null`. Poll it after showing the code. |
 | `DELETE /accounts/{account_id}` (`growth.manage`) | Disconnect one account. `204`. |
 
 `platforms` (in order): `x`, `linkedin`, `linkedin-page`, `facebook`,
-`instagram-standalone`, `threads`, `youtube`, `tiktok`, `reddit`, `pinterest`.
+`instagram-standalone`, `threads`, `youtube`, `tiktok`, `reddit`, `pinterest`,
+`dribbble`, `slack`, `telegram`.
 `POCKETPAW_POSTIZ_PLATFORMS` (comma-separated, e.g. `x,linkedin`) limits
 them to the providers this deployment has developer apps for; connecting any
 other returns `social.platform_unavailable`. Unset offers all of them.
 
+**Telegram** has no OAuth. Connect stores a Postiz connect code on the
+profile (valid 55 minutes; a new connect replaces it) and returns it with the
+bot's username. The user adds that bot to their channel or group as an admin
+and posts `/connect <code>` there (`/connect@<bot> <code>` also works). Each
+check reads the bot's pending updates from the Telegram Bot API, records the
+chat of every `/connect` it finds against the matching pending code (any
+profile's, so confirming the batch loses no one's), then confirms the batch.
+Once the caller's code has a chat, Postiz connects it and the code is cleared;
+a Postiz failure keeps it, so the check can be retried. Needs
+`POCKETPAW_POSTIZ_TELEGRAM_BOT_TOKEN` (the same bot token Postiz runs as its
+`TELEGRAM_TOKEN`; a secret, never logged) and `POCKETPAW_POSTIZ_TELEGRAM_BOT_NAME`
+(its username, without the `@`). The bot must have no webhook set, or
+`getUpdates` fails and the check returns `502`.
+
 | Status | Code | When |
 |---|---|---|
 | 503 | `social.accounts_unavailable` | Connect with no Postiz configured. |
+| 503 | `social.telegram_unavailable` | Telegram connect or check with the bot token or name unset. |
 | 422 | `social.platform_not_supported` | `platform` is not in the list above. |
 | 422 | `social.platform_unavailable` | Postiz has no app set up for that platform ("X isn't set up on this deployment yet."). |
 | 422 | `cloud.encryption_key_missing` | Connect with no `CLOUD_ENCRYPTION_KEY`; checked before Postiz is called. |
 | 404 | `social_profile.not_found` | No profile (or an unknown `profile_id`). |
 | 404 | `social_account.not_found` | Disconnect of an id that is not one of this profile's accounts. |
-| 502 | `social.accounts_upstream` | Postiz failed or answered something unexpected. |
+| 404 | `telegram_code.not_found` | Telegram check of a code that is unknown, expired, already used, or another profile's or workspace's. |
+| 502 | `social.accounts_upstream` | Postiz or the Telegram Bot API failed or answered something unexpected. |
 
 ## Growth — the agent surface (`pocketpaw_growth` MCP)
 

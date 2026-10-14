@@ -21,6 +21,8 @@ from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_front
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
+    CheckTelegramRequest,
+    CheckTelegramResponse,
     ConnectSocialAccountRequest,
     ConnectSocialAccountResponse,
     CreateCharacterRequest,
@@ -347,10 +349,24 @@ async def connect_account(
     profile_id: str | None = _PROFILE_ID,
     ctx: RequestContext = Depends(request_context),
 ) -> ConnectSocialAccountResponse:
-    """The platform's authorize URL; the browser returns to /growth/social/accounts.
-    503 with no Postiz, 422 for an unsupported or unset-up platform."""
+    """The authorize URL, or for Telegram a ``/connect`` code. 503 with no Postiz,
+    422 for an unsupported or unset-up platform."""
     origin = safe_frontend_origin(_caller_origin(request)) or frontend_base_url()
     return await social_service.connect_account(ctx, profile_id, body, origin)
+
+
+@router.post(
+    "/accounts/telegram/check",
+    response_model=CheckTelegramResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def check_telegram(
+    body: CheckTelegramRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> CheckTelegramResponse:
+    """Finish a Telegram connect once ``/connect <code>`` was posted; else ``pending``."""
+    return await social_service.check_telegram(ctx, profile_id, body)
 
 
 @router.delete(

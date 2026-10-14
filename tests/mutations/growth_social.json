@@ -79,5 +79,14 @@
     "tests": [
       "tests/cloud/growth/social/test_accounts.py"
     ]
+  },
+  {
+    "label": "tenancy: the pending Telegram code lookup drops its workspace filter (one workspace finishes another's connect)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            \"workspace\": workspace_id,\n            \"profile\": profile,\n            \"telegram_code\": code,\n",
+    "replace": "            \"profile\": profile,\n            \"telegram_code\": code,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
   }
 ]

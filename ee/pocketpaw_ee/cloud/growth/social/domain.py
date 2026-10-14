@@ -86,6 +86,9 @@ SOCIAL_ACCOUNT_PLATFORMS: tuple[tuple[str, str], ...] = (
     ("tiktok", "TikTok"),
     ("reddit", "Reddit"),
     ("pinterest", "Pinterest"),
+    ("dribbble", "Dribbble"),
+    ("slack", "Slack"),
+    ("telegram", "Telegram"),
 )
 
 DEFAULT_IDEA_COUNT = 6

@@ -399,5 +399,21 @@ class ConnectSocialAccountRequest(BaseModel):
     platform: str = Field(max_length=64)
 
 
+class TelegramConnectCode(BaseModel):
+    code: str
+    bot_name: str
+    expires_at: str
+
+
 class ConnectSocialAccountResponse(BaseModel):
-    url: str
+    url: str | None
+    telegram: TelegramConnectCode | None = None
+
+
+class CheckTelegramRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+
+
+class CheckTelegramResponse(BaseModel):
+    status: Literal["pending", "connected"]
+    account: SocialAccountResponse | None
