@@ -383,6 +383,7 @@ class CloudTaskDispatcher:
             if _is_lead(blob):  # the launch resolved the feature onto ``blob["lead"]``
                 lead = blob["lead"]
                 lead["sessions"] = [{"session_url": session, "at": cloud["launched_at"]}]
+                lead["stalls"] = []  # a fresh run starts the stall ladder over
             blob["cloud"] = cloud
             # A run sent back after a failure is in flight again: its old error goes.
             await _patch(
@@ -567,9 +568,23 @@ class CloudTaskDispatcher:
         issue = str(lead.get("issue") or "")
         base = str(blob.get("base_branch") or "main")
         while True:
+            action = await store.get_action(run_ref)
+            if getattr(action, "status", None) != "pending":
+                return  # a human rejected or approved it meanwhile; theirs stands
             now = self.wall()
             expired = now - launched >= self.lead_timeout_seconds
-            prs, pr_at = await self._lead_prs(slug, run_ref, cwd)
+            try:
+                prs, pr_at = await self._lead_prs(slug, run_ref, cwd)
+                argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "comments"]
+                raw = json.loads(await self._gh(argv, cwd, "TRACK: gh issue view") or "{}")
+            except (CloudStationError, ValueError) as exc:
+                # GitHub is down past the retries: skip this poll, not the lead.
+                logger.warning("belt cloud: lead %s poll skipped: %s", run_ref, exc)
+                if expired:
+                    raise self._lead_timeout(lead, issue) from exc
+                await self.sleep(self.poll_seconds)
+                continue
+            comments = raw.get("comments") or []
             # A write at least once per stall window: the line's headroom stops
             # counting a run its store row has not moved on for hours.
             beat = lead.get("heartbeat_at")
@@ -577,36 +592,35 @@ class CloudTaskDispatcher:
             if prs != lead.get("prs") or stale:
                 lead["prs"], lead["heartbeat_at"] = prs, now
                 await _patch(store, run_ref, lead=lead)
-            argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "comments"]
-            comments = (json.loads(await self._gh(argv, cwd, "TRACK: gh issue view") or "{}")).get(
-                "comments"
-            ) or []
             sheet = _contact_sheet(comments, launched)
-            done = next((p for p in prs if p["state"] == "MERGED" and p["done"]), None)
+            done = _newest_done(prs)
             if done and sheet and await self._dev_green(slug, base, done["merge_sha"], cwd):
                 await self._land_lead(store, run_ref, blob, slug, done, sheet)
                 return
             if expired:
-                session = (lead.get("sessions") or [{}])[-1].get("session_url")
-                raise CloudStationError(
-                    f"TRACK: feature lead #{issue} not done after "
-                    f"{self.lead_timeout_seconds:.0f}s (session {session})"
-                )
+                raise self._lead_timeout(lead, issue)
             said = max((_epoch(c.get("createdAt")) for c in comments), default=0.0)
+            branch = await self._branch_at(slug, str(lead.get("branch") or ""), cwd)
+            # The lead's own signs of work; a stall rung or a relaunch is Belt's.
+            active = max(launched, pr_at, said, branch)
             heard = max(
                 [
-                    launched,
-                    pr_at,
-                    said,
-                    await self._branch_at(slug, str(lead.get("branch") or ""), cwd),
+                    active,
                     *(float(s.get("at") or 0) for s in lead.get("sessions") or []),
                     *(float(s.get("at") or 0) for s in lead.get("stalls") or []),
                 ]
             )
             if now - heard >= self.lead_stall_seconds:
-                if not await self._lead_stall(store, run_ref, blob, slug, worker, cwd):
+                if not await self._lead_stall(store, run_ref, blob, slug, worker, cwd, active):
                     return
             await self.sleep(self.poll_seconds)
+
+    def _lead_timeout(self, lead: dict[str, Any], issue: str) -> CloudStationError:
+        session = (lead.get("sessions") or [{}])[-1].get("session_url")
+        return CloudStationError(
+            f"TRACK: feature lead #{issue} not done after "
+            f"{self.lead_timeout_seconds:.0f}s (session {session})"
+        )
 
     async def _lead_prs(
         self, slug: str, run_ref: str, cwd: Path
@@ -615,7 +629,7 @@ class CloudTaskDispatcher:
         <run_ref>``, by number, and the newest ``updatedAt`` among them (epoch).
         ponytail: the newest 100 PRs; a lead that outlives them loses the oldest."""
         argv = ["gh", "pr", "list", "-R", slug, "--state", "all", "--limit", "100", "--json"]
-        argv.append("number,url,state,body,labels,updatedAt,mergeCommit,headRefName")
+        argv.append("number,url,state,body,labels,updatedAt,mergeCommit,mergedAt,headRefName")
         rows = json.loads(await self._gh(argv, cwd, "TRACK: gh pr list") or "[]")
         mark = f"{LEAD_MARKER} {run_ref}"
         prs, newest = [], 0.0
@@ -632,6 +646,7 @@ class CloudTaskDispatcher:
                     "branch": str(pr.get("headRefName") or ""),
                     "done": _FEATURE_DONE in labels,
                     "merge_sha": str((pr.get("mergeCommit") or {}).get("oid") or ""),
+                    "merged_at": str(pr.get("mergedAt") or ""),
                 }
             )
         return sorted(prs, key=lambda p: p["number"]), newest
@@ -673,16 +688,24 @@ class CloudTaskDispatcher:
         slug: str,
         worker: dict[str, str],
         cwd: Path,
+        active: float = 0.0,
     ) -> bool:
-        """One step of the stall ladder, by how many stalls came before: nudge
-        the live session (``claude -p --cloud <session id>``), relaunch with the
-        resume brief, then label the issue ``needs-human`` and release the run.
-        Returns False when tracking stops."""
+        """One rung of the stall ladder. The ladder is the stalls since the
+        lead's last sign of work (``active``), so a lead a nudge revived starts
+        over. Rung 1 nudges the newest session (``claude -p --cloud <session
+        id>``); rung 2 relaunches with the resume brief, but only after a nudge
+        that was delivered and then met a whole silent window: after a failed
+        nudge the old session may still be live, so it is nudged again; rung 3
+        labels the issue ``needs-human`` and releases the run. A failed rung
+        (non-zero nudge, failed relaunch) still counts. Returns False when
+        tracking stops."""
         lead = blob["lead"]
         stalls: list[dict[str, Any]] = list(lead.get("stalls") or [])
+        ladder = [s for s in stalls if float(s.get("at") or 0) > active]
         entry: dict[str, Any] = {"at": self.wall()}
         feature = str(lead.get("feature") or "")
-        if len(stalls) >= 2:
+        delivered = bool(ladder) and ladder[-1].get("kind") == "nudge" and "error" not in ladder[-1]
+        if len(ladder) >= 2:
             entry["kind"] = _NEEDS_HUMAN
             lead["stalls"] = [*stalls, entry]
             await _patch(store, run_ref, lead=lead)
@@ -695,12 +718,13 @@ class CloudTaskDispatcher:
                 f"feature lead silent {minutes:.0f}m after a nudge and a relaunch",
             )
             return False
-        if not stalls:
+        if not ladder or not delivered:
             entry["kind"] = "nudge"
             session = str((lead.get("sessions") or [{}])[-1].get("session_url") or "")
             argv = [claude_cli_argv()[0], "-p", "--cloud", session.rsplit("/", 1)[-1]]
             argv.append(_resume_text(feature, self.lead_stall_seconds))
-            code, _, err = await self.runner(argv, cwd=cwd, timeout=300.0)
+            async with _LAUNCH_LOCK:  # its cwd is the shared launch clone
+                code, _, err = await self.runner(argv, cwd=cwd, timeout=300.0)
             if code != 0:
                 entry["error"] = _ESCAPES.sub("", err or "")[-300:] or f"exit {code}"
         else:
@@ -1903,6 +1927,13 @@ def _resume_text(feature: str, stall_seconds: float) -> str:
         "and continue from the last stage. Push RECORD.md after every stage. Questions go "
         "to the supervisor."
     )
+
+
+def _newest_done(prs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The newest merged ``feature-done`` PR (by merge time, then number): a
+    later one supersedes a first that broke dev CI."""
+    done = [p for p in prs if p["state"] == "MERGED" and p["done"]]
+    return max(done, key=lambda p: (p.get("merged_at") or "", p["number"]), default=None)
 
 
 def _contact_sheet(comments: list[dict[str, Any]], since: float) -> str:

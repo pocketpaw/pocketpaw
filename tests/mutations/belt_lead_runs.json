@@ -2,106 +2,217 @@
   {
     "label": "a lead lands without the feature-done label",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "done = next((p for p in prs if p[\"state\"] == \"MERGED\" and p[\"done\"]), None)",
-    "replace": "done = next((p for p in prs if p[\"state\"] == \"MERGED\"), None)",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "find": "    done = [p for p in prs if p[\"state\"] == \"MERGED\" and p[\"done\"]]",
+    "replace": "    done = [p for p in prs if p[\"state\"] == \"MERGED\"]",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "a lead lands before dev CI is green",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "        return bool(runs) and all(",
     "replace": "        return True or all(",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "an old contact sheet counts",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "        if _epoch(comment.get(\"createdAt\")) <= since:\n            continue",
     "replace": "        if False:\n            continue",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "the stall ladder skips the nudge",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "        if not stalls:\n            entry[\"kind\"] = \"nudge\"",
+    "find": "        if not ladder or not delivered:\n            entry[\"kind\"] = \"nudge\"",
     "replace": "        if False:\n            entry[\"kind\"] = \"nudge\"",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "branch commits do not count as activity",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                    await self._branch_at(slug, str(lead.get(\"branch\") or \"\"), cwd),",
-    "replace": "                    0.0,",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "find": "            branch = await self._branch_at(slug, str(lead.get(\"branch\") or \"\"), cwd)",
+    "replace": "            branch = 0.0",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "lead runs use the 4 h task timeout",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "            expired = now - launched >= self.lead_timeout_seconds",
     "replace": "            expired = now - launched >= self.timeout_seconds",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "the brief no longer loads the playbook",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "    playbook = path.read_text(encoding=\"utf-8\").strip()",
     "replace": "    playbook = \"\"",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "gh failures are never retried",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "            if attempt == self.gh_retries or not _TRANSIENT.search(err or \"\"):",
     "replace": "            if True:",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "every gh failure is retried",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "            if attempt == self.gh_retries or not _TRANSIENT.search(err or \"\"):",
     "replace": "            if attempt == self.gh_retries:",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "TRACK-errored runs are not re-tracked",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "                if not (_resumable(blob) or errored):",
     "replace": "                if not _resumable(blob):",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "a re-tracked run keeps its error",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "            await _patch(store, run_ref, headless_state=\"cloud\", headless_error=None)",
     "replace": "            await _patch(store, run_ref, headless_state=\"cloud\")",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "re-track ignores the run timeout",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "        and time.time() - at < timeout\n    )\n\n\ndef _resumable",
     "replace": "        and True\n    )\n\n\ndef _resumable",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "an errored running row counts in flight",
     "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
     "find": "    if status in {\"running\", \"queued\"} and run.get(\"headless_error\"):",
     "replace": "    if status == \"queued\" and run.get(\"headless_error\"):",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "mark_queued keeps the old error",
     "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
     "find": "            blob = {k: v for k, v in blob.items() if k != \"headless_error\"}\n",
     "replace": "",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   },
   {
     "label": "a lead writes its row only when its PRs change",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
     "find": "            if prs != lead.get(\"prs\") or stale:",
     "replace": "            if prs != lead.get(\"prs\"):",
-    "tests": ["tests/cloud/test_belt_lead_runs.py"]
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "the oldest feature-done PR decides done",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    return max(done, key=lambda p: (p.get(\"merged_at\") or \"\", p[\"number\"]), default=None)",
+    "replace": "    return min(done, key=lambda p: (p.get(\"merged_at\") or \"\", p[\"number\"]), default=None)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "the newest done PR is picked by number, not merge time",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    return max(done, key=lambda p: (p.get(\"merged_at\") or \"\", p[\"number\"]), default=None)",
+    "replace": "    return max(done, key=lambda p: p[\"number\"], default=None)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "a settled lead is still tracked",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            if getattr(action, \"status\", None) != \"pending\":\n                return  # a human rejected",
+    "replace": "            if False:\n                return  # a human rejected",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "the ladder never resets on activity",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        ladder = [s for s in stalls if float(s.get(\"at\") or 0) > active]",
+    "replace": "        ladder = stalls",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "a failed nudge leads to a relaunch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        delivered = bool(ladder) and ladder[-1].get(\"kind\") == \"nudge\" and \"error\" not in ladder[-1]",
+    "replace": "        delivered = bool(ladder)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "a fresh run keeps the old ladder",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                lead[\"stalls\"] = []  # a fresh run starts the stall ladder over\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "the nudge runs without the launch lock",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            async with _LAUNCH_LOCK:  # its cwd is the shared launch clone\n",
+    "replace": "            if True:  # its cwd is the shared launch clone\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "a GitHub outage ends the lead tracker",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            except (CloudStationError, ValueError) as exc:",
+    "replace": "            except ZeroDivisionError as exc:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "an outage past the timeout never ends the lead",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                    raise self._lead_timeout(lead, issue) from exc",
+    "replace": "                    pass",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   }
 ]
