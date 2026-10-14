@@ -25,6 +25,7 @@ from pocketpaw_ee.cloud.mandates.domain import (
     CrewSetup,
     KpiDirection,
     MandateStatus,
+    RunKind,
     ShiftState,
 )
 
@@ -92,6 +93,9 @@ class CharterRequest(BaseModel):
     recipes: dict[str, str] = Field(default_factory=dict)
     # The GitHub ``issues`` patrol takes an open issue carrying one of these.
     issue_labels: list[str] = Field(default_factory=list, max_length=20)
+    # ``feature-lead``: one lead run per free feature issue, no foreman, no
+    # human plan gate (``lead_planner``). ``task`` keeps the foreman.
+    run_kind: RunKind = "task"
 
     @field_validator("checks")
     @classmethod
