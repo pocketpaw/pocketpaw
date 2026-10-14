@@ -202,8 +202,11 @@ async def _require_allowed_repo(workspace_id: str, repo_id: str) -> None:
 
 async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str, Any]:
     """Create a new standing mandate. Charter body validated at entry; the
-    bound repo must sit inside the workspace's allowed roots (422 otherwise)."""
+    bound repo must sit inside the workspace's allowed roots, and a
+    ``feature-lead`` charter needs the cloud develop station (422 otherwise)."""
     body = CreateMandateRequest.model_validate(body)
+    charter = _charter_from_request(body)
+    _require_lead_station(charter)
     await _require_allowed_repo(workspace_id, body.surface.repo_id)
     crew = await _crew_from_request(workspace_id, user_id, body.crew)
 
@@ -211,7 +214,7 @@ async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str
         workspace=workspace_id,
         name=body.name,
         surface=Surface(repo_id=body.surface.repo_id),
-        charter=_charter_from_request(body),
+        charter=charter,
         status="active",
         soul_path=body.soul_path,
         patrols=list(body.patrols),
@@ -1271,6 +1274,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         raise ValidationError(
             "mandate.paused", "This mandate is paused — resume it before running a shift"
         )
+    _require_lead_station(doc.charter)
 
     # 0. CAPACITY — the shift's budget is the line's headroom under its
     #    in-flight cap. A full line opens no shift row, so nothing holds it.
@@ -1356,7 +1360,9 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     if lead:
         # A lead line plans without the foreman: one feature-lead run per free
         # feature issue, p1 first, then oldest, up to the shift's budget.
-        plan = await _lead_plan(workspace_id, mandate_id, shift_no, free, capacity["budget"])
+        plan = await _lead_plan(
+            workspace_id, mandate_id, shift_no, free, capacity["budget"], doc.surface.repo_id
+        )
         # The cloud station owns the lead recipe; the charter declares no command.
         charter_wire = {
             **charter_wire,
@@ -1867,22 +1873,59 @@ async def _approve_plan(
 
 
 async def _lead_plan(
-    workspace_id: str, mandate_id: str, shift_no: int, free: list[dict[str, Any]], budget: int
+    workspace_id: str,
+    mandate_id: str,
+    shift_no: int,
+    free: list[dict[str, Any]],
+    budget: int,
+    repo_id: str,
 ) -> Any:
     """The lead planner's plan (``lead_planner.plan``) over the ``free`` backlog
-    entries, read back as their sightings for the issue's title, labels and age."""
+    entries, read back as their sightings for the issue's title, labels and age,
+    each with its citing tasks and its issue's LIVE labels off the bound repo's
+    cached open issue list (``needs-human`` lands after the sighting is filed)."""
     from pocketpaw_ee.cloud.mandates import lead_planner
+    from pocketpaw_ee.cloud.mandates import patrols as mandate_patrols
 
-    ids = {str(o["id"]) for o in free}
+    entries = {str(o["id"]): o for o in free}
     docs = await SightingDoc.find(
         SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
     ).to_list()
-    sightings = [
-        {"id": str(d.id), "evidence": dict(d.evidence or {}), "ts": d.ts}
-        for d in docs
-        if str(d.id) in ids
-    ]
+    live = {
+        r["number"]: [str(lb.get("name") or "") for lb in r.get("labels") or []]
+        for r in await mandate_patrols.open_issues(repo_id)
+        if isinstance(r.get("number"), int) and isinstance(r.get("labels"), list)
+    }
+    sightings = []
+    for d in docs:
+        entry = entries.get(str(d.id))
+        if entry is None:
+            continue
+        number = str(d.evidence.get("source") or "").rpartition("#")[2]
+        sightings.append(
+            {
+                "id": str(d.id),
+                "evidence": dict(d.evidence or {}),
+                "ts": d.ts,
+                "labels": live.get(int(number)) if number.isdigit() else None,
+                "tasks": list(entry.get("tasks") or []),
+            }
+        )
     return lead_planner.plan(shift_no, sightings, budget)
+
+
+def _require_lead_station(charter: Charter) -> None:
+    """A lead mandate runs only on the cloud develop station: elsewhere the
+    ``feature-lead`` recipe has no command, the run fails and the next shift
+    plans it again. Refuse (422) unless that station is the wired dispatcher."""
+    from pocketpaw_ee.cloud.belt.headless import lead_station_wired
+
+    if charter.run_kind == LEAD_RUN_KIND and not lead_station_wired():
+        raise ValidationError(
+            "mandate.lead_needs_cloud_station",
+            "A feature-lead mandate needs the cloud develop station "
+            "(POCKETPAW_MANDATE_DISPATCHER=headless, POCKETPAW_FACTORY_DEVELOP=cloud)",
+        )
 
 
 async def _lead_gate(

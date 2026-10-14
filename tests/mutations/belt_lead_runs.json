@@ -209,8 +209,8 @@
   {
     "label": "an outage past the timeout never ends the lead",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                    raise self._lead_timeout(lead, issue) from exc",
-    "replace": "                    pass",
+    "find": "                if expired:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd)\n                    return\n                await self.sleep(self.poll_seconds)\n                continue",
+    "replace": "                await self.sleep(self.poll_seconds)\n                continue",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]

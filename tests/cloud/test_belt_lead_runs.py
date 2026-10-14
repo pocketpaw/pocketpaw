@@ -906,5 +906,9 @@ async def test_an_outage_past_the_lead_timeout_still_ends_it(store, dirs, playbo
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
-    assert cc["headless_error"].startswith("TRACK:") and "28800" in cc["headless_error"]
+    # Released and labelled like any timed-out lead, never left as a failure.
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith("feature lead not done after 8h")
+    assert any(a[:3] == ["gh", "issue", "edit"] and "needs-human" in a for a, _ in runner.calls)
+    assert "headless_error" not in action.parameters["_code_change"]

@@ -592,6 +592,16 @@ def set_production_develop_fn(fn: DevelopFn | None) -> None:
     _PRODUCTION_DEVELOP_FN = fn
 
 
+def lead_station_wired() -> bool:
+    """Approved mandate tasks reach a dispatcher that runs feature leads (the
+    cloud station: ``runs_leads``): ``POCKETPAW_MANDATE_DISPATCHER=headless``
+    with it wired. A lead mandate is refused without it."""
+    import os
+
+    choice = (os.environ.get("POCKETPAW_MANDATE_DISPATCHER") or "").strip().lower()
+    return choice == "headless" and bool(getattr(_PRODUCTION_DISPATCHER, "runs_leads", False))
+
+
 def resolve_headless_dispatcher() -> Any:
     """Build the headless dispatcher IF a production develop loop is wired.
 
@@ -615,6 +625,7 @@ __all__ = [
     "DevelopResult",
     "HeadlessDevelopRunner",
     "HeadlessTaskDispatcher",
+    "lead_station_wired",
     "resolve_headless_dispatcher",
     "set_production_develop_fn",
     "set_production_dispatcher",

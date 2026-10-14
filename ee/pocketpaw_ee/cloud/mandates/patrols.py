@@ -668,11 +668,13 @@ async def open_dependencies(
 
 
 async def open_issues(repo_id: str, gh: GhFn | None = None) -> list[dict[str, Any]]:
-    """The bound repo's OPEN GitHub issues (``number``, ``title``, ``body``): the
-    candidates Clef checks a Belt finding against for a duplicate. [] when the
-    repo is not on GitHub or gh fails. Never raises."""
+    """The bound repo's OPEN GitHub issues (``number``, ``title``, ``body``,
+    ``labels``): the candidates Clef checks a Belt finding against for a
+    duplicate, and the live labels the lead planner reads. [] when the repo is
+    not on GitHub or gh fails. Never raises."""
     argv = ["gh", "issue", "list", "--state", "open", "--limit", _GH_PR_LIMIT]
-    _, rows = await _gh_rows(_OPEN_ISSUES, repo_id, [*argv, "--json", "number,title,body"], gh)
+    fields = "number,title,body,labels"
+    _, rows = await _gh_rows(_OPEN_ISSUES, repo_id, [*argv, "--json", fields], gh)
     return rows
 
 
