@@ -31,6 +31,11 @@
 #   * refresh_with_meta: bool   ``refresh`` also gets ``meta=connection.meta``
 #     (the optional ``meta`` on the Protocol; others are called without it)
 #     (a provider whose token endpoint depends on the account, e.g. its region)
+#   * field_options(binding, ctx, key) -> list[SettingOption]   (async) the live
+#     choices of a ``select`` field declared with ``options_source="remote"`` (the
+#     account's audiences, bases, databases). ``binding`` is None when a kind with
+#     no connection has no binding yet. Raise ``ProviderError`` on failure; the
+#     caller caps, de-duplicates and caches the list (field_options.py)
 #
 # Handlers receive an ``ActionContext`` and return a JSON-safe dict that goes to a
 # public caller as ``result``. They must never return a token or a secret.
@@ -53,6 +58,7 @@ from pydantic import BaseModel, ConfigDict
 
 Kind = Literal["builtin", "connect", "embed"]
 FieldType = Literal["url", "text", "select", "link"]
+OptionsSource = Literal["static", "remote"]
 Plan = Literal["free", "site"]
 Availability = Literal["available", "coming_soon", "unconfigured"]
 
@@ -127,6 +133,7 @@ class SettingsField:
     multi: bool = False
     allowed_hosts: tuple[str, ...] = ()
     max_length: int = 500
+    options_source: OptionsSource = "static"
 
 
 @dataclass
@@ -275,3 +282,11 @@ class BaseProvider:
         redirect_uri: str,  # noqa: ARG002
     ) -> str | None:
         return None
+
+    async def field_options(
+        self,
+        binding: Any,  # noqa: ARG002
+        ctx: SetupContext,  # noqa: ARG002
+        key: str,  # noqa: ARG002
+    ) -> list[SettingOption]:
+        return []

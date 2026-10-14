@@ -39,6 +39,9 @@
 #
 # Unlinking a site, or purging it, runs the provider's optional ``site_teardown``
 # hook (best effort) for state the provider created elsewhere (a Turnstile widget).
+#
+# A PUT that changes a remote select (``options_source="remote"``) must pick from
+# the provider's live list (field_options.py); unreachable is a 502, never accepted.
 
 from __future__ import annotations
 
@@ -50,11 +53,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.integrations import field_options, vault
 from pocketpaw_ee.integrations import settings as settings_rules
-from pocketpaw_ee.integrations import vault
 from pocketpaw_ee.integrations.dto import ProviderView, SiteIntegrationPut, SiteIntegrationView
 from pocketpaw_ee.integrations.providers import all_providers, get_provider
-from pocketpaw_ee.integrations.providers.base import IntegrationProvider, SetupContext
+from pocketpaw_ee.integrations.providers.base import IntegrationProvider, SettingOption
 
 logger = logging.getLogger(__name__)
 
@@ -199,17 +202,12 @@ async def run_setup(binding: Any, provider: IntegrationProvider, conn: Any | Non
     hook = getattr(provider, "site_setup", None)
     if hook is None or not _setup_due(binding, provider, conn):
         return
-    ctx = SetupContext(
+    ctx = field_options.setup_context(
         workspace_id=binding.workspace,
         pocket_id=binding.pocket_id,
         user_id=user_id,
         provider=provider.id,
-        connection=conn,
-        get_token=(
-            (lambda rejected="": vault.get_valid_token(conn, rejected=rejected))
-            if conn is not None
-            else None
-        ),
+        conn=conn,
     )
     try:
         written = await hook(binding, ctx) or {}
@@ -307,6 +305,57 @@ async def list_for_pocket(
     return [await to_view(r) for r in sorted(rows, key=lambda r: r.provider) if r.provider in known]
 
 
+async def options_for_field(
+    *, workspace_id: str, user_id: str, pocket_id: str, provider_id: str, key: str
+) -> list[SettingOption]:
+    """``GET .../integrations/{provider}/fields/{key}/options``: a select's choices.
+
+    A static select answers its declared options; a remote one asks the provider
+    (cached). Unknown, hidden or non-select fields are a 404."""
+    provider = provider_or_404(provider_id)
+    await require_edit(workspace_id, user_id, pocket_id)
+    spec = settings_rules.field(provider, key)
+    if spec is None or spec.hidden or spec.type != "select":
+        raise NotFound("integration_field", key)
+    if not settings_rules.is_remote_select(spec):
+        return list(spec.options)
+    row = await _row(workspace_id, pocket_id, provider.id)
+    return await field_options.load(
+        provider,
+        spec,
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+        binding=row,
+        conn=await connection_for(row) if row is not None else None,
+    )
+
+
+async def _remote_allowed(
+    row: Any, provider: IntegrationProvider, keys: list[str], user_id: str
+) -> dict[str, set[str]]:
+    """The live option values of each remote select a PUT changes (409 / 502 on failure)."""
+    if not keys:
+        return {}
+    conn = await connection_for(row)
+    allowed: dict[str, set[str]] = {}
+    for key in keys:
+        spec = settings_rules.field(provider, key)
+        if spec is None:
+            continue
+        options = await field_options.load(
+            provider,
+            spec,
+            workspace_id=row.workspace,
+            pocket_id=row.pocket_id,
+            user_id=user_id,
+            binding=row,
+            conn=conn,
+        )
+        allowed[key] = {o.value for o in options}
+    return allowed
+
+
 # ------------------------------------------------------------------ writes
 
 
@@ -389,9 +438,14 @@ async def upsert(
         setup = setup or (body.connection_id or None) != row.connection_id
         row.connection_id = body.connection_id or None
     if body.settings is not None:
-        merged = _check_settings(
-            settings_rules.merge_put(provider, body.settings, dict(row.settings or {}))
+        current = dict(row.settings or {})
+        remote = await _remote_allowed(
+            row,
+            provider,
+            settings_rules.remote_keys_to_check(provider, body.settings, current),
+            user_id,
         )
+        merged = _check_settings(settings_rules.merge_put(provider, body.settings, current, remote))
         setup = setup or merged != dict(row.settings or {})
         row.settings = merged
     if body.enabled_actions is not None:

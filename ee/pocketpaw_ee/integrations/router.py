@@ -9,6 +9,8 @@
 #   GET    /sites/by-pocket/{pocket_id}/integrations     SiteIntegrationView[]
 #   PUT    /sites/by-pocket/{pocket_id}/integrations/{provider}
 #   DELETE /sites/by-pocket/{pocket_id}/integrations/{provider}   204, grant survives
+#   GET    /sites/by-pocket/{pocket_id}/integrations/{provider}/fields/{key}/options
+#                                                        {options} (select choices; 409/502)
 #   GET    /sites/by-pocket/{pocket_id}/integrations/newsletter/export.csv  (owner)
 #   GET    /sites/by-pocket/{pocket_id}/orders?limit&cursor
 #
@@ -27,8 +29,9 @@
 #   POST /integrations/social/redeem          PAW_GATEWAY_TOKEN + ticket + nonce
 #                                            (all three: social_broker.py)
 #
-# Wire shapes are pinned by the Wave 0 contract and its Wave 1 addendum; see dto.py. Mounted in
-# ``cloud.mount_cloud``; both routers are in tests/cloud/auth/test_route_auth_audit.py.
+# Wire shapes are pinned by the Wave 0 contract and its Wave 1 / Wave 2 addenda;
+# see dto.py. Mounted in ``cloud.mount_cloud``; both routers are in
+# tests/cloud/auth/test_route_auth_audit.py.
 
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ from pocketpaw_ee.integrations.dto import (
     ConnectBody,
     ConnectionView,
     ConnectResponse,
+    FieldOptionsView,
     OrdersPage,
     ProviderView,
     SiteIntegrationPut,
@@ -172,6 +176,27 @@ async def put_site_integration(
         body=body,
         is_admin=is_admin,
     )
+
+
+@router.get(
+    _SITE + "/integrations/{provider}/fields/{key}/options", response_model=FieldOptionsView
+)
+async def field_options(
+    pocket_id: str,
+    provider: str,
+    key: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> FieldOptionsView:
+    """A select's choices; remote ones come from the provider (cached 60s)."""
+    options = await bindings.options_for_field(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        provider_id=provider,
+        key=key,
+    )
+    return FieldOptionsView(options=[{"value": o.value, "label": o.label} for o in options])
 
 
 @router.delete(_SITE + "/integrations/{provider}", status_code=204)

@@ -1,6 +1,6 @@
 # ee/pocketpaw_ee/integrations/dto.py: the wire shapes of the integrations API.
 #
-# Pinned by the Wave 0 wire contract and its Wave 1 addendum
+# Pinned by the Wave 0 wire contract and its Wave 1 / Wave 2 addenda
 # (docs/design/drafts/2026-10-13-sites-integrations.md in paw-workspace):
 # paw-enterprise and paw-sites' paw.js build against these field names and enum
 # values, so rename nothing; changes are additive. No view carries a token.
@@ -44,6 +44,9 @@ class SettingsFieldView(BaseModel):
     multi: bool = False
     allowed_hosts: list[str] | None = None
     max_length: int | None = None
+    # "remote": the select's options load from
+    # GET /sites/by-pocket/{pocket_id}/integrations/{provider}/fields/{key}/options.
+    options_source: Literal["static", "remote"] = "static"
 
 
 class ProviderView(BaseModel):
@@ -97,6 +100,10 @@ class OrderView(BaseModel):
     customer_email: str | None = None
     items: list[OrderItemView] = Field(default_factory=list)
     created_at: datetime | None = None
+
+
+class FieldOptionsView(BaseModel):
+    options: list[SettingOptionView] = Field(default_factory=list)
 
 
 class OrdersPage(BaseModel):
