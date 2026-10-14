@@ -87,7 +87,16 @@ async def _queue_lead(store, repo: Path, *, task: str | None = None) -> str:
     return run_ref
 
 
-def _lead_pr(number: int, run_ref: str, *, state="OPEN", done=False, at: float = 0.0) -> dict:
+def _lead_pr(
+    number: int,
+    run_ref: str,
+    *,
+    state="OPEN",
+    done=False,
+    at: float = 0.0,
+    sha: str = MERGE_SHA,
+    merged: str = "2026-01-01T00:00:00Z",
+) -> dict:
     labels = [{"name": "fast-lane"}] + ([{"name": "feature-done"}] if done else [])
     return {
         "number": number,
@@ -97,7 +106,8 @@ def _lead_pr(number: int, run_ref: str, *, state="OPEN", done=False, at: float =
         "labels": labels,
         "headRefName": f"lead/{FEATURE}-{number}",
         "updatedAt": _iso(at) if at else "2020-01-01T00:00:00Z",
-        "mergeCommit": {"oid": MERGE_SHA} if state == "MERGED" else None,
+        "mergeCommit": {"oid": sha} if state == "MERGED" else None,
+        "mergedAt": merged if state == "MERGED" else None,
     }
 
 
@@ -118,6 +128,9 @@ class LeadRunner:
         ci: list[list[dict]] | None = None,
         issue_body: str = "",
         launches: int = 99,
+        ci_by_sha: dict[str, list[dict]] | None = None,
+        nudge_codes: list[int] | None = None,
+        fail: dict[str, int] | None = None,
     ):
         self.calls: list[tuple[list[str], Path]] = []
         self.prs = prs or [[]]
@@ -127,6 +140,12 @@ class LeadRunner:
         self.issue_body = issue_body
         self.launches_left = launches
         self.wall = time.time
+        self.ci_by_sha = ci_by_sha or {}  # dev CI runs per merge commit, over ``ci``
+        self.nudge_codes = nudge_codes or [0]  # exit code per ``claude -p --cloud``
+        # gh reads to fail transiently, by "pr list" / "issue view": calls left.
+        self.fail = dict(fail or {})
+        self.locked_at_nudge: list[bool] = []
+        self.on_pr_list = None  # called on each ``gh pr list``, before it answers
 
     @staticmethod
     def _next(seq: list):
@@ -139,11 +158,23 @@ class LeadRunner:
         if "rev-parse" in argv and "HEAD" in argv and "--abbrev-ref" not in argv:
             return 0, f"{HEAD_SHA}\n", ""
         if "-p" in argv and "--cloud" in argv:
-            return 0, "Sent.\n", ""
+            self.locked_at_nudge.append(cloud_station._LAUNCH_LOCK.locked())
+            code = self._next(self.nudge_codes)
+            return (
+                code,
+                "" if code else "Sent to cloud session.\n",
+                "session not found" * bool(code),
+            )
         if "--cloud" in argv:
             n = sum("--cloud" in a and "-p" not in a for a, _ in self.calls)
             return 0, f"Created cloud session: https://claude.ai/code/session_L{n}\r\n", ""
+        key = " ".join(argv[1:3])
+        if self.fail.get(key):
+            self.fail[key] -= 1
+            return 1, "", "Post https://api.github.com/graphql: HTTP 502 Bad Gateway"
         if argv[:3] == ["gh", "pr", "list"]:
+            if self.on_pr_list is not None:
+                await self.on_pr_list()
             return 0, json.dumps(self._next(self.prs)), ""
         if argv[:3] == ["gh", "issue", "view"]:
             data = {"comments": self._next(self.comments), "title": "Text shapes"}
@@ -154,6 +185,9 @@ class LeadRunner:
                 return 1, "", "gh: Not Found (HTTP 404)"
             return 0, json.dumps({"commit": {"committer": {"date": _iso(at)}}}), ""
         if argv[:3] == ["gh", "run", "list"]:
+            sha = argv[argv.index("--commit") + 1]
+            if sha in self.ci_by_sha:
+                return 0, json.dumps(self.ci_by_sha[sha]), ""
             return 0, json.dumps(self._next(self.ci)), ""
         return 0, "", ""  # git fetch / checkout, gh label / issue edit
 
@@ -691,3 +725,172 @@ async def test_a_run_handed_to_a_headless_develop_again_drops_its_old_error(stor
 
     cc = (await store.get_action(run_ref)).parameters["_code_change"]
     assert cc["headless_state"] == "queued" and "headless_error" not in cc
+
+
+# -- review fixes: newest done PR, settled runs, the ladder, outages ----------
+
+RED_RUN = {**GREEN_RUN, "conclusion": "failure"}
+
+
+async def test_the_newest_feature_done_pr_decides_done(store, dirs, playbook):
+    """A first ``feature-done`` PR that broke dev CI is superseded by a later
+    one: the lead lands on the newest merged ``feature-done`` PR, never stuck
+    on the first."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref)
+    first = _lead_pr(
+        32, run_ref, state="MERGED", done=True, sha="b" * 40, merged="2026-10-14T08:00:00Z"
+    )
+    fixed = _lead_pr(
+        35, run_ref, state="MERGED", done=True, sha="c" * 40, merged="2026-10-14T09:00:00Z"
+    )
+    runner.prs = [[first], [first, fixed]]
+    runner.ci_by_sha = {"b" * 40: [RED_RUN], "c" * 40: [GREEN_RUN]}
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    cc = action.parameters["_code_change"]
+    assert cc["pr_url"].endswith("/pull/35") and cc["commit_sha"] == "c" * 40
+
+
+async def test_newest_done_pr_is_by_merge_time_not_number(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref)
+    late = _lead_pr(
+        32, run_ref, state="MERGED", done=True, sha="c" * 40, merged="2026-10-14T09:00:00Z"
+    )
+    early = _lead_pr(
+        35, run_ref, state="MERGED", done=True, sha="b" * 40, merged="2026-10-14T08:00:00Z"
+    )
+    runner.prs = [[late, early]]
+    runner.ci_by_sha = {"b" * 40: [RED_RUN], "c" * 40: [GREEN_RUN]}
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert cc["pr_url"].endswith("/pull/32")
+
+
+@pytest.mark.parametrize("settle", ["reject", "approve"])
+async def test_a_settled_lead_is_no_longer_tracked(store, dirs, playbook, settle):
+    """A human who rejects or approves the run mid-flight ends its tracker at
+    the next poll: no nudge, no relaunch, no needs-human."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()  # silent: the ladder would act if tracking went on
+    polls = [0]
+
+    async def on_pr_list() -> None:
+        polls[0] += 1
+        if polls[0] == 2:
+            if settle == "reject":
+                await store.reject(run_ref, reason="not now", rejector="u1")
+            else:
+                await store.auto_approve(run_ref, approver="u1", verdict="ok", reasoning="by hand")
+
+    runner.on_pr_list = on_pr_list
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert polls[0] == 2
+    assert not _nudges(runner) and len(_launch_briefs(runner)) == 1
+    assert not any(a[:3] == ["gh", "issue", "edit"] for a, _ in runner.calls)
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert not cc["lead"].get("stalls") and "headless_error" not in cc
+
+
+async def test_activity_after_a_nudge_resets_the_ladder(store, dirs, playbook):
+    """A lead the nudge revived starts the ladder over on its next quiet
+    window: a nudge again, never a relaunch of a session that just worked."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+    disp = _lead_dispatcher(runner, launch)
+    start = runner.wall()
+    # Silent to 30 min (a nudge), one commit at 40 min, then silent for good.
+    runner.commits = [None] * 40 + [start + 2400]
+
+    await disp.run(run_ref, workspace_id=WS)
+
+    lead = (await store.get_action(run_ref)).parameters["_code_change"]["lead"]
+    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "nudge", "relaunch", "needs-human"]
+    assert lead["stalls"][1]["at"] >= start + 2400 + 1800  # a full quiet window after it
+
+
+async def test_a_failed_nudge_never_leads_to_a_relaunch(store, dirs, playbook):
+    """A nudge that exits non-zero is recorded and counts as a rung, but it
+    proves nothing about the session: the next rung nudges again instead of
+    relaunching beside a session that may still be live."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner(nudge_codes=[1, 0])
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    stalls = action.parameters["_code_change"]["lead"]["stalls"]
+    assert [s["kind"] for s in stalls] == ["nudge", "nudge", "needs-human"]
+    assert "session not found" in stalls[0]["error"] and "error" not in stalls[1]
+    assert len(_launch_briefs(runner)) == 1  # never relaunched
+    assert action.status == ActionStatus.REJECTED
+
+
+async def test_the_nudge_holds_the_launch_lock(store, dirs, playbook):
+    """The nudge runs in the shared launch clone: never beside a launch."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert runner.locked_at_nudge and all(runner.locked_at_nudge)
+
+
+async def test_a_fresh_run_starts_the_ladder_over(store, dirs, playbook):
+    """A human retry of a lead that was flagged starts from a nudge, not from
+    the old run's ladder (which would flag it again at the first stall)."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    old = [{"kind": "nudge", "at": 1.0}, {"kind": "relaunch", "at": 2.0}]
+    await cloud_station._patch(store, run_ref, lead={"feature": FEATURE, "stalls": old})
+    runner = LeadRunner()
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    lead = (await store.get_action(run_ref)).parameters["_code_change"]["lead"]
+    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "relaunch", "needs-human"]
+    assert all(s["at"] > 2.0 for s in lead["stalls"])  # none of the old run's
+    assert len(_nudges(runner)) == 1 and len(_launch_briefs(runner)) == 2
+
+
+@pytest.mark.parametrize("read", ["pr list", "issue view"])
+async def test_a_github_outage_skips_polls_instead_of_ending_the_lead(store, dirs, playbook, read):
+    """A gh read that fails past its retries skips that poll; the tracker goes
+    on and lands the lead once GitHub answers again."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref, fail={read: 10})  # 2+ polls' worth of retries
+
+    disp = _lead_dispatcher(runner, launch)
+    await disp.run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert "headless_error" not in action.parameters["_code_change"]
+    calls = sum(" ".join(a[1:3]) == read for a, _ in runner.calls)
+    assert calls > disp.gh_retries + 1  # it came back for another poll
+
+
+async def test_an_outage_past_the_lead_timeout_still_ends_it(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner(fail={"pr list": 10**6})
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert cc["headless_error"].startswith("TRACK:") and "28800" in cc["headless_error"]
