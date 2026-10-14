@@ -1131,9 +1131,8 @@ def _enabled_platforms() -> set[str]:
 def _account_platforms() -> list[SocialAccountPlatformResponse]:
     enabled = _enabled_platforms()
     return [
-        SocialAccountPlatformResponse(id=i, label=label)
+        SocialAccountPlatformResponse(id=i, label=label, available=i in enabled)
         for i, label in SOCIAL_ACCOUNT_PLATFORMS
-        if i in enabled
     ]
 
 

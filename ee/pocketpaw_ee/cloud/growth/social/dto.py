@@ -387,6 +387,7 @@ class SocialAccountResponse(BaseModel):
 class SocialAccountPlatformResponse(BaseModel):
     id: str
     label: str
+    available: bool
 
 
 class SocialAccountListResponse(BaseModel):

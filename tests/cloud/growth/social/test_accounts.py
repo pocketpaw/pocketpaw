@@ -229,7 +229,9 @@ async def test_only_configured_platforms_are_offered(w1, postiz, monkeypatch):
         lambda: SimpleNamespace(postiz_url=None, postiz_jwt_secret=None, postiz_platforms="x"),
     )
     await _profile(w1)
-    assert (await w1.get(ACCOUNTS)).json()["platforms"] == [{"id": "x", "label": "X"}]
+    platforms = (await w1.get(ACCOUNTS)).json()["platforms"]
+    assert len(platforms) == 13 and platforms[0] == {"id": "x", "label": "X", "available": True}
+    assert [p["id"] for p in platforms if p["available"]] == ["x"]
     resp = await w1.post(CONNECT, json={"platform": "linkedin"}, headers=LOCAL)
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "social.platform_unavailable"

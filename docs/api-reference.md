@@ -7820,7 +7820,7 @@ routes take `?profile_id=` like the rest.
 
 | Route | What it does |
 |---|---|
-| `GET /accounts` (`growth.read`) | `{items: [{id, platform, name, username, picture, disabled}], platforms: [{id, label}], configured}`. `platform` is the Postiz provider id, `username` the account handle (or `null`). `configured: false` means this deployment has no Postiz; `items` is empty then. |
+| `GET /accounts` (`growth.read`) | `{items: [{id, platform, name, username, picture, disabled}], platforms: [{id, label, available}], configured}`. `platform` is the Postiz provider id, `username` the account handle (or `null`). `configured: false` means this deployment has no Postiz; `items` is empty then. |
 | `POST /accounts/connect` (`growth.manage`) | `{platform}` → `{url, telegram}`. For every platform but Telegram, `url` is the platform's authorize URL and `telegram` is `null`: open the URL in the browser; after consent it returns to `<origin>/growth/social/accounts?added=<platform>`. The origin is the caller's (`Origin`, then `Referer`) when it is on the CORS allowlist, else `POCKETPAW_FRONTEND_BASE_URL`; it is never read from the body. For `telegram`, `url` is `null` and `telegram` is `{code, bot_name, expires_at}` (see Telegram below). |
 | `POST /accounts/telegram/check` (`growth.manage`) | `{code}` → `{status: "pending" \| "connected", account}`. `account` is the new account (shape as in `items`) once connected, else `null`. Poll it after showing the code. |
 | `DELETE /accounts/{account_id}` (`growth.manage`) | Disconnect one account. `204`. |
@@ -7828,9 +7828,10 @@ routes take `?profile_id=` like the rest.
 `platforms` (in order): `x`, `linkedin`, `linkedin-page`, `facebook`,
 `instagram-standalone`, `threads`, `youtube`, `tiktok`, `reddit`, `pinterest`,
 `dribbble`, `slack`, `telegram`.
-`POCKETPAW_POSTIZ_PLATFORMS` (comma-separated, e.g. `x,linkedin`) limits
-them to the providers this deployment has developer apps for; connecting any
-other returns `social.platform_unavailable`. Unset offers all of them.
+Every supported platform is always listed. `available` is false for the ones
+outside `POCKETPAW_POSTIZ_PLATFORMS` (comma-separated, e.g. `x,linkedin`: the
+providers this deployment has developer apps for); connecting one returns
+`social.platform_unavailable`. Unset makes all of them available.
 
 **Telegram** has no OAuth. Connect stores a Postiz connect code on the
 profile (valid 55 minutes; a new connect replaces it) and returns it with the
