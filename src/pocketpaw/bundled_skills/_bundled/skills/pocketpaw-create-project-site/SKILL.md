@@ -73,7 +73,9 @@ refusal is the owner's call in the publish dialog.
    `.dev.vars`; only names go in `.dev.vars.example`.
    Payments, newsletter, CRM: call `connect_site_integration` (the owner taps
    Connect), never `request_site_secret` for an API key. Server code calls the
-   gateway with `env.PAW_GATEWAY_TOKEN`.
+   gateway with `env.PAW_GATEWAY_TOKEN`. Selling: connect `stripe`, then call
+   `stripe`/`create_checkout` with `{product_ref: <catalog product id>, qty}` and
+   redirect to `result.url`; the price comes from the catalog, never your code.
 5. Design, before the first UI file. Run the research gate from the site
    preamble: search real sites, open about 3 references, fetch the one you lock,
    and state the locked direction (palette, type pairing, layout idea) in one

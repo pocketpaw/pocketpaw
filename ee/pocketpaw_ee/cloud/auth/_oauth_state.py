@@ -92,6 +92,25 @@ async def issue(
     return state
 
 
+async def peek(namespace: str, state: str) -> dict[str, Any] | None:
+    """Read a live state's payload WITHOUT redeeming it; None when absent or malformed.
+
+    For a provider that must bind server-side data to the flow it is starting
+    (Stripe binds the account it created to the flow's PKCE verifier). Never use
+    it to authorize a callback: only ``consume`` is single-use.
+    """
+    if not state:
+        return None
+    raw = await redis_client.get_redis().get(_key(namespace, state))
+    if raw is None:
+        return None
+    try:
+        loaded = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
 async def consume(namespace: str, state: str) -> dict[str, Any]:
     """Redeem ``state`` exactly once and return its payload.
 

@@ -228,6 +228,11 @@ use `request_site_secret` for one. The generator injects `paw.js`, so wire the
 markup and write no fetch code:
 
 - a buy button: `<button data-paw-checkout="<product ref>">Buy</button>`
+
+Selling: call `connect_site_integration(pocket_id, 'stripe', purpose)` first. Each
+buy button's `data-paw-checkout` is a catalog product id (add `data-qty="2"` for a
+fixed quantity). The price is read from the catalog at checkout, so the amount you
+print is display only: never put a price or currency in the button's data.
 - a signup: `<form data-paw-subscribe>` with an `<input type="email" name="email">`
 - anything else: `Paw.call(provider, action, args)` in a small inline script
 

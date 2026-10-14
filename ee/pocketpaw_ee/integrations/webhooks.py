@@ -1,15 +1,23 @@
 # ee/pocketpaw_ee/integrations/webhooks.py: provider webhook ingress and site orders.
 #
 #   POST /integrations/webhooks/{provider}
-#     1. the provider verifies the signature -> NormalizedEvent, or 401
+#     1. the provider verifies the signature -> NormalizedEvent, or 401. A verified
+#        event of a type we don't use comes back as ``ignored`` and is acked as is
 #     2. an event id already in ``IntegrationWebhookEvent`` answers 200 duplicate
 #     3. route to ONE site (see ``_site_for``): a named site must be bound through a
 #        connection with the event's ``account_ref``; the account_ref-only fallback
 #        refuses ambiguity. Unroutable events are acked 200 and not recorded.
 #     4. ``order.*`` events upsert a ``SiteOrder`` (unique provider + external id).
-#        A failure answers 500 and records nothing, so the provider retries.
+#        A failure answers 500 and records nothing, so the provider retries. With
+#        ``data.only_if_exists`` an event updates an existing order and never makes
+#        one (a failed card attempt is not an order). A late pending never undoes a
+#        settled order, and a late failed never undoes a paid or refunded one.
 #     5. only then the event id is recorded (unique index), and
 #        ``integrations.event`` goes on the in-process bus with identifiers only
+#
+#   ``connection.updated`` is account-level, not site-level: it skips step 3, merges
+#   ``data.meta`` into every live connection with that provider + account_ref, and
+#   tells each bound site its recomputed status (``site.integration_changed``).
 #
 #   list_orders: GET /sites/by-pocket/{pocket_id}/orders, newest first, cursor = the
 #   last row's id. Amounts are ISO 4217 minor units. Customer emails are masked
@@ -42,6 +50,9 @@ _ORDER_STATUS = {
 }
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 MAX_ORDERS_PAGE = 100
+IGNORED = "ignored"
+CONNECTION_UPDATED = "connection.updated"
+_META_VALUE = (str, int, float, bool, type(None))
 
 
 def _err(code: str, status: int, message: str) -> JSONResponse:
@@ -115,6 +126,8 @@ async def ingest(provider_id: str, request: Request) -> JSONResponse:
         event = None
     if event is None:
         return _err("unauthorized", 401, "Signature check failed.")
+    if event.type == IGNORED:
+        return JSONResponse({"ok": True, "ignored": True})
 
     already = await IntegrationWebhookEvent.find_one(
         IntegrationWebhookEvent.provider == provider.id,
@@ -122,6 +135,9 @@ async def ingest(provider_id: str, request: Request) -> JSONResponse:
     )
     if already is not None:
         return JSONResponse({"ok": True, "duplicate": True})
+
+    if event.type == CONNECTION_UPDATED:
+        return await _connection_updated(event)
 
     site, binding = await _site_for(event)
     if binding is None:
@@ -199,6 +215,8 @@ async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
     row = await SiteOrder.find_one(
         SiteOrder.provider == event.provider, SiteOrder.external_id == external_id
     )
+    if row is None and data.get("only_if_exists"):
+        return
     if row is None:
         row = SiteOrder(
             workspace=binding.workspace,
@@ -210,8 +228,10 @@ async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
     elif row.workspace != binding.workspace or row.pocket_id != binding.pocket_id:
         logger.warning("integrations: order %s belongs to another site, ignored", row.id)
         return
-    # A late "pending" never undoes a settled order.
-    if not (status == "pending" and row.status != "pending"):
+    # A late "pending" never undoes a settled order, a late "failed" never a paid one.
+    late_pending = status == "pending" and row.status != "pending"
+    late_failed = status == "failed" and row.status in ("paid", "refunded")
+    if not (late_pending or late_failed):
         row.status = status
     if "amount_minor" in data:
         row.amount_minor = _int(data.get("amount_minor"))
@@ -225,6 +245,57 @@ async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
     if items:
         row.items = items
     await row.save()
+
+
+async def _connection_updated(event: NormalizedEvent) -> JSONResponse:
+    """Merge the provider's non-secret account state into its connections."""
+    from pymongo.errors import DuplicateKeyError
+
+    from pocketpaw_ee.cloud._core.errors import NotFound
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection as Conn
+    from pocketpaw_ee.cloud.models.integration import IntegrationWebhookEvent
+
+    if not event.account_ref:
+        return JSONResponse({"ok": True, "routed": False})
+    raw = event.data.get("meta")
+    meta = {
+        str(k)[:64]: v
+        for k, v in (raw.items() if isinstance(raw, dict) else ())
+        if isinstance(v, _META_VALUE)
+    }
+    try:
+        conns = await Conn.find(
+            Conn.provider == event.provider,
+            Conn.account_ref == event.account_ref,
+            Conn.status != "revoked",
+        ).to_list()
+        for conn in conns:
+            conn.meta = {**(conn.meta or {}), **meta}
+            await conn.save()
+    except Exception:  # noqa: BLE001 - unrecorded, so the provider's retry reprocesses
+        logger.exception("integrations: %s event %s failed to process", event.provider, event.id)
+        return _err("provider_error", 500, "Could not process the event. Retry later.")
+    if not conns:
+        return JSONResponse({"ok": True, "routed": False})
+    try:
+        await IntegrationWebhookEvent(
+            provider=event.provider,
+            event_id=event.id,
+            event_type=event.type,
+            workspace=conns[0].workspace,
+        ).insert()
+    except DuplicateKeyError:
+        return JSONResponse({"ok": True, "duplicate": True})
+    provider = get_provider(event.provider)
+    for conn in conns:
+        for row in await bindings.bindings_for_connection(str(conn.id)):
+            try:
+                pocket = await bindings.pocket_in_workspace(row.workspace, row.pocket_id)
+            except NotFound:
+                continue
+            status = bindings.binding_status(row, provider, conn) if provider else "connected"
+            await bindings.emit_changed(pocket, row.provider, status, "")
+    return JSONResponse({"ok": True})
 
 
 async def _emit(event: NormalizedEvent, binding: Any, site: Any) -> None:
