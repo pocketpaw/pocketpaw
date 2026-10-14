@@ -17,7 +17,8 @@
 # any one missing keeps the run tracking.
 # STALL: 30 min with no lead-branch commit, PR update or issue comment: a
 # ``claude -p --cloud <session>`` nudge, then a relaunch with the resume brief,
-# then ``needs-human`` on the issue and the run released. Activity holds it off.
+# then ``needs-human`` on the issue and the run released, the reason naming the
+# rungs that ran ("after two nudges" when no relaunch did). Activity holds it off.
 # TIMEOUT: 8 h from the launch, and no 1 h no-PR rule.
 # RESUME: a launched lead is tracked again as a lead, never relaunched.
 # LESSON 42: a transient gh failure is retried with backoff; a permanent one
@@ -441,6 +442,7 @@ async def test_silent_lead_is_nudged_then_relaunched_then_flagged(store, dirs, p
     assert any(a[:3] == ["gh", "issue", "edit"] and "needs-human" in a for a, _ in runner.calls)
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason == "feature lead silent 30m after a nudge and a relaunch"
     lead = action.parameters["_code_change"]["lead"]
     assert [s["kind"] for s in lead["stalls"]] == ["nudge", "relaunch", "needs-human"]
     assert [s["session_url"] for s in lead["sessions"]] == [
@@ -837,6 +839,8 @@ async def test_a_failed_nudge_never_leads_to_a_relaunch(store, dirs, playbook):
     assert "session not found" in stalls[0]["error"] and "error" not in stalls[1]
     assert len(_launch_briefs(runner)) == 1  # never relaunched
     assert action.status == ActionStatus.REJECTED
+    # The reason names the rungs that ran: no relaunch on this path.
+    assert action.rejected_reason == "feature lead silent 30m after two nudges"
 
 
 async def test_the_nudge_holds_the_launch_lock(store, dirs, playbook):

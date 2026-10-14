@@ -235,6 +235,22 @@ def _tester_resumable(blob: dict[str, Any], timeout: float) -> bool:
     )
 
 
+_COUNTS = {1: "a", 2: "two", 3: "three"}
+
+
+def _rungs(ladder: list[dict[str, Any]]) -> str:
+    """The stall rungs that ran, in order: ``a nudge and a relaunch``, ``two nudges``."""
+    seen: dict[str, int] = {}
+    for rung in ladder:
+        kind = str(rung.get("kind") or "rung")
+        seen[kind] = seen.get(kind, 0) + 1
+    parts = []
+    for kind, n in seen.items():
+        plural = kind + ("es" if kind.endswith("h") else "s")
+        parts.append(f"{_COUNTS.get(n, str(n))} {kind if n == 1 else plural}")
+    return " and ".join(parts)
+
+
 def _is_lead(blob: dict[str, Any]) -> bool:
     return str(blob.get("recipe") or "") == LEAD_RECIPE
 
@@ -715,7 +731,7 @@ class CloudTaskDispatcher:
                 store,
                 run_ref,
                 blob,
-                f"feature lead silent {minutes:.0f}m after a nudge and a relaunch",
+                f"feature lead silent {minutes:.0f}m after {_rungs(ladder)}",
             )
             return False
         if not ladder or not delivered:
