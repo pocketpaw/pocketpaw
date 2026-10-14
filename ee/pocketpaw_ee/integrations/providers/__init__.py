@@ -16,6 +16,7 @@ from pocketpaw_ee.integrations.providers.demo import DemoProvider, demo_enabled
 from pocketpaw_ee.integrations.providers.google_sheets import GoogleSheetsProvider
 from pocketpaw_ee.integrations.providers.hubspot import HubSpotProvider
 from pocketpaw_ee.integrations.providers.newsletter import NewsletterProvider
+from pocketpaw_ee.integrations.providers.razorpay import RazorpayProvider
 from pocketpaw_ee.integrations.providers.scheduling import CalComProvider, CalendlyProvider
 from pocketpaw_ee.integrations.providers.social_login import SocialLoginProvider
 from pocketpaw_ee.integrations.providers.stripe import StripeProvider
@@ -33,6 +34,7 @@ _PROVIDERS: tuple[IntegrationProvider, ...] = (
     StripeProvider(),
     SocialLoginProvider(),
     ZohoCrmProvider(),
+    RazorpayProvider(),
 )
 
 _DEMO = DemoProvider()
