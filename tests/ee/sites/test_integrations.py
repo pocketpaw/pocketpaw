@@ -947,7 +947,7 @@ async def test_connect_tool_pushes_the_card_and_creates_the_binding(beanie_test_
     )
     assert builtin["site_integration"]["status"] == "connected"
     unknown = await sites_create._connect_site_integration_handler(
-        {"pocket_id": pid, "provider": "stripe", "purpose": "x"}
+        {"pocket_id": pid, "provider": "nope", "purpose": "x"}
     )
     assert unknown.get("is_error") and "newsletter" in unknown["content"][0]["text"]
 
