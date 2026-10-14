@@ -944,6 +944,25 @@ async def _turnstile_build_kwargs(workspace_id: str, pocket_id: str) -> dict[str
     return {"turnstile_site_key": key} if key else {}
 
 
+async def _turnstile_after_publish(workspace_id: str, pocket_id: str, sitekey: str) -> None:
+    try:
+        from pocketpaw_ee.integrations.providers import turnstile
+
+        await turnstile.after_publish(workspace_id, pocket_id, sitekey)
+    except Exception:  # noqa: BLE001 - the site is already live
+        logger.warning("sites: turnstile post-publish step failed", exc_info=True)
+
+
+async def _turnstile_resync(site: Any) -> None:
+    """A custom domain went live or was removed: re-domain the site's widget."""
+    try:
+        from pocketpaw_ee.integrations.providers import turnstile
+
+        await turnstile.resync_site(site)
+    except Exception:  # noqa: BLE001
+        logger.warning("sites: turnstile domain re-sync failed", exc_info=True)
+
+
 async def _build_or_cloud_error(
     generator: GeneratorClient, *, map_smoke_gate: bool = True, **build_kwargs: Any
 ) -> Any:
@@ -2976,6 +2995,9 @@ async def _deploy_site_doc(
     # the owner confirmed it (``project_d1``). Ignored by every other engine.
     confirm_destructive_migrations: bool = False,
     confirm_do_data_loss: list[str] | None = None,
+    # The Turnstile sitekey a PREBUILT artifact was built with (the async lane puts
+    # it in ``deploy_inputs``). An inline build looks its own up.
+    turnstile_site_key: str = "",
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -3093,6 +3115,7 @@ async def _deploy_site_doc(
     else:
         # Same rule for the site's Turnstile sitekey: present only when linked.
         _asset_kwargs.update(await _turnstile_build_kwargs(workspace_id, pocket_id))
+        turnstile_site_key = _asset_kwargs.get("turnstile_site_key", "")
         build = await _build_or_cloud_error(
             gen,
             ripple_spec=ripple_spec,
@@ -3505,6 +3528,10 @@ async def _deploy_site_doc(
     # Browser Rendering being configured — a deployment that gets no screenshots at
     # all still gets its cards' marks.
     _schedule_site_favicon(doc)
+    # The live build now carries ``turnstile_site_key`` (or none): the gateway may
+    # enforce that widget from here on, and a first publish whose URL only just
+    # became known gets its widget for the next one. Never fails the publish.
+    await _turnstile_after_publish(workspace_id, pocket_id, turnstile_site_key)
     return doc
 
 
@@ -5307,6 +5334,7 @@ async def _enqueue_static_build(
         doc.script_name = site_id
         await doc.save()
 
+    turnstile_kwargs = await _turnstile_build_kwargs(workspace_id, pocket_id)
     generator_input = build_generator_input(
         engine=engine,
         theme=theme,
@@ -5319,7 +5347,7 @@ async def _enqueue_static_build(
         assets=assets,
         builder_origin=builder_origin,
         keeps_client_bundle=keeps_client_bundle,
-        **await _turnstile_build_kwargs(workspace_id, pocket_id),
+        **turnstile_kwargs,
     )
     # The inputs the worker hands back to ``deploy_prebuilt_site`` so the deploy tail
     # runs with exactly what this publish captured, not with whatever the pocket's
@@ -5334,6 +5362,7 @@ async def _enqueue_static_build(
         "engine": engine,
         "pattern": pattern,
         "builder_origin": builder_origin,
+        **turnstile_kwargs,
     }
 
     # An enqueue failure PROPAGATES. The helper rolls the row to a terminal status
@@ -6029,6 +6058,10 @@ async def build_provision_bundle(
     caller applies migrations against ``project_dir`` (which carries wrangler.toml +
     migrations/) BEFORE deploying ``bundle``. ``generator`` is the test-injection
     seam; None uses a real ``GeneratorClient``."""
+    # This build carries no Turnstile sitekey, so stop enforcing a per-site widget
+    # the next live page can't render (the next regular publish restores it).
+    if site.pocket_id:
+        await _turnstile_after_publish(site.workspace, site.pocket_id, "")
     gen = generator or GeneratorClient()
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
     site_id = str(site.id)
@@ -6678,6 +6711,7 @@ async def remove_domain(
     # A DO site's Worker accepts WebSockets from its origins; drop this one live.
     if dom.status == "live":
         await _refresh_do_origins(site, cf)
+        await _turnstile_resync(site)
     # no-event: no SiteDomain event type exists — add_domain does not emit one either,
     # and inventing a half of the pair here would leave connects silent and
     # disconnects loud. Both belong in the reconciler work the design defers.
@@ -6702,8 +6736,10 @@ async def domain_status(
     dom.status = status.value
     await site.save()
     if was_live != (dom.status == "live"):
-        # Into or out of ``live``: a DO site's allowed WebSocket origins changed.
+        # Into or out of ``live``: a DO site's allowed WebSocket origins changed,
+        # and so did the hosts its Turnstile widget must cover.
         await _refresh_do_origins(site, cf)
+        await _turnstile_resync(site)
     return DomainStatusResponse(
         hostname=dom.hostname, cname_target=dom.cname_target, status=status.value
     )

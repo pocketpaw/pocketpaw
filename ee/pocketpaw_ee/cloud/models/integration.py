@@ -79,6 +79,10 @@ class SiteIntegration(TimestampedDocument):
     # A credential the provider minted for this binding (the Turnstile widget
     # secret), Fernet-encrypted with ``cloud._core.crypto``. Never in a view.
     secret_ciphertext: str = ""
+    # The Turnstile sitekey baked into the site's live build ("" when the last
+    # publish carried none). The gateway enforces the per-site widget only while it
+    # equals the current sitekey, so a build that can't render it is never refused.
+    deployed_sitekey: str = ""
 
     class Settings:
         name = "site_integrations"

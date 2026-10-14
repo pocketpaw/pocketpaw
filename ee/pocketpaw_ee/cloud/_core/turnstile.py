@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 TURNSTILE_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
 
+def _bare_host(value: str) -> str:
+    """Lowercased host without a port or trailing dot (``WWW.a.com:443`` -> ``www.a.com``)."""
+    host = value.strip().lower()
+    if not host.startswith("["):
+        host = host.split(":", 1)[0]
+    return host.rstrip(".")
+
+
 async def verify_turnstile(
     token: str,
     remote_ip: str | None,
@@ -65,8 +73,8 @@ async def verify_turnstile(
             body = resp.json() if resp.status_code == 200 else {}
             ok = body.get("success") is True
             if ok and expected_hostnames is not None:
-                allowed = {h.strip().lower() for h in expected_hostnames if h}
-                ok = str(body.get("hostname") or "").strip().lower() in allowed
+                allowed = {_bare_host(h) for h in expected_hostnames if h}
+                ok = _bare_host(str(body.get("hostname") or "")) in allowed - {""}
     except Exception as exc:  # network / bad JSON: fail closed, never log the secret
         logger.warning("turnstile: verify failed: %s", type(exc).__name__)
         ok = False
