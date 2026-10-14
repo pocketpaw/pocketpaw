@@ -1909,7 +1909,7 @@
       },
       "pocket": {
         "state": {
-          "themeColor": "#3b82f6"
+          "themeColor": "#1877F2"
         },
         "ui": {
           "type": "flex",
@@ -1924,7 +1924,7 @@
                 "label": "Theme color",
                 "showInput": true,
                 "presets": [
-                  "#3b82f6",
+                  "#1877F2",
                   "#8b5cf6",
                   "#22c55e",
                   "#f59e0b",
@@ -4074,7 +4074,8 @@
         "tasks": {
           "type": "Array<{ id: string; name: string; start: string; end: string; progress?: number; dependencies?: string }>",
           "required": true,
-          "description": "Task definitions (ISO dates YYYY-MM-DD)."
+          "description": "Task definitions (ISO dates YYYY-MM-DD).",
+          "data": true
         },
         "viewMode": {
           "type": "\"Quarter Day\" | \"Half Day\" | \"Day\" | \"Week\" | \"Month\" | \"Year\"",
@@ -4084,7 +4085,7 @@
         "height": {
           "type": "string",
           "required": false,
-          "description": "Container height. Default \"320px\"."
+          "description": "Max height. Default \"320px\"."
         }
       }
     },
@@ -7450,12 +7451,14 @@
         "value": {
           "type": "number",
           "required": false,
-          "description": "Current progress (0 to max)."
+          "description": "Current progress (0 to max).",
+          "data": true
         },
         "max": {
           "type": "number",
           "required": false,
-          "description": "Maximum value. Default 100."
+          "description": "Maximum value. Default 100.",
+          "data": true
         },
         "color": {
           "type": "string",
@@ -7466,6 +7469,11 @@
           "type": "\"default\" | \"thin\" | \"thick\"",
           "required": false,
           "description": "Height variant."
+        },
+        "label": {
+          "type": "string",
+          "required": false,
+          "description": "Label row above the bar."
         }
       }
     },
@@ -9582,7 +9590,7 @@
       "description": "Hierarchical treemap showing composition and relative sizes. Click to zoom into nested groups.",
       "props": {
         "data": {
-          "type": "Array<{ name: string; value?: number; children?: Node[]; color?: string }>",
+          "type": "Array<{ name: string; value?: number; children?: Node[] }>",
           "required": true,
           "description": "Recursive node tree."
         },
@@ -9690,12 +9698,12 @@
         "itemHeight": {
           "type": "number",
           "required": false,
-          "description": "Fixed row height in px. Default 36."
+          "description": "Fixed row height in px."
         },
         "height": {
           "type": "string | number",
           "required": false,
-          "description": "Container height. Default \"320px\"."
+          "description": "Box height; fits rows to 320px."
         },
         "overscan": {
           "type": "number",

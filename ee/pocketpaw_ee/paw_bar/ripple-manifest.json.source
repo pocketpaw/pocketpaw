@@ -40,7 +40,12 @@ feat/standup-board at e9a00de (generatedAt 2026-10-14T03:32:52.525Z, upstream sh
 b17b1c9f4c889033f1728964e4d4a1fc81d1aa58d4080ffa01b83a3f1156629d), after
 habit-tracker as upstream (216 widgets), with its "intents" entry (after agenda) and
 its clippedText "waivers" entry; that branch's longer spec "description" is not
-pulled. interval-workout's optional
+pulled. Five entries are swapped the same way, each alone, from branch
+feat/widget-polish at 539fa99 (generatedAt 2026-10-14T09:34:15.214Z, upstream sha256
+4c4abed755b48f9cc8f117d9fa433a952c51d0b6e9b450580a6c0c068a9c0bbd): "gantt" (shorter
+height description), "progress" (new optional label), "treemap" (no per-node color),
+"virtual-list" (shorter row and height descriptions) and "color-picker" (brand blue in
+its pocket). gantt's and progress's data flags come along with them. interval-workout's optional
 per-exercise "figure" (#216) is not pulled: nothing here checks exercise rows, and the
 widget matches figures by name. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.
