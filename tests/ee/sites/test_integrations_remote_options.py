@@ -6,7 +6,9 @@
 # (authz, 404 / 409 not_connected / 502 provider_error, normalising + the 500 cap,
 # the 60s per-binding cache), and PUT validation of a remote select (membership
 # from the same cached list, 502 rather than an unvalidated value, 409 without a
-# connection, an unchanged value never re-checked). The ``demo`` provider's
+# connection, an unchanged value never re-checked, every item of a multi select
+# re-checked), a relink (PUT or OAuth callback) dropping stored remote values,
+# single-flight loads, and a builtin with no binding. The ``demo`` provider's
 # ``board`` field is the fixture; helpers come from test_integrations.py.
 from __future__ import annotations
 
@@ -329,3 +331,199 @@ async def test_put_of_a_remote_value_without_a_connection_is_409(beanie_test_db,
         resp = await c.put(_put_url(pid), json={"settings": {"board": "brd_launch"}})
     assert (resp.status_code, resp.json()["error"]["code"]) == (409, "not_connected")
     assert state["calls"] == 0
+
+
+# ----------------------------------------------------------- relink, flights
+
+
+async def _second_connection() -> str:
+    from pocketpaw_ee.integrations import vault
+    from pocketpaw_ee.integrations.providers.base import TokenGrant
+
+    grant = TokenGrant(
+        access_token="AT-2",
+        refresh_token="RT-2",
+        expires_in=3600,
+        account_label="Other account",
+        account_ref="demo-account-2",
+    )
+    conn = await vault.store_grant(workspace_id=WS, provider="demo", grant=grant, user_id=OWNER)
+    return str(conn.id)
+
+
+def _per_connection(monkeypatch, lists: dict[str, list[str]]) -> dict:
+    """Each connection's account lists different boards."""
+    from pocketpaw_ee.integrations.providers.base import SettingOption
+    from pocketpaw_ee.integrations.providers.demo import DemoProvider
+
+    state = {"calls": 0}
+
+    async def _hook(self, binding, ctx, key):
+        state["calls"] += 1
+        return [SettingOption(v, v) for v in lists[str(ctx.connection.id)]]
+
+    monkeypatch.setattr(DemoProvider, "field_options", _hook)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_relinking_another_connection_drops_and_rechecks_remote_values(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.cloud.models.integration import SiteIntegration
+
+    pid = await _pocket()
+    async with _client() as c:
+        first = await _bound(c, pid)
+        second = await _second_connection()
+        _per_connection(monkeypatch, {first: ["brd_old"], second: ["brd_new"]})
+        saved = await c.put(_put_url(pid), json={"settings": {"board": "brd_old"}})
+        # Same PUT moves the binding and re-sends the old account's value: refused.
+        stale = await c.put(
+            _put_url(pid), json={"connection_id": second, "settings": {"board": "brd_old"}}
+        )
+        moved = await c.put(_put_url(pid), json={"connection_id": second})
+        repicked = await c.put(_put_url(pid), json={"settings": {"board": "brd_new"}})
+    assert saved.json()["settings"]["board"] == "brd_old"
+    assert (stale.status_code, stale.json()["error"]["code"]) == (422, "invalid_settings")
+    assert moved.status_code == 200 and "board" not in moved.json()["settings"]
+    row = await SiteIntegration.find_one(SiteIntegration.pocket_id == pid)
+    assert repicked.status_code == 200 and row.settings["board"] == "brd_new"
+
+
+@pytest.mark.asyncio
+async def test_relink_in_the_oauth_callback_drops_remote_values(beanie_test_db, monkeypatch):
+    from beanie import PydanticObjectId
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection, SiteIntegration
+    from pocketpaw_ee.integrations import bindings
+
+    pid = await _pocket()
+    async with _client() as c:
+        first = await _bound(c, pid)
+        second = await _second_connection()
+        _per_connection(monkeypatch, {first: ["brd_old"], second: ["brd_new"]})
+        await c.put(_put_url(pid), json={"settings": {"board": "brd_old", "note": "kept"}})
+    # Re-linking the same connection keeps the pick.
+    conn1 = await IntegrationConnection.get(PydanticObjectId(first))
+    await bindings.link_connection(workspace_id=WS, user_id=OWNER, pocket_id=pid, conn=conn1)
+    row = await SiteIntegration.find_one(SiteIntegration.pocket_id == pid)
+    assert row.settings["board"] == "brd_old"
+    conn2 = await IntegrationConnection.get(PydanticObjectId(second))
+    await bindings.link_connection(workspace_id=WS, user_id=OWNER, pocket_id=pid, conn=conn2)
+    row = await SiteIntegration.find_one(SiteIntegration.pocket_id == pid)
+    assert "board" not in row.settings and row.settings["note"] == "kept"
+
+
+@pytest.mark.asyncio
+async def test_a_required_remote_value_reads_missing_after_relink(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.integrations.providers.base import SettingsField
+    from pocketpaw_ee.integrations.providers.demo import DemoProvider
+
+    monkeypatch.setattr(
+        DemoProvider,
+        "settings_fields",
+        (
+            SettingsField("note", "Note", "text"),
+            SettingsField("board", "Board", "select", required=True, options_source="remote"),
+        ),
+    )
+    pid = await _pocket()
+    async with _client() as c:
+        first = await _bound(c, pid)
+        second = await _second_connection()
+        _per_connection(monkeypatch, {first: ["brd_old"], second: ["brd_new"]})
+        ok = await c.put(_put_url(pid), json={"settings": {"board": "brd_old"}})
+        moved = await c.put(_put_url(pid), json={"connection_id": second})
+    assert ok.json()["status"] == "connected"
+    assert moved.json()["status"] == "setup_required"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_misses_share_one_provider_call(beanie_test_db, monkeypatch):
+    import asyncio
+
+    from pocketpaw_ee.integrations import bindings, field_options
+    from pocketpaw_ee.integrations.providers import get_provider
+    from pocketpaw_ee.integrations.providers.demo import DEMO_BOARDS, DemoProvider
+
+    state = {"calls": 0}
+    gate = asyncio.Event()
+
+    async def _slow(self, binding, ctx, key):
+        state["calls"] += 1
+        await gate.wait()
+        return list(DEMO_BOARDS)
+
+    monkeypatch.setattr(DemoProvider, "field_options", _slow)
+    pid = await _pocket()
+    async with _client() as c:
+        await _bound(c, pid)
+    provider = get_provider("demo")
+    row = await bindings._row(WS, pid, "demo")
+    conn = await bindings.connection_for(row)
+    spec = next(f for f in provider.settings_fields if f.key == "board")
+
+    def _load():
+        return field_options.load(
+            provider, spec, workspace_id=WS, pocket_id=pid, user_id=OWNER, binding=row, conn=conn
+        )
+
+    waiters = [asyncio.ensure_future(_load()) for _ in range(5)]
+    await asyncio.sleep(0)
+    gate.set()
+    results = await asyncio.gather(*waiters)
+    assert state["calls"] == 1
+    assert all(r == list(DEMO_BOARDS) for r in results)
+    assert field_options._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_a_multi_remote_select_rechecks_every_item(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.integrations import field_options
+    from pocketpaw_ee.integrations.providers.base import SettingOption, SettingsField
+    from pocketpaw_ee.integrations.providers.demo import DemoProvider
+
+    monkeypatch.setattr(
+        DemoProvider,
+        "settings_fields",
+        (SettingsField("boards", "Boards", "select", multi=True, options_source="remote"),),
+    )
+    state = _counting(monkeypatch, result=[SettingOption("a", "A"), SettingOption("b", "B")])
+    pid = await _pocket()
+    async with _client() as c:
+        await _bound(c, pid)
+        saved = await c.put(_put_url(pid), json={"settings": {"boards": "a"}})
+        # "a" left the account; adding "b" re-checks "a" too.
+        field_options.clear_cache()
+        state["result"] = [SettingOption("b", "B")]
+        partial = await c.put(_put_url(pid), json={"settings": {"boards": "a,b"}})
+        replaced = await c.put(_put_url(pid), json={"settings": {"boards": "b"}})
+    assert saved.json()["settings"]["boards"] == "a"
+    assert (partial.status_code, partial.json()["error"]["code"]) == (422, "invalid_settings")
+    assert replaced.status_code == 200 and replaced.json()["settings"]["boards"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_a_builtin_remote_select_loads_with_no_binding(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.integrations.providers.base import SettingOption, SettingsField
+    from pocketpaw_ee.integrations.providers.newsletter import NewsletterProvider
+
+    seen: dict = {}
+
+    async def _hook(self, binding, ctx, key):
+        seen.update(binding=binding, get_token=ctx.get_token, connection=ctx.connection, key=key)
+        return [SettingOption("weekly", "Weekly")]
+
+    monkeypatch.setattr(
+        NewsletterProvider,
+        "settings_fields",
+        (SettingsField("cadence", "Cadence", "select", options_source="remote"),),
+    )
+    monkeypatch.setattr(NewsletterProvider, "field_options", _hook, raising=False)
+    pid = await _pocket()
+    async with _client() as c:
+        resp = await c.get(_options_url(pid, provider="newsletter", key="cadence"))
+        put = await c.put(_put_url(pid, "newsletter"), json={"settings": {"cadence": "weekly"}})
+    assert resp.json() == {"options": [{"value": "weekly", "label": "Weekly"}]}
+    assert seen == {"binding": None, "get_token": None, "connection": None, "key": "cadence"}
+    assert put.status_code == 200 and put.json()["settings"] == {"cadence": "weekly"}

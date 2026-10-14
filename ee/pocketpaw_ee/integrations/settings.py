@@ -3,6 +3,7 @@
 #
 #   merge_put(provider, incoming, current, remote)  the PUT body's ``settings`` -> stored dict
 #   remote_keys_to_check(provider, incoming, current)  remote selects a PUT changes
+#   drop_remote(provider, settings)         settings minus remote selects (on relink)
 #   missing_required(provider, settings)    required keys with no valid value
 #   field_views(provider)                   the ``settings_fields`` wire list
 #   visible(provider, settings)             stored settings minus hidden fields
@@ -19,8 +20,10 @@
 # ``remote`` select is checked against the provider's live options, which the
 # caller loads (field_options.py) for every remote key the PUT changes and passes
 # as ``remote``; a changed remote key with no loaded list is refused (fail closed).
-# A stored remote value is only re-checked when it changes. Every value is capped
-# at the field's ``max_length``.
+# A stored remote value is only re-checked when it changes; a relink to another
+# connection drops stored remote values first (``drop_remote``), so every remote
+# key in that PUT is new and a required one reads missing until re-picked. Every
+# value is capped at the field's ``max_length``.
 
 from __future__ import annotations
 
@@ -102,6 +105,16 @@ def _clears(value: Any) -> bool:
 
 def _unchanged(value: Any, stored: Any) -> bool:
     return isinstance(value, str) and isinstance(stored, str) and value.strip() == stored
+
+
+def drop_remote(provider: IntegrationProvider, settings: dict[str, Any]) -> dict[str, Any]:
+    """``settings`` without remote select values: they belong to the old account."""
+    fields = _fields(provider)
+    return {
+        k: v
+        for k, v in (settings or {}).items()
+        if not ((spec := fields.get(k)) is not None and is_remote_select(spec))
+    }
 
 
 def remote_keys_to_check(

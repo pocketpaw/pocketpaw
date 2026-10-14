@@ -42,6 +42,8 @@
 #
 # A PUT that changes a remote select (``options_source="remote"``) must pick from
 # the provider's live list (field_options.py); unreachable is a 502, never accepted.
+# Moving a binding to another connection (PUT or the OAuth callback) drops its
+# stored remote values: they name things in the old account.
 
 from __future__ import annotations
 
@@ -435,8 +437,11 @@ async def upsert(
             await _link_connection(
                 workspace_id, provider, body.connection_id, user_id=user_id, is_admin=is_admin
             )
-        setup = setup or (body.connection_id or None) != row.connection_id
+        relinked = (body.connection_id or None) != row.connection_id
+        setup = setup or relinked
         row.connection_id = body.connection_id or None
+        if relinked:
+            row.settings = settings_rules.drop_remote(provider, dict(row.settings or {}))
     if body.settings is not None:
         current = dict(row.settings or {})
         remote = await _remote_allowed(
@@ -473,8 +478,11 @@ async def link_connection(*, workspace_id: str, user_id: str, pocket_id: str, co
             enabled_actions=list(provider.actions),
             created_by=user_id,
         )
+    before = dict(row.settings or {})
+    if row.connection_id != str(conn.id):
+        row.settings = settings_rules.drop_remote(provider, before)
     row.connection_id = str(conn.id)
-    await _persist(row, None, "connection_id")
+    await _persist(row, before, "connection_id", "settings")
     await ensure_gateway_token(workspace_id, pocket_id)
     await run_setup(row, provider, conn, user_id)
     view = await to_view(row)

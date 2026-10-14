@@ -16,9 +16,11 @@
 #   * cached in process for ``TTL_SECONDS`` per (workspace, pocket, provider,
 #     connection, key), i.e. per binding + key; relinking another connection is a
 #     new key. The cache is bounded (``MAX_ENTRIES``, oldest out first).
+#   * single-flight: concurrent misses for one key share one provider call
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Mapping
@@ -42,6 +44,7 @@ TTL_SECONDS = 60.0
 MAX_ENTRIES = 2048
 
 _cache: dict[tuple[str, ...], tuple[float, list[SettingOption]]] = {}
+_inflight: dict[tuple[str, ...], asyncio.Task[list[SettingOption]]] = {}
 
 
 def not_connected() -> CloudError:
@@ -72,6 +75,7 @@ def setup_context(
 
 def clear_cache() -> None:
     _cache.clear()
+    _inflight.clear()
 
 
 def _normalise(raw: Any, spec: SettingsField) -> list[SettingOption]:
@@ -127,6 +131,29 @@ async def load(
     hit = _cache.get(key)
     if hit is not None and hit[0] > now:
         return hit[1]
+    task = _inflight.get(key)
+    if task is None:
+        task = asyncio.ensure_future(
+            _fetch(provider, spec, key, workspace_id, pocket_id, user_id, binding, conn)
+        )
+        _inflight[key] = task
+        task.add_done_callback(
+            lambda done: _inflight.pop(key, None) if _inflight.get(key) is done else None
+        )
+    # shield: one caller going away must not cancel the call the others wait on.
+    return await asyncio.shield(task)
+
+
+async def _fetch(
+    provider: IntegrationProvider,
+    spec: SettingsField,
+    key: tuple[str, ...],
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+    binding: Any | None,
+    conn: Any | None,
+) -> list[SettingOption]:
     hook = getattr(provider, "field_options", None)
     if hook is None:
         logger.info("integrations: %s has a remote field but no field_options", provider.id)
@@ -149,5 +176,5 @@ async def load(
         logger.exception("integrations: %s field_options(%s) crashed", provider.id, spec.key)
         raise provider_error() from None
     options = _normalise(raw, spec)
-    _store(key, now + TTL_SECONDS, options)
+    _store(key, time.monotonic() + TTL_SECONDS, options)
     return options
