@@ -35,7 +35,12 @@ feat/core-loop at 0420fdd (generatedAt 2026-10-13T15:33:48.272Z, upstream sha256
 d6e7ce5f9ce33f6732230dce683ce7ed51f41c18a341cd53894538ebd0d28904); no widget
 changes, because a full refresh from there changes 56 widgets this slice does not
 touch. widget_relevance reads "intents" and concierge_runtime renders rule text
-from "craft". interval-workout's optional
+from "craft". One data widget is added the same way, alone: "standup-board" from branch
+feat/standup-board at e9a00de (generatedAt 2026-10-14T03:32:52.525Z, upstream sha256
+b17b1c9f4c889033f1728964e4d4a1fc81d1aa58d4080ffa01b83a3f1156629d), after
+habit-tracker as upstream (216 widgets), with its "intents" entry (after agenda) and
+its clippedText "waivers" entry; that branch's longer spec "description" is not
+pulled. interval-workout's optional
 per-exercise "figure" (#216) is not pulled: nothing here checks exercise rows, and the
 widget matches figures by name. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.

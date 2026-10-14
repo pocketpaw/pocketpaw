@@ -6474,6 +6474,34 @@
       }
     },
     {
+      "type": "standup-board",
+      "category": "composite",
+      "description": "Team standup: people[{name, role, yesterday, today, blocker, status}]. Blocked people first, open blockers counted for you, the viewer can resolve one. Bind value.",
+      "props": {
+        "team": {
+          "type": "string",
+          "required": false,
+          "description": "Card title, e.g. \"Payments team\". Default \"Standup\"."
+        },
+        "date": {
+          "type": "string",
+          "required": false,
+          "description": "ISO day \"2026-10-14\" or a short label."
+        },
+        "summary": {
+          "type": "string",
+          "required": false,
+          "description": "One sentence naming who is stuck. Leave out and the widget writes it from the people."
+        },
+        "people": {
+          "type": "Array<{ name: string; role?: string; avatar?: string; yesterday?: string; today?: string; blocker?: string; status?: \"blocked\" | \"on-track\" | \"done\" | \"away\" }>",
+          "required": true,
+          "description": "Up to 20 people. Write blocker only when someone is stuck (it makes them blocked). status \"away\" for someone off today, with today like \"Back Monday\". Never write a blocker count.",
+          "data": true
+        }
+      }
+    },
+    {
       "type": "notes",
       "category": "composite",
       "description": "Notepad app: the visitor writes notes straight in, #tags become filter chips, pin, edit, delete with undo. Seed notes[{title, text, tags}]. Bind value.",
@@ -10556,6 +10584,11 @@
       "widget": "data-grid",
       "check": "overflow",
       "reason": "a wide table scrolls sideways inside its own frame on a phone instead of squeezing its columns"
+    },
+    {
+      "widget": "standup-board",
+      "check": "clippedText",
+      "reason": "with 5 or more people, on-track and done rows clamp Today to 1 line on a phone and Today and Yesterday to 2 lines on a wide card; names and roles never clamp, and a tap expands the row to the full text"
     }
   ],
   "intents": [
@@ -11323,6 +11356,28 @@
       ],
       "hints": [
         "start \"HH:MM\", minutes per item; bind a state key."
+      ]
+    },
+    {
+      "widget": "standup-board",
+      "ask": [
+        "standup",
+        "stand-up",
+        "blockers",
+        "blocker",
+        "blocked",
+        "team status",
+        "check-in",
+        "who is stuck"
+      ],
+      "props": [
+        "team",
+        "date",
+        "people",
+        "summary"
+      ],
+      "hints": [
+        "A team standup or check-in is one standup-board, never a kanban or a card per person: people[{name, role, yesterday, today, blocker, status}]. Write a blocker only when someone is stuck; leave it out otherwise. The widget counts open blockers itself."
       ]
     },
     {

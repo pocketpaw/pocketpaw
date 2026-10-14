@@ -56,6 +56,7 @@ _CHIPS = [
     ("documentaries about the ocean", "media-grid"),
     ("meeting agenda starting at 10", "agenda"),
     ("weekly schedule", "week-schedule"),
+    ("A standup board for 5 people with blockers flagged", "standup-board"),
     ("create an invoice", "invoice-layout"),
     ("due diligence checklist", "checklist-layout"),
     ("order a pizza", "menu-order"),
