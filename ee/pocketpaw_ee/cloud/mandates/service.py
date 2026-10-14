@@ -959,13 +959,15 @@ def _task_status(run: dict[str, Any]) -> str:
     """A run row's status in the foreman's words. A queued run whose headless
     develop failed waits for a human, so it is ``develop failed``, not in
     flight; one a develop is working (``running`` at a stage) is
-    ``developing``."""
+    ``developing``. A recorded ``headless_error`` wins over a live stage: an
+    errored run holds no slot until it is tracked or launched again, and both
+    clear the error."""
     status = str(run.get("status") or "")
+    if status in {"running", "queued"} and run.get("headless_error"):
+        return "develop failed"
     if status == "running":
         return "developing"
     if status == "queued":
-        if run.get("headless_error"):
-            return "develop failed"
         return "developing" if run.get("headless_state") else "queued"
     return "pending at gate" if status == "proposed" else status
 

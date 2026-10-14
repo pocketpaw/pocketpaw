@@ -43,10 +43,10 @@ from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
 from pocketpaw_ee.cloud.mandates.domain import Budget  # noqa: E402
 
 from pocketpaw.instinct.models import ActionStatus  # noqa: E402
-from tests.cloud.test_belt_cloud_station import (  # noqa: E402,F401
+from tests.cloud import test_belt_cloud_station as base  # noqa: E402
+from tests.cloud.test_belt_cloud_station import (  # noqa: E402
     CLOUD_URL,
     MERGED,
-    PR_URL,
     SESSION,
     SLUG,
     WS,
@@ -55,9 +55,9 @@ from tests.cloud.test_belt_cloud_station import (  # noqa: E402,F401
     _launched,
     _open,
     _queue,
-    dirs,
-    store,
 )
+
+store, dirs = base.store, base.dirs
 
 PLAYBOOK = "# Feature lead playbook\nRun the stages in order: Plan, Swarm, Anatomy, Ship.\n"
 PACKET = "docs/blueprints/flare/features/text-shapes.md"
@@ -458,9 +458,7 @@ async def test_lead_timeouts_read_the_env(monkeypatch, tmp_path):
     monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LEAD_STALL", "50")
     monkeypatch.setenv("POCKETPAW_FACTORY_LEAD_GIT_NAME", "Pat Lead")
     seen: list[CloudTaskDispatcher] = []
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.belt.headless.set_production_dispatcher", seen.append
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.belt.headless.set_production_dispatcher", seen.append)
 
     assert cloud_station.wire_cloud()
 
@@ -549,7 +547,9 @@ async def test_transient_gh_failures_are_retried_with_backoff(store, dirs):
 async def test_a_permanent_gh_failure_is_not_retried(store, dirs):
     repo, launch = dirs
     run_ref = await _queue(store, repo)
-    runner = FlakyRunner(["GraphQL: Could not resolve to a PullRequest"], launch_out=SESSION, pr=MERGED)
+    runner = FlakyRunner(
+        ["GraphQL: Could not resolve to a PullRequest"], launch_out=SESSION, pr=MERGED
+    )
     runner.run_ref = run_ref
 
     await _dispatcher(runner, launch).run(run_ref, workspace_id=WS)
@@ -674,3 +674,17 @@ async def test_a_relaunched_run_clears_its_old_error(store, dirs):
     await disp.run(run_ref, workspace_id=WS)
 
     assert seen and "headless_error" not in seen[0]
+
+
+async def test_a_run_handed_to_a_headless_develop_again_drops_its_old_error(store, dirs):
+    """The headless station's re-develop of a failed run is in flight again too."""
+    from pocketpaw_ee.cloud.belt.headless import HeadlessDevelopRunner
+
+    repo, _ = dirs
+    run_ref = await _queue(store, repo)
+    await cloud_station._patch(store, run_ref, headless_error="CHECK: red")
+
+    await HeadlessDevelopRunner(develop_fn=None).mark_queued(run_ref)  # type: ignore[arg-type]
+
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert cc["headless_state"] == "queued" and "headless_error" not in cc

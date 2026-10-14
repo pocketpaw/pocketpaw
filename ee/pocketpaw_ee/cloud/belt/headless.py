@@ -390,7 +390,8 @@ class HeadlessDevelopRunner:
         """Mark a run handed to a background develop (``headless_state=
         "queued"``). Attach and failure both clear it, so a run that still
         carries it was orphaned (a restart dropped the in-memory queue, or the
-        task crashed) and the digest reports it as stuck. Best-effort."""
+        task crashed) and the digest reports it as stuck. A previous attempt's
+        ``headless_error`` goes: the run is in flight again. Best-effort."""
         from pocketpaw.stores import get_instinct_store
 
         try:
@@ -400,6 +401,7 @@ class HeadlessDevelopRunner:
             blob = params.get(_CODE_CHANGE_PARAM_KEY)
             if not isinstance(blob, dict):
                 return
+            blob = {k: v for k, v in blob.items() if k != "headless_error"}
             params[_CODE_CHANGE_PARAM_KEY] = {**blob, "headless_state": "queued"}
             await store.update_parameters(action_id, params)
         except Exception:  # noqa: BLE001 — the marker must not block dispatch
