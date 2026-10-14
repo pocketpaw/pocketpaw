@@ -26,9 +26,10 @@
 # errors with a 200 + ``error``; ``invalid_code`` / ``invalid_grant`` raise
 # InvalidGrant (oauth_http).
 #
-# ``create_lead`` (public write): search Leads by email; a match gets only the
-# fields that are empty on it (never an overwrite), else insert. An insert that
-# still hits DUPLICATE_DATA (search index lag) takes the same fill-empty path.
+# ``create_lead`` (public write): search Leads by email; a lead whose primary
+# Email matches exactly (case-insensitive) gets only the fields that are empty on
+# it (never an overwrite), else insert. An insert that still hits DUPLICATE_DATA
+# (search index lag) fills that lead only if its primary Email matches too.
 # Zoho requires Last_Name (default: the email's local part) and many orgs require
 # Company (default ``Website visitor``); defaults never fill an existing lead.
 # ``message`` goes to Description. A 401 refreshes once; 429 is ``rate_limited``;
@@ -190,6 +191,10 @@ async def _call(ctx: ActionContext, method: str, url: str, **kwargs: Any) -> Any
     )
 
 
+def _same_email(record: dict[str, Any], email: str) -> bool:
+    return str(record.get("Email") or "").strip().lower() == email.lower()
+
+
 async def _find(ctx: ActionContext, api: str, email: str) -> dict[str, Any] | None:
     resp = await _call(
         ctx,
@@ -201,9 +206,8 @@ async def _find(ctx: ActionContext, api: str, email: str) -> dict[str, Any] | No
         return None
     _refuse_for(resp, "search leads")
     records = [r for r in oauth_http.body_of(resp).get("data") or [] if isinstance(r, dict)]
-    exact = [r for r in records if str(r.get("Email") or "").strip().lower() == email]
-    found = (exact or records or [None])[0]
-    return found if found and found.get("id") else None
+    # Only the primary Email counts: a Secondary_Email hit is someone else's lead.
+    return next((r for r in records if _same_email(r, email) and r.get("id")), None)
 
 
 async def _fill_empty(
@@ -265,6 +269,9 @@ async def _create_lead(ctx: ActionContext, args: CreateLeadArgs) -> dict[str, An
         )
         _refuse_for(stored, "read lead")
         record = {**_first(oauth_http.body_of(stored)), "id": dup_id}
+        if not _same_email(record, args.email):
+            # The duplicate is on another unique field: never write to that lead.
+            return {"status": "exists"}
         return await _fill_empty(ctx, api, record, supplied)
     _refuse_for(created, "create lead")
     if code in _INVALID:

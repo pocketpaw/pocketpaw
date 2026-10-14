@@ -29,6 +29,7 @@
 #     ``callback_params={key: value}``. They are untrusted browser input: the
 #     provider validates them before using any of them
 #   * refresh_with_meta: bool   ``refresh`` also gets ``meta=connection.meta``
+#     (the optional ``meta`` on the Protocol; others are called without it)
 #     (a provider whose token endpoint depends on the account, e.g. its region)
 #
 # Handlers receive an ``ActionContext`` and return a JSON-safe dict that goes to a
@@ -210,7 +211,9 @@ class IntegrationProvider(Protocol):
         self, code: str, redirect_uri: str, code_verifier: str | None = None
     ) -> TokenGrant: ...
 
-    async def refresh(self, refresh_token: str) -> TokenGrant: ...
+    async def refresh(
+        self, refresh_token: str, meta: Mapping[str, Any] | None = None
+    ) -> TokenGrant: ...
 
     def verify_webhook(self, body: bytes, headers: Mapping[str, str]) -> NormalizedEvent | None: ...
 
@@ -246,7 +249,11 @@ class BaseProvider:
     ) -> TokenGrant:
         raise ProviderError(f"{self.id} has no connect flow")
 
-    async def refresh(self, refresh_token: str) -> TokenGrant:  # noqa: ARG002
+    async def refresh(
+        self,
+        refresh_token: str,  # noqa: ARG002
+        meta: Mapping[str, Any] | None = None,  # noqa: ARG002
+    ) -> TokenGrant:
         raise ProviderError(f"{self.id} has no refresh flow")
 
     def verify_webhook(self, body: bytes, headers: Mapping[str, str]) -> NormalizedEvent | None:  # noqa: ARG002

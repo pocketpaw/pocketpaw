@@ -42,6 +42,7 @@ class FakeZoho:
         self.rate_limited = False
         self.mandatory = ""  # a custom field the org requires
         self.search_lag = False
+        self.unique_phone = False  # the org made Phone a unique field
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host
@@ -64,7 +65,13 @@ class FakeZoho:
             )
         if path == "/crm/v8/Leads/search":
             assert params["fields"].split(",")[0] == "Email"
-            hits = [r for r in self.leads.values() if r["Email"] == params["email"]]
+            # Zoho's email search matches every email field, Secondary_Email too.
+            wanted = params["email"]
+            hits = [
+                r
+                for r in self.leads.values()
+                if wanted in (r["Email"].lower(), r.get("Secondary_Email", "").lower())
+            ]
             if self.search_lag or not hits:
                 return httpx.Response(204)
             return httpx.Response(200, json={"data": hits, "info": {"count": len(hits)}})
@@ -73,7 +80,19 @@ class FakeZoho:
             if self.mandatory:
                 err = {"code": "MANDATORY_NOT_FOUND", "details": {"api_name": self.mandatory}}
                 return httpx.Response(400, json={"data": [{**err, "status": "error"}]})
-            dup = next((r for r in self.leads.values() if r["Email"] == record["Email"]), None)
+            dup = next(
+                (
+                    r
+                    for r in self.leads.values()
+                    if r["Email"] == record["Email"]
+                    or (
+                        self.unique_phone
+                        and record.get("Phone")
+                        and r.get("Phone") == record["Phone"]
+                    )
+                ),
+                None,
+            )
             if dup is not None:
                 err = {
                     "code": "DUPLICATE_DATA",
@@ -485,3 +504,47 @@ async def test_handler_refuses_a_connection_without_a_valid_api_domain(zoho):
         with pytest.raises(ProviderError):
             await _create_lead(ctx, CreateLeadArgs(email="a@b.co"))
     assert zoho.api_calls == []
+
+
+@pytest.mark.asyncio
+async def test_secondary_email_hit_is_not_the_lead(beanie_test_db, zoho):
+    zoho.leads["551"] = {
+        "id": "551",
+        "Email": "boss@corp.com",
+        "Secondary_Email": "Ada@Example.com",
+        "Last_Name": "Boss",
+        "Company": "Corp",
+    }
+    async with _client() as c:
+        sid = await _linked(c, zoho)
+        resp = await _gw(
+            c, sid, "zoho_crm", "create_lead", args={"email": "ada@example.com", "phone": "42"}
+        )
+    assert resp.json()["result"] == {"status": "created"}, resp.text
+    assert "Phone" not in zoho.leads["551"]  # the other person's lead is untouched
+    assert not [call for call in zoho.api_calls if call[1] == "PUT"]
+    [new] = [r for r in zoho.leads.values() if r["id"] != "551"]
+    assert new["Email"] == "ada@example.com" and new["Phone"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_on_another_field_writes_nothing(beanie_test_db, zoho):
+    zoho.unique_phone = True
+    zoho.leads["551"] = {"id": "551", "Email": "eve@example.com", "Phone": "42", "Last_Name": "Eve"}
+    async with _client() as c:
+        sid = await _linked(c, zoho)
+        resp = await _gw(
+            c,
+            sid,
+            "zoho_crm",
+            "create_lead",
+            args={"email": "ada@example.com", "phone": "42", "company": "Engines"},
+        )
+    assert resp.json()["result"] == {"status": "exists"}, resp.text
+    assert zoho.leads["551"] == {
+        "id": "551",
+        "Email": "eve@example.com",
+        "Phone": "42",
+        "Last_Name": "Eve",
+    }
+    assert not [call for call in zoho.api_calls if call[1] == "PUT"]
