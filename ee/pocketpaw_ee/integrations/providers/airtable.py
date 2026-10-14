@@ -57,6 +57,7 @@ from pocketpaw_ee.integrations.providers.base import (
     SettingsField,
     SetupContext,
     TokenGrant,
+    accepted,
 )
 from pocketpaw_ee.integrations.providers.google_sheets import (
     MAX_FIELDS,
@@ -294,7 +295,7 @@ async def _create_record(ctx: ActionContext, args: CreateRecordArgs) -> dict[str
             _schemas.pop(key, None)
         raise
     await bindings.clear_setup_error(ctx.workspace_id, ctx.pocket_id, ctx.provider)
-    return {"status": "ok"}
+    return accepted()
 
 
 def _int(value: Any) -> int | None:
