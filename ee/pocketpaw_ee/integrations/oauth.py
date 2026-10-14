@@ -352,7 +352,8 @@ async def finish_callback(
         provider = bindings.provider_or_404(provider_id)
         pairs = list(query.items()) if isinstance(query, Mapping) else list(query or [])
         verify = getattr(provider, "verify_callback", None)
-        if verify is not None and not verify(pairs, dict(connect)):
+        # Fail closed: only a literal True passes (an async verify would return a truthy coroutine).
+        if verify is not None and verify(pairs, dict(connect)) is not True:
             logger.warning("integrations: %s callback failed verification", provider_id)
             message["error"] = "invalid_callback"
             return message
