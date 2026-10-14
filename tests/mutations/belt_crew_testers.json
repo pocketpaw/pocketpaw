@@ -400,8 +400,8 @@
   {
     "label": "resume picks up a tester older than the run timeout",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "and time.time() - at < timeout",
-    "replace": "and True",
+    "find": "and time.time() - at < timeout\n    )\n\n\ndef _is_lead",
+    "replace": "and True\n    )\n\n\ndef _is_lead",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
     ]

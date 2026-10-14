@@ -57,8 +57,8 @@
   {
     "label": "the tracker never gives up",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "            if expired:\n",
-    "replace": "            if expired and False:\n",
+    "find": "            if expired:\n                what = ",
+    "replace": "            if expired and False:\n                what = ",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_tracker_timeout_without_a_pr"
     ]
@@ -93,8 +93,8 @@
   {
     "label": "a landing never fetches the bound repo",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "        await self._fetch_bound(blob)\n",
-    "replace": "",
+    "find": "        await self._fetch_bound(blob)\n        head = str(pr.get(\"headRefName\") or \"\")\n",
+    "replace": "        head = str(pr.get(\"headRefName\") or \"\")\n",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_merged_pr_lands_the_run"
     ]
@@ -174,8 +174,8 @@
   {
     "label": "resume relaunches the worker instead of tracking it",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "self._guard(store, action.id, self._retrack(store, action.id, dict(blob))),",
-    "replace": "self.run(action.id, workspace_id=ws),",
+    "find": "self._retrack(store, action.id, dict(blob), errored)",
+    "replace": "self.run(action.id, workspace_id=ws)",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_launched_run_and_lands_it"
     ]
@@ -341,8 +341,8 @@
   {
     "label": "the resolved base is not stored on the run",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "issue_url=url, base_branch=base",
-    "replace": "issue_url=url",
+    "find": "                base_branch=base,\n                headless_error=None,",
+    "replace": "                headless_error=None,",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_run_with_no_base_takes_the_bound_repos_branch"
     ]
