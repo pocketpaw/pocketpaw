@@ -83,6 +83,12 @@ class SiteIntegration(TimestampedDocument):
     # publish carried none). The gateway enforces the per-site widget only while it
     # equals the current sitekey, so a build that can't render it is never refused.
     deployed_sitekey: str = ""
+    # A short per-binding lease that serialises provider-side writes which must
+    # not interleave (a sheet's header row). ``bindings.claim_binding_lease``.
+    lease_owner: str | None = None
+    lease_until: datetime | None = None
+    # Non-secret provider bookkeeping (e.g. a daily new-column budget).
+    provider_state: dict[str, Any] = Field(default_factory=dict)
 
     class Settings:
         name = "site_integrations"

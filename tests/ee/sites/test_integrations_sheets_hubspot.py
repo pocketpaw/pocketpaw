@@ -12,6 +12,7 @@
 # upsert path, validation, 429 -> rate_limited.
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from datetime import UTC, datetime, timedelta
@@ -61,7 +62,9 @@ class FakeGoogle:
         self.refreshes = 0
         self.dead_refresh: set[str] = set()
         self.sheets: dict[str, dict] = {}
-        self.forbidden = False
+        # A canned Sheets error answer (status code, error body) for every API call.
+        self.fail: tuple[int, dict] | None = None
+        self.puts: list[tuple[str, list]] = []
         self.creates = 0
         self.calls: list[tuple[str, str, dict]] = []
 
@@ -78,8 +81,8 @@ class FakeGoogle:
         assert url.host == "sheets.googleapis.com", url
         if request.headers.get("authorization", "")[7:] not in self.valid:
             return httpx.Response(401, json={"error": {"code": 401}})
-        if self.forbidden:
-            return httpx.Response(403, json={"error": {"code": 403}})
+        if self.fail is not None:
+            return httpx.Response(self.fail[0], json={"error": self.fail[1]})
         path = unquote(url.raw_path.decode().split("?")[0]).removeprefix("/v4/spreadsheets")
         params = dict(url.params)
         body = json.loads(request.content) if request.content else {}
@@ -96,7 +99,7 @@ class FakeGoogle:
         sid, _, verb = sid.partition(":")
         sheet = self.sheets.get(sid)
         if sheet is None:
-            return httpx.Response(404, json={"error": {"code": 404}})
+            return httpx.Response(404, json={"error": {"code": 404, "status": "NOT_FOUND"}})
         if verb == "batchUpdate":
             for req in body["requests"]:
                 sheet["tabs"][req["addSheet"]["properties"]["title"]] = []
@@ -106,7 +109,7 @@ class FakeGoogle:
             return httpx.Response(200, json={"spreadsheetId": sid, "sheets": props})
         rng = rest.removeprefix("values/")
         rng, append = (rng[: -len(":append")], True) if rng.endswith(":append") else (rng, False)
-        tab_quoted, _, _cells = rng.rpartition("!")
+        tab_quoted, _, cells = rng.rpartition("!")
         tab = tab_quoted[1:-1].replace("''", "'")
         if tab not in sheet["tabs"]:
             return httpx.Response(400, json={"error": {"message": f"Unable to parse range: {rng}"}})
@@ -118,10 +121,17 @@ class FakeGoogle:
             assert params.get("insertDataOption") == "INSERT_ROWS"
             rows.extend(body["values"])
         else:
-            if rows:
-                rows[0] = body["values"][0]
-            else:
-                rows.append(body["values"][0])
+            # A single-row write at <col>1: only those cells change.
+            col = 0
+            for ch in cells.rstrip("0123456789"):
+                col = col * 26 + ord(ch) - 64
+            if not rows:
+                rows.append([])
+            header = rows[0]
+            new = body["values"][0]
+            self.puts.append((cells, list(new)))
+            header.extend([""] * max(0, col - 1 + len(new) - len(header)))
+            header[col - 1 : col - 1 + len(new)] = new
         return httpx.Response(200, json={})
 
     def _token_endpoint(self, request: httpx.Request) -> httpx.Response:
@@ -159,9 +169,14 @@ class FakeHubSpot:
         self.calls: list[tuple[str, str, dict, dict]] = []
         self.rate_limited = False
         self.scopes = ["oauth", "crm.objects.contacts.read", "crm.objects.contacts.write"]
+        # path -> whether OTel httpx instrumentation was live for that request.
+        self.traced: dict[str, bool] = {}
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        from opentelemetry.instrumentation.utils import is_http_instrumentation_enabled
+
         path = request.url.path
+        self.traced[path.rsplit("/", 1)[0]] = is_http_instrumentation_enabled()
         if path == "/oauth/v1/token":
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
             if form.get("refresh_token") == "BAD":
@@ -197,6 +212,12 @@ class FakeHubSpot:
                 return httpx.Response(409, json={"status": "error", "category": "CONFLICT"})
             self.contacts[props["email"]] = dict(props)
             return httpx.Response(201, json={"id": "1"})
+        if request.method == "GET":
+            email = unquote(path.rsplit("/", 1)[1])
+            assert request.url.params["idProperty"] == "email"
+            wanted = request.url.params["properties"].split(",")
+            stored = self.contacts[email]
+            return httpx.Response(200, json={"properties": {k: stored.get(k) for k in wanted}})
         if request.method == "PATCH":
             email = unquote(path.rsplit("/", 1)[1])
             self.contacts[email].update(props)
@@ -391,43 +412,94 @@ async def test_append_row_grows_the_header_writes_raw_and_strips_controls(beanie
 
 
 @pytest.mark.asyncio
-async def test_append_row_caps(beanie_test_db, fakes):
+async def test_append_row_validates_and_normalises_keys(beanie_test_db, fakes):
     google, _ = fakes
     async with _client() as c:
         pid, sid = await _sheets_site(c, google)
-        too_many = await _gw(
-            c,
-            sid,
-            "google_sheets",
-            "append_row",
-            args={"fields": {f"k{i}": "v" for i in range(51)}},
-        )
-        long_key = await _gw(
-            c, sid, "google_sheets", "append_row", args={"fields": {"k" * 81: "v"}}
-        )
-        long_value = await _gw(
-            c, sid, "google_sheets", "append_row", args={"fields": {"k": "v" * 2001}}
-        )
-        not_text = await _gw(c, sid, "google_sheets", "append_row", args={"fields": {"k": 3}})
-        fill = await _gw(
-            c,
-            sid,
-            "google_sheets",
-            "append_row",
-            args={"fields": {f"a{i}": "v" for i in range(50)}},
-        )
-        over = await _gw(
-            c,
-            sid,
-            "google_sheets",
-            "append_row",
-            args={"fields": {f"b{i}": "v" for i in range(10)}},
-        )
-    for resp in (too_many, long_key, long_value, not_text, over):
+
+        async def _send(fields):
+            return await _gw(c, sid, "google_sheets", "append_row", args={"fields": fields})
+
+        too_many = await _send({f"k{i}": "v" for i in range(51)})
+        long_key = await _send({"k" * 81: "v"})
+        long_value = await _send({"k": "v" * 2001})
+        not_text = await _send({"k": 3})
+        punctuation = await _send({"?!-": "v"})
+        spaced = await _send({"  First \t\n  name ": "Ada"})
+    for resp in (too_many, long_key, long_value, not_text, punctuation):
         assert resp.status_code == 422 and _code(resp) == "invalid_args", resp.text
-    assert fill.json()["ok"] is True
+    assert spaced.json()["ok"] is True, spaced.text
     [sheet] = google.sheets.values()
-    assert len(sheet["tabs"]["Responses"][0]) == 51  # header unchanged by the refusal
+    assert sheet["tabs"]["Responses"][0] == ["submitted_at", "First name"]
+
+
+@pytest.mark.asyncio
+async def test_new_keys_are_budgeted_and_known_keys_keep_working(beanie_test_db, fakes):
+    from pocketpaw_ee.cloud.models.integration import SiteIntegration
+
+    google, _ = fakes
+    async with _client() as c:
+        pid, sid = await _sheets_site(c, google)
+
+        async def _send(fields):
+            return await _gw(c, sid, "google_sheets", "append_row", args={"fields": fields})
+
+        first = await _send({f"k{i}": str(i) for i in range(7)})  # 5 per request
+        second = await _send({f"k{i}": str(i) for i in range(5, 11)})  # 5 left today
+        known = await _send({"k0": "again", "late": "dropped"})  # budget spent
+        only_new = await _send({"late": "x"})
+        row = await _binding(pid, "google_sheets")
+        await SiteIntegration.get_pymongo_collection().update_one(
+            {"_id": row.id},
+            {"$set": {"provider_state.new_keys": {"day": "2000-01-01", "used": 10}}},
+        )
+        next_day = await _send({"late": "y"})
+    for resp in (first, second, known, next_day):
+        assert resp.json()["ok"] is True, resp.text
+    assert only_new.status_code == 422 and _code(only_new) == "invalid_args"
+    [sheet] = google.sheets.values()
+    rows = sheet["tabs"]["Responses"]
+    keys = [f"k{i}" for i in range(10)]
+    assert rows[0] == ["submitted_at", *keys, "late"]
+    assert rows[1][1:6] == ["0", "1", "2", "3", "4"]
+    assert rows[2][6:11] == ["5", "6", "7", "8", "9"]
+    assert rows[3][1] == "again" and "dropped" not in rows[3]
+    assert rows[4][-1] == "y"
+
+
+@pytest.mark.asyncio
+async def test_header_growth_stops_at_sixty_columns(beanie_test_db, fakes):
+    google, _ = fakes
+    async with _client() as c:
+        pid, sid = await _sheets_site(c, google)
+        [sheet] = google.sheets.values()
+        sheet["tabs"]["Responses"].append(["submitted_at", *[f"c{i}" for i in range(58)]])
+        resp = await _gw(
+            c, sid, "google_sheets", "append_row", args={"fields": {"x": "1", "y": "2", "c0": "3"}}
+        )
+    assert resp.json()["ok"] is True, resp.text
+    header = sheet["tabs"]["Responses"][0]
+    assert len(header) == 60 and header[-1] == "x" and "y" not in header
+
+
+@pytest.mark.asyncio
+async def test_concurrent_forms_never_clobber_the_header(beanie_test_db, fakes):
+    google, _ = fakes
+    async with _client() as c:
+        pid, sid = await _sheets_site(c, google)
+        one, two = await asyncio.gather(
+            _gw(c, sid, "google_sheets", "append_row", args={"fields": {"a": "1", "b": "2"}}),
+            _gw(c, sid, "google_sheets", "append_row", args={"fields": {"c": "3", "d": "4"}}),
+        )
+    assert one.json()["ok"] is True and two.json()["ok"] is True
+    [sheet] = google.sheets.values()
+    header, *rows = sheet["tabs"]["Responses"]
+    assert sorted(header) == ["a", "b", "c", "d", "submitted_at"] and header[0] == "submitted_at"
+    by_col = [dict(zip(header, r, strict=False)) for r in rows]
+    assert any(r.get("a") == "1" and r.get("b") == "2" for r in by_col)
+    assert any(r.get("c") == "3" and r.get("d") == "4" for r in by_col)
+    # Only new cells were ever written: exactly one write started at A1.
+    assert [cells for cells, _ in google.puts].count("A1") == 1
 
 
 @pytest.mark.asyncio
@@ -442,28 +514,70 @@ async def test_append_row_refreshes_once_on_401(beanie_test_db, fakes):
 
 
 @pytest.mark.asyncio
-async def test_a_forbidden_sheet_marks_the_site_setup_required(beanie_test_db, fakes):
+async def test_google_errors_map_by_status_and_a_good_append_clears_setup(beanie_test_db, fakes):
     google, _ = fakes
     async with _client() as c:
         pid, sid = await _sheets_site(c, google)
-        google.forbidden = True
-        resp = await _gw(c, sid, "google_sheets", "append_row", args={"fields": {"a": "1"}})
+
+        async def _send():
+            return await _gw(c, sid, "google_sheets", "append_row", args={"fields": {"a": "1"}})
+
+        google.fail = (403, {"code": 403, "status": "PERMISSION_DENIED"})
+        denied = await _send()
         [view] = (await c.get(_sites_url(pid))).json()
-        google.forbidden = False
-        # A missing tab (the owner renamed it in Google) reads the same way.
+        google.fail = (
+            403,
+            {
+                "code": 403,
+                "status": "PERMISSION_DENIED",
+                "errors": [{"reason": "rateLimitExceeded"}],
+            },
+        )
+        quota = await _send()
+        google.fail = (429, {"code": 429, "status": "RESOURCE_EXHAUSTED"})
+        exhausted = await _send()
+        google.fail = (500, {"code": 500, "status": "INTERNAL"})
+        internal = await _send()
+        google.fail = None
+        ok = await _send()
+        [healed] = (await c.get(_sites_url(pid))).json()
+    assert denied.status_code == 409 and _code(denied) == "setup_required"
+    assert view["status"] == "setup_required"
+    assert quota.status_code == 429 and _code(quota) == "rate_limited"
+    assert exhausted.status_code == 429 and _code(exhausted) == "rate_limited"
+    assert internal.status_code == 502 and _code(internal) == "provider_error"
+    assert ok.json()["ok"] is True
+    assert (await _binding(pid, "google_sheets")).setup_error == ""
+    assert healed["status"] == "connected"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_tab_is_setup_required_and_setup_adds_it_back(beanie_test_db, fakes):
+    google, _ = fakes
+    async with _client() as c:
+        pid, sid = await _sheets_site(c, google)
         [sheet] = google.sheets.values()
         sheet["tabs"].clear()
-        await (await _binding(pid, "google_sheets")).set({"setup_error": ""})
         gone_tab = await _gw(c, sid, "google_sheets", "append_row", args={"fields": {"a": "1"}})
-        # Re-saving the settings re-runs setup, which adds the tab back.
         fixed = await c.put(
             _sites_url(pid, "google_sheets"), json={"settings": {"sheet_name": "Responses"}}
         )
-    assert resp.status_code == 409 and _code(resp) == "setup_required"
-    assert view["status"] == "setup_required"
     assert gone_tab.status_code == 409 and _code(gone_tab) == "setup_required"
-    assert (await _binding(pid, "google_sheets")).setup_error == ""
-    assert fixed.json()["status"] == "connected"
+    assert fixed.json()["status"] == "connected" and "Responses" in sheet["tabs"]
+    assert google.creates == 1
+
+
+@pytest.mark.asyncio
+async def test_site_setup_never_creates_a_second_sheet_on_403(beanie_test_db, fakes):
+    google, _ = fakes
+    async with _client() as c:
+        pid, _ = await _sheets_site(c, google)
+        google.fail = (403, {"code": 403, "status": "PERMISSION_DENIED"})
+        rerun = await c.put(
+            _sites_url(pid, "google_sheets"), json={"settings": {"sheet_name": "Leads"}}
+        )
+    assert google.creates == 1
+    assert rerun.json()["status"] == "setup_required"
 
 
 @pytest.mark.asyncio
@@ -541,22 +655,34 @@ async def test_hubspot_connect_create_and_upsert(beanie_test_db, fakes):
             sid,
             "hubspot",
             "create_contact",
-            args={"email": "ada@example.com", "company": "Analytical"},
+            args={"email": "ada@example.com", "firstname": "Eve", "company": "Analytical"},
+        )
+        unchanged = await _gw(
+            c,
+            sid,
+            "hubspot",
+            "create_contact",
+            args={"email": "ada@example.com", "firstname": "Mallory", "message": "spam"},
         )
     conn = await IntegrationConnection.find_one(IntegrationConnection.provider == "hubspot")
     assert conn.account_ref == "4242" and conn.account_label == "acme.hubspot.com"
     assert created.json() == {"ok": True, "result": {"status": "created"}}, created.text
     assert updated.json() == {"ok": True, "result": {"status": "updated"}}, updated.text
+    assert unchanged.json() == {"ok": True, "result": {"status": "exists"}}, unchanged.text
+    # A public caller filled the empty company and overwrote nothing.
     assert hub.contacts["ada@example.com"] == {
         "email": "ada@example.com",
         "firstname": "Ada",
         "message": "Hi there",
         "company": "Analytical",
     }
-    patch = next(call for call in hub.calls if call[0] == "PATCH")
+    [patch] = [call for call in hub.calls if call[0] == "PATCH"]
     assert patch[1] == "/crm/v3/objects/contacts/ada@example.com"
     assert patch[2] == {"idProperty": "email"}
-    assert patch[3] == {"properties": {"email": "ada@example.com", "company": "Analytical"}}
+    assert patch[3] == {"properties": {"company": "Analytical"}}
+    # The token-info URL carries the token: no httpx span for it, spans elsewhere.
+    assert hub.traced["/oauth/v1/access-tokens"] is False
+    assert hub.traced["/oauth/v1"] is True and hub.traced["/crm/v3/objects"] is True
 
 
 @pytest.mark.asyncio
@@ -605,3 +731,83 @@ def test_registry_lists_both_providers(fakes):
         "spreadsheet_id": ("text", True, True),
     }
     assert WS  # the shared fixtures module is wired
+
+
+# ------------------------------------------------------- vault: refused tokens
+
+
+async def _fresh_demo_conn():
+    from pocketpaw_ee.cloud._core import crypto
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection
+
+    conn = IntegrationConnection(
+        workspace=WS,
+        provider="demo",
+        account_ref="demo-account",
+        token_ciphertext=crypto.encrypt_json({"access_token": "AT-CUR", "refresh_token": "RT"}),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        created_by="user-owner",
+    )
+    await conn.insert()
+    return conn
+
+
+def _counting_refresh(monkeypatch) -> list[str]:
+    from pocketpaw_ee.integrations.providers.base import TokenGrant
+    from pocketpaw_ee.integrations.providers.demo import DemoProvider
+
+    calls: list[str] = []
+
+    async def _refresh(self, refresh_token):
+        calls.append(refresh_token)
+        await asyncio.sleep(0.2)
+        return TokenGrant(access_token=f"AT-NEW-{len(calls)}", expires_in=3600)
+
+    monkeypatch.setattr(DemoProvider, "refresh", _refresh)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_401s_refresh_once_and_share_the_new_token(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection
+    from pocketpaw_ee.integrations import vault
+
+    calls = _counting_refresh(monkeypatch)
+    conn = await _fresh_demo_conn()
+    copies = [await IntegrationConnection.get(conn.id) for _ in range(2)]
+    tokens = await asyncio.gather(*(vault.get_valid_token(c, rejected="AT-CUR") for c in copies))
+    assert tokens == ["AT-NEW-1", "AT-NEW-1"]
+    assert calls == ["RT"]
+
+
+@pytest.mark.asyncio
+async def test_a_holder_that_keeps_the_refused_token_does_not_hand_it_back(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection
+    from pocketpaw_ee.integrations import vault
+
+    calls = _counting_refresh(monkeypatch)
+    conn = await _fresh_demo_conn()
+    # Someone else holds the lease and will finish without a refresh.
+    coll = IntegrationConnection.get_pymongo_collection()
+    await coll.update_one(
+        {"_id": conn.id},
+        {
+            "$set": {
+                "refresh_lease_owner": "other",
+                "refresh_lease_until": datetime.now(UTC) + timedelta(seconds=30),
+            }
+        },
+    )
+
+    async def _release():
+        await asyncio.sleep(0.2)
+        await coll.update_one(
+            {"_id": conn.id}, {"$set": {"refresh_lease_owner": None, "refresh_lease_until": None}}
+        )
+
+    token, _ = await asyncio.gather(vault.get_valid_token(conn, rejected="AT-CUR"), _release())
+    assert token == "AT-NEW-1" and calls == ["RT"]

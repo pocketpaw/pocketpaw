@@ -10,7 +10,8 @@
 # expiry, the outbox claim pattern), re-checks the row (a sibling may have just
 # refreshed), refreshes, and writes the new bundle only while it still holds the
 # lease. A caller that loses the race waits for the holder's
-# result instead of refreshing with a refresh token that is about to be spent.
+# result instead of refreshing with a refresh token that is about to be spent;
+# if that result is the very token the caller was refused, it retries the claim.
 #
 # INVARIANTS A READER MUST NOT BREAK:
 #   * The newest refresh token is always persisted: providers that rotate
@@ -256,6 +257,21 @@ async def get_valid_token(conn: Any, *, rejected: str = "") -> str:
 
     Raises ``NotConnected`` for a revoked / needs_reconnect / missing connection,
     ``ProviderError`` when the provider fails or the lease holder never finishes."""
+    for _ in range(3):
+        try:
+            return await _get_valid_token_once(conn, rejected)
+        except _StillRejected:
+            # The lease holder finished without replacing the refused token (it
+            # found it fresh): claim the lease ourselves and refresh.
+            conn = await _reload(conn.id)
+    raise ProviderError("token refresh did not replace the refused token")
+
+
+class _StillRejected(Exception):
+    """The lease holder's result is the token the caller was refused."""
+
+
+async def _get_valid_token_once(conn: Any, rejected: str) -> str:
     if conn is None or conn.status != "active":
         raise NotConnected("connection is not active")
     now = _now()
@@ -266,7 +282,7 @@ async def get_valid_token(conn: Any, *, rejected: str = "") -> str:
     owner = uuid.uuid4().hex
     claimed = await _claim(conn.id, owner, now)
     if claimed is None:
-        return await _wait_for_holder(conn.id)
+        return await _wait_for_holder(conn.id, rejected)
 
     current = await _reload(conn.id)
     if current is None or current.status != "active":
@@ -323,7 +339,7 @@ async def get_valid_token(conn: Any, *, rejected: str = "") -> str:
     return grant.access_token
 
 
-async def _wait_for_holder(conn_id: Any) -> str:
+async def _wait_for_holder(conn_id: Any, rejected: str = "") -> str:
     deadline = asyncio.get_running_loop().time() + WAIT_SECONDS
     while asyncio.get_running_loop().time() < deadline:
         await asyncio.sleep(_POLL_SECONDS)
@@ -331,7 +347,10 @@ async def _wait_for_holder(conn_id: Any) -> str:
         if current is None or current.status != "active":
             raise NotConnected("connection is not active")
         if current.refresh_lease_owner is None and _fresh(current, _now()):
-            return _tokens(current).get("access_token", "")
+            token = _tokens(current).get("access_token", "")
+            if rejected and hmac.compare_digest(token.encode(), rejected.encode()):
+                raise _StillRejected
+            return token
     raise ProviderError("token refresh is taking too long")
 
 

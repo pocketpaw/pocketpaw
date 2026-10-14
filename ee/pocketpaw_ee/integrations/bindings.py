@@ -23,7 +23,9 @@
 # readonly settings that pass their field's check; stored with an atomic $set).
 # A failure is stored as ``setup_error`` and the site reads ``setup_required``;
 # it never fails the request. The gateway also stores one (``mark_setup_error``)
-# when a handler finds the provider-side setup gone (a deleted sheet).
+# when a handler finds the provider-side setup gone (a deleted sheet); a later
+# successful call clears it (``clear_setup_error``). ``claim_binding_lease``
+# serialises provider writes that must not interleave (the vault's lease pattern).
 #
 # Status (``binding_status``), first match wins: disabled (has actions, none on),
 # needs_connection / needs_reconnect (connect kinds), setup_required (a setup
@@ -40,8 +42,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
@@ -607,3 +612,72 @@ async def mark_setup_error(binding: Any, error: str) -> None:
         .update_one({"_id": binding.id}, {"$set": {"setup_error": error}})
     )
     binding.setup_error = error
+
+
+async def clear_setup_error(workspace_id: str, pocket_id: str, provider_id: str) -> None:
+    """A call just worked: drop a stale ``setup_error`` (one conditional $set)."""
+    await (
+        _doc()
+        .get_pymongo_collection()
+        .update_one(
+            {
+                "workspace": workspace_id,
+                "pocket_id": pocket_id,
+                "provider": provider_id,
+                "setup_error": {"$nin": ["", None]},
+            },
+            {"$set": {"setup_error": ""}},
+        )
+    )
+
+
+LEASE_SECONDS = 15
+
+
+async def claim_binding_lease(
+    workspace_id: str, pocket_id: str, provider_id: str, *, wait_seconds: float = 5.0
+) -> tuple[str, dict] | None:
+    """Take the binding's short lease: ``(owner, raw row)``, or None after waiting.
+
+    One atomic ``find_one_and_update`` per try (free or expired lease -> ours), the
+    vault's refresh-lease pattern. Release with ``release_binding_lease``."""
+    coll = _doc().get_pymongo_collection()
+    owner = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_seconds
+    while True:
+        now = datetime.now(UTC)
+        row = await coll.find_one_and_update(
+            {
+                "workspace": workspace_id,
+                "pocket_id": pocket_id,
+                "provider": provider_id,
+                "$or": [{"lease_until": None}, {"lease_until": {"$lte": now}}],
+            },
+            {"$set": {"lease_owner": owner, "lease_until": now + timedelta(seconds=LEASE_SECONDS)}},
+            return_document=True,
+        )
+        if row is not None:
+            return owner, row
+        if loop.time() >= deadline:
+            return None
+        await asyncio.sleep(0.05)
+
+
+async def release_binding_lease(
+    workspace_id: str, pocket_id: str, provider_id: str, owner: str, update: dict | None = None
+) -> None:
+    """Drop the lease, writing ``update`` only while we still hold it."""
+    await (
+        _doc()
+        .get_pymongo_collection()
+        .update_one(
+            {
+                "workspace": workspace_id,
+                "pocket_id": pocket_id,
+                "provider": provider_id,
+                "lease_owner": owner,
+            },
+            {"$set": {**(update or {}), "lease_owner": None, "lease_until": None}},
+        )
+    )

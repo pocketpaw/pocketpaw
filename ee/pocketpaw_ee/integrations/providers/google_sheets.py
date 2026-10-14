@@ -11,13 +11,22 @@
 # ``site_setup`` creates "<site name> — responses" in the owner's Drive with a tab
 # named ``sheet_name`` (default "Responses") and stores ``spreadsheet_id`` (hidden)
 # and ``spreadsheet_url`` (readonly link). Rerun is idempotent: a reachable sheet
-# is kept and only a missing tab is added; an unreachable one is replaced.
+# is kept and only a missing tab is added; only a 404 NOT_FOUND sheet is replaced
+# (a 403 never mints a second spreadsheet).
 #
 # ``append_row {fields}`` (public write) keeps row 1 as the header: ``submitted_at``
-# (UTC ISO) first, then field keys in first-seen order; new keys add columns, up to
-# 60 (beyond -> invalid_args). Values go in with ``valueInputOption=RAW`` so a cell
-# is never evaluated as a formula. Control characters are stripped (newlines kept).
-# A 401 refreshes once; a 403/404 or a missing tab marks the site setup_required.
+# (UTC ISO) first, then field keys (trimmed, whitespace collapsed, <=80 chars, not
+# punctuation-only) in first-seen order. Strangers must not exhaust the columns, so
+# new keys are budgeted: at most 5 per request, 10 per binding per UTC day, 60
+# columns total; keys over budget are dropped and the row still lands. Header
+# growth runs under the binding lease, writes only the NEW cells after the last
+# column, and values are placed by a re-read of row 1, so concurrent forms never
+# clobber each other's columns. Values go in with ``valueInputOption=RAW`` (never
+# evaluated as a formula); control characters are stripped (newlines kept).
+# Errors: a 401 refreshes once; Google ``PERMISSION_DENIED`` / ``NOT_FOUND`` or a
+# missing tab -> setup_required (marks the site); quota / rate limits ->
+# rate_limited; anything else -> provider_error. A successful append clears a
+# stale setup_required.
 
 from __future__ import annotations
 
@@ -59,15 +68,29 @@ MAX_FIELDS = 50
 MAX_KEY = 80
 MAX_VALUE = 2000
 MAX_COLUMNS = 60
+NEW_KEYS_PER_REQUEST = 5
+NEW_KEYS_PER_DAY = 10
 _SPREADSHEET_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 # C0 controls except newline, plus DEL and C1.
 _CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+_SPACES = re.compile(r"\s+")
 
 
 def _clean(value: str, *, keep_newlines: bool) -> str:
     value = value.replace("\r\n", "\n").replace("\r", "\n")
     value = _CONTROL.sub("", value)
     return value if keep_newlines else value.replace("\n", " ")
+
+
+def normalise_key(raw: str) -> str:
+    """A header key: controls stripped, whitespace collapsed, trimmed. ValueError
+    when empty, over 80 chars, or punctuation only."""
+    key = _SPACES.sub(" ", _clean(raw, keep_newlines=False)).strip()
+    if not key or len(key) > MAX_KEY:
+        raise ValueError(f"Field names must be 1-{MAX_KEY} characters.")
+    if not any(c.isalnum() for c in key):
+        raise ValueError("Field names need a letter or a digit.")
+    return key
 
 
 class AppendRowArgs(ActionArgs):
@@ -80,9 +103,7 @@ class AppendRowArgs(ActionArgs):
             raise ValueError(f"At most {MAX_FIELDS} fields.")
         cleaned: dict[str, str] = {}
         for raw_key, raw_value in value.items():
-            key = _clean(raw_key, keep_newlines=False).strip()
-            if not key or len(key) > MAX_KEY:
-                raise ValueError(f"Field names must be 1-{MAX_KEY} characters.")
+            key = normalise_key(raw_key)
             if len(raw_value) > MAX_VALUE:
                 raise ValueError(f"Field values must be at most {MAX_VALUE} characters.")
             if key == TIMESTAMP_COLUMN:
@@ -98,6 +119,15 @@ def _a1(sheet: str, cells: str) -> str:
     return quote("'" + sheet.replace("'", "''") + "'!" + cells, safe="")
 
 
+def _column(index: int) -> str:
+    """1-based column number -> A1 letters (1 -> A, 27 -> AA)."""
+    letters = ""
+    while index:
+        index, rem = divmod(index - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
 def _sheet_name(settings: Any) -> str:
     name = _clean(str((settings or {}).get("sheet_name") or ""), keep_newlines=False).strip()
     return name[:80] or DEFAULT_SHEET
@@ -107,29 +137,104 @@ def _sheet_url(spreadsheet_id: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
 
 
+def google_error(resp: Any) -> tuple[str, set[str], str]:
+    """(error.status, lowercased reasons, message) from a Google error body."""
+    err = oauth_http.body_of(resp).get("error")
+    if not isinstance(err, dict):
+        return "", set(), ""
+    reasons = {
+        str(item.get("reason") or "").lower()
+        for key in ("errors", "details")
+        for item in (err.get(key) or [])
+        if isinstance(item, dict)
+    } - {""}
+    return str(err.get("status") or ""), reasons, str(err.get("message") or "")
+
+
 def _refuse_for(resp: Any, what: str) -> None:
-    """Map a failed Sheets answer: gone/forbidden -> setup_required, else 429 / 502."""
-    status = resp.status_code
-    if status < 400:
+    """Map a failed Sheets answer to a gateway refusal or a ProviderError."""
+    code = resp.status_code
+    if code < 400:
         return
-    if status in (403, 404):
+    status, reasons, message = google_error(resp)
+    if (
+        code == 429
+        or status == "RESOURCE_EXHAUSTED"
+        or any("ratelimit" in r or "quota" in r for r in reasons)
+    ):
+        raise ActionRefused("rate_limited")
+    if status in ("PERMISSION_DENIED", "NOT_FOUND"):
         raise ActionRefused(
             "setup_required",
             "The spreadsheet for this site can't be reached. The site owner needs to reconnect it.",
             setup_error="sheet_unreachable",
         )
-    if status == 400 and "unable to parse range" in resp.text.lower():
+    if code == 400 and "unable to parse range" in message.lower():
         raise ActionRefused(
             "setup_required",
             "The sheet tab for this site is missing. The site owner needs to set it up again.",
             setup_error="sheet_tab_missing",
         )
-    if status == 429:
-        raise ActionRefused("rate_limited")
-    raise ProviderError(f"google_sheets: {what} answered {status}")
+    raise ProviderError(f"google_sheets: {what} answered {code} {status}".strip())
+
+
+async def _read_header(ctx: ActionContext, base: str, sheet: str) -> list[str]:
+    got = await oauth_http.authed(
+        ctx.get_token, "GET", f"{base}/{_a1(sheet, '1:1')}", provider="google_sheets"
+    )
+    _refuse_for(got, "header read")
+    rows = oauth_http.body_of(got).get("values") or []
+    return [str(c) for c in (rows[0] if rows else [])]
+
+
+def _today() -> str:
+    return datetime.now(UTC).date().isoformat()
+
+
+async def _grow_header(ctx: ActionContext, base: str, sheet: str, wanted: list[str]) -> list[str]:
+    """Add the budgeted share of ``wanted`` to row 1 under the binding lease and
+    return the re-read header. Only the new cells are written."""
+    from pocketpaw_ee.integrations import bindings
+
+    lease = await bindings.claim_binding_lease(ctx.workspace_id, ctx.pocket_id, ctx.provider)
+    if lease is None:
+        # Another submission held the header too long: write known keys only.
+        return await _read_header(ctx, base, sheet)
+    owner, row = lease
+    update: dict[str, Any] = {}
+    try:
+        header = await _read_header(ctx, base, sheet)
+        missing = [k for k in wanted if k not in header]
+        stamp_col = [TIMESTAMP_COLUMN] if TIMESTAMP_COLUMN in missing else []
+        others = [k for k in missing if k != TIMESTAMP_COLUMN][:NEW_KEYS_PER_REQUEST]
+        state = (row.get("provider_state") or {}).get("new_keys") or {}
+        used = int(state.get("used") or 0) if state.get("day") == _today() else 0
+        others = others[: max(0, NEW_KEYS_PER_DAY - used)]
+        add = [*stamp_col, *others][: max(0, MAX_COLUMNS - len(header))]
+        if not add:
+            return header
+        start = _column(len(header) + 1)
+        put = await oauth_http.authed(
+            ctx.get_token,
+            "PUT",
+            f"{base}/{_a1(sheet, f'{start}1')}",
+            provider="google_sheets",
+            params={"valueInputOption": "RAW"},
+            json={"values": [add]},
+        )
+        _refuse_for(put, "header write")
+        spent = len([k for k in add if k != TIMESTAMP_COLUMN])
+        update = {"provider_state.new_keys": {"day": _today(), "used": used + spent}}
+        return await _read_header(ctx, base, sheet)
+    finally:
+        await bindings.release_binding_lease(
+            ctx.workspace_id, ctx.pocket_id, ctx.provider, owner, update
+        )
 
 
 async def _append_row(ctx: ActionContext, args: AppendRowArgs) -> dict[str, Any]:
+    from pocketpaw_ee.integrations import bindings
+
     spreadsheet_id = str(ctx.settings.get("spreadsheet_id") or "")
     if not _SPREADSHEET_ID.match(spreadsheet_id):
         raise ActionRefused(
@@ -140,30 +245,12 @@ async def _append_row(ctx: ActionContext, args: AppendRowArgs) -> dict[str, Any]
     sheet = _sheet_name(ctx.settings)
     base = f"{SHEETS_API}/{spreadsheet_id}/values"
 
-    got = await oauth_http.authed(
-        ctx.get_token, "GET", f"{base}/{_a1(sheet, '1:1')}", provider="google_sheets"
-    )
-    _refuse_for(got, "header read")
-    rows = oauth_http.body_of(got).get("values") or []
-    header = [str(c) for c in (rows[0] if rows else [])]
-
-    wanted = [TIMESTAMP_COLUMN, *args.fields]
-    new = [k for k in wanted if k not in header]
-    if new:
-        if len(header) + len(new) > MAX_COLUMNS:
-            raise ActionRefused(
-                "invalid_args", f"This sheet can't take more than {MAX_COLUMNS} columns."
-            )
-        header = [*header, *new]
-        put = await oauth_http.authed(
-            ctx.get_token,
-            "PUT",
-            f"{base}/{_a1(sheet, 'A1')}",
-            provider="google_sheets",
-            params={"valueInputOption": "RAW"},
-            json={"values": [header]},
-        )
-        _refuse_for(put, "header write")
+    header = await _read_header(ctx, base, sheet)
+    wanted = [k for k in (TIMESTAMP_COLUMN, *args.fields) if k not in header]
+    if wanted:
+        header = await _grow_header(ctx, base, sheet, wanted)
+    if not any(k in header for k in args.fields):
+        raise ActionRefused("invalid_args", "This sheet isn't taking new fields right now.")
 
     stamp = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     values = {**args.fields, TIMESTAMP_COLUMN: stamp}
@@ -177,6 +264,7 @@ async def _append_row(ctx: ActionContext, args: AppendRowArgs) -> dict[str, Any]
         json={"values": [row]},
     )
     _refuse_for(appended, "append")
+    await bindings.clear_setup_error(ctx.workspace_id, ctx.pocket_id, ctx.provider)
     return {"appended": True}
 
 
@@ -353,9 +441,11 @@ class GoogleSheetsProvider(BaseProvider):
                     if added.status_code >= 400:
                         raise ProviderError(f"google_sheets: add tab answered {added.status_code}")
                 return {"spreadsheet_id": existing, "spreadsheet_url": _sheet_url(existing)}
-            if resp.status_code not in (403, 404):
+            status, _, _ = google_error(resp)
+            if resp.status_code != 404 or status != "NOT_FOUND":
+                # A 403 (or anything else) never mints a second spreadsheet.
                 raise ProviderError(f"google_sheets: sheet check answered {resp.status_code}")
-            # Deleted, or no longer ours: make a fresh one below.
+            # Deleted: make a fresh one below.
 
         title = f"{await _site_name(ctx.pocket_id)} — responses"
         created = await oauth_http.authed(

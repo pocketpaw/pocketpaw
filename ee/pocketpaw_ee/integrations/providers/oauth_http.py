@@ -9,15 +9,19 @@
 #   * ``authed()``          an API call with the site's token; a 401 refreshes
 #                           once through ``get_token(rejected=...)`` and retries
 #   * ``s256()`` / ``client_credentials()`` PKCE challenge and env-read app config
+#   * ``untraced()``        suppresses the OpenTelemetry httpx instrumentation
+#                           (Logfire) for a request whose URL carries a secret, so
+#                           the URL never lands in a span (HubSpot token info)
 #
 # Nothing here logs or raises with a token or a response body in the message.
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import httpx
@@ -29,6 +33,20 @@ _DEAD_GRANT = {"invalid_grant", "bad_refresh_token", "bad_auth_code"}
 
 # Tests replace this with ``httpx.MockTransport(handler)``.
 _transport: httpx.AsyncBaseTransport | None = None
+
+
+@contextlib.contextmanager
+def untraced() -> Iterator[None]:
+    """No httpx span inside: Logfire's ``instrument_httpx`` wraps the transport
+    class globally, so a per-client opt-out is impossible; the OTel suppress key
+    is the seam it honours (``is_http_instrumentation_enabled``)."""
+    try:
+        from opentelemetry.instrumentation.utils import suppress_http_instrumentation
+    except ImportError:  # no OTel installed: nothing traces httpx anyway
+        yield
+        return
+    with suppress_http_instrumentation():
+        yield
 
 
 def client() -> httpx.AsyncClient:
