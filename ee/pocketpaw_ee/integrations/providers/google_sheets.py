@@ -76,7 +76,7 @@ _CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 _SPACES = re.compile(r"\s+")
 
 
-def _clean(value: str, *, keep_newlines: bool) -> str:
+def clean_text(value: str, *, keep_newlines: bool) -> str:
     value = value.replace("\r\n", "\n").replace("\r", "\n")
     value = _CONTROL.sub("", value)
     return value if keep_newlines else value.replace("\n", " ")
@@ -85,7 +85,7 @@ def _clean(value: str, *, keep_newlines: bool) -> str:
 def normalise_key(raw: str) -> str:
     """A header key: controls stripped, whitespace collapsed, trimmed. ValueError
     when empty, over 80 chars, or punctuation only."""
-    key = _SPACES.sub(" ", _clean(raw, keep_newlines=False)).strip()
+    key = _SPACES.sub(" ", clean_text(raw, keep_newlines=False)).strip()
     if not key or len(key) > MAX_KEY:
         raise ValueError(f"Field names must be 1-{MAX_KEY} characters.")
     if not any(c.isalnum() for c in key):
@@ -108,7 +108,7 @@ class AppendRowArgs(ActionArgs):
                 raise ValueError(f"Field values must be at most {MAX_VALUE} characters.")
             if key == TIMESTAMP_COLUMN:
                 continue  # the server stamps this column
-            cleaned[key] = _clean(raw_value, keep_newlines=True).strip()
+            cleaned[key] = clean_text(raw_value, keep_newlines=True).strip()
         if not cleaned:
             raise ValueError("Send at least one field.")
         return cleaned
@@ -129,7 +129,7 @@ def _column(index: int) -> str:
 
 
 def _sheet_name(settings: Any) -> str:
-    name = _clean(str((settings or {}).get("sheet_name") or ""), keep_newlines=False).strip()
+    name = clean_text(str((settings or {}).get("sheet_name") or ""), keep_newlines=False).strip()
     return name[:80] or DEFAULT_SHEET
 
 
@@ -482,5 +482,5 @@ async def _site_name(pocket_id: str) -> str:
         pocket = await Pocket.get(PydanticObjectId(pocket_id))
     except Exception:  # noqa: BLE001 - a bad id just means no name
         pocket = None
-    name = _clean(str(getattr(pocket, "name", "") or ""), keep_newlines=False).strip()
+    name = clean_text(str(getattr(pocket, "name", "") or ""), keep_newlines=False).strip()
     return name[:120] or "Paw Site"

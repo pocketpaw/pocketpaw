@@ -100,6 +100,7 @@ async def test_provider_views_carry_settings_fields_and_requires_connection(bean
         "allowed_hosts",
         "max_length",
         "options_source",
+        "depends_on",
     }
     assert (field["key"], field["type"], field["required"], field["readonly"]) == (
         "url",

@@ -22,8 +22,11 @@
 # as ``remote``; a changed remote key with no loaded list is refused (fail closed).
 # A stored remote value is only re-checked when it changes; a relink to another
 # connection drops stored remote values first (``drop_remote``), so every remote
-# key in that PUT is new and a required one reads missing until re-picked. Every
-# value is capped at the field's ``max_length``.
+# key in that PUT is new and a required one reads missing until re-picked. A
+# remote select with ``depends_on`` (an Airtable table on its base) is re-checked
+# whenever a PUT changes one of those settings, and dropped when the PUT changes
+# them without sending it: its stored value named something under the old one.
+# Every value is capped at the field's ``max_length``.
 
 from __future__ import annotations
 
@@ -117,20 +120,38 @@ def drop_remote(provider: IntegrationProvider, settings: dict[str, Any]) -> dict
     }
 
 
+def deps_changed(spec: SettingsField, incoming: dict[str, Any], current: dict[str, Any]) -> bool:
+    """True when the PUT changes a setting ``spec``'s options depend on."""
+    for dep in spec.depends_on:
+        if dep not in incoming:
+            continue
+        value, stored = incoming[dep], (current or {}).get(dep)
+        if _clears(value):
+            if stored is not None:
+                return True
+        elif not _unchanged(value, stored):
+            return True
+    return False
+
+
 def remote_keys_to_check(
     provider: IntegrationProvider, incoming: dict[str, Any], current: dict[str, Any]
 ) -> list[str]:
-    """Remote select keys whose PUT value is new, so their live options must load."""
+    """Remote select keys whose PUT value is new (or whose ``depends_on`` setting
+    is), so their live options must load. Dependencies come first."""
     fields = _fields(provider)
-    return [
+    keys = [
         key
         for key, value in incoming.items()
         if (spec := fields.get(key)) is not None
         and is_remote_select(spec)
         and not (spec.readonly or spec.hidden)
         and not _clears(value)
-        and not _unchanged(value, (current or {}).get(key))
+        and (
+            not _unchanged(value, (current or {}).get(key)) or deps_changed(spec, incoming, current)
+        )
     ]
+    return sorted(keys, key=lambda k: len(fields[k].depends_on))
 
 
 def merge_put(
@@ -152,7 +173,9 @@ def merge_put(
             merged.pop(key, None)
             continue
         allowed = None
-        if is_remote_select(spec) and not _unchanged(value, merged.get(key)):
+        if is_remote_select(spec) and (
+            not _unchanged(value, merged.get(key)) or deps_changed(spec, incoming, current)
+        ):
             allowed = (remote or {}).get(key)
             if allowed is None:
                 raise ValidationError(INVALID, f"Pick {spec.label} from the list.")
@@ -160,6 +183,9 @@ def merge_put(
             merged[key] = check_value(spec, value, allowed)
         except ValueError as exc:
             raise ValidationError(INVALID, str(exc)) from None
+    for key, spec in fields.items():
+        if key not in incoming and spec.depends_on and deps_changed(spec, incoming, current):
+            merged.pop(key, None)
     return merged
 
 
@@ -211,6 +237,7 @@ def field_views(provider: IntegrationProvider) -> list[dict[str, Any]]:
             "allowed_hosts": list(f.allowed_hosts) or None,
             "max_length": f.max_length,
             "options_source": f.options_source,
+            "depends_on": list(f.depends_on) or None,
         }
         for f in _fields(provider).values()
         if not f.hidden

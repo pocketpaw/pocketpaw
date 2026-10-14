@@ -246,6 +246,7 @@ then submit with `Paw.call('google_sheets', 'append_row', {fields})` (string val
 Lead forms into a CRM: `connect_site_integration(pocket_id, 'hubspot', purpose)`, then
 `Paw.call('hubspot', 'create_contact', {email, firstname, lastname, phone, company, message})`.
 Zoho CRM instead: provider `zoho_crm`, `Paw.call('zoho_crm', 'create_lead', {email, first_name, last_name, phone, company, message})`.
+Airtable: provider `airtable`, `Paw.call('airtable', 'create_record', {fields})`; keys must match the table's text field names.
 Indian sellers (INR, UPI): `connect_site_integration(pocket_id, 'razorpay', purpose)`; `data-paw-checkout`
 is Stripe-only, so the button runs `Paw.call('razorpay', 'create_checkout', {product_ref, qty})` and opens `result.url`.
 Shopify stores (`connect_site_integration(pocket_id, 'shopify', purpose)`): product grids from `Paw.call('shopify', 'list_products', {limit, cursor})` (prices in minor units);

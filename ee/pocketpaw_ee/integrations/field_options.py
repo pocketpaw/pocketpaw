@@ -14,7 +14,8 @@
 #     values dropped (and values with a comma for a ``multi`` field), a missing
 #     label falls back to the value, capped at ``MAX_OPTIONS``
 #   * cached in process for ``TTL_SECONDS`` per (workspace, pocket, provider,
-#     connection, key), i.e. per binding + key; relinking another connection is a
+#     connection, key, the binding's values of the field's ``depends_on``), i.e.
+#     per binding + key; relinking another connection or picking another base is a
 #     new key. The cache is bounded (``MAX_ENTRIES``, oldest out first).
 #   * single-flight: concurrent misses for one key share one provider call
 
@@ -126,7 +127,15 @@ async def load(
     """The remote select's choices (cached), or a 409 / 502 ``CloudError``."""
     if provider.kind == "connect" and (conn is None or conn.status != "active"):
         raise not_connected()
-    key = (workspace_id, pocket_id, provider.id, str(conn.id) if conn is not None else "", spec.key)
+    stored = dict(getattr(binding, "settings", None) or {})
+    key = (
+        workspace_id,
+        pocket_id,
+        provider.id,
+        str(conn.id) if conn is not None else "",
+        spec.key,
+        *(str(stored.get(dep) or "") for dep in spec.depends_on),
+    )
     now = time.monotonic()
     hit = _cache.get(key)
     if hit is not None and hit[0] > now:

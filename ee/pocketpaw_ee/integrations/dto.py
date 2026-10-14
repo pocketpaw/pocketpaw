@@ -47,6 +47,8 @@ class SettingsFieldView(BaseModel):
     # "remote": the select's options load from
     # GET /sites/by-pocket/{pocket_id}/integrations/{provider}/fields/{key}/options.
     options_source: Literal["static", "remote"] = "static"
+    # Settings this remote select's options depend on: reload them when those change.
+    depends_on: list[str] | None = None
 
 
 class ConnectParamView(BaseModel):

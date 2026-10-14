@@ -43,6 +43,8 @@
 #
 # A PUT that changes a remote select (``options_source="remote"``) must pick from
 # the provider's live list (field_options.py); unreachable is a 502, never accepted.
+# A select with ``depends_on`` loads its list against the PUT's new value of those
+# settings (the binding's own settings are untouched until the PUT passes).
 # Moving a binding to another connection (PUT or the OAuth callback) drops its
 # stored remote values: they name things in the old account.
 
@@ -345,7 +347,11 @@ async def options_for_field(
 
 
 async def _remote_allowed(
-    row: Any, provider: IntegrationProvider, keys: list[str], user_id: str
+    row: Any,
+    provider: IntegrationProvider,
+    keys: list[str],
+    user_id: str,
+    incoming: dict[str, Any] | None = None,
 ) -> dict[str, set[str]]:
     """The live option values of each remote select a PUT changes (409 / 502 on failure)."""
     if not keys:
@@ -356,13 +362,25 @@ async def _remote_allowed(
         spec = settings_rules.field(provider, key)
         if spec is None:
             continue
+        binding = row
+        if spec.depends_on and incoming:
+            # Load against the PUT's value of the settings this list depends on.
+            pending = dict(row.settings or {})
+            for dep in spec.depends_on:
+                if dep in incoming:
+                    value = incoming[dep]
+                    if isinstance(value, str) and value.strip():
+                        pending[dep] = value.strip()
+                    else:
+                        pending.pop(dep, None)
+            binding = row.model_copy(update={"settings": pending})
         options = await field_options.load(
             provider,
             spec,
             workspace_id=row.workspace,
             pocket_id=row.pocket_id,
             user_id=user_id,
-            binding=row,
+            binding=binding,
             conn=conn,
         )
         allowed[key] = {o.value for o in options}
@@ -460,6 +478,7 @@ async def upsert(
             provider,
             settings_rules.remote_keys_to_check(provider, body.settings, current),
             user_id,
+            body.settings,
         )
         merged = _check_settings(settings_rules.merge_put(provider, body.settings, current, remote))
         setup = setup or merged != dict(row.settings or {})

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from pocketpaw_ee.integrations.providers.airtable import AirtableProvider
 from pocketpaw_ee.integrations.providers.base import IntegrationProvider
 from pocketpaw_ee.integrations.providers.brevo import BrevoProvider
 from pocketpaw_ee.integrations.providers.demo import DemoProvider, demo_enabled
@@ -43,6 +44,7 @@ _PROVIDERS: tuple[IntegrationProvider, ...] = (
     MailchimpProvider(),
     BrevoProvider(),
     NotionProvider(),
+    AirtableProvider(),
 )
 
 _DEMO = DemoProvider()

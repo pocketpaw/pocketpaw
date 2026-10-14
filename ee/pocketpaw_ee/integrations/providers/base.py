@@ -29,7 +29,9 @@
 #     requests) taken before site routing; True acks and records the event id
 #   * field_options(binding, ctx, key) -> list[SettingOption]   (async) live choices
 #     of a ``select`` with ``options_source="remote"``; ``binding`` may be None;
-#     raise ``ProviderError`` on failure (capped and cached in field_options.py)
+#     raise ``ProviderError`` on failure (capped and cached in field_options.py);
+#     a select listed per another setting names it in ``depends_on`` (Airtable's
+#     table per base): cache key, PUT re-check, and a changed one clears it
 #
 # Handlers receive an ``ActionContext`` and return a JSON-safe dict that goes to a
 # public caller as ``result``. They must never return a token or a secret.
@@ -145,6 +147,8 @@ class SettingsField:
     allowed_hosts: tuple[str, ...] = ()
     max_length: int = 500
     options_source: OptionsSource = "static"
+    # Remote selects only: settings whose value scopes this field's options.
+    depends_on: tuple[str, ...] = ()
 
 
 @dataclass
