@@ -6,7 +6,7 @@
 # ``oauth_http._transport``. No network. Covers: the metadata dc / api_endpoint
 # check (a mismatched endpoint is refused, no token sent there), no-expiry tokens
 # and refresh -> InvalidGrant (a 401 is needs_reconnect), the audiences remote
-# select, subscribe new (double opt-in pending vs subscribed), fill-empty merge
+# select, subscribe (always answering ok) new (pending vs subscribed), fill-empty merge
 # fields, unsubscribed / cleaned / archived never re-subscribed, a transactional
 # contact opting in, the audience missing, 400 / 429 mapping and arg caps.
 from __future__ import annotations
@@ -312,8 +312,8 @@ async def test_new_member_is_pending_by_default_and_subscribed_without_double_op
         pending = await _sub(c, sid, email=" Ada@Example.com ", first_name="Ada\n")
         await c.put(_put_url(pid), json={"settings": {"double_opt_in": "no"}})
         direct = await _sub(c, sid, email="bob@example.com")
-    assert pending.json() == {"ok": True, "result": {"status": "pending"}}, pending.text
-    assert direct.json()["result"] == {"status": "subscribed"}, direct.text
+    assert pending.json() == {"ok": True, "result": {"status": "ok"}}, pending.text
+    assert direct.json()["result"] == {"status": "ok"}, direct.text
     ada = mc.members[(LIST, _hash("ada@example.com"))]
     assert ada["status"] == "pending" and ada["merge_fields"] == {"FNAME": "Ada", "LNAME": ""}
     assert mc.members[(LIST, _hash("bob@example.com"))]["status"] == "subscribed"
@@ -336,8 +336,8 @@ async def test_existing_member_gets_empty_merge_fields_only(beanie_test_db, mc):
         _, sid = await _ready(c)
         filled = await _sub(c, sid, email="ada@example.com", first_name="Eve", last_name="Lace")
         same = await _sub(c, sid, email="ada@example.com", first_name="Mallory", last_name="X")
-    assert filled.json()["result"] == {"status": "updated"}, filled.text
-    assert same.json()["result"] == {"status": "exists"}, same.text
+    assert filled.json()["result"] == {"status": "ok"}, filled.text
+    assert same.json()["result"] == {"status": "ok"}, same.text
     member = mc.members[(LIST, _hash("ada@example.com"))]
     assert member == {"status": "subscribed", "merge_fields": {"FNAME": "Ada", "LNAME": "Lace"}}
     [patch] = mc.writes()
@@ -354,7 +354,7 @@ async def test_opted_out_members_are_never_resubscribed(beanie_test_db, mc, stat
     async with _client() as c:
         _, sid = await _ready(c, double_opt_in="no")
         resp = await _sub(c, sid, email="gone@example.com", first_name="Gone")
-    assert resp.json()["result"] == {"status": "exists"}, resp.text
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
     assert mc.writes() == []
     assert mc.members[(LIST, _hash("gone@example.com"))]["status"] == status
 
@@ -368,7 +368,7 @@ async def test_a_transactional_contact_opts_in(beanie_test_db, mc):
     async with _client() as c:
         _, sid = await _ready(c)
         resp = await _sub(c, sid, email="t@example.com", first_name="Tia", last_name="New")
-    assert resp.json()["result"] == {"status": "pending"}, resp.text
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
     [patch] = mc.writes()
     assert patch[3] == {"merge_fields": {"FNAME": "Tia"}, "status": "pending"}
 
@@ -379,7 +379,7 @@ async def test_an_audience_without_name_fields_still_subscribes(beanie_test_db, 
     async with _client() as c:
         _, sid = await _ready(c)
         resp = await _sub(c, sid, email="a@b.co", first_name="A")
-    assert resp.json()["result"] == {"status": "pending"}, resp.text
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
     assert mc.members[(LIST, _hash("a@b.co"))]["status"] == "pending"
 
 

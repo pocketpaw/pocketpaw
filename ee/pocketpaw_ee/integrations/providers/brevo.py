@@ -18,10 +18,11 @@
 # double opt-in needs an owner-made confirmation template and redirect URL, so
 # there is no ``double_opt_in`` field.
 #
-# ``subscribe`` (public write): create the contact with ``listIds=[list_id]``
+# ``subscribe`` (public write) answers ``accepted()`` whatever it did. Create the
+# contact with ``listIds=[list_id]``
 # (``updateEnabled`` false, FIRSTNAME / LASTNAME only when given). On
 # ``duplicate_parameter`` read the contact: blacklisted for email, or unsubscribed
-# from this list, is ``{"status": "exists"}`` with nothing written; otherwise one
+# from this list, gets nothing written; otherwise one
 # PUT adds the list (when missing) and only the name attributes that are empty.
 # An ``invalid_parameter`` with names retries once without them, on create or
 # update (accounts whose attributes have other names, e.g. PRENOM / NOM). A missing list (404 /
@@ -48,6 +49,7 @@ from pocketpaw_ee.integrations.providers.base import (
     SettingsField,
     SetupContext,
     TokenGrant,
+    accepted,
 )
 
 ENV_PREFIX = "POCKETPAW_INTEGRATIONS_BREVO"
@@ -117,7 +119,7 @@ async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
         supplied = {}
         created = await _call(ctx.get_token, "POST", f"{API}/contacts", json=body)
     if created.status_code < 400:
-        return {"status": "subscribed"}
+        return accepted()
     if _code(created) != "duplicate_parameter":
         _refuse_for(created, "create contact")
         raise ProviderError("brevo: create contact failed")  # pragma: no cover
@@ -129,7 +131,7 @@ async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
     _refuse_for(found, "read contact")
     contact = oauth_http.body_of(found)
     if contact.get("emailBlacklisted") or list_id in _ids(contact.get("listUnsubscribed")):
-        return {"status": "exists"}
+        return accepted()
     stored = contact.get("attributes")
     stored = stored if isinstance(stored, Mapping) else {}
     fill = {k: v for k, v in supplied.items() if not str(stored.get(k) or "").strip()}
@@ -140,14 +142,14 @@ async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
     if fill:
         update["attributes"] = fill
     if not update:
-        return {"status": "exists"}
+        return accepted()
     params = {"identifierType": "email_id"}
     updated = await _call(ctx.get_token, "PUT", contact_url, params=params, json=update)
     if updated.status_code == 400 and joins and fill and _code(updated) == "invalid_parameter":
         update.pop("attributes")
         updated = await _call(ctx.get_token, "PUT", contact_url, params=params, json=update)
     _refuse_for(updated, "update contact")
-    return {"status": "subscribed" if joins else "updated"}
+    return accepted()
 
 
 class BrevoProvider(BaseProvider):

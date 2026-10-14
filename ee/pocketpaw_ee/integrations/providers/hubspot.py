@@ -12,7 +12,8 @@
 # ``create_contact`` (public write) upserts by email: create, and on a 409 (the
 # email exists) read that contact and PATCH (``idProperty=email``) only the
 # properties that are empty on it: a stranger can fill gaps, never overwrite a
-# stored value. The token-info call carries the token in its URL path, so it runs
+# stored value. Every outcome answers ``accepted()`` (no membership leak). The
+# token-info call carries the token in its URL path, so it runs
 # under ``oauth_http.untraced()`` and never lands in a Logfire span. ``message``
 # goes to HubSpot's default ``message`` contact property. A 401 refreshes once;
 # a 429 is ``rate_limited``; a 400 from HubSpot is ``invalid_args``.
@@ -34,6 +35,7 @@ from pocketpaw_ee.integrations.providers.base import (
     BaseProvider,
     ProviderError,
     TokenGrant,
+    accepted,
 )
 from pocketpaw_ee.integrations.providers.newsletter import _EMAIL_RE, MAX_EMAIL
 
@@ -91,7 +93,7 @@ async def _create_contact(ctx: ActionContext, args: CreateContactArgs) -> dict[s
     )
     if created.status_code != 409:
         _refuse_for(created, "create contact")
-        return {"status": "created"}
+        return accepted()
     # The email exists. A public caller may only fill what is empty on it.
     contact_url = f"{CONTACTS_URL}/{quote(args.email, safe='')}"
     fillable = [k for k in properties if k != "email"]
@@ -106,7 +108,7 @@ async def _create_contact(ctx: ActionContext, args: CreateContactArgs) -> dict[s
     stored = oauth_http.body_of(existing).get("properties") or {}
     empty = {k: properties[k] for k in fillable if not str(stored.get(k) or "").strip()}
     if not empty:
-        return {"status": "exists"}
+        return accepted()
     updated = await oauth_http.authed(
         ctx.get_token,
         "PATCH",
@@ -116,7 +118,7 @@ async def _create_contact(ctx: ActionContext, args: CreateContactArgs) -> dict[s
         json={"properties": empty},
     )
     _refuse_for(updated, "update contact")
-    return {"status": "updated"}
+    return accepted()
 
 
 def _int(value: Any) -> int | None:

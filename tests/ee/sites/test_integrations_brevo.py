@@ -5,8 +5,8 @@
 # OAuth realm and API v3, swapped in as ``oauth_http._transport``. No network.
 # Covers: scopes + account ref/label, a grant without contacts access refused,
 # refresh (rotating) + invalid_grant -> needs_reconnect, the paged contact-list
-# remote select, subscribe new / duplicate joins the list and fills empty names /
-# exists, blacklisted and list-unsubscribed contacts never re-added, attribute
+# remote select, subscribe (always answering ok) new / duplicate joins the list and
+# fills empty names, blacklisted and list-unsubscribed contacts never re-added, attribute
 # fallback, the list missing, 400 / 429 mapping and arg caps.
 from __future__ import annotations
 
@@ -287,10 +287,10 @@ async def test_subscribe_new_then_duplicate_joins_and_fills_empty_only(beanie_te
         joined = await _sub(c, sid, email="old@example.com", first_name="Eve", last_name="Lace")
         filled = await _sub(c, sid, email="ada@example.com", last_name="Lovelace")
         same = await _sub(c, sid, email="ada@example.com", first_name="Mallory")
-    assert new.json() == {"ok": True, "result": {"status": "subscribed"}}, new.text
-    assert joined.json()["result"] == {"status": "subscribed"}, joined.text
-    assert filled.json()["result"] == {"status": "updated"}, filled.text
-    assert same.json()["result"] == {"status": "exists"}, same.text
+    assert new.json() == {"ok": True, "result": {"status": "ok"}}, new.text
+    assert joined.json()["result"] == {"status": "ok"}, joined.text
+    assert filled.json()["result"] == {"status": "ok"}, filled.text
+    assert same.json()["result"] == {"status": "ok"}, same.text
     ada = brevo.contacts["ada@example.com"]
     assert ada["attributes"] == {"FIRSTNAME": "Ada", "LASTNAME": "Lovelace"}
     assert ada["listIds"] == [LIST]
@@ -321,7 +321,7 @@ async def test_blacklisted_or_unsubscribed_contacts_are_never_re_added(
     async with _client() as c:
         _, sid = await _ready(c)
         resp = await _sub(c, sid, email="gone@example.com", first_name="Gone")
-    assert resp.json()["result"] == {"status": "exists"}, resp.text
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
     assert [w[0] for w in brevo.writes()] == ["POST"]  # the duplicate create, nothing after
     assert brevo.contacts["gone@example.com"]["listIds"] == [3]
     assert brevo.contacts["gone@example.com"]["attributes"] == {}
@@ -340,8 +340,8 @@ async def test_accounts_with_other_attribute_names_still_subscribe(beanie_test_d
         _, sid = await _ready(c)
         new = await _sub(c, sid, email="a@b.co", first_name="A")
         old = await _sub(c, sid, email="old@example.com", first_name="O")
-    assert new.json()["result"] == {"status": "subscribed"}, new.text
-    assert old.json()["result"] == {"status": "subscribed"}, old.text
+    assert new.json()["result"] == {"status": "ok"}, new.text
+    assert old.json()["result"] == {"status": "ok"}, old.text
     assert brevo.contacts["a@b.co"]["listIds"] == [LIST]
     assert brevo.contacts["old@example.com"]["listIds"] == [LIST]
 
@@ -392,7 +392,7 @@ async def test_a_401_refreshes_once_and_a_dead_refresh_needs_reconnect(beanie_te
         brevo.valid.clear()
         brevo.refresh_tokens.clear()  # 30 days unused, or the app was removed
         dead = await _sub(c, sid, email="b@b.co")
-    assert ok.json()["result"] == {"status": "subscribed"}, ok.text
+    assert ok.json()["result"] == {"status": "ok"}, ok.text
     grants = [f["grant_type"] for f in brevo.token_calls]
     assert grants == ["authorization_code", "refresh_token", "refresh_token"]
     assert brevo.token_calls[1]["refresh_token"] == "b-refresh-1"

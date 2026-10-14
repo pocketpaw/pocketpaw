@@ -20,11 +20,12 @@
 # SETTINGS. ``list_id`` is a remote select (the account's audiences, from
 # ``field_options``); ``double_opt_in`` yes/no, unset reads as yes.
 #
-# ``subscribe`` (public write) reads the member by md5(lowercased email) first:
+# ``subscribe`` (public write) answers ``accepted()`` whatever it did. It reads
+# the member by md5(lowercased email) first:
 #   * none: PUT (upsert) with ``status_if_new`` = pending (double opt-in, Mailchimp
 #     sends the confirmation) or subscribed, FNAME / LNAME only when given
-#   * unsubscribed / cleaned / archived: ``{"status": "exists"}``, nothing written,
-#     so a form can never re-subscribe someone who opted out or bounced
+#   * unsubscribed / cleaned / archived: nothing written, so a form can never
+#     re-subscribe someone who opted out or bounced
 #   * subscribed / pending: PATCH only the merge fields that are empty on it
 #   * transactional (a contact who never opted in or out): the visitor is opting in
 #     now, so PATCH the status like a new member, plus empty merge fields
@@ -55,6 +56,7 @@ from pocketpaw_ee.integrations.providers.base import (
     SettingsField,
     SetupContext,
     TokenGrant,
+    accepted,
 )
 
 ENV_PREFIX = "POCKETPAW_INTEGRATIONS_MAILCHIMP"
@@ -66,7 +68,6 @@ MAX_AUDIENCES = 500
 _DC_RE = re.compile(r"^[a-z]{2,4}\d{1,3}$")
 _LIST_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
 # Never written to from a public form: they opted out, bounced, or were removed.
-_OPTED_OUT = {"unsubscribed", "cleaned", "archived"}
 # The only stored statuses a form may touch; anything else reads as "exists".
 _WRITABLE = {"subscribed", "pending", "transactional"}
 _REFUSED = "Mailchimp didn't accept that email address."
@@ -143,16 +144,13 @@ async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
             body.pop("merge_fields")
             created = await _call(ctx.get_token, "PUT", member_url, json=body)
         _refuse_for(created, "add member")
-        stored = str(oauth_http.body_of(created).get("status") or "")
-        if stored in _OPTED_OUT:
-            return {"status": "exists"}
-        return {"status": target}
+        return accepted()
     _refuse_for(found, "read member")
 
     member = oauth_http.body_of(found)
     status = str(member.get("status") or "")
     if status not in _WRITABLE:  # opted out, bounced, archived, or unknown
-        return {"status": "exists"}
+        return accepted()
     merge = member.get("merge_fields")
     patch: dict[str, Any] = {}
     fill = _empty_merge(merge if isinstance(merge, Mapping) else {}, supplied)
@@ -161,13 +159,13 @@ async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
     if status == "transactional":
         patch["status"] = target
     if not patch:
-        return {"status": "exists"}
+        return accepted()
     updated = await _call(ctx.get_token, "PATCH", member_url, json=patch)
     if updated.status_code == 400 and "status" in patch and fill:
         patch.pop("merge_fields")
         updated = await _call(ctx.get_token, "PATCH", member_url, json=patch)
     _refuse_for(updated, "update member")
-    return {"status": target if "status" in patch else "updated"}
+    return accepted()
 
 
 class MailchimpProvider(BaseProvider):

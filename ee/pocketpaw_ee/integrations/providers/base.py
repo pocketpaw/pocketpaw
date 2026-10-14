@@ -34,6 +34,9 @@
 # Handlers receive an ``ActionContext`` and return a JSON-safe dict that goes to a
 # public caller as ``result``. They must never return a token or a secret.
 # ``ActionContext.connection_meta`` is the bound connection's non-secret ``meta``.
+# A public write into the owner's list or CRM answers ``accepted()`` whatever it
+# did (created, filled, skipped an opted-out address), so a site visitor can't
+# learn whether an email is already there.
 # ``ProviderError`` is the failure a handler raises; the gateway maps it to 502.
 # ``ActionRefused(code)`` is a handler refusal with a gateway code instead
 # (``invalid_args``, ``rate_limited``, ``setup_required``); ``setup_required`` also
@@ -78,6 +81,11 @@ class ActionRefused(ProviderError):
         self.message = message
         self.setup_error = setup_error or "setup_failed"
         super().__init__(f"{code}: {message}" if message else code)
+
+
+def accepted() -> dict[str, Any]:
+    """The one public answer of a contact / list write (see the header)."""
+    return {"status": "ok"}
 
 
 class ActionArgs(BaseModel):

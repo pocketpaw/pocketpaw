@@ -289,7 +289,7 @@ async def test_connect_persists_region_and_uses_it(beanie_test_db, zoho):
     async with _client() as c:
         sid = await _linked(c, zoho)
         created = await _gw(c, sid, "zoho_crm", "create_lead", args={"email": "ada@example.com"})
-    assert created.json() == {"ok": True, "result": {"status": "created"}}, created.text
+    assert created.json() == {"ok": True, "result": {"status": "ok"}}, created.text
     [(host, form)] = zoho.token_calls
     assert host == "accounts.zoho.eu" and form["grant_type"] == "authorization_code"
     assert form["redirect_uri"].endswith("/api/v1/integrations/zoho_crm/callback")
@@ -381,9 +381,9 @@ async def test_create_then_fill_empty_never_overwrite(beanie_test_db, zoho):
             "create_lead",
             args={"email": "ada@example.com", "first_name": "Mallory", "message": "spam"},
         )
-    assert created.json()["result"] == {"status": "created"}, created.text
-    assert updated.json()["result"] == {"status": "updated"}, updated.text
-    assert unchanged.json()["result"] == {"status": "exists"}, unchanged.text
+    assert created.json()["result"] == {"status": "ok"}, created.text
+    assert updated.json()["result"] == {"status": "ok"}, updated.text
+    assert unchanged.json()["result"] == {"status": "ok"}, unchanged.text
     [lead] = zoho.leads.values()
     # Defaults on insert (Last_Name = local part, Company placeholder); the second
     # call filled only the empty Phone, overwriting none of the stored values.
@@ -411,7 +411,7 @@ async def test_supplied_names_and_company_win_over_defaults(beanie_test_db, zoho
             "create_lead",
             args={"email": "b@x.io", "last_name": "Lovelace", "company": "Engines"},
         )
-    assert resp.json()["result"] == {"status": "created"}
+    assert resp.json()["result"] == {"status": "ok"}
     [lead] = zoho.leads.values()
     assert (lead["Last_Name"], lead["Company"]) == ("Lovelace", "Engines")
     assert "First_Name" not in lead and "Description" not in lead
@@ -426,7 +426,7 @@ async def test_duplicate_data_on_insert_takes_the_fill_empty_path(beanie_test_db
         resp = await _gw(
             c, sid, "zoho_crm", "create_lead", args={"email": "ada@example.com", "phone": "42"}
         )
-    assert resp.json()["result"] == {"status": "updated"}, resp.text
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
     [lead] = zoho.leads.values()
     assert lead["Phone"] == "42" and lead["Last_Name"] == "ada"
 
@@ -437,7 +437,7 @@ async def test_a_401_refreshes_once_at_the_regional_server(beanie_test_db, zoho)
         sid = await _linked(c, zoho)
         zoho.valid.clear()  # Zoho revoked the access token early
         resp = await _gw(c, sid, "zoho_crm", "create_lead", args={"email": "a@b.co"})
-    assert resp.json()["result"] == {"status": "created"}, resp.text
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
     refreshes = [call for call in zoho.token_calls if call[1]["grant_type"] == "refresh_token"]
     assert [(h, f["refresh_token"]) for h, f in refreshes] == [("accounts.zoho.eu", "z-refresh")]
 
@@ -520,7 +520,7 @@ async def test_secondary_email_hit_is_not_the_lead(beanie_test_db, zoho):
         resp = await _gw(
             c, sid, "zoho_crm", "create_lead", args={"email": "ada@example.com", "phone": "42"}
         )
-    assert resp.json()["result"] == {"status": "created"}, resp.text
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
     assert "Phone" not in zoho.leads["551"]  # the other person's lead is untouched
     assert not [call for call in zoho.api_calls if call[1] == "PUT"]
     [new] = [r for r in zoho.leads.values() if r["id"] != "551"]
@@ -540,7 +540,7 @@ async def test_duplicate_on_another_field_writes_nothing(beanie_test_db, zoho):
             "create_lead",
             args={"email": "ada@example.com", "phone": "42", "company": "Engines"},
         )
-    assert resp.json()["result"] == {"status": "exists"}, resp.text
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
     assert zoho.leads["551"] == {
         "id": "551",
         "Email": "eve@example.com",
