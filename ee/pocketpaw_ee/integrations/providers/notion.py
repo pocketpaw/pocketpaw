@@ -11,21 +11,25 @@
 #
 # Setting ``database_id`` is a remote select of the data sources shared with the
 # integration (``POST /v1/search``, Notion's 2025-09 "data source" model); the
-# stored value is a data source id. Two public READ actions (no Turnstile, gateway
-# rate limits apply):
+# stored value is a data source id. Convention: every checkbox in the data source
+# SCHEMA named "Published" or "Public" (any case) gates publishing, and a row is
+# public only when all of them are checked (both actions). With none, every row is
+# public; ``site_setup`` writes the readonly ``publishing`` note saying so. Two
+# public READ actions (no Turnstile, gateway rate limits apply):
 #   * ``list_entries {limit, cursor?}`` queries the data source, newest first (a
 #     publish-date property when there is one, then created_time), and projects
-#     each property to a plain string. Convention: when the data source has a
-#     checkbox property named "Published" or "Public" (any case), only checked rows
-#     are returned, and ``get_entry`` refuses unchecked ones.
-#   * ``get_entry {id}`` reads one page, only when its parent is the configured
-#     data source, and flattens its blocks to a fixed JSON shape (text only, never
-#     HTML), at most ``MAX_BLOCKS`` blocks and one level of children. Notion-hosted
-#     file URLs expire after about an hour; they come back with ``expires_at``.
-# Results are cached in process for ``CACHE_TTL`` seconds per (workspace, pocket,
-# account_ref, data source, action, args), single-flight, bounded.
+#     each property to a plain string (url only http(s), email / phone only when
+#     they look like one; no rich-text href is ever emitted).
+#   * ``get_entry {id}`` (tighter caps) reads one page, only when its parent
+#     data_source_id is the configured one, and flattens its blocks to a fixed JSON
+#     shape (text only, never HTML), at most ``MAX_BLOCKS`` blocks and one level
+#     of children. Notion-hosted file URLs expire after about an hour; they come
+#     back with ``expires_at``.
+# Results, the schema and get_entry refusals are cached in process for
+# ``CACHE_TTL`` seconds per (workspace, pocket, account_ref, data source, action,
+# args), single-flight, bounded.
 # Errors: 404 / 403 on the data source -> ``setup_required`` (marks the binding);
-# a missing or foreign page -> ``invalid_args``; 429 -> ``rate_limited``.
+# a missing, foreign or unpublished page -> ``invalid_args``; 429 -> ``rate_limited``.
 
 from __future__ import annotations
 
@@ -35,7 +39,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 from pydantic import Field
@@ -55,6 +59,7 @@ from pocketpaw_ee.integrations.providers.base import (
     SetupContext,
     TokenGrant,
 )
+from pocketpaw_ee.integrations.providers.newsletter import _EMAIL_RE
 
 ENV_PREFIX = "POCKETPAW_INTEGRATIONS_NOTION"
 NOTION_VERSION = "2026-03-11"
@@ -76,12 +81,16 @@ PUBLISHED_FLAGS = {"published", "public"}
 DATE_NAMES = {"published at", "published on", "publish date", "published date", "date"}
 EXCERPT_NAMES = {"excerpt", "summary", "description"}
 _DEAD_GRANT = {"invalid_grant"}
+_PHONE_RE = re.compile(r"^\+?[0-9()\- ]{3,40}$")
+NOTE_ALL_PUBLIC = "No Published checkbox found: every row in this database is public."
 _ID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$"
 )
 _LIST_TYPES = {"bulleted_list_item": "bulleted_list", "numbered_list_item": "numbered_list"}
 _TEXT_TYPES = {"paragraph", "quote", "toggle", "callout", "to_do"}
 _UNAVAILABLE = "That entry isn't available."
+# The cached answer for a page that is missing, foreign, trashed or unpublished.
+_MISSING: dict[str, Any] = {}
 
 
 def _norm(notion_id: str) -> str:
@@ -164,6 +173,20 @@ def _scalar(value: Any) -> str:
     return str(value)
 
 
+def _safe_link(kind: str, value: Any) -> str:
+    """A url / email / phone value only when it is what it claims to be, else ""."""
+    text = _clean(str(value or ""), MAX_VALUE).strip()
+    if kind == "url":
+        try:
+            parts = urlsplit(text)
+        except ValueError:
+            return ""
+        return text if parts.scheme.lower() in ("http", "https") and parts.netloc else ""
+    if kind == "email":
+        return text if _EMAIL_RE.match(text) else ""
+    return text if _PHONE_RE.match(text) else ""
+
+
 def _property_text(prop: Mapping[str, Any]) -> str | None:
     """A property as a plain string, or None for a type we don't project."""
     kind = prop.get("type")
@@ -177,8 +200,10 @@ def _property_text(prop: Mapping[str, Any]) -> str | None:
         return _clean(", ".join(n for n in names if n), MAX_VALUE)
     if kind == "date":
         return str((value or {}).get("start") or "")
-    if kind in ("number", "checkbox", "url", "email", "phone_number"):
+    if kind in ("number", "checkbox"):
         return _clean(_scalar(value), MAX_VALUE)
+    if kind in ("url", "email", "phone_number"):
+        return _safe_link(kind, value)
     if kind in ("created_time", "last_edited_time"):
         return str(value or "")
     if kind == "formula" and isinstance(value, dict):
@@ -189,16 +214,23 @@ def _property_text(prop: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _published_flag(schema: Mapping[str, Any]) -> str:
-    """The checkbox property that gates publishing, or ""."""
-    for name, prop in schema.items():
-        if (
-            isinstance(prop, dict)
-            and prop.get("type") == "checkbox"
-            and name.strip().lower() in PUBLISHED_FLAGS
-        ):
-            return name
-    return ""
+def _published_flags(schema: Mapping[str, Any]) -> list[str]:
+    """Every checkbox property of the data source SCHEMA that gates publishing.
+    A row is public only when all of them are checked."""
+    return [
+        name
+        for name, prop in schema.items()
+        if isinstance(prop, dict)
+        and prop.get("type") == "checkbox"
+        and name.strip().lower() in PUBLISHED_FLAGS
+    ]
+
+
+def _publishing_note(flags: list[str]) -> str:
+    if not flags:
+        return NOTE_ALL_PUBLIC
+    names = " and ".join(f'"{name}"' for name in flags)
+    return f"Only rows with {names} checked are public."
 
 
 def _date_property(schema: Mapping[str, Any]) -> str:
@@ -381,11 +413,20 @@ def _source(ctx: ActionContext) -> str:
     return source
 
 
-async def _schema(ctx: ActionContext, source: str) -> dict[str, Any]:
-    resp = await _api(ctx.get_token, "GET", f"/data_sources/{quote(source, safe='-')}")
+async def _fetch_schema(
+    get_token: Callable[..., Awaitable[str]] | None, source: str
+) -> dict[str, Any]:
+    resp = await _api(get_token, "GET", f"/data_sources/{quote(source, safe='-')}")
     body = _check(resp, "data source", missing=_database_gone())
     props = body.get("properties")
     return props if isinstance(props, dict) else {}
+
+
+async def _schema(ctx: ActionContext, source: str) -> dict[str, Any]:
+    """The data source's property schema, cached like the actions' results."""
+    account = str(ctx.connection_meta.get("workspace_id") or "")
+    key = (ctx.workspace_id, ctx.pocket_id, account, _norm(source), "schema")
+    return await _cached(key, lambda: _fetch_schema(ctx.get_token, source))
 
 
 async def _clear_setup_error(ctx: ActionContext) -> None:
@@ -399,14 +440,17 @@ async def _list_entries(ctx: ActionContext, args: ListEntriesArgs) -> dict[str, 
 
     async def fetch() -> dict[str, Any]:
         schema = await _schema(ctx, source)
-        flag, date = _published_flag(schema), _date_property(schema)
+        flags, date = _published_flags(schema), _date_property(schema)
         sorts: list[dict[str, str]] = []
         if date:
             sorts.append({"property": date, "direction": "descending"})
         sorts.append({"timestamp": "created_time", "direction": "descending"})
         query: dict[str, Any] = {"page_size": args.limit, "sorts": sorts}
-        if flag:
-            query["filter"] = {"property": flag, "checkbox": {"equals": True}}
+        checks = [{"property": f, "checkbox": {"equals": True}} for f in flags]
+        if len(checks) == 1:
+            query["filter"] = checks[0]
+        elif checks:
+            query["filter"] = {"and": checks}
         if args.cursor:
             query["start_cursor"] = args.cursor
         resp = await _api(
@@ -470,18 +514,24 @@ async def _get_entry(ctx: ActionContext, args: GetEntryArgs) -> dict[str, Any]:
     source = _source(ctx)
 
     async def fetch() -> dict[str, Any]:
+        flags = _published_flags(await _schema(ctx, source))
         resp = await _api(ctx.get_token, "GET", f"/pages/{quote(args.id, safe='-')}")
+        if resp.status_code in (403, 404):
+            return _MISSING  # cached too: a probe for a bad id costs Notion one call a minute
         page = _check(resp, "page", missing=_entry_missing())
         parent = page.get("parent") if isinstance(page.get("parent"), dict) else {}
-        owners = {_norm(str(parent.get(k) or "")) for k in ("data_source_id", "database_id")}
-        if page.get("object") != "page" or _norm(source) not in owners - {""}:
-            raise _entry_missing()
-        if page.get("in_trash") or page.get("archived"):
-            raise _entry_missing()
+        if (
+            page.get("object") != "page"
+            or _norm(str(parent.get("data_source_id") or "")) != _norm(source)
+            or page.get("in_trash")
+            or page.get("archived")
+        ):
+            return _MISSING
         props = page.get("properties") if isinstance(page.get("properties"), dict) else {}
-        flag = _published_flag(props)
-        if flag and (props[flag] or {}).get("checkbox") is not True:
-            raise _entry_missing()
+        for flag in flags:
+            prop = props.get(flag)
+            if not isinstance(prop, dict) or prop.get("checkbox") is not True:
+                return _MISSING
         entry = _entry(page)
         blocks, truncated = await _blocks(ctx, str(page.get("id") or args.id))
         entry.pop("excerpt", None)
@@ -490,7 +540,10 @@ async def _get_entry(ctx: ActionContext, args: GetEntryArgs) -> dict[str, Any]:
             entry["truncated"] = True
         return entry
 
-    return await _cached(_cache_key(ctx, source, _norm(args.id)), fetch)
+    result = await _cached(_cache_key(ctx, source, _norm(args.id)), fetch)
+    if result is _MISSING:
+        raise _entry_missing()
+    return result
 
 
 # ------------------------------------------------------------- provider
@@ -531,6 +584,13 @@ class NotionProvider(BaseProvider):
             options_source="remote",
             max_length=36,
         ),
+        SettingsField(
+            key="publishing",
+            label="Who sees rows",
+            type="text",
+            readonly=True,
+            help="Set from the database: a Published or Public checkbox hides unchecked rows.",
+        ),
     )
     actions = {
         "list_entries": ActionSpec(
@@ -546,8 +606,8 @@ class NotionProvider(BaseProvider):
             handler=_get_entry,
             description="Read one entry of the site's Notion database with its content.",
             public=True,
-            ip_per_min=60,
-            site_per_min=300,
+            ip_per_min=20,
+            site_per_min=60,
         ),
     }
 
@@ -609,6 +669,14 @@ class NotionProvider(BaseProvider):
             access_token=str(body["access_token"]),
             refresh_token=str(body.get("refresh_token") or ""),
         )
+
+    async def site_setup(self, binding: Any, ctx: SetupContext) -> dict[str, Any]:
+        """Tell the owner which rows are public (readonly ``publishing``)."""
+        source = str((getattr(binding, "settings", None) or {}).get("database_id") or "")
+        if not _ID_RE.match(source):
+            return {"publishing": ""}
+        schema = await _fetch_schema(ctx.get_token, source)
+        return {"publishing": _publishing_note(_published_flags(schema))}
 
     async def field_options(
         self,

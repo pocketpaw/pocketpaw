@@ -43,6 +43,7 @@ def uid(n: int) -> str:
 BLOG = uid(1)
 NEWS = uid(2)
 OTHER = uid(3)
+DUAL = uid(4)
 
 
 def rt(text: str) -> list[dict]:
@@ -93,6 +94,14 @@ class FakeNotion:
                 },
             },
             NEWS: {"title": "News", "schema": {"Name": {"type": "title"}}},
+            DUAL: {
+                "title": "Dual",
+                "schema": {
+                    "Name": {"type": "title"},
+                    "Published": {"type": "checkbox"},
+                    "PUBLIC": {"type": "checkbox"},
+                },
+            },
         }
         self.pages: list[dict] = [
             page(
@@ -105,7 +114,17 @@ class FakeNotion:
             page(12, BLOG, "Second post"),
             page(20, NEWS, "News item", published=None),
             page(30, OTHER, "Elsewhere", published=None),
+            page(40, DUAL, "Both", PUBLIC={"type": "checkbox", "checkbox": True}),
+            page(41, DUAL, "Only one", PUBLIC={"type": "checkbox", "checkbox": False}),
+            page(42, DUAL, "No public prop"),
         ]
+        # Parent database matches BLOG's id but the data source is another one.
+        self.pages.append(
+            {
+                **page(50, OTHER, "Sibling source"),
+                "parent": {"type": "data_source_id", "data_source_id": OTHER, "database_id": BLOG},
+            }
+        )
         self.blocks: dict[str, list[dict]] = {}
 
     # -- token endpoint
@@ -215,10 +234,15 @@ class FakeNotion:
         rows = [p for p in self.pages if p["parent"]["data_source_id"] == source]
         flt = body.get("filter")
         if flt:
+            checks = flt.get("and", [flt])
             rows = [
                 r
                 for r in rows
-                if r["properties"][flt["property"]]["checkbox"] is flt["checkbox"]["equals"]
+                if all(
+                    r["properties"].get(c["property"], {}).get("checkbox")
+                    is c["checkbox"]["equals"]
+                    for c in checks
+                )
             ]
         cursor = body.get("start_cursor")
         if cursor and cursor != "cur-1":
@@ -302,7 +326,8 @@ def test_registry_authorize_url_and_availability(monkeypatch, notion):
 
     provider = get_provider("notion")
     assert (provider.kind, provider.category, provider.plan) == ("connect", "cms", "site")
-    [field] = provider.settings_fields
+    field, note = provider.settings_fields
+    assert (note.key, note.type, note.readonly) == ("publishing", "text", True)
     assert (field.key, field.type, field.options_source, field.required) == (
         "database_id",
         "select",
@@ -348,6 +373,12 @@ def test_property_projection_for_each_type():
                 "Link": {"type": "url", "url": "https://a.test"},
                 "Mail": {"type": "email", "email": "a@b.co"},
                 "Phone": {"type": "phone_number", "phone_number": None},
+                "Tel": {"type": "phone_number", "phone_number": "+1 (555) 010-0000"},
+                "JsLink": {"type": "url", "url": "javascript:alert(1)"},
+                "DataLink": {"type": "url", "url": "data:text/html,<script>x</script>"},
+                "BareLink": {"type": "url", "url": "example.com"},
+                "BadMail": {"type": "email", "email": "javascript:alert(1)//@x"},
+                "BadTel": {"type": "phone_number", "phone_number": "tel:javascript:1"},
                 "Slug": {"type": "rich_text", "rich_text": rt("hello-world")},
                 "Calc": {"type": "formula", "formula": {"type": "string", "string": "x"}},
                 "People": {"type": "people", "people": [{"id": "u"}]},
@@ -368,6 +399,12 @@ def test_property_projection_for_each_type():
         "Link": "https://a.test",
         "Mail": "a@b.co",
         "Phone": "",
+        "Tel": "+1 (555) 010-0000",
+        "JsLink": "",
+        "DataLink": "",
+        "BareLink": "",
+        "BadMail": "",
+        "BadTel": "",
         "Slug": "hello-world",
         "Calc": "x",
     }
@@ -431,6 +468,7 @@ async def test_remote_database_options_and_validation(beanie_test_db, notion):
     assert [(o["value"], o["label"]) for o in options] == [
         (BLOG, "Blog"),
         (NEWS, "News"),
+        (DUAL, "Dual"),
         (uid(77), "Untitled database"),
         (uid(79), "Page two"),
     ]
@@ -631,3 +669,81 @@ async def test_error_mapping(beanie_test_db, notion):
     assert gone.status_code == 409 and _code(gone) == "setup_required"
     row = await SiteIntegration.find_one(SiteIntegration.provider == "notion")
     assert row.setup_error == "notion_database_unavailable"
+
+
+def test_get_entry_caps_are_tighter():
+    from pocketpaw_ee.integrations.providers import get_provider
+
+    actions = get_provider("notion").actions
+    assert actions["get_entry"].caps() == (20, 60)
+    assert actions["list_entries"].caps() == (60, 300)
+
+
+@pytest.mark.asyncio
+async def test_every_publish_checkbox_must_be_checked(beanie_test_db, notion):
+    async with _client() as c:
+        sid, pid = await _linked(c, DUAL)
+        listed = await _gw(c, sid, "notion", "list_entries", args={})
+        both = await _gw(c, sid, "notion", "get_entry", args={"id": uid(40)})
+        one = await _gw(c, sid, "notion", "get_entry", args={"id": uid(41)})
+        absent = await _gw(c, sid, "notion", "get_entry", args={"id": uid(42)})
+        view = await c.get(f"/api/v1/sites/by-pocket/{pid}/integrations")
+    assert [e["title"] for e in listed.json()["result"]["entries"]] == ["Both"], listed.text
+    assert notion.last_query["filter"] == {
+        "and": [
+            {"property": "Published", "checkbox": {"equals": True}},
+            {"property": "PUBLIC", "checkbox": {"equals": True}},
+        ]
+    }
+    assert both.json()["result"]["title"] == "Both"
+    assert _code(one) == "invalid_args" and _code(absent) == "invalid_args"
+    [row] = view.json()
+    assert row["settings"]["publishing"] == (
+        'Only rows with "Published" and "PUBLIC" checked are public.'
+    )
+
+
+@pytest.mark.asyncio
+async def test_publishing_note_tells_the_owner(beanie_test_db, notion):
+    from pocketpaw_ee.cloud.models.integration import SiteIntegration
+    from pocketpaw_ee.integrations.providers.notion import NOTE_ALL_PUBLIC
+
+    async with _client() as c:
+        _, pid = await _linked(c, NEWS)
+        row = await SiteIntegration.find_one(SiteIntegration.provider == "notion")
+        assert row.settings["publishing"] == NOTE_ALL_PUBLIC
+        assert (await _put_db(c, pid, BLOG)).status_code == 200
+        ignored = await c.put(
+            f"/api/v1/sites/by-pocket/{pid}/integrations/notion",
+            json={"settings": {"publishing": "everything is fine"}},
+        )
+    row = await SiteIntegration.find_one(SiteIntegration.provider == "notion")
+    assert row.settings["publishing"] == 'Only rows with "Published" checked are public.'
+    assert ignored.status_code in (200, 422)
+
+
+@pytest.mark.asyncio
+async def test_parent_database_id_alone_is_not_enough(beanie_test_db, notion):
+    async with _client() as c:
+        sid, _ = await _linked(c)
+        resp = await _gw(c, sid, "notion", "get_entry", args={"id": uid(50)})
+    assert _code(resp) == "invalid_args"
+
+
+@pytest.mark.asyncio
+async def test_get_entry_refusals_are_cached(beanie_test_db, notion):
+    async with _client() as c:
+        sid, _ = await _linked(c)
+        for _ in range(3):
+            assert (
+                _code(await _gw(c, sid, "notion", "get_entry", args={"id": uid(99)}))
+                == "invalid_args"
+            )
+            assert (
+                _code(await _gw(c, sid, "notion", "get_entry", args={"id": uid(11)}))
+                == "invalid_args"
+            )
+    page_calls = [call for call in notion.calls if call[1].startswith("/v1/pages/")]
+    assert sorted(page_calls) == sorted(
+        [("GET", f"/v1/pages/{uid(99)}"), ("GET", f"/v1/pages/{uid(11)}")]
+    )
