@@ -4,6 +4,9 @@
 #     1. the provider verifies the signature -> NormalizedEvent, or 401. A verified
 #        event of a type we don't use comes back as ``ignored`` and is acked as is
 #     2. an event id already in ``IntegrationWebhookEvent`` answers 200 duplicate
+#        (an account-level event the provider's ``handle_event`` takes, such as an
+#        app uninstall or a privacy request, is handled here, recorded, and acked;
+#        a failure answers 500 and records nothing, so the provider retries)
 #     3. route to ONE site (see ``_site_for``): a named site must be bound through a
 #        connection with the event's ``account_ref``; the account_ref-only fallback
 #        refuses ambiguity. Unroutable events are acked 200 and not recorded.
@@ -168,6 +171,22 @@ async def ingest(provider_id: str, request: Request) -> JSONResponse:
 
     if event.type == CONNECTION_UPDATED:
         return await _connection_updated(event)
+
+    handle = getattr(provider, "handle_event", None)
+    if handle is not None:
+        try:
+            handled = await handle(event)
+        except Exception:  # noqa: BLE001 - unrecorded, so the provider retries
+            logger.exception("integrations: %s event %s failed to handle", provider_id, event.id)
+            return _err("provider_error", 500, "Could not process the event. Retry later.")
+        if handled:
+            try:
+                await IntegrationWebhookEvent(
+                    provider=provider.id, event_id=event.id, event_type=event.type
+                ).insert()
+            except DuplicateKeyError:
+                return JSONResponse({"ok": True, "duplicate": True})
+            return JSONResponse({"ok": True})
 
     site, binding = await _site_for(event)
     if binding is None:

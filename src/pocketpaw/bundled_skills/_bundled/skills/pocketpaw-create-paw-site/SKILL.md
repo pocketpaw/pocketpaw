@@ -248,6 +248,8 @@ Lead forms into a CRM: `connect_site_integration(pocket_id, 'hubspot', purpose)`
 Zoho CRM instead: provider `zoho_crm`, `Paw.call('zoho_crm', 'create_lead', {email, first_name, last_name, phone, company, message})`.
 Indian sellers (INR, UPI): `connect_site_integration(pocket_id, 'razorpay', purpose)`; `data-paw-checkout`
 is Stripe-only, so the button runs `Paw.call('razorpay', 'create_checkout', {product_ref, qty})` and opens `result.url`.
+Shopify stores (`connect_site_integration(pocket_id, 'shopify', purpose)`): product grids from `Paw.call('shopify', 'list_products', {limit, cursor})` (prices in minor units);
+buy buttons call `Paw.call('shopify', 'create_cart_checkout', {variant_id, qty})` and open `result.url`.
 
 ### Changing an html site that already exists
 

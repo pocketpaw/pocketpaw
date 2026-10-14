@@ -49,6 +49,15 @@ class SettingsFieldView(BaseModel):
     options_source: Literal["static", "remote"] = "static"
 
 
+class ConnectParamView(BaseModel):
+    """A value the owner types before Connect (e.g. a Shopify shop domain); the
+    client sends it back as ``ConnectBody.params[key]``."""
+
+    key: str
+    label: str
+    placeholder: str = ""
+
+
 class ProviderView(BaseModel):
     id: str
     name: str
@@ -60,6 +69,8 @@ class ProviderView(BaseModel):
     settings_fields: list[SettingsFieldView] = Field(default_factory=list)
     # False for builtin and embed kinds: nothing to connect, just link and configure.
     requires_connection: bool = False
+    # Asked for before Connect; empty for every provider that needs nothing.
+    connect_params: list[ConnectParamView] = Field(default_factory=list)
 
 
 class ConnectionView(BaseModel):
@@ -113,6 +124,8 @@ class OrdersPage(BaseModel):
 
 class ConnectBody(BaseModel):
     pocket_id: str | None = None
+    # Values for the provider's ``connect_params`` (refused for providers with none).
+    params: dict[str, str] | None = Field(default=None, max_length=10)
 
 
 class ConnectResponse(BaseModel):

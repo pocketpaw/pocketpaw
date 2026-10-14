@@ -1,41 +1,35 @@
 # ee/pocketpaw_ee/integrations/providers/base.py: the provider contract.
 #
 # One module per provider under ``providers/`` implements ``IntegrationProvider``
-# and registers it in ``providers/__init__.py``. A provider declares:
-#   * identity: id, name, kind (builtin | connect | embed), category, plan
-#   * availability(): available | coming_soon | unconfigured (no client id set)
-#   * settings_fields: the owner-editable (and server-set readonly) settings, a
-#     tuple of ``SettingsField``; PUT settings are validated against it
-#   * the connect hooks for connect kinds: authorize_url (may be async) / complete /
-#     refresh, and ``supports_pkce`` (then authorize_url gets an S256 challenge and
-#     complete the verifier, which the flow keeps in its server-side state)
-#   * actions: an allowlist of ``ActionSpec`` (typed args model, public, write)
-#   * verify_webhook(): signature check -> ``NormalizedEvent`` or None
+# and registers it in ``providers/__init__.py``. A provider declares: identity (id,
+# name, kind builtin | connect | embed, category, plan); availability() (available |
+# coming_soon | unconfigured); ``settings_fields`` (owner-editable and server-set
+# readonly ``SettingsField``s, PUT is validated against them); for connect kinds
+# authorize_url (may be async) / complete / refresh and ``supports_pkce`` (S256
+# challenge to authorize_url, verifier to complete, kept in the server-side state);
+# ``actions`` (an allowlist of ``ActionSpec``); verify_webhook() -> NormalizedEvent.
 #
-# Optional hooks (``BaseProvider`` has no-op defaults; callers use getattr so a
-# bare Protocol implementer still works):
-#   * site_setup(binding, ctx) -> dict      runs on link/enable and on reconnect;
-#     must be idempotent; returns readonly settings to merge; raising leaves the
-#     site ``setup_required`` (nothing crashes)
+# Optional hooks (``BaseProvider`` has defaults; callers use getattr):
+#   * site_setup(binding, ctx) -> dict   on link/enable/reconnect; idempotent;
+#     returns readonly settings; raising leaves the site ``setup_required``
 #   * site_status(binding, connection) -> str | None   override the computed status
-#     (e.g. "setup_required" while the provider account can't take charges)
-#   * connection_attention(connection) -> str | None   owner-facing hint on the
-#     ConnectionView, read from the stored connection (``connection.meta``)
-#   * resume_url(connection, state, redirect_uri) -> str | None   (async) the
-#     provider page that continues an unfinished setup; it must send the browser
-#     back to ``redirect_uri`` with ``state`` (and a ``code`` for ``complete``)
-#   * callback_params: tuple[str, ...]   extra callback query keys the provider
-#     needs (Zoho's ``accounts-server``); ``complete`` then also gets
-#     ``callback_params={key: value}``. They are untrusted browser input: the
-#     provider validates them before using any of them
-#   * refresh_with_meta: bool   ``refresh`` also gets ``meta=connection.meta``
-#     (the optional ``meta`` on the Protocol; others are called without it)
-#     (a provider whose token endpoint depends on the account, e.g. its region)
-#   * field_options(binding, ctx, key) -> list[SettingOption]   (async) the live
-#     choices of a ``select`` field declared with ``options_source="remote"`` (the
-#     account's audiences, bases, databases). ``binding`` is None when a kind with
-#     no connection has no binding yet. Raise ``ProviderError`` on failure; the
-#     caller caps, de-duplicates and caches the list (field_options.py)
+#   * connection_attention(connection) -> str | None   ConnectionView hint (meta)
+#   * resume_url(connection, state, redirect_uri) -> str | None   (async) finishes an
+#     unfinished setup; sends the browser back to ``redirect_uri`` with ``state``
+#   * callback_params: tuple[str, ...]   callback query keys ``complete`` also gets
+#     as ``callback_params={key: value}``: untrusted, the provider validates them
+#   * refresh_with_meta: bool   ``refresh`` also gets ``meta=connection.meta`` (a
+#     token endpoint that depends on the account: Zoho's region, Shopify's shop)
+#   * connect_params: tuple[ConnectParam, ...]   typed by the owner before Connect;
+#     checked by ``check_connect_params``, kept in the state (never read from the
+#     callback), passed as ``params=`` to authorize_url / complete; a grant should
+#     keep them in ``meta["connect_params"]`` for resume and refresh
+#   * verify_callback(query, params) -> bool   checks the full (signed) callback query
+#   * handle_event(event) -> bool   (async) account-level webhooks (uninstall, privacy
+#     requests) taken before site routing; True acks and records the event id
+#   * field_options(binding, ctx, key) -> list[SettingOption]   (async) live choices
+#     of a ``select`` with ``options_source="remote"``; ``binding`` may be None;
+#     raise ``ProviderError`` on failure (capped and cached in field_options.py)
 #
 # Handlers receive an ``ActionContext`` and return a JSON-safe dict that goes to a
 # public caller as ``result``. They must never return a token or a secret.
@@ -43,10 +37,9 @@
 # ``ProviderError`` is the failure a handler raises; the gateway maps it to 502.
 # ``ActionRefused(code)`` is a handler refusal with a gateway code instead
 # (``invalid_args``, ``rate_limited``, ``setup_required``); ``setup_required`` also
-# marks the site's binding so the owner sees it. ``InvalidGrant`` from ``refresh``
-# means the grant is dead (owner must reconnect).
-# ``get_token(rejected=token)`` forces one refresh when the provider refused
-# ``token`` (a 401 before its stated expiry); without it the cached token comes back.
+# marks the site's binding. ``InvalidGrant`` from ``refresh`` means the grant is
+# dead (owner must reconnect). ``get_token(rejected=token)`` forces one refresh
+# when the provider refused ``token``; without it the cached token comes back.
 
 from __future__ import annotations
 
@@ -107,6 +100,16 @@ class TokenGrant:
     # Non-secret provider state kept on the connection (``connection.meta``), e.g.
     # whether a payments account can take charges yet. Never a credential.
     meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ConnectParam:
+    """One value the owner gives before Connect (``params`` on the connect body)."""
+
+    key: str
+    label: str
+    placeholder: str = ""
+    max_length: int = 200
 
 
 @dataclass(frozen=True)
@@ -236,9 +239,27 @@ class BaseProvider:
     supports_pkce: bool = False
     actions: dict[str, ActionSpec] = {}
     settings_fields: tuple[SettingsField, ...] = ()
+    connect_params: tuple[ConnectParam, ...] = ()
 
     def availability(self) -> Availability:
         return "available"
+
+    def check_connect_params(self, params: Mapping[str, Any]) -> dict[str, str]:
+        """The declared connect params, stripped. ValueError (owner-facing) for an
+        unknown key, a missing value or one over its cap."""
+        declared = {p.key: p for p in self.connect_params}
+        unknown = [k for k in params if k not in declared]
+        if unknown:
+            raise ValueError(f"{self.name} doesn't take {unknown[0]!r}.")
+        out: dict[str, str] = {}
+        for key, spec in declared.items():
+            value = str(params.get(key) or "").strip()
+            if not value:
+                raise ValueError(f"Enter your {spec.label}.")
+            if len(value) > spec.max_length:
+                raise ValueError(f"{spec.label} is too long.")
+            out[key] = value
+        return out
 
     def authorize_url(
         self,

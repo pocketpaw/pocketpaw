@@ -21,7 +21,8 @@
 # On link, on enable, on a settings change, and for every bound site after a
 # reconnect, the provider's ``site_setup`` hook runs (idempotent; it may write
 # readonly settings that pass their field's check; stored with an atomic $set).
-# A failure is stored as ``setup_error`` and the site reads ``setup_required``;
+# A failure is stored as ``setup_error`` (``setup_failed``, or the ``setup_error`` of
+# an ``ActionRefused("setup_required")`` the hook raised) and the site reads ``setup_required``;
 # it never fails the request. The gateway also stores one (``mark_setup_error``)
 # when a handler finds the provider-side setup gone (a deleted sheet); a later
 # successful call clears it (``clear_setup_error``). ``claim_binding_lease``
@@ -59,7 +60,11 @@ from pocketpaw_ee.integrations import field_options, vault
 from pocketpaw_ee.integrations import settings as settings_rules
 from pocketpaw_ee.integrations.dto import ProviderView, SiteIntegrationPut, SiteIntegrationView
 from pocketpaw_ee.integrations.providers import all_providers, get_provider
-from pocketpaw_ee.integrations.providers.base import IntegrationProvider, SettingOption
+from pocketpaw_ee.integrations.providers.base import (
+    ActionRefused,
+    IntegrationProvider,
+    SettingOption,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +159,10 @@ def provider_view(provider: IntegrationProvider) -> ProviderView:
         ],
         settings_fields=settings_rules.field_views(provider),
         requires_connection=provider.kind == "connect",
+        connect_params=[
+            {"key": p.key, "label": p.label, "placeholder": p.placeholder}
+            for p in getattr(provider, "connect_params", ())
+        ],
     )
 
 
@@ -219,6 +228,8 @@ async def run_setup(binding: Any, provider: IntegrationProvider, conn: Any | Non
     except Exception as exc:  # noqa: BLE001 - a setup failure is a status, not a crash
         logger.info("integrations: %s site_setup failed: %s", provider.id, type(exc).__name__)
         settings, error = dict(binding.settings or {}), "setup_failed"
+        if isinstance(exc, ActionRefused) and exc.code == "setup_required":
+            error = exc.setup_error[:80]
     update: dict[str, Any] = {}
     current = dict(binding.settings or {})
     for key, value in settings.items():

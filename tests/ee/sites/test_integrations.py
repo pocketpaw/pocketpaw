@@ -919,6 +919,7 @@ async def test_connect_tool_pushes_the_card_and_creates_the_binding(beanie_test_
         "actions",
         "settings_fields",
         "requires_connection",
+        "connect_params",
     }
     assert set(data["site_integration"]) == {
         "provider",

@@ -3,7 +3,7 @@
 # ``router`` (owner routes: session + workspace RBAC + the ``sites`` plan feature):
 #   GET    /integrations/providers                       ProviderView[]
 #   GET    /integrations/connections                     ConnectionView[]
-#   POST   /integrations/{provider}/connect              {pocket_id?} -> {authorize_url}
+#   POST   /integrations/{provider}/connect              {pocket_id?, params?} -> {authorize_url}
 #   POST   /integrations/connections/{id}/resume         {authorize_url} (creator or admin)
 #   DELETE /integrations/connections/{id}                revoke (creator or admin)
 #   GET    /sites/by-pocket/{pocket_id}/integrations     SiteIntegrationView[]
@@ -91,6 +91,7 @@ async def connect(
         user_id=ctx.user_id,
         provider_id=provider,
         pocket_id=(body.pocket_id if body else None) or None,
+        params=(body.params if body else None) or None,
     )
     return ConnectResponse(authorize_url=url)
 
@@ -290,7 +291,9 @@ async def oauth_callback(
 ) -> HTMLResponse:
     """Provider redirect. Needs the single-use state AND this browser's start cookie."""
     cookie = request.cookies.get(oauth.cookie_name(provider))
-    message = await oauth.finish_callback(provider, code, state, cookie, dict(request.query_params))
+    message = await oauth.finish_callback(
+        provider, code, state, cookie, list(request.query_params.multi_items())
+    )
     resp = _page(message)
     resp.delete_cookie(
         oauth.cookie_name(provider),
