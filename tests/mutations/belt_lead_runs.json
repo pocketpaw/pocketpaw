@@ -214,5 +214,14 @@
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
+  },
+  {
+    "label": "the done check counts only push-triggered CI again",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "argv += [\"--limit\", \"50\", \"--json\", \"status,conclusion,name\"]",
+    "replace": "argv += [\"--event\", \"push\", \"--limit\", \"50\", \"--json\", \"status,conclusion,name\"]",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_done_lead_lands_with_every_pr_and_the_contact_sheet"
+    ]
   }
 ]

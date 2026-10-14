@@ -696,12 +696,20 @@ class CloudTaskDispatcher:
             return 0.0
 
     async def _dev_green(self, slug: str, base: str, sha: str, cwd: Path) -> bool:
-        """The push CI ``sha`` (a merge commit) triggered on ``base``: at least
-        one run, every one finished green. Unreadable reads as not yet."""
+        """The CI that ran on ``sha`` (a merge commit) on ``base``, any event: at
+        least one run, every one finished green. Unreadable reads as not yet.
+
+        Any event, because the fast lane merges with a token that fires no push
+        runs and dispatches dev CI itself (``workflow_dispatch``); a push-only
+        filter never saw a single run, so no lead could land."""
         if not _HEX_SHA.match(sha):
             return False
+        # ponytail: runs on the merge commit only. When the lane merges another
+        # PR in the same sweep, CI runs on that later head and this keeps reading
+        # "not yet" until the 8 h timeout; a fallback to the newest dev head that
+        # contains ``sha`` (compare API) is the upgrade if leads start missing it.
         argv = ["gh", "run", "list", "-R", slug, "--commit", sha, "--branch", base]
-        argv += ["--event", "push", "--limit", "50", "--json", "status,conclusion,name"]
+        argv += ["--limit", "50", "--json", "status,conclusion,name"]
         try:
             runs = json.loads(await self._gh(argv, cwd, "DONE: gh run list") or "[]")
         except Exception:  # noqa: BLE001 — the next poll reads it again

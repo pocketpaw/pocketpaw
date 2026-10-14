@@ -356,6 +356,9 @@ async def test_done_lead_lands_with_every_pr_and_the_contact_sheet(store, dirs, 
     # The dev CI it read is the done PR's merge commit, on dev.
     ci = next(a for a, _ in runner.calls if a[:3] == ["gh", "run", "list"])
     assert MERGE_SHA in ci and "dev" in ci
+    # Any event counts: the lane dispatches dev CI (workflow_dispatch) with a
+    # token that fires no push runs, so a push-only filter never sees green.
+    assert "--event" not in ci
 
 
 async def test_lead_is_not_done_until_dev_ci_on_the_merge_is_green(store, dirs, playbook):
