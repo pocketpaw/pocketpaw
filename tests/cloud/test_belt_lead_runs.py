@@ -450,6 +450,9 @@ async def test_lead_has_8h_and_no_no_pr_rule(store, dirs, playbook):
     cc = (await store.get_action(run_ref)).parameters["_code_change"]
     assert cc["headless_error"].startswith("TRACK:") and "28800" in cc["headless_error"]
     assert cc["station_pending"] is True
+    # A lead with no PR change for hours still writes its row once per stall
+    # window, so the line's headroom (it drops rows unwritten for 3 h) counts it.
+    assert runner.wall() - cc["lead"]["heartbeat_at"] <= 1800
 
 
 async def test_lead_timeouts_read_the_env(monkeypatch, tmp_path):

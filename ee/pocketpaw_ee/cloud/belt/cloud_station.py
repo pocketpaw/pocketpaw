@@ -570,8 +570,12 @@ class CloudTaskDispatcher:
             now = self.wall()
             expired = now - launched >= self.lead_timeout_seconds
             prs, pr_at = await self._lead_prs(slug, run_ref, cwd)
-            if prs != lead.get("prs"):
-                lead["prs"] = prs
+            # A write at least once per stall window: the line's headroom stops
+            # counting a run its store row has not moved on for hours.
+            beat = lead.get("heartbeat_at")
+            stale = not isinstance(beat, int | float) or now - beat >= self.lead_stall_seconds
+            if prs != lead.get("prs") or stale:
+                lead["prs"], lead["heartbeat_at"] = prs, now
                 await _patch(store, run_ref, lead=lead)
             argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "comments"]
             comments = (json.loads(await self._gh(argv, cwd, "TRACK: gh issue view") or "{}")).get(
