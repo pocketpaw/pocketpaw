@@ -7,9 +7,12 @@
 # refresh (rotating) + invalid_grant -> needs_reconnect, the paged contact-list
 # remote select, subscribe (always answering ok) new / duplicate joins the list and
 # fills empty names, blacklisted and list-unsubscribed contacts never re-added, attribute
-# fallback, the list missing, 400 / 429 mapping and arg caps.
+# fallback (an existing contact with bad names answers ok like a new one), scopes
+# read from the JWT when the token response has none (fail closed), the list
+# missing, 400 / 429 mapping and arg caps.
 from __future__ import annotations
 
+import base64
 import json
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -40,6 +43,7 @@ class FakeBrevo:
         self.token_calls: list[dict] = []
         self.api_calls: list[tuple[str, str, dict, dict]] = []
         self.scope = "contacts:read contacts:write account:read"
+        self.jwt_scope: str | None = None  # set: tokens are JWTs carrying this claim
         self.rate_limited = False
         self.attributes = {"FIRSTNAME", "LASTNAME"}
 
@@ -79,12 +83,12 @@ class FakeBrevo:
             assert body["updateEnabled"] is False
             if any(i not in self.lists for i in body["listIds"]):
                 return httpx.Response(404, json={"code": "document_not_found", "message": "x"})
-            if set(body.get("attributes") or {}) - self.attributes:
-                return httpx.Response(400, json={"code": "invalid_parameter", "message": "attr"})
             if body["email"] in self.contacts:
                 return httpx.Response(
                     400, json={"code": "duplicate_parameter", "message": "Contact already exist"}
                 )
+            if set(body.get("attributes") or {}) - self.attributes:
+                return httpx.Response(400, json={"code": "invalid_parameter", "message": "attr"})
             self.contacts[body["email"]] = {
                 "email": body["email"],
                 "emailBlacklisted": False,
@@ -120,6 +124,10 @@ class FakeBrevo:
             return httpx.Response(400, json={"error": "invalid_grant"})
         self.issued += 1
         token, refresh = f"b-access-{self.issued}", f"b-refresh-{self.issued}"
+        if self.jwt_scope is not None:
+            claims = json.dumps({"sub": "u", "scope": self.jwt_scope}).encode()
+            payload = base64.urlsafe_b64encode(claims).decode().rstrip("=")
+            token = f"eyJhbGciOiJSUzI1NiJ9.{payload}.sig{self.issued}"
         self.valid.add(token)
         self.refresh_tokens.add(refresh)
         return httpx.Response(
@@ -129,7 +137,7 @@ class FakeBrevo:
                 "refresh_token": refresh,
                 "expires_in": 3600,
                 "token_type": "Bearer",
-                "scope": self.scope,
+                **({"scope": self.scope} if self.scope else {}),
             },
         )
 
@@ -398,3 +406,62 @@ async def test_a_401_refreshes_once_and_a_dead_refresh_needs_reconnect(beanie_te
     assert brevo.token_calls[1]["refresh_token"] == "b-refresh-1"
     assert dead.status_code == 409 and _code(dead) == "not_connected", dead.text
     assert (await _conn()).status == "needs_reconnect"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("jwt_scope", "active"),
+    [
+        ("contacts:read contacts:write account:read", True),
+        ("contacts:read account:read", False),
+        (None, False),  # no scope anywhere: fail closed
+    ],
+)
+async def test_a_grant_without_a_scope_field_is_checked_from_the_jwt(
+    beanie_test_db, brevo, jwt_scope, active
+):
+    brevo.scope = ""
+    brevo.jwt_scope = jwt_scope
+    pid = await _pocket()
+    async with _client() as c:
+        msg = await _connect(c, pid)
+    assert (msg["status"] == "active") is active, msg
+    conn = await _conn()
+    if active:
+        assert set(conn.scopes) == {"contacts:read", "contacts:write", "account:read"}
+    else:
+        assert conn is None and msg["error"] == "provider_error"
+
+
+@pytest.mark.asyncio
+async def test_bad_names_answer_ok_for_new_and_existing_alike(beanie_test_db, brevo):
+    async with _client() as c:
+        _, sid = await _ready(c)
+        brevo.contacts["in@example.com"] = {
+            "email": "in@example.com",
+            "emailBlacklisted": False,
+            "attributes": {},
+            "listIds": [LIST],
+        }
+        brevo.contacts["out@example.com"] = {
+            "email": "out@example.com",
+            "emailBlacklisted": False,
+            "attributes": {},
+            "listIds": [],
+        }
+        # Duplicate first, then the PUT refuses names the account doesn't have.
+        brevo.attributes = {"FIRSTNAME", "LASTNAME"}
+        new = await _sub(c, sid, email="new@example.com", first_name="N")
+        brevo.attributes = set()
+        dup_in = await _sub(c, sid, email="in@example.com", last_name="I")
+        dup_out = await _sub(c, sid, email="out@example.com", last_name="O")
+    for resp in (new, dup_in, dup_out):
+        assert resp.json() == {"ok": True, "result": {"status": "ok"}}, resp.text
+    assert brevo.contacts["out@example.com"]["listIds"] == [LIST]
+    assert brevo.contacts["in@example.com"]["attributes"] == {}
+    puts = [w[3] for w in brevo.writes() if w[0] == "PUT"]
+    assert puts == [
+        {"attributes": {"LASTNAME": "I"}},
+        {"listIds": [LIST], "attributes": {"LASTNAME": "O"}},
+        {"listIds": [LIST]},
+    ]

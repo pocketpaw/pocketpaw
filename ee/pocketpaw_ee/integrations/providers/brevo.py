@@ -4,8 +4,10 @@
 # PKCE), category ``email``, plan ``site``. The app is configured by
 # ``POCKETPAW_INTEGRATIONS_BREVO_CLIENT_ID`` / ``_SECRET``; without both it is
 # ``unconfigured``. Scopes: ``contacts:read contacts:write account:read`` (write
-# does not imply read in Brevo); a grant whose ``scope`` lacks either contacts
-# scope is refused. ``complete`` reads ``GET /v3/account``: ``account_ref`` =
+# does not imply read in Brevo). The granted scopes come from the token
+# response's ``scope``, else the access token's JWT ``scope`` claim; a grant that
+# doesn't show both contacts scopes is refused (fail closed). ``complete`` reads
+# ``GET /v3/account``: ``account_ref`` =
 # organization_id (else user_id), ``account_label`` = company name (else email).
 #
 # TOKENS. Access tokens live an hour (``expires_in`` is read); refresh tokens live
@@ -25,12 +27,16 @@
 # from this list, gets nothing written; otherwise one
 # PUT adds the list (when missing) and only the name attributes that are empty.
 # An ``invalid_parameter`` with names retries once without them, on create or
-# update (accounts whose attributes have other names, e.g. PRENOM / NOM). A missing list (404 /
+# update (accounts whose attributes have other names, e.g. PRENOM / NOM); an
+# update left with nothing to write is ``accepted()``, the same as a new address.
+# A missing list (404 /
 # ``document_not_found``) is ``setup_required``; other 400s are ``invalid_args``;
 # 429 is ``rate_limited``.
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -71,6 +77,21 @@ def _int(value: Any) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _jwt_scopes(token: str) -> list[str]:
+    """The ``scope`` claim of Brevo's JWT access token. Read only to decide what
+    the grant allows (it came straight from the token endpoint over TLS); never
+    trusted for identity. [] when it isn't a readable JWT."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return []
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, TypeError):
+        return []
+    scope = payload.get("scope") if isinstance(payload, dict) else None
+    return scope.split() if isinstance(scope, str) else []
 
 
 def _code(resp: Any) -> str:
@@ -145,8 +166,11 @@ async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
         return accepted()
     params = {"identifierType": "email_id"}
     updated = await _call(ctx.get_token, "PUT", contact_url, params=params, json=update)
-    if updated.status_code == 400 and joins and fill and _code(updated) == "invalid_parameter":
+    if updated.status_code == 400 and fill and _code(updated) == "invalid_parameter":
+        # Same answer as a new address whose names the account can't take.
         update.pop("attributes")
+        if not update:
+            return accepted()
         updated = await _call(ctx.get_token, "PUT", contact_url, params=params, json=update)
     _refuse_for(updated, "update contact")
     return accepted()
@@ -224,10 +248,11 @@ class BrevoProvider(BaseProvider):
             },
             provider=self.id,
         )
-        granted = str(body.get("scope") or "").split()
-        if granted and not {CONTACTS_READ, CONTACTS_WRITE} <= set(granted):
-            raise ProviderError("brevo: the grant has no contacts access")
         access = str(body["access_token"])
+        granted = str(body.get("scope") or "").split() or _jwt_scopes(access)
+        if not {CONTACTS_READ, CONTACTS_WRITE} <= set(granted):
+            # Fail closed: a grant that doesn't show contacts access is refused.
+            raise ProviderError("brevo: the grant doesn't show contacts read and write")
         account = await self._account(access)
         ref = str(account.get("organization_id") or account.get("user_id") or "")
         if not ref:
@@ -237,7 +262,7 @@ class BrevoProvider(BaseProvider):
             access_token=access,
             refresh_token=str(body.get("refresh_token") or ""),
             expires_in=_int(body.get("expires_in")),
-            scopes=granted or list(SCOPES),
+            scopes=granted,
             account_label=label,
             account_ref=ref,
         )

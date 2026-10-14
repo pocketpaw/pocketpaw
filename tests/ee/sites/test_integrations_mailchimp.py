@@ -7,7 +7,8 @@
 # check (a mismatched endpoint is refused, no token sent there), no-expiry tokens
 # and refresh -> InvalidGrant (a 401 is needs_reconnect), the audiences remote
 # select, subscribe (always answering ok) new (pending vs subscribed), fill-empty merge
-# fields, unsubscribed / cleaned / archived never re-subscribed, a transactional
+# fields, unsubscribed / cleaned / archived never re-subscribed (also when added
+# after the read: create-only POST), bad names and history 400s answering ok, a transactional
 # contact opting in, the audience missing, 400 / 429 mapping and arg caps.
 from __future__ import annotations
 
@@ -50,6 +51,9 @@ class FakeMailchimp:
         self.rate_limited = False
         self.forgotten: set[str] = set()
         self.no_names = False  # the audience has no FNAME / LNAME merge fields
+        self.compliance: set[str] = set()
+        self.fake_looking: set[str] = set()
+        self.race: dict | None = None  # a member created between our GET and POST
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host
@@ -68,8 +72,9 @@ class FakeMailchimp:
             assert request.url.params["fields"] == "lists.id,lists.name"
             lists = [{"id": k, "name": v} for k, v in self.lists.items()]
             return httpx.Response(200, json={"lists": lists})
-        parts = path.split("/")  # '', '3.0', 'lists', id, 'members', hash
-        list_id, member = parts[3], parts[5]
+        parts = path.split("/")  # '', '3.0', 'lists', id, 'members'[, hash]
+        list_id = parts[3]
+        member = parts[5] if len(parts) > 5 else _hash(body.get("email_address", ""))
         if list_id not in self.lists:
             return httpx.Response(404, json={"title": "Resource Not Found", "status": 404})
         key = (list_id, member)
@@ -80,20 +85,27 @@ class FakeMailchimp:
             return httpx.Response(200, json=stored)
         if "merge_fields" in body and self.no_names:
             return httpx.Response(400, json={"title": "Invalid Resource", "status": 400})
-        if request.method == "PUT":
-            assert _hash(body["email_address"]) == member
-            if body["email_address"] in self.forgotten:
-                return httpx.Response(
-                    400, json={"title": "Forgotten Email Not Subscribed", "status": 400}
-                )
-            if stored is None:
-                stored = {
-                    "email_address": body["email_address"],
-                    "status": body["status_if_new"],
-                    "merge_fields": {"FNAME": "", "LNAME": ""},
-                }
-                self.members[key] = stored
-            stored["merge_fields"].update(body.get("merge_fields") or {})
+        if request.method == "POST":
+            assert len(parts) == 5, path  # create only: never an upsert
+            email = body["email_address"]
+            if email in self.forgotten:
+                return self._bad("Forgotten Email Not Subscribed")
+            if email in self.compliance:
+                return self._bad("Member In Compliance State")
+            if email in self.fake_looking:
+                return self._bad("Invalid Resource")
+            if self.race is not None:
+                self.members[key] = self.race
+                self.race = None
+                stored = self.members[key]
+            if stored is not None:
+                return self._bad("Member Exists")
+            stored = {
+                "email_address": email,
+                "status": body["status"],
+                "merge_fields": {"FNAME": "", "LNAME": "", **(body.get("merge_fields") or {})},
+            }
+            self.members[key] = stored
             return httpx.Response(200, json=stored)
         if request.method == "PATCH":
             stored["merge_fields"].update(body.get("merge_fields") or {})
@@ -101,6 +113,10 @@ class FakeMailchimp:
                 stored["status"] = body["status"]
             return httpx.Response(200, json=stored)
         return httpx.Response(405)
+
+    @staticmethod
+    def _bad(title: str) -> httpx.Response:
+        return httpx.Response(400, json={"title": title, "status": 400})
 
     def _login(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/metadata":
@@ -317,10 +333,11 @@ async def test_new_member_is_pending_by_default_and_subscribed_without_double_op
     ada = mc.members[(LIST, _hash("ada@example.com"))]
     assert ada["status"] == "pending" and ada["merge_fields"] == {"FNAME": "Ada", "LNAME": ""}
     assert mc.members[(LIST, _hash("bob@example.com"))]["status"] == "subscribed"
-    puts = [w for w in mc.writes() if w[0] == "PUT"]
+    puts = [w for w in mc.writes() if w[0] == "POST"]
+    assert puts[0][1] == f"/3.0/lists/{LIST}/members"
     assert puts[0][3] == {
         "email_address": "ada@example.com",
-        "status_if_new": "pending",
+        "status": "pending",
         "merge_fields": {"FNAME": "Ada"},
     }
     assert "merge_fields" not in puts[1][3]  # no names given, none sent
@@ -399,8 +416,10 @@ async def test_no_audience_or_a_deleted_one_is_setup_required(beanie_test_db, mc
 
 
 @pytest.mark.asyncio
-async def test_validation_forgotten_email_and_rate_limit(beanie_test_db, mc):
+async def test_validation_quiet_history_400s_and_rate_limit(beanie_test_db, mc):
     mc.forgotten.add("gdpr@example.com")
+    mc.compliance.add("held@example.com")
+    mc.fake_looking.add("fake@example.com")
     async with _client() as c:
         _, sid = await _ready(c)
         bad = [
@@ -414,12 +433,17 @@ async def test_validation_forgotten_email_and_rate_limit(beanie_test_db, mc):
                 {"email": ("a" * 250) + "@b.co"},
             )
         ]
-        forgotten = await _sub(c, sid, email="gdpr@example.com")
+        forgotten = await _sub(c, sid, email="gdpr@example.com", first_name="G")
+        held = await _sub(c, sid, email="held@example.com")
+        fake = await _sub(c, sid, email="fake@example.com")
         mc.rate_limited = True
         limited = await _sub(c, sid, email="a@b.co")
-    for resp in [*bad, forgotten]:
+    for resp in (forgotten, held):
+        # An address's history on the audience answers like a new signup.
+        assert resp.json() == {"ok": True, "result": {"status": "ok"}}, resp.text
+    for resp in [*bad, fake]:
         assert resp.status_code == 422 and _code(resp) == "invalid_args", resp.text
-    assert "Forgotten" not in forgotten.text  # generic message only
+    assert "Invalid Resource" not in fake.text  # generic message only
     assert limited.status_code == 429 and _code(limited) == "rate_limited"
     assert mc.members == {}
 
@@ -433,3 +457,55 @@ async def test_a_revoked_token_needs_reconnect(beanie_test_db, mc):
     assert resp.status_code == 409 and _code(resp) == "not_connected", resp.text
     assert (await _conn()).status == "needs_reconnect"
     assert mc.token_calls and all(f["grant_type"] == "authorization_code" for f in mc.token_calls)
+
+
+@pytest.mark.asyncio
+async def test_bad_names_answer_ok_for_new_and_existing_alike(beanie_test_db, mc):
+    mc.no_names = True
+    mc.members[(LIST, _hash("old@example.com"))] = {
+        "status": "subscribed",
+        "merge_fields": {"FNAME": "", "LNAME": ""},
+    }
+    mc.members[(LIST, _hash("t@example.com"))] = {
+        "status": "transactional",
+        "merge_fields": {"FNAME": "", "LNAME": ""},
+    }
+    async with _client() as c:
+        _, sid = await _ready(c)
+        new = await _sub(c, sid, email="new@example.com", first_name="N")
+        old = await _sub(c, sid, email="old@example.com", first_name="O")
+        tx = await _sub(c, sid, email="t@example.com", first_name="T")
+    for resp in (new, old, tx):
+        assert resp.json() == {"ok": True, "result": {"status": "ok"}}, resp.text
+    assert mc.members[(LIST, _hash("new@example.com"))]["status"] == "pending"
+    assert mc.members[(LIST, _hash("t@example.com"))]["status"] == "pending"
+    patches = [w[3] for w in mc.writes() if w[0] == "PATCH"]
+    # old: one refused PATCH, nothing retried; transactional: retried with status only.
+    assert patches == [
+        {"merge_fields": {"FNAME": "O"}},
+        {"merge_fields": {"FNAME": "T"}, "status": "pending"},
+        {"status": "pending"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_member_added_after_the_read_is_filled_never_overwritten(beanie_test_db, mc):
+    mc.race = {"status": "subscribed", "merge_fields": {"FNAME": "Ada", "LNAME": ""}}
+    async with _client() as c:
+        _, sid = await _ready(c)
+        resp = await _sub(c, sid, email="ada@example.com", first_name="Eve", last_name="Lace")
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
+    member = mc.members[(LIST, _hash("ada@example.com"))]
+    assert member == {"status": "subscribed", "merge_fields": {"FNAME": "Ada", "LNAME": "Lace"}}
+    assert [w[0] for w in mc.writes()] == ["POST", "PATCH"]
+
+
+@pytest.mark.asyncio
+async def test_an_opted_out_member_added_after_the_read_stays_out(beanie_test_db, mc):
+    mc.race = {"status": "unsubscribed", "merge_fields": {"FNAME": "", "LNAME": ""}}
+    async with _client() as c:
+        _, sid = await _ready(c, double_opt_in="no")
+        resp = await _sub(c, sid, email="gone@example.com", first_name="G")
+    assert resp.json()["result"] == {"status": "ok"}, resp.text
+    assert mc.members[(LIST, _hash("gone@example.com"))]["status"] == "unsubscribed"
+    assert [w[0] for w in mc.writes()] == ["POST"]

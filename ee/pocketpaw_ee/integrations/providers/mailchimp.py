@@ -20,19 +20,23 @@
 # SETTINGS. ``list_id`` is a remote select (the account's audiences, from
 # ``field_options``); ``double_opt_in`` yes/no, unset reads as yes.
 #
-# ``subscribe`` (public write) answers ``accepted()`` whatever it did. It reads
-# the member by md5(lowercased email) first:
-#   * none: PUT (upsert) with ``status_if_new`` = pending (double opt-in, Mailchimp
-#     sends the confirmation) or subscribed, FNAME / LNAME only when given
+# ``subscribe`` (public write) answers ``accepted()`` whatever it did, so a
+# visitor can't learn who is on the audience. It reads the member by
+# md5(lowercased email) first:
+#   * none: POST (create only) with status pending (double opt-in, Mailchimp sends
+#     the confirmation) or subscribed, FNAME / LNAME only when given. A "Member
+#     Exists" 400 (added since the read) re-reads and takes the existing path, so
+#     a race never overwrites; "Forgotten Email Not Subscribed" / "Member In
+#     Compliance State" answer ``accepted()`` with nothing written
 #   * unsubscribed / cleaned / archived: nothing written, so a form can never
 #     re-subscribe someone who opted out or bounced
 #   * subscribed / pending: PATCH only the merge fields that are empty on it
 #   * transactional (a contact who never opted in or out): the visitor is opting in
 #     now, so PATCH the status like a new member, plus empty merge fields
-# A 404 on the write is the audience gone (``setup_required``); 400 (forgotten
-# email, compliance state, a fake-looking address) is ``invalid_args`` with a
-# generic message; 429 is ``rate_limited``. Merge-field rejection on a new member
-# retries once without names, so an audience without FNAME/LNAME still subscribes.
+# Any write carrying names that gets a 400 drops the names and retries once (an
+# audience without FNAME / LNAME); with nothing left to write it is ``accepted()``.
+# A 404 on the write is the audience gone (``setup_required``); other 400s (a
+# fake-looking address) are ``invalid_args``; 429 is ``rate_limited``.
 
 from __future__ import annotations
 
@@ -71,6 +75,10 @@ _LIST_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
 # The only stored statuses a form may touch; anything else reads as "exists".
 _WRITABLE = {"subscribed", "pending", "transactional"}
 _REFUSED = "Mailchimp didn't accept that email address."
+_MEMBER_EXISTS = "member exists"
+# 400s that only say something about the address's history on this audience:
+# answered like a success so the result never reveals it.
+_QUIET = {"forgotten email not subscribed", "member in compliance state"}
 
 
 def api_base(meta: Mapping[str, Any]) -> str | None:
@@ -125,29 +133,30 @@ def _empty_merge(stored: Mapping[str, Any], supplied: dict[str, str]) -> dict[st
     return {k: v for k, v in supplied.items() if not str(stored.get(k) or "").strip()}
 
 
-async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
-    api = _api(ctx.connection_meta)
-    list_id = picked_list(ctx.settings, _LIST_RE)
-    target = "pending" if _double_opt_in(ctx.settings) else "subscribed"
-    member_url = f"{api}/lists/{quote(list_id, safe='')}/members/{_member_hash(args.email)}"
-    supplied = {"FNAME": args.first_name, "LNAME": args.last_name}
-    supplied = {k: v for k, v in supplied.items() if v}
+def _title(resp: Any) -> str:
+    return str(oauth_http.body_of(resp).get("title") or "").strip().lower()
 
-    found = await _call(ctx.get_token, "GET", member_url, params={"fields": "status,merge_fields"})
-    if found.status_code == 404:
-        body: dict[str, Any] = {"email_address": args.email, "status_if_new": target}
-        if supplied:
-            body["merge_fields"] = supplied
-        created = await _call(ctx.get_token, "PUT", member_url, json=body)
-        if created.status_code == 400 and supplied:
-            # The audience may not have FNAME / LNAME: the address matters most.
-            body.pop("merge_fields")
-            created = await _call(ctx.get_token, "PUT", member_url, json=body)
-        _refuse_for(created, "add member")
-        return accepted()
-    _refuse_for(found, "read member")
 
-    member = oauth_http.body_of(found)
+async def _write(
+    ctx: ActionContext, method: str, url: str, body: dict[str, Any]
+) -> tuple[Any, dict[str, Any]]:
+    """Send ``body``; a 400 on a body with names drops them and retries once. The
+    answer, and the body that produced it (empty: nothing was left to write)."""
+    resp = await _call(ctx.get_token, method, url, json=body)
+    if resp.status_code != 400 or "merge_fields" not in body or _title(resp) in _QUIET:
+        return resp, body
+    if _title(resp) == _MEMBER_EXISTS:
+        return resp, body
+    # The audience may not have FNAME / LNAME: the address matters most.
+    body = {k: v for k, v in body.items() if k != "merge_fields"}
+    if not set(body) - {"email_address"}:
+        return None, {}
+    return await _call(ctx.get_token, method, url, json=body), body
+
+
+async def _fill_existing(
+    ctx: ActionContext, member_url: str, member: dict[str, Any], supplied: dict[str, str]
+) -> dict[str, Any]:
     status = str(member.get("status") or "")
     if status not in _WRITABLE:  # opted out, bounced, archived, or unknown
         return accepted()
@@ -157,14 +166,53 @@ async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
     if fill:
         patch["merge_fields"] = fill
     if status == "transactional":
-        patch["status"] = target
+        patch["status"] = _target(ctx)
     if not patch:
         return accepted()
-    updated = await _call(ctx.get_token, "PATCH", member_url, json=patch)
-    if updated.status_code == 400 and "status" in patch and fill:
-        patch.pop("merge_fields")
-        updated = await _call(ctx.get_token, "PATCH", member_url, json=patch)
-    _refuse_for(updated, "update member")
+    updated, sent = await _write(ctx, "PATCH", member_url, patch)
+    if sent and _title(updated) not in _QUIET:
+        _refuse_for(updated, "update member")
+    return accepted()
+
+
+def _target(ctx: ActionContext) -> str:
+    return "pending" if _double_opt_in(ctx.settings) else "subscribed"
+
+
+async def _read(ctx: ActionContext, member_url: str) -> Any:
+    return await _call(ctx.get_token, "GET", member_url, params={"fields": "status,merge_fields"})
+
+
+async def _subscribe(ctx: ActionContext, args: SubscribeArgs) -> dict[str, Any]:
+    api = _api(ctx.connection_meta)
+    list_id = picked_list(ctx.settings, _LIST_RE)
+    members_url = f"{api}/lists/{quote(list_id, safe='')}/members"
+    member_url = f"{members_url}/{_member_hash(args.email)}"
+    supplied = {"FNAME": args.first_name, "LNAME": args.last_name}
+    supplied = {k: v for k, v in supplied.items() if v}
+
+    found = await _read(ctx, member_url)
+    if found.status_code != 404:
+        _refuse_for(found, "read member")
+        return await _fill_existing(ctx, member_url, oauth_http.body_of(found), supplied)
+
+    # POST only creates: a member added since the read is a "Member Exists" 400,
+    # never an overwrite, and takes the fill-empty path instead.
+    body: dict[str, Any] = {"email_address": args.email, "status": _target(ctx)}
+    if supplied:
+        body["merge_fields"] = supplied
+    created, _ = await _write(ctx, "POST", members_url, body)
+    title = _title(created)
+    if created.status_code == 400 and title == _MEMBER_EXISTS:
+        again = await _read(ctx, member_url)
+        if again.status_code == 404:
+            raise ProviderError("mailchimp: an existing member could not be read")
+        _refuse_for(again, "read member")
+        return await _fill_existing(ctx, member_url, oauth_http.body_of(again), supplied)
+    if created.status_code == 400 and title in _QUIET:
+        # Forgotten / compliance-held addresses answer like any other: no leak.
+        return accepted()
+    _refuse_for(created, "add member")
     return accepted()
 
 
