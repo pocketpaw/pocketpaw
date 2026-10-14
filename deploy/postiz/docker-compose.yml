@@ -1,7 +1,7 @@
 # Local self-hosted Postiz for Growth › Social development: the publishing
 # backend we call to post on users' social handles. Based on
 # gitroomhq/postiz-docker-compose with the image pinned and secrets moved to a
-# gitignored .env (copy .env.example). App: http://localhost:4007,
+# gitignored .env (copy .env.example). App: http://127.0.0.1:4007,
 # Temporal UI: http://127.0.0.1:8080. Change env, then `down` + `up` to apply.
 
 name: postiz
@@ -13,14 +13,15 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      MAIN_URL: 'http://localhost:4007'
-      FRONTEND_URL: 'http://localhost:4007'
-      NEXT_PUBLIC_BACKEND_URL: 'http://localhost:4007/api'
+      MAIN_URL: 'http://127.0.0.1:4007'
+      FRONTEND_URL: 'http://127.0.0.1:4007'
+      NEXT_PUBLIC_BACKEND_URL: 'http://127.0.0.1:4007/api'
       BACKEND_INTERNAL_URL: 'http://localhost:3000'
       DATABASE_URL: 'postgresql://postiz-user:postiz-password@postiz-postgres:5432/postiz-db-local'
       REDIS_URL: 'redis://postiz-redis:6379'
       TEMPORAL_ADDRESS: 'temporal:7233'
       IS_GENERAL: 'true'
+      NOT_SECURED: 'true'
       DISABLE_REGISTRATION: 'false'
       RUN_CRON: 'true'
       STORAGE_PROVIDER: 'local'
