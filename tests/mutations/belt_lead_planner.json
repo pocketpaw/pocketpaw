@@ -1,0 +1,173 @@
+[
+  {
+    "label": "a lead line still calls the foreman",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    lead = doc.charter.run_kind == LEAD_RUN_KIND\n",
+    "replace": "    lead = False\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "every mandate is a lead line",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    lead = doc.charter.run_kind == LEAD_RUN_KIND\n",
+    "replace": "    lead = True\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the run kind is dropped on create",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        run_kind=req.charter.run_kind,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the run kind is left off the wire",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        \"run_kind\": charter.run_kind,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the lead plan waits for a human",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    if lead:\n        state = await _lead_gate(",
+    "replace": "    if False:\n        state = await _lead_gate(",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the lead plan is approved as the belt policy",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "APPROVER = \"system:lead-planner\"",
+    "replace": "APPROVER = \"system:belt-policy\"",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the lead gate approves without recording its policy",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    if not await _record_policy(workspace_id, action_id, record):\n        return \"in_gate\"\n    return await _approve_plan(\n        workspace_id=workspace_id,\n        mandate_id=mandate_id,\n        shift_no=shift_no,\n        task_count=task_count,",
+    "replace": "    return await _approve_plan(\n        workspace_id=workspace_id,\n        mandate_id=mandate_id,\n        shift_no=shift_no,\n        task_count=task_count,",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the lead recipe fails validation",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            \"recipes\": {**charter_wire[\"recipes\"], LEAD_RUN_KIND: \"\"},",
+    "replace": "            \"recipes\": charter_wire[\"recipes\"],",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "blocked and in-flight issues are planned",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        plan = await _lead_plan(workspace_id, mandate_id, shift_no, free, capacity[\"budget\"])",
+    "replace": "        plan = await _lead_plan(workspace_id, mandate_id, shift_no, backlog[\"open\"], capacity[\"budget\"])",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the lead plan ignores the line's headroom",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        plan = await _lead_plan(workspace_id, mandate_id, shift_no, free, capacity[\"budget\"])",
+    "replace": "        plan = await _lead_plan(workspace_id, mandate_id, shift_no, free, doc.charter.budget.max_tasks_per_shift)",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "priority labels are ignored",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "    return min(ranks, default=_UNRANKED)",
+    "replace": "    return _UNRANKED",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "priority labels match case-sensitively",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "_PRIORITY.get(str(lb).strip().lower(), _UNRANKED)",
+    "replace": "_PRIORITY.get(str(lb).strip(), _UNRANKED)",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the first priority label wins, not the highest",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "    return min(ranks, default=_UNRANKED)",
+    "replace": "    return next((r for r in ranks if r != _UNRANKED), _UNRANKED)",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "newest first within a priority",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "            _aware(pair[0][\"ts\"]),",
+    "replace": "            -_aware(pair[0][\"ts\"]).timestamp(),",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the budget is not applied",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "    tasks = [_task(s, number) for s, number in issues[: max(0, budget)]]",
+    "replace": "    tasks = [_task(s, number) for s, number in issues]",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "a sighting without an issue is planned",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "        if found:\n            issues.append((s, found[2]))",
+    "replace": "        issues.append((s, found[2] if found else \"0\"))",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the task carries no recipe",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "        recipe=LEAD_RUN_KIND,",
+    "replace": "        recipe=None,",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the why does not point at the issue",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "        why=f\"Feature issue #{number}\" + (f\": {url}\" if url else \"\"),",
+    "replace": "        why=f\"Feature issue {url}\",",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the released lead's reason always names a relaunch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                f\"feature lead silent {minutes:.0f}m after {_rungs(ladder)}\",",
+    "replace": "                f\"feature lead silent {minutes:.0f}m after a nudge and a relaunch\",",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  }
+]
