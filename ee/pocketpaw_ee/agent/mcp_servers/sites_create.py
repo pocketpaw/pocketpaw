@@ -3990,6 +3990,13 @@ _INTEGRATION_WIRING = (
     "Paw.call(provider, action, args). Project Workers call the gateway server-side "
     "with env.PAW_GATEWAY_TOKEN."
 )
+# Providers wired another way than paw.js / the gateway: their next step replaces
+# ``_INTEGRATION_WIRING`` in the connect_site_integration message.
+_INTEGRATION_NEXT_STEPS = {
+    "supabase": "Its keys are provisioned as SUPABASE_URL, SUPABASE_ANON_KEY and "
+    "SUPABASE_SERVICE_ROLE_KEY site secrets once the owner picks a project; apply the "
+    "supabase recipe and skip its step that requests them.",
+}
 
 
 async def _list_site_integrations_handler(args: dict) -> dict:
@@ -4073,13 +4080,15 @@ async def _connect_site_integration_handler(args: dict) -> dict:
             "link. Never invent a link."
         )
     elif view.status == "connected":
-        message = f"{provider.name} is ready on this site. " + _INTEGRATION_WIRING
+        wiring = _INTEGRATION_NEXT_STEPS.get(provider.id, _INTEGRATION_WIRING)
+        message = f"{provider.name} is ready on this site. " + wiring
     else:
+        wiring = _INTEGRATION_NEXT_STEPS.get(provider.id, _INTEGRATION_WIRING)
         message = (
             f"Asked the owner to connect {provider.name}: they tap Connect on the card in "
             "chat and approve on the provider's page. You never see or ask for "
             "credentials or API keys. Keep building; calls answer `not_connected` until "
-            "they finish. " + _INTEGRATION_WIRING
+            "they finish. " + wiring
         )
     return _success_response(
         {

@@ -44,6 +44,10 @@ class SiteSecret(TimestampedDocument):
     # Who last set the value, and when. Both None while pending.
     value_set_by: str | None = None
     value_set_at: datetime | None = None
+    # Set when a platform integration wrote the value (``"integration:supabase"``):
+    # the owner UI shows it as connected, and the integration's unlink deletes only
+    # the rows it manages. None for owner-set and agent-requested secrets.
+    managed_by: str | None = None
 
     class Settings:
         name = "site_secrets"

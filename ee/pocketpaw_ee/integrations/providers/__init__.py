@@ -25,6 +25,7 @@ from pocketpaw_ee.integrations.providers.scheduling import CalComProvider, Calen
 from pocketpaw_ee.integrations.providers.shopify import ShopifyProvider
 from pocketpaw_ee.integrations.providers.social_login import SocialLoginProvider
 from pocketpaw_ee.integrations.providers.stripe import StripeProvider
+from pocketpaw_ee.integrations.providers.supabase import SupabaseProvider
 from pocketpaw_ee.integrations.providers.turnstile import TurnstileProvider
 from pocketpaw_ee.integrations.providers.zoho_crm import ZohoCrmProvider
 
@@ -45,6 +46,7 @@ _PROVIDERS: tuple[IntegrationProvider, ...] = (
     BrevoProvider(),
     NotionProvider(),
     AirtableProvider(),
+    SupabaseProvider(),
 )
 
 _DEMO = DemoProvider()
