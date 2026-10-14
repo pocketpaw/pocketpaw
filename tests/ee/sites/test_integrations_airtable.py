@@ -9,7 +9,8 @@
 # the grant can edit, paginated; no tables without a base; a table re-checked and
 # dropped when the base changes; cache keyed by base), create_record mapping onto
 # existing text fields only (case-insensitive, unknown and non-text keys dropped,
-# typecast off, by field id), the arg caps, and the error mapping.
+# typecast off, by field id), the owner's ``writable_fields`` allowlist, the
+# arg caps, fullmatched ids, and the error mapping.
 from __future__ import annotations
 
 import base64
@@ -64,6 +65,7 @@ LEADS_FIELDS = [
 
 class FakeAirtable:
     def __init__(self) -> None:
+        self.secret = SECRET
         self.valid: set[str] = set()
         self.live_refresh: set[str] = set()
         self.issued = 0
@@ -129,7 +131,7 @@ class FakeAirtable:
         auth = request.headers.get("authorization", "")
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         self.token_calls.append((auth, form))
-        expected = base64.urlsafe_b64encode(f"{CLIENT_ID}:{SECRET}".encode()).decode()
+        expected = base64.b64encode(f"{CLIENT_ID}:{self.secret}".encode()).decode()
         if auth != f"Basic {expected}":
             return httpx.Response(401, json={"error": "invalid_client"})
         assert "client_secret" not in form
@@ -478,6 +480,10 @@ async def test_create_record_drops_a_bad_email_and_refuses_no_match(beanie_test_
     assert kept.json()["ok"] is True
     assert air.records[0]["fields"] == {"fldName0000000001": "Ada"}
     assert none.status_code == 422 and _code(none) == "invalid_args"
+    # A fixed message: it never names the table's fields.
+    message = none.json()["error"]["message"]
+    assert message == "These fields can't be saved to this form's table."
+    assert not any(f["name"].lower() in message.lower() for f in LEADS_FIELDS)
     assert len(air.records) == 1
 
 
@@ -568,3 +574,96 @@ async def test_deleted_table_is_setup_required(beanie_test_db, air):
         resp = await _gw(c, sid, "airtable", "create_record", args={"fields": {"Name": "A"}})
     assert _code(resp) == "setup_required"
     assert (await _binding()).setup_error == "table_missing"
+
+
+# --------------------------------------------------------- security review
+
+
+@pytest.mark.asyncio
+async def test_basic_auth_is_standard_base64(monkeypatch, air):
+    from pocketpaw_ee.integrations.providers.airtable import AirtableProvider
+
+    # Standard base64 of "air-client:sk~~~~?>" has both "+" and "/".
+    air.secret = "sk~~~~?>"
+    monkeypatch.setenv("POCKETPAW_INTEGRATIONS_AIRTABLE_CLIENT_SECRET", air.secret)
+    air.live_refresh.add("rt-0")
+    grant = await AirtableProvider().refresh("rt-0")
+    assert grant.access_token == "at-1"
+    auth = air.token_calls[0][0]
+    assert auth == "Basic YWlyLWNsaWVudDpza35+fn4/Pg=="
+    assert "+" in auth and "/" in auth
+
+
+@pytest.mark.asyncio
+async def test_ids_must_fullmatch(air):
+    from pocketpaw_ee.integrations.providers import airtable
+    from pocketpaw_ee.integrations.providers.base import SetupContext
+
+    assert airtable._BASE_ID.fullmatch(BASE_A)
+    for bad in (BASE_A + "\n", BASE_A + "/x", "x" + BASE_A, BASE_A[:-1]):
+        assert airtable._BASE_ID.fullmatch(bad) is None
+    assert airtable._TABLE_ID.fullmatch(TBL_LEADS + "\n") is None
+    assert airtable._seg("a/b?c") == "a%2Fb%3Fc"
+    binding = type("B", (), {"settings": {"base_id": BASE_A + "\n"}})()
+    ctx = SetupContext(workspace_id="w", pocket_id="p", user_id="u", provider="airtable")
+    assert await airtable.AirtableProvider().field_options(binding, ctx, "table_name") == []
+    assert air.api_calls == []
+
+
+@pytest.mark.asyncio
+async def test_writable_fields_limit_what_visitors_write(beanie_test_db, air):
+    async with _client() as c:
+        pid, sid = await _linked(c, air)
+        put = await c.put(_url(pid), json={"settings": {"writable_fields": " name , EMAIL "}})
+        assert put.status_code == 200 and put.json()["status"] == "connected", put.text
+        ok = await _gw(
+            c,
+            sid,
+            "airtable",
+            "create_record",
+            args={"fields": {"Name": "Ada", "Email": "ada@example.com", "Message": "hi"}},
+        )
+        only_other = await _gw(
+            c, sid, "airtable", "create_record", args={"fields": {"Message": "hi"}}
+        )
+    assert ok.json()["ok"] is True, ok.text
+    assert air.records[0]["fields"] == {
+        "fldName0000000001": "Ada",
+        "fldEmail000000001": "ada@example.com",
+    }
+    assert _code(only_other) == "invalid_args"
+    assert len(air.records) == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_writable_field_is_setup_required_until_fixed(beanie_test_db, air):
+    async with _client() as c:
+        pid, sid = await _linked(c, air)
+        # "Nope" doesn't exist; "Score" exists but is a number field.
+        for bad in ("Name, Nope", "Score"):
+            put = await c.put(_url(pid), json={"settings": {"writable_fields": bad}})
+            assert put.status_code == 200, put.text
+            assert put.json()["status"] == "setup_required"
+        refused = await _gw(c, sid, "airtable", "create_record", args={"fields": {"Name": "A"}})
+        assert _code(refused) == "setup_required"
+        assert air.records == []
+        fixed = await c.put(_url(pid), json={"settings": {"writable_fields": "Name"}})
+        assert fixed.json()["status"] == "connected", fixed.text
+        ok = await _gw(c, sid, "airtable", "create_record", args={"fields": {"Name": "A"}})
+    assert ok.json()["ok"] is True, ok.text
+
+
+@pytest.mark.asyncio
+async def test_writable_field_dropped_from_the_table_refuses_writes(beanie_test_db, air):
+    from pocketpaw_ee.integrations.providers import airtable
+
+    async with _client() as c:
+        pid, sid = await _linked(c, air)
+        await c.put(_url(pid), json={"settings": {"writable_fields": "Name, Email"}})
+        # The owner deletes the Email column later: the allowlist is never widened.
+        air.tables[BASE_A][0]["fields"] = [LEADS_FIELDS[0]]
+        airtable.clear_cache()
+        resp = await _gw(c, sid, "airtable", "create_record", args={"fields": {"Name": "A"}})
+    assert _code(resp) == "setup_required"
+    assert (await _binding()).setup_error == "writable_fields_unknown"
+    assert air.records == []

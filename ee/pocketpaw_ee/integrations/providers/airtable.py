@@ -3,7 +3,8 @@
 # Kind ``connect`` (Airtable OAuth, authorization code + PKCE S256, which Airtable
 # requires), category ``data``, plan ``site``. The app is configured by
 # ``POCKETPAW_INTEGRATIONS_AIRTABLE_CLIENT_ID`` / ``_SECRET``; without both it is
-# ``unconfigured``. The token endpoint takes the client secret as HTTP Basic auth.
+# ``unconfigured``. The token endpoint takes the client secret as HTTP Basic auth
+# (standard base64, see ``_basic``).
 # Scopes: ``data.records:write`` + ``schema.bases:read`` (both required on the
 # grant) and ``user.email:read`` for the label. ``account_ref`` is the Airtable
 # user id from ``/meta/whoami``, ``account_label`` its email.
@@ -13,7 +14,12 @@
 # Settings: ``base_id`` and ``table_name`` are remote selects. Bases are the ones
 # the grant can edit; tables are those of the chosen base (none without one), and
 # ``table_name`` depends on ``base_id``. A table's value is its id (``tbl…``), so a
-# rename in Airtable doesn't break the site.
+# rename in Airtable doesn't break the site. Optional ``writable_fields`` (text,
+# comma-separated field names, case-insensitive) narrows what visitors may write;
+# empty means every text-like field. ``site_setup`` checks the names against the
+# table, so a typo leaves the site ``setup_required``; a name that later vanishes
+# from the table refuses writes the same way (never silently widened). Ids are
+# fullmatched against Airtable's shapes and quoted in URL paths.
 #
 # ``create_record {fields}`` (public write) maps keys (normalised like
 # google_sheets) case-insensitively onto the table's EXISTING text-like fields
@@ -21,7 +27,8 @@
 # in the owner's base, so strangers can't grow its schema: unknown keys and
 # non-text fields are dropped, an email field only takes something that looks
 # like an address, and the record is written by field id with ``typecast`` off.
-# A request where no key matches is ``invalid_args``. The table schema is cached
+# A request where no key matches is ``invalid_args`` with a fixed message that
+# never names the table's fields. The table schema is cached
 # for 60s per binding and dropped on a 403 / 404 / 422.
 # Errors: a 401 refreshes once; 403 / 404 (base or table gone or unreachable) ->
 # setup_required (marks the site); 422 / 413 -> invalid_args; 429 -> rate_limited;
@@ -70,11 +77,14 @@ _WRITABLE_BASES = frozenset({"create", "edit"})
 # Field types that take a plain string with typecast off.
 _SINGLE_LINE = frozenset({"singleLineText", "email", "url", "phoneNumber"})
 _MULTI_LINE = frozenset({"multilineText", "richText"})
-_BASE_ID = re.compile(r"^app[A-Za-z0-9]{14}$")
-_TABLE_ID = re.compile(r"^tbl[A-Za-z0-9]{14}$")
-_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+# Always ``fullmatch`` (``$`` alone would let a trailing newline through).
+_BASE_ID = re.compile(r"app[A-Za-z0-9]{14}")
+_TABLE_ID = re.compile(r"tbl[A-Za-z0-9]{14}")
+_EMAIL = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 _SPACES = re.compile(r"\s+")
 MAX_BASE_PAGES = 5
+MAX_WRITABLE = 60
+NO_MATCH = "These fields can't be saved to this form's table."
 SCHEMA_TTL = 60.0
 _SCHEMA_CACHE_MAX = 512
 
@@ -87,6 +97,18 @@ def clear_cache() -> None:
 
 def _fold(name: str) -> str:
     return _SPACES.sub(" ", name).strip().casefold()
+
+
+def _seg(value: str) -> str:
+    """One URL path segment."""
+    return quote(value, safe="")
+
+
+def writable_names(settings: Any) -> set[str] | None:
+    """The owner's ``writable_fields`` folded, or None when unset (all text fields)."""
+    raw = str((settings or {}).get("writable_fields") or "")
+    names = {_fold(n) for n in raw.split(",")} - {""}
+    return names or None
 
 
 def _error_type(resp: Any) -> str:
@@ -141,7 +163,7 @@ async def _list_bases(get_token: Any) -> list[SettingOption]:
             if not isinstance(base, dict) or base.get("permissionLevel") not in _WRITABLE_BASES:
                 continue
             base_id, name = str(base.get("id") or ""), str(base.get("name") or "")
-            if _BASE_ID.match(base_id):
+            if _BASE_ID.fullmatch(base_id):
                 options.append(SettingOption(value=base_id, label=name or base_id))
         offset = str(body.get("offset") or "")
         if not offset:
@@ -151,11 +173,13 @@ async def _list_bases(get_token: Any) -> list[SettingOption]:
 
 async def _tables(get_token: Any, base_id: str) -> Any:
     return await oauth_http.authed(
-        get_token, "GET", f"{API}/meta/bases/{base_id}/tables", provider="airtable"
+        get_token, "GET", f"{API}/meta/bases/{_seg(base_id)}/tables", provider="airtable"
     )
 
 
-async def _table_schema(ctx: ActionContext, base_id: str, table: str) -> dict[str, Any]:
+async def _table_schema(
+    ctx: ActionContext | SetupContext, base_id: str, table: str
+) -> dict[str, Any]:
     """The bound table (``{id, fields}``), cached for ``SCHEMA_TTL`` seconds."""
     key = (ctx.workspace_id, ctx.pocket_id, base_id, table)
     now = time.monotonic()
@@ -166,7 +190,7 @@ async def _table_schema(ctx: ActionContext, base_id: str, table: str) -> dict[st
     _refuse_for(resp, "schema read")
     tables = [t for t in oauth_http.body_of(resp).get("tables") or [] if isinstance(t, dict)]
     found = next((t for t in tables if t.get("id") == table), None)
-    if found is None or not _TABLE_ID.match(str(found.get("id") or "")):
+    if found is None or not _TABLE_ID.fullmatch(str(found.get("id") or "")):
         raise ActionRefused(
             "setup_required",
             "The Airtable table for this site is gone. The site owner needs to pick it again.",
@@ -179,8 +203,8 @@ async def _table_schema(ctx: ActionContext, base_id: str, table: str) -> dict[st
     return schema
 
 
-def _map_fields(schema: dict[str, Any], fields: dict[str, str]) -> dict[str, str]:
-    """``{field id: value}`` for the keys that match an existing text-like field."""
+def _text_targets(schema: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    """``{folded name: (field id, type)}`` of the table's text-like fields."""
     targets: dict[str, tuple[str, str]] = {}
     for item in schema["fields"]:
         if not isinstance(item, dict):
@@ -192,6 +216,17 @@ def _map_fields(schema: dict[str, Any], fields: dict[str, str]) -> dict[str, str
         )
         if fid and name and ftype in _SINGLE_LINE | _MULTI_LINE:
             targets.setdefault(_fold(name), (fid, ftype))
+    return targets
+
+
+def _map_fields(
+    schema: dict[str, Any], fields: dict[str, str], allowed: set[str] | None = None
+) -> dict[str, str]:
+    """``{field id: value}`` for the keys that match an existing text-like field
+    (and, when the owner set ``writable_fields``, one of those)."""
+    targets = _text_targets(schema)
+    if allowed is not None:
+        targets = {k: v for k, v in targets.items() if k in allowed}
     out: dict[str, str] = {}
     for key, value in fields.items():
         target = targets.get(_fold(key))
@@ -200,7 +235,7 @@ def _map_fields(schema: dict[str, Any], fields: dict[str, str]) -> dict[str, str
         fid, ftype = target
         if ftype in _SINGLE_LINE:
             value = value.replace("\n", " ").strip()
-        if ftype == "email" and not _EMAIL.match(value):
+        if ftype == "email" and not _EMAIL.fullmatch(value):
             continue
         if value:
             out.setdefault(fid, value)
@@ -229,18 +264,25 @@ async def _create_record(ctx: ActionContext, args: CreateRecordArgs) -> dict[str
 
     base_id = str(ctx.settings.get("base_id") or "")
     table = str(ctx.settings.get("table_name") or "").strip()
-    if not _BASE_ID.match(base_id) or not table:
+    if not _BASE_ID.fullmatch(base_id) or not table:
         raise _setup_missing()
     key = (ctx.workspace_id, ctx.pocket_id, base_id, table)
     try:
         schema = await _table_schema(ctx, base_id, table)
-        mapped = _map_fields(schema, args.fields)
+        allowed = writable_names(ctx.settings)
+        if allowed is not None and not allowed <= set(_text_targets(schema)):
+            raise ActionRefused(
+                "setup_required",
+                "This site's Airtable form fields need checking by the site owner.",
+                setup_error="writable_fields_unknown",
+            )
+        mapped = _map_fields(schema, args.fields, allowed)
         if not mapped:
-            raise ActionRefused("invalid_args", "None of these fields match the Airtable table.")
+            raise ActionRefused("invalid_args", NO_MATCH)
         created = await oauth_http.authed(
             ctx.get_token,
             "POST",
-            f"{API}/{base_id}/{quote(schema['id'], safe='')}",
+            f"{API}/{_seg(base_id)}/{_seg(schema['id'])}",
             provider="airtable",
             json={"fields": mapped, "typecast": False},
         )
@@ -289,6 +331,13 @@ class AirtableProvider(BaseProvider):
             max_length=64,
             help="Form fields fill the table's text fields with the same name.",
         ),
+        SettingsField(
+            key="writable_fields",
+            label="Fields visitors can fill",
+            type="text",
+            max_length=1000,
+            help="Comma-separated field names. Leave empty to allow every text field.",
+        ),
     )
     actions = {
         "create_record": ActionSpec(
@@ -312,8 +361,12 @@ class AirtableProvider(BaseProvider):
 
     def _basic(self) -> dict[str, str]:
         client_id, secret = self._credentials()
-        # Airtable's docs: base64url of "client_id:client_secret".
-        raw = base64.urlsafe_b64encode(f"{client_id}:{secret}".encode()).decode("ascii")
+        # Standard base64. The reference page words it "base64 url-encoding"
+        # (https://airtable.com/developers/web/api/oauth-reference), but Airtable's
+        # own example it links (https://github.com/Airtable/oauth-example, index.js:
+        # ``Buffer.from(`${clientId}:${clientSecret}`).toString('base64')``) and
+        # RFC 7617 use standard base64, which is what the server is known to accept.
+        raw = base64.b64encode(f"{client_id}:{secret}".encode()).decode("ascii")
         return {"authorization": f"Basic {raw}"}
 
     def authorize_url(
@@ -390,13 +443,30 @@ class AirtableProvider(BaseProvider):
             scopes=str(body.get("scope") or "").split(),
         )
 
+    async def site_setup(self, binding: Any, ctx: SetupContext) -> dict[str, Any]:
+        """Check ``writable_fields`` against the table; a bad name raises, so the
+        site reads ``setup_required`` until the owner fixes it."""
+        settings = dict(getattr(binding, "settings", None) or {})
+        allowed = writable_names(settings)
+        base_id = str(settings.get("base_id") or "")
+        table = str(settings.get("table_name") or "").strip()
+        if allowed is None or not _BASE_ID.fullmatch(base_id) or not table:
+            return {}
+        if len(allowed) > MAX_WRITABLE:
+            raise ProviderError(f"airtable: more than {MAX_WRITABLE} writable fields")
+        _schemas.pop((ctx.workspace_id, ctx.pocket_id, base_id, table), None)
+        schema = await _table_schema(ctx, base_id, table)
+        if not allowed <= set(_text_targets(schema)):
+            raise ProviderError("airtable: writable_fields names a field the table lacks")
+        return {}
+
     async def field_options(self, binding: Any, ctx: SetupContext, key: str) -> list[SettingOption]:
         if key == "base_id":
             return await _list_bases(ctx.get_token)
         if key != "table_name":
             return []
         base_id = str((getattr(binding, "settings", None) or {}).get("base_id") or "")
-        if not _BASE_ID.match(base_id):
+        if not _BASE_ID.fullmatch(base_id):
             return []
         resp = await _tables(ctx.get_token, base_id)
         if resp.status_code >= 400:
@@ -404,5 +474,5 @@ class AirtableProvider(BaseProvider):
         return [
             SettingOption(value=str(t["id"]), label=str(t.get("name") or t["id"]))
             for t in oauth_http.body_of(resp).get("tables") or []
-            if isinstance(t, dict) and _TABLE_ID.match(str(t.get("id") or ""))
+            if isinstance(t, dict) and _TABLE_ID.fullmatch(str(t.get("id") or ""))
         ]
