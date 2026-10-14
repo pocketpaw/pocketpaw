@@ -2,50 +2,61 @@
 # the built-in ``social_login`` integration (Google / GitHub sign-in for visitors of
 # project sites that use better-auth).
 #
-#   authorize  GET  /integrations/social/{provider}/authorize?site_id&return_to&nonce&next
-#   callback   GET  /integrations/social/{provider}/callback?code&state
-#   redeem     POST /integrations/social/redeem  Bearer PAW_GATEWAY_TOKEN, {site_id, ticket, nonce}
+#   consent   GET  /integrations/social/{provider}/authorize?site_id&return_to&nonce&next
+#   decide    POST /integrations/social/{provider}/authorize   form t + action
+#   callback  GET  /integrations/social/{provider}/callback?code&state
+#   redeem    POST /integrations/social/redeem  Bearer PAW_GATEWAY_TOKEN, {site_id, ticket, nonce}
 #
-# The site Worker starts at its own ``/api/paw-auth/start``: it sets a
-# ``__Host-paw_social=<nonce>`` cookie on the site's origin and sends the browser to
-# ``authorize``. That checks the site has ``social_login`` bound with this provider
-# on, the platform client is configured, ``return_to`` is exactly
-# ``https://<one of the site's own hosts>/api/paw-auth/callback`` (the site url's
-# host or a LIVE custom domain; https, no userinfo, no port, no query; the core-v2
-# URL check in ``settings._url_host``), ``next`` is a same-origin path, and the
-# nonce is well formed. Everything goes into single-use server-side state
-# (``_oauth_state``, namespace ``social_broker``, 10 min) with a PKCE verifier and,
-# for Google, an id_token nonce. The browser then goes to the provider with the
-# PLATFORM client and one fixed callback per provider.
+# The site Worker's ``/api/paw-auth/start`` sets a ``__Host-paw_social=<nonce>``
+# cookie on the site's origin and sends the browser to ``consent``. That checks the
+# site has ``social_login`` bound with this provider on, the platform client is
+# configured, ``return_to`` is exactly ``https://<one of the site's own
+# hosts>/api/paw-auth/callback`` (the site url's host or a LIVE custom domain; https,
+# no userinfo, no port, no query; ``settings._url_host``), ``next`` is a same-origin
+# path and the nonce is well formed, then shows a page naming the site.
+#
+# CONSENT. GitHub (and Google, once approved) skip their own consent for an app the
+# visitor already approved, and every site shares the platform app, so without this
+# page any site could bounce a visitor through unseen. The page holds a single-use
+# token (``_oauth_state``, namespace ``social_consent``) and sets a SameSite=Strict
+# cookie with its hash: only a POST from our own page in the same browser can spend
+# it (a cross-site auto-submit carries no Strict cookie). Nonce CSP,
+# ``frame-ancestors 'none'`` and X-Frame-Options stop clickjacking. Cancel returns to
+# ``return_to`` with ``error=cancelled``. Continue stores the flow state (namespace
+# ``social_broker``, 10 min, PKCE S256 for both providers, a Google id_token nonce)
+# and redirects to the provider with the PLATFORM client and one fixed callback.
 #
 # ``callback`` trusts only that state. It exchanges the code, reads the profile
 # (Google: the signed id_token; GitHub: /user plus the primary VERIFIED address from
-# /user/emails, never /user's self-asserted email), parks it under an opaque
-# single-use ticket (namespace ``social_ticket``, 60 s) bound to site_id + nonce,
-# and redirects to ``return_to?ticket&next``. No profile data rides a URL.
+# /user/emails, never /user's email), swaps the provider's account id for a PAIRWISE
+# one (HMAC-SHA256(POCKETPAW_SOCIAL_PAIRWISE_SECRET, "site_id:provider:raw id"); the
+# raw id is never stored or returned, so a visitor can't be linked across sites),
+# parks the profile under an opaque single-use ticket (namespace ``social_ticket``,
+# 60 s) bound to site_id + nonce, and redirects to ``return_to?ticket&next``.
 #
-# ``redeem`` is server to server: the Worker presents the site's PAW_GATEWAY_TOKEN
-# (constant time, ``site_secrets``) and the nonce from the visitor's cookie. The
-# ticket is spent on the first try, right or wrong; a site or nonce mismatch is
-# refused. A login-CSRF link (someone else's ticket) fails here because the
-# victim's browser has no cookie with that nonce.
+# ``redeem`` is server to server: the site's PAW_GATEWAY_TOKEN (constant time) plus
+# the nonce from the visitor's cookie. The ticket is spent on the first try, right or
+# wrong; a site or nonce mismatch is refused, which is what defeats a login-CSRF link.
 #
-# Not built on better-auth's ``oAuthProxy`` plugin (cross-domain cookie and state
-# bugs); this flow owns its state end to end.
+# Rate limits use the gateway's Mongo per-minute counters (``gateway._bump``, shared
+# across workers): per IP on consent, decide and callback; per site on redeem, before
+# the token is decrypted. Not built on better-auth's ``oAuthProxy`` plugin.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import html
 import logging
 import re
+import secrets
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-from fastapi import Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.integrations import bindings, oauth
 from pocketpaw_ee.integrations.providers import social_login
@@ -54,14 +65,20 @@ from pocketpaw_ee.integrations.settings import _url_host
 logger = logging.getLogger(__name__)
 
 PROVIDER_ID = "social_login"
+CONSENT_NAMESPACE = "social_consent"
 STATE_NAMESPACE = "social_broker"
 TICKET_NAMESPACE = "social_ticket"
 STATE_TTL_SECONDS = 600
 TICKET_TTL_SECONDS = 60
+CONSENT_COOKIE = "paw_social_consent"
+COOKIE_PATH = "/api/v1/integrations/social/"
 CALLBACK_PATH = "/api/paw-auth/callback"
 MAX_NEXT = 512
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _TIMEOUT = 10.0
+# Per-minute caps on the shared counters: a person needs a couple, a script is cut off.
+IP_PER_MIN = 30
+REDEEM_SITE_PER_MIN = 300
 
 GOOGLE_ISSUER = "https://accounts.google.com"
 GOOGLE_AUTHORIZE = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -69,6 +86,7 @@ GITHUB_AUTHORIZE = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN = "https://github.com/login/oauth/access_token"
 GITHUB_API = "https://api.github.com"
 SCOPES = {"google": "openid email profile", "github": "read:user user:email"}
+LABELS = {"google": "Google", "github": "GitHub"}
 
 STATUS = {
     "invalid_request": 400,
@@ -91,9 +109,6 @@ MESSAGES = {
     "rate_limited": "Too many sign-in attempts. Wait a moment and try again.",
 }
 
-# 30 sign-in starts a minute per address: a person needs one, a script is cut off
-# before it fills the state store.
-_ip_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
 # Tests swap in an ``httpx.MockTransport``; None means the real network.
 _transport: httpx.AsyncBaseTransport | None = None
 
@@ -114,6 +129,31 @@ def error_response(code: str) -> JSONResponse:
 
 def redirect_uri(provider: str) -> str:
     return f"{oauth.callback_base()}/api/v1/integrations/social/{provider}/callback"
+
+
+def _hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def pairwise_id(site_id: str, provider: str, raw_id: str) -> str:
+    """The id a site sees for one visitor: stable per (site, provider), unlinkable
+    across sites without the platform secret."""
+    key = social_login.pairwise_secret().encode("utf-8")
+    return hmac.new(key, f"{site_id}:{provider}:{raw_id}".encode(), hashlib.sha256).hexdigest()
+
+
+async def _limit(scope: str, key: str, cap: int) -> None:
+    from pocketpaw_ee.integrations.gateway import _bump
+
+    if await _bump(scope, key) > cap:
+        raise BrokerError("rate_limited")
+
+
+async def _limit_ip(request: Request) -> None:
+    from pocketpaw_ee.cloud._core.rate_limit import client_ip
+    from pocketpaw_ee.integrations.gateway import _rate_key
+
+    await _limit("social_ip", _rate_key(client_ip(request)), IP_PER_MIN)
 
 
 def safe_next(value: str | None) -> str | None:
@@ -173,35 +213,68 @@ def _provider_url(provider: str, state: str, challenge: str, oidc_nonce: str) ->
         "redirect_uri": redirect_uri(provider),
         "scope": SCOPES[provider],
         "state": state,
+        # PKCE S256 on both. GitHub OAuth Apps support it too:
+        # https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
     }
     if provider == "google":
-        params.update(
-            response_type="code",
-            prompt="select_account",
-            nonce=oidc_nonce,
-            code_challenge=challenge,
-            code_challenge_method="S256",
-        )
+        params.update(response_type="code", prompt="select_account", nonce=oidc_nonce)
         return f"{GOOGLE_AUTHORIZE}?{urlencode(params)}"
-    # GitHub OAuth Apps ignore PKCE; the verifier still rides the state, harmlessly.
     params["allow_signup"] = "true"
     return f"{GITHUB_AUTHORIZE}?{urlencode(params)}"
 
 
-# ---------------------------------------------------------------- authorize
+def _back(return_to: str, **params: str) -> RedirectResponse:
+    return RedirectResponse(
+        f"{return_to}?{urlencode(params)}",
+        status_code=303,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
+
+
+# ------------------------------------------------------------------ consent
+
+
+def consent_html(provider: str, host: str, token: str, nonce: str) -> str:
+    label, site = html.escape(LABELS[provider]), html.escape(host)
+    action = html.escape(f"/api/v1/integrations/social/{provider}/authorize")
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in to {site}</title>
+<style nonce="{nonce}">
+body{{font:16px/1.5 system-ui,sans-serif;margin:0;min-height:100vh;display:grid;
+place-items:center;background:#f6f6f4;color:#1b1b1a}}
+main{{max-width:24rem;padding:2rem;background:#fff;border-radius:12px;box-shadow:0 1px 3px #0002}}
+h1{{font-size:1.25rem;margin:0 0 .5rem}}p{{margin:0 0 1.5rem;color:#555}}
+form{{display:flex;gap:.75rem}}
+button{{flex:1;font:inherit;padding:.6rem;border-radius:8px;border:1px solid #ccc;
+background:#fff;cursor:pointer}}
+button[value=continue]{{background:#1b1b1a;color:#fff;border-color:#1b1b1a}}
+</style></head>
+<body><main>
+<h1>Sign in to {site} with {label}?</h1>
+<p>{site} will get your name, email address and profile picture from {label}.</p>
+<form method="post" action="{action}">
+<input type="hidden" name="t" value="{html.escape(token)}">
+<button type="submit" name="action" value="cancel">Cancel</button>
+<button type="submit" name="action" value="continue">Continue</button>
+</form>
+</main></body></html>"""
 
 
 async def authorize(
     request: Request, provider: str, site_id: str, return_to: str, nonce: str, next_path: str
-) -> RedirectResponse | JSONResponse:
-    from pocketpaw_ee.cloud._core.rate_limit import client_ip
+) -> Response:
+    """GET: validate, then show the page that names the site. Nothing goes to the
+    provider until the visitor presses Continue."""
     from pocketpaw_ee.cloud.auth import _oauth_state
 
     try:
         if provider not in social_login.SOCIAL_PROVIDERS:
             raise BrokerError("not_found")
-        if not _ip_limiter.check(f"social-broker:{client_ip(request)}").allowed:
-            raise BrokerError("rate_limited")
+        await _limit_ip(request)
         if not _NONCE_RE.match(nonce or ""):
             raise BrokerError("invalid_request")
         nxt = safe_next(next_path)
@@ -214,34 +287,90 @@ async def authorize(
     except BrokerError as exc:
         return error_response(exc.code)
 
-    verifier, challenge = _oauth_state.pkce_pair()
-    oidc_nonce = _oauth_state.new_nonce()
-    state = await _oauth_state.issue(
-        STATE_NAMESPACE,
+    token = await _oauth_state.issue(
+        CONSENT_NAMESPACE,
         {
             "provider": provider,
             "site_id": str(site.id),
             "return_to": back,
             "nonce": nonce,
             "next": nxt,
-            "code_verifier": verifier,
-            "oidc_nonce": oidc_nonce,
         },
         ttl_seconds=STATE_TTL_SECONDS,
     )
-    return RedirectResponse(
-        _provider_url(provider, state, challenge, oidc_nonce),
-        status_code=302,
-        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    csp_nonce = secrets.token_urlsafe(16)
+    resp = HTMLResponse(
+        consent_html(provider, urlsplit(back).hostname or "", token, csp_nonce),
+        headers={
+            "Content-Security-Policy": (
+                f"default-src 'none'; style-src 'nonce-{csp_nonce}'; base-uri 'none'; "
+                "frame-ancestors 'none'"
+            ),
+            "X-Frame-Options": "DENY",
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+        },
     )
+    resp.set_cookie(
+        CONSENT_COOKIE,
+        _hash(token),
+        max_age=STATE_TTL_SECONDS,
+        path=COOKIE_PATH,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+    )
+    return resp
+
+
+async def decide(request: Request, provider: str) -> Response:
+    """POST from the consent page: Continue -> provider, Cancel -> back to the site."""
+    from pocketpaw_ee.cloud.auth import _oauth_state
+
+    try:
+        await _limit_ip(request)
+    except BrokerError as exc:
+        return error_response(exc.code)
+    form = await request.form()
+    token, action = str(form.get("t") or ""), str(form.get("action") or "")
+    cookie = request.cookies.get(CONSENT_COOKIE) or ""
+    # The Strict cookie proves the POST came from our own page in this browser.
+    if not token or not cookie or not hmac.compare_digest(cookie, _hash(token)):
+        return error_response("invalid_request")
+    try:
+        payload = await _oauth_state.consume(CONSENT_NAMESPACE, token)
+    except CloudError:
+        return error_response("invalid_ticket")
+    if payload.get("provider") != provider or action not in ("continue", "cancel"):
+        return error_response("invalid_request")
+    resp: Response
+    if action == "cancel":
+        resp = _back(str(payload["return_to"]), error="cancelled", next=str(payload["next"]))
+    else:
+        verifier, challenge = _oauth_state.pkce_pair()
+        oidc_nonce = _oauth_state.new_nonce()
+        state = await _oauth_state.issue(
+            STATE_NAMESPACE,
+            {**payload, "code_verifier": verifier, "oidc_nonce": oidc_nonce},
+            ttl_seconds=STATE_TTL_SECONDS,
+        )
+        resp = RedirectResponse(
+            _provider_url(provider, state, challenge, oidc_nonce),
+            status_code=303,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
+    resp.delete_cookie(
+        CONSENT_COOKIE, path=COOKIE_PATH, secure=True, httponly=True, samesite="strict"
+    )
+    return resp
 
 
 # ----------------------------------------------------------------- profiles
 
 
 def google_profile(claims: dict[str, Any]) -> dict[str, Any]:
-    """Profile from VERIFIED id_token claims. ``email_verified`` only when the claim
-    is a real ``true``."""
+    """Profile from VERIFIED id_token claims, with the RAW ``sub`` (``callback`` makes
+    it pairwise). ``email_verified`` only when the claim is a real ``true``."""
     sub = claims.get("sub")
     if not sub:
         raise BrokerError("provider_error")
@@ -281,7 +410,7 @@ async def _google(code: str, verifier: str, oidc_nonce: str) -> dict[str, Any]:
     return google_profile(claims)
 
 
-async def _github(code: str) -> dict[str, Any]:
+async def _github(code: str, verifier: str) -> dict[str, Any]:
     from pocketpaw_ee.cloud.auth.social.providers.github import pick_verified_email
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, transport=_transport) as client:
@@ -293,6 +422,7 @@ async def _github(code: str) -> dict[str, Any]:
                 "client_secret": social_login.client_secret("github"),
                 "code": code,
                 "redirect_uri": redirect_uri("github"),
+                "code_verifier": verifier,
             },
         )
         resp.raise_for_status()
@@ -321,25 +451,23 @@ async def _github(code: str) -> dict[str, Any]:
 
 
 async def fetch_profile(provider: str, code: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """The provider's profile with its RAW account id (never leaves this module)."""
+    verifier = payload.get("code_verifier", "")
     if provider == "google":
-        return await _google(code, payload.get("code_verifier", ""), payload.get("oidc_nonce", ""))
-    return await _github(code)
+        return await _google(code, verifier, payload.get("oidc_nonce", ""))
+    return await _github(code, verifier)
 
 
 # ------------------------------------------------------------------ callback
 
 
-def _back(return_to: str, **params: str) -> RedirectResponse:
-    return RedirectResponse(
-        f"{return_to}?{urlencode(params)}",
-        status_code=302,
-        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
-    )
-
-
-async def callback(provider: str, code: str, state: str) -> RedirectResponse | JSONResponse:
+async def callback(request: Request, provider: str, code: str, state: str) -> Response:
     from pocketpaw_ee.cloud.auth import _oauth_state
 
+    try:
+        await _limit_ip(request)
+    except BrokerError as exc:
+        return error_response(exc.code)
     try:
         payload = await _oauth_state.consume(STATE_NAMESPACE, state or "")
     except CloudError:
@@ -351,6 +479,9 @@ async def callback(provider: str, code: str, state: str) -> RedirectResponse | J
         return _back(return_to, error="access_denied", next=nxt)
     try:
         profile = await fetch_profile(provider, code, payload)
+        profile["provider_account_id"] = pairwise_id(
+            str(payload["site_id"]), provider, str(profile["provider_account_id"])
+        )
     except Exception as exc:  # noqa: BLE001 - every failure is one safe answer
         logger.warning("social broker: %s callback failed: %s", provider, type(exc).__name__)
         return _back(return_to, error="provider_error", next=nxt)
@@ -385,6 +516,10 @@ async def redeem(request: Request) -> JSONResponse:
     site = await _site_by_id(site_id)
     if site is None or site.revoked or not site.pocket_id or not auth.lower().startswith("bearer "):
         return error_response("unauthorized")
+    try:
+        await _limit("social_redeem", f"{site.workspace}:{site.id}", REDEEM_SITE_PER_MIN)
+    except BrokerError as exc:
+        return error_response(exc.code)
     if not await site_secrets.secret_matches(
         workspace_id=site.workspace,
         pocket_id=site.pocket_id,

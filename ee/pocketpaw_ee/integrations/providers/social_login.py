@@ -9,8 +9,10 @@
 #
 # Platform clients come from env (``POCKETPAW_SOCIAL_GOOGLE_CLIENT_ID`` /
 # ``_SECRET``, ``POCKETPAW_SOCIAL_GITHUB_CLIENT_ID`` / ``_SECRET``), deliberately
-# separate from the app's own sign-in clients. With neither configured the provider
-# reads ``unconfigured``. ``site_setup`` makes sure the site's ``PAW_GATEWAY_TOKEN``
+# separate from the app's own sign-in clients, plus ``POCKETPAW_SOCIAL_PAIRWISE_SECRET``
+# (32+ chars, never rotated) that keys the per-site pairwise account ids. A provider
+# counts as configured only with its client AND that secret; with neither provider
+# configured this reads ``unconfigured``. ``site_setup`` makes sure the site's ``PAW_GATEWAY_TOKEN``
 # exists: the site Worker presents it to redeem a sign-in ticket.
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ from pocketpaw_ee.integrations.providers.base import (
 
 SOCIAL_PROVIDERS = ("google", "github")
 _ENV = "POCKETPAW_SOCIAL_{}_CLIENT_{}"
+PAIRWISE_ENV = "POCKETPAW_SOCIAL_PAIRWISE_SECRET"
+MIN_PAIRWISE_SECRET = 32
 
 
 def client_id(provider: str) -> str:
@@ -38,8 +42,18 @@ def client_secret(provider: str) -> str:
     return os.environ.get(_ENV.format(provider.upper(), "SECRET"), "").strip()
 
 
+def pairwise_secret() -> str:
+    """Keys the per-site pairwise account ids. Rotating it changes every visitor's id
+    on every site (they would get new accounts), so set it once."""
+    return os.environ.get(PAIRWISE_ENV, "").strip()
+
+
 def configured(provider: str) -> bool:
-    return provider in SOCIAL_PROVIDERS and bool(client_id(provider) and client_secret(provider))
+    return (
+        provider in SOCIAL_PROVIDERS
+        and bool(client_id(provider) and client_secret(provider))
+        and len(pairwise_secret()) >= MIN_PAIRWISE_SECRET
+    )
 
 
 def enabled_providers(settings: dict[str, Any] | None) -> list[str]:

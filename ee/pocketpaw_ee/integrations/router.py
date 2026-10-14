@@ -19,8 +19,10 @@
 #   GET  /integrations/{provider}/callback   single-use state + the matching cookie
 #   POST /sites/{site_id}/x/{provider}/{action}   site key or PAW_GATEWAY_TOKEN
 #   POST /integrations/webhooks/{provider}   provider signature
-#   GET  /integrations/social/{provider}/authorize   visitor sign-in broker start
+#   GET  /integrations/social/{provider}/authorize   visitor sign-in consent page
 #                                            (site binding + own-host return_to)
+#   POST /integrations/social/{provider}/authorize   Continue / Cancel from that page
+#                                            (single-use token + SameSite=Strict cookie)
 #   GET  /integrations/social/{provider}/callback    single-use broker state
 #   POST /integrations/social/redeem          PAW_GATEWAY_TOKEN + ticket + nonce
 #                                            (all three: social_broker.py)
@@ -297,14 +299,22 @@ async def social_authorize(
     next: str = "/",  # noqa: A002 - the wire name
 ) -> Response:
     """Visitor sign-in for a project site: checks the binding and return_to, then
-    sends the browser to Google / GitHub with the platform client."""
+    shows a page naming the site; nothing goes to the provider before Continue."""
     return await social_broker.authorize(request, provider, site_id, return_to, nonce, next)
 
 
+@public_router.post("/integrations/social/{provider}/authorize")
+async def social_authorize_decide(provider: str, request: Request) -> Response:
+    """Continue (-> provider) or Cancel (-> the site) from the consent page."""
+    return await social_broker.decide(request, provider)
+
+
 @public_router.get("/integrations/social/{provider}/callback")
-async def social_callback(provider: str, code: str = "", state: str = "") -> Response:
+async def social_callback(
+    provider: str, request: Request, code: str = "", state: str = ""
+) -> Response:
     """Provider redirect: single-use state -> ticket -> back to the site's callback."""
-    return await social_broker.callback(provider, code, state)
+    return await social_broker.callback(request, provider, code, state)
 
 
 @public_router.post("/integrations/social/redeem")

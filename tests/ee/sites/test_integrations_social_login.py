@@ -2,15 +2,19 @@
 # integration and its platform OAuth broker (integrations/social_broker.py).
 #
 # Covers the provider view (builtin / auth / site, required multi select,
-# unconfigured without platform clients), ``authorize`` (binding + provider enabled,
-# return_to exact own-host origin incl. userinfo / port / suffix / backslash tricks,
-# live custom domains only, same-origin ``next``, PKCE + Google nonce), ``callback``
-# (single-use state, provider pinned, ticket in the URL and no profile, denial),
-# the Google / GitHub profile mapping (GitHub: only a VERIFIED /user/emails address),
-# and ``redeem`` (gateway token, single use, nonce / site mismatch, 60 s TTL).
+# unconfigured without platform clients or the pairwise secret), ``authorize`` (binding
+# + provider enabled, return_to exact own-host origin incl. userinfo / port / suffix /
+# backslash tricks, live custom domains only, same-origin ``next``), the consent page
+# (names the site, CSP + no framing, Strict-cookie-bound single-use token, Cancel),
+# PKCE on both providers, ``callback`` (single-use state, provider pinned, ticket in
+# the URL and no profile, denial, pairwise account ids), the Google / GitHub profile
+# mapping (GitHub: only a VERIFIED /user/emails address), ``redeem`` (gateway token,
+# single use, nonce / site mismatch, 60 s TTL) and the shared per-minute counters.
 # Fixtures come from test_integrations.py; no network anywhere.
 from __future__ import annotations
 
+import hashlib
+import re
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -39,14 +43,10 @@ PROFILE = {
 
 @pytest.fixture(autouse=True)
 def _social_env(monkeypatch):
-    from pocketpaw_ee.integrations import social_broker
-
-    from pocketpaw.security.rate_limiter import RateLimiter
-
     for p in ("GOOGLE", "GITHUB"):
         monkeypatch.setenv(f"POCKETPAW_SOCIAL_{p}_CLIENT_ID", f"{p.lower()}-client")
         monkeypatch.setenv(f"POCKETPAW_SOCIAL_{p}_CLIENT_SECRET", f"{p.lower()}-secret")
-    monkeypatch.setattr(social_broker, "_ip_limiter", RateLimiter(rate=1000.0, capacity=1000))
+    monkeypatch.setenv("POCKETPAW_SOCIAL_PAIRWISE_SECRET", "p" * 40)
 
 
 async def _site(pocket_id: str, *, script: str = "shop-abc", url: str = f"https://{HOST}"):
@@ -86,6 +86,20 @@ async def _authorize(c, site_id: str, provider: str = "google", **over):
     return await c.get(f"/api/v1/integrations/social/{provider}/authorize", params=params)
 
 
+def _consent_token(page) -> str:
+    return re.search(r'name="t" value="([^"]+)"', page.text).group(1)
+
+
+async def _start(c, site_id: str, provider: str = "google", action: str = "continue", **over):
+    """consent page -> Continue (or Cancel) in the same browser."""
+    page = await _authorize(c, site_id, provider, **over)
+    assert page.status_code == 200, page.text
+    return await c.post(
+        f"/api/v1/integrations/social/{provider}/authorize",
+        data={"t": _consent_token(page), "action": action},
+    )
+
+
 def _q(resp) -> dict:
     return {k: v[0] for k, v in parse_qs(urlsplit(resp.headers["location"]).query).items()}
 
@@ -104,13 +118,13 @@ async def _ticket(c, site_id: str, monkeypatch, provider: str = "google", profil
         return dict(profile or {**PROFILE, "provider": prov})
 
     monkeypatch.setattr(social_broker, "fetch_profile", _fake)
-    start = await _authorize(c, site_id, provider)
-    assert start.status_code == 302, start.text
+    start = await _start(c, site_id, provider)
+    assert start.status_code == 303, start.text
     cb = await c.get(
         f"/api/v1/integrations/social/{provider}/callback",
         params={"code": "the-code", "state": _q(start)["state"]},
     )
-    assert cb.status_code == 302, cb.text
+    assert cb.status_code == 303, cb.text
     return _q(cb)["ticket"]
 
 
@@ -150,6 +164,8 @@ async def test_provider_view_and_availability(beanie_test_db, monkeypatch):
     assert SocialLoginProvider().availability() == "unconfigured"
     monkeypatch.setenv("POCKETPAW_SOCIAL_GITHUB_CLIENT_ID", "x")
     assert SocialLoginProvider().availability() == "available"
+    monkeypatch.setenv("POCKETPAW_SOCIAL_PAIRWISE_SECRET", "too-short")
+    assert SocialLoginProvider().availability() == "unconfigured"
 
 
 @pytest.mark.asyncio
@@ -173,14 +189,14 @@ async def test_linking_mints_the_gateway_token_and_needs_a_provider(beanie_test_
 
 
 @pytest.mark.asyncio
-async def test_authorize_redirects_to_google_with_pkce_and_platform_callback(beanie_test_db):
+async def test_continue_redirects_to_google_with_pkce_and_platform_callback(beanie_test_db):
     from pocketpaw_ee.cloud._core import redis_client
 
     _, site = await _bound()
     async with _client() as c:
-        resp = await _authorize(c, str(site.id))
-        by_script = await _authorize(c, "shop-abc", "github")
-    assert resp.status_code == 302
+        resp = await _start(c, str(site.id))
+        by_script = await _start(c, "shop-abc", "github")
+    assert resp.status_code == 303
     loc = resp.headers["location"]
     assert loc.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
     q = _q(resp)
@@ -193,10 +209,11 @@ async def test_authorize_redirects_to_google_with_pkce_and_platform_callback(bea
     raw = await redis_client.get_redis().get(f"social_broker_state:{q['state']}")
     assert NONCE in raw and "/account" in raw and RETURN_TO in raw
     assert NONCE not in loc
-    assert by_script.status_code == 302
+    assert by_script.status_code == 303
     gh = _q(by_script)
     assert by_script.headers["location"].startswith("https://github.com/login/oauth/authorize?")
     assert gh["scope"] == "read:user user:email" and gh["client_id"] == "github-client"
+    assert gh["code_challenge_method"] == "S256" and gh["code_challenge"]
 
 
 @pytest.mark.asyncio
@@ -233,7 +250,8 @@ async def test_authorize_accepts_a_live_custom_domain(beanie_test_db):
         resp = await _authorize(
             c, str(site.id), return_to="https://WWW.acme.test/api/paw-auth/callback"
         )
-    assert resp.status_code == 302, resp.text
+    assert resp.status_code == 200, resp.text
+    assert "Sign in to www.acme.test with Google?" in resp.text
 
 
 @pytest.mark.asyncio
@@ -273,7 +291,7 @@ async def test_authorize_next_must_be_a_same_origin_path(beanie_test_db, next_pa
     async with _client() as c:
         resp = await _authorize(c, str(site.id), next=next_path)
     if ok:
-        assert resp.status_code == 302
+        assert resp.status_code == 200
     else:
         assert (resp.status_code, _err(resp)) == (400, "invalid_request")
 
@@ -301,12 +319,12 @@ async def test_callback_issues_a_ticket_and_state_is_single_use(beanie_test_db, 
     monkeypatch.setattr(social_broker, "fetch_profile", _fake)
     _, site = await _bound()
     async with _client() as c:
-        start = await _authorize(c, str(site.id))
+        start = await _start(c, str(site.id))
         state = _q(start)["state"]
         wrong = await c.get(
             "/api/v1/integrations/social/github/callback", params={"code": "c", "state": state}
         )
-        start = await _authorize(c, str(site.id))
+        start = await _start(c, str(site.id))
         state = _q(start)["state"]
         cb = await c.get(
             "/api/v1/integrations/social/google/callback", params={"code": "c", "state": state}
@@ -315,7 +333,7 @@ async def test_callback_issues_a_ticket_and_state_is_single_use(beanie_test_db, 
             "/api/v1/integrations/social/google/callback", params={"code": "c", "state": state}
         )
     assert (wrong.status_code, _err(wrong)) == (400, "invalid_ticket")
-    assert cb.status_code == 302
+    assert cb.status_code == 303
     loc = cb.headers["location"]
     assert loc.startswith(RETURN_TO + "?")
     q = _q(cb)
@@ -336,11 +354,11 @@ async def test_callback_denied_or_failed_goes_back_with_an_error(beanie_test_db,
     async with _client() as c:
         denied = await c.get(
             "/api/v1/integrations/social/google/callback",
-            params={"state": _q(await _authorize(c, str(site.id)))["state"]},
+            params={"state": _q(await _start(c, str(site.id)))["state"]},
         )
         failed = await c.get(
             "/api/v1/integrations/social/google/callback",
-            params={"code": "c", "state": _q(await _authorize(c, str(site.id)))["state"]},
+            params={"code": "c", "state": _q(await _start(c, str(site.id)))["state"]},
         )
     assert _q(denied) == {"error": "access_denied", "next": "/account"}
     assert _q(failed) == {"error": "provider_error", "next": "/account"}
@@ -396,6 +414,7 @@ async def test_github_profile_uses_only_a_verified_email(monkeypatch, rows, emai
         seen.append(request.url.path)
         if request.url.path == "/login/oauth/access_token":
             assert b"client_secret=github-secret" in request.content
+            assert b"code_verifier=the-verifier" in request.content
             return httpx.Response(200, json={"access_token": "gho_x"})
         assert request.headers["authorization"] == "Bearer gho_x"
         if request.url.path == "/user":
@@ -414,7 +433,7 @@ async def test_github_profile_uses_only_a_verified_email(monkeypatch, rows, emai
         return httpx.Response(200, json=rows)
 
     monkeypatch.setattr(social_broker, "_transport", httpx.MockTransport(handler))
-    profile = await social_broker.fetch_profile("github", "code", {})
+    profile = await social_broker.fetch_profile("github", "code", {"code_verifier": "the-verifier"})
     assert profile == {
         "provider": "github",
         "provider_account_id": "42",
@@ -441,7 +460,12 @@ async def test_redeem_returns_the_profile_once(beanie_test_db, monkeypatch):
         ok = await _redeem(c, token, site_id=str(site.id), ticket=ticket, nonce=NONCE)
         again = await _redeem(c, token, site_id=str(site.id), ticket=ticket, nonce=NONCE)
     assert 0 < ttl <= 60
-    assert ok.status_code == 200 and ok.json() == {"ok": True, "result": PROFILE}
+    from pocketpaw_ee.integrations.social_broker import pairwise_id
+
+    pairwise = pairwise_id(str(site.id), "google", "g-123")
+    assert len(pairwise) == 64 and pairwise != "g-123"
+    assert ok.status_code == 200
+    assert ok.json() == {"ok": True, "result": {**PROFILE, "provider_account_id": pairwise}}
     assert (again.status_code, _err(again)) == (400, "invalid_ticket")
 
 
@@ -516,3 +540,140 @@ async def test_an_expired_ticket_is_refused(beanie_test_db, monkeypatch):
             c, await _token(site), site_id=str(site.id), ticket=ticket, nonce=NONCE
         )
     assert (resp.status_code, _err(resp)) == (400, "invalid_ticket")
+
+
+# ------------------------------------------------------------------- consent
+
+
+@pytest.mark.asyncio
+async def test_consent_page_names_the_site_and_cannot_be_framed(beanie_test_db):
+    _, site = await _bound()
+    async with _client() as c:
+        page = await _authorize(c, str(site.id), "github")
+    assert page.status_code == 200
+    assert "Sign in to shop.example.com with GitHub?" in page.text
+    csp = page.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in csp and "default-src 'none'" in csp
+    nonce = re.search(r"style-src 'nonce-([^']+)'", csp).group(1)
+    assert f'<style nonce="{nonce}">' in page.text and "<script" not in page.text
+    assert page.headers["x-frame-options"] == "DENY"
+    assert page.headers["cache-control"] == "no-store"
+    cookie = page.headers["set-cookie"].lower()
+    assert "samesite=strict" in cookie and "httponly" in cookie and "secure" in cookie
+    assert "path=/api/v1/integrations/social/" in cookie
+    # Nothing has gone to the provider yet.
+    assert "github.com" not in page.text and "location" not in page.headers
+
+
+@pytest.mark.asyncio
+async def test_continue_needs_the_strict_cookie_and_the_token_is_single_use(beanie_test_db):
+    _, site = await _bound()
+    url = "/api/v1/integrations/social/google/authorize"
+    async with _client() as c:
+        token = _consent_token(await _authorize(c, str(site.id)))
+    # Another browser: a cross-site auto-submit carries no Strict cookie.
+    async with _client() as other:
+        foreign = await other.post(url, data={"t": token, "action": "continue"})
+    async with _client() as c2:
+        page2 = await _authorize(c2, str(site.id))
+        swapped = await c2.post(url, data={"t": token, "action": "continue"})
+        wrong_provider = await c2.post(
+            "/api/v1/integrations/social/github/authorize",
+            data={"t": _consent_token(page2), "action": "continue"},
+        )
+    async with _client() as c3:
+        t3 = _consent_token(await _authorize(c3, str(site.id)))
+        first = await c3.post(url, data={"t": t3, "action": "continue"})
+        c3.cookies.set(
+            "paw_social_consent",
+            hashlib.sha256(t3.encode()).hexdigest(),
+            path="/api/v1/integrations/social/",
+        )
+        replay = await c3.post(url, data={"t": t3, "action": "continue"})
+    assert (foreign.status_code, _err(foreign)) == (400, "invalid_request")
+    assert (swapped.status_code, _err(swapped)) == (400, "invalid_request")
+    assert (wrong_provider.status_code, _err(wrong_provider)) == (400, "invalid_request")
+    assert first.status_code == 303
+    assert (replay.status_code, _err(replay)) == (400, "invalid_ticket")
+
+
+@pytest.mark.asyncio
+async def test_cancel_goes_back_to_the_site_without_the_provider(beanie_test_db):
+    _, site = await _bound()
+    async with _client() as c:
+        resp = await _start(c, str(site.id), action="cancel")
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith(RETURN_TO + "?")
+    assert _q(resp) == {"error": "cancelled", "next": "/account"}
+
+
+# ------------------------------------------------------------------ pairwise
+
+
+@pytest.mark.asyncio
+async def test_one_visitor_gets_unlinkable_ids_on_two_sites(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud._core import redis_client
+
+    _, site_a = await _bound()
+    pid_b = await _pocket()
+    site_b = await _site(pid_b, script="shop-b")
+    await _link(pid_b, "social_login", settings={"providers": "google"})
+    async with _client() as c:
+        ta = await _ticket(c, str(site_a.id), monkeypatch)
+        tb = await _ticket(c, str(site_b.id), monkeypatch)
+        raw = await redis_client.get_redis().get(f"social_ticket_state:{ta}")
+        a = await _redeem(c, await _token(site_a), site_id=str(site_a.id), ticket=ta, nonce=NONCE)
+        b = await _redeem(c, await _token(site_b), site_id=str(site_b.id), ticket=tb, nonce=NONCE)
+        again = await _ticket(c, str(site_a.id), monkeypatch)
+        a2 = await _redeem(
+            c, await _token(site_a), site_id=str(site_a.id), ticket=again, nonce=NONCE
+        )
+    ida = a.json()["result"]["provider_account_id"]
+    idb = b.json()["result"]["provider_account_id"]
+    assert ida != idb and "g-123" not in (ida + idb)
+    assert a2.json()["result"]["provider_account_id"] == ida  # stable per site
+    assert "g-123" not in raw  # the raw id is never stored
+
+
+# --------------------------------------------------------------- rate limits
+
+
+@pytest.mark.asyncio
+async def test_per_ip_counter_covers_consent_decide_and_callback(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.integrations import social_broker
+
+    monkeypatch.setattr(social_broker, "IP_PER_MIN", 3)
+    _, site = await _bound()
+    async with _client() as c:
+        start = await _start(c, str(site.id))  # consent + decide: 2
+        cb = await c.get(  # 3
+            "/api/v1/integrations/social/google/callback",
+            params={"state": _q(start)["state"]},
+        )
+        over = await _authorize(c, str(site.id))  # 4
+    assert start.status_code == 303 and cb.status_code == 303
+    assert (over.status_code, _err(over)) == (429, "rate_limited")
+
+
+@pytest.mark.asyncio
+async def test_redeem_is_capped_per_site_before_the_token_is_checked(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.integrations import social_broker
+    from pocketpaw_ee.sites import site_secrets
+
+    _, site = await _bound()
+    token = await _token(site)
+    monkeypatch.setattr(social_broker, "REDEEM_SITE_PER_MIN", 1)
+    calls = []
+    real = site_secrets.secret_matches
+
+    async def _spy(**kw):
+        calls.append(kw)
+        return await real(**kw)
+
+    monkeypatch.setattr(site_secrets, "secret_matches", _spy)
+    async with _client() as c:
+        first = await _redeem(c, token, site_id=str(site.id), ticket="t" * 40, nonce=NONCE)
+        second = await _redeem(c, token, site_id=str(site.id), ticket="t" * 40, nonce=NONCE)
+    assert _err(first) == "invalid_ticket"
+    assert (second.status_code, _err(second)) == (429, "rate_limited")
+    assert len(calls) == 1

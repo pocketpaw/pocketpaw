@@ -256,8 +256,12 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     ),
     "POST /integrations/webhooks/{provider}": "provider webhook; provider signature verified",
     "GET /integrations/social/{provider}/authorize": (
-        "visitor sign-in broker start; the site must bind social_login with that "
-        "provider on, return_to must be the site's own host, per-IP bucket"
+        "visitor sign-in consent page; the site must bind social_login with that "
+        "provider on, return_to must be the site's own host, per-IP counter"
+    ),
+    "POST /integrations/social/{provider}/authorize": (
+        "consent Continue / Cancel; single-use server token whose hash must match the "
+        "SameSite=Strict cookie the consent page set, per-IP counter"
     ),
     "GET /integrations/social/{provider}/callback": (
         "provider redirect; single-use server-side state (_oauth_state) issued by authorize"

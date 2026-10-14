@@ -111,19 +111,27 @@ async def peek(namespace: str, state: str) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+async def _take(redis: Any, key: str) -> Any:
+    """Read and delete ``key`` atomically: GETDEL, or a MULTI/EXEC GET+DEL on a
+    client without it. Two callers racing for one key: exactly one gets the value."""
+    getdel = getattr(redis, "getdel", None)
+    if getdel is not None:
+        return await getdel(key)
+    async with redis.pipeline(transaction=True) as pipe:
+        raw, _ = await pipe.get(key).delete(key).execute()
+    return raw
+
+
 async def consume(namespace: str, state: str) -> dict[str, Any]:
     """Redeem ``state`` exactly once and return its payload.
 
     Raises ``Forbidden("<namespace>.invalid_state")`` when the state is unknown,
-    already spent, expired, or belongs to a different flow. The delete happens
-    immediately after the read, so two concurrent callbacks cannot both proceed.
+    already spent, expired, or belongs to a different flow. Read and delete are
+    one atomic step (``_take``), so two concurrent callbacks cannot both proceed.
     """
-    redis = redis_client.get_redis()
-    key = _key(namespace, state)
-    raw = await redis.get(key)
+    raw = await _take(redis_client.get_redis(), _key(namespace, state))
     if raw is None:
         raise Forbidden(f"{namespace}.invalid_state", "Login state is missing or expired")
-    await redis.delete(key)
     try:
         loaded = json.loads(raw)
     except (TypeError, ValueError) as exc:
