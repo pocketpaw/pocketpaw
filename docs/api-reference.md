@@ -7826,6 +7826,9 @@ routes take `?profile_id=` like the rest.
 
 `platforms` (in order): `x`, `linkedin`, `linkedin-page`, `facebook`,
 `instagram-standalone`, `threads`, `youtube`, `tiktok`, `reddit`, `pinterest`.
+`POCKETPAW_POSTIZ_PLATFORMS` (comma-separated, e.g. `x,linkedin`) limits
+them to the providers this deployment has developer apps for; connecting any
+other returns `social.platform_unavailable`. Unset offers all of them.
 
 | Status | Code | When |
 |---|---|---|

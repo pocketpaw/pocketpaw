@@ -2605,6 +2605,14 @@ class Settings(BaseSettings):
             "POCKETPAW_POSTIZ_JWT_SECRET. NEVER logged."
         ),
     )
+    postiz_platforms: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated Postiz providers this deployment has developer apps for, "
+            "e.g. 'x,linkedin'. Unset offers every supported platform. Set via "
+            "POCKETPAW_POSTIZ_PLATFORMS."
+        ),
+    )
 
     # AI visibility checks (AV-3) — the platform's OWN provider accounts that ask
     # AI search engines about a business (ee/pocketpaw_ee/cloud/ai_visibility).

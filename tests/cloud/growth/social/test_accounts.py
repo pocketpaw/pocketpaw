@@ -113,7 +113,7 @@ async def _profile(client: httpx.AsyncClient, name: str = "Acme") -> str:
 async def test_unconfigured_lists_nothing_and_refuses_connect(w1, monkeypatch):
     monkeypatch.setattr(
         "pocketpaw.config.get_settings",
-        lambda: SimpleNamespace(postiz_url=None, postiz_jwt_secret=None),
+        lambda: SimpleNamespace(postiz_url=None, postiz_jwt_secret=None, postiz_platforms=None),
     )
     await _profile(w1)
     listed = (await w1.get(ACCOUNTS)).json()
@@ -164,6 +164,19 @@ async def test_platform_errors(w1, postiz):
     resp = await w1.post(CONNECT, json={"platform": "x"}, headers=LOCAL)
     assert resp.status_code == 502
     assert resp.json()["error"]["code"] == "social.accounts_upstream"
+
+
+async def test_only_configured_platforms_are_offered(w1, postiz, monkeypatch):
+    monkeypatch.setattr(
+        "pocketpaw.config.get_settings",
+        lambda: SimpleNamespace(postiz_url=None, postiz_jwt_secret=None, postiz_platforms="x"),
+    )
+    await _profile(w1)
+    assert (await w1.get(ACCOUNTS)).json()["platforms"] == [{"id": "x", "label": "X"}]
+    resp = await w1.post(CONNECT, json={"platform": "linkedin"}, headers=LOCAL)
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "social.platform_unavailable"
+    assert postiz.created == []
 
 
 async def test_profiles_get_their_own_orgs_and_accounts(w1, postiz):

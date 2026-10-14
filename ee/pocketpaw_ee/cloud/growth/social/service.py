@@ -1107,9 +1107,20 @@ async def unschedule_idea(ctx: RequestContext, idea_id: str) -> SocialIdeaRespon
 # ---------------------------------------------------------------------------
 
 
+def _enabled_platforms() -> set[str]:
+    from pocketpaw.config import get_settings
+
+    raw = get_settings().postiz_platforms or ""
+    chosen = {p.strip() for p in raw.split(",") if p.strip()}
+    return chosen or {i for i, _ in SOCIAL_ACCOUNT_PLATFORMS}
+
+
 def _account_platforms() -> list[SocialAccountPlatformResponse]:
+    enabled = _enabled_platforms()
     return [
-        SocialAccountPlatformResponse(id=i, label=label) for i, label in SOCIAL_ACCOUNT_PLATFORMS
+        SocialAccountPlatformResponse(id=i, label=label)
+        for i, label in SOCIAL_ACCOUNT_PLATFORMS
+        if i in enabled
     ]
 
 
@@ -1218,6 +1229,10 @@ async def connect_account(
             503,
             "social.accounts_unavailable",
             "Social account connections aren't set up on this deployment.",
+        )
+    if body.platform not in _enabled_platforms():
+        raise ValidationError(
+            "social.platform_unavailable", f"{label} isn't set up on this deployment yet."
         )
     profile = await _require_profile_doc(workspace_id, profile_id)
     org = await _ensure_postiz_org(postiz, workspace_id, profile)
