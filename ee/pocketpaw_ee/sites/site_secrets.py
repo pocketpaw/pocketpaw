@@ -100,6 +100,17 @@ def validate_name(name: str) -> str:
     return name
 
 
+def _check_value(name: str, value: str) -> None:
+    """A non-empty string within the size cap, else an owner-facing error."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError("sites.secret_value_empty", f"{name} needs a non-empty value.")
+    if len(value.encode("utf-8")) > MAX_VALUE_BYTES:
+        raise PayloadTooLarge(
+            "sites.secret_too_large",
+            f"{name} is over the {MAX_VALUE_BYTES // 1024} KB limit for a site secret.",
+        )
+
+
 def _doc():
     from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 
@@ -234,13 +245,7 @@ async def set_secret(
 ) -> SiteSecretView:
     """Encrypt and store a value (owner only). Fills a pending request if there is one."""
     name = validate_name(name)
-    if not isinstance(value, str) or not value.strip():
-        raise ValidationError("sites.secret_value_empty", f"{name} needs a non-empty value.")
-    if len(value.encode("utf-8")) > MAX_VALUE_BYTES:
-        raise PayloadTooLarge(
-            "sites.secret_too_large",
-            f"{name} is over the {MAX_VALUE_BYTES // 1024} KB limit for a site secret.",
-        )
+    _check_value(name, value)
     pocket = await _require_owner(workspace_id, user_id, pocket_id)
     token = crypto.encrypt(value)
     now = datetime.now(UTC)
@@ -389,10 +394,7 @@ async def set_managed_secret(
     name = validate_name(name)
     if not managed_by:
         raise ValueError("managed_by is required")
-    if not isinstance(value, str) or not value.strip():
-        raise ValidationError("sites.secret_value_empty", f"{name} needs a non-empty value.")
-    if len(value.encode("utf-8")) > MAX_VALUE_BYTES:
-        raise PayloadTooLarge("sites.secret_too_large", f"{name} is too large for a site secret.")
+    _check_value(name, value)
     row = await _row(workspace_id, pocket_id, name)
     if row is None:
         row = _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name)
