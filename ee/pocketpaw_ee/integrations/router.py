@@ -265,7 +265,7 @@ async def oauth_callback(
 ) -> HTMLResponse:
     """Provider redirect. Needs the single-use state AND this browser's start cookie."""
     cookie = request.cookies.get(oauth.cookie_name(provider))
-    message = await oauth.finish_callback(provider, code, state, cookie)
+    message = await oauth.finish_callback(provider, code, state, cookie, dict(request.query_params))
     resp = _page(message)
     resp.delete_cookie(
         oauth.cookie_name(provider),

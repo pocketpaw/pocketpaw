@@ -321,6 +321,7 @@ async def _call(request: Request, site_id: str, provider_id: str, action: str) -
         settings=dict(binding.settings or {}),
         caller=caller,  # type: ignore[arg-type]
         get_token=_token if conn is not None else None,
+        connection_meta=dict(getattr(conn, "meta", None) or {}) if conn is not None else {},
     )
     try:
         result = await spec.handler(ctx, parsed)

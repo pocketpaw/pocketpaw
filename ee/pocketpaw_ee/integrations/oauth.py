@@ -14,9 +14,11 @@
 # S256 verifier. Its TTL is the provider's ``state_ttl_seconds`` when it sets one
 # (Stripe onboarding can take an hour), else the store default; the browser
 # cookie lives as long. The callback trusts only that payload, never its own query
-# string beyond ``code`` and ``state``. A resume updates its own connection row in place
-# (a different provider account is refused) and re-runs ``site_setup`` for every
-# site bound to it. A provider's authorize_url may be sync or async.
+# string beyond ``code``, ``state`` and the keys a provider declares in
+# ``callback_params`` (handed to its ``complete``, which validates them). A resume
+# updates its own connection row in place (a different provider account is
+# refused) and re-runs ``site_setup`` for every site bound to it. A provider's
+# authorize_url may be sync or async.
 #
 # BROWSER BINDING. ``/start`` redeems a one-time ticket (TTL ``TICKET_TTL_SECONDS``)
 # and sets an HttpOnly, Secure, SameSite=Lax cookie on the integrations path holding
@@ -264,7 +266,11 @@ async def redeem_ticket(
 
 
 async def finish_callback(
-    provider_id: str, code: str, state: str, cookie: str | None = None
+    provider_id: str,
+    code: str,
+    state: str,
+    cookie: str | None = None,
+    params: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Check the browser cookie, redeem state, finish the grant, store it, link the
     site. Returns the message for the opener."""
@@ -294,8 +300,12 @@ async def finish_callback(
         return message
     try:
         provider = bindings.provider_or_404(provider_id)
+        extra: dict[str, Any] = {}
+        wanted = tuple(getattr(provider, "callback_params", ()) or ())
+        if wanted:
+            extra["callback_params"] = {k: str((params or {}).get(k) or "") for k in wanted}
         grant = await provider.complete(
-            code, redirect_uri(provider_id), code_verifier=payload.get("code_verifier")
+            code, redirect_uri(provider_id), code_verifier=payload.get("code_verifier"), **extra
         )
         conn = await vault.store_grant(
             workspace_id=payload["workspace_id"],

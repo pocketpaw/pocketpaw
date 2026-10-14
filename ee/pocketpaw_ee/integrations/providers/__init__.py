@@ -20,6 +20,7 @@ from pocketpaw_ee.integrations.providers.scheduling import CalComProvider, Calen
 from pocketpaw_ee.integrations.providers.social_login import SocialLoginProvider
 from pocketpaw_ee.integrations.providers.stripe import StripeProvider
 from pocketpaw_ee.integrations.providers.turnstile import TurnstileProvider
+from pocketpaw_ee.integrations.providers.zoho_crm import ZohoCrmProvider
 
 _PROVIDERS: tuple[IntegrationProvider, ...] = (
     NewsletterProvider(),
@@ -31,6 +32,7 @@ _PROVIDERS: tuple[IntegrationProvider, ...] = (
     HubSpotProvider(),
     StripeProvider(),
     SocialLoginProvider(),
+    ZohoCrmProvider(),
 )
 
 _DEMO = DemoProvider()

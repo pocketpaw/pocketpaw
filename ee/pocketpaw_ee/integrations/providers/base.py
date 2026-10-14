@@ -24,9 +24,16 @@
 #   * resume_url(connection, state, redirect_uri) -> str | None   (async) the
 #     provider page that continues an unfinished setup; it must send the browser
 #     back to ``redirect_uri`` with ``state`` (and a ``code`` for ``complete``)
+#   * callback_params: tuple[str, ...]   extra callback query keys the provider
+#     needs (Zoho's ``accounts-server``); ``complete`` then also gets
+#     ``callback_params={key: value}``. They are untrusted browser input: the
+#     provider validates them before using any of them
+#   * refresh_with_meta: bool   ``refresh`` also gets ``meta=connection.meta``
+#     (a provider whose token endpoint depends on the account, e.g. its region)
 #
 # Handlers receive an ``ActionContext`` and return a JSON-safe dict that goes to a
 # public caller as ``result``. They must never return a token or a secret.
+# ``ActionContext.connection_meta`` is the bound connection's non-secret ``meta``.
 # ``ProviderError`` is the failure a handler raises; the gateway maps it to 502.
 # ``ActionRefused(code)`` is a handler refusal with a gateway code instead
 # (``invalid_args``, ``rate_limited``, ``setup_required``); ``setup_required`` also
@@ -145,6 +152,7 @@ class ActionContext:
     settings: Mapping[str, Any]
     caller: Literal["site_key", "gateway_token", "owner"]
     get_token: Callable[..., Awaitable[str]] | None = None
+    connection_meta: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

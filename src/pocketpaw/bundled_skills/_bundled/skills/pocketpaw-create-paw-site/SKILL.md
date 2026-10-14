@@ -245,6 +245,7 @@ Forms into a spreadsheet: `connect_site_integration(pocket_id, 'google_sheets', 
 then submit with `Paw.call('google_sheets', 'append_row', {fields})` (string values).
 Lead forms into a CRM: `connect_site_integration(pocket_id, 'hubspot', purpose)`, then
 `Paw.call('hubspot', 'create_contact', {email, firstname, lastname, phone, company, message})`.
+Zoho CRM instead: provider `zoho_crm`, `Paw.call('zoho_crm', 'create_lead', {email, first_name, last_name, phone, company, message})`.
 
 ### Changing an html site that already exists
 

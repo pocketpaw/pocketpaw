@@ -25,7 +25,8 @@
 # connection it continues and updates that row in place, refusing a different
 # provider account. Non-secret provider state rides ``TokenGrant.meta`` into
 # ``connection.meta``; the view's ``attention`` is the provider's
-# ``connection_attention`` hook over the stored row.
+# ``connection_attention`` hook over the stored row. A provider with
+# ``refresh_with_meta`` gets that meta on ``refresh`` (Zoho's regional token host).
 
 from __future__ import annotations
 
@@ -297,7 +298,11 @@ async def _get_valid_token_once(conn: Any, rejected: str) -> str:
     try:
         if provider is None:
             raise ProviderError(f"provider {current.provider} is not available")
-        grant = await provider.refresh(previous_refresh)
+        if getattr(provider, "refresh_with_meta", False):
+            meta = dict(getattr(current, "meta", None) or {})
+            grant = await provider.refresh(previous_refresh, meta=meta)
+        else:
+            grant = await provider.refresh(previous_refresh)
     except InvalidGrant:
         await _finish(
             conn.id,

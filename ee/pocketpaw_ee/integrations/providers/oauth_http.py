@@ -1,13 +1,18 @@
 # ee/pocketpaw_ee/integrations/providers/oauth_http.py: outbound HTTP for OAuth providers.
 #
-# The small shared layer the real connect providers (google_sheets, hubspot) use:
+# The small shared layer the real connect providers (google_sheets, hubspot,
+# zoho_crm) use:
 #   * ``client()``          one ``httpx.AsyncClient`` per call; tests swap
 #                           ``_transport`` for an ``httpx.MockTransport``
 #   * ``token_request()``   form POST to a token endpoint; a dead grant
-#                           (``invalid_grant`` / ``BAD_REFRESH_TOKEN``) raises
-#                           ``InvalidGrant`` so the vault flips needs_reconnect
-#   * ``authed()``          an API call with the site's token; a 401 refreshes
-#                           once through ``get_token(rejected=...)`` and retries
+#                           (``invalid_grant`` / ``BAD_REFRESH_TOKEN`` /
+#                           ``invalid_code``) raises ``InvalidGrant`` so the vault
+#                           flips needs_reconnect. An ``error`` body is a failure
+#                           even on a 200 (Zoho answers errors that way)
+#   * ``authed()``          an API call with the site's token (``auth_scheme``
+#                           defaults to ``Bearer``; Zoho wants ``Zoho-oauthtoken``);
+#                           a 401 refreshes once through ``get_token(rejected=...)``
+#                           and retries
 #   * ``s256()`` / ``client_credentials()`` PKCE challenge and env-read app config
 #   * ``untraced()``        suppresses the OpenTelemetry httpx instrumentation
 #                           (Logfire) for a request whose URL carries a secret, so
@@ -29,7 +34,7 @@ import httpx
 from pocketpaw_ee.integrations.providers.base import InvalidGrant, ProviderError
 
 TIMEOUT = httpx.Timeout(15.0, connect=5.0)
-_DEAD_GRANT = {"invalid_grant", "bad_refresh_token", "bad_auth_code"}
+_DEAD_GRANT = {"invalid_grant", "bad_refresh_token", "bad_auth_code", "invalid_code"}
 
 # Tests replace this with ``httpx.MockTransport(handler)``.
 _transport: httpx.AsyncBaseTransport | None = None
@@ -84,7 +89,7 @@ async def token_request(url: str, data: dict[str, str], *, provider: str) -> dic
             f"{provider}: token endpoint unreachable ({type(exc).__name__})"
         ) from None
     body = _json(resp)
-    if resp.status_code >= 400:
+    if resp.status_code >= 400 or (body.get("error") and not body.get("access_token")):
         reason = str(body.get("error") or body.get("status") or "").lower()
         if reason in _DEAD_GRANT:
             raise InvalidGrant(f"{provider}: {reason}")
@@ -100,6 +105,7 @@ async def authed(
     url: str,
     *,
     provider: str,
+    auth_scheme: str = "Bearer",
     **kwargs: Any,
 ) -> httpx.Response:
     """Call ``url`` with a bearer token; on a 401 refresh once and retry."""
@@ -109,7 +115,7 @@ async def authed(
     token = await get_token()
     async with client() as http:
         for attempt in (0, 1):
-            headers = {**base_headers, "authorization": f"Bearer {token}"}
+            headers = {**base_headers, "authorization": f"{auth_scheme} {token}"}
             try:
                 resp = await http.request(method, url, headers=headers, **kwargs)
             except httpx.HTTPError as exc:
