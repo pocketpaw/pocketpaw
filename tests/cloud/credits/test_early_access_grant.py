@@ -1,8 +1,10 @@
 # tests/cloud/credits/test_early_access_grant.py: the one-time early-access
 # grant. A verified user gets ``early_access_grant_credits`` exactly once, into a
 # workspace they OWN, through every door that calls ``grant_early_access``:
-# first owned-workspace create and the guest social upgrade. Also pins the
-# launch switch that closes password sign-up (``password_signup_open``).
+# social sign-in (including pre-launch accounts that already own a workspace),
+# first owned-workspace create and the guest social upgrade. A failed grant
+# never fails sign-in or workspace create. Also pins the launch switch that
+# closes password sign-up (``password_signup_open``).
 #
 # Nothing on the money path is faked: the real ledger, the real workspace
 # create and the real guest mint run against mongomock. Only infrastructure is
@@ -320,3 +322,96 @@ async def test_wiped_claim_and_deleted_workspace_cannot_farm_a_second_grant(mong
     healed = await _reload(user)
     assert healed.early_access_workspace_id == ws1
     assert healed.early_access_granted_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Social sign-in door, and best-effort grants
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def social_app(auth_app, monkeypatch):
+    monkeypatch.setenv("POCKETPAW_GITHUB_OAUTH_CLIENT_ID", "cid")
+    monkeypatch.setenv("POCKETPAW_GITHUB_OAUTH_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("POCKETPAW_FRONTEND_BASE_URL", "http://localhost:1420")
+    monkeypatch.setenv(
+        "POCKETPAW_SOCIAL_REDIRECT_URI", "http://localhost:8888/api/v1/auth/social/callback"
+    )
+    return auth_app
+
+
+async def _social_login(app: FastAPI, monkeypatch, email: str, account_id: str) -> None:  # noqa: ANN001
+    """One full web sign-in through the callback. The login branch is
+    provider-agnostic, so GitHub stands in for Google here."""
+    from pocketpaw_ee.cloud.auth.social.providers.base import SocialIdentity
+    from pocketpaw_ee.cloud.auth.social.providers.github import GitHubProvider
+
+    identity = SocialIdentity(provider="github", account_id=account_id, email=email)
+
+    async def fake_exchange(self, **kwargs):  # noqa: ANN001, ARG001
+        return identity
+
+    monkeypatch.setattr(GitHubProvider, "exchange", fake_exchange)
+    async with _client(app) as c:
+        start = await c.get(
+            "/api/v1/auth/social/github/login", params={"flow": "web"}, follow_redirects=False
+        )
+        state = start.headers["location"].split("state=")[1].split("&")[0]
+        back = await c.get(
+            "/api/v1/auth/social/callback",
+            params={"code": "c", "state": state},
+            follow_redirects=False,
+        )
+    assert back.status_code == 302, back.text
+    assert "paw_auth" in back.cookies
+
+
+async def _prelaunch_account():
+    """A verified user who already owns a workspace that was never granted
+    (created before launch), so only the sign-in door can grant it."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    user = await _user()
+    ws = Workspace(name="pre", slug=f"pre-{uuid.uuid4().hex[:6]}", owner=str(user.id))
+    await ws.insert()
+    return user, str(ws.id)
+
+
+async def test_social_sign_in_grants_an_existing_owner_exactly_once(social_app, monkeypatch):
+    user, ws = await _prelaunch_account()
+    assert await _balance(ws) == 0
+
+    # First Google sign-in attaches by verified email ("link"), the second
+    # finds the attached identity ("sign_in"). Only the first grants.
+    await _social_login(social_app, monkeypatch, user.email, "gh-prelaunch")
+    assert await _balance(ws) == GRANT
+    assert len(await _grant_entries(str(user.id))) == 1
+    granted_at = (await _reload(user)).early_access_granted_at
+    assert granted_at is not None
+
+    await _social_login(social_app, monkeypatch, user.email, "gh-prelaunch")
+    assert await _balance(ws) == GRANT
+    assert len(await _grant_entries(str(user.id))) == 1
+    assert (await _reload(user)).early_access_granted_at == granted_at
+
+
+async def test_a_failed_grant_fails_neither_create_nor_sign_in(social_app, monkeypatch):
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    real_grant = credits_service.grant
+
+    async def _boom(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(credits_service, "grant", _boom)
+    user = await _user()
+    ws = await _create_ws(user)  # no exception, so no half-created workspace
+    await _social_login(social_app, monkeypatch, user.email, "gh-flaky")
+    assert await _balance(ws) == 0
+    assert await _grant_entries(str(user.id)) == []
+
+    # The ledger recovers; the next sign-in lands the grant.
+    monkeypatch.setattr(credits_service, "grant", real_grant)
+    await _social_login(social_app, monkeypatch, user.email, "gh-flaky")
+    assert await _balance(ws) == GRANT
+    assert len(await _grant_entries(str(user.id))) == 1

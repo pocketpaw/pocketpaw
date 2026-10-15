@@ -6,7 +6,8 @@
 # Movements: grant / debit (idempotent, emit CreditMovement after each real
 # movement, never on a replay), record_no_movement (zero-value "seen" marker),
 # grant_early_access (one-time per-user grant into an owned workspace; it also
-# stamps the claim fields on the User row).
+# stamps the claim fields on the User row) and grant_early_access_best_effort
+# (the same, logged instead of raised, for sign-in and workspace create).
 # Gates: check_balance and check_quota are pure, flag-free assertions that
 # raise InsufficientCredits / QuotaExceeded (402); callers decide when to
 # enforce. Reads: balance, month_to_date_spend, has_paid_credits, history,
@@ -241,7 +242,8 @@ async def grant_early_access(user: User) -> None:
     user OWNS (``Workspace.owner``), never one they were invited to. Skipped for
     unverified, inactive or guest users, and while
     ``early_access_grant_credits`` is 0. A user who owns no workspace yet gets
-    nothing now and is granted on their first owned-workspace create.
+    nothing now and is granted on their first owned-workspace create. Doors:
+    social sign-in, workspace create, and the guest social upgrade.
 
     ``early_access_granted_at`` is the fast path. Behind it the LEDGER is the
     record: any ``early_access:{user_id}`` entry in a workspace the user owns
@@ -312,6 +314,20 @@ async def grant_early_access(user: User) -> None:
     # Keep the caller's copy current so a later save() of it cannot unset these.
     user.early_access_workspace_id = workspace_id
     user.early_access_granted_at = granted_at
+
+
+async def grant_early_access_best_effort(user: User) -> None:
+    """``grant_early_access`` for doors that must not fail on it.
+
+    Sign-in and workspace create call this. A failed grant is logged, not
+    raised: every one of those doors retries the (idempotent) grant, so the
+    next sign-in or owned-workspace create lands it instead of a 500 that
+    leaves a half-created workspace or a refused login behind.
+    """
+    try:
+        await grant_early_access(user)
+    except Exception:  # noqa: BLE001 - logged; the next door retries
+        logger.exception("early access grant failed for user=%s; will retry", user.id)
 
 
 async def debit(

@@ -39,7 +39,7 @@
   {
     "label": "workspace create never grants",
     "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
-    "find": "            await credits_service.grant_early_access(owner)\n",
+    "find": "            await credits_service.grant_early_access_best_effort(owner)\n",
     "replace": "            pass\n",
     "tests": [
       "tests/cloud/credits/test_early_access_grant.py::test_first_owned_workspace_gets_the_grant_once"
@@ -62,6 +62,25 @@
     "tests": [
       "tests/cloud/credits/test_early_access_grant.py::test_register_is_refused_when_password_signup_is_closed",
       "tests/cloud/credits/test_early_access_grant.py::test_guest_password_upgrade_is_refused_when_closed"
+    ]
+  },
+  {
+    "label": "social sign-in never grants, so a pre-launch owner is locked out at 0",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    await credits_service.grant_early_access_best_effort(user)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_social_sign_in_grants_an_existing_owner_exactly_once",
+      "tests/cloud/credits/test_early_access_grant.py::test_a_failed_grant_fails_neither_create_nor_sign_in"
+    ]
+  },
+  {
+    "label": "a failed grant is raised, so workspace create and sign-in fail",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "        logger.exception(\"early access grant failed for user=%s; will retry\", user.id)\n",
+    "replace": "        raise\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_a_failed_grant_fails_neither_create_nor_sign_in"
     ]
   }
 ]

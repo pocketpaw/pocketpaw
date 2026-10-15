@@ -2444,10 +2444,15 @@ Every verified user gets `early_access_grant_credits` (default 1,000) early
 access credits once. The grant lands in the oldest workspace the user owns,
 never in one they were invited to, and is written as a `genesis` ledger entry
 with cause `early_access` and idempotency key `early_access:{user_id}`. It fires
-when a verified user creates a workspace they own and when a guest upgrades
-through social sign-in (`/auth/social/...` link flow); a guest or an unverified
-account gets nothing. A second owned workspace, a retry, or deleting the granted
-workspace and creating another never grants again. The user row records the
+on every social sign-in (`/auth/social/callback`, so an account that already
+owned a workspace before launch is granted on its next Google sign-in), when a
+verified user creates a workspace they own, and when a guest upgrades through
+social sign-in (`/auth/social/...` link flow); a guest or an unverified account
+gets nothing. A user who owns no workspace yet (joined by invite or domain
+auto-join) is granted when they first create one. A second owned workspace, a
+retry, or deleting the granted workspace and creating another never grants
+again. On sign-in and workspace create the grant is best-effort: a ledger
+failure is logged, the request still succeeds, and the next sign-in retries. The user row records the
 claim in `early_access_workspace_id` and `early_access_granted_at`.
 
 ### Password sign-up switch
