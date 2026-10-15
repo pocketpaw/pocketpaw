@@ -16,7 +16,8 @@
 #     unsupported kinds are dropped with a warning, an unprovisioned backend refuses.
 #   * secrets bind as ``secret_text`` (a missing required one refuses with
 #     ``sites.secrets_missing``; values never reach a log or repr); platform env
-#     (``plain_text``) wins over a secret of the same name.
+#     (``plain_text``) wins over a secret of the same name. An assets-only bundle
+#     (no worker modules) binds no secrets: nothing could read them.
 #   * Durable Objects (``durable_objects``, behind ``PAW_SITES_DURABLE_OBJECTS``):
 #     vetted and migration-planned before ``provision``, bound as
 #     ``durable_object_namespace``; the result carries Cloudflare's ``migration_tag``.
@@ -687,6 +688,11 @@ def load_bundle(build_dir: str | Path, provisioned: ProvisionedResources) -> Paw
 
 
 def _map_into(bundle: PawBundle, manifest: dict, provisioned: ProvisionedResources) -> None:
+    if not bundle.modules and provisioned.secrets:
+        # An assets-only Worker (a no-build site, a static build) has no code to read a
+        # secret, so none is sent to Cloudflare. Its pages reach the integrations
+        # gateway from the browser instead (paw.js + the public site key).
+        provisioned = replace(provisioned, secrets={})
     bindings, binding_warnings = map_bindings(
         manifest.get("bindingRequests"),
         manifest.get("droppedBindings"),

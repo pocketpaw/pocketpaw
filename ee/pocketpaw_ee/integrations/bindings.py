@@ -15,7 +15,8 @@
 #
 # Every link / unlink / connect / reconnect emits ``site.integration_changed``
 # {pocket_id, provider, status}. Linking also mints the site's ``PAW_GATEWAY_TOKEN``
-# secret (once) so a project Worker gets it as a secret_text binding on deploy.
+# secret (once) so a project Worker gets it as a secret_text binding on deploy; every
+# Worker deploy re-checks it (``ensure_gateway_token_if_linked``).
 #
 # Settings are validated against the provider's ``settings_fields`` (settings.py).
 # On link, on enable, on a settings change, and for every bound site after a
@@ -656,6 +657,30 @@ async def ensure_gateway_token(workspace_id: str, pocket_id: str) -> None:
         )
     except Exception:  # noqa: BLE001
         logger.warning("integrations: could not mint the gateway token", exc_info=True)
+
+
+async def ensure_gateway_token_if_linked(workspace_id: str, pocket_id: str) -> bool:
+    """Before a site's Worker deploys: make sure a site with any linked integration
+    has its ``PAW_GATEWAY_TOKEN`` (a link whose mint failed, or one made before the
+    token existed, gets it now), so ``site_secrets.secrets_for_deploy`` binds it.
+    True when the site has a linked integration. Never raises.
+
+    Only a deployed Worker can read the token. Generated workers (ripple, svelte,
+    react) run no author server code, and an assets-only Worker (a no-build
+    project) has no code at all: those sites reach the gateway from the browser,
+    through paw.js and the public site key."""
+    if not workspace_id or not pocket_id:
+        return False
+    try:
+        doc = _doc()
+        linked = await doc.find_one(doc.workspace == workspace_id, doc.pocket_id == pocket_id)
+    except Exception:  # noqa: BLE001 - a deploy never fails on this lookup
+        logger.warning("integrations: binding lookup before deploy failed", exc_info=True)
+        return False
+    if linked is None:
+        return False
+    await ensure_gateway_token(workspace_id, pocket_id)
+    return True
 
 
 # -------------------------------------------------- connection fan-out

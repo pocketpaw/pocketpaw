@@ -3336,7 +3336,9 @@ framework config, wrangler config) is also served here, with two extra fields:
 
 - It is never armed: `body_html` / `css` are always empty and the draft is only
   `preview_url`. A cold read queues a Daytona build (`paw-sites-gen project-build`)
-  with the same `queued` / `building` / `failed` handle as above.
+  with the same `queued` / `building` / `failed` handle as above. A no-build tree (a
+  `"build": "none"` template such as `static`) is staged in-process instead and the
+  first read already answers `build_status: "none"` with `preview_mode: "full"`.
 - `preview_mode`:
   - `"full"`: the preview is the whole site. Either the assets are the whole site,
     or (with `PAW_SITES_DRAFT_WORKERS=1`) a draft Worker runs the build's server

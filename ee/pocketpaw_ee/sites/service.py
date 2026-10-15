@@ -2836,14 +2836,18 @@ async def _deploy_project_site(
 ) -> _SiteDoc:
     """Publish a ``project`` pocket from its stored draft build.
 
-    Nothing builds here and nothing the author wrote runs here: the bundle the sandbox
-    built for the pocket's CURRENT source (``project_build``) is materialized and
-    handed to ``_deploy_site_doc`` as a prebuilt tree, which deploys it through
+    Nothing the author wrote runs here. A no-build tree (``project_build.is_no_build``)
+    is staged from the CURRENT source right here, in-process, with the live site
+    config (no sandbox, and no draft needed first). Anything else: the bundle the
+    sandbox built for the CURRENT source (``project_build``) is materialized, and a
+    source with no finished draft build is a 409 (open the preview, or run a build,
+    then publish). Either way paw.js is (re)applied to the bundle's static pages with
+    the live identity (``project_build.apply_paw_client_to_bundle``, idempotent), and
+    the tree goes to ``_deploy_site_doc`` as a prebuilt dir, which deploys it through
     ``bundle_deploy`` + the binding provisioner: into the WfP namespace, or (workers
-    mode / ``PAW_SITES_PROJECT_DEPLOY_TARGET=account``) as an account-level Worker.
-    A source with no finished draft build is a 409 (open the preview, or run a
-    build, then publish). The site's plan is checked against the manifest first
-    (``project_build.check_plan_allows``).
+    mode / ``PAW_SITES_PROJECT_DEPLOY_TARGET=account``) as an account-level Worker; a
+    no-build bundle is an assets-only Worker (``workerModules: []``). The site's plan
+    is checked against the manifest first (``project_build.check_plan_allows``).
 
     The Site doc is ensured (inserted undeployed on a first publish) BEFORE the deploy,
     because the provisioner records the D1 / KV / R2 it creates on it. A ``d1``
@@ -2858,10 +2862,18 @@ async def _deploy_project_site(
     from pocketpaw_ee.sites import project_build
 
     files_source = source if isinstance(source, dict) else None
-    project_build.project_files(files_source)
-    content_hash = project_build.project_content_hash(files_source or {})
-    store = _store or _default_artifact_store()
-    bundle = store.read_dist(pocket_id, project_build.bundle_key(content_hash))
+    files = project_build.project_files(files_source)
+    turnstile_site_key = (await _turnstile_build_kwargs(workspace_id, pocket_id)).get(
+        "turnstile_site_key", ""
+    )
+    site_config = _project_paw_config(site_id, signed_key, turnstile_site_key)
+    if project_build.files_are_no_build(files):
+        _manifest, staged, _ = project_build.no_build_bundle(files, site_config=site_config)
+        bundle = preview_origin.pack_files(staged)
+    else:
+        content_hash = project_build.project_content_hash(files_source or {})
+        store = _store or _default_artifact_store()
+        bundle = store.read_dist(pocket_id, project_build.bundle_key(content_hash))
     if not bundle:
         raise ConflictError(
             "sites.project_build_required",
@@ -2876,6 +2888,10 @@ async def _deploy_project_site(
             raise ValidationError(
                 "sites.bundle_invalid", f"The stored build cannot be deployed: {exc}"
             ) from exc
+        # The Turnstile sitekey counts as baked only when paw.js (which carries it) shipped.
+        shipped = project_build.apply_paw_client_to_bundle(
+            Path(work), manifest, files_source, site_config
+        )
         doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
         project_build.check_plan_allows(
             manifest,
@@ -2913,6 +2929,7 @@ async def _deploy_project_site(
             prebuilt_project_dir=work,
             confirm_destructive_migrations=confirm_destructive_migrations,
             confirm_do_data_loss=confirm_do_data_loss,
+            turnstile_site_key=turnstile_site_key if shipped else "",
         )
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -5957,6 +5974,12 @@ def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None =
 
         if d1_database_id is not None:
             res = replace(res, d1_database_id=d1_database_id)
+        # A site with a linked integration always deploys with its gateway token.
+        from pocketpaw_ee.integrations import bindings as integration_bindings
+
+        await integration_bindings.ensure_gateway_token_if_linked(
+            str(getattr(site, "workspace", "") or ""), str(getattr(site, "pocket_id", "") or "")
+        )
         # The owner's secrets ride as secret_text bindings (values never logged).
         return replace(res, secrets=await site_secrets.secrets_for_deploy(site))
 
@@ -10469,6 +10492,7 @@ async def get_native_artifact(
             pocket_id=pocket_id,
             source=pocket.get("source"),
             store=_store or _default_artifact_store(),
+            site_config=await _project_site_config(workspace_id, pocket_id),
             _pool=_pool,
         )
     # ONE origin resolver for every armed hash (the view, the pre-warm, verify,
@@ -10593,11 +10617,15 @@ async def _project_draft_artifact(
     pocket_id: str,
     source: Any,
     store: Any,
+    site_config: dict[str, Any] | None = None,
     _pool: Any | None = None,
     _records: Any | None = None,
 ) -> dict[str, Any]:
-    """A ``project`` draft: served from its sandbox build when one finished for the
-    current source, else a build is queued in the preview lane (``project_build``).
+    """A ``project`` draft: served from its build when one finished for the current
+    source, else built. A no-build tree (``project_build.is_no_build``) builds right
+    here, in-process, and answers ``built`` at once; anything else is queued in the
+    sandbox preview lane (``project_build``). ``site_config`` is the site's paw.js
+    config (:func:`_project_site_config`), applied to a build that starts now.
 
     The same response shape as every other engine plus ``preview_mode`` (``"full"``
     when the preview is the whole site, a draft Worker included; ``"static"`` when
@@ -10658,12 +10686,39 @@ async def _project_draft_artifact(
                 "capabilities": capabilities,
             }
 
+    if project_build.is_no_build(files_source):
+        built = project_build.build_no_build_draft(
+            pocket_id,
+            content_hash,
+            files_source,
+            store=store,
+            records=records,
+            site_config=site_config,
+        )
+        ok = built["status"] == project_build.STATUS_BUILT
+        return {
+            "pocket_id": pocket_id,
+            "body_html": "",
+            "css": "",
+            "build_status": "none" if ok else "failed",
+            "build_reason": built["reason"],
+            "build_job_id": built["job_id"],
+            "preview_url": (
+                preview_origin.existing_preview_url(store, pocket_id, content_hash) if ok else None
+            ),
+            "preview_mode": built["preview_mode"],
+            "capabilities": capabilities,
+        }
+
+    generator_input: dict[str, Any] = {"source": files_source}
+    if site_config:
+        generator_input["siteConfig"] = site_config
     try:
         enqueued = await build_job.enqueue_preview_build(
             pocket_id=pocket_id,
             content_hash=content_hash,
             engine="project",
-            generator_input={"source": files_source},
+            generator_input=generator_input,
             _pool_override=_pool,
         )
     except Exception as exc:
@@ -10708,6 +10763,35 @@ async def _project_published_view(pocket_id: str, content_hash: str) -> str | No
         logger.warning("sites.draft: published view of %s unavailable", pocket_id, exc_info=True)
         return None
     return (url or "") if is_published else None
+
+
+async def _project_site_config(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
+    """The generator ``siteConfig`` a project build tags its pages with paw.js from
+    (the html engine's: capture base, site id, signed key, Turnstile sitekey), or
+    ``None`` before the site has a signed key (no first publish yet). Publish
+    re-applies paw.js with the live identity, so a draft built without it still
+    ships it. Never raises."""
+    try:
+        doc = await _canonical_site_doc(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001 - a draft builds without paw.js rather than fail
+        logger.warning("sites.project: site lookup for %s failed", pocket_id, exc_info=True)
+        return None
+    signed_key = getattr(doc, "signed_key", "") if doc is not None else ""
+    if not signed_key:
+        return None
+    turnstile = await _turnstile_build_kwargs(workspace_id, pocket_id)
+    return _project_paw_config(str(doc.id), signed_key, turnstile.get("turnstile_site_key", ""))
+
+
+def _project_paw_config(site_id: str, signed_key: str, turnstile_site_key: str) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "siteId": site_id,
+        "captureApiBase": _capture_base(),
+        "captureSignedKey": signed_key,
+    }
+    if turnstile_site_key:
+        config["turnstileSiteKey"] = turnstile_site_key
+    return config
 
 
 async def project_latest_build(
@@ -10798,6 +10882,7 @@ async def queue_project_build(
         pocket_id=pocket_id,
         source=pocket.get("source"),
         store=_default_artifact_store(),
+        site_config=await _project_site_config(workspace_id, pocket_id),
         _pool=_pool,
     )
 

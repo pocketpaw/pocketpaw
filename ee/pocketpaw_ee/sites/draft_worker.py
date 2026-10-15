@@ -556,8 +556,11 @@ async def _default_context(pocket_id: str) -> tuple[str, bool]:
 
 
 async def _default_secrets(workspace_id: str, pocket_id: str) -> dict[str, str]:
+    from pocketpaw_ee.integrations import bindings as integration_bindings
     from pocketpaw_ee.sites import site_secrets
 
+    # A draft Worker of a site with a linked integration gets its gateway token too.
+    await integration_bindings.ensure_gateway_token_if_linked(workspace_id, pocket_id)
     return await site_secrets.secrets_for_deploy(
         SimpleNamespace(workspace=workspace_id, pocket_id=pocket_id)
     )

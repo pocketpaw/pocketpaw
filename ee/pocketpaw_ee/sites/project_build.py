@@ -1,28 +1,43 @@
 # ee/pocketpaw_ee/sites/project_build.py — the ``project`` engine's draft build and
 # the reads/gates its publish needs.
 #
-# A project pocket's source map is a whole repo the author owns. Its draft builds only
-# in a Daytona sandbox: the source map is uploaded as the project tree, the vendored
-# paw-sites generator is uploaded beside it, and ``paw-sites-gen project-build`` runs
-# install + build + (worker targets) wrangler dry-run and writes ``paw-build.json``. A
-# small stage step then copies the manifest and the files it names into
-# ``engines.PROJECT_STAGE_REL``, which the existing wrapper tars like any other output.
+# A project pocket's source map is a whole repo the author owns. Two lanes build it:
+#   * no-build (a ``paw.template.json`` with ``"build": "none"``, the ``static``
+#     starter; or, with no template manifest, no package.json but a root index.html):
+#     the tree IS the site. :func:`build_no_build_draft` stages it in-process, no
+#     sandbox: the files minus :func:`excluded_from_static_output` (paw-sites'
+#     ``excludedFromStaticOutput``) under ``STATIC_OUT_DIR``, an assets-only
+#     ``paw-build.json`` (``workerModules: []``), and paw.js when the site qualifies
+#     (``paw_client``). Its preview mode is always ``"full"``.
+#   * everything else builds in a Daytona sandbox: the source map is uploaded as the
+#     project tree, the vendored paw-sites generator beside it (plus its
+#     ``templates/_paw/paw.js``), and ``paw-sites-gen project-build`` runs install +
+#     build + (worker targets) wrangler dry-run and writes ``paw-build.json``. A site
+#     config that carries its key rides ``--site-config`` on a generator that knows it
+#     (:func:`supports_site_config`); queued builds have the key scrubbed, so in
+#     practice paw.js lands at publish. An older generator builds as before. A stage
+#     step copies the manifest and the files it names into
+#     ``engines.PROJECT_STAGE_REL``, which the wrapper tars like any other output.
 #
 # What a finished build leaves, all keyed by ``(pocket_id, content_hash)``:
 #   * the whole bundle (manifest + assets + worker modules) in the artifact store under
-#     ``<hash>.bundle`` — what publish deploys through ``bundle_deploy``;
+#     ``<hash>.bundle`` — what publish deploys through ``bundle_deploy`` (a no-build
+#     publish re-stages from the source with the live site config instead);
 #   * the assets alone as the draft's preview files + token (``preview_origin``),
 #     unless they have no root index.html (see ``preview_mode`` below);
 #   * a build record in ``verify_store`` (``build-<job id>``): status, rung, the
 #     redacted and capped build log, ``preview_mode`` and the framework; plus the
 #     pocket's ``latest-build`` pointer.
 #
-# Invariants: nothing here runs author code on this host; the build log is scrubbed
-# (``verify_diagnostics.scrub_log_text``) before it is stored; ``preview_mode`` is
-# ``"full"`` when the assets are the whole site or a draft Worker serves the build
-# (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``; its fallback rung is the
-# record's ``draft_worker_reason``), else ``"static"`` for a worker build, and
-# ``"server_only"`` when a worker build's assets have no root index.html (next,
+# Invariants: nothing here runs author code on this host; the content hash is the
+# source alone, so the site config (which only exists after a first publish) never
+# moves it: a draft keeps the paw.js it was built with, and publish re-applies paw.js
+# with the live config (:func:`apply_paw_client_to_bundle`, idempotent). The build log
+# is scrubbed (``verify_diagnostics.scrub_log_text``) before it is stored;
+# ``preview_mode`` is ``"full"`` when the assets are the whole site or a draft Worker
+# serves the build (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``; its fallback
+# rung is the record's ``draft_worker_reason``), else ``"static"`` for a worker build,
+# and ``"server_only"`` when a worker build's assets have no root index.html (next,
 # sveltekit): no preview files are stored then, because the URL would only 404.
 # ``"published"`` is never a build's mode: ``service._project_draft_artifact`` answers
 # it for the pocket's published content once its drafts were purged. No realtime
@@ -82,6 +97,34 @@ _PREVIEW_SKIP = frozenset({"_headers", "_redirects", ".assetsignore", "_routes.j
 #: free = static + light D1/KV). ``assets`` only exposes the site's own files.
 FREE_WORKER_BINDINGS = frozenset({"d1", "kv", "assets"})
 
+#: The starter manifest a template copy carries, and its no-build marker.
+TEMPLATE_MANIFEST = "paw.template.json"
+NO_BUILD = "none"
+#: Where a no-build project's served files are staged (paw-sites ``STATIC_OUT_DIR``).
+STATIC_OUT_DIR = ".paw/static"
+#: Root files of a no-build project that are tooling, never served (paw-sites
+#: ``STATIC_ROOT_EXCLUDES``).
+STATIC_ROOT_EXCLUDES = frozenset(
+    {
+        "AGENTS.md",
+        TEMPLATE_MANIFEST,
+        "paw-build.json",
+        "paw.recipes.json",
+        "package.json",
+        "bun.lock",
+        "bun.lockb",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "wrangler.json",
+        "wrangler.jsonc",
+        "wrangler.toml",
+    }
+)
+
+#: Where the site config file goes in the sandbox (``project-build --site-config``).
+SANDBOX_SITE_CONFIG = "/tmp/paw-site-config.json"
+
 BUILD_KEY_PREFIX = "build-"
 
 #: Statuses a build record carries. ``queued`` / ``building`` / ``failed`` are the
@@ -134,10 +177,11 @@ def project_files(source: Mapping[str, Any] | None) -> dict[str, bytes]:
         data = contents.encode("utf-8")
         total += len(data)
         files[rel] = data
-    if "package.json" not in files:
+    if "package.json" not in files and not files_are_no_build(files):
         raise ValidationError(
             "sites.project_no_package_json",
-            "A project site needs a package.json at its root.",
+            "A project site needs a package.json at its root, or a paw.template.json "
+            'with "build": "none" and an index.html.',
         )
     if len(files) > MAX_SOURCE_FILES or total > MAX_SOURCE_BYTES:
         raise ValidationError(
@@ -146,6 +190,187 @@ def project_files(source: Mapping[str, Any] | None) -> dict[str, bytes]:
             f"{MAX_SOURCE_BYTES // (1024 * 1024)} MiB of source).",
         )
     return files
+
+
+# ---------------------------------------------------------------------------
+# No-build projects
+# ---------------------------------------------------------------------------
+
+
+def _template_manifest(files: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw = files.get(TEMPLATE_MANIFEST)
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    if not isinstance(raw, str):
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def files_are_no_build(files: Mapping[str, Any]) -> bool:
+    """True for a project tree (normalized relpaths) that is its own output: its
+    ``paw.template.json`` says ``"build": "none"``, or it has no template manifest,
+    no package.json and a root index.html (paw-sites' ``detectProject`` rule). A
+    manifest with a build object always builds, whatever else the tree holds."""
+    manifest = _template_manifest(files)
+    if manifest is not None and "build" in manifest:
+        return manifest.get("build") == NO_BUILD
+    return "package.json" not in files and "index.html" in files
+
+
+def is_no_build(source: Mapping[str, Any] | None) -> bool:
+    """:func:`files_are_no_build` over a raw source map (paths not yet normalized)."""
+    if not isinstance(source, Mapping):
+        return False
+    files = {rel: v for raw, v in source.items() if (rel := safe_rel(raw)) not in (None, ".")}
+    return files_are_no_build(files)
+
+
+def excluded_from_static_output(rel: str) -> bool:
+    """paw-sites ``excludedFromStaticOutput``: a no-build project path that is not
+    served. Dotfiles and dot-dirs at any depth, ``node_modules``, and the root
+    tooling files (:data:`STATIC_ROOT_EXCLUDES`)."""
+    segments = rel.replace("\\", "/").split("/")
+    if any(seg.startswith(".") or seg == "node_modules" for seg in segments):
+        return True
+    return len(segments) == 1 and segments[0] in STATIC_ROOT_EXCLUDES
+
+
+def no_build_bundle(
+    files: Mapping[str, bytes],
+    *,
+    site_config: Mapping[str, Any] | None = None,
+    client: bytes | None = None,
+) -> tuple[dict[str, Any], dict[str, bytes], bool]:
+    """``(manifest, bundle files, paw.js shipped)`` of a no-build project: the served
+    tree under :data:`STATIC_OUT_DIR` plus an assets-only ``paw-build.json`` in the
+    shape paw-sites writes for an ``assets`` target. ``site_config`` (a generator
+    ``siteConfig``) tags the pages with paw.js when the source uses it. Raises
+    ``ValidationError`` when nothing serves a root index.html."""
+    from pocketpaw_ee.sites import paw_client
+
+    served = {rel: data for rel, data in files.items() if not excluded_from_static_output(rel)}
+    if "index.html" not in served:
+        raise ValidationError(
+            "sites.project_no_index",
+            "A site without a build step needs an index.html at its root.",
+        )
+    shipped = paw_client.apply_to_assets(
+        served,
+        paw_client.client_config(site_config),
+        paw_client.source_texts(files),
+        client=client,
+    )
+    template = _template_manifest(files) or {}
+    slug = template.get("slug") if isinstance(template.get("slug"), str) else ""
+    manifest: dict[str, Any] = {
+        "slug": slug or "static",
+        "assetsDir": STATIC_OUT_DIR,
+        "workerModules": [],
+        "compat": {"date": None, "flags": []},
+        "bindingRequests": [],
+        "framework": "static",
+        "sizes": {
+            "assetFiles": len(served),
+            "assetBytes": sum(len(b) for b in served.values()),
+            "workerBytes": 0,
+        },
+    }
+    bundle = {PAW_BUILD_FILENAME: json.dumps(manifest, indent=2).encode("utf-8")}
+    bundle.update({f"{STATIC_OUT_DIR}/{rel}": data for rel, data in served.items()})
+    return manifest, bundle, shipped
+
+
+def build_no_build_draft(
+    pocket_id: str,
+    content_hash: str,
+    source: Mapping[str, Any] | None,
+    *,
+    store: Any,
+    records: Any,
+    site_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a no-build draft in-process (no sandbox, well under a second): store the
+    bundle under :func:`bundle_key` and the served tree as the preview, and record the
+    build. Returns the job's ``{status, reason, preview_mode, job_id}`` shape; a tree
+    that cannot serve records ``failed`` with a ``scaffold_failed`` rung. Never raises
+    for a build outcome."""
+    from pocketpaw_ee.sites import build_job, preview_origin
+
+    job_id = build_job._preview_job_id(pocket_id, content_hash)
+
+    def _finish(status: str, reason: str | None, **extra: Any) -> dict[str, Any]:
+        write_build_record(
+            records, pocket_id, new_record(job_id, content_hash, status, reason=reason, **extra)
+        )
+        return {
+            "status": status,
+            "reason": reason,
+            "job_id": job_id,
+            "preview_mode": extra.get("preview_mode"),
+        }
+
+    try:
+        manifest, bundle, shipped = no_build_bundle(project_files(source), site_config=site_config)
+    except ValidationError as exc:
+        return _finish("failed", f"{build_job.RUNG_SCAFFOLD_FAILED}:{exc.code}", log=exc.message)
+    try:
+        artifact = preview_origin.pack_files(bundle)
+        if not store.write_dist(pocket_id, bundle_key(content_hash), artifact):
+            raise RuntimeError("the artifact store refused the bundle")
+        if preview_origin.store_supports_preview(store):
+            preview_origin.publish_draft(
+                store,
+                pocket_id,
+                content_hash,
+                preview_origin.pack_files(preview_files(manifest, bundle)),
+            )
+    except Exception:
+        logger.exception("sites.project: pocket %s no-build draft could not be stored", pocket_id)
+        return _finish("failed", f"{build_job.RUNG_PREVIEW_UNREADABLE}:bundle_unreadable")
+    count = manifest["sizes"]["assetFiles"]
+    log = f"No build step: {count} file(s) served as they are."
+    if shipped:
+        log += " paw.js added to the pages."
+    return _finish(
+        STATUS_BUILT, None, preview_mode="full", framework="static", log=log, paw_client=shipped
+    )
+
+
+def apply_paw_client_to_bundle(
+    root: Path, manifest: Mapping[str, Any], source: Mapping[str, Any] | None, site_config: Any
+) -> bool:
+    """Publish-time paw.js over a materialized bundle under ``root``: tag the .html
+    pages of its assets dir and write ``_paw/paw.js`` there when the live site config
+    qualifies and the source uses the client. Idempotent over a bundle the generator
+    already tagged. Returns whether the client shipped."""
+    from pocketpaw_ee.sites import paw_client
+
+    cfg = paw_client.client_config(site_config)
+    texts = paw_client.source_texts(source) if isinstance(source, Mapping) else []
+    rel = safe_rel(manifest.get("assetsDir"))
+    if cfg is None or rel is None or rel == "." or not paw_client.uses_client(texts):
+        return False
+    assets_dir = root.joinpath(*rel.split("/"))
+    if not assets_dir.is_dir():
+        return False
+    pages = {
+        p.relative_to(assets_dir).as_posix(): p.read_bytes()
+        for p in assets_dir.rglob("*")
+        if p.is_file() and not p.is_symlink() and p.suffix.lower() in (".html", ".htm")
+    }
+    before = dict(pages)
+    if not paw_client.apply_to_assets(pages, cfg, texts):
+        return False
+    for name, data in pages.items():
+        if before.get(name) != data:
+            target = assets_dir.joinpath(*name.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +389,11 @@ def generator_dir() -> Path | None:
 
 def generator_uploads() -> list[tuple[bytes, str]] | None:
     """The generator's runtime files as ``(bytes, sandbox path)`` pairs, or ``None``
-    when it is not on this host. Its dist has no npm runtime deps (vendor script)."""
+    when it is not on this host. Its dist has no npm runtime deps (vendor script).
+    The prebuilt paw.js (``templates/_paw/paw.js``) rides along when the vendored
+    tree has it: ``project-build --site-config`` reads it from there."""
+    from pocketpaw_ee.sites.paw_client import CLIENT_TEMPLATE_REL
+
     root = generator_dir()
     if root is None:
         return None
@@ -173,22 +402,38 @@ def generator_uploads() -> list[tuple[bytes, str]] | None:
         if path.is_file() and not path.is_symlink() and path.suffix != ".map":
             rel = path.relative_to(root).as_posix()
             uploads.append((path.read_bytes(), f"{SANDBOX_GEN_DIR}/{rel}"))
+    client = root / CLIENT_TEMPLATE_REL
+    if client.is_file() and not client.is_symlink():
+        uploads.append((client.read_bytes(), f"{SANDBOX_GEN_DIR}/{CLIENT_TEMPLATE_REL}"))
     return uploads
 
 
-def build_script(project_dir: str) -> str:
+def supports_site_config(uploads: list[tuple[bytes, str]]) -> bool:
+    """True when the generator in ``uploads`` takes ``project-build --site-config``
+    (paw-sites#79) and ships the paw.js it reads. An older vendored generator would
+    refuse the unknown flag, so its builds run exactly as before."""
+    by_path = {path: data for data, path in uploads}
+    from pocketpaw_ee.sites.paw_client import CLIENT_TEMPLATE_REL
+
+    cli = by_path.get(f"{SANDBOX_GEN_DIR}/dist/cli.js") or b""
+    return b"--site-config" in cli and f"{SANDBOX_GEN_DIR}/{CLIENT_TEMPLATE_REL}" in by_path
+
+
+def build_script(project_dir: str, *, site_config_path: str | None = None) -> str:
     """The bash the wrapper's build step runs (under its timeout, logging to its log):
-    ``project-build``, then the stage step. Exits with the first failure's code."""
+    ``project-build`` (with ``--site-config`` when given), then the stage step. Exits
+    with the first failure's code."""
     project = shlex.quote(project_dir)
     out = shlex.quote(f"{project_dir.rstrip('/')}/{PROJECT_STAGE_REL}")
     cli = shlex.quote(f"{SANDBOX_GEN_DIR}/dist/cli.js")
     manifest = shlex.quote(f"{project_dir.rstrip('/')}/{PAW_BUILD_FILENAME}")
+    extra = f" --site-config {shlex.quote(site_config_path)}" if site_config_path else ""
     return f"""#!/usr/bin/env bash
 # Generated by pocketpaw_ee.sites.project_build — do not edit in place.
 set -u
 RUN=node
 command -v node >/dev/null 2>&1 || RUN=bun
-"$RUN" {cli} project-build --dir {project} --out {manifest} --json
+"$RUN" {cli} project-build --dir {project} --out {manifest}{extra} --json
 CODE=$?
 if [ "$CODE" -ne 0 ]; then
   echo "paw: project-build exited $CODE"
@@ -499,17 +744,42 @@ async def run_project_preview_build(
     except ValidationError as exc:
         return _finish("failed", f"{build_job.RUNG_SCAFFOLD_FAILED}:{exc.code}", log=exc.message)
 
+    site_config = generator_input.get("siteConfig")
+    site_config = site_config if isinstance(site_config, dict) else None
+    if files_are_no_build(files):
+        # Its own output: staged in-process, no generator and no sandbox needed.
+        return build_no_build_draft(
+            pocket_id,
+            content_hash,
+            generator_input.get("source"),
+            store=store,
+            records=records,
+            site_config=site_config,
+        )
+
     gen = _gen_uploads if _gen_uploads is not None else generator_uploads()
     if gen is None:
         logger.error("sites.project: no vendored generator on this host (%s)", GEN_DIR_ENV)
         return _finish("failed", f"{build_job.RUNG_SANDBOX_UNAVAILABLE}:generator_missing")
 
     write_build_record(records, pocket_id, new_record(job_id, content_hash, "building"))
+    # paw.js for the built pages rides --site-config, only on a generator that has it
+    # and a config that still carries the site key. The queued path never does today:
+    # ``build_job.enqueue_preview_build`` scrubs ``captureSignedKey`` before Redis and
+    # the sandbox (build_job's header), so a sandbox-built site gets paw.js at publish
+    # instead (:func:`apply_paw_client_to_bundle`, the "inject at deploy" rule).
+    from pocketpaw_ee.sites.paw_client import client_config
+
+    wants_client = client_config(site_config) is not None
+    config_path = SANDBOX_SITE_CONFIG if wants_client and supports_site_config(gen) else None
+    script = build_script(SANDBOX_PROJECT_DIR, site_config_path=config_path)
     uploads = [
         *gen,
-        (build_script(SANDBOX_PROJECT_DIR).encode(), SANDBOX_BUILD_SCRIPT),
+        (script.encode(), SANDBOX_BUILD_SCRIPT),
         (STAGE_SCRIPT.encode(), SANDBOX_STAGE_SCRIPT),
     ]
+    if config_path:
+        uploads.append((json.dumps(site_config).encode("utf-8"), config_path))
     runner = _runner or run_build
     try:
         result = await runner(
@@ -704,17 +974,27 @@ __all__ = [
     "ENGINE",
     "FREE_WORKER_BINDINGS",
     "LOG_CAP_BYTES",
+    "NO_BUILD",
     "PREVIEW_PUBLISHED",
     "PREVIEW_SERVER_ONLY",
     "STAGE_SCRIPT",
+    "STATIC_OUT_DIR",
+    "STATIC_ROOT_EXCLUDES",
+    "TEMPLATE_MANIFEST",
+    "apply_paw_client_to_bundle",
+    "build_no_build_draft",
     "build_record_key",
     "build_script",
     "bundle_key",
     "check_plan_allows",
     "cli_failure_code",
+    "excluded_from_static_output",
+    "files_are_no_build",
     "generator_uploads",
+    "is_no_build",
     "job_belongs_to",
     "materialize_bundle",
+    "no_build_bundle",
     "preview_files",
     "preview_mode",
     "project_content_hash",
@@ -724,5 +1004,6 @@ __all__ = [
     "read_latest_build",
     "redact_build_log",
     "run_project_preview_build",
+    "supports_site_config",
     "write_build_record",
 ]
