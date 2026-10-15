@@ -8,6 +8,11 @@ with register's 400 ``REGISTER_INVALID_PASSWORD`` shape). Both, and the
 MFA-gated login overrides, are registered BEFORE the fastapi-users
 sub-routers, because route order is the override.
 
+``password_signup_open`` (settings) gates the two password sign-up doors,
+/auth/register and /auth/guest/upgrade: while False both answer 403
+``auth.password_signup_closed`` and social sign-in is the only way in. Login
+for existing password accounts is untouched.
+
 Password checks in this module (MFA disable, backup-code regenerate) go
 through ``auth.password_hashing`` so argon2 never runs on the event loop, and
 are rate-limited per user (``mfa_password_limiter``, 429).
@@ -34,12 +39,14 @@ from fastapi_users.router.common import ErrorCode
 from pydantic import BaseModel
 from starlette.responses import FileResponse
 
+from pocketpaw.config import get_settings  # type: ignore[import-untyped]
 from pocketpaw.security.rate_limiter import (
     guest_mint_limiter,
     mfa_challenge_limiter,
     mfa_password_limiter,
 )
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.auth import guest as guest_service
 from pocketpaw_ee.cloud.auth import mfa as mfa_service
@@ -361,7 +368,21 @@ async def guest_mint(
     return response
 
 
-@router.post("/auth/guest/upgrade", name="auth:guest.upgrade")
+def _require_password_signup_open() -> None:
+    """Refuse a new password account while the launch switch has it closed."""
+    if not get_settings().password_signup_open:
+        raise Forbidden(
+            "auth.password_signup_closed",
+            "Sign-up with email and password is closed during early access. "
+            "Continue with Google instead.",
+        )
+
+
+@router.post(
+    "/auth/guest/upgrade",
+    name="auth:guest.upgrade",
+    dependencies=[Depends(_require_password_signup_open)],
+)
 async def guest_upgrade(
     body: _GuestUpgradeRequest,
     user: Any = Depends(current_active_user),
@@ -400,6 +421,7 @@ router.include_router(
 router.include_router(
     fastapi_users.get_register_router(UserRead, UserCreate),
     prefix="/auth",
+    dependencies=[Depends(_require_password_signup_open)],
 )
 router.include_router(
     fastapi_users.get_reset_password_router(),

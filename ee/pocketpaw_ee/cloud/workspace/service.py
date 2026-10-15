@@ -22,7 +22,9 @@ feature that owns one setting and gates its own route (growth's
 Invariants a reader must not break:
 - ``create`` seeds the default agent inline and mints the LiteLLM tenant key in
   a background task (``llm_provisioning.schedule_ensure_tenant_key``). Both are
-  best-effort; neither may fail or stall workspace creation.
+  best-effort; neither may fail or stall workspace creation. The owner's
+  one-time early access grant (``credits.service.grant_early_access_best_effort``)
+  is best-effort too: a failure is logged and the next sign-in retries it.
 - Only an owner actor may grant the owner role or remove an owner
   (``owner_grant_requires_owner`` / ``owner_removal_requires_owner``). The
   guard lives here so every caller inherits it.
@@ -361,6 +363,16 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
     await doc.insert()
 
     await _add_member(str(doc.id), ctx.user_id, role="owner", set_active=True)
+
+    # One-time early access credits. Idempotent per user, so only the first
+    # owned workspace of a verified user receives them; guests and unverified
+    # users get nothing here (the guest social upgrade grants instead).
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    if PydanticObjectId.is_valid(ctx.user_id):
+        owner = await _UserDoc.get(PydanticObjectId(ctx.user_id))
+        if owner is not None:
+            await credits_service.grant_early_access_best_effort(owner)
 
     # Seed the default "pocketpaw" agent so the new workspace has a DM target
     # immediately. Idempotent; non-fatal — the boot-time back-fill is the
