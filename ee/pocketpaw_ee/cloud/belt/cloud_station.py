@@ -60,7 +60,9 @@
 #           ``lead/<feature>`` commit, PR update or issue comment for LEAD_STALL:
 #           a ``claude -p --cloud`` nudge, then a resume relaunch, then
 #           ``needs-human`` and the run released. LEAD_TIMEOUT (8 h) settles the same
-#           way (labelled and released, never a develop failure); no no-PR rule.
+#           way (labelled and released, never a develop failure) once the lead is
+#           also silent for a stall window; a lead still working runs to twice the
+#           timeout. No no-PR rule.
 # Only git, gh and the launcher run locally; an approved escalated diff lands on the line.
 
 from __future__ import annotations
@@ -617,13 +619,17 @@ class CloudTaskDispatcher:
             if done and sheet and await self._dev_green(slug, base, done["merge_sha"], cwd):
                 await self._land_lead(store, run_ref, blob, slug, done, sheet)
                 return
-            if expired:
-                await self._lead_expired(store, run_ref, blob, slug, cwd)
-                return
             said = max((_epoch(c.get("createdAt")) for c in comments), default=0.0)
             branch = await self._branch_at(slug, str(lead.get("branch") or ""), cwd)
             # The lead's own signs of work; a stall rung or a relaunch is Belt's.
             active = max(launched, pr_at, said, branch)
+            # Past the timeout a lead still showing work inside one stall window
+            # keeps going, up to twice the timeout: a paused plan or a long
+            # Anatomy round must not release a live lead (factory lesson 100).
+            hard = now - launched >= 2 * self.lead_timeout_seconds
+            if hard or (expired and now - active >= self.lead_stall_seconds):
+                await self._lead_expired(store, run_ref, blob, slug, cwd, hard=hard)
+                return
             heard = max(
                 [
                     active,
@@ -637,7 +643,14 @@ class CloudTaskDispatcher:
             await self.sleep(self.poll_seconds)
 
     async def _lead_expired(
-        self, store: Any, run_ref: str, blob: dict[str, Any], slug: str, cwd: Path
+        self,
+        store: Any,
+        run_ref: str,
+        blob: dict[str, Any],
+        slug: str,
+        cwd: Path,
+        *,
+        hard: bool = False,
     ) -> None:
         """Out of time: settle like the stall ladder's last rung (label the issue
         ``needs-human``, release the run). Never as a develop failure: a failed
@@ -648,7 +661,7 @@ class CloudTaskDispatcher:
         await _patch(store, run_ref, lead=lead)
         await self._flag_issue(slug, str(lead.get("issue") or ""), cwd)
         session = (lead.get("sessions") or [{}])[-1].get("session_url")
-        hours = self.lead_timeout_seconds / 3600
+        hours = self.lead_timeout_seconds * (2 if hard else 1) / 3600
         await self._release(
             store, run_ref, blob, f"feature lead not done after {hours:g}h (session {session})"
         )

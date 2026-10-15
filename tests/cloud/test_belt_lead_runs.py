@@ -486,7 +486,11 @@ async def test_lead_has_8h_and_no_no_pr_rule(store, dirs, playbook):
 
     assert len(_launch_briefs(runner)) == 1 and not _nudges(runner)  # no 1 h relaunch
     polls = sum(a[:3] == ["gh", "pr", "list"] for a, _ in runner.calls)
-    assert 8 * 60 <= polls <= 8 * 60 + 2
+    # Past 8 h a lead still committing keeps going; it is released once it has
+    # been past the timeout AND silent for a whole stall window (commits stop at
+    # 9 h, so 9 h 30 m). A paused plan or a long Anatomy round must not release
+    # a live lead (factory lesson 100).
+    assert 9 * 60 + 30 <= polls <= 9 * 60 + 32
     # Out of time it settles like the ladder's last rung, never as a develop
     # failure: a failed run stops counting in flight while its session may still
     # commit, and the next shift would launch a second lead on the feature.
@@ -502,6 +506,43 @@ async def test_lead_has_8h_and_no_no_pr_rule(store, dirs, playbook):
     # A lead with no PR change for hours still writes its row once per stall
     # window, so the line's headroom (it drops rows unwritten for 3 h) counts it.
     assert runner.wall() - cc["lead"]["heartbeat_at"] <= 1800
+
+
+async def test_a_lead_still_working_is_released_only_at_twice_the_timeout(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+    disp = _lead_dispatcher(runner, launch)
+    runner.commits = [runner.wall() + 60 * i for i in range(20 * 60)]  # busy for 20 h
+
+    await disp.run(run_ref, workspace_id=WS)
+
+    polls = sum(a[:3] == ["gh", "pr", "list"] for a, _ in runner.calls)
+    assert 16 * 60 <= polls <= 16 * 60 + 2  # the hard cap: twice the 8 h timeout
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason == (
+        "feature lead not done after 16h (session https://claude.ai/code/session_L1)"
+    )
+
+
+async def test_a_lead_quiet_before_the_timeout_gets_the_ladder_not_the_timeout(
+    store, dirs, playbook
+):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+    disp = _lead_dispatcher(runner, launch)
+    runner.commits = [runner.wall() + 60 * i for i in range(5 * 60)]  # busy 5 h, then quiet
+
+    await disp.run(run_ref, workspace_id=WS)
+
+    # Quiet at 5 h is a stall, not a timeout: the 8 h clock has not run out, so
+    # the ladder (nudge, relaunch, then needs-human) settles it.
+    assert _nudges(runner)
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert "not done after" not in (action.rejected_reason or "")
 
 
 async def test_lead_timeouts_read_the_env(monkeypatch, tmp_path):

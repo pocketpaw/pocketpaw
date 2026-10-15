@@ -50,7 +50,8 @@
     "find": "            expired = now - launched >= self.lead_timeout_seconds",
     "replace": "            expired = now - launched >= self.timeout_seconds",
     "tests": [
-      "tests/cloud/test_belt_lead_runs.py"
+      "tests/cloud/test_belt_lead_runs.py",
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_quiet_before_the_timeout_gets_the_ladder_not_the_timeout"
     ]
   },
   {
@@ -222,6 +223,25 @@
     "replace": "argv += [\"--event\", \"push\", \"--limit\", \"50\", \"--json\", \"status,conclusion,name\"]",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_done_lead_lands_with_every_pr_and_the_contact_sheet"
+    ]
+  },
+  {
+    "label": "the timeout releases a lead that is still working",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if hard or (expired and now - active >= self.lead_stall_seconds):",
+    "replace": "if hard or expired:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_lead_has_8h_and_no_no_pr_rule",
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_still_working_is_released_only_at_twice_the_timeout"
+    ]
+  },
+  {
+    "label": "no hard cap on a lead that keeps working",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "hard = now - launched >= 2 * self.lead_timeout_seconds",
+    "replace": "hard = False",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_still_working_is_released_only_at_twice_the_timeout"
     ]
   }
 ]
