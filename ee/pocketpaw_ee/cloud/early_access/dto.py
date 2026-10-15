@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
@@ -16,4 +18,11 @@ class WaitlistJoinRequest(BaseModel):
     source: str | None = Field(default=None, max_length=64)
 
 
-__all__ = ["WaitlistJoinRequest"]
+class NotifyPlansResponse(BaseModel):
+    """POST /early-access/notify. The first time the user asked; repeat calls
+    return the same value."""
+
+    notified_at: datetime
+
+
+__all__ = ["NotifyPlansResponse", "WaitlistJoinRequest"]

@@ -2610,6 +2610,44 @@ The answer is 204 whether or not the email was already on the list, and a repeat
 join adds nothing. A malformed email is 422. Each IP gets 5 joins an hour; past
 that the answer is 429 `early_access.waitlist_rate_limited`.
 
+### Early-access client contract
+
+Three reads and one write the client uses to show early access. All of them are
+display only: every limit is enforced on the server.
+
+`GET /entitlements` carries the deployment's payment posture and the models a
+free workspace may use, both read from settings (`POCKETPAW_PAYMENTS_OPEN`,
+`POCKETPAW_FREE_MODEL_ALLOWLIST`) and the same for every workspace:
+
+```json
+{
+  "workspace_id": "...",
+  "plan": "free",
+  "monthly_credit_allotment": 0,
+  "features": [],
+  "payments_open": false,
+  "free_model_allowlist": ["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-6"]
+}
+```
+
+(other entitlement fields omitted). While `payments_open` is false the client
+renders no upgrade, plan, pricing or top-up surface, and its model pickers offer
+only `free_model_allowlist` to a free workspace.
+
+`POST /api/v1/early-access/notify` records that the signed-in user wants to hear
+when plans open. No body. It sets `User.notify_plans_at` on the first call and
+returns that time on every call, so a repeat click changes nothing:
+
+```json
+{"notified_at": "2026-10-16T09:00:00Z"}
+```
+
+No session is 401. Nothing is emailed; the launch stats count the stamp.
+
+`GET /auth/me` carries two early-access stamps, null until each happens:
+`early_access_granted_at` (the one-time credit grant landed) and
+`notify_plans_at` (the notify call above).
+
 ## Agent Activity
 
 HR-12a. The workspace-scoped answer to "which of my agents are working

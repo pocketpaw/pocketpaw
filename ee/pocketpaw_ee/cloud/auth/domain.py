@@ -47,6 +47,10 @@ class AuthUser:
     # because /auth/me is the only channel by which a client can learn it, and
     # it must not be inferred from is_superuser (a different, narrower thing).
     platform_role: str | None = None
+    # Early access: when the one-time credit grant landed, and when the user
+    # asked to hear about plans. None until each happens.
+    early_access_granted_at: datetime | None = None
+    notify_plans_at: datetime | None = None
 
 
 @dataclass(frozen=True)

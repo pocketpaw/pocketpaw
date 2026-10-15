@@ -65,6 +65,8 @@ def _to_domain(doc: _UserDoc) -> AuthUser:
         # should raise here rather than read back as "no platform access" on
         # every request forever.
         platform_role=doc.platform_role,
+        early_access_granted_at=doc.early_access_granted_at,
+        notify_plans_at=doc.notify_plans_at,
     )
 
 

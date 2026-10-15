@@ -55,6 +55,10 @@ def test_profile_out_keys_match_existing_wire_shape() -> None:
         # is not on this wire, and a workspace role says nothing about platform
         # access. Null for everyone until an operator is granted one.
         "platform_role",
+        # Early access stamps: the one-time credit grant and the "notify me
+        # when plans open" click. Null until each happens.
+        "early_access_granted_at",
+        "notify_plans_at",
     }
 
 
