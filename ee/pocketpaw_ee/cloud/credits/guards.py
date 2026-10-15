@@ -239,11 +239,11 @@ async def _older_active_run(workspace_id: str, run_id: str | None) -> bool:
         since=datetime.now(UTC) - _ACTIVE_RUN_WINDOW,
         limit=_ACTIVE_RUN_SCAN,
     )
-    others = [r for r in rows if r.run_id != run_id]
     mine = next((r for r in rows if r.run_id == run_id), None) if run_id else None
     if mine is None:
-        return bool(others)
-    return any((r.created_at, r.run_id) < (mine.created_at, mine.run_id) for r in others)
+        return bool(rows)
+    # Strictly older, so the own row never counts against itself.
+    return any((r.created_at, r.run_id) < (mine.created_at, mine.run_id) for r in rows)
 
 
 async def assert_within_billing(

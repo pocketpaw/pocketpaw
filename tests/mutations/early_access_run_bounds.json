@@ -11,8 +11,8 @@
   {
     "label": "the executor counts its own run, so every free run refuses itself",
     "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
-    "find": "    others = [r for r in rows if r.run_id != run_id]\n",
-    "replace": "    others = list(rows)\n",
+    "find": "    mine = next((r for r in rows if r.run_id == run_id), None) if run_id else None\n",
+    "replace": "    mine = None\n",
     "tests": [
       "tests/cloud/credits/test_early_access_run_bounds.py"
     ]
@@ -20,7 +20,7 @@
   {
     "label": "any other active run blocks, so two racing tabs refuse each other",
     "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
-    "find": "    return any((r.created_at, r.run_id) < (mine.created_at, mine.run_id) for r in others)\n",
+    "find": "    return any((r.created_at, r.run_id) < (mine.created_at, mine.run_id) for r in rows)\n",
     "replace": "    return bool(others)\n",
     "tests": [
       "tests/cloud/credits/test_early_access_run_bounds.py"
