@@ -28,7 +28,9 @@ pydantic_ai with ``free_run_max_turns`` and a token limit its wallet pays for at
 the forced backend's model price; it skips the prewarm and the supervisor, and
 any stored key is withheld because the turn was gated and is billed as platform.
 Before anything is built, every model in ``guards.free_run_models`` must pass
-``guards.free_model_denial`` or the run ends with ``model.not_allowed``.
+``guards.free_model_denial`` or the run ends with ``model.not_allowed``, and
+then ``guards.reserve_free_run`` must fit the run under the daily early-access
+ceiling or it ends with ``early_access.paused``.
 
 Every terminal path persists the streamed text as an assistant ``Message`` with
 its steps, records token usage (latest-wins), and sets the stream TTL; a
@@ -3081,6 +3083,13 @@ async def execute_run(spec: RunSpec) -> None:
             if refusal is not None:
                 await _guards.refuse_run(spec.run_id, refusal, transport=transport)
                 return
+        # Last gate: reserve this run's estimate on the platform-wide daily
+        # early-access ceiling. ``bill_run`` reconciles it, so a run that ends
+        # before the model call gives it all back.
+        refusal = await _guards.reserve_free_run(spec.run_id, ctx.free_run_bounds)
+        if refusal is not None:
+            await _guards.refuse_run(spec.run_id, refusal, transport=transport)
+            return
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's
     # fail-closed (fix/cloud-artifacts-reland). ``agent_jail.resolve_agent_cwd``

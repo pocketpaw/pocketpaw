@@ -28,6 +28,15 @@
 # turn). One rule: ``None`` = uncapped, ``0`` = disabled, ``n > 0`` = cap; each
 # resolver maps its legacy env var onto it. See "DAILY CAPS" below.
 #
+# Early-access ceiling. ``reserve_early_access`` claims a free run's estimate on
+# ``DailyMeter.EARLY_ACCESS_CREDITS`` for the one platform subject
+# (``PLATFORM_SUBJECT``, shared by every unpaid workspace) and records it on the
+# run. ``bill_run`` claims that record once and moves the meter to the run's
+# real spend in whole credits rounded up (a refund for an unused estimate, which
+# also releases a run refused before the model call, or a charge past the cap
+# for an overrun). Never in the ``live`` spend mode, which skips ``bill_run``.
+# ``early_access_credits_used_today`` is the reader for the dashboard.
+#
 # Module-level ``async def`` API. Only ``CloudError`` subclasses propagate; a
 # missing or malformed usage dict is treated as no usage.
 
@@ -43,7 +52,7 @@ from pymongo import ReturnDocument
 
 from pocketpaw_ee.cloud.chat.runs import service as chat_runs_service
 from pocketpaw_ee.cloud.credits import service as credits_service
-from pocketpaw_ee.cloud.credits.domain import micro_to_credits
+from pocketpaw_ee.cloud.credits.domain import MICRO_PER_CREDIT, micro_to_credits
 from pocketpaw_ee.cloud.metering.domain import ComputeCost, DailyMeter, RateCard, SubjectType
 from pocketpaw_ee.cloud.metering.dto import BillResult
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
@@ -325,6 +334,9 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
     workspace's own key paid the provider. Its cost is still resolved and
     returned and its usage stays on the run doc, so analytics see it.
 
+    A free run's early-access reservation is reconciled here to the real spend
+    (``_reconcile_early_access``), before the flag is set.
+
     ``rate_card`` may be injected (tests / a future per-workspace card); it
     defaults to the settings-derived card.
     """
@@ -389,6 +401,8 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
             cost.cost_usd,
             cost.source,
         )
+
+    await _reconcile_early_access(run_id, micro)
 
     # Flip the flag last, through the chat.runs entity that OWNS ChatRunDoc (EE
     # Rule 2 — metering never writes a foreign document). Idempotent by
@@ -645,14 +659,103 @@ async def used(
     return int((doc or {}).get("used", 0))
 
 
+# ─── EARLY-ACCESS DAILY CEILING ───────────────────────────────────────────────
+
+#: The subject every unpaid workspace's free chat spend is counted against.
+PLATFORM_SUBJECT = "__platform__"
+
+
+def credits_ceil(micro: int) -> int:
+    """Micro-credits as whole credits, rounded up, so the meter never undercounts."""
+    return -(-max(micro, 0) // MICRO_PER_CREDIT)
+
+
+async def reserve_early_access(run_id: str, credits: int, *, ceiling_credits: int) -> bool:
+    """Reserve ``credits`` of today's early-access ceiling for ``run_id``.
+
+    False when the claim would pass ``ceiling_credits`` (0 refuses every claim)
+    or the meter cannot be read: the ceiling fails closed. On success the claim
+    is recorded on the run for ``bill_run`` to reconcile; if that write fails
+    the claim stays counted (the meter over-counts, never under).
+    """
+    day = today()
+    if not await try_spend(
+        subject_type="workspace",
+        subject_id=PLATFORM_SUBJECT,
+        meter=DailyMeter.EARLY_ACCESS_CREDITS,
+        amount=credits,
+        cap=ceiling_credits,
+    ):
+        return False
+    try:
+        await chat_runs_service.set_early_access_reservation(run_id, credits, day)
+    except Exception:
+        logger.warning(
+            "early access reservation of %d credits not recorded on run %s; it stays counted",
+            credits,
+            run_id,
+            exc_info=True,
+        )
+    return True
+
+
+async def _reconcile_early_access(run_id: str, micro: int) -> None:
+    """Move the meter from ``run_id``'s reservation to its real spend, once.
+
+    Best-effort: the meter is a ceiling, and a failure here must never fail the
+    bill. A run with nothing reserved (paid, BYOK, or already reconciled) is a
+    no-op.
+    """
+    try:
+        held = await chat_runs_service.take_early_access_reservation(run_id)
+        if held is None:
+            return
+        reserved, day = held
+        delta = credits_ceil(micro) - reserved
+        if delta < 0:
+            await refund(
+                subject_type="workspace",
+                subject_id=PLATFORM_SUBJECT,
+                meter=DailyMeter.EARLY_ACCESS_CREDITS,
+                amount=-delta,
+                day=day,
+            )
+        elif delta > 0:
+            # The spend already happened, so it lands past the cap too.
+            now = datetime.now(UTC)
+            await DailyUsage.get_pymongo_collection().update_one(
+                _key("workspace", PLATFORM_SUBJECT, DailyMeter.EARLY_ACCESS_CREDITS, day),
+                {
+                    "$inc": {"used": delta},
+                    "$setOnInsert": {"createdAt": now},
+                    "$set": {"updatedAt": now},
+                },
+                upsert=True,
+            )
+    except Exception:
+        logger.warning("early access reconcile failed for run %s", run_id, exc_info=True)
+
+
+async def early_access_credits_used_today() -> int:
+    """Whole credits on today's early-access meter: reservations in flight plus
+    reconciled spend. Raises on a storage error, like ``used``."""
+    return await used(
+        subject_type="workspace", subject_id=PLATFORM_SUBJECT, meter=DailyMeter.EARLY_ACCESS_CREDITS
+    )
+
+
 __all__ = [
+    "PLATFORM_SUBJECT",
     "bill_run",
     "bill_run_now",
+    "credits_ceil",
+    "early_access_credits_used_today",
     "file_comprehension_cap",
     "file_transcription_cap",
     "illustration_cap",
     "load_rate_card",
     "refund",
+    "reserve_early_access",
     "resolve_cost",
     "run_moment",
     "today",

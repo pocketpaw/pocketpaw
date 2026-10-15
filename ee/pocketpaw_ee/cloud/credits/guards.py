@@ -37,6 +37,12 @@
 #   the same list through ``free_model_refusal`` so the refusal is a 400.
 #   ``pydantic_ai_model`` is always on that list: it must be on the allowlist,
 #   or every free turn is refused.
+# * ``reserve_free_run`` is the daily early-access ceiling: ``run_core`` calls it
+#   last, once per free run, to reserve the run's bounded estimate on the
+#   platform meter (``metering.service.reserve_early_access``). Past the
+#   launch controls' ``daily_free_ceiling_credits``, or with the controls or the
+#   meter unreadable, it is 503 ``early_access.paused`` (fails closed, unlike the
+#   kill switch). ``bill_run`` reconciles the reservation.
 #
 # ``credits_enforced`` gates only this chat credit check; ``billing_enforced``
 # also turns on the seat, pocket, connector and other paid gates elsewhere.
@@ -475,6 +481,34 @@ async def free_model_refusal(
     return None
 
 
+async def reserve_free_run(run_id: str, bounds: FreeRunBounds) -> CloudError | None:
+    """Reserve a free run's estimate on today's early-access ceiling, or refuse.
+
+    Call once per run, after ``free_run_bounds`` returned ``bounds`` and the
+    model check passed; it writes, so the check-only HTTP seam must not call
+    it. ``EarlyAccessPaused`` when the reservation does not fit under
+    ``daily_free_ceiling_credits``, or when the launch controls or the meter
+    cannot be read. None once reserved.
+    """
+    from pocketpaw_ee.cloud._core.errors import EarlyAccessPaused
+    from pocketpaw_ee.cloud.launch_controls.service import get_launch_controls
+    from pocketpaw_ee.cloud.metering import service as metering
+
+    controls = await get_launch_controls()
+    if controls.read_failed:
+        return EarlyAccessPaused()
+    # ponytail: the estimate is the whole starting wallet, the most the token
+    # limit lets this run spend, so a fresh 1,000-credit wallet holds 1,000 of
+    # the ceiling until it bills (about 25 such runs at once fill 25,000).
+    # Narrow it to a per-run figure if launch concurrency trips the pause.
+    estimate = max(1, metering.credits_ceil(bounds.balance_micro))
+    if not await metering.reserve_early_access(
+        run_id, estimate, ceiling_credits=controls.daily_free_ceiling_credits
+    ):
+        return EarlyAccessPaused()
+    return None
+
+
 async def free_run_models(agent_id: str | None, model_override: str | None) -> list[str]:
     """Every model a bounded free run on ``agent_id`` must be allowed to use.
 
@@ -515,5 +549,6 @@ __all__ = [
     "over_billing_limit",
     "refuse_run",
     "reject_if_over_billing",
+    "reserve_free_run",
     "resolve_payer",
 ]
