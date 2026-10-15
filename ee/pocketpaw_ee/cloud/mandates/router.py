@@ -31,6 +31,7 @@ from pocketpaw_ee.cloud._core.deps import (
     current_user_id,
     current_workspace_id,
     require_action_any_workspace,
+    require_paid_or_early_access_allowed,
 )
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.mandates import service as mandate_service
@@ -38,8 +39,12 @@ from pocketpaw_ee.cloud.mandates.dto import (
     CreateMandateRequest,
 )
 
+# Mandates dispatch Belt work off the credit ledger: refused for an unpaid
+# early-access workspace (403 ``early_access.not_available``), approve included.
 router = APIRouter(
-    prefix="/belt/mandates", tags=["Belt Mandates"], dependencies=[Depends(require_license)]
+    prefix="/belt/mandates",
+    tags=["Belt Mandates"],
+    dependencies=[Depends(require_license), Depends(require_paid_or_early_access_allowed)],
 )
 
 

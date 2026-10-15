@@ -646,6 +646,15 @@ async def execute_approved_change(
             stage="done",
         )
 
+    # Unpaid early-access workspace: Belt is not in early access, so an approved
+    # change is refused at the one chokepoint every approve path reaches.
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+    denied = await early_access_denial(workspace_id)
+    if denied is not None:
+        await _fail(denied.message, error_class=denied.code)
+        return
+
     if blob.get("schema") != _CODE_CHANGE_SCHEMA:
         await _fail(
             "code-change schema mismatch — the change blob is from an "

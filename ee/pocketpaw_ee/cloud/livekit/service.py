@@ -2,7 +2,9 @@
 
 Uses the ``livekit-api`` Python SDK to talk to LiveKit Cloud.
 Requires ``LIVEKIT_URL``, ``LIVEKIT_API_KEY``, ``LIVEKIT_API_SECRET``
-environment variables.
+environment variables. ``create_room`` starts the meeting-notes bot only when
+``_meeting_notes_allowed``: an unpaid early-access workspace's call runs without
+it, since its STT and summary spend never reaches the credit ledger.
 
 Change log:
 - Fix duplicate call-bot spawn race: ``create_room()`` now guards the agent
@@ -770,6 +772,24 @@ async def _force_end_at_budget(group_id: str, workspace_id: str, deadline: datet
         logger.warning("Failed to force-end call %s at budget deadline: %s", group_id, exc)
 
 
+async def _meeting_notes_allowed(workspace_id: str) -> bool:
+    """False for an unpaid early-access workspace: the notes bot spends on STT
+    and an LLM summary outside the credit ledger, so the call runs without it.
+    A failed check also answers False; a call with no notes is the safe miss.
+    """
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+    try:
+        return await early_access_denial(workspace_id) is None
+    except Exception:
+        logger.warning(
+            "livekit: early-access check failed for workspace=%s; no meeting notes",
+            workspace_id,
+            exc_info=True,
+        )
+        return False
+
+
 async def create_room(
     group_id: str,
     workspace_id: str = "",
@@ -930,8 +950,9 @@ async def create_room(
     # deploy runs a single worker so this fully dedupes it; cross-replica dedupe
     # (only if the API is ever run multi-replica) is the LiveKit Agents
     # migration's job, not a best-effort participant poll here.
+    notes_on = await _meeting_notes_allowed(workspace_id)
     async with _spawn_lock_for(group_id):
-        if group_id not in _active_agents:
+        if notes_on and group_id not in _active_agents:
             proc = await _spawn_agent_process(
                 group_id=group_id,
                 room_name=room_name,

@@ -1,65 +1,28 @@
-# media.py — in-process MCP server exposing the STUDIO media-generation actions
-# (image + audio + video) to the claude_agent_sdk cloud chat backend.
+# media.py: in-process MCP server (``pocketpaw_media``) exposing Studio media
+# generation to the claude_agent_sdk cloud chat backend: ``image_generate``,
+# ``audio_generate`` (TTS), ``audio_transcribe`` (STT) and ``video_generate``.
 #
-# Created: 2026-06-10 (feat/studio-code-migration).
-# 2026-06-26 (MCG-6 + MCG-7): media generation now routes through the self-hosted
-# LiteLLM proxy via its OpenAI-compatible endpoints instead of calling Google /
-# Replicate directly. One gateway means one credential path, one spend log, and
-# any model the proxy serves (gpt-image-1, dall-e-*, imagen-*, tts-1, whisper-*,
-# sora/veo/kling) is reachable by catalog model id with no per-provider code:
-#   * image → POST {proxy}/v1/images/generations  (no response_format param —
-#     gpt-image-1 / the newer dall-e API reject it; we accept either b64_json
-#     OR url in the response, confirmed against the live proxy 2026-06-26)
-#   * audio TTS → POST {proxy}/v1/audio/speech       (raw audio bytes back)
-#   * audio STT → POST {proxy}/v1/audio/transcriptions (multipart upload)
-#   * video → POST {proxy}/videos                    (async job, GET-poll)
-# The model id comes from the CALLER (a catalog model id passed as `model`), not a
-# hardcoded settings field. When the caller passes nothing we fall back to a
-# per-modality default (image keeps settings.image_model for backward-compat with
-# the existing studio skill / preamble, which pass only prompt + aspect_ratio).
-# Proxy base/key resolution + the httpx style are REUSED from the catalog entity
-# (ee.pocketpaw_ee.catalog.config + its LiteLLMClient header/transport shape) — we
-# do NOT re-resolve the proxy URL/key here. The tenant is tagged on every request
-# via the OpenAI `user` field (the proxy keys per-end-customer spend off it) so
-# the existing proxy spend log attributes cost to the workspace; we do not block
-# on metering — the proxy already logs it.
-# 2026-06-26 (MCG-8): each proxy call now Bearers the workspace's PROVISIONED
-# per-tenant LiteLLM virtual key (resolved best-effort via
-# ee.cloud.llm_provisioning.service.get_tenant_key) instead of the deployment
-# master key, so the proxy enforces the tenant's budget + rate caps and attributes
-# spend to the tenant key. Falls back to the master key when a workspace has no
-# key yet (provisioning hasn't run) or the lookup fails — media never breaks on
-# key resolution, and the `user=workspace_id` tag still attributes spend either
-# way. See ``_resolve_auth_key``.
+# Every call goes through the self-hosted LiteLLM proxy's OpenAI-compatible
+# endpoints (images/generations, audio/speech, audio/transcriptions, and an async
+# video job polled with GET), using the catalog's proxy base and transport. The
+# model is the caller's catalog id, else a per-modality default. Each request
+# carries the workspace's provisioned tenant key (``_resolve_auth_key``, falling
+# back to the master key) and ``user=workspace_id`` so proxy spend attributes to
+# the tenant. Nothing here writes the credit ledger.
 #
-# What this file does: clones the sites.py / sites_create.py shape — a single
-# ``create_sdk_mcp_server`` with an SDK import-guard, ``SERVER_NAME`` /
-# ``*_TOOL_ID`` allowlist constants, ContextVar-sourced identity (the same
-# ``current_workspace_id`` / ``current_user_id`` accessors in
-# ``ee.cloud.chat.agent_service`` the sites / pocket-specialist servers read),
-# and the ``_error_response`` / ``_success_response`` helpers. Tool ids namespace
-# as ``mcp__pocketpaw_media__image_generate`` / ``__audio_generate`` /
-# ``__audio_transcribe`` / ``__video_generate`` so the Claude Code allowlist
-# machinery matches them.
+# Because of that, every handler refuses an unpaid early-access workspace
+# (``_early_access_refusal``, backed by ``credits.guards.early_access_denial``)
+# before any proxy call. ``site_media`` reuses the same refusal.
 #
-# Four SDK @tool defs (image / audio_generate (TTS) / audio_transcribe (STT) /
-# video). Generated assets (image bytes, TTS audio bytes, the video output URL)
-# land in a STUDIO gallery pocket via the TRUSTED-CREATE path
-# (``agent_create(... type_="studio", pattern="gallery", engine="ripple",
-# ripple_spec=<gallery spec>, trusted=True)``) so the strict catalog gate is
-# bypassed (image / video-player widgets lag the published manifest), then binds
-# the session + emits ``pocket_created`` exactly like sites_create.py
-# (``_bind_session_and_emit``). The gallery spec uses ONLY existing widget types
-# (grid / card / image / video-player / text). Transcription (STT) is an input
-# op, not a generated asset, so it returns the text directly and does NOT touch
-# the gallery. Media accumulates across the session (per-session state holds the
-# gallery's media list); each generation re-creates the gallery with the full
-# list and emits the refreshed pocket, so the canvas always shows every asset
-# made this session.
+# Identity comes from the chat runtime's ContextVars (``_identity``). Generated
+# images, audio and video land in a Studio gallery pocket through the
+# trusted-create path and re-emit the refreshed pocket; transcription returns
+# text and does not touch the gallery. Tool ids namespace as
+# ``mcp__pocketpaw_media__<tool>`` for the allowlist machinery.
 #
-# EE→OSS boundary: this module lives in pocketpaw_ee; the surface service loads
-# MEDIA_TOOL_IDS as a plain frozenset[str] inside a try/except (never importing a
-# pocketpaw_ee symbol into src/pocketpaw).
+# EE to OSS boundary: the surface service loads ``MEDIA_TOOL_IDS`` as a plain
+# frozenset[str] inside a try/except, never importing a pocketpaw_ee symbol into
+# src/pocketpaw.
 """Agent-side MCP surface for STUDIO image + audio + video generation."""
 
 from __future__ import annotations
@@ -129,6 +92,24 @@ def _error_response(message: str) -> dict[str, Any]:
         "content": [{"type": "text", "text": f"Error: {message}"}],
         "is_error": True,
     }
+
+
+EARLY_ACCESS_REFUSAL = "Image, video and voice generation is not in early access yet."
+
+
+async def _early_access_refusal(workspace_id: str) -> dict[str, Any] | None:
+    """The error response for an unpaid early-access workspace, else None.
+
+    Media spend goes to the gateway and never reaches the credit ledger, so the
+    tools refuse it here, before any proxy call. The tools stay registered
+    (servers are built once per process, not per workspace); the refusal text
+    tells the agent what to relay.
+    """
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+    if await early_access_denial(workspace_id) is None:
+        return None
+    return _error_response(EARLY_ACCESS_REFUSAL)
 
 
 def _success_response(body: dict[str, Any]) -> dict[str, Any]:
@@ -525,6 +506,8 @@ async def _image_generate_handler(args: dict) -> dict:
         return _error_response(
             "image_generate requires workspace and user context (call from a cloud chat session)."
         )
+    if (refusal := await _early_access_refusal(workspace_id)) is not None:
+        return refusal
 
     record_tool_call(
         workspace_id=workspace_id,
@@ -645,6 +628,8 @@ async def _audio_generate_handler(args: dict) -> dict:
         return _error_response(
             "audio_generate requires workspace and user context (call from a cloud chat session)."
         )
+    if (refusal := await _early_access_refusal(workspace_id)) is not None:
+        return refusal
 
     text = args.get("text")
     if not isinstance(text, str) or not text.strip():
@@ -752,6 +737,8 @@ async def _audio_transcribe_handler(args: dict) -> dict:
         return _error_response(
             "audio_transcribe requires workspace and user context (call from a cloud chat session)."
         )
+    if (refusal := await _early_access_refusal(workspace_id)) is not None:
+        return refusal
 
     path = args.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -896,6 +883,8 @@ async def _video_generate_handler(args: dict) -> dict:
         return _error_response(
             "video_generate requires workspace and user context (call from a cloud chat session)."
         )
+    if (refusal := await _early_access_refusal(workspace_id)) is not None:
+        return refusal
 
     record_tool_call(
         workspace_id=workspace_id,

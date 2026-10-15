@@ -28,8 +28,9 @@
 # knowledge; the first ```pawbar-action goes through ``action_spec.render_action``.
 # A reply cut off at ``pawbar_concierge_max_tokens`` keeps what streamed; a visitor
 # asking for a person always gets a route to the team (``contact_route``); a
-# transient failure before any text is retried once; an unanswerable turn (spend
-# cap, quota, provider error) ends with ``degrade_reply``. A site's
+# transient failure before any text is retried once; an unanswerable turn (an
+# unpaid early-access owner workspace, spend cap, quota, provider error) ends with
+# ``degrade_reply``. A site's
 # ``concierge_daily_spend_cap`` only lowers the global cap, except on an ops site
 # (``is_ops_site``: ``pawbar_ops_site_ids``), where it replaces it.
 #
@@ -2757,9 +2758,10 @@ def _fence_filter_for(
 
 # Why a turn was not answered. Logged and written to the run doc; the visitor
 # only sees the coarse ``unavailable`` reason each one maps to.
-DEGRADE_REASONS = ("spend_cap", "quota", "provider_timeout", "provider_error")
+DEGRADE_REASONS = ("spend_cap", "quota", "early_access", "provider_timeout", "provider_error")
 _UNAVAILABLE_REASON = {
     "spend_cap": "limit",
+    "early_access": "limit",
     "quota": "limit",
     "provider_timeout": "temporary",
     "provider_error": "temporary",
@@ -2953,7 +2955,8 @@ async def run_concierge_v2(
     route is also added to a contact turn the model answered without a valid
     lead card. A site at its daily spend cap gets ``degrade_reply``
     alone (reason "limit"), with no run doc and no model call, and its owner is
-    told once that UTC day.
+    told once that UTC day. An unpaid early-access owner workspace gets the same
+    frame, with no owner note (``credits.guards.early_access_denial``).
     """
     from pydantic_ai import Agent
 
@@ -2964,6 +2967,15 @@ async def run_concierge_v2(
 
     settings = _settings()
     profile = ui_profile(site, settings)
+    # An unpaid early-access owner workspace gets no concierge: its spend is
+    # billed after the fact, so nothing would bound it. Checked before the cap,
+    # with no run doc, no model call and no owner note.
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+    if await early_access_denial(workspace_id) is not None:
+        async for frame in degrade_reply(widget, "early_access"):
+            yield frame
+        return
     if await _over_spend_cap(settings, workspace_id, pocket_id, site):
         from pocketpaw_ee.paw_bar.notify import notify_spend_cap_reached
 

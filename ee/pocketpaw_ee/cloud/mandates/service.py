@@ -1265,9 +1265,14 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     from uuid import uuid4
 
     from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed
     from pocketpaw_ee.cloud.mandates import foreman as foreman_mod
     from pocketpaw_ee.cloud.mandates import patrols as mandate_patrols
     from pocketpaw_ee.cloud.mandates import soul_link
+
+    # The foreman call spends off the credit ledger; the cadence scheduler
+    # reaches this without the router's deny, so it is checked here too.
+    await assert_early_access_allowed(workspace_id)
 
     doc = await _fetch_mandate(workspace_id, mandate_id)
     if doc.status != "active":
