@@ -7,7 +7,10 @@
 #     expired / superseded tokens refused); unconfirmed addresses never get mail
 #   * per-event sinks, the signed site webhook, and the workspace fallback
 #   * routes: admin OK, member 403, another workspace's site 404
-#   * partner lead WhatsApp (PH-6, 2026-10-02): a lead on a partner-sold site
+#   * a concierge handoff, raised through ``raise_handoff`` against a real
+#     paw-bar store, reaches the widget's site sinks (email + webhook) with the
+#     agent on the bell; the id-only fallback resolvers find the widget too
+#   * partner lead WhatsApp (PH-6): a lead on a partner-sold site
 #     reaches the opted-in shop owner through the platform MSG91 account. The
 #     real bridge, dispatch, outbox and MSG91 client run (MSG91 answers through
 #     the MockTransport); only ``send_template`` is spied. No opt-in, no
@@ -18,9 +21,8 @@
 #     change after queueing kills the row, a failed send-time lookup retries,
 #     MSG91 4xx is dead and 5xx retries (no PII in last_error), and visitor
 #     text is defanged (no formatting marks, no live links) and length-capped.
-# Updated 2026-10-02: ``partner_journal`` clears the shared
-# ``read_model.default_journal_store`` cache (partners ``_default_store`` now
-# delegates to it) and points the per-workspace stores at tmp_path.
+#     ``partner_journal`` clears the shared ``read_model.default_journal_store``
+#     cache and points the per-workspace stores at tmp_path.
 
 from __future__ import annotations
 
@@ -543,6 +545,116 @@ async def test_handoff_routes_through_site_settings(net, monkeypatch) -> None:
     event = json.loads(_hooks(net, SITE_HOOK)[0].content)
     assert event["type"] == "concierge.handoff"
     assert event["data"]["customer_ref"] == "c1" and event["data"]["question"]
+
+
+async def _handoff_widget(tmp_path, ws: str, site: Site):
+    """A real paw-bar store holding a widget on ``site``'s pocket."""
+    from pocketpaw.paw_bar.models import PawBarBlock, PawBarSpec, PawBarWidget
+    from pocketpaw.paw_bar.store import PawBarStore
+
+    store = PawBarStore(tmp_path / "paw_bar.db")
+    widget = await store.create_widget(
+        PawBarWidget(
+            pocket_id=site.pocket_id,
+            owner="user:maya",
+            name=site.name,
+            spec=PawBarSpec(
+                widget_id="pp_seed",
+                pocket_id=site.pocket_id,
+                blocks=[PawBarBlock(type="text", content="Hi")],
+            ),
+            allowed_domains=["brightsmile.test"],
+            agent_id="agent-xyz",
+            workspace_id=ws,
+        )
+    )
+    return store, widget
+
+
+async def test_a_raised_handoff_reaches_the_site_sinks(net, monkeypatch, tmp_path) -> None:
+    """End to end through ``raise_handoff`` with nothing mocked between the
+    producer and the outbox: the handoff must find the widget's site and go out
+    on the site's email + webhook, with the agent on the bell's source. The leads
+    bridge skips the handoff lead's ``lead.captured``, so if this misses the site
+    nothing reaches the site's sinks at all."""
+    from pocketpaw_ee.paw_bar.handoff import raise_handoff
+
+    import pocketpaw.stores as stores_mod
+
+    ws, owner = await _tenant()
+    site = await _site(ws)
+    await ns.update_settings(
+        ws,
+        str(site.id),
+        webhook_url=SITE_HOOK,
+        events={"handoff": ["email", "push", "webhook"]},
+    )
+    store, widget = await _handoff_widget(tmp_path, ws, site)
+    # The process-wide store the fallback resolvers read is the same store.
+    monkeypatch.setattr(stores_mod, "_paw_bar_store", store)
+    monkeypatch.setattr("pocketpaw_ee.api.get_fabric_store", lambda *a, **k: None)
+
+    outcome = await raise_handoff(
+        widget=widget,
+        workspace_id=ws,
+        customer_ref="cust-1",
+        question="Can someone call me?",
+        contact="v@visitor.test",
+        store=store,
+    )
+    assert outcome.ok and outcome.escalated
+
+    rows = await NotificationOutboxItem.find_all().to_list()
+    assert sorted(r.sink for r in rows) == ["email", "webhook"]
+    [bell] = await _NotificationDoc.find({"recipient": owner}).to_list()
+    assert bell.source.agent_id == "agent-xyz"
+
+    await outbox.process_due()
+    assert _emails(net)[0]["to"] == [OWNER_EMAIL]
+    event = json.loads(_hooks(net, SITE_HOOK)[0].content)
+    assert event["type"] == "concierge.handoff"
+    assert event["data"]["site_id"] == str(site.id)
+    assert event["data"]["agent_id"] == "agent-xyz"
+
+    # The handoff lead reads back with its flat source fields filled in, which
+    # is what the Leads page renders the "Handoff" badge and thread link from.
+    [lead] = await leads_service.list_for_site(ws, site.script_name)
+    assert lead.source_kind == "handoff"
+    assert lead.conversation_ref == f"{widget.id}:cust-1"
+    assert lead.created_at is not None
+
+
+async def test_the_fallback_resolvers_find_a_widget_by_id(monkeypatch, tmp_path) -> None:
+    """Callers that only hold a widget id still resolve its site and agent."""
+    from pocketpaw_ee.paw_bar import notify
+
+    import pocketpaw.stores as stores_mod
+
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    store, widget = await _handoff_widget(tmp_path, ws, site)
+    monkeypatch.setattr(stores_mod, "_paw_bar_store", store)
+
+    assert await notify.resolve_widget_site(widget.id, ws) == (str(site.id), site.name)
+    assert await notify.resolve_widget_agent(widget.id, ws) == "agent-xyz"
+
+
+async def test_a_named_widget_that_cannot_be_found_logs_a_warning(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    import logging
+
+    from pocketpaw_ee.paw_bar import notify
+
+    import pocketpaw.stores as stores_mod
+
+    ws, _ = await _tenant()
+    monkeypatch.setattr(stores_mod, "_paw_bar_store", None)
+    monkeypatch.setattr(stores_mod, "_DATA_DIR", tmp_path)
+    with caplog.at_level(logging.WARNING, logger=notify.__name__):
+        assert await notify.resolve_widget_site("missing-widget", ws) == ("", "")
+        assert await notify.resolve_widget_agent("missing-widget", ws) == ""
+    assert sum("missing-widget" in r.getMessage() for r in caplog.records) == 2
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,9 @@
 #   5. record ``paw.handoff.raised`` in the agent ledger, keyed on the Fabric id
 #      (``paw.handoff.resolved`` fires where a thread leaves needs_human, in the
 #      inbox PATCH, via ``ledger.emit_conversation_transition``);
-#   6. notify the workspace owner (``notify``).
+#   6. notify the workspace owner (``notify``), passing the site and agent
+#      resolved from the widget in hand: the same site step 3 wrote the lead on,
+#      so a handoff routes through that site's notification settings.
 # The call succeeds when step 1 OR 2 landed (two separate owner-visible surfaces);
 # only when both fail does the visitor hear 503.
 #
@@ -208,10 +210,21 @@ async def _record_marker(store: Any, widget_id: str, customer_ref: str, source: 
         logger.debug("handoff marker record failed (non-fatal)", exc_info=True)
 
 
+_UNRESOLVED: Any = object()
+
+
 async def _write_handoff_lead(
-    widget: Any, workspace_id: str, customer_ref: str, question: str, contact: str
+    widget: Any,
+    workspace_id: str,
+    customer_ref: str,
+    question: str,
+    contact: str,
+    site: Any = _UNRESOLVED,
 ) -> None:
-    """Step 3 of the module header. Never raises: the handoff already landed."""
+    """Step 3 of the module header. Never raises: the handoff already landed.
+
+    ``site`` is the widget's Site as ``raise_handoff`` resolved it (None: no
+    site); omitted, it is looked up here."""
     from pocketpaw.sites_capture.contact_form import looks_like_email, looks_like_phone
 
     if looks_like_email(contact):
@@ -228,10 +241,11 @@ async def _write_handoff_lead(
         return
     try:
         from pocketpaw_ee.cloud.leads import service as leads_service
-        from pocketpaw_ee.cloud.models.site import Site
         from pocketpaw_ee.paw_bar.ledger import conversation_id
+        from pocketpaw_ee.paw_bar.notify import site_for_pocket
 
-        site = await Site.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
+        if site is _UNRESOLVED:
+            site = await site_for_pocket(workspace_id, pocket_id)
         if site is None:
             return
         ref = conversation_id(widget_id, customer_ref)
@@ -311,7 +325,18 @@ async def raise_handoff(
         # visitor a person is coming when nothing recorded that they asked.
         return HandoffOutcome(ok=False, error="handoff_unavailable", http_status=503)
 
-    await _write_handoff_lead(widget, workspace_id, customer_ref, question_text, contact_text)
+    from pocketpaw_ee.paw_bar.notify import (
+        NOTIFY_NEEDS_HUMAN,
+        notify_workspace_owner,
+        site_for_pocket,
+    )
+
+    # One site lookup for the lead (step 3) and the notification (step 6), from
+    # the widget in hand, so the two can't disagree about where this belongs.
+    site = await site_for_pocket(workspace_id, str(getattr(widget, "pocket_id", "") or ""))
+    await _write_handoff_lead(
+        widget, workspace_id, customer_ref, question_text, contact_text, site=site
+    )
 
     logger.info(
         "paw_bar.handoff.raised widget=%s source=%s escalated=%s object=%s",
@@ -337,8 +362,6 @@ async def raise_handoff(
         source=source,
     )
 
-    from pocketpaw_ee.paw_bar.notify import NOTIFY_NEEDS_HUMAN, notify_workspace_owner
-
     await notify_workspace_owner(
         workspace_id=workspace_id,
         kind=NOTIFY_NEEDS_HUMAN,
@@ -346,6 +369,9 @@ async def raise_handoff(
         body=question_text,
         widget_id=widget_id,
         customer_ref=customer_ref,
+        agent_id=str(getattr(widget, "agent_id", "") or ""),
+        site_id=str(site.id) if site is not None else "",
+        site_name=(site.name or "") if site is not None else "",
     )
     return HandoffOutcome(ok=True, handoff_id=handoff_id, escalated=escalated)
 
