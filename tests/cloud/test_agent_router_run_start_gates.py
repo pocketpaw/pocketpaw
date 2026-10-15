@@ -82,6 +82,14 @@ def _install(monkeypatch, *, billing: bool, fail: set[str], barrier: asyncio.Bar
 
     # No stored key: the billing leg gates as platform, hermetically.
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _platform)
+
+    # No other active run, so the early-access one-run check reads no Mongo.
+    async def _no_runs(**_k):
+        return []
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.service.find_active_runs_for_workspace", _no_runs
+    )
     return started
 
 
@@ -147,15 +155,17 @@ async def test_the_billing_leg_is_the_shared_guard(monkeypatch):
     _install(monkeypatch, billing=True, fail=set())
     asked: list[str] = []
 
-    async def _over(ws, source="platform"):
-        asked.append((ws, source))
+    async def _over(ws, source="platform", *, one_active_run=False, run_id=None):
+        asked.append((ws, source, one_active_run, run_id))
         return InsufficientCredits(requested=1, available=0)
 
     monkeypatch.setattr("pocketpaw_ee.cloud.credits.guards.over_billing_limit", _over)
 
     with pytest.raises(InsufficientCredits) as caught:
         await mod._run_start_gates("w1", "u1", "w1")
-    assert asked == [("w1", "platform")]
+    # The chat route asks for the early-access one-run check; no run doc exists
+    # yet, so there is no run id to exclude.
+    assert asked == [("w1", "platform", True, None)]
     assert caught.value.code == "credits.insufficient"
 
 

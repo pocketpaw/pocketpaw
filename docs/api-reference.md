@@ -2428,8 +2428,10 @@ marked `failed`. No model or backend is started either way.
 | 503 | `early_access.paused` | free early-access usage is paused (launch controls below); unpaid workspaces only |
 | 402 | `credits.insufficient` | the wallet balance is at or below 0 |
 | 402 | `credits.quota_exceeded` | month-to-date spend reached the plan's monthly ceiling |
+| 429 | `credits.run_in_progress` | an unpaid early-access workspace already has a chat run active (chat route and worker only) |
 
-The pause check runs first, then the balance check, so a workspace that is both
+The pause check runs first, then the balance check, then the quota check, then
+the one-run check, so a workspace that is both
 empty and over its ceiling sees `credits.insufficient`. A run already in flight is never stopped;
 a completed run is always billed, so the last run before the cap can take the
 wallet below 0.
@@ -2454,6 +2456,36 @@ gateway address the egress guard rejects refuses the turn with 422
 it is off, a workspace on the `free` plan whose ledger holds no applied `top_up`
 or `subscription_grant` is platform-funded early access, the group the
 early-access limits apply to.
+
+### Free-run bounds
+
+While the gate above is on, a platform-paid run on an unpaid early-access
+workspace is bounded if it goes through the run executor (`execute_run`): the
+chat route, the worker, the Paw Bar and the concierge. A BYOK run and a paid
+workspace are not bounded.
+
+- One active chat run per workspace. A second send while one is queued or
+  running gets 429 `credits.run_in_progress` from the chat route; if two race
+  past the route, the worker lets the older run through and refuses the newer
+  one with that code on its terminal frame.
+- The run is served by `pydantic_ai` whatever backend the agent is configured
+  for (an agent on another backend runs on the deployment's
+  `pydantic_ai_model`, and a per-send model picked for that backend is dropped).
+  The agent's own tool policy carries over, so a planner opt-in still applies.
+- At most `free_run_max_turns` (default 20) model requests.
+- A total token limit sized from the wallet the run starts with, at the output
+  price of the model it runs, so the run stops at or before the wallet. A run
+  that hits a limit ends with an `error` frame; the usage it already spent is
+  billed. An unpriced model gets no token limit (the request cap still applies).
+
+Three paths start agent runs without `execute_run` and are not billed: the
+group/DM agent bridge, the `/files` AI edits (`ai-edit`, `spreadsheet-edit`,
+`slides-edit`) and the planner's task runs. A wallet that is never debited
+cannot bound them, so an unpaid early-access workspace is refused there instead,
+under the same flags, with 403 `early_access.not_available`. The `/files` routes
+answer with that code in the standard envelope, the bridge emits one
+`agent.error` with it to the group, and the planner leaves the tasks `proposed`
+and logs it. A paid workspace runs these paths as before.
 
 ### Early access grant
 

@@ -811,6 +811,11 @@ class ScopeContext:
     #: (``credits.guards.billing_source``). Set by ``execute_run``; ``None``
     #: elsewhere, where readers fall back to ``turn_credentials``.
     credential_source: Literal["platform", "byok"] | None = None
+    #: ``credits.guards.FreeRunBounds`` for a platform-funded free run (an
+    #: unpaid early-access workspace while credits are enforced), set by
+    #: ``execute_run`` after the gates; ``_drive_agent_loop`` forces such a run
+    #: onto pydantic_ai within them. None for every other run.
+    free_run_bounds: Any = None
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,138 @@
+[
+  {
+    "label": "the one-run check is skipped, so a second tab runs a second free run",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        one_active_run\n        and await _older_active_run(workspace_id, run_id)\n",
+    "replace": "        False\n        and await _older_active_run(workspace_id, run_id)\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_run_bounds.py"
+    ]
+  },
+  {
+    "label": "the executor counts its own run, so every free run refuses itself",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    mine = next((r for r in rows if r.run_id == run_id), None) if run_id else None\n",
+    "replace": "    mine = None\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_run_bounds.py"
+    ]
+  },
+  {
+    "label": "any other active run blocks, so two racing tabs refuse each other",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    return any((r.created_at, r.run_id) < (mine.created_at, mine.run_id) for r in rows)\n",
+    "replace": "    return bool(others)\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_run_bounds.py"
+    ]
+  },
+  {
+    "label": "the one-run check ignores who is unpaid, so a paid workspace is refused",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        and await is_platform_funded_free(workspace_id)\n    ):",
+    "replace": "    ):",
+    "tests": [
+      "tests/cloud/credits/test_early_access_run_bounds.py"
+    ]
+  },
+  {
+    "label": "bounds apply to a paid workspace or a BYOK run",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if not enforced or not workspace_id or source != \"platform\":\n",
+    "replace": "    if not enforced or not workspace_id:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_run_bounds.py"
+    ]
+  },
+  {
+    "label": "bounds apply while credits are not enforced",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    enforced = settings.billing_enforced or settings.credits_enforced\n",
+    "replace": "    enforced = True\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_run_bounds.py"
+    ]
+  },
+  {
+    "label": "the token limit prices input tokens, so the run can overshoot the wallet",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "            price_run(name, input_tokens=0, output_tokens=1_000_000, at=now) if name else None\n",
+    "replace": "            price_run(name, input_tokens=1_000_000, output_tokens=0, at=now) if name else None\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_run_bounds.py"
+    ]
+  },
+  {
+    "label": "the run is not forced onto pydantic_ai",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            run_kwargs[\"force_pydantic_ai\"] = True\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_run_core_free_run_bounds.py"
+    ]
+  },
+  {
+    "label": "the token limit never reaches the pool",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                run_kwargs[\"total_tokens_limit\"] = token_limit\n",
+    "replace": "                pass\n",
+    "tests": [
+      "tests/cloud/runs/test_run_core_free_run_bounds.py"
+    ]
+  },
+  {
+    "label": "a stored key rides a bounded platform turn",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            run_kwargs.pop(\"byok_api_key\", None)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_run_core_free_run_bounds.py"
+    ]
+  },
+  {
+    "label": "a bounded run leases a Claude SDK client from the supervisor",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            and free_run_bounds is None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_run_core_free_run_bounds.py"
+    ]
+  },
+  {
+    "label": "the pool ignores force_pydantic_ai",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            elif force_pydantic_ai and not byok_api_key:\n",
+    "replace": "            elif False:\n",
+    "tests": [
+      "tests/test_agent_pool_backend_lifecycle.py"
+    ]
+  },
+  {
+    "label": "a limited run proceeds on a backend that cannot take the limits",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "                    yield AgentEvent(type=\"error\", content=RUN_LIMITS_UNSUPPORTED_MESSAGE)\n                    return\n",
+    "replace": "                    pass\n",
+    "tests": [
+      "tests/test_agent_pool_backend_lifecycle.py"
+    ]
+  },
+  {
+    "label": "pydantic_ai ignores the per-run token limit",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                limits[\"total_tokens_limit\"] = max(total_tokens_limit, 0)\n",
+    "replace": "                pass\n",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_per_run_limits_reach_usage_limits",
+      "tests/test_pydantic_ai_backend.py::test_a_token_limit_the_run_exceeds_stops_it_with_usage_first"
+    ]
+  },
+  {
+    "label": "max_requests can raise the deployment turn cap",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                max_turns = min(max_turns, max_requests) if max_turns > 0 else max_requests\n",
+    "replace": "                max_turns = max_requests\n",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_per_run_limits_reach_usage_limits"
+    ]
+  }
+]

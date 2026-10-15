@@ -3861,3 +3861,75 @@ async def test_a_tool_returning_images_keeps_them_and_reports_text_only():
     assert [(img.data, img.media_type) for img in images] == [(png, "image/png")]
     result = next(e for e in events if e.type == "tool_result")
     assert result.content == "Captured the draft. [+1 image]"
+
+
+# --------------------------------------------------------------------------
+# per-run usage limits (the early-access free-run bounds)
+# --------------------------------------------------------------------------
+
+
+def _record_usage_limits(monkeypatch) -> list[dict]:
+    """Spy on the ``UsageLimits`` the run builds, keeping the real class."""
+    import pydantic_ai.usage as usage_mod
+
+    seen: list[dict] = []
+    real = usage_mod.UsageLimits
+
+    def _spy(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(usage_mod, "UsageLimits", _spy)
+    return seen
+
+
+async def test_per_run_limits_reach_usage_limits(monkeypatch):
+    """``max_requests`` tightens the deployment turn cap (never loosens it) and
+    ``total_tokens_limit`` rides beside it.
+
+    Mutation: ignore either kwarg, or let ``max_requests`` raise the cap.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+    await _collect(backend, "hi", max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    await _collect(backend, "hi", max_requests=500)
+    assert seen[-1] == {"request_limit": 100}
+
+    await _collect(backend, "hi")
+    assert seen[-1] == {"request_limit": 100}
+
+
+async def test_a_token_limit_the_run_exceeds_stops_it_with_usage_first():
+    """A run over its token limit ends in an error, and its usage still reaches
+    the caller first so the tokens it did spend are billed."""
+    backend = _backend_with_model(TestModel(custom_output_text="hello world"))
+    events = await _collect(backend, "hi", total_tokens_limit=1)
+
+    kinds = [e.type for e in events]
+    assert "error" in kinds, kinds
+    assert "token_usage" in kinds[: kinds.index("error")], kinds
+    error = next(e for e in events if e.type == "error")
+    assert "limit" in error.content.lower()
+
+
+def test_only_a_caller_limited_run_gets_the_plain_usage_limit_text():
+    """A self-hosted or paid run that hits ``pydantic_ai_max_turns`` keeps the
+    raw text naming the limit to raise; only a run the caller limited gets the
+    plain sentence.
+
+    Mutation: return the plain sentence for every ``UsageLimitExceeded``.
+    """
+    from pydantic_ai.exceptions import UsageLimitExceeded
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    exc = UsageLimitExceeded("The next request would exceed the request_limit of 25")
+
+    raw = backend._explain_error(exc)
+    assert raw.startswith("Pydantic AI error:")
+    assert "request_limit of 25" in raw
+
+    plain = backend._explain_error(exc, per_run_limit=True)
+    assert "request_limit" not in plain
+    assert "usage limit" in plain

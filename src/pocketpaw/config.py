@@ -2745,6 +2745,18 @@ class Settings(BaseSettings):
             "Default False. Set via POCKETPAW_PAYMENTS_OPEN."
         ),
     )
+    free_run_max_turns: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Model requests one platform-funded free run may make (an unpaid "
+            "early-access workspace, credits.guards.free_run_bounds), in place of "
+            "pydantic_ai_max_turns when lower. Such a run is also forced onto the "
+            "pydantic_ai backend and given a total token limit its wallet can pay "
+            "for. Applies only while credits_enforced or billing_enforced is on. "
+            "Set via POCKETPAW_FREE_RUN_MAX_TURNS."
+        ),
+    )
     early_access_grant_credits: int = Field(
         default=1_000,
         ge=0,

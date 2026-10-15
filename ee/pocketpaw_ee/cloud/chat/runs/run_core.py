@@ -22,6 +22,12 @@ gets ``agent.provider_busy``; other backend errors ``agent.backend_error``.
 Behind ``POCKETPAW_SESSION_SUPERVISOR`` it resumes the agent's native CLI
 session and can lease a warm client.
 
+A platform-funded free run (``ctx.free_run_bounds``, set by ``execute_run``
+after the gates from ``credits.guards.free_run_bounds``) is forced onto
+pydantic_ai with ``free_run_max_turns`` and a token limit its wallet pays for at
+the forced backend's model price; it skips the prewarm and the supervisor, and
+any stored key is withheld because the turn was gated and is billed as platform.
+
 Every terminal path persists the streamed text as an assistant ``Message`` with
 its steps, records token usage (latest-wins), and sets the stream TTL; a
 concierge run never trains the agent's soul. Invariants: the cancel check keeps
@@ -1319,6 +1325,9 @@ async def _prewarm_session(
         # turn never uses.
         if getattr(ctx.resolved_profile, "exclusive_tools", False):
             return
+        # Same for a bounded free run, which is forced onto pydantic_ai.
+        if getattr(ctx, "free_run_bounds", None) is not None:
+            return
 
         pool = get_agent_pool()
         instance = await pool.get(ctx.target_agent_id)
@@ -1577,6 +1586,23 @@ def _read_turn_images(ctx: ScopeContext) -> tuple[tuple[bytes, str], ...]:
     return tuple(out)
 
 
+def _forced_pydantic_ai_model(instance: Any, backend_name: str | None, override: str | None) -> str:
+    """The model a run forced onto pydantic_ai will use, for pricing.
+
+    An agent already on pydantic_ai keeps its per-send model, else its own
+    ``pydantic_ai_model`` (``route_model`` put the agent's model there). Any
+    other agent runs on a pydantic_ai backend built from its settings, whose
+    ``pydantic_ai_model`` is the deployment default, and the pool drops the
+    per-send model. Falls back to the deployment setting.
+    """
+    from pocketpaw.config import get_settings
+
+    if backend_name == "pydantic_ai" and override:
+        return override
+    settings = getattr(getattr(instance, "backend", None), "settings", None)
+    return getattr(settings, "pydantic_ai_model", None) or get_settings().pydantic_ai_model
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -1642,7 +1668,10 @@ async def _drive_agent_loop(
     backend_name = (
         instance.config.get("backend", "claude_agent_sdk") if hasattr(instance, "config") else None
     )
-    behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
+    # A bounded free run is served by pydantic_ai (see the free-run block below),
+    # so its prompt must not name tools only the agent's own backend has.
+    prompt_backend = "pydantic_ai" if getattr(ctx, "free_run_bounds", None) else backend_name
+    behavior_instructions = build_behavior_instructions(ctx, backend_name=prompt_backend)
 
     # Uploaded files are INLINED, and the backend with file tools has to be
     # told so as a RULE. ``_build_attachments_block`` already says it inside
@@ -2127,6 +2156,25 @@ async def _drive_agent_loop(
                 _exc = ByokKeyRequired()
                 yield ("error", {"code": _exc.code, "message": _exc.message})
                 return
+        # --- Free-run bounds (early access) -------------------------------------
+        # An unpaid platform-funded run: pydantic_ai whatever the agent says, at
+        # most ``free_run_max_turns`` model requests, and a token limit the
+        # wallet can pay for at the price of the model that backend will run
+        # (the per-send model only survives on an agent already on pydantic_ai;
+        # the pool drops it otherwise). A stored key is withheld: this turn was
+        # gated and is billed as platform, so it runs on our gateway, bounded.
+        free_run_bounds = getattr(ctx, "free_run_bounds", None)
+        if free_run_bounds is not None:
+            from pocketpaw_ee.cloud.credits import guards
+
+            run_kwargs.pop("byok_api_key", None)
+            run_kwargs.pop("byok_settings_override", None)
+            run_kwargs["force_pydantic_ai"] = True
+            run_kwargs["max_requests"] = free_run_bounds.max_turns
+            turn_model = _forced_pydantic_ai_model(instance, backend_name, ctx.model_override)
+            token_limit = guards.free_run_token_limit(free_run_bounds.balance_micro, turn_model)
+            if token_limit is not None:
+                run_kwargs["total_tokens_limit"] = token_limit
         # --- Supervised native-resume wiring (feat/session-supervisor SS-5) -----
         # Flag-gated (default OFF). When ON, route this turn through the
         # SessionSupervisor: recover any prior native ``cli_session_id`` from the
@@ -2153,6 +2201,9 @@ async def _drive_agent_loop(
             and sup_session_id
             and sup_agent_id
             and "byok_api_key" not in run_kwargs
+            # A bounded free run is served by pydantic_ai, which has no CLI
+            # session to resume and no warm client to lease.
+            and free_run_bounds is None
         ):
             try:
                 prior_cli = await runtime_service.get_cli_session_id(
@@ -3010,6 +3061,15 @@ async def execute_run(spec: RunSpec) -> None:
     # persists to the same database.
     if await _reject_if_over_daily_turns(spec, ctx, transport):
         return
+
+    # Free-run bounds, read after every gate passed so the wallet is the one
+    # this run starts on. None for a paid workspace, a BYOK run, or while
+    # neither credits_enforced nor billing_enforced is on.
+    from pocketpaw_ee.cloud.credits import guards as _guards
+
+    ctx.free_run_bounds = await _guards.free_run_bounds(
+        ctx.workspace_id, getattr(ctx, "credential_source", None) or "platform"
+    )
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's
     # fail-closed (fix/cloud-artifacts-reland). ``agent_jail.resolve_agent_cwd``
