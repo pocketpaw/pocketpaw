@@ -8,29 +8,29 @@
 #     sandbox: the files minus :func:`excluded_from_static_output` (paw-sites'
 #     ``excludedFromStaticOutput``) under ``STATIC_OUT_DIR``, an assets-only
 #     ``paw-build.json`` (``workerModules: []``), and paw.js when the site qualifies
-#     (``paw_client``). Its preview mode is always ``"full"``.
+#     (``paw_client``); its preview pages (never the bundle) carry ``stamp-html``'s
+#     ``data-paw-src`` stamps when the generator has it. Preview mode always ``"full"``.
 #   * everything else builds in a Daytona sandbox: the source map is uploaded as the
-#     project tree, the vendored paw-sites generator beside it (plus its
-#     ``templates/_paw/paw.js``), and ``paw-sites-gen project-build`` runs install +
-#     build + (worker targets) wrangler dry-run and writes ``paw-build.json``. A site
-#     config that carries its key rides ``--site-config`` on a generator that knows it
-#     (:func:`supports_site_config`); queued builds have the key scrubbed, so in
-#     practice paw.js lands at publish. An older generator builds as before. A stage
-#     step copies the manifest and the files it names into
-#     ``engines.PROJECT_STAGE_REL``, which the wrapper tars like any other output.
+#     project tree, the vendored generator beside it (plus ``templates/_paw/paw.js``),
+#     and ``paw-sites-gen project-build`` installs, builds and writes ``paw-build.json``;
+#     ``--site-config`` rides only a generator that knows it (queued builds have the
+#     key scrubbed, so paw.js lands at publish). On a generator with ``--source-tags``
+#     a draft builds twice: untagged, then tagged into :data:`TAGGED_STAGE` for the
+#     preview (:func:`build_script`). A stage step copies each manifest and its files
+#     into ``engines.PROJECT_STAGE_REL``, which the wrapper tars.
 #
 # What a finished build leaves, all keyed by ``(pocket_id, content_hash)``:
-#   * the whole bundle (manifest + assets + worker modules) in the artifact store under
-#     ``<hash>.bundle`` — what publish deploys through ``bundle_deploy`` (a no-build
-#     publish re-stages from the source with the live site config instead);
-#   * the assets alone as the draft's preview files + token (``preview_origin``),
-#     unless they have no root index.html (see ``preview_mode`` below);
+#   * the whole UNTAGGED bundle in the artifact store under ``<hash>.bundle``: what
+#     publish deploys through ``bundle_deploy`` (a no-build publish re-stages from the
+#     source with the live site config instead), so no tag or stamp ever ships;
+#   * the (tagged when there is one) assets as the draft's preview files + token
+#     (``preview_origin``), unless they have no root index.html (``preview_mode``);
 #   * a build record in ``verify_store`` (``build-<job id>``): status, rung, the
 #     redacted and capped build log, ``preview_mode`` and the framework; plus the
 #     pocket's ``latest-build`` pointer.
 #
 # Invariants: nothing here runs author code on this host; the content hash is the
-# source alone, so the site config (the Site doc's id + signed key) never moves it:
+# source plus the draft tag mode, so the site config (id + signed key) never moves it:
 # a draft keeps the paw.js it was built with, and publish re-applies paw.js
 # with the live config (:func:`apply_paw_client_to_bundle`, idempotent) and resolves
 # the lead-form capture placeholders (:func:`apply_capture_tokens_to_bundle`). The build log
@@ -138,18 +138,36 @@ STATUS_BUILT = "built"
 # ---------------------------------------------------------------------------
 
 
+def draft_tag_mode(source: Mapping[str, Any] | None) -> str | None:
+    """How this host marks a draft of ``source`` for visual editing: ``"stamp-html"``
+    (a no-build tree, its preview pages stamped in-process), ``"source-tags"`` (a
+    sandbox build, ``project-build --source-tags``), or ``None`` when the generator
+    has neither. Publish output never carries either."""
+    from pocketpaw_ee.sites import visual_edit
+
+    if is_no_build(source):
+        return "stamp-html" if visual_edit.stamp_html_supported() else None
+    return "source-tags" if visual_edit.source_tags_supported() else None
+
+
 def project_content_hash(source: Mapping[str, Any]) -> str:
     """The draft's content hash: the source map, the engine and this lane's format.
-    The generator version rides it too, so a new ``project-build`` rebuilds drafts."""
+    The generator version rides it too, so a new ``project-build`` rebuilds drafts,
+    and so does :func:`draft_tag_mode` when it is on, so an untagged draft is never
+    served as a tagged one (with it off the hash is what it always was)."""
     from pocketpaw_ee.sites.generator_client import generator_version
 
-    h = hashlib.sha256()
-    for part in (
+    parts = [
         BUILD_FORMAT,
         generator_version(),
         ENGINE,
         json.dumps(dict(source), sort_keys=True, separators=(",", ":"), ensure_ascii=False),
-    ):
+    ]
+    tag_mode = draft_tag_mode(source)
+    if tag_mode:
+        parts.append(f"tags:{tag_mode}")
+    h = hashlib.sha256()
+    for part in parts:
         h.update(part.encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()
@@ -285,7 +303,7 @@ def no_build_bundle(
     return manifest, bundle, shipped
 
 
-def build_no_build_draft(
+async def build_no_build_draft(
     pocket_id: str,
     content_hash: str,
     source: Mapping[str, Any] | None,
@@ -298,7 +316,12 @@ def build_no_build_draft(
     bundle under :func:`bundle_key` and the served tree as the preview, and record the
     build. Returns the job's ``{status, reason, preview_mode, job_id}`` shape; a tree
     that cannot serve records ``failed`` with a ``scaffold_failed`` rung. Never raises
-    for a build outcome."""
+    for a build outcome.
+
+    The preview's pages (never the bundle) are stamped with ``data-paw-src`` by the
+    generator's ``stamp-html`` when it has it (:func:`_stamped_preview`); a stamp that
+    fails serves them unstamped. The stored preview is the cache: one stamp per
+    content hash."""
     from pocketpaw_ee.sites import build_job, preview_origin
 
     job_id = build_job._preview_job_id(pocket_id, content_hash)
@@ -315,19 +338,18 @@ def build_no_build_draft(
         }
 
     try:
-        manifest, bundle, shipped = no_build_bundle(project_files(source), site_config=site_config)
+        files = project_files(source)
+        manifest, bundle, shipped = no_build_bundle(files, site_config=site_config)
     except ValidationError as exc:
         return _finish("failed", f"{build_job.RUNG_SCAFFOLD_FAILED}:{exc.code}", log=exc.message)
+    preview, stamped = await _stamped_preview(files, manifest, bundle, site_config)
     try:
         artifact = preview_origin.pack_files(bundle)
         if not store.write_dist(pocket_id, bundle_key(content_hash), artifact):
             raise RuntimeError("the artifact store refused the bundle")
         if preview_origin.store_supports_preview(store):
             preview_origin.publish_draft(
-                store,
-                pocket_id,
-                content_hash,
-                preview_origin.pack_files(preview_files(manifest, bundle)),
+                store, pocket_id, content_hash, preview_origin.pack_files(preview)
             )
     except Exception:
         logger.exception("sites.project: pocket %s no-build draft could not be stored", pocket_id)
@@ -337,8 +359,45 @@ def build_no_build_draft(
     if shipped:
         log += " paw.js added to the pages."
     return _finish(
-        STATUS_BUILT, None, preview_mode="full", framework="static", log=log, paw_client=shipped
+        STATUS_BUILT,
+        None,
+        preview_mode="full",
+        framework="static",
+        log=log,
+        paw_client=shipped,
+        source_tags=stamped,
     )
+
+
+async def _stamped_preview(
+    files: Mapping[str, bytes],
+    manifest: Mapping[str, Any],
+    bundle: Mapping[str, bytes],
+    site_config: Mapping[str, Any] | None,
+) -> tuple[dict[str, bytes], bool]:
+    """``(preview files, stamped)`` of a no-build draft. The served .html SOURCE pages
+    go through ``stamp-html`` before paw.js is applied, so each ``data-paw-src`` names
+    a line of the file the author edits; anything else, or a failed stamp, is the
+    plain preview."""
+    from pocketpaw_ee.sites import visual_edit
+
+    plain = preview_files(manifest, bundle)
+    if draft_tag_mode(files) != "stamp-html":
+        return plain, False
+    pages = {
+        rel: data
+        for rel, data in files.items()
+        if rel.lower().endswith(".html") and not excluded_from_static_output(rel)
+    }
+    stamped = await visual_edit.stamp_html(pages)
+    if not stamped:
+        return plain, False
+    try:
+        _m, stamped_bundle, _ = no_build_bundle({**files, **stamped}, site_config=site_config)
+    except ValidationError:
+        logger.warning("sites.project: the stamped preview could not be staged; serving it plain")
+        return plain, False
+    return preview_files(manifest, stamped_bundle), True
 
 
 def apply_paw_client_to_bundle(
@@ -463,15 +522,50 @@ def supports_site_config(uploads: list[tuple[bytes, str]]) -> bool:
     return b"--site-config" in cli and f"{SANDBOX_GEN_DIR}/{CLIENT_TEMPLATE_REL}" in by_path
 
 
-def build_script(project_dir: str, *, site_config_path: str | None = None) -> str:
+def supports_source_tags(uploads: list[tuple[bytes, str]]) -> bool:
+    """True when the generator in ``uploads`` takes ``project-build --source-tags``
+    (paw-sites#80). An older one would refuse the flag, so it never gets it."""
+    from pocketpaw_ee.sites.visual_edit import cli_has_source_tags
+
+    by_path = {path: data for data, path in uploads}
+    return cli_has_source_tags(by_path.get(f"{SANDBOX_GEN_DIR}/dist/cli.js") or b"")
+
+
+#: Where a draft's source-tagged second build is staged, inside the stage dir. Split
+#: out of the artifact on this side (:func:`split_tagged_artifact`); never deployed.
+TAGGED_STAGE = "_paw_tagged"
+
+
+def build_script(
+    project_dir: str, *, site_config_path: str | None = None, source_tags: bool = False
+) -> str:
     """The bash the wrapper's build step runs (under its timeout, logging to its log):
     ``project-build`` (with ``--site-config`` when given), then the stage step. Exits
-    with the first failure's code."""
+    with the first failure's code.
+
+    ``source_tags`` (a draft on a generator that has the flag) adds a SECOND build with
+    ``--source-tags``, staged under :data:`TAGGED_STAGE`: the preview shows the tagged
+    pages while the untagged bundle stays the one publish deploys. A tagged build that
+    fails only costs the tags (the draft previews untagged)."""
     project = shlex.quote(project_dir)
-    out = shlex.quote(f"{project_dir.rstrip('/')}/{PROJECT_STAGE_REL}")
+    out_dir = f"{project_dir.rstrip('/')}/{PROJECT_STAGE_REL}"
+    out = shlex.quote(out_dir)
     cli = shlex.quote(f"{SANDBOX_GEN_DIR}/dist/cli.js")
     manifest = shlex.quote(f"{project_dir.rstrip('/')}/{PAW_BUILD_FILENAME}")
+    stage = shlex.quote(SANDBOX_STAGE_SCRIPT)
     extra = f" --site-config {shlex.quote(site_config_path)}" if site_config_path else ""
+    tagged = ""
+    if source_tags:
+        tagged_out = shlex.quote(f"{out_dir}/{TAGGED_STAGE}")
+        tagged = (
+            f'if "$RUN" {cli} project-build --dir {project} --out {manifest}{extra}'
+            " --source-tags --json; then\n"
+            f"  python3 {stage} {project} {tagged_out} || {{ rm -rf {tagged_out};"
+            ' echo "paw: the source-tagged preview could not be staged"; }\n'
+            "else\n"
+            '  echo "paw: the source-tagged build failed; the preview is untagged"\n'
+            "fi\n"
+        )
     return f"""#!/usr/bin/env bash
 # Generated by pocketpaw_ee.sites.project_build — do not edit in place.
 set -u
@@ -483,8 +577,8 @@ if [ "$CODE" -ne 0 ]; then
   echo "paw: project-build exited $CODE"
   exit "$CODE"
 fi
-python3 {shlex.quote(SANDBOX_STAGE_SCRIPT)} {project} {out}
-"""
+python3 {stage} {project} {out} || exit $?
+{tagged}"""
 
 
 #: Copies paw-build.json and the files it names into the stage dir. Refuses a path that
@@ -547,6 +641,22 @@ def bundle_key(content_hash: str) -> str:
     """The artifact-store key the whole bundle is kept under, beside the preview files.
     A dotted suffix so the filesystem store evicts it with its content hash."""
     return f"{content_hash}.bundle"
+
+
+def split_tagged_artifact(artifact: bytes) -> tuple[bytes, bytes | None]:
+    """``(publish bundle, tagged bundle or None)`` of a staged build tar. Without a
+    :data:`TAGGED_STAGE` dir the artifact is returned as it is; with one, its files
+    become the tagged bundle and everything else is repacked as the publish bundle,
+    so a tag can never reach a deploy."""
+    from pocketpaw_ee.sites import preview_origin
+
+    files = preview_origin.unpack_files(artifact)
+    prefix = f"{TAGGED_STAGE}/"
+    if not any(name.startswith(prefix) for name in files):
+        return artifact, None
+    plain = {n: d for n, d in files.items() if not n.startswith(prefix)}
+    tagged = {n[len(prefix) :]: d for n, d in files.items() if n.startswith(prefix)}
+    return preview_origin.pack_files(plain), preview_origin.pack_files(tagged)
 
 
 #: ``preview_mode`` of a draft whose worker renders every page: its assets have no
@@ -792,7 +902,7 @@ async def run_project_preview_build(
     site_config = site_config if isinstance(site_config, dict) else None
     if files_are_no_build(files):
         # Its own output: staged in-process, no generator and no sandbox needed.
-        return build_no_build_draft(
+        return await build_no_build_draft(
             pocket_id,
             content_hash,
             generator_input.get("source"),
@@ -816,7 +926,12 @@ async def run_project_preview_build(
 
     wants_client = client_config(site_config) is not None
     config_path = SANDBOX_SITE_CONFIG if wants_client and supports_site_config(gen) else None
-    script = build_script(SANDBOX_PROJECT_DIR, site_config_path=config_path)
+    # A draft builds twice when the generator can tag sources: untagged for the bundle
+    # publish deploys, tagged for the preview (see build_script).
+    source_tags = draft_tag_mode(files) == "source-tags" and supports_source_tags(gen)
+    script = build_script(
+        SANDBOX_PROJECT_DIR, site_config_path=config_path, source_tags=source_tags
+    )
     uploads = [
         *gen,
         (script.encode(), SANDBOX_BUILD_SCRIPT),
@@ -855,12 +970,22 @@ async def run_project_preview_build(
             reason = f"build_failed:{code}"
         return _finish(settlement.status or "failed", reason, **logged)
 
+    tagged: bytes | None = None
     try:
-        manifest, bundle_files = read_bundle(result.artifact or b"")
-        if not store.write_dist(pocket_id, bundle_key(content_hash), result.artifact):
+        artifact, tagged = split_tagged_artifact(result.artifact or b"")
+        manifest, bundle_files = read_bundle(artifact)
+        if not store.write_dist(pocket_id, bundle_key(content_hash), artifact):
             raise RuntimeError("the artifact store refused the bundle")
-        preview = preview_files(manifest, bundle_files)
-        mode = preview_mode(manifest, preview)
+        view_manifest, view_files = manifest, bundle_files
+        if tagged is not None:
+            try:
+                view_manifest, view_files = read_bundle(tagged)
+            except ValueError:
+                logger.warning("sites.project: pocket %s tagged build unreadable", pocket_id)
+                tagged = None
+                view_manifest, view_files = manifest, bundle_files
+        preview = preview_files(view_manifest, view_files)
+        mode = preview_mode(view_manifest, preview)
         # A server-only draft gets no preview files or token: its URL would 404.
         if mode != PREVIEW_SERVER_ONLY and preview_origin.store_supports_preview(store):
             preview_origin.publish_draft(
@@ -872,12 +997,12 @@ async def run_project_preview_build(
 
     draft_reason: str | None = None
     draft_extra: dict[str, Any] = {}
-    if manifest_has_worker(dict(manifest)):
+    if manifest_has_worker(dict(view_manifest)):
         mode, draft_reason, missing = await _draft_worker_mode(
             pocket_id,
             content_hash,
-            result.artifact or b"",
-            manifest,
+            tagged or artifact,
+            view_manifest,
             generator_input,
             store,
             mode,
@@ -893,6 +1018,7 @@ async def run_project_preview_build(
         preview_mode=mode,
         framework=framework,
         draft_worker_reason=draft_reason,
+        source_tags=tagged is not None,
         **draft_extra,
         **logged,
     )
@@ -1024,6 +1150,7 @@ __all__ = [
     "STAGE_SCRIPT",
     "STATIC_OUT_DIR",
     "STATIC_ROOT_EXCLUDES",
+    "TAGGED_STAGE",
     "TEMPLATE_MANIFEST",
     "apply_capture_tokens_to_bundle",
     "apply_paw_client_to_bundle",
@@ -1033,6 +1160,7 @@ __all__ = [
     "bundle_key",
     "check_plan_allows",
     "cli_failure_code",
+    "draft_tag_mode",
     "excluded_from_static_output",
     "files_are_no_build",
     "generator_uploads",
@@ -1049,6 +1177,8 @@ __all__ = [
     "read_latest_build",
     "redact_build_log",
     "run_project_preview_build",
+    "split_tagged_artifact",
     "supports_site_config",
+    "supports_source_tags",
     "write_build_record",
 ]

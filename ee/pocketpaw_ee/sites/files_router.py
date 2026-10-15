@@ -5,7 +5,9 @@
 # many, patch one with exact-once ``{old, new}`` blocks, delete many. Each is a thin
 # shell over ``sites.project_tools``, the same functions the agent's file tools call,
 # so the path policy, size caps, lockfile rule and "every write queues the draft build"
-# behaviour cannot drift between the two.
+# behaviour cannot drift between the two. A sixth, ``POST .../visual-edit``, applies a
+# preview click's edit to the stamped source file (``sites.visual_edit``) and saves it
+# through the same writer.
 #
 # Auth, the same as A1's build routes: a session (``request_context``), the "sites"
 # plan feature, and ``fabric.write`` (owner / editor) on every route, reads included,
@@ -20,7 +22,7 @@ from fastapi import APIRouter, Depends, Query
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
-from pocketpaw_ee.sites import project_tools
+from pocketpaw_ee.sites import project_tools, visual_edit
 from pocketpaw_ee.sites.dto import (
     ProjectFileContentResponse,
     ProjectFileListResponse,
@@ -28,6 +30,8 @@ from pocketpaw_ee.sites.dto import (
     ProjectFilesDeleteRequest,
     ProjectFilesWriteRequest,
     ProjectFileWriteResponse,
+    VisualEditRequest,
+    VisualEditResponse,
 )
 
 router = APIRouter(
@@ -115,3 +119,26 @@ async def delete_project_files(
         workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, paths=body.paths
     )
     return ProjectFileWriteResponse(**result)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/visual-edit", response_model=VisualEditResponse)
+async def visual_edit_project_file(
+    pocket_id: str,
+    body: VisualEditRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> VisualEditResponse:
+    """Apply one edit made on the preview (text, class, attr, delete, duplicate, move)
+    to the source file its ``src`` stamp names, save it like any file write and queue
+    the draft build. 409 when the file moved on (``stale``), 422 for a bad request or
+    an element the generator will not edit, 501 when the generator has no visual-edit."""
+    result = await visual_edit.apply_visual_edit(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        src=body.src,
+        kind=body.kind,
+        value=body.value,
+        base_hash=body.base_hash,
+    )
+    return VisualEditResponse(**result)

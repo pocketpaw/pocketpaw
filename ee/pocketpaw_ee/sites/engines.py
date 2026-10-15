@@ -11,7 +11,9 @@
 #
 # Invariants: every predicate routes through :func:`normalize_engine`, which falls an
 # unknown engine back to ripple (never raises; a non-empty unknown value logs a warning
-# once). Only the ``resolve_*`` functions read the filesystem; everything else is pure.
+# once). Only the ``resolve_*`` functions read the filesystem, plus
+# :func:`engine_capabilities` for ``project``, whose visual-edit flags ask the generator
+# (``visual_edit.visual_edit_supported``, cached); everything else is pure.
 # The FE mirror is paw-enterprise ``core/sites/engines.ts``; :func:`site_capabilities`
 # (the engine's :func:`engine_capabilities` plus the site's ``has_database``) is the
 # wire shape every site read carries, and :func:`site_has_database` is the one answer
@@ -335,22 +337,31 @@ def engine_capabilities(engine: str | None) -> dict[str, bool]:
       inspect and a write-back lane to save into (svelte only).
     * ``sections`` — a click can resolve to a whole section: ripple's spec sections,
       or the ``data-paw-section`` anchors an armed build stamps (svelte, react).
+    * ``structure`` — an element can be deleted, duplicated or moved up / down in its
+      source (``POST /sites/by-pocket/{id}/visual-edit``). Project only.
 
-    ``project`` answers ``select``/``text``/``design``/``sections`` False and
-    ``code``/``build_log`` True: it has no generator-owned anchors yet, so edits go
-    through files and the agent.
+    ``project`` answers ``code``/``build_log`` True and ``design``/``sections`` False.
+    Its ``select``/``text``/``structure`` are True only when the generator has
+    ``visual-edit``: its drafts carry ``data-paw-src`` stamps and an edit is written back
+    to the stamped file. Otherwise they are False and edits go through files and the agent.
     """
     has_scaffold = has_generator_scaffold(engine)
     native = has_native_edit_lane(engine)
     write_back = has_write_back_lane(engine)
     spec = has_spec_edit_lane(engine)
+    visual = False
+    if build_requires_sandbox(engine):
+        from pocketpaw_ee.sites.visual_edit import visual_edit_supported
+
+        visual = visual_edit_supported()
     return {
-        "select": spec or (has_scaffold and (native or write_back)),
-        "text": has_scaffold and write_back,
+        "select": spec or (has_scaffold and (native or write_back)) or visual,
+        "text": (has_scaffold and write_back) or visual,
         "code": is_source_engine(engine),
         "build_log": build_requires_sandbox(engine),
         "design": native and write_back,
         "sections": spec or native,
+        "structure": visual,
     }
 
 

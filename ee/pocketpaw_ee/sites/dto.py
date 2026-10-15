@@ -119,7 +119,7 @@ class SiteResponse(BaseModel):
     # engine field or could not be resolved (the card shows no engine badge).
     engine: str = ""
     # The site's edit/build flags (``engines.site_capabilities``): {select, text,
-    # code, build_log, design, sections, has_database}. Set on the list read for
+    # code, build_log, design, sections, structure, has_database}. Set on the list read for
     # every resolved pocket, whatever its engine; None where ``engine`` is "".
     capabilities: dict[str, bool] | None = None
     # charge-first: the Dodo annual-checkout link for a PAID-tier publish. A paid
@@ -1090,7 +1090,7 @@ class NativeArtifactResponse(BaseModel):
     # site's URL, or None). None until a build finished.
     preview_mode: str | None = None
     # The site's edit/build capability flags (``engines.site_capabilities``):
-    # {select, text, code, build_log, design, sections, has_database}, on every
+    # {select, text, code, build_log, design, sections, structure, has_database}, on every
     # engine's answer. ``preview_mode`` above stays a sibling: it is a property of a
     # finished build, not of the engine.
     capabilities: dict[str, bool] | None = None
@@ -1598,4 +1598,33 @@ class ProjectFileWriteResponse(BaseModel):
     deleted: list[str] = Field(default_factory=list)
     path: str | None = None
     lockfile_removed: list[str] = Field(default_factory=list)
+    verification: dict[str, Any]
+
+
+class VisualEditRequest(BaseModel):
+    """POST /sites/by-pocket/{pocket_id}/visual-edit. ``src`` is the clicked element's
+    ``data-paw-src`` (``<file>:<line>:<col>``); ``value`` by ``kind``: text / class a
+    string, attr ``{name: src|href|alt|title, value}``, delete / duplicate null, move
+    ``up`` / ``down`` (checked in ``visual_edit.check_value``). ``base_hash`` is the
+    sha256 of the file as the client last saw it (a ``file_hash``); a mismatch is 409."""
+
+    src: str = Field(min_length=5, max_length=600)
+    kind: Literal["text", "class", "attr", "delete", "duplicate", "move"]
+    value: Any = None
+    base_hash: str | None = Field(default=None, max_length=128)
+
+
+class VisualEditResponse(BaseModel):
+    """One applied visual edit: the file it changed, that file's new ``file_hash``,
+    whether the text changed at all, and the queued draft build (``build_status``:
+    ``pending`` / ``passed`` (a no-build site, already built) / ``failed`` /
+    ``unverified``; ``verification`` is the same object every file write answers)."""
+
+    ok: bool
+    pocket_id: str
+    file: str
+    file_hash: str
+    changed: bool
+    build_status: str | None = None
+    job_id: str | None = None
     verification: dict[str, Any]

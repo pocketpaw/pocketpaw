@@ -6,8 +6,9 @@
 # (``sites/files_router.py``) call, so the two share one path policy, one set of caps
 # and one rebuild rule.
 #
-# The four CLI commands here install nothing and run no author code: they copy and
-# edit files. Only ``project-build`` runs author code, and that stays in the Daytona
+# The CLI commands here (these four, and ``visual_edit``'s stdin-JSON ``visual-edit`` /
+# ``stamp-html`` through :func:`run_cli`) install nothing and run no author code: they
+# copy and edit files. Only ``project-build`` runs author code, and that stays in the Daytona
 # sandbox (``project_build``). Every temp dir is removed before the call returns.
 #
 # Invariants:
@@ -125,22 +126,22 @@ def _last_json(stdout: str) -> dict[str, Any] | None:
 
 
 async def run_cli(
-    args: list[str], *, timeout: float = CLI_TIMEOUT_SEC
+    args: list[str], *, timeout: float = CLI_TIMEOUT_SEC, stdin: bytes | None = None
 ) -> tuple[int, dict[str, Any] | None, str]:
-    """Run one CLI command; ``(exit code, last JSON line of stdout, stderr tail)``."""
+    """Run one CLI command; ``(exit code, last JSON line of stdout, stderr tail)``.
+    ``stdin`` is written to the command's stdin (the JSON-in commands)."""
+    pipes: dict[str, Any] = {"stdout": asyncio.subprocess.PIPE, "stderr": asyncio.subprocess.PIPE}
+    if stdin is not None:
+        pipes["stdin"] = asyncio.subprocess.PIPE
     try:
-        proc = await _create_subprocess_exec(
-            *cli_argv(),
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        proc = await _create_subprocess_exec(*cli_argv(), *args, **pipes)
     except OSError as exc:
         raise ProjectCliError(
             "generator_missing", f"The site generator could not be started ({exc})."
         ) from exc
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+        talk = proc.communicate(stdin) if stdin is not None else proc.communicate()
+        stdout, stderr = await asyncio.wait_for(talk, timeout)
     except TimeoutError as exc:
         try:
             proc.kill()

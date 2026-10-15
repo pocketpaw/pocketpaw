@@ -173,7 +173,10 @@ def _preview_base(monkeypatch):
 # ---------------------------------------------------------------- predicates
 
 
-def test_project_is_a_known_engine_with_its_own_capabilities():
+def test_project_is_a_known_engine_with_its_own_capabilities(monkeypatch):
+    from pocketpaw_ee.sites import visual_edit
+
+    monkeypatch.setattr(visual_edit, "generator_cli_text", lambda: b"")  # no visual-edit
     assert engines.normalize_engine("project") == "project"
     assert engines.is_source_engine("project")
     assert engines.content_key("project") == "source"
@@ -192,6 +195,7 @@ def test_project_is_a_known_engine_with_its_own_capabilities():
         "build_log": True,
         "design": False,
         "sections": False,
+        "structure": False,
     }
 
 

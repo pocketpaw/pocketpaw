@@ -3330,7 +3330,8 @@ framework config, wrangler config) is also served here, with two extra fields:
   "build_job_id": "site-preview-p_abc123-9f2c…",
   "preview_url": "https://3f9c….paw-preview.example/index.html",
   "preview_mode": "static",
-  "capabilities": {"select": false, "text": false, "code": true, "build_log": true}
+  "capabilities": {"select": true, "text": true, "code": true, "build_log": true,
+                   "design": false, "sections": false, "structure": true}
 }
 ```
 
@@ -3350,9 +3351,19 @@ framework config, wrangler config) is also served here, with two extra fields:
     deleted on publish. `preview_url` is the live site's URL (`null` when unknown).
     No draft is rebuilt; the next edit builds one.
   - `null` until a build finished.
-- `capabilities` are the engine's edit/build flags. A project has no Select or Text
-  tool yet (no generator-owned anchors); edits go through files and the agent, and
-  every build keeps a log. Other engines answer `capabilities: null` for now.
+- `capabilities` are the engine's edit/build flags. A project's `select`, `text` and
+  `structure` are `true` only when the server's site generator has `visual-edit`: its
+  drafts then carry `data-paw-src` stamps and a click is written back through
+  `POST .../visual-edit` (below). On an older generator all three are `false` and
+  edits go through files and the agent. `design` and `sections` stay `false`; every
+  build keeps a log. Every engine's answer carries `structure` (`false` on all but
+  `project`).
+- Visual-edit stamps live in drafts only. A sandbox draft on a generator with
+  `project-build --source-tags` builds twice: untagged for the stored bundle publish
+  deploys, tagged for the preview (and the draft Worker). A no-build draft's preview
+  pages go through `paw-sites-gen stamp-html` (a failed stamp serves them plain). The
+  draft's content hash includes the tag mode, so an untagged draft is never reused as a
+  tagged one. The build record carries `source_tags: true|false`.
 - A project with no `package.json`, or a path that leaves the project, is a `422`.
 - `build_reason` on a failed project build is `build_failed:<code>` with the CLI's
   code (`install_failed`, `build_failed`, `output_missing`, `wrangler_failed`,
@@ -3461,6 +3472,63 @@ sites.project_file_too_large` (over 1 MiB), `422 sites.project_call_too_large` (
 site_file.not_found` (a path to read, patch or delete that is not there).
 A change to `package.json`'s dependency lists also removes a stale lockfile and lists
 it in `lockfile_removed`.
+
+#### `POST /sites/by-pocket/{pocket_id}/visual-edit`
+
+Write one edit made on the preview back to the source file the clicked element came
+from. Same auth as the file routes (session, `sites` plan feature, `fabric.write`,
+pockets edit access, workspace match; a non-project pocket is `422`). Runs
+`paw-sites-gen visual-edit` on the API host (a parse and a splice, no author code),
+then saves through the same writer as `PUT .../files` (one draft version: history,
+undo and Review changes see it like any file write) and queues the draft build (a
+no-build site rebuilds in-process, so `build_status` is already `passed`).
+
+```json
+{
+  "src": "src/App.tsx:12:5",
+  "kind": "text",
+  "value": "Welcome",
+  "base_hash": "9b1f…"
+}
+```
+
+- `src` is the element's `data-paw-src` (`<file>:<line>:<col>`). The file must be in
+  the project, pass the file-route path rules and end in `.tsx`, `.jsx`, `.svelte`,
+  `.astro` or `.html`.
+- `kind` and `value`: `text` (string), `class` (the full class string), `attr`
+  (`{"name": "src" | "href" | "alt" | "title", "value": "..."}`; a `javascript:` or
+  `vbscript:` URL is refused), `delete` / `duplicate` (`null`), `move` (`"up"` /
+  `"down"`).
+- `base_hash` (optional): sha256 hex of the file's UTF-8 text as the client last saw
+  it (a previous answer's `file_hash`). A mismatch is `409` before anything runs.
+
+```json
+{
+  "ok": true,
+  "pocket_id": "p_abc123",
+  "file": "src/App.tsx",
+  "file_hash": "4c0e…",
+  "changed": true,
+  "build_status": "pending",
+  "job_id": "site-preview-p_abc123-9f2c…",
+  "verification": {"status": "pending", "build": "pending", "job_id": "…"}
+}
+```
+
+| Status | Code | When |
+|---|---|---|
+| `409` | `sites.visual_edit_stale` | the file moved on (`base_hash`, or the generator found no element at `src`) |
+| `422` | `sites.visual_edit_not_editable` | the element's text or attribute is an expression, a prop or a loop item |
+| `422` | `sites.visual_edit_parse_error` | the file does not parse |
+| `422` | `sites.visual_edit_unsupported` | the generator refused the edit kind for that element |
+| `422` | `sites.visual_edit_bad_src` / `_bad_kind` / `_bad_value`, `sites.project_bad_path` | the request is off the contract |
+| `404` | `site_file.not_found` | `src` names a file that is not in the project |
+| `501` | `sites.visual_edit_unavailable` | the server's generator has no `visual-edit` (`capabilities.text` is `false` then too) |
+| `500` | `sites.visual_edit_failed` | the generator crashed or answered off the contract (logged) |
+
+The generator's `message` is passed through on every refusal. Nothing is saved on any
+non-`200` answer. `PAW_SITES_VISUAL_EDIT=0` turns visual editing (this route, the
+draft tags and the capabilities) off.
 
 ### Site images — `/sites/by-pocket/{pocket_id}/assets`
 

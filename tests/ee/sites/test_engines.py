@@ -331,28 +331,35 @@ def test_react_combines_all_three_capabilities_uniquely() -> None:
 _EXPECTED_CAPABILITIES = {
     "ripple": {
         "select": True, "text": False, "code": False, "build_log": False,
-        "design": False, "sections": True,
+        "design": False, "sections": True, "structure": False,
     },
     "svelte": {
         "select": True, "text": True, "code": True, "build_log": False,
-        "design": True, "sections": True,
+        "design": True, "sections": True, "structure": False,
     },
     "html": {
         "select": True, "text": True, "code": True, "build_log": False,
-        "design": False, "sections": False,
+        "design": False, "sections": False, "structure": False,
     },
     "react": {
         "select": True, "text": False, "code": True, "build_log": False,
-        "design": False, "sections": True,
+        "design": False, "sections": True, "structure": False,
     },
     "project": {
         "select": False, "text": False, "code": True, "build_log": True,
-        "design": False, "sections": False,
+        "design": False, "sections": False, "structure": False,
     },
 }  # fmt: skip
 
 
 class TestEngineCapabilities:
+    @pytest.fixture(autouse=True)
+    def _no_visual_edit(self, monkeypatch) -> None:
+        """Pin a generator without ``visual-edit`` (project select/text/structure off)."""
+        from pocketpaw_ee.sites import visual_edit
+
+        monkeypatch.setattr(visual_edit, "generator_cli_text", lambda: b"")
+
     def test_every_known_engine_has_a_pinned_shape(self) -> None:
         assert set(_EXPECTED_CAPABILITIES) == engines.KNOWN_ENGINES
 

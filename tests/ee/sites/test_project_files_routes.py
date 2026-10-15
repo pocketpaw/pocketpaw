@@ -352,7 +352,7 @@ async def test_every_route_carries_the_guards() -> None:
     from pocketpaw_ee.sites.files_router import router
 
     routes = [r for r in router.routes if getattr(r, "path", "").startswith("/sites/")]
-    assert len(routes) == 5
+    assert len(routes) == 6  # five file routes + visual-edit
     for route in routes:
         deps = [repr(d.call) for d in route.dependant.dependencies]
         assert any("request_context" in d for d in deps), (route.path, deps)

@@ -10754,7 +10754,7 @@ async def _project_draft_artifact(
             }
 
     if project_build.is_no_build(files_source):
-        built = project_build.build_no_build_draft(
+        built = await project_build.build_no_build_draft(
             pocket_id,
             content_hash,
             files_source,
