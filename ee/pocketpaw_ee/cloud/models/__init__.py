@@ -280,6 +280,7 @@ from pocketpaw_ee.cloud.models.integration import (
     SiteOrder,
 )
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
+from pocketpaw_ee.cloud.models.launch_controls import LaunchControlsDoc
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
@@ -338,6 +339,7 @@ from pocketpaw_ee.cloud.models.task_event import TaskEvent
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
+from pocketpaw_ee.cloud.models.waitlist import WaitlistEntry
 from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
@@ -712,6 +714,10 @@ def get_all_documents():
         # VS-4 — an address a renamed site gave up, held 30 days for its old
         # workspace. Only ``pocketpaw_ee.sites.service`` reads/writes it.
         ReleasedSlug,
+        # Early-access launch switches (singleton) and the paused-signup waitlist.
+        # Only ``ee.cloud.launch_controls`` and ``ee.cloud.early_access`` touch them.
+        LaunchControlsDoc,
+        WaitlistEntry,
         # Growth prospect store (G-1) — the /growth outbound engine's
         # workspace-scoped, domain-deduped prospect record. Only
         # ``ee.cloud.growth.service`` imports this doc directly (import-linter

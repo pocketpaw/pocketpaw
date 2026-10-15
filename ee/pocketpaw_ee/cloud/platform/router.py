@@ -48,6 +48,7 @@ from pocketpaw_ee.cloud.platform.credits import router as credits_router
 from pocketpaw_ee.cloud.platform.discover import router as discover_router
 from pocketpaw_ee.cloud.platform.entitlements import router as entitlements_router
 from pocketpaw_ee.cloud.platform.health import router as health_router
+from pocketpaw_ee.cloud.platform.launch_controls import router as launch_controls_router
 from pocketpaw_ee.cloud.platform.partners import applications_router as partner_applications_router
 from pocketpaw_ee.cloud.platform.partners import router as partners_router
 from pocketpaw_ee.cloud.platform.revenue import router as revenue_router
@@ -68,6 +69,7 @@ router.include_router(credits_router)
 router.include_router(discover_router)
 router.include_router(entitlements_router)
 router.include_router(health_router)
+router.include_router(launch_controls_router)
 router.include_router(partners_router)
 router.include_router(partner_applications_router)
 router.include_router(revenue_router)

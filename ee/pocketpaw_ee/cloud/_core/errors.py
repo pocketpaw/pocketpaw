@@ -12,10 +12,10 @@ caps, `InsufficientCredits`, `QuotaExceeded`, `NoActiveSubscription`, and the
 per-site capability gates `CustomDomainNotEntitled`, `ProjectDownloadNotEntitled`,
 `BadgeRemovalNotEntitled`), 403 `Forbidden`, 404 `NotFound`, 409 `ConflictError`,
 412 `PreconditionFailed` (stale If-Match), 413 `PayloadTooLarge`, 422
-`ValidationError`, 429 `RateLimited`, 500 `Internal`. The guest/BYOK family
-(`GuestLimitError` and siblings) adds top-level `code`/`kind` keys beside the
-envelope: a frozen frontend contract. Re-exported via `ee.cloud.shared.errors`
-(a shim); new code imports from here.
+`ValidationError`, 429 `RateLimited`, 500 `Internal`, 503 `EarlyAccessPaused`.
+The guest/BYOK family (`GuestLimitError` and siblings) adds top-level
+`code`/`kind` keys beside the envelope: a frozen frontend contract. Re-exported
+via `ee.cloud.shared.errors` (a shim); new code imports from here.
 """
 
 from __future__ import annotations
@@ -581,6 +581,22 @@ class NoActiveSubscription(CloudError):
             402,
             "billing.no_active_subscription",
             message,
+        )
+
+
+class EarlyAccessPaused(CloudError):
+    """Free early-access usage is paused platform-wide (503).
+
+    The operator kill switch (``launch_controls.free_usage_paused``) or the daily
+    free ceiling. Only unpaid, platform-funded runs see it; the wallet is not the
+    reason, so the answer is to wait, not to top up.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "early_access.paused",
+            "Early access is busy right now. Your credits are safe; please try again later.",
         )
 
 

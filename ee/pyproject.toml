@@ -570,6 +570,23 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.daily_usage"]
 
 [[tool.importlinter.contracts]]
+name = "LaunchControls: Beanie docs only from their services"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.launch_controls.domain",
+    "pocketpaw_ee.cloud.launch_controls.dto",
+    "pocketpaw_ee.cloud.platform.launch_controls",
+    "pocketpaw_ee.cloud.early_access.dto",
+    "pocketpaw_ee.cloud.early_access.router",
+    "pocketpaw_ee.cloud.credits.guards",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.launch_controls",
+    "pocketpaw_ee.cloud.models.waitlist",
+]
+
+[[tool.importlinter.contracts]]
 name = "Partners — Workspace document only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
