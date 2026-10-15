@@ -275,7 +275,7 @@ async def grant_early_access(user: User) -> None:
         else None
     )
     if prior is not None:
-        workspace_id: str | None = prior.workspace
+        workspace_id: str = prior.workspace
     else:
         live = [str(w.id) for w in owned if w.deleted_at is None]
         if not live:
@@ -285,9 +285,10 @@ async def grant_early_access(user: User) -> None:
             {"$set": {"early_access_workspace_id": live[0]}},
         )
         stored = await users.find_one({"_id": user.id}, {"early_access_workspace_id": 1})
-        workspace_id = (stored or {}).get("early_access_workspace_id")
-        if not workspace_id:
+        claimed = (stored or {}).get("early_access_workspace_id")
+        if not claimed:
             return
+        workspace_id = str(claimed)
 
     await grant(
         workspace_id,

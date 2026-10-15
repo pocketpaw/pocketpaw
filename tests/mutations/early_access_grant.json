@@ -11,8 +11,8 @@
   {
     "label": "the ledger check is skipped, so a wiped claim plus a deleted workspace farms a second grant",
     "file": "ee/pocketpaw_ee/cloud/credits/service.py",
-    "find": "    if prior is not None:\n        workspace_id: str | None = prior.workspace\n",
-    "replace": "    if False:\n        workspace_id: str | None = prior.workspace\n",
+    "find": "    if prior is not None:\n        workspace_id: str = prior.workspace\n",
+    "replace": "    if False:\n        workspace_id: str = prior.workspace\n",
     "tests": [
       "tests/cloud/credits/test_early_access_grant.py::test_wiped_claim_and_deleted_workspace_cannot_farm_a_second_grant"
     ]
