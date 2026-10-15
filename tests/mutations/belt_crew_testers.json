@@ -300,8 +300,8 @@
   {
     "label": "the runs list drops each run's screenshots",
     "file": "ee/pocketpaw_ee/cloud/belt/service.py",
-    "find": "            for s in blob.get(\"screenshots\") or []\n            if isinstance(s, dict)\n        ],\n    }",
-    "replace": "            for s in []\n        ],\n    }",
+    "find": "            for s in blob.get(\"screenshots\") or []\n            if isinstance(s, dict)\n        ],\n        \"lead\": _lead_row(blob),",
+    "replace": "            for s in []\n        ],\n        \"lead\": _lead_row(blob),",
     "tests": [
       "tests/cloud/test_belt_console.py::test_run_screenshots_are_listed_and_served"
     ]
