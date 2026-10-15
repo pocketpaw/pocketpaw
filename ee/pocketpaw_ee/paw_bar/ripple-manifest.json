@@ -4098,12 +4098,14 @@
         "value": {
           "type": "number",
           "required": true,
-          "description": "Current value."
+          "description": "Current value.",
+          "data": true
         },
         "max": {
           "type": "number",
           "required": false,
-          "description": "Maximum value. Default 100."
+          "description": "Maximum value. Default 100.",
+          "data": true
         },
         "label": {
           "type": "string",
@@ -4118,7 +4120,7 @@
         "height": {
           "type": "number",
           "required": false,
-          "description": "Height in px. Default 200."
+          "description": "Max height in px."
         },
         "title": {
           "type": "string",
@@ -6174,7 +6176,7 @@
         "title": {
           "type": "string",
           "required": false,
-          "description": "Heading. Defaults to \"Tracking your order\" / \"Delivered\" / \"Order paused\" based on status."
+          "description": "Heading. Defaults to the current step."
         },
         "orderId": {
           "type": "string",
@@ -6199,7 +6201,7 @@
         "eta": {
           "type": "string",
           "required": false,
-          "description": "ETA string (e.g. \"Today, 4 – 6 PM\")."
+          "description": "ETA string (e.g. \"Today, 4 to 6 PM\")."
         },
         "tracking": {
           "type": "{ carrier: string; number: string; url?: string }",
@@ -6234,12 +6236,12 @@
         "mapHeight": {
           "type": "string | number",
           "required": false,
-          "description": "Map height. Default \"320px\"."
+          "description": "Map height."
         },
         "mapTiles": {
           "type": "\"osm\" | \"carto-voyager\" | \"carto-light\" | \"carto-dark\" | \"osm-hot\" | \"custom\"",
           "required": false,
-          "description": "Map tile preset. Default \"carto-voyager\"."
+          "description": "Map tile preset."
         },
         "followTracker": {
           "type": "boolean",
@@ -7320,7 +7322,7 @@
     {
       "type": "pipeline-dashboard",
       "category": "composite",
-      "description": "Sales / pipeline / funnel archetype: quota progress hero + leaderboard side rail + funnel chart + stage conversion + deals table + live activity ticker.",
+      "description": "Sales or hiring pipeline: quota progress, funnel, leaderboard, deals table and recent activity.",
       "props": {
         "title": {
           "type": "string",
@@ -7340,7 +7342,7 @@
         "quota": {
           "type": "{ label?: string; current: number; target: number; currency?: string; period?: string }",
           "required": false,
-          "description": "Big quota progress hero (current vs target)."
+          "description": "Progress to a target. Currency optional."
         },
         "funnel": {
           "type": "{ title?: string; stages: Array<{ label: string; value: number; color?: string }> }",
@@ -7350,12 +7352,12 @@
         "conversion": {
           "type": "Array<{ from: string; to: string; rate: number }>",
           "required": false,
-          "description": "Stage-to-stage conversion percentages (0–100)."
+          "description": "Step rates 0-100; used without a funnel."
         },
         "leaderboard": {
           "type": "{ title?: string; items: Array<{ name: string; avatar?: string; value: string | number; delta?: string; sublabel?: string; position?: number }> }",
           "required": false,
-          "description": "Leaderboard sidebar (medals on top 3)."
+          "description": "Ranked people; top 3 marked."
         },
         "deals": {
           "type": "{ title?: string; columns: Array<{ key: string; label: string; align?: \"left\" | \"right\" | \"center\" }>; rows: Record<string, unknown>[] }",
@@ -7365,7 +7367,7 @@
         "ticker": {
           "type": "Array<{ time: string; label: string; actor?: string; icon?: string }>",
           "required": false,
-          "description": "Live activity ticker."
+          "description": "Recent activity."
         }
       }
     },
@@ -8191,7 +8193,7 @@
         "height": {
           "type": "number",
           "required": false,
-          "description": "Height in px. Default 320."
+          "description": "Max height in px."
         },
         "title": {
           "type": "string",

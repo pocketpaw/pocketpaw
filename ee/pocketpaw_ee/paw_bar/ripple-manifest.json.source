@@ -51,9 +51,16 @@ swapped the same way, each alone, from branch feat/widget-polish-2 at 834b73a
 a539662b6f3b9c40344a8fe770bed7f57082b44eca7034bb3002aedcbe5e4aa4): "audit-log"
 (shorter groupBy description), "funnel" (fitted height, colors ignored), "heatmap"
 (max height, colorRange ignored) and "saved-views" (chips, shorter descriptions);
-funnel's and heatmap's data flags come along with them. interval-workout's optional
-per-exercise "figure" (#216) is not pulled: nothing here checks exercise rows, and the
-widget matches figures by name. The server never reads the examples, and one carries a
+funnel's and heatmap's data flags come along with them. Four more are swapped the
+same way, each alone, from branch feat/widget-polish-3 at 5b97065 (generatedAt
+2026-10-15T09:56:53.261Z, upstream sha256
+05339169b91a466602bc8df656d41803369932d8e243f43dbbaf2e732769b7c8): "gauge" (max
+height description), "order-status" (shorter title, map height and tiles
+descriptions), "pipeline-dashboard" (shorter description, sales or hiring) and
+"sankey" (max height description); gauge's data flags come along with it.
+sources-bar changed only its example and org-chart nothing, so neither is pulled.
+interval-workout's optional per-exercise "figure" (#216) is not pulled: nothing here
+checks exercise rows, and the widget matches figures by name. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.
 
 Refresh (once the data widgets ship in a release, use the release asset):
