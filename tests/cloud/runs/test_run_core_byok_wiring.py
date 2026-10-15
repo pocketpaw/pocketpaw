@@ -372,3 +372,16 @@ async def test_the_plaintext_key_never_reaches_a_log_record(monkeypatch, caplog)
     assert _PLAINTEXT not in caplog.text
     for rec in caplog.records:
         assert _PLAINTEXT not in str(rec.args or "")
+
+
+async def test_credentials_resolved_by_the_gate_are_reused_not_resolved_again(monkeypatch):
+    """``execute_run`` resolves who pays before the credit gate and carries the
+    answer on ``ctx.turn_credentials``. The loop must spend THAT answer: a second
+    resolution could disagree with the one the gate let through. Mutation: drop
+    the reuse and resolve again, and the crashing resolver below degrades the
+    turn to platform, so no key is threaded."""
+    ctx = _ctx()
+    ctx.turn_credentials = TurnCredentials(source="byok", api_key=_PLAINTEXT, provider="anthropic")
+    pool, _ = await _drive(monkeypatch, ctx, creds=RuntimeError("must not resolve twice"))
+    assert pool.run_called is True
+    assert pool.run_kwargs.get("byok_api_key") == _PLAINTEXT
