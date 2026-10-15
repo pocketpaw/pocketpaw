@@ -372,3 +372,35 @@ async def test_the_plaintext_key_never_reaches_a_log_record(monkeypatch, caplog)
     assert _PLAINTEXT not in caplog.text
     for rec in caplog.records:
         assert _PLAINTEXT not in str(rec.args or "")
+
+
+async def test_credentials_resolved_by_the_gate_are_reused_not_resolved_again(monkeypatch):
+    """``execute_run`` resolves who pays before the credit gate and carries the
+    answer on ``ctx.turn_credentials``. The loop must spend THAT answer: a second
+    resolution could disagree with the one the gate let through. Mutation: drop
+    the reuse and resolve again, and the crashing resolver below degrades the
+    turn to platform, so no key is threaded."""
+    ctx = _ctx()
+    ctx.turn_credentials = TurnCredentials(source="byok", api_key=_PLAINTEXT, provider="anthropic")
+    pool, _ = await _drive(monkeypatch, ctx, creds=RuntimeError("must not resolve twice"))
+    assert pool.run_called is True
+    assert pool.run_kwargs.get("byok_api_key") == _PLAINTEXT
+
+
+async def test_a_key_billed_as_platform_still_faces_the_model_catalog(monkeypatch):
+    """A stored key on a backend that ignores it is billed as platform
+    (``ctx.credential_source``), so the turn runs on our gateway and a model id
+    the gateway does not list is refused, as for any platform turn. Mutation:
+    key the catalog check on ``turn_credentials.source`` alone."""
+
+    async def _unknown(_model):
+        return True
+
+    monkeypatch.setattr(run_core, "_model_is_unknown_to_gateway", _unknown)
+    ctx = _ctx(model_override="claude-made-up-9")
+    ctx.turn_credentials = TurnCredentials(source="byok", api_key=_PLAINTEXT, provider="anthropic")
+    ctx.credential_source = "platform"
+    pool, out = await _drive(monkeypatch, ctx, creds=RuntimeError("must not resolve twice"))
+    assert pool.run_called is False
+    errors = [d for name, d in out if name == "error"]
+    assert errors and errors[0]["code"] == "model.not_available"

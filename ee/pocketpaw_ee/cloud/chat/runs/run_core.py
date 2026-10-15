@@ -1983,10 +1983,17 @@ async def _drive_agent_loop(
         # A resolver crash degrades to platform for non-guests (matching
         # ``resolve_turn_credentials``'s own philosophy) but NEVER silently for
         # guests. The key itself is never logged — only source/provider are.
+        #
+        # ``execute_run`` already resolved who pays, before its credit gate, and
+        # left the answer on ``ctx.turn_credentials``. Spend that answer: the
+        # gate let this turn through on it, and a second resolution could
+        # disagree. Only a caller that did not resolve (None) resolves here.
         from pocketpaw_ee.cloud.byok import service as byok_service
 
         try:
-            byok_creds = await byok_service.resolve_turn_credentials(ctx.workspace_id)
+            byok_creds = getattr(ctx, "turn_credentials", None)
+            if byok_creds is None:
+                byok_creds = await byok_service.resolve_turn_credentials(ctx.workspace_id)
         except byok_service.GatewayEgressRejected as exc:
             # The stored gateway address no longer passes the egress guard —
             # it resolves somewhere this server must not dial (2026-09-11,
@@ -2029,9 +2036,12 @@ async def _drive_agent_loop(
         #
         # A BYOK turn is not left unchecked; ``provider_allows_model`` below is
         # the check that belongs to it.
+        # ``ctx.credential_source`` (set by ``execute_run``) wins when present:
+        # a stored key on a backend that ignores it runs on our gateway, so the
+        # catalog applies to it.
         if (
             ctx.model_override
-            and byok_creds.source != "byok"
+            and (getattr(ctx, "credential_source", None) or byok_creds.source) != "byok"
             and await _model_is_unknown_to_gateway(ctx.model_override)
         ):
             yield (
@@ -2758,6 +2768,63 @@ async def _requires_own_key(ctx: ScopeContext) -> bool:
     return await kiosk_byok.requires_own_key(ctx)
 
 
+async def _resolve_payer_or_refuse(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """Decide who pays for this run before the credit gate. True if refused.
+
+    Stores the credentials on ``ctx.turn_credentials`` (``_drive_agent_loop``
+    spends them) and the billing answer on ``ctx.credential_source``, which the
+    credit gate reads and the run doc records (``bill_run`` debits 0 for
+    ``byok``). The billing answer is ``byok`` only when the agent's backend
+    really spends the key (``credits.guards.billing_source``); a stored key on
+    any other backend is gated and charged as platform. A resolver failure
+    degrades to platform inside ``credits.guards.resolve_payer``, so the run is
+    gated and charged, never free.
+
+    A gateway address the egress guard rejects is refused here, with the same
+    ``byok.base_url_rejected`` code the loop uses, rather than gated as
+    platform: the turn must not run on our key, and a wallet refusal would
+    tell a BYOK user to buy credits for a broken address. Same rejection shape
+    as the neighbouring gates. The stamp is best-effort; an unstamped doc
+    keeps its ``platform`` default and is charged.
+    """
+    from pocketpaw_ee.cloud.byok.service import GatewayEgressRejected
+    from pocketpaw_ee.cloud.credits import guards
+
+    try:
+        ctx.turn_credentials = await guards.resolve_payer(ctx.workspace_id)
+    except GatewayEgressRejected as exc:
+        logger.warning(
+            "run %s rejected: gateway address refused by the egress guard for workspace=%s",
+            spec.run_id,
+            ctx.workspace_id,
+        )
+        try:
+            await transport.append_event(
+                spec.run_id, "error", {"code": exc.code, "message": exc.message}
+            )
+        except Exception:
+            logger.debug("egress error frame append failed for %s", spec.run_id, exc_info=True)
+        try:
+            await run_service.mark_terminal(spec.run_id, status="failed", error=exc.message)
+        except Exception:
+            logger.exception("mark_terminal(failed) failed for egress-refused run %s", spec.run_id)
+        try:
+            await transport.set_ttl(spec.run_id, _stream_ttl())
+        except Exception:
+            logger.debug("egress stream ttl set failed for %s", spec.run_id, exc_info=True)
+        return True
+    ctx.credential_source = await guards.billing_source(
+        ctx.turn_credentials,
+        ctx.target_agent_id,
+        exclusive_tools=bool(getattr(ctx.resolved_profile, "exclusive_tools", False)),
+    )
+    try:
+        await run_service.set_credential_source(spec.run_id, ctx.credential_source)
+    except Exception:
+        logger.warning("credential_source stamp failed for %s", spec.run_id, exc_info=True)
+    return False
+
+
 async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
     """Universal run-start BILLING gate on the worker/executor path.
 
@@ -2787,6 +2854,7 @@ async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transpo
         run_id=spec.run_id,
         transport=transport,
         log_label=spec.run_id,
+        source=getattr(ctx, "credential_source", None) or "platform",
     )
 
 
@@ -2915,6 +2983,10 @@ async def execute_run(spec: RunSpec) -> None:
     # guarantee). Flag-gated inside the helper: a no-op unless
     # ``billing_enforced`` or ``credits_enforced`` is on, so OSS / self-host is
     # unaffected and IN-FLIGHT runs (already past this point) are never killed.
+    # Who pays is resolved first: a run on the workspace's own key is not gated
+    # by the wallet and is billed 0.
+    if await _resolve_payer_or_refuse(spec, ctx, transport):
+        return
     if await _reject_if_over_credit_quota(spec, ctx, transport):
         return
 

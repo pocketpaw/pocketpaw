@@ -52,8 +52,8 @@
   {
     "label": "the sites flag leaks into the chat-run credit gate",
     "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
-    "find": "    settings = get_settings()\n    if not (settings.billing_enforced or settings.credits_enforced):\n        return None\n    if not workspace_id:",
-    "replace": "    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced\n\n    if not sites_enforced():\n        return None\n    if not workspace_id:",
+    "find": "    settings = get_settings()\n    if not (settings.billing_enforced or settings.credits_enforced):\n        return None\n    if not workspace_id or source == \"byok\":",
+    "replace": "    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced\n\n    if not sites_enforced():\n        return None\n    if not workspace_id or source == \"byok\":",
     "tests": [
       "tests/cloud/sites/test_sites_billing_flag.py::test_the_sites_flag_does_not_start_402ing_chat_runs"
     ]

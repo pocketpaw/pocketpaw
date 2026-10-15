@@ -38,13 +38,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     # Type-only — the runtime read imports ``get_person`` lazily inside
     # ``_resolve_about_member`` so importing this module never drags in the
     # people service (and its journal accessor) for chat paths that never
     # render an about-block.
+    from pocketpaw_ee.cloud.byok.service import TurnCredentials
     from pocketpaw_ee.cloud.people.domain import Person
 
 from pocketpaw.agents.backend import ImageAttachment
@@ -799,6 +800,17 @@ class ScopeContext:
     #: ``None`` is the legacy path. Copied onto ``ctx`` by ``execute_run``
     #: exactly like ``model_override`` beside it.
     tools_enabled: bool | None = None
+    #: Who pays for this turn, resolved by ``execute_run`` BEFORE its credit
+    #: gate (``credits.guards.resolve_payer``) so the gate and the loop act on
+    #: one answer. ``_drive_agent_loop`` spends it instead of resolving again;
+    #: ``None`` (every other caller) makes the loop resolve for itself. Can
+    #: carry a plaintext provider key: never log or serialize it.
+    turn_credentials: TurnCredentials | None = None
+    #: Who the credit gate and ``bill_run`` treat as paying: ``byok`` only when
+    #: ``turn_credentials`` is BYOK and the agent's backend spends the key
+    #: (``credits.guards.billing_source``). Set by ``execute_run``; ``None``
+    #: elsewhere, where readers fall back to ``turn_credentials``.
+    credential_source: Literal["platform", "byok"] | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,9 @@
 #     declares one.
 #   * AgentPool.invalidate releases the dropped instance's backend: at once when
 #     it is idle, after its last run when it is busy.
+#   * A BYOK turn whose private backend cannot be built is refused with an
+#     ``error`` event; the shared backend (our credentials) never runs it.
+#   * ``spends_byok_key`` says which backends really spend the caller's key.
 
 from __future__ import annotations
 
@@ -23,17 +26,19 @@ pytestmark = pytest.mark.asyncio
 
 
 class _Backend:
-    def __init__(self, name: str = "shared") -> None:
+    def __init__(self, name: str = "shared", agent_backend: str = "claude_agent_sdk") -> None:
         self.name = name
-        self.settings = SimpleNamespace(agent_backend="claude_agent_sdk")
+        self.settings = SimpleNamespace(agent_backend=agent_backend)
         self.policy = object()
         self.cleaned = 0
         self.stopped = 0
+        self.ran = 0
 
     def get_tool_policy(self):
         return self.policy
 
     async def run(self, message, **kwargs):
+        self.ran += 1
         yield SimpleNamespace(type="done", content="")
 
     async def cleanup(self):
@@ -123,3 +128,91 @@ async def test_invalidate_defers_teardown_of_a_busy_instance(monkeypatch):
     async for _ in agen:
         pass
     assert backend.stopped == 1, "the invalidated instance was never torn down"
+
+
+@pytest.mark.parametrize("exclusive_tools", [False, True])
+async def test_a_failed_byok_build_refuses_the_turn(monkeypatch, exclusive_tools):
+    """The cloud let this turn skip the wallet because the caller's key pays.
+    Running it on the shared backend instead would be unbilled platform spend,
+    so the pool yields an error and runs nothing. Covers the plain BYOK branch
+    and the deny-by-default one.
+
+    Mutation: fall back to ``instance.backend`` (or the platform pydantic_ai)
+    when the isolated build raises.
+    """
+    from pocketpaw.agents import pool as pool_mod
+    from pocketpaw.agents import registry
+    from pocketpaw.agents.router import AgentRouter
+
+    shared = _Backend(agent_backend="pydantic_ai")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("bad settings key")
+
+    monkeypatch.setattr(AgentRouter, "create_isolated_backend", staticmethod(_boom))
+    monkeypatch.setattr(registry, "get_backend_class", lambda _n: _Backend)
+    pool = AgentPool()
+    inst = _instance(shared)
+
+    async def _get(_aid):
+        return inst
+
+    monkeypatch.setattr(pool, "get", _get)
+    events = [
+        ev
+        async for ev in pool.run(
+            "a1", "hi", "session:s1", byok_api_key="sk-user", exclusive_tools=exclusive_tools
+        )
+    ]
+
+    assert [ev.type for ev in events] == ["error"]
+    assert events[0].content == pool_mod.BYOK_BACKEND_FAILED_MESSAGE
+    assert shared.ran == 0, "the turn ran on the platform backend"
+    assert inst.active_runs == 0
+
+
+@pytest.mark.parametrize(
+    ("backend", "exclusive", "spends"),
+    [
+        ("pydantic_ai", False, True),
+        ("claude_agent_sdk", False, False),
+        ("claude_code", False, False),
+        (None, False, False),
+        ("openai_agents", False, False),
+        ("claude_agent_sdk", True, True),
+    ],
+)
+async def test_spends_byok_key(backend, exclusive, spends):
+    """Mutation: answer True for every backend, or default a missing backend to
+    pydantic_ai (the pool builds a missing one as claude_agent_sdk)."""
+    from pocketpaw.agents.pool import spends_byok_key
+
+    assert spends_byok_key(backend, exclusive_tools=exclusive) is spends
+
+
+async def test_a_failed_byok_build_on_a_backend_that_ignores_the_key_falls_back(monkeypatch):
+    """claude_agent_sdk never reads the override, so the cloud gated and billed
+    this turn as platform already. A failed private build then runs it on the
+    shared backend instead of telling the user their key failed.
+
+    Mutation: refuse on every failed build.
+    """
+    from pocketpaw.agents.router import AgentRouter
+
+    shared = _Backend(agent_backend="claude_agent_sdk")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("bad settings key")
+
+    monkeypatch.setattr(AgentRouter, "create_isolated_backend", staticmethod(_boom))
+    pool = AgentPool()
+    inst = _instance(shared)
+
+    async def _get(_aid):
+        return inst
+
+    monkeypatch.setattr(pool, "get", _get)
+    events = [ev async for ev in pool.run("a1", "hi", "session:s1", byok_api_key="sk-user")]
+
+    assert [ev.type for ev in events] == ["done"]
+    assert shared.ran == 1
