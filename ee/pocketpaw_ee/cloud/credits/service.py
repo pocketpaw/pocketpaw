@@ -1,239 +1,31 @@
-# ee/pocketpaw_ee/cloud/credits/service.py — the credit ledger business logic
-# (BC-1, the Ledger primitive). Sole owner of writes to the ``CreditBalance``
-# and ``CreditLedgerEntry`` Beanie documents (entity isolation — only THIS
-# module imports ``models.credit``).
+# ee/pocketpaw_ee/cloud/credits/service.py: the credit ledger business logic.
+# Sole owner of writes (and reads) of the CreditBalance and CreditLedgerEntry
+# documents; no other module imports models.credit. Module-level async API, no
+# class (EE cloud rule).
 #
-# Module-level ``async def`` API (NOT a class, per EE cloud rule). Public API:
-#   * ``grant``     — add credits, idempotent. Returns a ``GrantResult`` carrying
-#                     the new balance AND ``created`` (True on a real first grant,
-#                     False on a duplicate-key replay) so callers gate side
-#                     effects on the authoritative created-flag, not a balance
-#                     delta that races under concurrency.
-#   * ``debit``     — remove credits, idempotent + atomic. Raises
-#                     ``InsufficientCredits`` (402) on over-debit, with ZERO
-#                     side effects. Returns the new balance.
-#   * ``balance``   — read the current spendable balance (tenant-scoped).
-#   * ``check_balance`` — raise ``InsufficientCredits`` when the wallet is
-#                     out of credits (balance <= 0). The pure, flag-free
-#                     assertion behind BC-4's run-start hard-block.
-#   * ``month_to_date_spend`` — server-side ``$sum`` of this UTC month's APPLIED
-#                     spend debits (compute_spend + litellm_spend). The read the
-#                     monthly-quota gate compares against.
-#   * ``check_quota`` — raise ``QuotaExceeded`` (402) when month-to-date spend
-#                     meets the workspace's effective monthly ceiling (plan
-#                     ceiling + purchased top-ups this period). Pure + flag-free,
-#                     mirroring ``check_balance``; a no-op for an uncapped plan.
-#   * ``history``   — page the append-only ledger, newest first.
-#   * ``reconcile`` — recompute ``balance == sum(amount_delta)`` and repair the
-#                     CreditBalance doc if it drifted (covers a crash between
-#                     the ledger insert and the balance ``$inc``).
+# Movements: grant / debit (idempotent, emit CreditMovement after each real
+# movement, never on a replay), record_no_movement (zero-value "seen" marker).
+# Gates: check_balance and check_quota are pure, flag-free assertions that
+# raise InsufficientCredits / QuotaExceeded (402); callers decide when to
+# enforce. Reads: balance, month_to_date_spend, has_paid_credits, history,
+# spend_by_model, sum_debits_by_cause, is_recorded, find_by_key, wallet_exists,
+# unapplied_count. Repair: reconcile; boot check: verify_wallet_migrated.
 #
-# ATOMICITY (verdict from grounding: NO Mongo transactions — single-node Mongo
-# has no replica set, so ``session.start_transaction`` is unavailable and used
-# nowhere). Movements are made atomic with single-document operators only:
+# Atomicity without transactions (single-node Mongo, no replica set):
+#   1. Insert the ledger entry FIRST. The unique (workspace, idempotency_key)
+#      index makes a retried movement collide, so a duplicate key never
+#      double-applies. The entry is the idempotency token.
+#   2. Apply with one atomic $inc on the balance doc. A strict debit filters on
+#      balance >= amount; on a miss it deletes its own entry and raises, so a
+#      refused debit leaves no trace and a retry re-evaluates cleanly.
+#      allow_negative debits (metered spend) may drive the balance below 0.
+#   3. Stamp balance_after and flip applied=True on the entry.
+# The only crash window is between 1 and 2, leaving applied=False. reconcile
+# re-drives those entries (voiding strict debits that no longer fit), then sums
+# applied entries only. The balance is never clamped to 0.
 #
-#   1. Exactly-once guard — INSERT the ledger entry FIRST, stamped with the
-#      caller's ``idempotency_key``. The UNIQUE compound index on
-#      ``(workspace, idempotency_key)`` makes a retried movement collide on
-#      insert (``DuplicateKeyError`` / Mongo code 11000) → the movement was
-#      already applied → return the current balance (no-op, no re-apply,
-#      no second emit). This holds invariant (a): a duplicate key never
-#      double-applies.
-#
-#   2. Apply the effect with a conditional atomic ``$inc`` on the single
-#      CreditBalance doc (the ``find_one_and_update`` CAS idiom — copied from
-#      ``auth/service.py``'s claim_home_pocket_id and ``leads/service.py``'s
-#      _bump):
-#        * grant — unconditional ``$inc: +amount`` with ``upsert=True`` (creates
-#          the balance row at 0 then increments in one call).
-#        * debit — CONDITIONAL ``$inc: -amount`` filtered on
-#          ``balance_credits >= amount``. If it returns ``None`` the wallet had
-#          insufficient funds → we DELETE the ledger entry we inserted in step 1
-#          (rollback) and raise ``InsufficientCredits``. This holds invariant
-#          (b): a rejected over-debit leaves NO ledger entry and NO balance
-#          change, AND a later retry with the same key re-evaluates cleanly
-#          (the key is free again because the entry was deleted).
-#
-#   WHY insert-first then rollback-on-reject (not "insert only after a
-#   successful $inc"): the ledger entry IS the idempotency token. If we applied
-#   the $inc first and inserted the entry second, two concurrent calls with the
-#   same key could both pass the $inc before either inserted (double-spend), and
-#   the unique-key guard would only catch it AFTER the money already moved. By
-#   inserting first, the unique index serializes same-key callers before any
-#   balance moves; the conditional $inc serializes DIFFERENT-key debits against
-#   the funds check. The deletion on insufficient funds is the only compensating
-#   write, and it runs before the balance ever changed, so invariant (b) holds.
-#
-#   3. The new ``balance_after`` (returned by the atomic ``$inc``) is written
-#      back onto the ledger entry, and ``applied`` is flipped to True, so the
-#      audit row is self-describing AND ``reconcile`` can tell a landed entry
-#      from a phantom.
-#
-#   The only crash window is between the step-1 insert and the step-2 $inc: a
-#   committed ledger entry whose effect never landed on the balance — i.e. one
-#   left at ``applied is False``. ``reconcile`` closes it by RE-DRIVING every
-#   unapplied entry (not by blindly summing the whole ledger, which would count
-#   the phantom as if it had applied).
-#
-# Rule 9 — ``emit(CreditMovement(...))`` fires after each SUCCESSFUL grant /
-# debit (never on a no-op replay). Rule 10 — raise ``InsufficientCredits``
-# (CloudError), never HTTPException.
-#
-# Created 2026-06-23 (integration/billing-credits, BC-1): new entity.
-# Changed 2026-06-24 (BC-1 reconcile fix): an adversarial review found
-# ``reconcile`` summed ``amount_delta`` over ALL committed entries with no notion
-# of whether each entry's $inc actually LANDED, so a phantom (committed but
-# unapplied) debit drove the balance to a fabricated value. Three changes close
-# it: (1) every entry now carries an ``applied`` flag flipped True only after its
-# $inc lands; (2) ``debit`` gains ``allow_negative`` — an unconditional debit for
-# metered compute spend (BC-3) that may drive the balance below zero (a completed
-# run is always billed); a strict debit is tagged ``conditional=True``; (3)
-# ``reconcile`` now RE-DRIVES every ``applied is False`` entry (re-applying grants
-# and allow_negative debits unconditionally, re-applying strict debits with the
-# $gte guard and VOIDING them if the funds aren't there) and then sums only the
-# applied entries. The balance is NEVER clamped to >= 0 — a legitimate negative
-# from metered overage is preserved.
-# Changed 2026-06-24 (BC-4 run-start hard-block): added ``check_balance`` — a
-# pure, flag-free read that raises ``InsufficientCredits`` (402) when the wallet
-# is at or below zero. The chat run-start chokepoint (chat/agent_router.py) calls
-# it BEFORE create_run/submit, but ONLY when ``settings.billing_enforced`` is on,
-# so OSS/self-host (flag default False) is unaffected and IN-FLIGHT runs are never
-# touched. Kept flag-free here so the check stays reusable.
-# Changed 2026-06-24 (B1 review fix): ``grant`` now returns a ``GrantResult``
-# (balance + ``created``) instead of a bare int. ``created`` is True only when the
-# ledger entry was NEWLY inserted, False on the ``DuplicateKeyError`` replay path.
-# Billing's webhook keyed its capture-event emit on a balance-delta heuristic
-# (``new_balance == before + amount``) that is wrong under concurrency — a racing
-# grant could suppress a genuine emit or fire a spurious one. The created-flag is
-# the authoritative replay signal; callers gate the emit on it.
-# Changed 2026-06-26 (MCG-8): added ``is_recorded`` — a read-only check for whether
-# a ``(workspace, idempotency_key)`` movement already exists. MCG-8's LiteLLM
-# spend-log sweep ingests already-deduplicated external rows; it uses this to
-# report an accurate newly-billed count and skip a redundant insert-then-rollback
-# on the duplicate path. It does NOT weaken the exactly-once guard (grant/debit
-# stay idempotent via the unique index); it only saves the wasted round-trip.
-# Changed 2026-06-26 (WU-F billing cutover): added ``sum_debits_by_cause`` — a
-# read-only, tenant-filtered sum of credits debited under one ``cause`` over a
-# ``createdAt`` window (only ``applied`` entries counted). The shadow-compare phase
-# of the LiteLLM cutover uses it to total the BC-3 ``compute_spend`` debits for a
-# tenant's window so the llm_provisioning entity never reads the credit ledger doc
-# directly (the credits service owns reads of its own ``CreditLedgerEntry``). It
-# performs NO writes — shadow mode debits nothing.
-# Changed 2026-06-29 (fix/billing-usage-ledger-source): added ``spend_by_model`` —
-# a read-only, tenant-filtered breakdown of spend credits by (UTC day, model)
-# over a ``createdAt`` window, summed across the spend causes
-# (``compute_spend`` + ``litellm_spend``, only ``applied`` entries). The billing
-# usage graph reads through it so the "Usage by model" chart is sourced from the
-# wallet's OWN ledger (the universal meter, mode-agnostic) instead of the LiteLLM
-# proxy — which is empty in the default off-mode where finished runs debit the
-# ledger directly and never route through the proxy. EE entity-isolation: billing
-# must not read ``CreditLedgerEntry`` itself, so this owns the read (sibling to
-# ``sum_debits_by_cause``). It performs NO writes and changes NOTHING that is
-# charged — a pure re-source of the display.
-# Changed 2026-07-11 (feat/llm-cost-attribution): ``spend_by_model`` now sums each
-# debit's ``ref.total_tokens`` per (day, model) and returns it on the new
-# ``ModelSpendRow.tokens`` field, so the ledger-sourced usage graph surfaces real
-# token volume instead of a hardcoded 0. A legacy entry whose ref predates the
-# token stamp contributes 0 (the credits + requests figures are unchanged). Read
-# only — no new writes.
-# Changed 2026-09-11 (fix/billing-usage-chart-micro): ``spend_by_model`` now
-# returns the group's EXACT micro-credit sum on ``ModelSpendRow.credits_micro``
-# alongside the truncated ``credits``. The pipeline already summed
-# ``amount_delta_micro`` correctly; this function then threw the precision away per
-# (day, model) group, so a day of sub-credit runs reached the usage chart as zeros.
-# Read only — the pipeline, the causes and every written figure are untouched.
-# Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added the monthly
-# credit-QUOTA reads + assertion. ``month_to_date_spend`` sums this UTC calendar
-# month's APPLIED spend debits (compute_spend + litellm_spend, the same two
-# ``spend_by_model`` reads) via a SERVER-SIDE Mongo ``$match`` + ``$group`` (not
-# pull-all-then-sum) — iterated with ``async for`` because the mongomock-motor
-# test harness cannot ``await`` a latent command cursor (Beanie's
-# ``aggregate().to_list()`` raises there), so async-iteration is the call style
-# that runs the aggregation in both real Mongo and tests. ``check_quota`` is the
-# pure, flag-free monthly-cap assertion (the credit-spend sibling of
-# ``check_balance``): it resolves the plan ``monthly_ceiling`` via
-# ``entitlements.resolve_entitlements`` (no-op when None/uncapped), adds the
-# PURCHASED top-ups granted this period (``cause="top_up"`` only — the recurring
-# ``subscription_grant`` allotment is the ceiling's own baseline and is NOT
-# counted, which would otherwise double-credit the cap), and raises
-# ``QuotaExceeded`` (402 ``credits.quota_exceeded``) when month-to-date spend is
-# ``>=`` that effective ceiling. Reads only; charges nothing. Chunk 3 wires the
-# gate at run-start — this chunk owns only the reusable read + assertion.
-# Changed 2026-09-02 (fix/credits-spend-by-model-aggregation): ``spend_by_model``
-# now folds SERVER-SIDE. It used to run ``CreditLedgerEntry.find(query).to_list()``
-# and group the result in a Python loop, under a comment claiming the load was
-# "bounded — matches ``sum_debits_by_cause``". Neither is bounded: the window is
-# the caller's, and ``billing/usage.py`` lets it reach 366 days, so a busy
-# workspace's whole year of debits was materialised as Beanie documents to produce
-# a few dozen rows. The new ``_spend_by_model_pipeline`` does the work in Mongo —
-# ``$match`` (tenant + causes + applied + window + ``amount_delta < 0``) then
-# ``$group`` on (``$dateToString`` day, ``ref.model``) with ``$sum`` / ``$sum: 1``
-# for credits, requests and tokens — using the same cross-driver cursor idiom as
-# ``_sum_amount_delta`` (``inspect.isawaitable``: the pymongo-async client returns
-# a coroutine, mongomock-motor a directly-iterable cursor). Only the process
-# memory changed: every documented semantic is preserved, including the skip (not
-# clamp) of a non-negative delta, the ``"unknown"`` bucket for unattributed spend
-# so the chart still reconciles with the wallet, and the UTC day boundary. Rows
-# now come back sorted by (day, model) — ``$group`` order is unspecified, and the
-# old dict order was incidental. The one difference is a ``ref.total_tokens``
-# stored as something ``int()`` would coerce but BSON does not call a number — a
-# numeric string, a bool — which the pipeline reads as 0; the field's only writer
-# (``metering.service._total_tokens``) returns a non-negative ``int``, so no such
-# document exists, and 0 is the safer reading of junk. Still a pure read — no
-# writes, no change to anything charged. The ``(workspace, createdAt)`` compound
-# index on ``CreditLedgerEntry`` already serves the ``$match``.
-
-# Updated 2026-09-04 (fix/litellm-spend-leaks): added ``record_no_movement`` — a
-# zero-value ledger entry that records a source event as accounted for without
-# touching the wallet. ``debit`` rightly refuses a non-positive amount, but an
-# ingest that accumulates fractional external spend still needs somewhere to say "I
-# have seen this row", and this ledger's unique (workspace, idempotency_key) index
-# is the only per-row store with an exactly-once guarantee. Without it the LiteLLM
-# sweep's overlapping re-read would fold the same fraction in on every tick.
-
-# Changed 2026-09-04 (fix/wallet-migration-guard): added ``verify_wallet_migrated``
-# — a boot-path assertion that no wallet document still carries a pre-micro field.
-# The rename to micro-credits shipped and its migration was not run, and only the
-# ledger half of that failed audibly: an unconverted BALANCE row parses cleanly,
-# because ``balance_micro`` defaults to 0, so every customer read as having an
-# empty wallet and the run-start gate refused them. Nothing logged it. The guard
-# lives here rather than in the reader because the read cannot be fixed — an
-# absent field and a genuinely empty wallet are the same document — so refusing to
-# serve is the only answer that does not guess about money.
-# Changed 2026-09-16 (feat/platform-credits, chunk 6 of the Paw Admin PRD): four
-# additive changes for the new platform wallet/adjustment routes, all verified
-# against every existing call site before landing —
-#   * ``grant`` gained an ``amount_micro`` kwarg, mirroring ``debit``'s existing
-#     exactly-one-of-amount/amount_micro convention. Without it, a platform
-#     operator correcting a sub-credit discrepancy had no way to grant an exact
-#     micro amount — routing it through the whole-credit ``amount`` path
-#     truncates toward zero, so a 375_000-micro correction would silently grant
-#     0. Every existing caller (~90 call sites, production and test) passes
-#     ``amount`` explicitly, so this is fully backward compatible.
-#   * ``history`` gained an optional ``cause`` exact-match filter, for an
-#     operator scoping a wallet's ledger to just its platform adjustments.
-#     Default ``None`` preserves the existing query unchanged.
-#   * ``reconcile`` now returns a ``ReconcileResult(balance, redriven, voided)``
-#     instead of a bare balance int, so the platform reconcile route can report
-#     what the repair actually did rather than only its end state. Verified
-#     ZERO production callers before making this change; the 8 test call sites
-#     (tests/cloud/credits/test_ledger.py, test_micro_credit_migration.py) were
-#     updated in the same PR.
-#   * ``_entry_to_domain`` now carries ``applied``/``conditional`` onto the
-#     ``LedgerEntry`` domain object (verified as the sole construction site), so
-#     a platform wallet-history read can show an operator which entries are
-#     phantoms.
-#   * Added ``wallet_exists`` and ``unapplied_count`` — read-only helpers so the
-#     platform wallet-detail route can report "no wallet yet" and "N entries
-#     need reconcile" without any write.
-#   * Added ``find_by_key`` — a read-only lookup by ``(workspace,
-#     idempotency_key)``, so the platform adjust route can echo
-#     ``ledger_entry_id`` without importing ``models.credit`` itself.
-# ``debit``'s public signature was deliberately left untouched — see
-# ``ee/pocketpaw_ee/cloud/platform/credits.py`` for why (a replay signal is
-# derived from the pre-existing ``is_recorded`` instead), since changing it
-# would have touched revenue-critical call sites in billing/service.py,
-# llm_provisioning/service.py and metering/service.py outside this chunk's scope.
+# Aggregations run server-side and are iterated with async for, so the same
+# code works on real Mongo and the mongomock-motor test harness.
 
 from __future__ import annotations
 

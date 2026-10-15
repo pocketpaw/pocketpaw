@@ -44,11 +44,11 @@ run identity.
 Changes: 2026-06-24 (BC-4, integration/billing-credits) — credit hard-block at
 run-start. This module is the SINGLE chokepoint that starts a new chat run
 (``create_run`` + executor submit), so the credit gate sits here, right after
-scope resolution and BEFORE any DB write. When ``settings.billing_enforced`` is
-on, a workspace at balance <= 0 gets 402 (``credits.insufficient``) and NO run /
-user message is persisted; in-flight runs (already past this point) are never
-affected. The flag is OFF by default so OSS / self-host (no ledger) are
-unaffected. See ``credits.service.check_balance``.
+scope resolution and BEFORE any DB write. When ``billing_enforced`` or
+``credits_enforced`` is on, a workspace at balance <= 0 gets 402
+(``credits.insufficient``) and NO run / user message is persisted; in-flight
+runs (already past this point) are never affected. Both flags are OFF by
+default so OSS / self-host (no ledger) are unaffected. See ``credits.service.check_balance``.
 
 Changes: 2026-06-18 (PERF-6, feat/sites-minimal-context) — window the history
 fed to the agent on the SITES EDIT/REFINE surface only. The sites builder got
@@ -156,7 +156,8 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
     an earlier one failed has no side effect.
 
     * Balance + quota (BC-4 / chunk 3): ``credits.guards.assert_within_billing``,
-      a no-op unless ``billing_enforced``; balance before quota inside it.
+      a no-op unless ``billing_enforced`` or ``credits_enforced``; balance
+      before quota inside it.
     * Guest turn gate (feat/byok-guest-backend): the frozen
       ``guest_limit_reached`` / ``guest_key_required`` 402 the signup prompt
       keys on. Does NOT increment; ``run_core._reject_if_guest_over_limit``
@@ -170,7 +171,8 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
     from pocketpaw_ee.cloud.credits.guards import assert_within_billing
 
     checks = [
-        # Flag-gated no-op unless billing_enforced; balance then quota inside.
+        # Flag-gated no-op unless billing_enforced or credits_enforced;
+        # balance then quota inside.
         assert_within_billing(workspace_id),
         assert_guest_turn_allowed(user_id, scope_workspace_id),
         _assert_under_daily_turns(scope_workspace_id),

@@ -130,8 +130,9 @@ async def _dispatch_agent_responses(data: dict) -> None:
     # ``_should_agent_respond`` -> ``_smart_relevance_check``: that pre-classifier
     # is itself a (cheap Haiku) model call, so gating only before ``pool.run``
     # would still let an over-budget workspace spend on the relevance check. The
-    # shared guard is flag-gated (a no-op unless ``billing_enforced``) and runs
-    # both the empty-wallet and monthly-ceiling assertions; on rejection we emit a
+    # shared guard is flag-gated (a no-op unless ``billing_enforced`` or
+    # ``credits_enforced``) and runs both the empty-wallet and monthly-ceiling
+    # assertions; on rejection we emit a
     # single terminal ``agent.error`` to the group (best-effort — no run_id /
     # stream transport on this event-bus path) and return without dispatching any
     # agent. An empty ``workspace_id`` is a no-op (no wallet to attribute).
