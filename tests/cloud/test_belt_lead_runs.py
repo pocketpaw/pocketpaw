@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -138,6 +139,7 @@ class LeadRunner:
         ci_by_sha: dict[str, list[dict]] | None = None,
         nudge_codes: list[int] | None = None,
         fail: dict[str, int] | None = None,
+        base_runs: list[dict] | Callable[[float], list[dict]] | None = None,
     ):
         self.calls: list[tuple[list[str], Path]] = []
         self.prs = prs or [[]]
@@ -155,6 +157,9 @@ class LeadRunner:
         self.fail = dict(fail or {})
         self.locked_at_nudge: list[bool] = []
         self.on_pr_list = None  # called on each ``gh pr list``, before it answers
+        self.record = ""  # RECORD.md on the lead branch, read with its last commit
+        # Base-branch runs the stall check reads: a list, or a function of the wall.
+        self.base_runs = base_runs or []
 
     @staticmethod
     def _next(seq: list):
@@ -193,6 +198,14 @@ class LeadRunner:
             if at is None:
                 return 1, "", "gh: Not Found (HTTP 404)"
             return 0, json.dumps({"commit": {"committer": {"date": _iso(at)}}}), ""
+        if argv[:3] == ["gh", "api", "graphql"]:  # the lead branch's last commit + RECORD.md
+            at = self._next(self.commits)
+            record = {"object": {"text": self.record}} if self.record else None
+            head = None if at is None else {"committedDate": _iso(at), "file": record}
+            return 0, json.dumps({"data": {"repository": {"object": head}}}), ""
+        if argv[:3] == ["gh", "run", "list"] and "updatedAt" in argv[-1]:
+            runs = self.base_runs
+            return 0, json.dumps(runs(self.wall()) if callable(runs) else runs), ""
         if argv[:2] == ["gh", "api"] and "/compare/" in argv[2]:
             head = argv[2].split("...")[-1]
             return 0, json.dumps({"status": self.contains.get(head, "diverged")}), ""
@@ -620,6 +633,170 @@ async def test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_lad
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.REJECTED
     assert (action.rejected_reason or "").startswith("feature lead not done after 8h")
+
+
+# -- waiting, not stalled ------------------------------------------------------
+
+
+def _record(next_step: str) -> str:
+    return f"# {FEATURE} lead record\n\nIssue: #93\nStage: 4 round 1\nNext: {next_step}\n"
+
+
+def _commits(start: float, polls: int, busy: Callable[[int], bool]) -> list[float | None]:
+    """The lead branch's last commit time at each poll (one per minute): a commit
+    on every ``busy`` minute, none on the others."""
+    out: list[float | None] = []
+    last = None
+    for minute in range(polls):
+        last = start + 60 * minute if busy(minute) else last
+        out.append(last)
+    return out
+
+
+def _base_run(updated: float, *, status: str = "completed", conclusion: str = "failure") -> dict:
+    return {"status": status, "conclusion": conclusion, "updatedAt": _iso(updated)}
+
+
+def _flagged(runner: LeadRunner) -> bool:
+    return any(a[:3] == ["gh", "issue", "edit"] and "needs-human" in a for a, _ in runner.calls)
+
+
+async def test_a_lead_waiting_on_red_dev_ci_is_not_stalled(store, dirs, playbook):
+    """#1035 (viewer-playback): its RECORD's Next was "read the dev CI run
+    dispatched by #1211 as round 2" while dev CI stayed red for hours on other
+    features' breaks. It took nudges, then the 8 h timeout labelled it
+    needs-human 31 min after its last commit. A lead waiting on CI it cannot
+    shorten is not stalled: no rung while it waits, before or past 8 h."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+    disp = _lead_dispatcher(runner, launch)
+    start = runner.wall()
+    runner.record = _record("read the dev CI run dispatched by #1211 as round 2")
+    # Busy, waiting on dev CI from 3 h to 5 h, busy, waiting again from 8 h 5 m.
+    polls = 11 * 60
+    waits = (range(3 * 60, 5 * 60), range(8 * 60 + 5, polls))
+    runner.commits = _commits(start, polls, lambda m: not any(m in w for w in waits))
+    # Red dev CI all day: a run finishes every 10 min.
+    runner.base_runs = lambda now: [_base_run(now - (now - start) % 600)]
+    done = _done_runner(run_ref)  # at 11 h the round is clean and the feature done
+    runner.prs = [[]] * polls + done.prs
+    runner.comments = [[]] * polls + done.comments
+
+    await disp.run(run_ref, workspace_id=WS)
+
+    assert not _nudges(runner) and len(_launch_briefs(runner)) == 1
+    assert not _flagged(runner)
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert not action.parameters["_code_change"]["lead"]["stalls"]
+
+
+async def test_a_lead_waiting_for_the_lane_and_ci_on_its_fixes_is_not_stalled(
+    store, dirs, playbook
+):
+    """#1075 (photo-edit): its five fix PRs merged, then its RECORD's Next was
+    "... collect PRs, wait for the lane, then round 2 on the CI run that contains
+    them" while that dev CI run was still in progress. Past 8 h, 31 min after
+    its last commit, the timeout labelled it needs-human."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+    disp = _lead_dispatcher(runner, launch)
+    start = runner.wall()
+    runner.record = _record(
+        "fix batches r1-b1..b5 running (workflow wf_1); collect PRs, wait for the lane, "
+        "then round 2 on the CI run that contains them"
+    )
+    runner.commits = _commits(start, 8 * 60 + 5, lambda m: True)  # quiet from 8 h 5 m
+    fixes = [_lead_pr(40 + i, run_ref, state="MERGED", at=start + 8 * 3600) for i in range(5)]
+    # The dev CI run with the fixes started at 7 h 55 m and runs past 9 h 30 m.
+    runner.base_runs = [_base_run(start + 7 * 3600 + 55 * 60, status="in_progress")]
+    done = _done_runner(run_ref)
+    runner.prs = [[]] * (8 * 60) + [fixes] * 90 + [fixes + done.prs[0]]
+    runner.comments = [[]] * (8 * 60 + 90) + done.comments
+
+    await disp.run(run_ref, workspace_id=WS)
+
+    assert not _nudges(runner) and not _flagged(runner)
+    assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+
+
+@pytest.mark.parametrize(
+    ("next_step", "base_runs"),
+    [
+        # Next names CI, but nothing ran on the base inside the stall window.
+        ("read the dev CI run as round 2", [_base_run(time.time() - 3600)]),
+        # The base is busy, but Next names neither CI nor the lane.
+        ("start the wave 3 builders", [_base_run(time.time(), status="in_progress")]),
+    ],
+)
+async def test_a_silent_lead_with_no_wait_in_evidence_still_climbs_the_ladder(
+    store, dirs, playbook, next_step, base_runs
+):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner(base_runs=base_runs)
+    runner.commits = [runner.wall()]  # its RECORD at the launch, then silence
+    runner.record = _record(next_step)
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    lead = action.parameters["_code_change"]["lead"]
+    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "relaunch", "needs-human"]
+    assert action.rejected_reason == "feature lead silent 30m after a nudge and a relaunch"
+    assert _flagged(runner)
+
+
+async def test_a_wait_is_bounded_by_the_timeout_from_the_last_progress(store, dirs, playbook):
+    """A lead whose RECORD names CI on a base that never goes quiet, with no
+    progress after 1 h, is never nudged; the timeout counts from its last
+    commit and releases it at 9 h, labelled needs-human."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    in_progress = [_base_run(time.time(), status="in_progress")]
+    runner = LeadRunner(base_runs=in_progress)
+    disp = _lead_dispatcher(runner, launch)
+    runner.commits = _commits(runner.wall(), 60, lambda m: True)  # busy 1 h, then silent
+    runner.record = _record("wait for the lane, then round 2 on the CI run")
+
+    await disp.run(run_ref, workspace_id=WS)
+
+    assert not _nudges(runner) and _flagged(runner)
+    polls = sum(a[:3] == ["gh", "pr", "list"] for a, _ in runner.calls)
+    assert 9 * 60 - 2 <= polls <= 9 * 60 + 2  # 8 h after the last commit, not the launch
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith("feature lead not done after 8h")
+
+
+async def test_an_outage_while_a_lead_waits_past_8h_does_not_release_it(store, dirs, playbook):
+    """A GitHub outage skips polls; a lead that was waiting when it began keeps
+    its timeout counted from its last progress, not from the launch."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner(base_runs=[_base_run(time.time(), status="in_progress")])
+    disp = _lead_dispatcher(runner, launch)
+    start = runner.wall()
+    runner.commits = _commits(start, 8 * 60 + 5, lambda m: True)
+    runner.record = _record("read the dev CI run as round 2")
+    done = _done_runner(run_ref)
+    runner.prs = [[]] * (9 * 60) + done.prs
+    runner.comments = [[]] * (9 * 60) + done.comments
+
+    async def outage() -> None:  # two polls' worth of failed reads at 8 h 40 m
+        if runner.wall() >= start + 8 * 3600 + 40 * 60 and runner.on_pr_list:
+            runner.fail["pr list"] = 2 * (disp.gh_retries + 1)
+            runner.on_pr_list = None
+
+    runner.on_pr_list = outage
+
+    await disp.run(run_ref, workspace_id=WS)
+
+    assert sum(" ".join(a[1:3]) == "pr list" for a, _ in runner.calls) > 9 * 60
+    assert not _nudges(runner) and not _flagged(runner)
+    assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
 
 
 async def test_lead_timeouts_read_the_env(monkeypatch, tmp_path):
