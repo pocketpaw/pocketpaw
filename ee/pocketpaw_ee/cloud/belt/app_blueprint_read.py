@@ -8,8 +8,11 @@
 # ``///`` id. An app's title and its named journeys come from ``<app>.md`` (first
 # ``# `` heading, the Journeys section) and every id anywhere in its wave files.
 # GitHub comes through the patrols gh runner: ``feature-lead`` issues, merged
-# feature-done PRs, dev CI, every lead head in one call, a RECORD.md only for a
-# lead whose head moved, one issue list per repo a ``waits_on`` ref names. Lead
+# feature-done PRs, dev CI, every lead head in one call, one issue list per repo a
+# ``waits_on`` ref names, and a RECORD.md (``_PARALLEL`` at a time) only for a lead
+# whose head moved since its last read and whose feature is in a wave file and not
+# closed and done (issue closed, feature-done PR merged, no pending run). A RECORD
+# never changes a status, so a closed, done lead keeps its last read or none. Lead
 # runs come from ``service.list_runs``; an app row counts its features' slices by
 # status (done-with-gaps apart from done). Cached per (workspace, repo) for ``TTL``
 # behind a single-flight lock; any failed refresh (git, gh, a rate limit, a bug)
@@ -40,6 +43,7 @@ from .service import _READ_GIT, MAX_MODEL_BYTES, BeltConsoleError
 
 Run = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
 TTL = 60.0
+_PARALLEL = 8  # RECORD reads in flight at once
 _ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 _FILE = re.compile(r"docs/blueprints/([^/]+)/(?:features/([^/]+)\.wave\.json|c4-planned\.json)")
 _JID = re.compile(r"[A-Z]+-[JP][0-9]+")
@@ -247,7 +251,7 @@ async def _read(
     slug = prev["slug"] if "slug" in prev else await _github_slug(str(path), gh) or ""
     issues: dict[Any, dict[str, Any]] = {}
     done_prs: dict[str, list[dict[str, Any]]] = {}
-    ci, heads, records = {}, {}, {}
+    ci, heads = {}, {}
     if slug:
         leads_argv = ["gh", "issue", "list", "-R", slug, "--label", "feature-lead", *_LIST]
         for row in await _rows(gh, [*leads_argv, "number,state,labels"]):
@@ -263,11 +267,6 @@ async def _read(
             f = str(row.get("ref") or "").removeprefix("refs/heads/lead/")
             if _ID.fullmatch(f):
                 heads[f] = (row.get("object") or {}).get("sha")
-        for f, head in heads.items():
-            if head == prev.get("heads", {}).get(f):
-                records[f] = prev.get("records", {}).get(f)
-            else:
-                records[f] = await _record(gh, slug, f)
     state = {"success": "green", "failure": "red"}.get(ci.get("conclusion"), "pending")
     dev_ci = {"sha": ci.get("headSha"), "state": state, "url": ci.get("url")} if ci else None
 
@@ -285,6 +284,32 @@ async def _read(
             in_flight.append(
                 {"action_id": row["action_id"], "kind": kind, "feature": fid, "files": files}
             )
+
+    pending, live = {r["feature"] for r in in_flight}, set()
+    for app, files in apps.items():
+        for f, p in files.items():
+            wave = ab.parse_wave(await blob(p) or "") if f else None
+            if wave is None:
+                continue
+            closed = str((issues.get(wave["issue"]) or {}).get("state")).lower() == "closed"
+            if not (closed and f in done_prs) or f"{app}/{f}" in pending:
+                live.add(f)
+    seen, kept = prev.get("heads", {}), prev.get("records", {})
+    moved = [f for f in heads if f in live and heads[f] != seen.get(f)]
+    read_at = {f: heads[f] if f in live else seen.get(f) for f in heads}  # skipped: as last read
+    records = {f: kept.get(f) for f in heads}
+    gate = asyncio.Semaphore(_PARALLEL)
+
+    async def fetch(f: str) -> None:
+        async with gate:
+            records[f] = await _record(gh, slug, f)
+
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for f in moved:
+                tg.create_task(fetch(f))
+    except ExceptionGroup as eg:  # the first failure, as a lone read raises it
+        raise eg.exceptions[0] from None
 
     features, components, journeys, gaps, app_rows, models = [], [], [], [], [], []
     c4: dict[str, dict[str, Any] | None] = {}
@@ -380,7 +405,7 @@ async def _read(
     return {
         "graph": graph,
         "slug": slug,
-        "heads": heads,
+        "heads": read_at,
         "records": records,
         "models": c4,
         "paths": on_dev,

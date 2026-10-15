@@ -2,9 +2,11 @@
 #
 # ``read_blueprint`` over fake git and gh runners serving the B2 fixtures as a
 # creative-apps clone (Halo's c4-planned.json, two wave files, the layer-keys
-# RECORD on its lead branch). Pins the cache (no calls within the TTL; a moved lead
-# head re-reads only its RECORD), the stale fallback on a rate limit, and the
-# guards (a bad id or an oversized file is refused before it is read). The
+# RECORD on its lead branch); ``Fake.lead`` adds more leads. Pins the cache (no
+# calls within the TTL; a moved lead head re-reads only its RECORD), which RECORDs
+# a read fetches (only a lead in a wave file that is not closed and done) and how
+# many at once, the stale fallback on a rate limit, and the guards (a bad id or an
+# oversized file is refused before it is read). The
 # run rows, the grep output and the blueprint .md are shaped like the real ones:
 # ``stalls`` is an int, journey ids sit in a wave's ``note`` and the .md's
 # Journeys section, a test function follows its ``///`` comment. A feature's
@@ -12,9 +14,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -57,14 +61,44 @@ class Fake:
         self.origin = "https://github.com/qbtrix/creative-apps.git"
         self.heads = {"layer-keys": "a1", "easing": "b1", "Bad.Ref": "c1"}
         self.records = {"layer-keys": contents(RECORD), "easing": contents("Stage: 1 plan\n")}
-        tree = [*FILES, *(FX / "dev-tree.txt").read_text().split()]
+        self.issues = [{"number": 1036, "state": "OPEN", "labels": [{"name": "feature-lead"}]}]
+        self.files, self.prs, self.more_runs = dict(FILES), [], []
+        self.inflight = self.peak = 0
+        self.limited_records = False
+        self.tree()
+
+    def tree(self):
+        tree = [*self.files, *(FX / "dev-tree.txt").read_text().split()]
         size = {HUGE: MAX_MODEL_BYTES + 1}
         self.ls = "".join(f"100644 blob {sha(p)} {size.get(p, 10)}\t{p}\n" for p in tree)
+
+    def lead(self, f, state, *, merged=False, run=None):
+        """A Halo feature with a wave file, a lead branch and a RECORD; ``state``
+        ``None`` leaves its issue off the feature-lead list."""
+        n = 2000 + len(self.files)
+        wave = {"title": f, "wave": "W2", "status": "planned", "feature_issue": f"#{n}"}
+        self.files[f"{BP}/features/{f}.wave.json"] = json.dumps(wave)
+        row = {"number": n, "state": state, "labels": [{"name": "feature-lead"}]}
+        self.issues += [row] if state else []
+        self.prs += [{"number": n + 5000, "body": f"Feature: halo/{f}\n"}] if merged else []
+        lead = {"feature": f, "app": "halo", "prs": [], "stalls": 0}
+        if run:
+            self.more_runs.append(
+                {"action_id": f"act-{f}", "status": run, "repo": str(self.repo), "lead": lead}
+            )
+        self.heads[f], self.records[f] = "h1", contents(f"Stage: 3 {f}\n")
+        self.tree()
+        return row
+
+    def reads(self, since=0):
+        """The lead branches whose RECORD was fetched since call ``since``."""
+        api = [c[2] for c in self.calls[since:] if c[1:2] == ["api"] and "contents/" in c[2]]
+        return sorted(r.split("ref=lead/")[1] for r in api)
 
     async def git(self, argv):
         self.calls.append(argv)
         if argv[0] == "cat-file":
-            return 0, next(t for p, t in FILES.items() if sha(p) == argv[2]), ""
+            return 0, next(t for p, t in self.files.items() if sha(p) == argv[2]), ""
         drag, parent = (
             "origin/dev:UITests/HaloJourneyTests+Drag.swift",
             "origin/dev:UITests/P.swift",
@@ -90,25 +124,34 @@ class Fake:
             return 1, "", "HTTP 403: API rate limit exceeded"
         rows: object = []
         if argv[1:3] == ["issue", "list"] and "qbtrix/creative-apps" in argv:
-            rows = [{"number": 1036, "state": "OPEN", "labels": [{"name": "feature-lead"}]}]
+            rows = list(self.issues)
             if "feature-lead" not in argv:  # the waits_on read sees every issue
                 rows.append({"number": 333, "state": "OPEN"})
         elif argv[1:3] == ["issue", "list"]:
             rows = [{"number": 171, "state": "CLOSED"}]
+        elif argv[1:3] == ["pr", "list"]:
+            rows = self.prs
         elif argv[1:3] == ["run", "list"]:
             rows = [{"headSha": "62a8577", "conclusion": "success", "url": "u"}]
         elif argv[1] == "api" and "matching-refs" in argv[2]:
             rows = [
                 {"ref": f"refs/heads/lead/{f}", "object": {"sha": s}} for f, s in self.heads.items()
             ]
-        elif argv[1] == "api":
+        elif argv[1] == "api":  # a RECORD: yield so concurrent reads overlap
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+            await asyncio.sleep(0)
+            self.inflight -= 1
+            if self.limited_records:
+                return 1, "", "HTTP 403: API rate limit exceeded"
             rows = self.records[argv[2].split("ref=lead/")[1]]
         return 0, json.dumps(rows), ""
 
     async def runs(self, ws):
         lead = {"feature": "layer-keys", "app": "halo", "prs": [], "stalls": self.stalls}
         lead |= self.lead_extra
-        return [{"action_id": "act-1", "status": "running", "repo": str(self.repo), "lead": lead}]
+        row = {"action_id": "act-1", "status": "running", "repo": str(self.repo), "lead": lead}
+        return [row, *self.more_runs]
 
     async def touched(self, ws, action_id):
         return ["UITests/HaloJourneyTests+Drag.swift"]
@@ -307,3 +350,53 @@ async def test_features_carry_their_slices_and_apps_count_them(fake, monkeypatch
     assert got == [("LK-a", "done-with-gaps"), ("LK-b", "done"), ("LK-c", "planned")]
     assert feature(g, "halo/live-keys")["slices"] == []
     assert g["apps"][0]["slices"] == {"done": 1, "done-with-gaps": 1, "building": 0, "planned": 1}
+
+
+async def test_a_cold_read_fetches_only_records_that_can_still_change(fake):
+    for i in range(30):  # closed and done: their RECORD changes nothing
+        fake.lead(f"done-{i}", "CLOSED", merged=True)
+    fake.lead("done-ran", "CLOSED", merged=True, run="landed")
+    fake.lead("open", "OPEN", merged=True)  # its issue is open
+    fake.lead("unmerged", "CLOSED")  # no feature-done PR has merged
+    fake.lead("running", "CLOSED", merged=True, run="running")  # a pending run
+    fake.lead("unlisted", None, merged=True)  # gh did not list its issue
+    g = await read(fake)
+    # easing has a lead branch but no wave file; Bad.Ref fails the id check
+    assert fake.reads() == ["layer-keys", "open", "running", "unlisted", "unmerged"]
+    assert feature(g, "halo/done-0")["status"] == "done"
+    assert feature(g, "halo/done-ran")["run"]["stage"] is None
+    assert feature(g, "halo/open")["status"] == "built"
+
+
+async def test_record_reads_run_concurrently_within_the_bound(fake):
+    for i in range(20):
+        fake.lead(f"open-{i}", "OPEN")
+    await read(fake)
+    assert len(fake.reads()) == 21 and 1 < fake.peak <= 8
+    assert fake.inflight == 0
+
+
+async def test_a_done_lead_keeps_its_last_record_and_a_reopened_one_is_reread(fake):
+    issue = fake.lead("shipped", "OPEN", run="landed")
+    assert feature(await read(fake), "halo/shipped")["run"]["stage"] == "3 shipped"
+    issue["state"] = "CLOSED"
+    fake.prs.append({"number": 9001, "body": "Feature: halo/shipped"})
+    fake.heads["shipped"], fake.records["shipped"] = "h2", contents("Stage: 9 later\n")
+    n = len(fake.calls)
+    g = await read(fake, t=61.0)
+    assert fake.reads(n) == [] and feature(g, "halo/shipped")["run"]["stage"] == "3 shipped"
+    issue["state"] = "OPEN"  # reopened: its head moved since the last read
+    n = len(fake.calls)
+    g = await read(fake, t=122.0)
+    assert fake.reads(n) == ["shipped"] and feature(g, "halo/shipped")["run"]["stage"] == "9 later"
+
+
+async def test_a_rate_limited_record_read_serves_stale_without_an_error_log(fake, caplog):
+    for i in range(10):
+        fake.lead(f"open-{i}", "OPEN")
+    await read(fake)
+    fake.heads = {f: "moved" for f in fake.heads}
+    fake.limited_records = True
+    with caplog.at_level(logging.ERROR, logger=abr.__name__):
+        g = await read(fake, t=61.0)
+    assert g["stale"] is True and not caplog.records
