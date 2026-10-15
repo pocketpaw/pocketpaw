@@ -162,6 +162,8 @@ ROUTER_MODULES = [
     # Sites integrations. Owner routes take request_context; the three public ones
     # are on the allowlist below. Authz is asserted in tests/ee/sites/test_integrations_*.
     ("integrations", "pocketpaw_ee.integrations.router"),
+    # Early access (EA-7): one public route, on the allowlist below.
+    ("early_access", "pocketpaw_ee.cloud.early_access.router"),
 ]
 
 #: Modules that mount more than their ``router`` attribute. Anything not named
@@ -232,6 +234,10 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     "POST /pros/apply": (
         "apply to become a Pro; per-IP limit (rate_limit_partner_apply), a global "
         "daily cap and Turnstile (refused in production when the secret is unset)"
+    ),
+    "POST /early-access/waitlist": (
+        "a visitor joins the waitlist while signups are paused, so has no account; "
+        "per-IP limit (rate_limit_early_access_waitlist), one row per email"
     ),
     "POST /tools/ai-check": (
         "free AI check; per-IP limit (rate_limit_ai_check_public) and the daily USD "
