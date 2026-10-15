@@ -2639,14 +2639,15 @@ when plans open. No body. It sets `User.notify_plans_at` on the first call and
 returns that time on every call, so a repeat click changes nothing:
 
 ```json
-{"notified_at": "2026-10-16T09:00:00Z"}
+{"notified_at": "2026-10-16T09:00:00+00:00"}
 ```
 
 No session is 401. Nothing is emailed; the launch stats count the stamp.
 
 `GET /auth/me` carries two early-access stamps, null until each happens:
 `early_access_granted_at` (the one-time credit grant landed) and
-`notify_plans_at` (the notify call above).
+`notify_plans_at` (the notify call above). Every early-access timestamp here is
+a UTC ISO string with an explicit `+00:00` offset.
 
 ## Agent Activity
 

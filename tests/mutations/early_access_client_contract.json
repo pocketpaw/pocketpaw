@@ -31,7 +31,7 @@
   {
     "label": "auth/me drops the grant stamp",
     "file": "ee/pocketpaw_ee/cloud/auth/dto.py",
-    "find": "        early_access_granted_at=user.early_access_granted_at,\n",
+    "find": "        early_access_granted_at=iso_utc(user.early_access_granted_at),\n",
     "replace": "",
     "tests": [
       "tests/cloud/credits/test_early_access_client_contract.py::test_auth_me_carries_grant_and_notify_stamps"
@@ -44,6 +44,15 @@
     "replace": "",
     "tests": [
       "tests/cloud/credits/test_early_access_client_contract.py::test_auth_me_carries_grant_and_notify_stamps"
+    ]
+  },
+  {
+    "label": "notify returns a zone-less time the browser reads as local",
+    "file": "ee/pocketpaw_ee/cloud/early_access/router.py",
+    "find": "notified_at=iso_utc(await service.notify_plans(ctx.user_id))",
+    "replace": "notified_at=(await service.notify_plans(ctx.user_id)).isoformat()",
+    "tests": [
+      "tests/cloud/credits/test_early_access_client_contract.py::test_notify_stamps_once_and_repeats_the_same_time"
     ]
   }
 ]

@@ -7,10 +7,9 @@ wire shape consumed by paw-enterprise (camelCase for ``emailVerified``,
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from pydantic import BaseModel
 
+from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.auth.domain import AuthUser
 
 
@@ -65,8 +64,9 @@ class ProfileOut(BaseModel):
     # Early access stamps, null until each happens: the one-time credit grant
     # (a verified user with none has not been granted) and the "notify me when
     # plans open" click (the client shows the button as already pressed).
-    early_access_granted_at: datetime | None = None
-    notify_plans_at: datetime | None = None
+    # UTC ISO strings with an offset (``iso_utc``), never zone-less.
+    early_access_granted_at: str | None = None
+    notify_plans_at: str | None = None
 
 
 def auth_user_to_profile_out(user: AuthUser) -> ProfileOut:
@@ -83,8 +83,8 @@ def auth_user_to_profile_out(user: AuthUser) -> ProfileOut:
         mfa_enabled=user.mfa_enabled,
         is_guest=user.is_guest,
         platform_role=user.platform_role,
-        early_access_granted_at=user.early_access_granted_at,
-        notify_plans_at=user.notify_plans_at,
+        early_access_granted_at=iso_utc(user.early_access_granted_at),
+        notify_plans_at=iso_utc(user.notify_plans_at),
     )
 
 

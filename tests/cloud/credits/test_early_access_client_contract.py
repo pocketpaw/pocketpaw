@@ -99,6 +99,8 @@ async def test_notify_stamps_once_and_repeats_the_same_time(mongo_db):  # noqa: 
     assert first.json() == second.json()
     stored = (await User.get(user.id)).notify_plans_at
     assert stored is not None
+    # Zoned on the wire: a zone-less ISO string parses as browser-local time.
+    assert first.json()["notified_at"].endswith(("Z", "+00:00"))
     got = datetime.fromisoformat(first.json()["notified_at"])
     assert abs(got.replace(tzinfo=None) - stored.replace(tzinfo=None)).total_seconds() < 0.001
 
@@ -141,8 +143,9 @@ async def test_auth_me_carries_grant_and_notify_stamps(mongo_db):  # noqa: ARG00
 
     out = auth_user_to_profile_out(await service.get_profile(ctx))
 
-    assert out.early_access_granted_at.replace(tzinfo=None) == granted.replace(tzinfo=None)
-    assert out.notify_plans_at.replace(tzinfo=None) == notified.replace(tzinfo=None)
+    # Zoned on the wire, like notified_at.
+    assert out.early_access_granted_at == "2026-10-15T09:00:00+00:00"
+    assert out.notify_plans_at == "2026-10-16T09:00:00+00:00"
 
 
 async def test_auth_me_stamps_are_null_for_a_new_user(mongo_db):  # noqa: ARG001

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.rate_limit import rate_limit_early_access_waitlist
+from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.early_access import service
 from pocketpaw_ee.cloud.early_access.dto import NotifyPlansResponse, WaitlistJoinRequest
 
@@ -27,7 +28,7 @@ async def join_waitlist(body: WaitlistJoinRequest) -> Response:
 async def notify_plans(ctx: RequestContext = Depends(request_context)) -> NotifyPlansResponse:
     """Signed-in user asks to hear when plans open. Sets
     ``User.notify_plans_at`` on the first call; every call returns that time."""
-    return NotifyPlansResponse(notified_at=await service.notify_plans(ctx.user_id))
+    return NotifyPlansResponse(notified_at=iso_utc(await service.notify_plans(ctx.user_id)))
 
 
 __all__ = ["router"]

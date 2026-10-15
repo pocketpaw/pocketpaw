@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
@@ -20,9 +18,9 @@ class WaitlistJoinRequest(BaseModel):
 
 class NotifyPlansResponse(BaseModel):
     """POST /early-access/notify. The first time the user asked; repeat calls
-    return the same value."""
+    return the same value. A UTC ISO string with an offset (``iso_utc``)."""
 
-    notified_at: datetime
+    notified_at: str
 
 
 __all__ = ["NotifyPlansResponse", "WaitlistJoinRequest"]
