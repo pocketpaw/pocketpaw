@@ -4,8 +4,8 @@
 # Every route carries the license gate, ``request_context`` and a per-route
 # RBAC guard (pinned by the guard-coverage test in tests/cloud/growth/
 # test_gate.py): GETs ``growth.read``, workspace-internal writes
-# ``growth.write``, and connecting or disconnecting a social account (which
-# reaches an outside platform) ``growth.manage``. The connect route builds the
+# ``growth.write``, and connecting or disconnecting a social account or posting
+# to one (which reaches an outside platform) ``growth.manage``. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
 # allowlist; it is never taken from the request body.
 
@@ -26,6 +26,8 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     ConnectSocialAccountRequest,
     ConnectSocialAccountResponse,
     CreateCharacterRequest,
+    CreateSocialPostRequest,
+    CreateSocialPostResponse,
     GenerateIdeasRequest,
     MakeMediaRequest,
     MakeMemeRequest,
@@ -33,8 +35,10 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     RefreshPulseRequest,
     ScheduleIdeasRequest,
     SocialAccountListResponse,
+    SocialChannelListResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialPostListResponse,
     SocialProfileListResponse,
     SocialProfileResponse,
     SocialPulseResponse,
@@ -382,3 +386,45 @@ async def disconnect_account(
     """Disconnect one account. 404 when it isn't this social's."""
     await social_service.disconnect_account(ctx, profile_id, account_id)
     return Response(status_code=204)
+
+
+@router.get(
+    "/accounts/{account_id}/channels",
+    response_model=SocialChannelListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_channels(
+    account_id: str,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialChannelListResponse:
+    """The channels a post to this account can go to (Slack)."""
+    return await social_service.list_channels(ctx, profile_id, account_id)
+
+
+@router.post(
+    "/posts",
+    response_model=CreateSocialPostResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def create_post(
+    body: CreateSocialPostRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> CreateSocialPostResponse:
+    """Publish one text post now to each target account."""
+    return await social_service.create_post(ctx, profile_id, body)
+
+
+@router.get(
+    "/posts",
+    response_model=SocialPostListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_posts(
+    profile_id: str | None = _PROFILE_ID,
+    ids: str | None = Query(default=None, max_length=2000),
+    ctx: RequestContext = Depends(request_context),
+) -> SocialPostListResponse:
+    """Posts from the last 7 days, newest first; ``ids`` narrows to those post ids."""
+    return await social_service.list_posts(ctx, profile_id, ids)

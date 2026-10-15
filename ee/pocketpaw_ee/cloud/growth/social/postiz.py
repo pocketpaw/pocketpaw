@@ -12,6 +12,10 @@
 # those messages straight from the Bot API (token scrubbed from every error), and
 # ``complete_connect`` hands Postiz the state plus the chat id. Tests replace the
 # Bot API read through ``set_production_telegram_updates``.
+#
+# Publishing uses the public API too: ``create_posts`` takes a payload the
+# service builds, ``list_posts`` reads a date window, and ``trigger_tool`` runs a
+# provider helper such as Slack's channel list.
 
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ import hmac
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -174,6 +178,43 @@ class PostizClient:
         await self._request(
             "DELETE", f"/public/v1/integrations/{quote(integration_id, safe='')}", api_key=api_key
         )
+
+    @staticmethod
+    def _json(resp: httpx.Response) -> Any:
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
+    async def trigger_tool(
+        self, api_key: str, integration_id: str, method: str, data: dict[str, Any] | None = None
+    ) -> Any:
+        resp = await self._request(
+            "POST",
+            f"/public/v1/integration-trigger/{quote(integration_id, safe='')}",
+            body={"methodName": method, "data": data or {}},
+            api_key=api_key,
+        )
+        body = self._json(resp)
+        if not isinstance(body, dict) or "output" not in body:
+            raise PostizError("postiz.bad_response", f"Postiz returned no output for {method}.")
+        return body["output"]
+
+    async def create_posts(self, api_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        resp = await self._request("POST", "/public/v1/posts", body=payload, api_key=api_key)
+        data = self._json(resp)
+        if not isinstance(data, list):
+            raise PostizError("postiz.bad_response", "Postiz returned an unexpected post result.")
+        return [item for item in data if isinstance(item, dict)]
+
+    async def list_posts(self, api_key: str, start: str, end: str) -> list[dict[str, Any]]:
+        query = urlencode({"startDate": start, "endDate": end})
+        resp = await self._request("GET", f"/public/v1/posts?{query}", api_key=api_key)
+        data = self._json(resp)
+        posts = data.get("posts") if isinstance(data, dict) else None
+        if not isinstance(posts, list):
+            raise PostizError("postiz.bad_response", "Postiz returned an unexpected post list.")
+        return [item for item in posts if isinstance(item, dict)]
 
 
 TelegramUpdatesFn = Callable[..., Awaitable[list[dict[str, Any]]]]

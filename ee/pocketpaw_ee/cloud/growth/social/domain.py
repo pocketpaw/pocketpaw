@@ -8,6 +8,8 @@
 # (docs/design/drafts/2026-10-06-growth-social-setup.md); the frontend builds
 # against the same strings, so a rename here is a breaking change there.
 # ``COMPLETE_REQUIRED_FIELDS`` is what ``POST /social/profile/complete`` demands.
+# ``POSTABLE_PLATFORMS`` are the connected accounts "post now" can publish to;
+# ``CHANNEL_PLATFORMS`` additionally need a channel picked per post.
 
 from __future__ import annotations
 
@@ -90,6 +92,8 @@ SOCIAL_ACCOUNT_PLATFORMS: tuple[tuple[str, str], ...] = (
     ("slack", "Slack"),
     ("telegram", "Telegram"),
 )
+POSTABLE_PLATFORMS = frozenset({"slack"})
+CHANNEL_PLATFORMS = frozenset({"slack"})
 
 DEFAULT_IDEA_COUNT = 6
 MAX_IDEA_COUNT = 12

@@ -12,7 +12,8 @@
 # at 2000. ``website`` is trimmed and gets ``https://`` when typed bare;
 # anything that is not then an http(s) URL with a host is a 422. ``category``
 # is free text up to 60 characters. Idea edits need at least one field; script
-# beats and hashtags are trimmed and capped.
+# beats and hashtags are trimmed and capped. A post names 1–10 distinct
+# accounts and trimmed, non-empty content of at most 10000 characters.
 
 from __future__ import annotations
 
@@ -382,6 +383,8 @@ class SocialAccountResponse(BaseModel):
     username: str | None
     picture: str | None
     disabled: bool
+    can_post: bool
+    needs_channel: bool
 
 
 class SocialAccountPlatformResponse(BaseModel):
@@ -418,3 +421,65 @@ class CheckTelegramRequest(BaseModel):
 class CheckTelegramResponse(BaseModel):
     status: Literal["pending", "connected"]
     account: SocialAccountResponse | None
+
+
+class SocialChannelResponse(BaseModel):
+    id: str
+    name: str
+
+
+class SocialChannelListResponse(BaseModel):
+    items: list[SocialChannelResponse]
+
+
+class SocialPostTarget(BaseModel):
+    account_id: str = Field(min_length=1, max_length=64)
+    channel: str | None = Field(default=None, max_length=128)
+
+    @field_validator("channel")
+    @classmethod
+    def _channel(cls, v: str | None) -> str | None:
+        return (v or "").strip() or None
+
+
+_PostContent = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=10000)
+]
+
+
+class CreateSocialPostRequest(BaseModel):
+    content: _PostContent
+    targets: list[SocialPostTarget] = Field(min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def _unique_accounts(self) -> CreateSocialPostRequest:
+        ids = [t.account_id for t in self.targets]
+        if len(set(ids)) != len(ids):
+            raise ValueError("each account may be targeted once")
+        return self
+
+
+class SocialPostCreated(BaseModel):
+    account_id: str
+    platform: str
+    post_id: str
+
+
+class CreateSocialPostResponse(BaseModel):
+    items: list[SocialPostCreated]
+
+
+class SocialPostResponse(BaseModel):
+    id: str
+    account_id: str
+    platform: str
+    account_name: str
+    content: str
+    state: str
+    url: str | None
+    error: str | None
+    published_at: str | None
+
+
+class SocialPostListResponse(BaseModel):
+    items: list[SocialPostResponse]

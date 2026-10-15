@@ -4,9 +4,11 @@
 # deployment, one org per profile, the server-built OAuth return URL, platform
 # errors, tenant and profile isolation, disconnect, the encrypted key, the
 # Telegram code flow (a fake Bot API read through
-# ``set_production_telegram_updates``, including the cross-workspace sweep), and
-# the Postiz client's JWT signer, create-org failure and the Bot API read's token
-# scrubbing (``httpx.MockTransport``).
+# ``set_production_telegram_updates``, including the cross-workspace sweep),
+# posting now (Slack channels, the payload sent, every refusal before Postiz is
+# called, the posts list and tenant isolation), and the Postiz client's JWT
+# signer, create-org failure and the Bot API read's token scrubbing
+# (``httpx.MockTransport``).
 
 from __future__ import annotations
 
@@ -39,6 +41,7 @@ from tests.cloud.growth.social.test_router import BASE, _client
 ACCOUNTS = f"{BASE}/accounts"
 CONNECT = f"{ACCOUNTS}/connect"
 CHECK = f"{ACCOUNTS}/telegram/check"
+POSTS = f"{BASE}/posts"
 TOKEN = "123:bot-secret"
 LOCAL = {"Origin": "http://localhost:5173"}
 
@@ -51,6 +54,11 @@ class _FakePostiz:
         self.connects: list[tuple[str, str, str]] = []
         self.deleted: list[tuple[str, str]] = []
         self.completed: list[tuple[str, str, str]] = []
+        self.triggered: list[tuple[str, str, str]] = []
+        self.channels: list[dict[str, Any]] = [{"id": "C1", "name": "social"}]
+        self.posted: list[tuple[str, dict[str, Any]]] = []
+        self.posts: list[dict[str, Any]] = []
+        self.listed: list[tuple[str, str, str]] = []
 
     async def create_org(self, external_id: str, name: str) -> tuple[str, str]:
         self.created.append((external_id, name))
@@ -85,12 +93,29 @@ class _FakePostiz:
     async def delete_integration(self, api_key: str, integration_id: str) -> None:
         self.deleted.append((api_key, integration_id))
 
+    async def trigger_tool(
+        self, api_key: str, integration_id: str, method: str, data: dict[str, Any] | None = None
+    ) -> Any:
+        self.triggered.append((api_key, integration_id, method))
+        return self.channels
 
-def _integration(account_id: str) -> dict[str, Any]:
+    async def create_posts(self, api_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        self.posted.append((api_key, payload))
+        return [
+            {"postId": f"post-{p['integration']['id']}", "integration": p["integration"]["id"]}
+            for p in payload["posts"]
+        ]
+
+    async def list_posts(self, api_key: str, start: str, end: str) -> list[dict[str, Any]]:
+        self.listed.append((api_key, start, end))
+        return list(self.posts)
+
+
+def _integration(account_id: str, identifier: str = "x") -> dict[str, Any]:
     return {
         "id": account_id,
         "name": "Acme",
-        "identifier": "x",
+        "identifier": identifier,
         "picture": "https://pbs.example/a.png",
         "disabled": False,
         "profile": "acme",
@@ -255,6 +280,8 @@ async def test_profiles_get_their_own_orgs_and_accounts(w1, postiz):
             "username": "acme",
             "picture": "https://pbs.example/a.png",
             "disabled": False,
+            "can_post": False,
+            "needs_channel": False,
         }
     ]
     assert (await w1.get(ACCOUNTS, params={"profile_id": second})).json()["items"] == []
@@ -337,6 +364,8 @@ async def test_telegram_check_is_pending_until_the_bot_sees_connect(w1, postiz, 
             "username": None,
             "picture": None,
             "disabled": False,
+            "can_post": False,
+            "needs_channel": False,
         },
     }
     assert postiz.completed == [("telegram", "state-1", "-100123")]
@@ -385,6 +414,202 @@ async def test_telegram_check_refuses_unknown_expired_and_foreign_codes(w1, w2, 
     assert telegram.calls == [] and postiz.completed == []
 
 
+async def _connected(client: httpx.AsyncClient, postiz: _FakePostiz, key: str = "key-1") -> None:
+    await _profile(client)
+    await client.post(CONNECT, json={"platform": "x"}, headers=LOCAL)
+    postiz.integrations[key] = [_integration("sl-1", "slack"), _integration("x-1")]
+
+
+async def test_accounts_say_whether_they_can_post(w1, postiz):
+    await _connected(w1, postiz)
+    items = (await w1.get(ACCOUNTS)).json()["items"]
+    assert [(a["id"], a["can_post"], a["needs_channel"]) for a in items] == [
+        ("sl-1", True, True),
+        ("x-1", False, False),
+    ]
+
+
+async def test_channels(w1, postiz):
+    await _connected(w1, postiz)
+    resp = await w1.get(f"{ACCOUNTS}/sl-1/channels")
+    assert resp.status_code == 200
+    assert resp.json() == {"items": [{"id": "C1", "name": "social"}]}
+    assert postiz.triggered == [("key-1", "sl-1", "channels")]
+
+    resp = await w1.get(f"{ACCOUNTS}/x-1/channels")
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "social.channels_unsupported"
+    resp = await w1.get(f"{ACCOUNTS}/nope/channels")
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "social_account.not_found"
+    assert len(postiz.triggered) == 1
+
+
+async def test_post_now_sends_one_payload_and_maps_the_result(w1, postiz):
+    await _connected(w1, postiz)
+    body = {"content": "  Ship day!  ", "targets": [{"account_id": "sl-1", "channel": "C1"}]}
+    resp = await w1.post(POSTS, json=body)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "items": [{"account_id": "sl-1", "platform": "slack", "post_id": "post-sl-1"}]
+    }
+    [(key, payload)] = postiz.posted
+    sent = datetime.fromisoformat(payload.pop("date").replace("Z", "+00:00"))
+    assert abs(datetime.now(UTC) - sent) < timedelta(seconds=10)
+    assert key == "key-1"
+    assert payload == {
+        "type": "now",
+        "shortLink": False,
+        "tags": [],
+        "posts": [
+            {
+                "integration": {"id": "sl-1"},
+                "value": [{"content": "Ship day!", "image": []}],
+                "settings": {"__type": "slack", "channel": "C1"},
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "code"),
+    [
+        (
+            {"content": "hi", "targets": [{"account_id": "x-1"}]},
+            422,
+            "social.post_platform_unsupported",
+        ),
+        (
+            {"content": "hi", "targets": [{"account_id": "sl-1", "channel": " "}]},
+            422,
+            "social.channel_required",
+        ),
+        (
+            {
+                "content": "hi",
+                "targets": [{"account_id": "sl-1", "channel": "C1"}, {"account_id": "nope"}],
+            },
+            404,
+            "social_account.not_found",
+        ),
+        ({"content": "   ", "targets": [{"account_id": "sl-1", "channel": "C1"}]}, 422, None),
+        ({"content": "x" * 10001, "targets": [{"account_id": "sl-1", "channel": "C1"}]}, 422, None),
+        ({"content": "hi", "targets": []}, 422, None),
+        ({"content": "hi", "targets": [{"account_id": "sl-1", "channel": "C1"}] * 2}, 422, None),
+    ],
+)
+async def test_post_now_refusals_never_reach_postiz(w1, postiz, body, status, code):
+    await _connected(w1, postiz)
+    resp = await w1.post(POSTS, json=body)
+    assert resp.status_code == status, resp.text
+    if code:
+        assert resp.json()["error"]["code"] == code
+    assert postiz.posted == []
+
+
+async def test_post_now_names_the_platform_it_cannot_post_to(w1, postiz):
+    await _connected(w1, postiz)
+    resp = await w1.post(POSTS, json={"content": "hi", "targets": [{"account_id": "x-1"}]})
+    assert resp.json()["error"]["message"] == "Posting to X isn't supported yet."
+
+
+def _post(post_id: str, state: str, when: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "id": post_id,
+        "content": f"body {post_id}",
+        "publishDate": when,
+        "releaseURL": extra.pop("url", None),
+        "state": state,
+        "integration": {"id": "sl-1", "providerIdentifier": "slack", "name": "Acme HQ"},
+        **extra,
+    }
+
+
+async def test_posts_list(w1, postiz):
+    await _profile(w1)
+    assert (await w1.get(POSTS)).json() == {"items": []}
+    assert postiz.listed == [] and postiz.created == []
+
+    await w1.post(CONNECT, json={"platform": "x"}, headers=LOCAL)
+    postiz.posts = [
+        _post("p1", "PUBLISHED", "2026-10-14T08:00:00.000Z", url="https://slack.example/p1"),
+        _post("p2", "ERROR", "2026-10-15T08:00:00.000Z", error="channel_not_found"),
+        _post("p3", "QUEUE", "2026-10-15T09:00:00.000Z"),
+        _post("p4", "ODD", "2026-10-13T09:00:00.000Z"),
+    ]
+    items = (await w1.get(POSTS)).json()["items"]
+    assert [(i["id"], i["state"]) for i in items] == [
+        ("p3", "queued"),
+        ("p2", "error"),
+        ("p1", "published"),
+        ("p4", "odd"),
+    ]
+    assert items[2] == {
+        "id": "p1",
+        "account_id": "sl-1",
+        "platform": "slack",
+        "account_name": "Acme HQ",
+        "content": "body p1",
+        "state": "published",
+        "url": "https://slack.example/p1",
+        "error": None,
+        "published_at": "2026-10-14T08:00:00.000Z",
+    }
+    assert items[1]["error"] == "channel_not_found" and items[1]["published_at"] is None
+    _, start, end = postiz.listed[-1]
+    span = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+    assert span == timedelta(days=8)
+
+    picked = (await w1.get(POSTS, params={"ids": "p1, p3,missing"})).json()["items"]
+    assert [i["id"] for i in picked] == ["p3", "p1"]
+
+
+async def test_posts_need_postiz(w1, monkeypatch):
+    monkeypatch.setattr(
+        "pocketpaw.config.get_settings",
+        lambda: SimpleNamespace(postiz_url=None, postiz_jwt_secret=None, postiz_platforms=None),
+    )
+    await _profile(w1)
+    for resp in (
+        await w1.get(POSTS),
+        await w1.post(POSTS, json={"content": "hi", "targets": [{"account_id": "sl-1"}]}),
+        await w1.get(f"{ACCOUNTS}/sl-1/channels"),
+    ):
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "social.accounts_unavailable"
+
+
+async def test_post_upstream_failure_is_502(w1, postiz):
+    await _connected(w1, postiz)
+
+    async def boom(api_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        raise PostizError("postiz.http_error", "boom")
+
+    postiz.create_posts = boom  # type: ignore[method-assign]
+    body = {"content": "hi", "targets": [{"account_id": "sl-1", "channel": "C1"}]}
+    resp = await w1.post(POSTS, json=body)
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "social.accounts_upstream"
+
+
+async def test_another_workspace_cannot_post_or_list_channels(w1, w2, postiz):
+    await _connected(w1, postiz)
+    other = await _profile(w2)
+    await SocialPostizOrg(
+        workspace="w1", profile=other, postiz_org_id="org-1", api_key_enc=encrypt("key-1")
+    ).insert()
+
+    resp = await w2.get(f"{ACCOUNTS}/sl-1/channels")
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "social_account.not_found"
+    body = {"content": "hi", "targets": [{"account_id": "sl-1", "channel": "C1"}]}
+    resp = await w2.post(POSTS, json=body)
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "social_account.not_found"
+    assert (await w2.get(POSTS)).json() == {"items": []}
+    assert postiz.triggered == [] and postiz.posted == [] and postiz.listed == []
+
+
 async def test_telegram_updates_scrubs_the_token():
     seen: list[httpx.Request] = []
 
@@ -430,3 +655,38 @@ async def test_create_org_refusal_is_an_error_without_secrets():
     assert "s3cret" not in repr(client)
     claims = json.loads(_unb64(seen[0]["params"].split(".")[1]))
     assert claims == {"id": "w1:p1", "name": "Acme", "saasName": "PocketPaw", "email": ""}
+
+
+async def test_client_publishing_calls_hit_the_public_api():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/integration-trigger/sl-1"):
+            return httpx.Response(200, json={"output": [{"id": "C1", "name": "social"}]})
+        if request.method == "POST":
+            return httpx.Response(201, json=[{"postId": "p1", "integration": "sl-1"}])
+        if request.url.params.get("startDate") == "bad":
+            return httpx.Response(500, text="no key-9 for you")
+        return httpx.Response(200, json={"posts": [{"id": "p1"}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = PostizClient("http://postiz.test/", "s3cret", client=http)
+        assert await client.trigger_tool("key-9", "sl-1", "channels") == [
+            {"id": "C1", "name": "social"}
+        ]
+        assert await client.create_posts("key-9", {"type": "now"}) == [
+            {"postId": "p1", "integration": "sl-1"}
+        ]
+        assert await client.list_posts("key-9", "2026-10-08", "2026-10-16") == [{"id": "p1"}]
+        with pytest.raises(PostizError) as caught:
+            await client.list_posts("key-9", "bad", "2026-10-16")
+    assert [(r.method, r.url.path) for r in seen[:3]] == [
+        ("POST", "/api/public/v1/integration-trigger/sl-1"),
+        ("POST", "/api/public/v1/posts"),
+        ("GET", "/api/public/v1/posts"),
+    ]
+    assert json.loads(seen[0].content) == {"methodName": "channels", "data": {}}
+    assert seen[2].url.params["endDate"] == "2026-10-16"
+    assert all(r.headers["authorization"] == "key-9" for r in seen)
+    assert "key-9" not in caught.value.message

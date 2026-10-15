@@ -7815,15 +7815,16 @@ instance. The profile gets its own Postiz organisation on its first connect
 (never on a read); the org's API key is stored encrypted with
 `CLOUD_ENCRYPTION_KEY`. Connections are off until both
 `POCKETPAW_POSTIZ_URL` (the instance's base URL) and
-`POCKETPAW_POSTIZ_JWT_SECRET` (Postiz's `JWT_SECRET`) are set. All four
-routes take `?profile_id=` like the rest.
+`POCKETPAW_POSTIZ_JWT_SECRET` (Postiz's `JWT_SECRET`) are set. Every route
+here, posting included, takes `?profile_id=` like the rest.
 
 | Route | What it does |
 |---|---|
-| `GET /accounts` (`growth.read`) | `{items: [{id, platform, name, username, picture, disabled}], platforms: [{id, label, available}], configured}`. `platform` is the Postiz provider id, `username` the account handle (or `null`). `configured: false` means this deployment has no Postiz; `items` is empty then. |
+| `GET /accounts` (`growth.read`) | `{items: [{id, platform, name, username, picture, disabled, can_post, needs_channel}], platforms: [{id, label, available}], configured}`. `platform` is the Postiz provider id, `username` the account handle (or `null`). `can_post` is true when "post now" can publish to the account (Slack only for now); `needs_channel` is true when each post must name a channel (Slack). `configured: false` means this deployment has no Postiz; `items` is empty then. |
 | `POST /accounts/connect` (`growth.manage`) | `{platform}` → `{url, telegram}`. For every platform but Telegram, `url` is the platform's authorize URL and `telegram` is `null`: open the URL in the browser; after consent it returns to `<origin>/growth/social/accounts?added=<platform>`. The origin is the caller's (`Origin`, then `Referer`) when it is on the CORS allowlist, else `POCKETPAW_FRONTEND_BASE_URL`; it is never read from the body. For `telegram`, `url` is `null` and `telegram` is `{code, bot_name, expires_at}` (see Telegram below). |
 | `POST /accounts/telegram/check` (`growth.manage`) | `{code}` → `{status: "pending" \| "connected", account}`. `account` is the new account (shape as in `items`) once connected, else `null`. Poll it after showing the code. |
 | `DELETE /accounts/{account_id}` (`growth.manage`) | Disconnect one account. `204`. |
+| `GET /accounts/{account_id}/channels` (`growth.read`) | `{items: [{id, name}]}`: the channels a post to this account can go to, read live from the platform through Postiz. Only for accounts with `needs_channel`. |
 
 `platforms` (in order): `x`, `linkedin`, `linkedin-page`, `facebook`,
 `instagram-standalone`, `threads`, `youtube`, `tiktok`, `reddit`, `pinterest`,
@@ -7858,6 +7859,34 @@ a Postiz failure keeps it, so the check can be retried. Needs
 | 404 | `social_account.not_found` | Disconnect of an id that is not one of this profile's accounts. |
 | 404 | `telegram_code.not_found` | Telegram check of a code that is unknown, expired, already used, or another profile's or workspace's. |
 | 502 | `social.accounts_upstream` | Postiz or the Telegram Bot API failed or answered something unexpected. |
+
+Channels add these:
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `social.accounts_unavailable` | No Postiz configured. |
+| 404 | `social_account.not_found` | The id is not one of this profile's accounts (or the profile has none yet). |
+| 422 | `social.channels_unsupported` | The account's platform has no channels to pick. |
+
+### Posts — `/api/v1/growth/social/posts`
+
+"Post now" publishes one text post to connected accounts through Postiz.
+Only Slack can be posted to for now.
+
+| Route | What it does |
+|---|---|
+| `POST /posts` (`growth.manage`) | `{content, targets: [{account_id, channel}]}` → `{items: [{account_id, platform, post_id}]}`. `content` is trimmed and must be 1–10000 characters. `targets` is 1–10 distinct accounts; `channel` is a channel id from the channels route, required for accounts with `needs_channel` and `null` otherwise. Every target is checked before anything is sent, so one bad target refuses the whole post and nothing goes out. Postiz publishes asynchronously: the post starts `queued` and usually becomes `published` within seconds. |
+| `GET /posts` (`growth.read`) | `{items: [{id, account_id, platform, account_name, content, state, url, error, published_at}]}`: the profile's posts from the last 7 days (and the next day), newest first. `?ids=a,b` returns only those post ids; unknown ids are left out. `state` is `queued \| published \| error \| draft`. `url` is the published post's link when the platform gives one, `error` the failure reason when Postiz reports one, and `published_at` is set only once the post is `published`. A profile with no connected accounts yet gets `{items: []}`. Poll it with `ids` after posting. |
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `social.accounts_unavailable` | No Postiz configured. |
+| 422 | — | Empty or over-long `content`, no targets or more than 10, or the same account twice. |
+| 404 | `social_account.not_found` | A target is not one of this profile's accounts. |
+| 422 | `social.post_platform_unsupported` | A target's platform can't be posted to yet ("Posting to X isn't supported yet."). |
+| 422 | `social.channel_required` | A Slack target has no `channel`. |
+| 404 | `social_profile.not_found` | No profile (or an unknown `profile_id`). |
+| 502 | `social.accounts_upstream` | Postiz failed or answered something unexpected. |
 
 ## Growth — the agent surface (`pocketpaw_growth` MCP)
 

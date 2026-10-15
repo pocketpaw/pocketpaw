@@ -37,6 +37,9 @@
 # org row, and ``check_telegram`` sweeps the bot's pending ``/connect`` messages
 # onto every unexpired row whose code they name (across workspaces, so confirming
 # the batch never drops another tenant's) before finishing the caller's connect.
+# Posting checks every target (owned by the profile's org, a postable platform,
+# a channel where the platform needs one) before Postiz is asked to publish, so
+# a bad target never leaves a half-sent post. The posts list never creates an org.
 
 from __future__ import annotations
 
@@ -59,7 +62,9 @@ from pocketpaw_ee.cloud._core.errors import (
 )
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.social.domain import (
+    CHANNEL_PLATFORMS,
     DESCRIPTION_FIELDS,
+    POSTABLE_PLATFORMS,
     SOCIAL_ACCOUNT_PLATFORMS,
     AnalysisOutcome,
     AnalysisRequest,
@@ -77,6 +82,8 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     ConnectSocialAccountRequest,
     ConnectSocialAccountResponse,
     CreateCharacterRequest,
+    CreateSocialPostRequest,
+    CreateSocialPostResponse,
     DescriptionResponse,
     GenerateIdeasRequest,
     MakeMediaRequest,
@@ -91,8 +98,13 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialAccountPlatformResponse,
     SocialAccountResponse,
     SocialAnalysisResponse,
+    SocialChannelListResponse,
+    SocialChannelResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialPostCreated,
+    SocialPostListResponse,
+    SocialPostResponse,
     SocialProfileListResponse,
     SocialProfileResponse,
     SocialPulseResponse,
@@ -1142,14 +1154,28 @@ def _account_response(raw: dict[str, Any]) -> SocialAccountResponse | None:
         return None
     username = raw.get("profile")
     picture = raw.get("picture")
+    platform = str(raw.get("identifier") or "")
     return SocialAccountResponse(
         id=account_id,
-        platform=str(raw.get("identifier") or ""),
+        platform=platform,
         name=str(raw.get("name") or ""),
         username=username if isinstance(username, str) and username else None,
         picture=picture if isinstance(picture, str) and picture else None,
         disabled=bool(raw.get("disabled")),
+        can_post=platform in POSTABLE_PLATFORMS,
+        needs_channel=platform in CHANNEL_PLATFORMS,
     )
+
+
+def _require_postiz() -> PostizClient:
+    postiz = resolve_postiz()
+    if postiz is None:
+        raise CloudError(
+            503,
+            "social.accounts_unavailable",
+            "Social account connections aren't set up on this deployment.",
+        )
+    return postiz
 
 
 def _upstream(exc: PostizError) -> CloudError:
@@ -1235,13 +1261,7 @@ async def connect_account(
         raise ValidationError(
             "social.platform_not_supported", f"Connecting {body.platform!r} isn't supported."
         )
-    postiz = resolve_postiz()
-    if postiz is None:
-        raise CloudError(
-            503,
-            "social.accounts_unavailable",
-            "Social account connections aren't set up on this deployment.",
-        )
+    postiz = _require_postiz()
     if body.platform not in _enabled_platforms():
         raise ValidationError(
             "social.platform_unavailable", f"{label} isn't set up on this deployment yet."
@@ -1354,13 +1374,7 @@ async def check_telegram(
     if org is None:
         raise NotFound("telegram_code", body.code)
     token, _ = _telegram_bot()
-    postiz = resolve_postiz()
-    if postiz is None:
-        raise CloudError(
-            503,
-            "social.accounts_unavailable",
-            "Social account connections aren't set up on this deployment.",
-        )
+    postiz = _require_postiz()
     if not org.telegram_chat_id:
         await _sweep_telegram(token)
         org = await _pending_telegram(workspace_id, profile_key, body.code)
@@ -1398,9 +1412,160 @@ async def disconnect_account(ctx: RequestContext, profile_id: str | None, accoun
     # no-event: Growth › Social has no realtime subscriber; the Accounts page re-fetches.
 
 
+async def _owned_accounts(
+    workspace_id: str, profile_id: str | None, postiz: PostizClient, account_id: str
+) -> tuple[_PostizOrgDoc, dict[str, dict[str, Any]]]:
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    org = await _postiz_org(workspace_id, str(profile.id))
+    if org is None:
+        raise NotFound("social_account", account_id)
+    return org, {str(i.get("id")): i for i in await _integrations(postiz, org)}
+
+
+def _platform_label(platform: str) -> str:
+    return dict(SOCIAL_ACCOUNT_PLATFORMS).get(platform, platform)
+
+
+async def list_channels(
+    ctx: RequestContext, profile_id: str | None, account_id: str
+) -> SocialChannelListResponse:
+    workspace_id = _require_workspace(ctx)
+    postiz = _require_postiz()
+    org, owned = await _owned_accounts(workspace_id, profile_id, postiz, account_id)
+    integration = owned.get(account_id)
+    if integration is None:
+        raise NotFound("social_account", account_id)
+    platform = str(integration.get("identifier") or "")
+    if platform not in CHANNEL_PLATFORMS:
+        raise ValidationError(
+            "social.channels_unsupported", f"{_platform_label(platform)} has no channels to pick."
+        )
+    try:
+        output = await postiz.trigger_tool(decrypt(org.api_key_enc), account_id, "channels")
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    items = [
+        SocialChannelResponse(id=str(c["id"]), name=str(c.get("name") or c["id"]))
+        for c in (output if isinstance(output, list) else [])
+        if isinstance(c, dict) and c.get("id")
+    ]
+    return SocialChannelListResponse(items=items)
+
+
+async def create_post(
+    ctx: RequestContext, profile_id: str | None, body: CreateSocialPostRequest
+) -> CreateSocialPostResponse:
+    body = CreateSocialPostRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    postiz = _require_postiz()
+    org, owned = await _owned_accounts(workspace_id, profile_id, postiz, body.targets[0].account_id)
+    platforms: dict[str, str] = {}
+    for target in body.targets:
+        if target.account_id not in owned:
+            raise NotFound("social_account", target.account_id)
+        platform = str(owned[target.account_id].get("identifier") or "")
+        if platform not in POSTABLE_PLATFORMS:
+            raise ValidationError(
+                "social.post_platform_unsupported",
+                f"Posting to {_platform_label(platform)} isn't supported yet.",
+            )
+        if platform in CHANNEL_PLATFORMS and not target.channel:
+            raise ValidationError(
+                "social.channel_required",
+                f"Pick a channel to post to in {_platform_label(platform)}.",
+            )
+        platforms[target.account_id] = platform
+    posts = []
+    for target in body.targets:
+        settings: dict[str, Any] = {"__type": platforms[target.account_id]}
+        if target.channel:
+            settings["channel"] = target.channel
+        posts.append(
+            {
+                "integration": {"id": target.account_id},
+                "value": [{"content": body.content, "image": []}],
+                "settings": settings,
+            }
+        )
+    payload = {
+        "type": "now",
+        "date": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "shortLink": False,
+        "tags": [],
+        "posts": posts,
+    }
+    try:
+        created = await postiz.create_posts(decrypt(org.api_key_enc), payload)
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    # no-event: Growth › Social has no realtime subscriber; the composer polls the posts list.
+    post_ids = {str(c.get("integration")): str(c["postId"]) for c in created if c.get("postId")}
+    items = [
+        SocialPostCreated(account_id=a, platform=platforms[a], post_id=post_ids[a])
+        for a in platforms
+        if a in post_ids
+    ]
+    if not items:
+        raise _upstream(PostizError("postiz.bad_response", "Postiz created no post."))
+    return CreateSocialPostResponse(items=items)
+
+
+POST_STATES = {"QUEUE": "queued", "PUBLISHED": "published", "ERROR": "error", "DRAFT": "draft"}
+POSTS_LOOKBACK = timedelta(days=7)
+POSTS_LOOKAHEAD = timedelta(days=1)
+
+
+def _post_response(raw: dict[str, Any]) -> SocialPostResponse | None:
+    post_id = str(raw.get("id") or "")
+    if not post_id or raw.get("deletedAt"):
+        return None
+    integration = raw.get("integration") if isinstance(raw.get("integration"), dict) else {}
+    raw_state = str(raw.get("state") or "")
+    state = POST_STATES.get(raw_state, raw_state.lower())
+    url, error, published = raw.get("releaseURL"), raw.get("error"), raw.get("publishDate")
+    return SocialPostResponse(
+        id=post_id,
+        account_id=str(integration.get("id") or ""),
+        platform=str(integration.get("providerIdentifier") or ""),
+        account_name=str(integration.get("name") or ""),
+        content=str(raw.get("content") or ""),
+        state=state,
+        url=url if isinstance(url, str) and url else None,
+        error=error if isinstance(error, str) and error else None,
+        published_at=published if state == "published" and isinstance(published, str) else None,
+    )
+
+
+async def list_posts(
+    ctx: RequestContext, profile_id: str | None = None, ids: str | None = None
+) -> SocialPostListResponse:
+    workspace_id = _require_workspace(ctx)
+    postiz = _require_postiz()
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    org = await _postiz_org(workspace_id, str(profile.id))
+    if org is None:
+        return SocialPostListResponse(items=[])
+    now = datetime.now(UTC)
+    try:
+        raw = await postiz.list_posts(
+            decrypt(org.api_key_enc),
+            (now - POSTS_LOOKBACK).isoformat(),
+            (now + POSTS_LOOKAHEAD).isoformat(),
+        )
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    wanted = {i.strip() for i in (ids or "").split(",") if i.strip()} or None
+    raw = sorted(raw, key=lambda p: str(p.get("publishDate") or ""), reverse=True)
+    items = [p for p in map(_post_response, raw) if p and (wanted is None or p.id in wanted)]
+    return SocialPostListResponse(items=items)
+
+
 __all__ = [
     "check_telegram",
     "connect_account",
+    "create_post",
+    "list_channels",
+    "list_posts",
     "disconnect_account",
     "list_accounts",
     "analyze_profile",

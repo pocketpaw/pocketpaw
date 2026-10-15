@@ -88,5 +88,23 @@
     "tests": [
       "tests/cloud/growth/social/test_accounts.py"
     ]
+  },
+  {
+    "label": "tenancy: posting skips the ownership check (a post goes to an account outside the profile's org)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if target.account_id not in owned:\n            raise NotFound(\"social_account\", target.account_id)\n        platform = str(owned[target.account_id].get(\"identifier\") or \"\")\n",
+    "replace": "        platform = str(owned.get(target.account_id, {}).get(\"identifier\") or \"slack\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
+  },
+  {
+    "label": "posting: a missing Slack channel is sent to Postiz anyway",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if platform in CHANNEL_PLATFORMS and not target.channel:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
   }
 ]
