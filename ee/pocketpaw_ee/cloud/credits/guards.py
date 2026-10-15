@@ -5,10 +5,13 @@
 # * ``over_billing_limit(workspace, source=...)`` is the core. A no-op (None)
 #   unless ``billing_enforced`` or ``credits_enforced`` is on, and always a
 #   no-op for ``source="byok"``: a turn on the workspace's own provider key
-#   costs us nothing, so the wallet does not gate it. When enforced it runs
-#   ``check_balance`` (wallet <= 0, 402 ``credits.insufficient``) first, then
+#   costs us nothing, so neither the wallet nor the kill switch gates it. When
+#   enforced it first checks the launch kill switch
+#   (``launch_controls.free_usage_paused``: 503 ``early_access.paused`` for an
+#   unpaid early-access workspace only), then runs ``check_balance`` (wallet
+#   <= 0, 402 ``credits.insufficient``), then
 #   ``check_quota`` (monthly ceiling reached, 402 ``credits.quota_exceeded``), and
-#   returns the first CloudError that trips, or None. It never raises those two
+#   returns the first CloudError that trips, or None. It never raises those
 #   itself; any other exception (a real infra failure) propagates. An empty
 #   workspace id is a no-op: there is no wallet to attribute. ``source``
 #   defaults to ``"platform"``; the two chat seams pass the value
@@ -132,7 +135,9 @@ async def over_billing_limit(
 
     The pure, transport-agnostic core of the run-start billing gate. A no-op
     (returns None) unless ``billing_enforced`` or ``credits_enforced`` is on;
-    OSS / self-host deployments run no credit ledger. When enforced, it runs the two
+    OSS / self-host deployments run no credit ledger. When enforced, an unpaid
+    early-access workspace is refused first with ``EarlyAccessPaused`` (503) while
+    the ``free_usage_paused`` launch control is on. Then it runs the two
     credit assertions in the SAME order as the chat chokepoint: ``check_balance``
     (empty wallet) first, then ``check_quota`` (monthly ceiling). The FIRST that
     trips is returned (an ``InsufficientCredits`` or ``QuotaExceeded``, both 402
@@ -153,8 +158,19 @@ async def over_billing_limit(
     if not workspace_id or source == "byok":
         return None
 
-    from pocketpaw_ee.cloud._core.errors import InsufficientCredits, QuotaExceeded
+    from pocketpaw_ee.cloud._core.errors import (
+        EarlyAccessPaused,
+        InsufficientCredits,
+        QuotaExceeded,
+    )
     from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.launch_controls.service import get_launch_controls
+
+    # Kill switch first: cached, so the common (unpaused) case costs no DB read,
+    # and the plan/ledger lookup only runs while the switch is on.
+    controls = await get_launch_controls()
+    if controls.free_usage_paused and await is_platform_funded_free(workspace_id):
+        return EarlyAccessPaused()
 
     try:
         # Order mirrors chat/agent_router: the empty-wallet block is the primary
@@ -167,7 +183,7 @@ async def over_billing_limit(
 
 
 async def assert_within_billing(workspace_id: str, source: CredentialSource = "platform") -> None:
-    """Raise the billing rejection (402 CloudError) when over budget; else no-op.
+    """Raise the billing rejection (402, or 503 while paused) when refused; else no-op.
 
     For HTTP routes: the raised ``InsufficientCredits`` / ``QuotaExceeded`` is a
     CloudError that ``_core.http`` maps to a 402 wire response. Call it BEFORE any

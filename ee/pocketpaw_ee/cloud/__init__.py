@@ -324,6 +324,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
     from pocketpaw_ee.cloud.discover.router import router as discover_router
     from pocketpaw_ee.cloud.discovery.router import router as discovery_router
+    from pocketpaw_ee.cloud.early_access.router import router as early_access_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.herdr_cockpit.router import router as herdr_cockpit_router
@@ -367,6 +368,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(partners_router, prefix="/api/v1")
     # Find a Pro: the public, no-sign-in face of partners (directory, profile, apply).
     app.include_router(pros_router, prefix="/api/v1")
+    # Early access: the public waitlist a visitor joins while signups are paused.
+    app.include_router(early_access_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
     # Web Cursor sandbox registry (WC-1) — the (workspace, user, repo) -> sandbox
     # tenancy/auth oracle every later Web Cursor slice authorizes against.

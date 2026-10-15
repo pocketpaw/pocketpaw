@@ -2425,11 +2425,12 @@ marked `failed`. No model or backend is started either way.
 
 | Status | Code | Means |
 |--------|------|-------|
+| 503 | `early_access.paused` | free early-access usage is paused (launch controls below); unpaid workspaces only |
 | 402 | `credits.insufficient` | the wallet balance is at or below 0 |
 | 402 | `credits.quota_exceeded` | month-to-date spend reached the plan's monthly ceiling |
 
-The balance check runs first, so a workspace that is both empty and over its
-ceiling sees `credits.insufficient`. A run already in flight is never stopped;
+The pause check runs first, then the balance check, so a workspace that is both
+empty and over its ceiling sees `credits.insufficient`. A run already in flight is never stopped;
 a completed run is always billed, so the last run before the cap can take the
 wallet below 0.
 
@@ -2481,6 +2482,57 @@ With `password_signup_open` off, the two password sign-up doors refuse:
 | `POST /auth/guest/upgrade` | 403 | `auth.password_signup_closed` |
 
 Social sign-in is unaffected, and existing password accounts still log in.
+
+### Early-access launch controls
+
+Three platform-wide switches live in one Mongo document (`launch_controls`
+collection, a single row with `key: "global"`). A missing row means the defaults.
+
+| Field | Default | Effect |
+|-------|---------|--------|
+| `free_usage_paused` | `false` | Kill switch. While on, every platform-paid agent run on an unpaid early-access workspace is refused (a BYOK turn is not) with 503 `early_access.paused` at the run-start gate above (so only while that gate is on). Paid workspaces are not affected. |
+| `signups_paused` | `false` | Signup pause. Stored and readable; the account-creation check that enforces it is not built yet. |
+| `daily_free_ceiling_credits` | `25000` | Global daily free ceiling. Stored and readable; the meter that enforces it is not built yet. |
+
+Every process (web and arq worker) reads the row through a 30-second in-process
+cache, so a flip takes effect everywhere within 30 seconds with no restart. If
+the read fails, the server logs an error and uses the defaults, so the pause
+flags fail open; the per-workspace credit gate still applies.
+
+Operators change the switches with `PUT /api/v1/platform/launch-controls`
+(`platform.settings.write`, audited as `platform.launch_controls.write`) and read
+them with `GET /api/v1/platform/launch-controls` (`platform.settings.read`):
+
+```json
+PUT /api/v1/platform/launch-controls
+{"free_usage_paused": true, "reason": "cost spike"}
+
+200 {"signups_paused": false, "free_usage_paused": true, "daily_free_ceiling_credits": 25000}
+```
+
+Only the fields sent change. `reason` is required (422
+`platform.launch_controls.reason_required`), and a body with no field to change
+is 422 `platform.launch_controls.no_changes`. The writing process sees the change
+at once. An operator can also flip the row in Mongo directly:
+
+```js
+db.launch_controls.updateOne({key: "global"}, {$set: {free_usage_paused: true}}, {upsert: true})
+```
+
+### Early-access waitlist
+
+`POST /api/v1/early-access/waitlist` takes an email from a visitor who cannot
+sign up yet. No sign-in.
+
+```json
+{"email": "ada@example.com", "source": "ripple"}
+```
+
+`source` is optional free text (at most 64 characters). The email is stored
+lowercased in the `waitlist` collection with its `source` and `created_at`.
+The answer is 204 whether or not the email was already on the list, and a repeat
+join adds nothing. A malformed email is 422. Each IP gets 5 joins an hour; past
+that the answer is 429 `early_access.waitlist_rate_limited`.
 
 ## Agent Activity
 
