@@ -230,6 +230,8 @@ async def test_bad_id_and_oversized_files_are_refused_not_parsed(fake):
     assert sha(f"{BP}/features/Bad_Id.wave.json") not in cat and sha(HUGE) not in cat
     assert {f["id"] for f in g["features"]} == {"halo/layer-keys", "halo/live-keys"}
     assert not any("Bad.Ref" in c[2] for c in fake.calls if c[1:2] == ["api"])
+    entry = next(iter(abr._CACHE.values()))  # a bad ref never reaches a later read either
+    assert "Bad.Ref" not in entry["heads"] and "Bad.Ref" not in entry["records"]
     fake.heads["layer-keys"] = "a3"
     fake.records["layer-keys"] = contents(RECORD, size=MAX_MODEL_BYTES + 1)
     g = await read(fake, t=61.0)
