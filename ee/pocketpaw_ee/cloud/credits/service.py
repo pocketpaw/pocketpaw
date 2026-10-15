@@ -712,6 +712,25 @@ async def _period_topup_credits(workspace: str) -> int:
     return micro_to_credits(max(net_micro, 0))
 
 
+_PAID_CAUSES = (_TOPUP_CAUSE, "subscription_grant")
+
+
+async def has_paid_credits(workspace: str) -> bool:
+    """Whether ``workspace`` ever received paid credits.
+
+    True when the ledger holds at least one APPLIED entry whose cause is a
+    purchase (``top_up``) or a paid plan's allotment (``subscription_grant``).
+    Any time, not only this month: a workspace that has paid once is not
+    platform-funded early access. Read by ``guards.is_platform_funded_free``.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+    entry = await CreditLedgerEntry.find_one(
+        {"workspace": workspace, "cause": {"$in": list(_PAID_CAUSES)}, "applied": True}
+    )
+    return entry is not None
+
+
 async def check_quota(workspace: str) -> None:
     """Raise ``QuotaExceeded`` when the workspace has hit its monthly credit cap.
 
@@ -1393,6 +1412,7 @@ __all__ = [
     "debit",
     "find_by_key",
     "grant",
+    "has_paid_credits",
     "history",
     "is_recorded",
     "month_to_date_spend",

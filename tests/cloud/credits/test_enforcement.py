@@ -107,7 +107,9 @@ def _enforce(monkeypatch, mod, *, on: bool) -> None:
     """Point the billing guard's ``get_settings`` at a stub carrying the flag."""
     from pocketpaw_ee.cloud.credits import guards
 
-    monkeypatch.setattr(guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on))
+    monkeypatch.setattr(
+        guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on, credits_enforced=False)
+    )
 
 
 def _patch_run_internals(mod):

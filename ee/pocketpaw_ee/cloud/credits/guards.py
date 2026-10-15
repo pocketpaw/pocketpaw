@@ -1,49 +1,29 @@
-# ee/pocketpaw_ee/cloud/credits/guards.py — the shared, flag-gated run-start
-# BILLING gate, factored out of run_core so every agent-run entry seam blocks an
-# over-budget tenant the SAME way, with NO model call when rejected ("no model
-# call = no overspend").
+# ee/pocketpaw_ee/cloud/credits/guards.py: the shared run-start credit gate every
+# agent-run seam calls, so an over-budget workspace is refused the same way
+# everywhere and no model call happens on a refusal.
 #
-# Three helpers, one core check, so each caller emits the terminal/error response
-# native to ITS transport (the callers are NOT identical):
+# * ``over_billing_limit(workspace)`` is the core. A no-op (None) unless
+#   ``billing_enforced`` or ``credits_enforced`` is on. When enforced it runs
+#   ``check_balance`` (wallet <= 0, 402 ``credits.insufficient``) first, then
+#   ``check_quota`` (monthly ceiling reached, 402 ``credits.quota_exceeded``), and
+#   returns the first CloudError that trips, or None. It never raises those two
+#   itself; any other exception (a real infra failure) propagates. An empty
+#   workspace id is a no-op: there is no wallet to attribute.
+# * ``assert_within_billing(workspace)`` raises that error for HTTP routes, where
+#   ``_core.http`` maps it to ``{"error": {"code", "message"}}``. Call it before
+#   any local ``try/except Exception`` so the 402 is not swallowed into a 500.
+# * ``reject_if_over_billing(workspace, ...)`` is the run/stream variant used by
+#   ``run_core.execute_run``: it appends one terminal ``error`` frame
+#   ``{"code", "message"}``, marks the run failed and sets the stream TTL, each
+#   best-effort, then returns True so the caller stops before any agent work.
+# * ``is_platform_funded_free(workspace)`` is the one definition of an unpaid
+#   early-access workspace that the early-access guards share: plan ``free``,
+#   ``payments_open`` off, and no applied ``top_up`` or ``subscription_grant``.
 #
-#   * ``over_billing_limit(workspace)`` — the pure, reusable core. Flag-gated
-#     (a no-op returning None unless ``get_settings().billing_enforced``). Runs
-#     the SAME two assertions the chat chokepoint (chat/agent_router) runs, in the
-#     SAME order: ``check_balance`` (wallet <= 0 -> InsufficientCredits, 402
-#     credits.insufficient) FIRST, then ``check_quota`` (month-to-date spend >=
-#     the effective monthly ceiling -> QuotaExceeded, 402 credits.quota_exceeded).
-#     Returns the raised CloudError to REJECT, or None to PROCEED. It does NOT
-#     emit / raise itself — the caller decides how to respond. An uncapped
-#     (Enterprise, ceiling=None) plan is a no-op in ``check_quota`` by
-#     construction; an unknown plan fails CLOSED to the Free ceiling (the
-#     entitlements resolver). An empty workspace returns None (no wallet to
-#     attribute — the run-transport callers validate a non-empty workspace
-#     upstream; the event-bus callers can't gate a run they can't attribute).
-#
-#   * ``assert_within_billing(workspace)`` — for HTTP routes: RAISE the CloudError
-#     (402) so ``_core.http`` maps it to the wire. Place it BEFORE any local
-#     ``try/except Exception`` in the handler so the 402 isn't swallowed into a
-#     500.
-#
-#   * ``reject_if_over_billing(workspace, *, run_id, transport, log_label)`` — for
-#     the run/stream transport (run_core.execute_run): on rejection emit a clean
-#     terminal ``error`` stream frame, ``mark_terminal(failed)`` the run doc, and
-#     set the stream TTL, then return True so the caller early-returns BEFORE any
-#     model/agent work. Returns False to proceed. Each side effect is best-effort
-#     (a transient Redis/Mongo blip can't turn a clean reject into a crash),
-#     mirroring the jail-quota reject.
-#
-# The credits package is imported LOCALLY inside the core so this module stays off
-# the hot import graph; ``run_service`` is imported locally in the run-transport
-# helper to keep the credits layer from importing chat at module load.
-#
-# Created 2026-07-08 (feat/billing-enforce-gate): universalize the run-start
-# credit gate across every agent-run seam (chat was already gated; this adds the
-# group/DM auto-response bridge, the /files Library agent ops, and the planner
-# task executor). run_core's ``_reject_if_over_credit_quota`` now delegates here
-# and thereby ALSO gains the ``check_balance`` (wallet <= 0) leg it lacked — the
-# worker/executor path now rejects at an empty wallet, not only at the monthly
-# ceiling.
+# ``credits_enforced`` gates only this chat credit check; ``billing_enforced``
+# also turns on the seat, pocket, connector and other paid gates elsewhere.
+# Credits and run-service imports are local to keep this module off the hot
+# import graph.
 
 from __future__ import annotations
 
@@ -69,8 +49,8 @@ async def over_billing_limit(workspace_id: str) -> CloudError | None:
     """Return the billing rejection for ``workspace_id``, or None to proceed.
 
     The pure, transport-agnostic core of the run-start billing gate. A no-op
-    (returns None) unless ``get_settings().billing_enforced`` is on — OSS /
-    self-host deployments run no credit ledger. When enforced, it runs the two
+    (returns None) unless ``billing_enforced`` or ``credits_enforced`` is on;
+    OSS / self-host deployments run no credit ledger. When enforced, it runs the two
     credit assertions in the SAME order as the chat chokepoint: ``check_balance``
     (empty wallet) first, then ``check_quota`` (monthly ceiling). The FIRST that
     trips is returned (an ``InsufficientCredits`` or ``QuotaExceeded``, both 402
@@ -83,7 +63,8 @@ async def over_billing_limit(workspace_id: str) -> CloudError | None:
     caught here — any other exception (a real infra failure) propagates, exactly
     as the pre-existing run_core gate let it.
     """
-    if not get_settings().billing_enforced:
+    settings = get_settings()
+    if not (settings.billing_enforced or settings.credits_enforced):
         return None
     if not workspace_id:
         return None
@@ -157,8 +138,31 @@ async def reject_if_over_billing(
     return True
 
 
+async def is_platform_funded_free(workspace_id: str) -> bool:
+    """True when ``workspace_id`` is an unpaid early-access workspace.
+
+    All three must hold: the workspace resolves to the ``free`` plan, payments
+    are closed (``payments_open`` is off), and its ledger holds no applied
+    ``top_up`` or ``subscription_grant``. An unknown or missing workspace
+    resolves to ``free`` (the entitlements resolver fails closed), so it counts
+    as unpaid. The ledger leg cannot trip while payments are closed; it keeps
+    the answer right once they open.
+    """
+    if get_settings().payments_open:
+        return False
+
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    if ent.plan != "free":
+        return False
+    return not await credits_service.has_paid_credits(workspace_id)
+
+
 __all__ = [
     "assert_within_billing",
+    "is_platform_funded_free",
     "over_billing_limit",
     "reject_if_over_billing",
 ]

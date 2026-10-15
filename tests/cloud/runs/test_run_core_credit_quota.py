@@ -119,7 +119,7 @@ def _wire_common(monkeypatch, transport, *, enforced: bool) -> dict[str, bool]:
 
     from pocketpaw_ee.cloud.credits import guards
 
-    stub_settings = SimpleNamespace(billing_enforced=enforced)
+    stub_settings = SimpleNamespace(billing_enforced=enforced, credits_enforced=False)
     monkeypatch.setattr(guards, "get_settings", lambda: stub_settings)
 
     # The shared gate now runs check_balance BEFORE check_quota. Default it to a

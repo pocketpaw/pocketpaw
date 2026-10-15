@@ -29,7 +29,7 @@ def _flag(on: bool):
     """Patch the guard's own settings source so the REAL guard sees the flag."""
     return patch(
         "pocketpaw_ee.cloud.credits.guards.get_settings",
-        new=lambda: SimpleNamespace(billing_enforced=on),
+        new=lambda: SimpleNamespace(billing_enforced=on, credits_enforced=False),
     )
 
 
