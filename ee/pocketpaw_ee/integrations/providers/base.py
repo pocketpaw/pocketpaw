@@ -27,6 +27,8 @@
 #   * verify_callback(query, params) -> bool   checks the full (signed) callback query
 #   * handle_event(event) -> bool   (async) account-level webhooks (uninstall, privacy
 #     requests) taken before site routing; True acks and records the event id
+#   * expand_event(event) -> NormalizedEvent   (async) fills in a thin webhook (one
+#     that names a resource but not its state) after dedupe; raising is retried
 #   * field_options(binding, ctx, key) -> list[SettingOption]   (async) live choices
 #     of a ``select`` with ``options_source="remote"``; ``binding`` may be None;
 #     raise ``ProviderError`` on failure (capped and cached in field_options.py);

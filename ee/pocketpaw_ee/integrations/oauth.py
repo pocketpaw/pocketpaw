@@ -5,6 +5,8 @@
 #   start_resume    POST /integrations/connections/{id}/resume -> {authorize_url}
 #                   the same /start URL, to the provider's ``resume_url`` (an
 #                   unfinished setup) or, for needs_reconnect, its authorize_url
+#                   (either start: a ``ProviderError`` from the provider's hook
+#                   is 502 ``provider_error``, generic message, state dropped)
 #   redeem_ticket   GET  /integrations/{provider}/start?t   -> cookie + 302 to provider
 #   finish_callback GET  /integrations/{provider}/callback?code&state -> HTML page
 #
@@ -116,6 +118,37 @@ async def _resolve(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
 
 
+async def _provider_url(provider: Any, state: str, call: Any) -> Any:
+    """Await a provider's authorize_url / resume_url. A ``ProviderError`` (the
+    provider refused or is down) drops the state and becomes 502 ``provider_error``
+    with a generic message: the provider's own text never reaches the owner, and
+    only its type (plus Stripe-style ``<status>`` when the message leads with one)
+    is logged."""
+    from pocketpaw_ee.cloud.auth import _oauth_state
+    from pocketpaw_ee.integrations.providers.base import ProviderError
+
+    try:
+        return await _resolve(call())
+    except ProviderError as exc:
+        status = next((w for w in str(exc).split() if w.isdigit() and len(w) == 3), "-")
+        logger.warning(
+            "integrations: %s connect start failed: %s (status %s)",
+            provider.id,
+            type(exc).__name__,
+            status,
+        )
+        try:
+            await _oauth_state.consume(STATE_NAMESPACE, state)
+        except CloudError:
+            pass
+        raise CloudError(
+            502,
+            "provider_error",
+            f"Couldn't start connecting to {provider.name}. Try again, or contact "
+            "support if it keeps happening.",
+        ) from None
+
+
 def message_origins() -> list[str]:
     """Where the callback page may post its result. Each is an origin we serve."""
     from pocketpaw.api.cors import BUILTIN_ORIGINS
@@ -205,13 +238,15 @@ async def start_connect(
             "params": checked,
         },
     )
-    provider_url = await _resolve(
-        provider.authorize_url(
+    provider_url = await _provider_url(
+        provider,
+        state,
+        lambda: provider.authorize_url(
             state,
             redirect_uri(provider.id),
             code_challenge=challenge,
             **params_kwargs(provider, checked),
-        )
+        ),
     )
     return await _ticket_url(provider.id, state, user_id, provider_url)
 
@@ -250,15 +285,19 @@ async def start_resume(
     hook = getattr(provider, "resume_url", None)
     provider_url = None
     if hook is not None:
-        provider_url = await _resolve(hook(conn, state, redirect_uri(provider.id)))
+        provider_url = await _provider_url(
+            provider, state, lambda: hook(conn, state, redirect_uri(provider.id))
+        )
     if not provider_url and conn.status == "needs_reconnect":
-        provider_url = await _resolve(
-            provider.authorize_url(
+        provider_url = await _provider_url(
+            provider,
+            state,
+            lambda: provider.authorize_url(
                 state,
                 redirect_uri(provider.id),
                 code_challenge=challenge,
                 **params_kwargs(provider, checked),
-            )
+            ),
         )
     if not provider_url:
         try:

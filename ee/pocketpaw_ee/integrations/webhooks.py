@@ -20,6 +20,10 @@
 #     5. only then the event id is recorded (unique index), and
 #        ``integrations.event`` goes on the in-process bus with identifiers only
 #
+#   A provider with ``expand_event`` (async) turns a thin notification into a full
+#   event after step 2 (Stripe's v2 account events refetch the account); a failure
+#   answers 500 unrecorded, so the provider retries.
+#
 #   ``connection.updated`` is account-level, not site-level: it skips step 3, merges
 #   ``data.meta`` into every live connection with that provider + account_ref, and
 #   tells each bound site its recomputed status (``site.integration_changed``).
@@ -168,6 +172,16 @@ async def ingest(provider_id: str, request: Request) -> JSONResponse:
     )
     if already is not None:
         return JSONResponse({"ok": True, "duplicate": True})
+
+    expand = getattr(provider, "expand_event", None)
+    if expand is not None:
+        try:
+            event = await expand(event)
+        except Exception:  # noqa: BLE001 - unrecorded, so the provider retries
+            logger.warning("integrations: %s event %s failed to expand", provider_id, event.id)
+            return _err("provider_error", 500, "Could not process the event. Retry later.")
+        if event.type == IGNORED:
+            return JSONResponse({"ok": True, "ignored": True})
 
     if event.type == CONNECTION_UPDATED:
         return await _connection_updated(event)

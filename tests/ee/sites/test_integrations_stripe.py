@@ -1,12 +1,16 @@
 # tests/ee/sites/test_integrations_stripe.py: the ``stripe`` Sites integration.
 #
 # Stripe's REST API is a fake behind ``httpx.MockTransport`` (``_FakeStripe``):
-# accounts, account links and checkout sessions. Covers the Account Link connect
-# flow (server-side account binding, pending-account reuse, resume), attention and
-# site status from connection meta, ``create_checkout`` (server-side catalog
-# pricing, currency, qty bounds, success/cancel URLs, platform fee off), and the
-# Connect webhook (signature, orders paid / refunded / failed, dedupe,
-# account.updated refreshing meta, cross-account refusal). No network.
+# v2 accounts (JSON bodies, the v2 ``Stripe-Version``), v2 account links and v1
+# checkout sessions. Covers the Account Link connect flow (v2 create body,
+# server-side account binding, pending-account reuse, resume), meta from a v2
+# account, a Stripe failure at connect/resume as a generic 502 (and the "platform
+# has no Connect" warning), attention and site status from connection meta,
+# ``create_checkout`` (server-side catalog pricing, currency, qty bounds,
+# success/cancel URLs, platform fee off, ``Stripe-Account`` = the v2 account id),
+# and webhooks (signature, orders paid / refunded / failed, dedupe, v1
+# account.updated and thin v2 account events refreshing meta, cross-account
+# refusal). No network.
 from __future__ import annotations
 
 import json
@@ -33,47 +37,95 @@ WHSEC = "whsec_stripe_test"
 SHOP = "https://shop.example.com"
 
 
+def _v2_account(acct: str, body: dict) -> dict:
+    """A fresh v2 merchant account as Stripe returns it with our includes."""
+    return {
+        "id": acct,
+        "object": "v2.core.account",
+        "contact_email": "owner@shop.test",
+        "dashboard": body.get("dashboard"),
+        "metadata": dict(body.get("metadata") or {}),
+        "configuration": {
+            "merchant": {
+                "capabilities": {"card_payments": {"status": "restricted", "status_details": []}}
+            }
+        },
+        "requirements": {
+            "entries": [
+                {
+                    "awaiting_action_from": "user",
+                    "description": "external_account",
+                    "minimum_deadline": {"status": "currently_due"},
+                },
+                {
+                    "awaiting_action_from": "user",
+                    "description": "business_profile.url",
+                    "minimum_deadline": {"status": "eventually_due"},
+                },
+            ]
+        },
+    }
+
+
+def _onboarded(account: dict) -> None:
+    """Flip a fake v2 account to fully onboarded (card payments active)."""
+    caps = account["configuration"]["merchant"]["capabilities"]
+    caps["card_payments"]["status"] = "active"
+    account["requirements"] = {"entries": []}
+
+
 class _FakeStripe:
     def __init__(self) -> None:
         self.accounts: dict[str, dict] = {}
+        self.bodies: dict[str, dict] = {}
         self.links: list[dict] = []
         self.sessions: list[dict] = []
         self.headers: list[dict] = []
+        self.paths: list[str] = []
+        self.fail_create: tuple[int, dict] | None = None
+        self.fail_link: tuple[int, dict] | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.headers.append(dict(request.headers))
-        form = dict(parse_qsl(request.content.decode())) if request.content else {}
+        self.paths.append(str(request.url.raw_path.decode()))
         path = request.url.path
-        if path == "/v1/accounts" and request.method == "POST":
+        if path.startswith("/v2/"):
+            assert request.headers["stripe-version"] == "2026-09-30.endive"
+            body = json.loads(request.content) if request.content else {}
+            if request.content:
+                assert request.headers["content-type"] == "application/json"
+        else:
+            assert request.headers["stripe-version"] == "2025-08-27.basil"
+            body = dict(parse_qsl(request.content.decode())) if request.content else {}
+        if path == "/v2/core/accounts" and request.method == "POST":
+            if self.fail_create is not None:
+                return httpx.Response(self.fail_create[0], json=self.fail_create[1])
             acct = f"acct_{len(self.accounts) + 1:04d}"
-            self.accounts[acct] = {
-                "id": acct,
-                "charges_enabled": False,
-                "details_submitted": False,
-                "email": "owner@shop.test",
-                "requirements": {"currently_due": ["external_account"]},
-                "metadata": {
-                    k[len("metadata[") : -1]: v
-                    for k, v in form.items()
-                    if k.startswith("metadata[")
-                },
-                "form": form,
-            }
-            return httpx.Response(200, json=self.accounts[acct])
-        if path.startswith("/v1/accounts/") and request.method == "GET":
+            self.bodies[acct] = body
+            self.accounts[acct] = _v2_account(acct, body)
+            return httpx.Response(200, json={"id": acct, "object": "v2.core.account"})
+        if path.startswith("/v2/core/accounts/") and request.method == "GET":
+            includes = {v for k, v in request.url.params.multi_items() if k.startswith("include[")}
+            assert {"configuration.merchant", "requirements"} <= includes
             acct = self.accounts.get(path.rsplit("/", 1)[1])
             if acct is None:
-                return httpx.Response(404, json={"error": {"type": "invalid_request_error"}})
+                return httpx.Response(404, json={"error": {"type": "not_found"}})
             return httpx.Response(200, json=acct)
-        if path == "/v1/account_links":
-            self.links.append(form)
-            return httpx.Response(
-                200, json={"url": f"https://connect.stripe.com/setup/s/{len(self.links)}"}
-            )
+        if path == "/v2/core/account_links" and request.method == "POST":
+            if self.fail_link is not None:
+                return httpx.Response(self.fail_link[0], json=self.fail_link[1])
+            self.links.append(body)
+            n = len(self.links)
+            return httpx.Response(200, json={"url": f"https://connect.stripe.com/setup/s/{n}"})
         if path == "/v1/checkout/sessions":
-            self.sessions.append(form)
+            self.sessions.append(body)
             return httpx.Response(200, json={"url": "https://checkout.stripe.com/c/pay/cs_1"})
         return httpx.Response(404, json={"error": {"type": "not_found"}})
+
+
+def _onboarding(link: dict) -> dict:
+    assert link["use_case"]["type"] == "account_onboarding"
+    return link["use_case"]["account_onboarding"]
 
 
 @pytest.fixture
@@ -126,7 +178,7 @@ async def _start(c, pocket_id: str | None = None) -> tuple[str, dict]:
 
 async def _return(c, link_form: dict, **override) -> dict:
     """Follow the link's return_url back to our callback (Stripe's redirect)."""
-    query = dict(parse_qsl(urlsplit(link_form["return_url"]).query))
+    query = dict(parse_qsl(urlsplit(_onboarding(link_form)["return_url"]).query))
     query.update(override)
     cb = await c.get("/api/v1/integrations/stripe/callback", params=query)
     assert cb.status_code == 200
@@ -181,18 +233,24 @@ async def test_connect_creates_a_controller_account_and_binds_it(beanie_test_db,
         location, _ = await _start(c, pid)
         assert location == "https://connect.stripe.com/setup/s/1"
         [acct] = stripe.accounts
-        form = stripe.accounts[acct]["form"]
-        assert form["controller[stripe_dashboard][type]"] == "full"
-        assert form["controller[fees][payer]"] == "account"
-        assert form["controller[losses][payments]"] == "stripe"
-        assert form["metadata[workspace_id]"] == WS
+        body = stripe.bodies[acct]
+        assert body == {
+            "dashboard": "full",
+            "configuration": {"merchant": {"capabilities": {"card_payments": {"requested": True}}}},
+            "defaults": {
+                "responsibilities": {"fees_collector": "stripe", "losses_collector": "stripe"}
+            },
+            "metadata": {"workspace_id": WS, "user_id": OWNER},
+        }
+        assert "POST /v1/accounts" not in " ".join(stripe.paths)
         link = stripe.links[0]
-        assert link["account"] == acct and link["type"] == "account_onboarding"
-        assert link["return_url"].startswith(
+        onboarding = _onboarding(link)
+        assert link["account"] == acct
+        assert onboarding["return_url"].startswith(
             "https://connect.example.com/api/v1/integrations/stripe/callback?state="
         )
-        assert "code=" not in link["refresh_url"]
-        assert all(h["stripe-version"] == "2025-08-27.basil" for h in stripe.headers)
+        assert f"code={acct}" in onboarding["return_url"]
+        assert "code=" not in onboarding["refresh_url"]
         assert all(h["authorization"] == f"Bearer {SK}" for h in stripe.headers)
 
         msg = await _return(c, link)
@@ -202,6 +260,7 @@ async def test_connect_creates_a_controller_account_and_binds_it(beanie_test_db,
 
     conn = await _conn(msg["connection_id"])
     assert conn.account_ref == acct and conn.account_label == "owner@shop.test"
+    # Only the currently-due entry counts; the eventually-due one doesn't.
     assert conn.meta == {
         "charges_enabled": False,
         "details_submitted": False,
@@ -235,7 +294,7 @@ async def test_restarting_connect_reuses_the_pending_account(beanie_test_db, str
         assert len(stripe.accounts) == 1
         assert stripe.links[0]["account"] == stripe.links[1]["account"]
         # Fully onboarded but never connected: still theirs, still reused.
-        stripe.accounts["acct_0001"].update(details_submitted=True, charges_enabled=True)
+        _onboarded(stripe.accounts["acct_0001"])
         await _start(c)
         assert len(stripe.accounts) == 1
         msg = await _return(c, stripe.links[-1])
@@ -255,7 +314,9 @@ async def test_onboarding_past_the_default_ttl_still_completes(beanie_test_db, s
         started = await c.post("/api/v1/integrations/stripe/connect", json={})
         split = urlsplit(started.json()["authorize_url"])
         start = await c.get(split.path, params=parse_qs(split.query))
-        state = dict(parse_qsl(urlsplit(stripe.links[-1]["return_url"]).query))["state"]
+        state = dict(parse_qsl(urlsplit(_onboarding(stripe.links[-1])["return_url"]).query))[
+            "state"
+        ]
         assert 7000 < await redis.ttl(f"integrations_state:{state}") <= 7200
         assert "Max-Age=7200" in start.headers["set-cookie"]
         bind_keys = await redis.keys("integrations_stripe_bind:*")
@@ -265,7 +326,7 @@ async def test_onboarding_past_the_default_ttl_still_completes(beanie_test_db, s
         # Even past 2 h: the state is gone, the callback fails, and the next
         # connect picks the same (now verified) account back up.
         await redis.delete(f"integrations_state:{state}")
-        stripe.accounts["acct_0001"].update(details_submitted=True, charges_enabled=True)
+        _onboarded(stripe.accounts["acct_0001"])
         lost = await _return(c, stripe.links[-1])
         assert lost["error"] == "invalid_state"
         await _start(c)
@@ -307,15 +368,100 @@ async def test_resume_issues_a_fresh_link_for_the_same_account(beanie_test_db, s
         assert stripe.links[1]["account"] == "acct_0001"
         assert len(stripe.accounts) == 1
 
-        stripe.accounts["acct_0001"].update(
-            charges_enabled=True, details_submitted=True, requirements={"currently_due": []}
-        )
+        _onboarded(stripe.accounts["acct_0001"])
         done = await _return(c, stripe.links[1])
         assert done == {**done, "status": "active", "connection_id": conn_id}
         listed = (await c.get("/api/v1/integrations/connections")).json()
         nothing = await c.post(f"/api/v1/integrations/connections/{conn_id}/resume")
     assert listed[0]["attention"] is None
     assert nothing.status_code == 409
+
+
+def test_v2_meta_maps_capability_and_user_requirements():
+    from pocketpaw_ee.integrations.providers.stripe import _label, _v2_meta
+
+    def entry(who: str, status: str) -> dict:
+        return {"awaiting_action_from": who, "minimum_deadline": {"status": status}}
+
+    account = {
+        "id": "acct_1",
+        "configuration": {"merchant": {"capabilities": {"card_payments": {"status": "active"}}}},
+        "requirements": {
+            "entries": [
+                entry("user", "past_due"),
+                entry("user", "currently_due"),
+                entry("user", "eventually_due"),
+                entry("stripe", "currently_due"),  # Stripe is verifying: nothing to do
+            ]
+        },
+    }
+    assert _v2_meta(account) == {
+        "charges_enabled": True,
+        "details_submitted": False,
+        "requirements_due_count": 2,
+    }
+    account["requirements"]["entries"] = [entry("stripe", "currently_due")]
+    pending = {"configuration": {"merchant": {"capabilities": {"card_payments": {}}}}}
+    assert _v2_meta(account)["details_submitted"] is True
+    assert _v2_meta({"id": "acct_1"}) == {
+        "charges_enabled": False,
+        "details_submitted": False,
+        "requirements_due_count": 0,
+    }
+    assert _v2_meta({**pending, "requirements": {"entries": []}})["charges_enabled"] is False
+    assert _label({"id": "acct_1", "display_name": " Mug Co ", "contact_email": "a@b.c"}) == (
+        "Mug Co"
+    )
+    business = {"identity": {"business_details": {"registered_name": "Mug Ltd"}}}
+    assert _label({"id": "acct_1", **business}) == "Mug Ltd"
+    assert _label({"id": "acct_1"}) == "acct_1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"type": "invalid_request_error", "code": "platform_registration_required"},
+        {
+            "type": "invalid_request_error",
+            "message": "You can only create new accounts if you've signed up for Connect",
+        },
+    ],
+)
+async def test_connect_on_a_platform_without_connect_is_a_502_and_a_warning(
+    beanie_test_db, stripe, caplog, error
+):
+    import logging
+
+    stripe.fail_create = (400, {"error": error})
+    with caplog.at_level(logging.WARNING):
+        async with _client() as c:
+            resp = await c.post("/api/v1/integrations/stripe/connect", json={})
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["error"]["code"] == "provider_error"
+    assert "Couldn't start connecting to Stripe." in resp.text
+    assert "Connect" not in resp.text
+    assert "platform_registration" not in resp.text and "signed up" not in resp.text
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "not signed up for Connect" in logs
+    assert "ProviderError (status 400)" in logs
+    assert SK not in logs and "only create new accounts" not in logs
+
+
+@pytest.mark.asyncio
+async def test_a_stripe_failure_at_connect_or_resume_is_a_generic_502(beanie_test_db, stripe):
+    async with _client() as c:
+        stripe.fail_create = (500, {"error": {"type": "api_error", "message": "secret detail"}})
+        connect = await c.post("/api/v1/integrations/stripe/connect", json={})
+        stripe.fail_create = None
+        msg = await _connect(c, stripe)
+        stripe.fail_link = (400, {"error": {"type": "invalid_request_error", "code": "nope"}})
+        resume = await c.post(f"/api/v1/integrations/connections/{msg['connection_id']}/resume")
+    for resp in (connect, resume):
+        assert resp.status_code == 502, resp.text
+        assert resp.json()["error"]["code"] == "provider_error"
+        assert "secret detail" not in resp.text and "nope" not in resp.text
+        assert "Try again, or contact support if it keeps happening." in resp.text
 
 
 # ------------------------------------------------------------------ checkout
@@ -699,3 +845,72 @@ async def test_an_early_refund_is_retried_and_applies_after_paid(beanie_test_db,
         again = await _post(c, refund)  # Stripe's redelivery
         status = (await SiteOrder.find_one()).status
     assert again.json() == {"ok": True} and status == "refunded"
+
+
+def _thin(eid: str, kind: str, acct: str = "acct_0001") -> dict:
+    return {
+        "id": eid,
+        "object": "v2.core.event",
+        "type": kind,
+        "livemode": False,
+        "created": "2026-10-01T10:00:00.000Z",
+        "context": None,
+        "related_object": {
+            "id": acct,
+            "type": "v2.core.account",
+            "url": f"/v2/core/accounts/{acct}",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_thin_v2_account_event_refetches_the_account(
+    beanie_test_db, stripe, catalog, monkeypatch
+):
+    from pocketpaw_ee.integrations.providers import stripe as mod
+
+    thin_secret = "whsec_thin_destination"
+    monkeypatch.setenv(mod.ACCOUNTS_WEBHOOK_SECRET_ENV, thin_secret)
+    async with _client() as c:
+        pid, _, conn_id = await _ready_site(c, stripe, catalog)
+        _onboarded(stripe.accounts["acct_0001"])
+        kind = "v2.core.account[requirements].updated"
+        first = await _post(c, _thin("evt_t1", kind), secret=thin_secret)
+        again = await _post(c, _thin("evt_t1", kind), secret=thin_secret)
+        # A v1 snapshot generated before that fetch can't undo it.
+        blocked = {"id": "acct_0001", "charges_enabled": False, "details_submitted": True}
+        old = {**_evt("evt_v1", "account.updated", blocked), "created": int(time.time()) - 60}
+        stale = await _post(c, old)
+        unknown = await _post(c, _thin("evt_t2", kind, acct="acct_gone"), secret=thin_secret)
+        other = await _post(
+            c, _thin("evt_t3", "v2.core.account_person.updated"), secret=thin_secret
+        )
+        forged = await _post(c, _thin("evt_t4", kind), secret="whsec_wrong")
+        sites = (await c.get(f"/api/v1/sites/by-pocket/{pid}/integrations")).json()
+    assert first.json() == {"ok": True}, first.text
+    assert again.json()["duplicate"] is True
+    assert stale.json() == {"ok": True, "stale": True}
+    assert unknown.json()["ignored"] is True and other.json()["ignored"] is True
+    assert forged.status_code == 401
+    conn = await _conn(conn_id)
+    assert conn.meta["charges_enabled"] is True and conn.meta["requirements_due_count"] == 0
+    assert conn.meta["details_submitted"] is True
+    assert abs(conn.meta["as_of"] - time.time()) < 60
+    assert [s["status"] for s in sites if s["provider"] == "stripe"] == ["connected"]
+
+
+@pytest.mark.asyncio
+async def test_a_thin_event_whose_fetch_fails_is_retried_unrecorded(
+    beanie_test_db, stripe, catalog
+):
+    from pocketpaw_ee.cloud.models.integration import IntegrationWebhookEvent
+
+    async with _client() as c:
+        await _ready_site(c, stripe, catalog)
+        stripe.accounts["acct_0001"] = "not an object"  # an answer we can't use
+        resp = await _post(c, _thin("evt_t5", "v2.core.account.updated"))
+    assert resp.status_code == 500
+    assert (
+        await IntegrationWebhookEvent.find(IntegrationWebhookEvent.event_id == "evt_t5").count()
+        == 0
+    )
