@@ -2,56 +2,39 @@
 # agent-run seam calls, so an over-budget workspace is refused the same way
 # everywhere and no model call happens on a refusal.
 #
-# * ``over_billing_limit(workspace, source=...)`` is the core. A no-op (None)
-#   unless ``billing_enforced`` or ``credits_enforced`` is on, and always a
-#   no-op for ``source="byok"``: a turn on the workspace's own provider key
-#   costs us nothing, so neither the wallet nor the kill switch gates it. When
-#   enforced it first checks the launch kill switch
-#   (``launch_controls.free_usage_paused``: 503 ``early_access.paused`` for an
-#   unpaid early-access workspace only), then runs ``check_balance`` (wallet
-#   <= 0, 402 ``credits.insufficient``), then
-#   ``check_quota`` (monthly ceiling reached, 402 ``credits.quota_exceeded``), and
-#   returns the first CloudError that trips, or None. It never raises those
-#   itself; any other exception (a real infra failure) propagates. An empty
-#   workspace id is a no-op: there is no wallet to attribute. ``source``
-#   defaults to ``"platform"``; the two chat seams pass the value
-#   ``resolve_payer`` gave them, every other caller keeps the default.
-# * ``resolve_payer(workspace)`` decides who pays before the gate: the
-#   BYOK resolver's answer, or platform when the resolver fails (gated and
-#   charged, never free). It lets ``GatewayEgressRejected`` through, because
-#   that one is a refusal of the turn, not a failure to degrade.
-# * ``billing_source(creds, agent_id, exclusive_tools=...)`` is the source the
-#   gate and ``bill_run`` act on. ``byok`` only when the resolver said so AND
-#   the backend that will serve the turn really spends the key
-#   (``pocketpaw.agents.pool.spends_byok_key``: pydantic_ai, or a
-#   deny-by-default run). A stored key on any other backend runs on our
-#   credentials, so it is gated and charged as platform. Reads the Agent
-#   document, never the pool, so a refused turn builds no backend; any lookup
-#   failure answers platform.
-# * ``assert_within_billing(workspace)`` raises that error for HTTP routes, where
-#   ``_core.http`` maps it to ``{"error": {"code", "message"}}``. Call it before
-#   any local ``try/except Exception`` so the 402 is not swallowed into a 500.
-# * ``reject_if_over_billing(workspace, ...)`` is the run/stream variant used by
-#   ``run_core.execute_run``: it appends one terminal ``error`` frame
-#   ``{"code", "message"}``, marks the run failed and sets the stream TTL, each
-#   best-effort, then returns True so the caller stops before any agent work.
-# * ``is_platform_funded_free(workspace)`` is the one definition of an unpaid
-#   early-access workspace that the early-access guards share: plan ``free``,
-#   ``payments_open`` off, and no applied ``top_up`` or ``subscription_grant``.
-# * ``early_access_denial(workspace)`` / ``assert_early_access_allowed(workspace)``
-#   refuse the spend surfaces the ledger never meters (Belt, mandates, Foresight
-#   runs, Studio and media generation, the concierge, meeting notes) for such a
-#   workspace with 403 ``early_access.not_available``. On under the same flags as
-#   ``over_billing_limit``, so it switches on with the credit gate, not at deploy.
-# * Free-run bounds. With ``one_active_run=True`` (only the two chat seams pass
-#   it) an unpaid platform-funded workspace that already has an active chat run
-#   is refused with 429 ``credits.run_in_progress``; ``run_id`` names the
-#   executor's own run, which is not counted, nor is any run created after it,
-#   so the oldest of two racing tabs proceeds. ``free_run_bounds`` returns the
-#   bounds ``run_core`` applies to such a run (turn cap
-#   ``free_run_max_turns`` and the wallet), and ``free_run_token_limit`` sizes
-#   its pydantic_ai token limit from that wallet at the turn model's output
-#   price (conservative; None for an unpriced model).
+# * ``over_billing_limit(workspace, source=...)`` is the core: None unless
+#   ``billing_enforced`` or ``credits_enforced`` is on, and always None for
+#   ``source="byok"`` or an empty workspace. Otherwise, in order: the launch
+#   kill switch (503 ``early_access.paused``, unpaid early access only), wallet
+#   <= 0 (402 ``credits.insufficient``), monthly ceiling (402
+#   ``credits.quota_exceeded``), then with ``one_active_run`` an older active
+#   chat run on an unpaid workspace (429 ``credits.run_in_progress``; the oldest
+#   of two racing runs proceeds). Returns the first CloudError, never raises
+#   those; a real infra failure propagates.
+# * ``resolve_payer`` and ``billing_source`` decide who pays before the gate.
+#   ``byok`` only when the BYOK resolver says so AND the agent's backend spends
+#   the key (``pool.spends_byok_key``); a resolver failure or any lookup failure
+#   answers platform (gated and charged, never free). ``GatewayEgressRejected``
+#   propagates as a refusal of the turn.
+# * ``assert_within_billing`` raises the refusal for HTTP routes (call it before
+#   any local ``except Exception``); ``reject_if_over_billing`` is the executor
+#   variant and ends the run through ``refuse_run`` (terminal ``error`` frame
+#   ``{"code", "message"}``, ``mark_terminal(failed)``, stream TTL, each
+#   best-effort).
+# * ``is_platform_funded_free`` is the one definition of an unpaid early-access
+#   workspace: plan ``free``, ``payments_open`` off, no applied ``top_up`` or
+#   ``subscription_grant``. ``early_access_denial`` refuses the spend surfaces
+#   the ledger never meters for such a workspace (403
+#   ``early_access.not_available``), under the same flags as the gate.
+# * Free runs (platform-funded, unpaid): ``free_run_bounds`` gives ``run_core``
+#   the turn cap and the starting wallet, and ``free_run_token_limit`` sizes the
+#   pydantic_ai token limit from it at the model's output price.
+#   ``free_model_denial`` is 400 ``model.not_allowed`` unless the model is on
+#   ``free_model_allowlist`` (ignoring case and a ``provider:`` prefix) and
+#   priced by the metering ladder, since an unpriced model bills 0. ``run_core``
+#   checks every model in ``free_run_models`` (the one asked for, plus the
+#   deployment default a forced run really uses); the chat HTTP seam checks the
+#   per-send model through ``free_model_refusal``.
 #
 # ``credits_enforced`` gates only this chat credit check; ``billing_enforced``
 # also turns on the seat, pocket, connector and other paid gates elsewhere.
@@ -64,6 +47,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
 from pocketpaw.config import get_settings  # type: ignore[import-untyped]
@@ -289,10 +273,22 @@ async def reject_if_over_billing(
     exc = await over_billing_limit(workspace_id, source, one_active_run=True, run_id=run_id)
     if exc is None:
         return False
+    await refuse_run(run_id, exc, transport=transport, log_label=log_label)
+    return True
 
+
+async def refuse_run(
+    run_id: str, exc: CloudError, *, transport: Any, log_label: str | None = None
+) -> None:
+    """End a run before any agent work with ``exc`` as its terminal ``error``
+    frame ``{"code", "message"}``, ``mark_terminal(failed)`` and the stream TTL.
+
+    Each write is best-effort: a transient Redis or Mongo failure must not turn
+    a clean refusal into a crash that takes the worker down.
+    """
     label = log_label or run_id
     message = str(exc)
-    logger.warning("run %s rejected — billing gate: %s (%s)", label, message, exc.code)
+    logger.warning("run %s refused at run start: %s (%s)", label, message, exc.code)
     try:
         await transport.append_event(run_id, "error", {"code": exc.code, "message": message})
     except Exception:
@@ -307,7 +303,6 @@ async def reject_if_over_billing(
         await transport.set_ttl(run_id, _stream_ttl())
     except Exception:
         logger.debug("billing stream ttl set failed for %s", run_id, exc_info=True)
-    return True
 
 
 async def is_platform_funded_free(workspace_id: str) -> bool:
@@ -404,20 +399,95 @@ def free_run_token_limit(
     if balance_micro <= 0:
         return 0
 
-    from pocketpaw.usage_tracker import price_run
     from pocketpaw_ee.cloud.metering.service import load_rate_card
 
+    per_million = _output_usd_per_million(model)
+    if per_million is None:
+        return None
     card = rate_card if rate_card is not None else load_rate_card()
+    micro_per_million = card.to_micro_credits(per_million)
+    if micro_per_million <= 0:
+        return None
+    return balance_micro * 1_000_000 // micro_per_million
+
+
+def _output_usd_per_million(model: str) -> Decimal | None:
+    """USD for a million output tokens on ``model``, through a provider prefix
+    (``litellm:claude-haiku-4-5`` prices as ``claude-haiku-4-5``). None when
+    nothing on the metering ladder prices it, or prices it at 0."""
+    from pocketpaw.usage_tracker import price_run
+
     now = datetime.now(UTC)
     for name in (model, model.partition(":")[2]):
         per_million = (
             price_run(name, input_tokens=0, output_tokens=1_000_000, at=now) if name else None
         )
         if per_million:
-            micro_per_million = card.to_micro_credits(per_million)
-            if micro_per_million > 0:
-                return balance_micro * 1_000_000 // micro_per_million
+            return per_million
     return None
+
+
+def free_model_denial(model: str) -> CloudError | None:
+    """``ModelNotAllowed`` unless ``model`` may run on early access credits.
+
+    It must be on ``free_model_allowlist`` (exact, ignoring case and a
+    ``provider:`` prefix) and priced by the metering ladder, because an
+    unpriced model bills 0 and so would run free. Says nothing about who pays:
+    callers apply it to platform-funded turns on unpaid workspaces only.
+    """
+
+    def bare(name: str) -> str:
+        return name.rpartition(":")[2].strip().lower()
+
+    allowed = {bare(m) for m in get_settings().free_model_allowlist}
+    if bare(model) in allowed - {""} and _output_usd_per_million(bare(model)):
+        return None
+
+    from pocketpaw_ee.cloud._core.errors import ModelNotAllowed
+
+    return ModelNotAllowed(model)
+
+
+async def free_model_refusal(
+    workspace_id: str, source: CredentialSource, model: str | None
+) -> CloudError | None:
+    """``free_model_denial(model)`` for a platform-funded turn on an unpaid
+    early-access workspace while the credit gate is on, else None. The chat
+    HTTP seam's check of the per-send model; an empty model is None."""
+    settings = get_settings()
+    if source != "platform" or not (settings.billing_enforced or settings.credits_enforced):
+        return None
+    if not workspace_id or not model:
+        return None
+    exc = free_model_denial(model)
+    if exc is None or not await is_platform_funded_free(workspace_id):
+        return None
+    return exc
+
+
+async def free_run_models(agent_id: str | None, model_override: str | None) -> list[str]:
+    """Every model a bounded free run on ``agent_id`` must be allowed to use.
+
+    The one asked for (per-send model, else the agent's own, else the
+    deployment's ``pydantic_ai_model``), plus, for an agent not on pydantic_ai,
+    that deployment default: the forced pydantic_ai backend really runs on it
+    and drops the agent's model. A missing or unreadable agent counts as one
+    with no model on another backend, so both checks still apply.
+    """
+    default = get_settings().pydantic_ai_model
+    backend, agent_model = "", ""
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.agent import Agent
+
+        doc = await Agent.get(PydanticObjectId(agent_id)) if agent_id else None
+        if doc is not None:
+            backend, agent_model = doc.config.backend, doc.config.model
+    except Exception:
+        logger.warning("could not read agent %s for the model check", agent_id, exc_info=True)
+    asked = model_override or agent_model or default
+    return [asked] if backend == "pydantic_ai" else [asked, default]
 
 
 __all__ = [
@@ -426,10 +496,14 @@ __all__ = [
     "assert_within_billing",
     "billing_source",
     "early_access_denial",
+    "free_model_denial",
+    "free_model_refusal",
     "free_run_bounds",
+    "free_run_models",
     "free_run_token_limit",
     "is_platform_funded_free",
     "over_billing_limit",
+    "refuse_run",
     "reject_if_over_billing",
     "resolve_payer",
 ]

@@ -27,6 +27,8 @@ after the gates from ``credits.guards.free_run_bounds``) is forced onto
 pydantic_ai with ``free_run_max_turns`` and a token limit its wallet pays for at
 the forced backend's model price; it skips the prewarm and the supervisor, and
 any stored key is withheld because the turn was gated and is billed as platform.
+Before anything is built, every model in ``guards.free_run_models`` must pass
+``guards.free_model_denial`` or the run ends with ``model.not_allowed``.
 
 Every terminal path persists the streamed text as an assistant ``Message`` with
 its steps, records token usage (latest-wins), and sets the stream TTL; a
@@ -3070,6 +3072,15 @@ async def execute_run(spec: RunSpec) -> None:
     ctx.free_run_bounds = await _guards.free_run_bounds(
         ctx.workspace_id, getattr(ctx, "credential_source", None) or "platform"
     )
+    # Such a run may only use an allowlisted, priced model: the one asked for
+    # and the one the forced pydantic_ai backend really runs on. Refused here,
+    # before the pool builds anything.
+    if ctx.free_run_bounds is not None:
+        for model in await _guards.free_run_models(ctx.target_agent_id, ctx.model_override):
+            refusal = _guards.free_model_denial(model)
+            if refusal is not None:
+                await _guards.refuse_run(spec.run_id, refusal, transport=transport)
+                return
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's
     # fail-closed (fix/cloud-artifacts-reland). ``agent_jail.resolve_agent_cwd``

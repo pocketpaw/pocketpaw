@@ -2429,6 +2429,7 @@ marked `failed`. No model or backend is started either way.
 | 402 | `credits.insufficient` | the wallet balance is at or below 0 |
 | 402 | `credits.quota_exceeded` | month-to-date spend reached the plan's monthly ceiling |
 | 429 | `credits.run_in_progress` | an unpaid early-access workspace already has a chat run active (chat route and worker only) |
+| 400 | `model.not_allowed` | a platform-paid turn on an unpaid early-access workspace asked for a model that is not on `free_model_allowlist` or that nothing prices (see Free-run bounds) |
 
 The pause check runs first, then the balance check, then the quota check, then
 the one-run check, so a workspace that is both
@@ -2472,6 +2473,17 @@ workspace are not bounded.
   for (an agent on another backend runs on the deployment's
   `pydantic_ai_model`, and a per-send model picked for that backend is dropped).
   The agent's own tool policy carries over, so a planner opt-in still applies.
+- Only models on `free_model_allowlist` (default `claude-haiku-4-5`,
+  `claude-haiku-4-5-20251001`, `claude-sonnet-4-6`; matched ignoring case and a
+  provider prefix such as `litellm:`) that the metering prices can price. The
+  per-send model, else the agent's own model, else `pydantic_ai_model` must
+  pass, and so must `pydantic_ai_model` itself when the agent is on another
+  backend, because that is what the forced run really uses. Otherwise the turn
+  is refused with 400 `model.not_allowed`: the chat route checks the per-send
+  model before any run row exists, and the worker checks all of them and ends
+  the run with that code on its terminal frame before any backend is built. An
+  allowlisted model that nothing prices is refused too, since it would bill 0.
+  Opus and Fable are not on the default list.
 - At most `free_run_max_turns` (default 20) model requests.
 - A total token limit sized from the wallet the run starts with, at the output
   price of the model it runs, so the run stops at or before the wallet. A run
