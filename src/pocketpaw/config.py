@@ -2727,9 +2727,10 @@ class Settings(BaseSettings):
             "billing_enforced it turns on nothing else: the seat, pocket, "
             "connector, upload, storage, call and sites gates stay off. It "
             "exists for the early-access launch, where free credits are "
-            "metered but no plan or upgrade surface is live. Env only on "
-            "purpose: a database switch that turns enforcement off is a "
-            "footgun. Default False. Set via POCKETPAW_CREDITS_ENFORCED."
+            "metered but no plan or upgrade surface is live. The platform "
+            "settings route refuses writes to it on purpose: a runtime switch "
+            "that turns enforcement off is a footgun. Default False. Set via "
+            "POCKETPAW_CREDITS_ENFORCED."
         ),
     )
     payments_open: bool = Field(
@@ -2740,7 +2741,8 @@ class Settings(BaseSettings):
             "subscription_grant in its ledger is platform-funded early access "
             "(credits.guards.is_platform_funded_free), and the early-access "
             "guards apply to it. Flip it together with live payment provider "
-            "credentials. Default False. Set via POCKETPAW_PAYMENTS_OPEN."
+            "credentials. The platform settings route refuses writes to it. "
+            "Default False. Set via POCKETPAW_PAYMENTS_OPEN."
         ),
     )
     billing_dunning_grace_days: int = Field(
