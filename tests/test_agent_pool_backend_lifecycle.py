@@ -216,3 +216,105 @@ async def test_a_failed_byok_build_on_a_backend_that_ignores_the_key_falls_back(
 
     assert [ev.type for ev in events] == ["done"]
     assert shared.ran == 1
+
+
+class _PaiBackend(_Backend):
+    """A pydantic_ai stand-in that declares the per-run limit kwargs."""
+
+    def __init__(self, name: str = "pai") -> None:
+        super().__init__(name, agent_backend="pydantic_ai")
+        self.kwargs: dict = {}
+
+    async def run(
+        self,
+        message,
+        *,
+        max_requests: int | None = None,
+        total_tokens_limit: int | None = None,
+        model_override: str | None = None,
+        **kwargs,
+    ):
+        self.ran += 1
+        self.kwargs = {
+            "max_requests": max_requests,
+            "total_tokens_limit": total_tokens_limit,
+            "model_override": model_override,
+        }
+        yield SimpleNamespace(type="done", content="")
+
+
+def _forcing_pool(monkeypatch, shared, built):
+    from pocketpaw.agents import registry
+    from pocketpaw.agents.router import AgentRouter
+
+    def _build(name, settings, settings_override=None, **_k):
+        built.append(settings_override)
+        return pai
+
+    pai = _PaiBackend()
+    monkeypatch.setattr(AgentRouter, "create_isolated_backend", staticmethod(_build))
+    monkeypatch.setattr(registry, "get_backend_class", lambda _n: _PaiBackend)
+    pool = AgentPool()
+    inst = _instance(shared)
+
+    async def _get(_aid):
+        return inst
+
+    monkeypatch.setattr(pool, "get", _get)
+    return pool, inst, pai
+
+
+async def test_force_pydantic_ai_runs_a_claude_sdk_agent_on_pydantic_ai(monkeypatch):
+    """An unpaid platform-funded run never touches the agent's claude_agent_sdk
+    backend (its own turn cap, the server's CLI credentials). It runs on
+    pydantic_ai with the per-run limits, and the per-send model chosen for the
+    other backend is dropped.
+
+    Mutation: ignore ``force_pydantic_ai``, or skip forwarding the limits.
+    """
+    shared = _Backend()
+    built: list = []
+    pool, inst, pai = _forcing_pool(monkeypatch, shared, built)
+
+    events = [
+        ev
+        async for ev in pool.run(
+            "a1",
+            "hi",
+            "session:s1",
+            force_pydantic_ai=True,
+            max_requests=20,
+            total_tokens_limit=5_000,
+            model_override="claude-opus-4-6",
+        )
+    ]
+
+    assert [ev.type for ev in events] == ["done"]
+    assert shared.ran == 0, "the turn ran on the agent's own backend"
+    assert pai.ran == 1
+    assert built == [{"agent_backend": "pydantic_ai"}]
+    assert pai.kwargs == {"max_requests": 20, "total_tokens_limit": 5_000, "model_override": None}
+    assert inst.active_runs == 0
+
+
+async def test_limits_a_backend_cannot_take_refuse_the_turn(monkeypatch):
+    """Limits that would be silently dropped are not limits. A backend whose
+    ``run`` cannot take them gets no turn.
+
+    Mutation: forward the limits only when accepted and run anyway.
+    """
+    from pocketpaw.agents import pool as pool_mod
+
+    shared = _Backend()
+    pool = AgentPool()
+    inst = _instance(shared)
+
+    async def _get(_aid):
+        return inst
+
+    monkeypatch.setattr(pool, "get", _get)
+    events = [ev async for ev in pool.run("a1", "hi", "session:s1", max_requests=20)]
+
+    assert [ev.type for ev in events] == ["error"]
+    assert events[0].content == pool_mod.RUN_LIMITS_UNSUPPORTED_MESSAGE
+    assert shared.ran == 0
