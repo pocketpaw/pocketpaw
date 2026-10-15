@@ -38,8 +38,8 @@
   {
     "label": "branch commits do not count as activity",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "            branch = await self._branch_at(slug, str(lead.get(\"branch\") or \"\"), cwd)",
-    "replace": "            branch = 0.0",
+    "find": "            branch, step = await self._branch_at(slug, lead, cwd)",
+    "replace": "            _, step = await self._branch_at(slug, lead, cwd)\n            branch = 0.0",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
@@ -47,8 +47,8 @@
   {
     "label": "lead runs use the 4 h task timeout",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "            expired = now - launched >= self.lead_timeout_seconds",
-    "replace": "            expired = now - launched >= self.timeout_seconds",
+    "find": "            expired = now - since >= self.lead_timeout_seconds",
+    "replace": "            expired = now - since >= self.timeout_seconds",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py",
       "tests/cloud/test_belt_lead_runs.py::test_a_lead_quiet_before_the_timeout_gets_the_ladder_not_the_timeout"
@@ -210,7 +210,7 @@
   {
     "label": "an outage past the timeout never ends the lead",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                if expired:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd)\n                    return\n                await self.sleep(self.poll_seconds)\n                continue",
+    "find": "                if now - since >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd)\n                    return\n                await self.sleep(self.poll_seconds)\n                continue",
     "replace": "                await self.sleep(self.poll_seconds)\n                continue",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
@@ -274,8 +274,8 @@
   {
     "label": "a finished lead waiting on CI gets nudged and relaunched",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "            if not sheet and now - heard >= self.lead_stall_seconds:",
-    "replace": "            if now - heard >= self.lead_stall_seconds:",
+    "find": "            if not (sheet or waiting) and now - heard >= self.lead_stall_seconds:",
+    "replace": "            if not waiting and now - heard >= self.lead_stall_seconds:",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_ladder"
     ]
@@ -324,6 +324,100 @@
     "replace": "        why = f\"feature lead #{lead.get('issue')} ended\"",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot"
+    ]
+  },
+  {
+    "label": "a lead waiting on CI gets the stall ladder",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            if not (sheet or waiting) and now - heard >= self.lead_stall_seconds:",
+    "replace": "            if not sheet and now - heard >= self.lead_stall_seconds:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_waiting_on_red_dev_ci_is_not_stalled",
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_waiting_for_the_lane_and_ci_on_its_fixes_is_not_stalled"
+    ]
+  },
+  {
+    "label": "a waiting lead's timeout counts from the launch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            since = active if waiting else launched\n",
+    "replace": "            since = launched\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_waiting_on_red_dev_ci_is_not_stalled",
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_waiting_for_the_lane_and_ci_on_its_fixes_is_not_stalled"
+    ]
+  },
+  {
+    "label": "every lead's timeout counts from its last progress",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            since = active if waiting else launched\n",
+    "replace": "            since = active\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_lead_has_8h_and_no_no_pr_rule"
+    ]
+  },
+  {
+    "label": "an outage counts the timeout from the launch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                if now - since >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd)",
+    "replace": "                if now - launched >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_an_outage_while_a_lead_waits_past_8h_does_not_release_it"
+    ]
+  },
+  {
+    "label": "any Next line counts as a wait",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        if not _WAITS_ON_CI.search(step):\n            return False",
+    "replace": "        if False:\n            return False",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_silent_lead_with_no_wait_in_evidence_still_climbs_the_ladder"
+    ]
+  },
+  {
+    "label": "a run that finished long ago counts as a wait",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "_epoch(r.get(\"updatedAt\")) >= window for r in runs",
+    "replace": "True for r in runs",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_silent_lead_with_no_wait_in_evidence_still_climbs_the_ladder"
+    ]
+  },
+  {
+    "label": "an in-progress run is no evidence of a wait",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            r.get(\"status\") != \"completed\" or _epoch(",
+    "replace": "            False or _epoch(",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_waiting_for_the_lane_and_ci_on_its_fixes_is_not_stalled",
+      "tests/cloud/test_belt_lead_runs.py::test_a_wait_is_bounded_by_the_timeout_from_the_last_progress"
+    ]
+  },
+  {
+    "label": "the branch read drops the RECORD's Next line",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "str(parse_record(text)[\"next\"] or \"\")",
+    "replace": "\"\"",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_waiting_on_red_dev_ci_is_not_stalled",
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_waiting_for_the_lane_and_ci_on_its_fixes_is_not_stalled"
+    ]
+  },
+  {
+    "label": "a lead waits on any word, not CI or the lane",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "_WAITS_ON_CI = re.compile(r\"\\bCI\\b|\\b[Ll]ane\\b\")",
+    "replace": "_WAITS_ON_CI = re.compile(r\"\\w\")",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_silent_lead_with_no_wait_in_evidence_still_climbs_the_ladder"
+    ]
+  },
+  {
+    "label": "the wait ignores the stall window's length",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        window = now - self.lead_stall_seconds\n",
+    "replace": "        window = now - 2 * self.lead_timeout_seconds\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_silent_lead_with_no_wait_in_evidence_still_climbs_the_ladder"
     ]
   }
 ]

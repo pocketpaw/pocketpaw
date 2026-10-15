@@ -58,12 +58,16 @@
 #           ``feature-done`` PR, green dev CI on its merge commit and a
 #           ``Belt-Contact-Sheet:`` issue comment since the launch, or the feature
 #           issue closed (done at once, never nudged or relaunched). STALL: no
-#           ``lead/<feature>`` commit, PR update or issue comment for LEAD_STALL:
-#           a ``claude -p --cloud`` nudge, then a resume relaunch, then
-#           ``needs-human`` and the run released. LEAD_TIMEOUT (8 h) settles the same
-#           way (labelled and released, never a develop failure) once the lead is
-#           also silent for a stall window; a lead still working runs to twice the
-#           timeout. No no-PR rule.
+#           ``lead/<feature>`` commit, PR update or issue comment (its progress)
+#           for LEAD_STALL: a ``claude -p --cloud`` nudge, then a resume relaunch,
+#           then ``needs-human`` and the run released. WAITING is no stall and gets
+#           no rung: the ``Next:`` of the branch's RECORD.md (read with its last
+#           commit) names CI or the lane, and a run on the base is live or ended
+#           inside LEAD_STALL. LEAD_TIMEOUT (8 h, from the launch, or from the last
+#           progress while waiting) settles like the last rung (labelled and
+#           released, never a develop failure) once the lead is also silent for a
+#           stall window; a lead still working stops at twice it from the launch.
+#           No no-PR rule.
 # Only git, gh and the launcher run locally; an approved escalated diff lands on the line.
 
 from __future__ import annotations
@@ -87,6 +91,7 @@ from pathlib import Path
 from typing import Any, ClassVar, cast
 
 from pocketpaw_ee.cloud.belt import clef, orient
+from pocketpaw_ee.cloud.belt.app_blueprint import parse_record
 from pocketpaw_ee.cloud.belt.develop_station import (
     _GIT,
     ClaudeCodeDevelop,
@@ -129,6 +134,14 @@ _SAFE_FEATURE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _FEATURE_DONE = "feature-done"
 _CONTACT_SHEET = "Belt-Contact-Sheet:"
 _CI_DONE_OK = {"success", "neutral", "skipped"}
+# A lead's RECORD ``Next:`` that names a wait it cannot shorten: CI or the lane.
+_WAITS_ON_CI = re.compile(r"\bCI\b|\b[Ll]ane\b")
+# The lead branch's last commit time and its RECORD.md, in one read.
+_BRANCH_QUERY = (
+    "query($owner:String!,$name:String!,$ref:String!,$path:String!){"
+    "repository(owner:$owner,name:$name){object(expression:$ref){"
+    "...on Commit{committedDate file(path:$path){object{...on Blob{text}}}}}}}"
+)
 
 
 def _run_green(run: dict[str, Any]) -> bool:
@@ -597,12 +610,14 @@ class CloudTaskDispatcher:
         cwd = Path(self.launch_dir).expanduser()
         issue = str(lead.get("issue") or "")
         base = str(blob.get("base_branch") or "main")
+        # Where the timeout counts from: the launch, or the last progress of a
+        # lead that waits. Kept across polls for the ones GitHub fails.
+        since = launched
         while True:
             action = await store.get_action(run_ref)
             if getattr(action, "status", None) != "pending":
                 return  # a human rejected or approved it meanwhile; theirs stands
             now = self.wall()
-            expired = now - launched >= self.lead_timeout_seconds
             try:
                 prs, pr_at = await self._lead_prs(slug, run_ref, cwd)
                 argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "comments,state"]
@@ -610,7 +625,7 @@ class CloudTaskDispatcher:
             except (CloudStationError, ValueError) as exc:
                 # GitHub is down past the retries: skip this poll, not the lead.
                 logger.warning("belt cloud: lead %s poll skipped: %s", run_ref, exc)
-                if expired:
+                if now - since >= self.lead_timeout_seconds:
                     await self._lead_expired(store, run_ref, blob, slug, cwd)
                     return
                 await self.sleep(self.poll_seconds)
@@ -634,9 +649,17 @@ class CloudTaskDispatcher:
                 await self._lead_closed(store, run_ref, blob, prs)
                 return
             said = max((_epoch(c.get("createdAt")) for c in comments), default=0.0)
-            branch = await self._branch_at(slug, str(lead.get("branch") or ""), cwd)
+            branch, step = await self._branch_at(slug, lead, cwd)
             # The lead's own signs of work; a stall rung or a relaunch is Belt's.
             active = max(launched, pr_at, said, branch)
+            # Quiet but waiting on CI or the lane (``_waits_on_ci``) is no stall:
+            # no rung, and the timeout counts from the last progress instead of
+            # the launch. ponytail: a lead that wrote "wait for CI" and died on a
+            # busy base is kept 8 h past its last commit.
+            quiet = now - active >= self.lead_stall_seconds
+            waiting = quiet and await self._waits_on_ci(slug, base, step, now, cwd)
+            since = active if waiting else launched
+            expired = now - since >= self.lead_timeout_seconds
             # Past the timeout a lead still showing work inside one stall window
             # keeps going, up to twice the timeout: a paused plan or a long
             # Anatomy round must not release a live lead (factory lesson 100).
@@ -653,7 +676,7 @@ class CloudTaskDispatcher:
             )
             # A lead whose contact sheet is up has finished and waits on dev CI:
             # a quiet branch then is not a stall, and the timeout settles it.
-            if not sheet and now - heard >= self.lead_stall_seconds:
+            if not (sheet or waiting) and now - heard >= self.lead_stall_seconds:
                 if not await self._lead_stall(store, run_ref, blob, slug, worker, cwd, active):
                     return
             await self.sleep(self.poll_seconds)
@@ -711,18 +734,42 @@ class CloudTaskDispatcher:
             )
         return sorted(prs, key=lambda p: p["number"]), newest
 
-    async def _branch_at(self, slug: str, branch: str, cwd: Path) -> float:
-        """When ``branch``'s last commit was made (epoch); 0 when it does not
-        exist yet or is unreadable."""
-        if not branch or not _SAFE_REF.match(branch):
-            return 0.0
+    async def _branch_at(self, slug: str, lead: dict[str, Any], cwd: Path) -> tuple[float, str]:
+        """When the lead's status branch got its last commit (epoch) and the
+        ``Next:`` line of the RECORD.md on it, in one GraphQL read; ``(0.0, "")``
+        when the branch does not exist yet or is unreadable."""
+        branch, feature = str(lead.get("branch") or ""), str(lead.get("feature") or "")
+        if not _SAFE_REF.match(branch) or not _SAFE_FEATURE.match(feature):
+            return 0.0, ""
+        owner, name = slug.split("/", 1)
+        argv = ["gh", "api", "graphql", "-f", f"query={_BRANCH_QUERY}", "-f", f"owner={owner}"]
+        argv += ["-f", f"name={name}", "-f", f"ref={branch}"]
+        argv += ["-f", f"path=docs/leads/{feature}/RECORD.md"]
         try:
-            out = await self._gh(["gh", "api", f"repos/{slug}/commits/{branch}"], cwd, "STALL")
-            return _epoch(
-                ((json.loads(out or "{}").get("commit") or {}).get("committer") or {}).get("date")
-            )
+            data = json.loads(await self._gh(argv, cwd, "STALL") or "{}").get("data") or {}
         except Exception:  # noqa: BLE001 — no status branch yet reads as no activity
-            return 0.0
+            return 0.0, ""
+        head = (data.get("repository") or {}).get("object") or {}
+        text = ((head.get("file") or {}).get("object") or {}).get("text")
+        return _epoch(head.get("committedDate")), str(parse_record(text)["next"] or "")
+
+    async def _waits_on_ci(self, slug: str, base: str, step: str, now: float, cwd: Path) -> bool:
+        """A quiet lead is waiting, not stalled, when its RECORD's ``Next:``
+        (``step``) names CI or the lane and a run on ``base`` is in progress or
+        finished inside the last stall window. Any workflow and event counts: the
+        lane runs on a schedule too. Unreadable runs read as no wait."""
+        if not _WAITS_ON_CI.search(step):
+            return False
+        argv = ["gh", "run", "list", "-R", slug, "--branch", base, "--limit", "30"]
+        argv += ["--json", "status,updatedAt"]
+        try:
+            runs = json.loads(await self._gh(argv, cwd, "STALL: gh run list") or "[]")
+        except Exception:  # noqa: BLE001 — no evidence of a wait; the ladder goes on
+            return False
+        window = now - self.lead_stall_seconds
+        return any(
+            r.get("status") != "completed" or _epoch(r.get("updatedAt")) >= window for r in runs
+        )
 
     async def _dev_green(self, slug: str, base: str, sha: str, cwd: Path) -> bool:
         """Dev CI says the merge commit ``sha`` is green: every run on ``sha``
@@ -2016,7 +2063,8 @@ def _lead_brief(
         f"- Status: after every stage push {record}/RECORD.md and {record}/timeline.tsv to "
         f"branch {branch}. Belt reads that branch's last commit; with no commit there, no PR "
         f"event and no issue comment for {stall_seconds / 60:.0f} min it nudges you, then "
-        "relaunches.\n"
+        "relaunches. While the RECORD.md `Next:` line names CI or the lane and a CI run on "
+        f"{base} is running or just ended, it waits instead.\n"
         f"- Every PR: base {base}, label `fast-lane`, at most 400 lines and 15 files. Body "
         f"lines `{LEAD_MARKER} {request.action_id}` and `Feature: {feature}`, then "
         "`Fast-Check: pass` and `Head: <full sha>` after scripts/ci passes. The lane merges "

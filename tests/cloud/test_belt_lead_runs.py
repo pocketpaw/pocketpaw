@@ -20,8 +20,12 @@
 # ``claude -p --cloud <session>`` nudge, then a relaunch with the resume brief,
 # then ``needs-human`` on the issue and the run released, the reason naming the
 # rungs that ran ("after two nudges" when no relaunch did). Activity holds it off.
-# TIMEOUT: 8 h from the launch, and no 1 h no-PR rule; a timed-out lead is
-# labelled ``needs-human`` and released like the ladder's last rung.
+# WAITING: a quiet lead whose RECORD.md ``Next:`` names CI or the lane while a run
+# on the base is live or ended inside the window gets no rung (the viewer-playback
+# and photo-edit leads); a silent lead with no such evidence still climbs.
+# TIMEOUT: 8 h from the launch (from the last progress while waiting), and no 1 h
+# no-PR rule; a timed-out lead is labelled ``needs-human`` and released like the
+# ladder's last rung.
 # RESUME: a launched lead is tracked again as a lead, never relaunched.
 # LESSON 42: a transient gh failure is retried with backoff; a permanent one
 # fails at once; a transient one past the retries ends the tracker.
@@ -193,11 +197,6 @@ class LeadRunner:
         if argv[:3] == ["gh", "issue", "view"]:
             data = {"comments": self._next(self.comments), "title": "Text shapes"}
             return 0, json.dumps({**data, "body": self.issue_body}), ""
-        if argv[:2] == ["gh", "api"] and "/commits/lead/" in argv[2]:
-            at = self._next(self.commits)
-            if at is None:
-                return 1, "", "gh: Not Found (HTTP 404)"
-            return 0, json.dumps({"commit": {"committer": {"date": _iso(at)}}}), ""
         if argv[:3] == ["gh", "api", "graphql"]:  # the lead branch's last commit + RECORD.md
             at = self._next(self.commits)
             record = {"object": {"text": self.record}} if self.record else None
@@ -285,6 +284,7 @@ async def test_lead_brief_is_the_playbook_plus_the_run_and_the_rules(store, dirs
     assert f"Belt-Lead: {run_ref}" in brief and f"Feature: {FEATURE}" in brief
     assert f"lead/{FEATURE}" in brief and f"docs/leads/{FEATURE}/RECORD.md" in brief
     assert "timeline.tsv" in brief
+    assert "`Next:` line names CI or the lane" in brief  # a wait holds the ladder off
     assert HEAD_SHA in brief  # the base SHA step one verifies
     assert "Fast-Check: pass" in brief and "Head: <full sha>" in brief
     assert "`feature-done`" in brief and "Belt-Contact-Sheet:" in brief
