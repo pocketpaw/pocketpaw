@@ -68,8 +68,8 @@
   {
     "label": "the route gates without the resolved source",
     "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
-    "find": "        await guards.assert_within_billing(workspace_id, source)\n",
-    "replace": "        await guards.assert_within_billing(workspace_id)\n",
+    "find": "        await guards.assert_within_billing(workspace_id, source, one_active_run=True)\n",
+    "replace": "        await guards.assert_within_billing(workspace_id, one_active_run=True)\n",
     "tests": [
       "tests/cloud/test_agent_router_run_start_gates.py::test_a_byok_turn_skips_the_wallet",
       "tests/cloud/credits/test_early_access_byok.py::test_byok_chat_http_at_wallet_zero_is_admitted"

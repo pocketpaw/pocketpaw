@@ -38,6 +38,15 @@
 # * ``is_platform_funded_free(workspace)`` is the one definition of an unpaid
 #   early-access workspace that the early-access guards share: plan ``free``,
 #   ``payments_open`` off, and no applied ``top_up`` or ``subscription_grant``.
+# * Free-run bounds. With ``one_active_run=True`` (only the two chat seams pass
+#   it) an unpaid platform-funded workspace that already has an active chat run
+#   is refused with 429 ``credits.run_in_progress``; ``run_id`` names the
+#   executor's own run, which is not counted, nor is any run created after it,
+#   so the oldest of two racing tabs proceeds. ``free_run_bounds`` returns the
+#   bounds ``run_core`` applies to such a run (turn cap
+#   ``free_run_max_turns`` and the wallet), and ``free_run_token_limit`` sizes
+#   its pydantic_ai token limit from that wallet at the turn model's output
+#   price (conservative; None for an unpriced model).
 #
 # ``credits_enforced`` gates only this chat credit check; ``billing_enforced``
 # also turns on the seat, pocket, connector and other paid gates elsewhere.
@@ -48,6 +57,8 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from pocketpaw.config import get_settings  # type: ignore[import-untyped]
@@ -55,6 +66,7 @@ from pocketpaw.config import get_settings  # type: ignore[import-untyped]
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.cloud.byok.service import TurnCredentials
+    from pocketpaw_ee.cloud.metering.domain import RateCard
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +141,11 @@ async def billing_source(
 
 
 async def over_billing_limit(
-    workspace_id: str, source: CredentialSource = "platform"
+    workspace_id: str,
+    source: CredentialSource = "platform",
+    *,
+    one_active_run: bool = False,
+    run_id: str | None = None,
 ) -> CloudError | None:
     """Return the billing rejection for ``workspace_id``, or None to proceed.
 
@@ -146,7 +162,10 @@ async def over_billing_limit(
     An uncapped plan (Enterprise, ``monthly_ceiling`` is None) never trips the
     quota leg (``check_quota`` no-ops there). ``source="byok"`` returns None:
     the workspace's own key pays the provider, so neither its balance nor its
-    quota applies. An empty ``workspace_id`` returns
+    quota applies. With ``one_active_run`` an unpaid platform-funded workspace
+    that already has an older active chat run than ``run_id`` (any, when
+    ``run_id`` is None) gets a 429 ``credits.run_in_progress``, after the
+    wallet checks. An empty ``workspace_id`` returns
     None: there is no wallet to attribute, and the run-transport callers already
     validate a non-empty workspace upstream. Only the two credit CloudErrors are
     caught here — any other exception (a real infra failure) propagates, exactly
@@ -179,10 +198,57 @@ async def over_billing_limit(
         await credits_service.check_quota(workspace_id)
     except (InsufficientCredits, QuotaExceeded) as exc:
         return exc
+    # The run read first: it is one indexed query and nearly always empty, so
+    # the plan and ledger reads only run for a workspace that has another run.
+    if (
+        one_active_run
+        and await _older_active_run(workspace_id, run_id)
+        and await is_platform_funded_free(workspace_id)
+    ):
+        from pocketpaw_ee.cloud._core.errors import RateLimited
+
+        return RateLimited(
+            "credits.run_in_progress",
+            "Your last message is still being answered. Wait for it to finish, "
+            "then send this one again.",
+        )
     return None
 
 
-async def assert_within_billing(workspace_id: str, source: CredentialSource = "platform") -> None:
+#: How far back an active run still counts. A run whose worker died stops
+#: beating and the stale-run sweeper moves it out of ``running`` within minutes;
+#: this only bounds the query, and no bounded free run lasts this long.
+_ACTIVE_RUN_WINDOW = timedelta(hours=1)
+#: Rows read. Newest first, so an executor's own run sits near the top.
+_ACTIVE_RUN_SCAN = 20
+
+
+async def _older_active_run(workspace_id: str, run_id: str | None) -> bool:
+    """Whether ``workspace_id`` has an active chat run that blocks this one.
+
+    With no ``run_id`` (the HTTP seam, before the run doc exists) any active run
+    blocks. With one (the executor, whose own run is already active) only a run
+    created before it blocks, ties broken by run id, so of two racing runs
+    exactly the older proceeds. If the own run is not among the rows read,
+    every other active run blocks (fail closed).
+    """
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+
+    rows = await run_service.find_active_runs_for_workspace(
+        workspace_id=workspace_id,
+        since=datetime.now(UTC) - _ACTIVE_RUN_WINDOW,
+        limit=_ACTIVE_RUN_SCAN,
+    )
+    others = [r for r in rows if r.run_id != run_id]
+    mine = next((r for r in rows if r.run_id == run_id), None) if run_id else None
+    if mine is None:
+        return bool(others)
+    return any((r.created_at, r.run_id) < (mine.created_at, mine.run_id) for r in others)
+
+
+async def assert_within_billing(
+    workspace_id: str, source: CredentialSource = "platform", *, one_active_run: bool = False
+) -> None:
     """Raise the billing rejection (402, or 503 while paused) when refused; else no-op.
 
     For HTTP routes: the raised ``InsufficientCredits`` / ``QuotaExceeded`` is a
@@ -190,7 +256,7 @@ async def assert_within_billing(workspace_id: str, source: CredentialSource = "p
     local ``try/except Exception`` in the handler so the 402 isn't swallowed into
     a generic 500. Flag-gated and Enterprise-safe via ``over_billing_limit``.
     """
-    exc = await over_billing_limit(workspace_id, source)
+    exc = await over_billing_limit(workspace_id, source, one_active_run=one_active_run)
     if exc is not None:
         raise exc
 
@@ -215,7 +281,7 @@ async def reject_if_over_billing(
     writing the rejection must not turn a clean 402-equivalent block into an
     unhandled crash that takes the worker down.
     """
-    exc = await over_billing_limit(workspace_id, source)
+    exc = await over_billing_limit(workspace_id, source, one_active_run=True, run_id=run_id)
     if exc is None:
         return False
 
@@ -261,9 +327,72 @@ async def is_platform_funded_free(workspace_id: str) -> bool:
     return not await credits_service.has_paid_credits(workspace_id)
 
 
+@dataclass(frozen=True)
+class FreeRunBounds:
+    """What a platform-funded free run may use: model requests and wallet."""
+
+    max_turns: int
+    balance_micro: int
+
+
+async def free_run_bounds(workspace_id: str, source: CredentialSource) -> FreeRunBounds | None:
+    """The bounds for this run, or None when it is not a platform-funded free run.
+
+    None unless ``credits_enforced`` or ``billing_enforced`` is on, the run is
+    paid by the platform, and the workspace is unpaid early access. Read at run
+    start, after the gate, so ``balance_micro`` is the wallet the run starts on.
+    """
+    settings = get_settings()
+    enforced = settings.billing_enforced or settings.credits_enforced
+    if not enforced or not workspace_id or source != "platform":
+        return None
+    if not await is_platform_funded_free(workspace_id):
+        return None
+
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    return FreeRunBounds(
+        max_turns=settings.free_run_max_turns,
+        balance_micro=await credits_service.balance_micro(workspace_id),
+    )
+
+
+def free_run_token_limit(
+    balance_micro: int, model: str, *, rate_card: RateCard | None = None
+) -> int | None:
+    """Tokens ``balance_micro`` pays for on ``model``, priced as output tokens.
+
+    The output price is the higher one, so the run stops at or before the
+    wallet whatever its input/output mix. ``model`` may carry a provider prefix
+    (``litellm:claude-haiku-4-5``). None when nothing prices the model: the turn
+    cap still binds, and unpriced models are refused upstream. 0 for an empty
+    wallet.
+    """
+    if balance_micro <= 0:
+        return 0
+
+    from pocketpaw.usage_tracker import price_run
+    from pocketpaw_ee.cloud.metering.service import load_rate_card
+
+    card = rate_card if rate_card is not None else load_rate_card()
+    now = datetime.now(UTC)
+    for name in (model, model.partition(":")[2]):
+        per_million = (
+            price_run(name, input_tokens=0, output_tokens=1_000_000, at=now) if name else None
+        )
+        if per_million:
+            micro_per_million = card.to_micro_credits(per_million)
+            if micro_per_million > 0:
+                return balance_micro * 1_000_000 // micro_per_million
+    return None
+
+
 __all__ = [
+    "FreeRunBounds",
     "assert_within_billing",
     "billing_source",
+    "free_run_bounds",
+    "free_run_token_limit",
     "is_platform_funded_free",
     "over_billing_limit",
     "reject_if_over_billing",

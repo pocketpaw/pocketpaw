@@ -235,6 +235,20 @@ def _accepts_exclusive_tools_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_run_limits_kwarg(func: Any) -> bool:
+    """Does ``func`` name both ``max_requests`` and ``total_tokens_limit``?
+
+    The per-run usage limits a platform-funded free run carries. Only
+    ``pydantic_ai`` declares them. The pool refuses a limited run on a backend
+    that does not, because a limit dropped on the floor is no limit.
+    """
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+    return "max_requests" in params and "total_tokens_limit" in params
+
+
 def _accepts_turn_context_kwarg(func: Any) -> bool:
     """Does ``func`` name ``turn_context`` in its signature?
 

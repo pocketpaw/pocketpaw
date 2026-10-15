@@ -12,7 +12,9 @@ checks BEFORE any DB write, so a refused turn leaves no run and no message:
 
 * who pays (``credits.guards.resolve_payer`` and ``billing_source``), then
   the credit gate (``assert_within_billing``: balance, then monthly quota, 402
-  ``credits.insufficient`` / ``credits.quota_exceeded``). A no-op unless
+  ``credits.insufficient`` / ``credits.quota_exceeded``, and 429
+  ``credits.run_in_progress`` for an unpaid early-access workspace that already
+  has a chat run active). A no-op unless
   ``billing_enforced`` or ``credits_enforced``, and skipped for a turn on the
   workspace's own key when the serving backend spends it. The surface is
   resolved before these gates, because a deny-by-default surface changes
@@ -133,7 +135,8 @@ async def _run_start_gates(
       workspace's own key skips the wallet only when ``agent_id``'s backend
       (or a deny-by-default ``exclusive_tools`` run) spends that key, a
       resolver failure is gated as platform, and a gateway address the egress
-      guard rejects raises its 422.
+      guard rejects raises its 422. An unpaid early-access workspace with a
+      chat run already active gets 429 ``credits.run_in_progress``.
     * Guest turn gate (feat/byok-guest-backend): the frozen
       ``guest_limit_reached`` / ``guest_key_required`` 402 the signup prompt
       keys on. Does NOT increment; ``run_core._reject_if_guest_over_limit``
@@ -155,7 +158,7 @@ async def _run_start_gates(
             return
         payer = await guards.resolve_payer(workspace_id)
         source = await guards.billing_source(payer, agent_id, exclusive_tools=exclusive_tools)
-        await guards.assert_within_billing(workspace_id, source)
+        await guards.assert_within_billing(workspace_id, source, one_active_run=True)
 
     checks = [
         # Flag-gated no-op unless billing_enforced or credits_enforced;

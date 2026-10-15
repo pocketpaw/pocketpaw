@@ -103,12 +103,11 @@ async def test_the_older_run_proceeds_while_a_newer_one_is_queued(
     Mutation: count the run's own doc, or any other active run, as in progress.
     """
     from pocketpaw_ee.cloud.chat.runs import run_core
-    from pocketpaw_ee.cloud.chat.runs import service as run_service
 
     ws, uid = ea_user.workspace_id, ea_user.user_id
     transport, seen = _wire_executor(monkeypatch, ws, uid, await _agent(ws, uid))
     spec = _spec(ws, uid, "r-older")
-    await run_service.create_run(spec)
+    await _active_run(ws, uid, spec.run_id, age_s=5)
     await _active_run(ws, uid, "r-newer")
 
     await run_core.execute_run(spec)

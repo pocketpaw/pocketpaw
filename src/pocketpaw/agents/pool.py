@@ -20,7 +20,11 @@ exclusive tools, images, image attachments, the tool switch) are withheld when
 empty and forwarded only to a backend whose ``run`` signature declares them.
 
 A run with ``exclusive_tools`` (the deny-by-default concierge) is always served
-by pydantic_ai (``_deny_by_default_backend``), never the owner's backend.
+by pydantic_ai (``_deny_by_default_backend``), never the owner's backend. So is
+a run with ``force_pydantic_ai`` (the cloud's platform-funded free run), which
+swaps the backend without the tool lockdown. Per-run usage limits
+(``max_requests``, ``total_tokens_limit``) go only to a backend that declares
+them; a limited run on any other backend is refused, never run unlimited.
 
 BYOK: a turn given ``byok_api_key`` runs on a private backend built for that
 turn alone (``AgentRouter.create_isolated_backend``), carrying the agent's own
@@ -55,6 +59,7 @@ from pocketpaw.agents.backend import (
     _accepts_images_kwarg,
     _accepts_prompt_digest,
     _accepts_prompt_digest_kwarg,
+    _accepts_run_limits_kwarg,
     _accepts_tools_enabled_kwarg,
     _accepts_turn_context_kwarg,
 )
@@ -78,6 +83,12 @@ logger = logging.getLogger(__name__)
 BYOK_BACKEND_FAILED_MESSAGE = (
     "Your API key couldn't be used for this turn, so it wasn't run. "
     "Check the key in your workspace settings and try again."
+)
+
+#: The ``error`` a run carrying usage limits gets when the backend serving it
+#: cannot take them. Refused rather than run unlimited.
+RUN_LIMITS_UNSUPPORTED_MESSAGE = (
+    "This reply couldn't start because its usage limits aren't supported here."
 )
 
 
@@ -651,6 +662,9 @@ class AgentPool:
         byok_api_key: str | None = None,
         byok_settings_override: dict[str, object] | None = None,
         images: tuple[tuple[bytes, str], ...] = (),
+        force_pydantic_ai: bool = False,
+        max_requests: int | None = None,
+        total_tokens_limit: int | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -754,6 +768,13 @@ class AgentPool:
 
         None (the default) = the shared cached instance, unchanged for every
         existing run.
+
+        ``force_pydantic_ai`` serves a non-BYOK run on pydantic_ai whatever the
+        agent's backend is (the same backend ``_deny_by_default_backend`` builds,
+        without ``exclusive_tools``), dropping a per-send model picked for the
+        other backend. ``max_requests`` / ``total_tokens_limit`` cap the run; a
+        backend that cannot take them refuses the turn. The cloud sets all three
+        for a platform-funded free run. Defaults leave every run unchanged.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -932,6 +953,12 @@ class AgentPool:
                 # different backend it is not a model we know to be valid.
                 if run_backend is not instance.backend:
                     run_kwargs.pop("model_override", None)
+            elif force_pydantic_ai and not byok_api_key:
+                # Raises when no pydantic_ai backend can be built: the run must
+                # not fall back to the agent's own backend.
+                run_backend = self._deny_by_default_backend(instance, None)
+                if run_backend is not instance.backend:
+                    run_kwargs.pop("model_override", None)
             elif byok_api_key:
                 from pocketpaw.agents.registry import _LEGACY_BACKENDS
 
@@ -967,6 +994,14 @@ class AgentPool:
             if byok_build_failed:
                 yield AgentEvent(type="error", content=BYOK_BACKEND_FAILED_MESSAGE)
                 return
+            if max_requests is not None or total_tokens_limit is not None:
+                if not _accepts_run_limits_kwarg(run_backend.run):
+                    yield AgentEvent(type="error", content=RUN_LIMITS_UNSUPPORTED_MESSAGE)
+                    return
+                if max_requests is not None:
+                    run_kwargs["max_requests"] = max_requests
+                if total_tokens_limit is not None:
+                    run_kwargs["total_tokens_limit"] = total_tokens_limit
 
             # Asked of the signature for the same reason ``_accepts_policy``
             # and ``_accepts_prompt_digest_kwarg`` are: a backend opts in by
