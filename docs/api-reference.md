@@ -2425,7 +2425,7 @@ marked `failed`. No model or backend is started either way.
 
 | Status | Code | Means |
 |--------|------|-------|
-| 503 | `early_access.paused` | free early-access usage is paused (launch controls below); unpaid workspaces only |
+| 503 | `early_access.paused` | free early-access usage is paused, or the day's free ceiling is reached (launch controls below); unpaid workspaces only |
 | 402 | `credits.insufficient` | the wallet balance is at or below 0 |
 | 402 | `credits.quota_exceeded` | month-to-date spend reached the plan's monthly ceiling |
 | 429 | `credits.run_in_progress` | an unpaid early-access workspace already has a chat run active (chat route and worker only) |
@@ -2568,12 +2568,40 @@ collection, a single row with `key: "global"`). A missing row means the defaults
 |-------|---------|--------|
 | `free_usage_paused` | `false` | Kill switch. While on, every platform-paid agent run on an unpaid early-access workspace is refused (a BYOK turn is not) with 503 `early_access.paused` at the run-start gate above (so only while that gate is on). Paid workspaces are not affected. |
 | `signups_paused` | `false` | Signup pause. Stored and readable; the account-creation check that enforces it is not built yet. |
-| `daily_free_ceiling_credits` | `25000` | Global daily free ceiling. Stored and readable; the meter that enforces it is not built yet. |
+| `daily_free_ceiling_credits` | `25000` | Global daily free ceiling, in credits per UTC day, shared by every unpaid workspace. See "Daily free ceiling" below. `0` refuses every free run. |
 
 Every process (web and arq worker) reads the row through a 30-second in-process
 cache, so a flip takes effect everywhere within 30 seconds with no restart. If
 the read fails, the server logs an error and uses the defaults, so the pause
-flags fail open; the per-workspace credit gate still applies.
+flags fail open; the per-workspace credit gate still applies. The daily ceiling
+fails closed instead: while the row cannot be read, free runs are refused.
+
+#### Daily free ceiling
+
+Every platform-paid agent run on an unpaid early-access workspace (not a BYOK
+turn, not a paid workspace) reserves an estimate on one platform-wide meter
+before the model is called: the `daily_usage` row with `meter:
+"early_access_credits"`, `subject_type: "workspace"`, `subject_id:
+"__platform__"` and the UTC `day`. The estimate is `free_run_reserve_credits`
+(default 100, env `POCKETPAW_FREE_RUN_RESERVE_CREDITS`), or the wallet the run
+starts on in whole credits rounded up when that is smaller. It is a per-run hold,
+not the most the run may spend, so many users chatting at once do not fill the
+ceiling with holds while real spend is low. If the reservation would take the day past
+`daily_free_ceiling_credits`, or the meter or the control row cannot be read,
+the run ends at once with 503 `early_access.paused` (terminal `error` frame,
+run `failed`) and no model call. Paid and BYOK runs never touch the meter.
+
+When the run is billed, the reservation is reconciled to the real spend (whole
+credits rounded up): an unused estimate is given back, so a run refused or
+dropped before the model call releases all of it, and spend past the estimate
+is added even above the ceiling, so the next reservations see it. Each run is
+reconciled once, however often it is billed. The meter therefore reads
+"credits spent today plus credits held by runs in flight".
+
+The ceiling is a soft burn-rate limit, not a hard cap: a run that spends more
+than its hold still finishes, so runs already in flight can take the day past the
+ceiling by up to (concurrent free runs) x (run spend minus the hold). Each user's
+one-time grant still bounds what that user can ever spend.
 
 Operators change the switches with `PUT /api/v1/platform/launch-controls`
 (`platform.settings.write`, audited as `platform.launch_controls.write`) and read

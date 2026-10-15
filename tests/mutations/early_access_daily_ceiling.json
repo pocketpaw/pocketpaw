@@ -1,0 +1,65 @@
+[
+  {
+    "label": "free runs never reserve, so the ceiling never refuses",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        refusal = await _guards.reserve_free_run(spec.run_id, ctx.free_run_bounds)\n",
+    "replace": "        refusal = None\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "the reservation ignores the ceiling",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        cap=ceiling_credits,\n",
+    "replace": "        cap=None,\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "the estimate is one credit, not the per-run hold",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    estimate = max(1, min(metering.credits_ceil(bounds.balance_micro), reserve))\n",
+    "replace": "    estimate = 1\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "a run holds its whole starting wallet, so concurrency alone trips the pause",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    estimate = max(1, min(metering.credits_ceil(bounds.balance_micro), reserve))\n",
+    "replace": "    estimate = max(1, metering.credits_ceil(bounds.balance_micro))\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "an unreadable control row lets free runs through",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if controls.read_failed:\n        return EarlyAccessPaused()\n    # ponytail",
+    "replace": "    if False:\n        return EarlyAccessPaused()\n    # ponytail",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "bill_run never reconciles, so estimates and refused runs hold the ceiling all day",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "    await _reconcile_early_access(run_id, micro)\n",
+    "replace": "    pass\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "reconcile only refunds, so an overrun never lands in the meter",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        elif delta > 0:\n",
+    "replace": "        elif False:\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "the reservation is not cleared when claimed, so a re-bill reconciles twice",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/service.py",
+    "find": "        {\"$set\": {\"early_access_reserved_credits\": 0, \"early_access_reserved_day\": \"\"}},\n",
+    "replace": "        {\"$set\": {\"early_access_reserved_unused\": 0}},\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "the reservation reads the clock twice, so a claim across midnight is refunded on the wrong day",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        cap=ceiling_credits,\n        day=day,\n",
+    "replace": "        cap=ceiling_credits,\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  }
+]

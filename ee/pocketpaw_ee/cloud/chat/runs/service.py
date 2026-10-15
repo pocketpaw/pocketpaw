@@ -14,6 +14,9 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
   metering service's write, made here so metering never writes this document.
   ``set_credential_source`` records who paid the provider (``platform`` or
   ``byok``), which ``bill_run`` reads to decide whether to debit.
+  ``set_early_access_reservation`` records what a free run reserved against the
+  daily early-access ceiling; ``take_early_access_reservation`` hands it to
+  ``bill_run`` exactly once (an atomic claim that zeroes it).
 - Reads for other modules return value objects, never the Beanie document:
   ``RunActivityRow`` for the agent-activity board, ``StrandedReply`` for a
   failed / cancelled / interrupted run's partial text (runs with an
@@ -33,6 +36,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.errors import NotFound
@@ -286,6 +290,31 @@ async def set_credential_source(run_id: str, source: Literal["platform", "byok"]
     missing run is a no-op, and the field's ``platform`` default then bills it."""
     await ChatRunDoc.get_pymongo_collection().update_one(
         {"run_id": run_id}, {"$set": {"credential_source": source}}
+    )
+
+
+async def set_early_access_reservation(run_id: str, credits: int, day: str) -> None:
+    """Record that ``run_id`` reserved ``credits`` on the early-access meter on
+    UTC ``day``. A missing run is a no-op."""
+    await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id},
+        {"$set": {"early_access_reserved_credits": credits, "early_access_reserved_day": day}},
+    )
+
+
+async def take_early_access_reservation(run_id: str) -> tuple[int, str] | None:
+    """Claim ``run_id``'s early-access reservation as ``(credits, day)`` and
+    zero it, or None when nothing is held. One atomic write, so of two racing
+    bills (the executor and the sweeper) exactly one gets it."""
+    before = await ChatRunDoc.get_pymongo_collection().find_one_and_update(
+        {"run_id": run_id, "early_access_reserved_credits": {"$gt": 0}},
+        {"$set": {"early_access_reserved_credits": 0, "early_access_reserved_day": ""}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if before is None:
+        return None
+    return int(before["early_access_reserved_credits"]), str(
+        before.get("early_access_reserved_day") or ""
     )
 
 
