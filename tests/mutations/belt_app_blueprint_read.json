@@ -9,10 +9,10 @@
     ]
   },
   {
-    "label": "every lead RECORD is re-read, moved or not",
+    "label": "every live lead RECORD is re-read, moved or not",
     "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
-    "find": "if head == prev.get(\"heads\", {}).get(f):",
-    "replace": "if False:",
+    "find": "moved = [f for f in heads if f in live and heads[f] != seen.get(f)]",
+    "replace": "moved = [f for f in heads if f in live]",
     "tests": [
       "tests/cloud/test_belt_app_blueprint_read.py"
     ]
@@ -20,8 +20,98 @@
   {
     "label": "no lead RECORD is ever read",
     "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
-    "find": "if head == prev.get(\"heads\", {}).get(f):",
+    "find": "moved = [f for f in heads if f in live and heads[f] != seen.get(f)]",
+    "replace": "moved = []",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a closed, done lead's RECORD is still read",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not (closed and f in done_prs) or f\"{app}/{f}\" in pending:",
     "replace": "if True:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an open issue does not keep a merged lead live",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not (closed and f in done_prs) or f\"{app}/{f}\" in pending:",
+    "replace": "if f not in done_prs or f\"{app}/{f}\" in pending:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an unmerged feature-done PR does not keep a closed lead live",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not (closed and f in done_prs) or f\"{app}/{f}\" in pending:",
+    "replace": "if not closed or f\"{app}/{f}\" in pending:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a pending run does not keep a closed, done lead live",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not (closed and f in done_prs) or f\"{app}/{f}\" in pending:",
+    "replace": "if not (closed and f in done_prs):",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an issue gh did not list counts as closed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "str((issues.get(wave[\"issue\"]) or {}).get(\"state\")).lower() == \"closed\"",
+    "replace": "str((issues.get(wave[\"issue\"]) or {}).get(\"state\")).lower() != \"open\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a skipped lead drops its last RECORD",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "records = {f: kept.get(f) for f in heads}",
+    "replace": "records = {}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a skipped lead takes its fresh head, so a reopen is not re-read",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "read_at = {f: heads[f] if f in live else seen.get(f) for f in heads}",
+    "replace": "read_at = dict(heads)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "RECORD reads have no bound",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "_PARALLEL = 8  # RECORD reads in flight at once",
+    "replace": "_PARALLEL = 64  # RECORD reads in flight at once",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "RECORD reads run one at a time",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "gate = asyncio.Semaphore(_PARALLEL)",
+    "replace": "gate = asyncio.Semaphore(1)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a failed RECORD read escapes as an ExceptionGroup",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "raise eg.exceptions[0] from None",
+    "replace": "raise",
     "tests": [
       "tests/cloud/test_belt_app_blueprint_read.py"
     ]
