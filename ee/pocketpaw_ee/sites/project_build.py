@@ -30,8 +30,8 @@
 #     pocket's ``latest-build`` pointer.
 #
 # Invariants: nothing here runs author code on this host; the content hash is the
-# source alone, so the site config (which only exists after a first publish) never
-# moves it: a draft keeps the paw.js it was built with, and publish re-applies paw.js
+# source alone, so the site config (the Site doc's id + signed key) never moves it:
+# a draft keeps the paw.js it was built with, and publish re-applies paw.js
 # with the live config (:func:`apply_paw_client_to_bundle`, idempotent). The build log
 # is scrubbed (``verify_diagnostics.scrub_log_text``) before it is stored;
 # ``preview_mode`` is ``"full"`` when the assets are the whole site or a draft Worker

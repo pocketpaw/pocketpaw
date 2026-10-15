@@ -2,7 +2,8 @@
 #
 # Covers the vault (encryption, never in a DTO, leased refresh with rotation,
 # needs_reconnect), hosted OAuth (single-use state, callback links the site), owner
-# routes and their authz, the public gateway's gate order (every error code,
+# routes and their authz, the public gateway's gate order (every error code, the
+# site's own draft preview origin admitted and every other preview origin refused,
 # Turnstile on writes only, the PAW_GATEWAY_TOKEN path), the built-in newsletter
 # (dedupe + CSV), webhook dedupe + orders, and the agent tools' SSE payload.
 # The ``demo`` provider is the fake connect provider; no network anywhere.
@@ -580,6 +581,70 @@ async def test_gateway_auth_gates(beanie_test_db):
         "ok": True,
         "result": {"subscribed": True},
     }
+
+
+class _DraftTokens:
+    """The artifact store's draft-token surface: token -> (pocket, content hash)."""
+
+    def __init__(self, tokens: dict[str, tuple[str, str]]) -> None:
+        self.tokens = tokens
+
+    def resolve_preview_token(self, token):
+        return self.tokens.get(token)
+
+    def write_dist(self, *a):
+        return True
+
+    def read_dist(self, *a):
+        return None
+
+    def write_preview_token(self, *a):
+        return True
+
+    def read_preview_token(self, *a):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_gateway_accepts_the_sites_own_draft_preview_origin(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.sites import preview_origin
+    from pocketpaw_ee.sites import service as sites_service
+
+    monkeypatch.setenv("PAW_SITES_PREVIEW_BASE_URL", "https://preview.paw.test")
+    pid = await _pocket()
+    other_pid = await _pocket()
+    site = await _site(pid)
+    await _link(pid, "newsletter")
+    own, foreign, unknown = "a" * 32, "b" * 32, "c" * 32
+    store = _DraftTokens({own: (pid, "h1"), foreign: (other_pid, "h2")})
+    monkeypatch.setattr(sites_service, "_default_artifact_store", lambda: store)
+    preview_origin._clear_caches()
+
+    async def call(origin: str):
+        return await _gw(
+            c,
+            str(site.id),
+            "newsletter",
+            "subscribe",
+            args={"email": "a@b.co"},
+            headers={"x-paw-site-key": SITE_KEY, "origin": origin},
+        )
+
+    try:
+        async with _client() as c:
+            ok = await call(f"https://{own}.preview.paw.test")
+            other_draft = await call(f"https://{foreign}.preview.paw.test")
+            stale = await call(f"https://{unknown}.preview.paw.test")
+            wrong_scheme = await call(f"http://{own}.preview.paw.test")
+            wrong_port = await call(f"https://{own}.preview.paw.test:8443")
+            not_a_token = await call("https://evil.preview.paw.test")
+            lookalike = await call(f"https://{own}.preview.paw.test.evil.test")
+    finally:
+        preview_origin._clear_caches()
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {"ok": True, "result": {"subscribed": True}}
+    for denied in (other_draft, stale, wrong_scheme, wrong_port, not_a_token, lookalike):
+        assert (denied.status_code, _code(denied)) == (403, "origin_denied")
 
 
 @pytest.mark.asyncio

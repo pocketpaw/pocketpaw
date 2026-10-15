@@ -10553,7 +10553,9 @@ async def _native_artifact_for_pocket(
             pocket_id=pocket_id,
             source=pocket.get("source"),
             store=_store or _default_artifact_store(),
-            site_config=await _project_site_config(workspace_id, pocket_id),
+            site_config=await _project_site_config(
+                workspace_id, pocket_id, mint_key=_no_build_source(pocket.get("source"))
+            ),
             _pool=_pool,
         )
     # ONE origin resolver for every armed hash (the view, the pre-warm, verify,
@@ -10810,6 +10812,13 @@ async def _project_draft_artifact(
     }
 
 
+def _no_build_source(source: Any) -> bool:
+    """True for a no-build project tree, the lane that stages in-process."""
+    from pocketpaw_ee.sites import project_build
+
+    return project_build.is_no_build(source if isinstance(source, dict) else None)
+
+
 async def _project_published_view(pocket_id: str, content_hash: str) -> str | None:
     """The published URL ("" when unknown) when ``content_hash`` is the pocket's
     published content and its drafts were purged; ``None`` otherwise (and always
@@ -10826,22 +10835,46 @@ async def _project_published_view(pocket_id: str, content_hash: str) -> str | No
     return (url or "") if is_published else None
 
 
-async def _project_site_config(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
+async def _project_site_config(
+    workspace_id: str, pocket_id: str, *, mint_key: bool = False
+) -> dict[str, Any] | None:
     """The generator ``siteConfig`` a project build tags its pages with paw.js from
     (the html engine's: capture base, site id, signed key, Turnstile sitekey), or
-    ``None`` before the site has a signed key (no first publish yet). Publish
+    ``None`` when the pocket has no Site doc or the doc has no signed key. Publish
     re-applies paw.js with the live identity, so a draft built without it still
-    ships it. Never raises."""
+    ships it. Never raises.
+
+    ``create_draft_site`` seeds the key on every new draft, so a keyless doc is a
+    draft minted before that seeding. ``mint_key`` (the no-build lane, which stages
+    in-process and never hands the key to a sandbox) gives such a doc its key now,
+    the same ``site_key_<token>`` publish would mint and later reuse. Queued sandbox
+    builds pass ``False``: their key is scrubbed anyway (``build_job``)."""
     try:
         doc = await _canonical_site_doc(workspace_id, pocket_id)
+        signed_key = getattr(doc, "signed_key", "") if doc is not None else ""
+        if doc is not None and not signed_key and mint_key:
+            signed_key = await _mint_missing_signed_key(doc)
     except Exception:  # noqa: BLE001 - a draft builds without paw.js rather than fail
         logger.warning("sites.project: site lookup for %s failed", pocket_id, exc_info=True)
         return None
-    signed_key = getattr(doc, "signed_key", "") if doc is not None else ""
     if not signed_key:
         return None
     turnstile = await _turnstile_build_kwargs(workspace_id, pocket_id)
     return _project_paw_config(str(doc.id), signed_key, turnstile.get("turnstile_site_key", ""))
+
+
+async def _mint_missing_signed_key(doc: _SiteDoc) -> str:
+    """Give a keyless Site doc its public embed key and return the stored key.
+    Compare-and-set on ``signed_key == ""``, so two concurrent previews agree on one
+    key and an existing key is never replaced (rotation stays ``rotate_signed_key``'s
+    job)."""
+    coll = _SiteDoc.get_pymongo_collection()
+    await coll.update_one(
+        {"_id": doc.id, "workspace": doc.workspace, "signed_key": {"$in": ["", None]}},
+        {"$set": {"signed_key": f"site_key_{secrets.token_urlsafe(24)}"}},
+    )
+    stored = await coll.find_one({"_id": doc.id, "workspace": doc.workspace}, {"signed_key": 1})
+    return str((stored or {}).get("signed_key") or "")
 
 
 def _project_paw_config(site_id: str, signed_key: str, turnstile_site_key: str) -> dict[str, Any]:
@@ -10943,7 +10976,9 @@ async def queue_project_build(
         pocket_id=pocket_id,
         source=pocket.get("source"),
         store=_default_artifact_store(),
-        site_config=await _project_site_config(workspace_id, pocket_id),
+        site_config=await _project_site_config(
+            workspace_id, pocket_id, mint_key=_no_build_source(pocket.get("source"))
+        ),
         _pool=_pool,
     )
 

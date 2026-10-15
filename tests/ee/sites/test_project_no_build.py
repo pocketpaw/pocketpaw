@@ -1,8 +1,10 @@
 # Tests for the project engine's no-build lane (a ``"build": "none"`` starter such as
 # ``static``) and the paw.js / gateway-token reach of project sites: detection, the
 # served tree and its exclusions, paw.js injection on and off (sites/paw_client.py),
-# an in-process build that never spends a sandbox, publish as an assets-only Worker,
-# ``project-build --site-config`` behind its generator version guard, and the
+# an in-process build that never spends a sandbox, paw.js in a never-published draft's
+# preview (its key minted only on this lane, never sent to a sandbox), publish as an
+# assets-only Worker, ``project-build --site-config`` behind its generator version
+# guard, and the
 # PAW_GATEWAY_TOKEN binding. Daytona, Cloudflare and the paw-sites CLI are faked.
 from __future__ import annotations
 
@@ -337,6 +339,113 @@ async def test_a_queued_sandbox_build_never_carries_the_site_key(beanie_test_db)
     payload = pool.calls[0]["args"][2]
     assert payload["siteConfig"]["captureSignedKey"] == ""
     assert payload["siteConfig"]["siteId"] == "site1"
+
+
+# ------------------------------------------------ never-published draft preview
+
+
+async def _draft_preview(monkeypatch, source: dict, pocket_id: str):
+    """Open a project draft the way the editor does (``_native_artifact_for_pocket``,
+    which reads the site config itself). Returns (store, pool)."""
+    from pocketpaw_ee.sites import verify_store
+
+    records = _Records()
+    monkeypatch.setattr(verify_store, "default_verify_store", lambda: records)
+    store, pool = _Store(), _Pool()
+    await sites_service._native_artifact_for_pocket(
+        workspace_id="ws1",
+        pocket_id=pocket_id,
+        pocket={"engine": "project", "source": dict(source)},
+        builder_origin=None,
+        _store=store,
+        _pool=pool,
+        _arm=None,
+    )
+    return store, pool
+
+
+async def _keyless_draft_doc(pocket_id: str):
+    """A draft Site doc from before ``create_draft_site`` seeded a key."""
+    doc = await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, name="Bakery"
+    )
+    await doc.set({"signed_key": ""})
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_a_never_published_static_draft_carries_paw_js(beanie_test_db, gen_dir, monkeypatch):
+    pocket_id = await _make_pocket(SELLING)
+    doc = await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, name="Bakery"
+    )
+    assert not doc.deployed and doc.signed_key
+    store, pool = await _draft_preview(monkeypatch, SELLING, pocket_id)
+    preview = preview_origin.unpack_files(
+        store.dist[(pocket_id, project_build.project_content_hash(SELLING))]
+    )
+    page = preview["index.html"].decode()
+    assert f'src="{paw_client.CLIENT_SRC}"' in page
+    assert f'data-site-key="{doc.signed_key}"' in page
+    assert f'data-site-id="{doc.id}"' in page
+    assert preview["_paw/paw.js"] == CLIENT
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_keyless_draft_gets_its_key_once_on_the_no_build_lane(
+    beanie_test_db, gen_dir, monkeypatch
+):
+    pocket_id = await _make_pocket(SELLING)
+    doc = await _keyless_draft_doc(pocket_id)
+    config = await sites_service._project_site_config("ws1", pocket_id, mint_key=True)
+    stored = await type(doc).get(doc.id)
+    assert stored.signed_key.startswith("site_key_") and not stored.deployed
+    assert config["captureSignedKey"] == stored.signed_key
+    # A second preview reuses the stored key; it is never rotated here.
+    again = await sites_service._project_site_config("ws1", pocket_id, mint_key=True)
+    assert again["captureSignedKey"] == stored.signed_key
+    store, _pool = await _draft_preview(monkeypatch, SELLING, pocket_id)
+    preview = preview_origin.unpack_files(
+        store.dist[(pocket_id, project_build.project_content_hash(SELLING))]
+    )
+    assert f'data-site-key="{stored.signed_key}"'.encode() in preview["index.html"]
+
+
+@pytest.mark.asyncio
+async def test_a_draft_that_does_not_use_the_client_stays_untagged(
+    beanie_test_db, gen_dir, monkeypatch
+):
+    pocket_id = await _make_pocket(NOBUILD)
+    await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, name="Bakery"
+    )
+    store, _pool = await _draft_preview(monkeypatch, NOBUILD, pocket_id)
+    preview = preview_origin.unpack_files(
+        store.dist[(pocket_id, project_build.project_content_hash(NOBUILD))]
+    )
+    assert b"_paw/paw.js" not in preview["index.html"]
+    assert "_paw/paw.js" not in preview
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_draft_never_gets_the_key(beanie_test_db, monkeypatch):
+    """The sandbox lane neither mints a key nor carries the existing one."""
+    pocket_id = await _make_pocket(SOURCE)
+    doc = await _keyless_draft_doc(pocket_id)
+    _store, pool = await _draft_preview(monkeypatch, SOURCE, pocket_id)
+    assert (await type(doc).get(doc.id)).signed_key == ""
+    assert "captureSignedKey" not in (pool.calls[0]["args"][2].get("siteConfig") or {})
+
+    keyed = await _make_pocket({**SOURCE, "README.md": "keyed"})
+    keyed_doc = await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id=keyed, name="Keyed"
+    )
+    assert keyed_doc.signed_key
+    _store, pool = await _draft_preview(monkeypatch, {**SOURCE, "README.md": "keyed"}, keyed)
+    payload = pool.calls[0]["args"][2]
+    assert payload["siteConfig"]["captureSignedKey"] == ""
+    assert keyed_doc.signed_key not in json.dumps(payload)
 
 
 # --------------------------------------------------------- sandbox site config

@@ -35,7 +35,8 @@
 # send Set-Cookie. Static bytes come only from the artifact store; nothing in a
 # request can name a path outside a draft's own file set or choose a proxy upstream.
 # A preview URL is handed out only when the draft's files (or its draft Worker) AND
-# token are both stored.
+# token are both stored. ``draft_pocket_for_origin`` maps a draft's origin back to its
+# pocket, which is how the integrations gateway lets that pocket's draft call it.
 # Per-process caches (token lookups, unpacked drafts, single-flight loads) keep an
 # asset request off the store; every servable draft fits the draft cache.
 
@@ -224,6 +225,29 @@ def token_from_host(host: str) -> str | None:
         return None
     label = name[: -len(base) - 1]
     return label if TOKEN_RE.fullmatch(label) else None
+
+
+def draft_pocket_for_origin(origin: str | None) -> str | None:
+    """The pocket a draft preview ``Origin`` header belongs to, or ``None``.
+
+    Only an exact ``<token>.<base host>`` origin under the base's own scheme and port
+    counts, and only when the artifact store resolves the token: the token is minted
+    per stored draft, so the origin can serve nothing but that pocket's own files.
+    Blocking (store read, cached like a page load): call it off the event loop."""
+    parts = _base_parts()
+    if parts is None or not origin:
+        return None
+    try:
+        split = urlsplit(origin.strip())
+        port = split.port
+    except ValueError:
+        return None
+    scheme, _host, base_port = parts
+    if split.scheme.lower() != scheme or port != base_port or split.path not in ("", "/"):
+        return None
+    token = token_from_host(split.hostname or "")
+    ref = _resolve_ref(token) if token else None
+    return ref[0] if ref is not None else None
 
 
 def new_token() -> str:
@@ -871,6 +895,7 @@ class PreviewHostDispatch:
 __all__ = [
     "PREVIEW_BASE_ENV",
     "PreviewHostDispatch",
+    "draft_pocket_for_origin",
     "existing_preview_url",
     "forget_pocket",
     "inject_edit_bridge",

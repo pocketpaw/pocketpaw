@@ -8,7 +8,10 @@
 #        X-Paw-Site-Key: the site's public embed key (browser). Same credential
 #          chain as the concierge (``site_keys.lookup_site_by_key``: type, length,
 #          revoked, constant-time), the key's site must be ``site_id``, then a
-#          fail-closed origin gate over the site's allowlist + own hosts
+#          fail-closed origin gate over the site's allowlist + own hosts, or the
+#          origin of one of the site's OWN drafts (``preview_origin``: a
+#          ``<token>.<preview base>`` host whose stored token resolves to the
+#          site's pocket; another pocket's draft is refused)
 #                                                          -> unauthorized 401 / origin_denied 403
 #        Authorization: Bearer <PAW_GATEWAY_TOKEN> (project Worker, server side),
 #          compared in constant time inside ``site_secrets``  -> unauthorized 401
@@ -33,6 +36,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -125,6 +129,22 @@ def _matches(site: Any, site_id: str) -> bool:
     return site_id in {str(site.id), site.script_name or "\x00"}
 
 
+async def _own_draft(site: Any, origin: str | None) -> bool:
+    """True when ``origin`` is a draft preview of ``site``'s own pocket. A draft's
+    token names exactly one stored draft, so this admits that pocket's preview and
+    nothing else. Fails closed when the store cannot be read."""
+    if not origin or not site.pocket_id:
+        return False
+    from pocketpaw_ee.sites import preview_origin
+
+    try:
+        pocket_id = await asyncio.to_thread(preview_origin.draft_pocket_for_origin, origin)
+    except Exception:  # noqa: BLE001 - an unreadable store denies, never admits
+        logger.warning("integrations: draft origin lookup failed", exc_info=True)
+        return False
+    return pocket_id is not None and pocket_id == str(site.pocket_id)
+
+
 async def _authenticate(request: Request, site_id: str) -> tuple[Any, str]:
     auth = request.headers.get("authorization", "")
     key = request.headers.get("x-paw-site-key", "")
@@ -154,7 +174,10 @@ async def _authenticate(request: Request, site_id: str) -> tuple[Any, str]:
             raise GatewayError("unauthorized") from None
         if not _matches(site, site_id):
             raise GatewayError("unauthorized")
-        if not origin_allowed(_effective_origins(site), request.headers.get("origin") or None):
+        origin = request.headers.get("origin") or None
+        if not origin_allowed(_effective_origins(site), origin) and not await _own_draft(
+            site, origin
+        ):
             raise GatewayError("origin_denied")
         return site, "site_key"
     raise GatewayError("unauthorized")
