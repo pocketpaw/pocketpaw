@@ -2684,8 +2684,9 @@ async def _reject_if_over_daily_turns(spec: RunSpec, ctx: ScopeContext, transpor
     """Per-workspace daily agent-run ceiling (feat/abuse-budgets).
 
     The always-on sibling of ``_reject_if_over_credit_quota``. That gate is the
-    priced ceiling and is a no-op unless ``billing_enforced``, which defaults
-    off — so on a deployment that has not configured billing, nothing bounds
+    priced ceiling and is a no-op unless ``billing_enforced`` or
+    ``credits_enforced``, both of which default off, so on a deployment that
+    has not configured billing nothing bounds
     what one signed-up account can spend on models. Guests have had a daily
     turn cap since ``guest_budget``; this is its signed-up equivalent, and it
     is deliberately NOT flag-gated.
@@ -2770,7 +2771,7 @@ async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transpo
 
     Delegates to the shared ``credits.guards.reject_if_over_billing`` so every
     agent-run seam blocks identically. That helper is flag-gated (a no-op unless
-    ``billing_enforced``) and runs BOTH credit assertions: ``check_balance``
+    ``billing_enforced`` or ``credits_enforced``) and runs BOTH credit assertions: ``check_balance``
     (wallet <= 0 -> 402 credits.insufficient) AND ``check_quota`` (month-to-date
     spend >= the effective monthly ceiling -> 402 credits.quota_exceeded, itself a
     no-op for an uncapped Enterprise plan). Before this delegation the worker leg
@@ -2912,8 +2913,8 @@ async def execute_run(spec: RunSpec) -> None:
     # reject above is (terminal ``error`` frame + ``mark_terminal(failed)``, then
     # an early return WITHOUT running the agent — the no-overspend money
     # guarantee). Flag-gated inside the helper: a no-op unless
-    # ``billing_enforced`` is on, so OSS / self-host is unaffected and IN-FLIGHT
-    # runs (already past this point) are never killed.
+    # ``billing_enforced`` or ``credits_enforced`` is on, so OSS / self-host is
+    # unaffected and IN-FLIGHT runs (already past this point) are never killed.
     if await _reject_if_over_credit_quota(spec, ctx, transport):
         return
 

@@ -2714,6 +2714,37 @@ class Settings(BaseSettings):
             "via POCKETPAW_SITES_BILLING_ENFORCED."
         ),
     )
+    credits_enforced: bool = Field(
+        default=False,
+        description=(
+            "Chat credit gate only, independent of billing_enforced. When True, "
+            "starting a chat or agent run is refused with HTTP 402 when the "
+            "workspace credit balance is <= 0 (credits.insufficient) or its "
+            "monthly credit ceiling is reached (credits.quota_exceeded), on "
+            "every seam that reads the shared run-start guard (chat HTTP, "
+            "execute_run, the group/DM bridge, /files agent ops, the planner). "
+            "The guard reads billing_enforced OR this flag. Unlike "
+            "billing_enforced it turns on nothing else: the seat, pocket, "
+            "connector, upload, storage, call and sites gates stay off. It "
+            "exists for the early-access launch, where free credits are "
+            "metered but no plan or upgrade surface is live. The platform "
+            "settings route refuses writes to it on purpose: a runtime switch "
+            "that turns enforcement off is a footgun. Default False. Set via "
+            "POCKETPAW_CREDITS_ENFORCED."
+        ),
+    )
+    payments_open: bool = Field(
+        default=False,
+        description=(
+            "Whether customers can pay (plans, top-ups). While False, a "
+            "workspace on the free plan with no purchased top_up or "
+            "subscription_grant in its ledger is platform-funded early access "
+            "(credits.guards.is_platform_funded_free), and the early-access "
+            "guards apply to it. Flip it together with live payment provider "
+            "credentials. The platform settings route refuses writes to it. "
+            "Default False. Set via POCKETPAW_PAYMENTS_OPEN."
+        ),
+    )
     billing_dunning_grace_days: int = Field(
         default=7,
         description=(

@@ -2401,6 +2401,43 @@ largest token lever on that surface, because the upstream prompt cache does
 not cover tool schemas — a run carrying a tool surface reads zero cached
 tokens every turn.
 
+## Agent chat: the run-start credit gate
+
+Every agent run is checked against the workspace credit wallet before any model
+call: the chat route `POST /cloud/chat/{scope}/{scope_id}/agent`, the worker that
+executes queued and resumed runs, the group/DM agent bridge, `/files` agent ops
+and the planner. The check is on when either `billing_enforced` or
+`credits_enforced` is set (see the configuration reference); with both off it does
+nothing. `credits_enforced` turns on this check and nothing else, which is the
+early-access posture: free credits are metered while the seat, pocket, connector,
+storage and sites gates stay off.
+
+Refusals carry a stable `code` the client branches on. The chat route answers
+before any run row exists, in the standard envelope:
+
+```json
+{"error": {"code": "credits.insufficient", "message": "..."}}
+```
+
+A run that reaches the worker gets exactly one terminal `error` frame on its
+stream, `{"code": "credits.insufficient", "message": "..."}`, and the run doc is
+marked `failed`. No model or backend is started either way.
+
+| Status | Code | Means |
+|--------|------|-------|
+| 402 | `credits.insufficient` | the wallet balance is at or below 0 |
+| 402 | `credits.quota_exceeded` | month-to-date spend reached the plan's monthly ceiling |
+
+The balance check runs first, so a workspace that is both empty and over its
+ceiling sees `credits.insufficient`. A run already in flight is never stopped;
+a completed run is always billed, so the last run before the cap can take the
+wallet below 0.
+
+`payments_open` (default off) tells the server whether customers can pay. While
+it is off, a workspace on the `free` plan whose ledger holds no applied `top_up`
+or `subscription_grant` is platform-funded early access, the group the
+early-access limits apply to.
+
 ## Agent Activity
 
 HR-12a. The workspace-scoped answer to "which of my agents are working
