@@ -735,6 +735,10 @@ class CloudTaskDispatcher:
             argv = ["gh", "run", "list", "-R", slug, "--branch", base, "--limit", "30"]
             argv += ["--json", "headSha,status,conclusion,name"]
             recent = json.loads(await self._gh(argv, cwd, "DONE: gh run list") or "[]")
+            # Only the workflows that judged the merge commit count on a later
+            # head: a green lane or audit run says nothing about CI.
+            names = {r.get("name") for r in runs}
+            recent = [r for r in recent if not names or r.get("name") in names]
             heads = list(dict.fromkeys(str(r.get("headSha") or "") for r in recent))
             for head in heads:  # newest first
                 group = [r for r in recent if r.get("headSha") == head]

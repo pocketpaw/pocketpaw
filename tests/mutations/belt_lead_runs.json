@@ -261,5 +261,14 @@
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_green_dev_run_without_the_merge_does_not_land_the_lead"
     ]
+  },
+  {
+    "label": "a later green run of another workflow lands the lead",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            recent = [r for r in recent if not names or r.get(\"name\") in names]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_later_green_run_of_another_workflow_does_not_land_the_lead"
+    ]
   }
 ]

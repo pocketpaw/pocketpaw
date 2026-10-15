@@ -387,9 +387,12 @@ async def test_a_later_green_dev_run_that_contains_the_merge_lands_the_lead(stor
     # on the merge commit is superseded by a later green one that includes it.
     repo, launch = dirs
     run_ref = await _queue_lead(store, repo)
-    runner = _done_runner(run_ref, ci_by_sha={MERGE_SHA: [RED_RUN]})
+    runner = _done_runner(run_ref, ci_by_sha={MERGE_SHA: [{**RED_RUN, "name": "CI"}]})
     later = "d" * 40
-    runner.dev_runs = [{**GREEN_RUN, "headSha": later}, {**RED_RUN, "headSha": MERGE_SHA}]
+    runner.dev_runs = [
+        {**GREEN_RUN, "name": "CI", "headSha": later},
+        {**RED_RUN, "name": "CI", "headSha": MERGE_SHA},
+    ]
     runner.contains = {later: "ahead"}
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
@@ -404,6 +407,22 @@ async def test_a_green_dev_run_without_the_merge_does_not_land_the_lead(store, d
     other = "e" * 40
     runner.dev_runs = [{**GREEN_RUN, "headSha": other}]
     runner.contains = {other: "diverged"}  # a green head that lacks the merge commit
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert (await store.get_action(run_ref)).status != ActionStatus.EXECUTED
+
+
+async def test_a_later_green_run_of_another_workflow_does_not_land_the_lead(store, dirs, playbook):
+    # Only the workflow that judged the merge commit counts on a later head: a
+    # green lane or audit run on dev says nothing about CI.
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    red_ci = {**RED_RUN, "name": "CI"}
+    runner = _done_runner(run_ref, ci_by_sha={MERGE_SHA: [red_ci]})
+    later = "f" * 40
+    runner.dev_runs = [{**GREEN_RUN, "name": "Fast Lane", "headSha": later}]
+    runner.contains = {later: "ahead"}
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
