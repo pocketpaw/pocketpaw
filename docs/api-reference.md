@@ -2438,6 +2438,29 @@ it is off, a workspace on the `free` plan whose ledger holds no applied `top_up`
 or `subscription_grant` is platform-funded early access, the group the
 early-access limits apply to.
 
+### Early access grant
+
+Every verified user gets `early_access_grant_credits` (default 1,000) early
+access credits once. The grant lands in the oldest workspace the user owns,
+never in one they were invited to, and is written as a `genesis` ledger entry
+with cause `early_access` and idempotency key `early_access:{user_id}`. It fires
+when a verified user creates a workspace they own and when a guest upgrades
+through social sign-in (`/auth/social/...` link flow); a guest or an unverified
+account gets nothing. A second owned workspace, a retry, or deleting the granted
+workspace and creating another never grants again. The user row records the
+claim in `early_access_workspace_id` and `early_access_granted_at`.
+
+### Password sign-up switch
+
+With `password_signup_open` off, the two password sign-up doors refuse:
+
+| Route | Status | Code |
+|-------|--------|------|
+| `POST /auth/register` | 403 | `auth.password_signup_closed` |
+| `POST /auth/guest/upgrade` | 403 | `auth.password_signup_closed` |
+
+Social sign-in is unaffected, and existing password accounts still log in.
+
 ## Agent Activity
 
 HR-12a. The workspace-scoped answer to "which of my agents are working

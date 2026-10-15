@@ -2745,6 +2745,31 @@ class Settings(BaseSettings):
             "Default False. Set via POCKETPAW_PAYMENTS_OPEN."
         ),
     )
+    early_access_grant_credits: int = Field(
+        default=1_000,
+        ge=0,
+        description=(
+            "Early access credits granted ONCE per verified user, into the first "
+            "workspace they own (credits.service.grant_early_access). Fired on "
+            "owned-workspace create and on the guest social upgrade; never into "
+            "a workspace the user was only invited to. Keep it at or below the "
+            "free plan's monthly ceiling. 0 turns the grant off. Grants are "
+            "permanent, so changing it affects new users only. Set via "
+            "POCKETPAW_EARLY_ACCESS_GRANT_CREDITS."
+        ),
+    )
+    password_signup_open: bool = Field(
+        default=True,
+        description=(
+            "Whether new accounts may be created with an email and password. "
+            "When False, POST /auth/register and the guest password upgrade "
+            "(POST /auth/guest/upgrade) are refused with 403 "
+            "auth.password_signup_closed, and social sign-in (Google) is the "
+            "only way in. Existing password accounts still sign in. The "
+            "early-access launch runs with it False. Default True so self-host "
+            "keeps working. Set via POCKETPAW_PASSWORD_SIGNUP_OPEN."
+        ),
+    )
     billing_dunning_grace_days: int = Field(
         default=7,
         description=(

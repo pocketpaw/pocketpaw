@@ -10,6 +10,10 @@
 # place (password or social identity), so pages and the stored key survive.
 # Password hashes use the shared ``auth.password_hashing`` helper, off the loop.
 # ``upgrade_guest`` runs the register password policy (incl. HIBP) first.
+# ``upgrade_guest_via_social`` grants the one-time early access credits
+# (``credits.service.grant_early_access``); the password upgrade does not, since
+# its address is unverified (and the route refuses it while password sign-up is
+# closed).
 #
 # Flow (the order is the security property):
 #   rate-limit -> validate the key against the provider -> mint user ->
@@ -223,6 +227,12 @@ async def upgrade_guest_via_social(user: User, *, email: str) -> User:
     user.is_verified = True
     await user.save()
     logger.info("guest upgraded via social: user=%s", user.id)
+
+    # The provider vouched for the address, so the early access credits land
+    # now, in the guest's own notebook workspace. Idempotent per user.
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    await credits_service.grant_early_access(user)
     return user
 
 

@@ -293,3 +293,30 @@ async def test_guest_password_upgrade_is_refused_when_closed(auth_app, monkeypat
         )
     assert resp.status_code == 403, resp.text
     assert resp.json()["error"]["code"] == "auth.password_signup_closed"
+
+
+async def test_wiped_claim_and_deleted_workspace_cannot_farm_a_second_grant(mongo_db):  # noqa: ARG001
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    user = await _user()
+    ws1 = await _create_ws(user)
+
+    # A stale User.save() elsewhere overwrites both claim fields with None, and
+    # the user then deletes the granted workspace and creates a fresh one.
+    fresh = await _reload(user)
+    fresh.early_access_workspace_id = None
+    fresh.early_access_granted_at = None
+    await fresh.save()
+    doc = await Workspace.get(ws1)
+    doc.deleted_at = doc.createdAt
+    await doc.save()
+
+    ws2 = await _create_ws(user)
+    await credits_service.grant_early_access(await _reload(user))
+
+    assert await _balance(ws2) == 0
+    assert len(await _grant_entries(str(user.id))) == 1
+    healed = await _reload(user)
+    assert healed.early_access_workspace_id == ws1
+    assert healed.early_access_granted_at is not None

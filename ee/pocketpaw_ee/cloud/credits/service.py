@@ -4,7 +4,9 @@
 # class (EE cloud rule).
 #
 # Movements: grant / debit (idempotent, emit CreditMovement after each real
-# movement, never on a replay), record_no_movement (zero-value "seen" marker).
+# movement, never on a replay), record_no_movement (zero-value "seen" marker),
+# grant_early_access (one-time per-user grant into an owned workspace; it also
+# stamps the claim fields on the User row).
 # Gates: check_balance and check_quota are pure, flag-free assertions that
 # raise InsufficientCredits / QuotaExceeded (402); callers decide when to
 # enforce. Reads: balance, month_to_date_spend, has_paid_credits, history,
@@ -38,6 +40,7 @@ from beanie import PydanticObjectId
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from pocketpaw.config import get_settings  # type: ignore[import-untyped]
 from pocketpaw_ee.cloud._core.errors import (
     InsufficientCredits,
     QuotaExceeded,
@@ -54,6 +57,8 @@ from pocketpaw_ee.cloud.credits.domain import (
     micro_to_credits,
 )
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
+from pocketpaw_ee.cloud.models.user import User
+from pocketpaw_ee.cloud.models.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +229,88 @@ async def grant(
 
     await _emit_movement(entry)
     return GrantResult(balance=micro_to_credits(new_balance_micro), created=True)
+
+
+EARLY_ACCESS_CAUSE = "early_access"
+
+
+async def grant_early_access(user: User) -> None:
+    """Grant the one-time early access credits to ``user``. Idempotent.
+
+    Exactly once per USER, never per workspace, and only into a workspace the
+    user OWNS (``Workspace.owner``), never one they were invited to. Skipped for
+    unverified, inactive or guest users, and while
+    ``early_access_grant_credits`` is 0. A user who owns no workspace yet gets
+    nothing now and is granted on their first owned-workspace create.
+
+    ``early_access_granted_at`` is the fast path. Behind it the LEDGER is the
+    record: any ``early_access:{user_id}`` entry in a workspace the user owns
+    (soft-deleted ones included) means the grant already happened, so a stale
+    ``User.save()`` that wipes both fields, followed by deleting the granted
+    workspace and creating another, still cannot farm a second grant.
+
+    Otherwise claim then grant: set ``early_access_workspace_id`` to the
+    OLDEST live owned workspace only if it is unset, read back what is stored,
+    and grant ``kind='genesis'`` there. One claimed workspace plus the ledger's
+    unique (workspace, key) index make a retry or a concurrent call a no-op.
+    """
+    if user.early_access_granted_at is not None:
+        return
+    if not user.is_verified or not user.is_active or user.is_guest:
+        return
+    amount = get_settings().early_access_grant_credits
+    if amount <= 0:
+        return
+
+    user_id = str(user.id)
+    key = f"early_access:{user_id}"
+    users = User.get_pymongo_collection()
+    # global-read: the user's own workspaces, looked up by owner id.
+    owned = await Workspace.find({"owner": user_id}).sort("_id").to_list()
+    prior = (
+        await CreditLedgerEntry.find_one(
+            {"workspace": {"$in": [str(w.id) for w in owned]}, "idempotency_key": key}
+        )
+        if owned
+        else None
+    )
+    if prior is not None:
+        workspace_id: str | None = prior.workspace
+    else:
+        live = [str(w.id) for w in owned if w.deleted_at is None]
+        if not live:
+            return
+        await users.update_one(
+            {"_id": user.id, "early_access_workspace_id": None},
+            {"$set": {"early_access_workspace_id": live[0]}},
+        )
+        stored = await users.find_one({"_id": user.id}, {"early_access_workspace_id": 1})
+        workspace_id = (stored or {}).get("early_access_workspace_id")
+        if not workspace_id:
+            return
+
+    await grant(
+        workspace_id,
+        amount,
+        cause=EARLY_ACCESS_CAUSE,
+        idempotency_key=key,
+        kind="genesis",
+        member_id=user_id,
+    )
+    granted_at = prior.createdAt if prior is not None else datetime.now(UTC)
+    # no-event: the grant above already emitted credits.movement.
+    await users.update_one(
+        {"_id": user.id},
+        {
+            "$set": {
+                "early_access_workspace_id": workspace_id,
+                "early_access_granted_at": granted_at,
+            }
+        },
+    )
+    # Keep the caller's copy current so a later save() of it cannot unset these.
+    user.early_access_workspace_id = workspace_id
+    user.early_access_granted_at = granted_at
 
 
 async def debit(
