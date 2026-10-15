@@ -2459,22 +2459,33 @@ early-access limits apply to.
 
 ### Free-run bounds
 
-A platform-paid run on an unpaid early-access workspace is bounded, while the
-gate above is on (a BYOK run and a paid workspace are not):
+While the gate above is on, a platform-paid run on an unpaid early-access
+workspace is bounded if it goes through the run executor (`execute_run`): the
+chat route, the worker, the Paw Bar and the concierge. A BYOK run and a paid
+workspace are not bounded.
 
 - One active chat run per workspace. A second send while one is queued or
   running gets 429 `credits.run_in_progress` from the chat route; if two race
   past the route, the worker lets the older run through and refuses the newer
-  one with that code on its terminal frame. The group/DM bridge, `/files` agent
-  ops and the planner do not apply this check.
+  one with that code on its terminal frame.
 - The run is served by `pydantic_ai` whatever backend the agent is configured
   for (an agent on another backend runs on the deployment's
   `pydantic_ai_model`, and a per-send model picked for that backend is dropped).
+  The agent's own tool policy carries over, so a planner opt-in still applies.
 - At most `free_run_max_turns` (default 20) model requests.
 - A total token limit sized from the wallet the run starts with, at the output
   price of the model it runs, so the run stops at or before the wallet. A run
   that hits a limit ends with an `error` frame; the usage it already spent is
   billed. An unpriced model gets no token limit (the request cap still applies).
+
+Three paths start agent runs without `execute_run` and are not billed: the
+group/DM agent bridge, the `/files` AI edits (`ai-edit`, `spreadsheet-edit`,
+`slides-edit`) and the planner's task runs. A wallet that is never debited
+cannot bound them, so an unpaid early-access workspace is refused there instead,
+under the same flags, with 403 `early_access.not_available`. The `/files` routes
+answer with that code in the standard envelope, the bridge emits one
+`agent.error` with it to the group, and the planner leaves the tasks `proposed`
+and logs it. A paid workspace runs these paths as before.
 
 ### Early access grant
 

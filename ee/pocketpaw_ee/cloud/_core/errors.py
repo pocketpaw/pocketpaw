@@ -10,9 +10,10 @@ parse out of `message` (e.g. the classes in `sites.do_data_loss_unconfirmed`).
 Status families: 400 `BadRequest`, 402 for money/plan refusals (the `*LimitError`
 caps, `InsufficientCredits`, `QuotaExceeded`, `NoActiveSubscription`, and the
 per-site capability gates `CustomDomainNotEntitled`, `ProjectDownloadNotEntitled`,
-`BadgeRemovalNotEntitled`), 403 `Forbidden`, 404 `NotFound`, 409 `ConflictError`,
-412 `PreconditionFailed` (stale If-Match), 413 `PayloadTooLarge`, 422
-`ValidationError`, 429 `RateLimited`, 500 `Internal`, 503 `EarlyAccessPaused`.
+`BadgeRemovalNotEntitled`), 403 `Forbidden` and `EarlyAccessNotAvailable`, 404
+`NotFound`, 409 `ConflictError`, 412 `PreconditionFailed` (stale If-Match), 413
+`PayloadTooLarge`, 422 `ValidationError`, 429 `RateLimited`, 500 `Internal`, 503
+`EarlyAccessPaused`.
 The guest/BYOK family (`GuestLimitError` and siblings) adds top-level
 `code`/`kind` keys beside the envelope: a frozen frontend contract. Re-exported
 via `ee.cloud.shared.errors` (a shim); new code imports from here.
@@ -597,6 +598,23 @@ class EarlyAccessPaused(CloudError):
             503,
             "early_access.paused",
             "Early access is busy right now. Your credits are safe; please try again later.",
+        )
+
+
+class EarlyAccessNotAvailable(CloudError):
+    """A spend surface the credit ledger does not meter, refused for an unpaid
+    early-access workspace (403).
+
+    Belt, mandates, Foresight runs, Studio and media generation, the Paw Bar
+    concierge and meeting notes. Nothing the user can top up fixes it while
+    payments are closed, so the copy says "not yet", not "upgrade".
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            403,
+            "early_access.not_available",
+            "This is not in early access yet.",
         )
 
 

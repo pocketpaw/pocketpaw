@@ -38,6 +38,11 @@
 # * ``is_platform_funded_free(workspace)`` is the one definition of an unpaid
 #   early-access workspace that the early-access guards share: plan ``free``,
 #   ``payments_open`` off, and no applied ``top_up`` or ``subscription_grant``.
+# * ``early_access_denial(workspace)`` / ``assert_early_access_allowed(workspace)``
+#   refuse the spend surfaces the ledger never meters (Belt, mandates, Foresight
+#   runs, Studio and media generation, the concierge, meeting notes) for such a
+#   workspace with 403 ``early_access.not_available``. On under the same flags as
+#   ``over_billing_limit``, so it switches on with the credit gate, not at deploy.
 # * Free-run bounds. With ``one_active_run=True`` (only the two chat seams pass
 #   it) an unpaid platform-funded workspace that already has an active chat run
 #   is refused with 429 ``credits.run_in_progress``; ``run_id`` names the
@@ -327,6 +332,34 @@ async def is_platform_funded_free(workspace_id: str) -> bool:
     return not await credits_service.has_paid_credits(workspace_id)
 
 
+async def early_access_denial(workspace_id: str) -> CloudError | None:
+    """``EarlyAccessNotAvailable`` when ``workspace_id`` is an unpaid early-access
+    workspace and the credit gate is on, else None.
+
+    For spend that never reaches the ledger, so the wallet cannot bound it: the
+    surface is refused outright rather than metered. Off while neither
+    ``billing_enforced`` nor ``credits_enforced`` is set (self-host, and prod
+    before the launch flip). An empty ``workspace_id`` is None, like
+    ``over_billing_limit``.
+    """
+    settings = get_settings()
+    if not (settings.billing_enforced or settings.credits_enforced) or not workspace_id:
+        return None
+    if not await is_platform_funded_free(workspace_id):
+        return None
+
+    from pocketpaw_ee.cloud._core.errors import EarlyAccessNotAvailable
+
+    return EarlyAccessNotAvailable()
+
+
+async def assert_early_access_allowed(workspace_id: str) -> None:
+    """Raise ``early_access_denial``'s refusal (403) when there is one."""
+    exc = await early_access_denial(workspace_id)
+    if exc is not None:
+        raise exc
+
+
 @dataclass(frozen=True)
 class FreeRunBounds:
     """What a platform-funded free run may use: model requests and wallet."""
@@ -389,8 +422,10 @@ def free_run_token_limit(
 
 __all__ = [
     "FreeRunBounds",
+    "assert_early_access_allowed",
     "assert_within_billing",
     "billing_source",
+    "early_access_denial",
     "free_run_bounds",
     "free_run_token_limit",
     "is_platform_funded_free",

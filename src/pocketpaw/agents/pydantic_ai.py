@@ -2969,7 +2969,10 @@ class PydanticAIBackend:
             snapshot = _usage_snapshot()
             if snapshot is not None:
                 yield snapshot
-            yield AgentEvent(type="error", content=self._explain_error(exc))
+            per_run_limit = max_requests is not None or total_tokens_limit is not None
+            yield AgentEvent(
+                type="error", content=self._explain_error(exc, per_run_limit=per_run_limit)
+            )
             yield AgentEvent(type="done", content="")
             return
         finally:
@@ -2982,7 +2985,7 @@ class PydanticAIBackend:
             yield snapshot
         yield AgentEvent(type="done", content="")
 
-    def _explain_error(self, exc: Exception) -> str:
+    def _explain_error(self, exc: Exception, *, per_run_limit: bool = False) -> str:
         """Turn a provider error into something that names the actual problem.
 
         A proxy auth failure is the single most confusing error on this path,
@@ -2993,10 +2996,14 @@ class PydanticAIBackend:
         "my key is wrong", which sends you to change the one thing that works.
 
         This cost real time to diagnose by hand, so the backend says it now.
+
+        A run the caller limited (``per_run_limit``, the cloud's free run) that
+        hits a usage limit gets a plain sentence. Any other run keeps the raw
+        text, which names the setting to raise (``request_limit of N``).
         """
         from pydantic_ai.exceptions import UsageLimitExceeded
 
-        if isinstance(exc, UsageLimitExceeded):
+        if per_run_limit and isinstance(exc, UsageLimitExceeded):
             # A run limit, not a fault: say so plainly, without token counts.
             return "This reply reached its usage limit for one run and stopped."
         text = str(exc)

@@ -3912,3 +3912,24 @@ async def test_a_token_limit_the_run_exceeds_stops_it_with_usage_first():
     assert "token_usage" in kinds[: kinds.index("error")], kinds
     error = next(e for e in events if e.type == "error")
     assert "limit" in error.content.lower()
+
+
+def test_only_a_caller_limited_run_gets_the_plain_usage_limit_text():
+    """A self-hosted or paid run that hits ``pydantic_ai_max_turns`` keeps the
+    raw text naming the limit to raise; only a run the caller limited gets the
+    plain sentence.
+
+    Mutation: return the plain sentence for every ``UsageLimitExceeded``.
+    """
+    from pydantic_ai.exceptions import UsageLimitExceeded
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    exc = UsageLimitExceeded("The next request would exceed the request_limit of 25")
+
+    raw = backend._explain_error(exc)
+    assert raw.startswith("Pydantic AI error:")
+    assert "request_limit of 25" in raw
+
+    plain = backend._explain_error(exc, per_run_limit=True)
+    assert "request_limit" not in plain
+    assert "usage limit" in plain

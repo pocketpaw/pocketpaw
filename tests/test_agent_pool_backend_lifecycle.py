@@ -247,8 +247,9 @@ def _forcing_pool(monkeypatch, shared, built):
     from pocketpaw.agents import registry
     from pocketpaw.agents.router import AgentRouter
 
-    def _build(name, settings, settings_override=None, **_k):
+    def _build(name, settings, settings_override=None, policy=None, **_k):
         built.append(settings_override)
+        pai.policy = policy
         return pai
 
     pai = _PaiBackend()
@@ -295,6 +296,21 @@ async def test_force_pydantic_ai_runs_a_claude_sdk_agent_on_pydantic_ai(monkeypa
     assert built == [{"agent_backend": "pydantic_ai"}]
     assert pai.kwargs == {"max_requests": 20, "total_tokens_limit": 5_000, "model_override": None}
     assert inst.active_runs == 0
+
+
+async def test_force_pydantic_ai_keeps_the_agent_tool_policy(monkeypatch):
+    """A forced free run is built with the agent's own ToolPolicy, so a
+    claude_agent_sdk agent that opted into the planner keeps it on pydantic_ai.
+
+    Mutation: build the forced backend without ``policy=``.
+    """
+    shared = _Backend()
+    pool, _inst, pai = _forcing_pool(monkeypatch, shared, [])
+
+    _ = [ev async for ev in pool.run("a1", "hi", "session:s1", force_pydantic_ai=True)]
+
+    assert pai.ran == 1
+    assert pai.policy is shared.policy, "the forced build dropped the agent's ToolPolicy"
 
 
 async def test_limits_a_backend_cannot_take_refuse_the_turn(monkeypatch):

@@ -1249,7 +1249,9 @@ class AgentPool:
         deployment's ``pydantic_ai_model``: the owner's model id was chosen for a
         different backend and is not assumed to be valid here. That backend is
         cached on the instance (and stopped in ``_teardown``) so a concierge
-        does not rebuild its tool bridge every turn.
+        does not rebuild its tool bridge every turn. A built backend carries the
+        agent's own ToolPolicy (planner opt-ins, narrowed profile), as the BYOK
+        build below does, so a forced run keeps the tools the agent opted into.
 
         With BYOK the backend is built fresh for this run, like the BYOK path
         below, and a failed build raises: running the turn on the platform's
@@ -1270,14 +1272,18 @@ class AgentPool:
         if isinstance(own, pai_cls) and byok_override is None:
             return own
         override = {"agent_backend": "pydantic_ai"}
+        policy = own.get_tool_policy() if hasattr(own, "get_tool_policy") else None
         if byok_override is not None:
             return AgentRouter.create_isolated_backend(
-                "pydantic_ai", own.settings, settings_override={**override, **byok_override}
+                "pydantic_ai",
+                own.settings,
+                settings_override={**override, **byok_override},
+                policy=policy,
             )
         cached = getattr(instance, "deny_by_default_backend", None)
         if cached is None:
             cached = AgentRouter.create_isolated_backend(
-                "pydantic_ai", own.settings, settings_override=override
+                "pydantic_ai", own.settings, settings_override=override, policy=policy
             )
             instance.deny_by_default_backend = cached
         return cached
