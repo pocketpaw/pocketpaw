@@ -27,22 +27,12 @@
 #   the ledger never meters for such a workspace (403
 #   ``early_access.not_available``), under the same flags as the gate.
 # * Free runs (platform-funded, unpaid): ``free_run_bounds`` gives ``run_core``
-#   the turn cap and the starting wallet, and ``free_run_token_limit`` sizes the
-#   pydantic_ai token limit from it at the model's output price.
-#   ``free_model_denial`` is 400 ``model.not_allowed`` unless the model is on
-#   ``free_model_allowlist`` (ignoring case and a known ``provider:`` prefix) and
-#   priced by the metering ladder, since an unpriced model bills 0. ``run_core``
-#   checks every model in ``free_run_models`` (the one asked for, plus the
-#   deployment default a forced run really uses), and the chat HTTP seam runs
-#   the same list through ``free_model_refusal`` so the refusal is a 400.
-#   ``pydantic_ai_model`` is always on that list: it must be on the allowlist,
-#   or every free turn is refused.
-# * ``reserve_free_run`` is the daily early-access ceiling: ``run_core`` calls it
-#   last, once per free run, to reserve the run's bounded estimate on the
-#   platform meter (``metering.service.reserve_early_access``). Past the
-#   launch controls' ``daily_free_ceiling_credits``, or with the controls or the
-#   meter unreadable, it is 503 ``early_access.paused`` (fails closed, unlike the
-#   kill switch). ``bill_run`` reconciles the reservation.
+#   the turn cap and starting wallet; ``free_run_token_limit`` sizes the token
+#   limit from it. ``free_model_denial`` (400 ``model.not_allowed``) admits only
+#   allowlisted, priced models, checked over ``free_run_models`` by ``run_core``
+#   and, as ``free_model_refusal``, by the chat HTTP seam. ``reserve_free_run``
+#   then reserves the run on the daily early-access ceiling (503
+#   ``early_access.paused`` past it or when unreadable; ``bill_run`` reconciles).
 #
 # ``credits_enforced`` gates only this chat credit check; ``billing_enforced``
 # also turns on the seat, pocket, connector and other paid gates elsewhere.
