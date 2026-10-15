@@ -138,8 +138,9 @@ async def _run_start_gates(
       resolver failure is gated as platform, and a gateway address the egress
       guard rejects raises its 422. An unpaid early-access workspace with a
       chat run already active gets 429 ``credits.run_in_progress``, and a
-      per-send ``model_override`` it may not use on early access credits gets
-      400 ``model.not_allowed`` (the executor also checks the agent's model).
+      model it may not use on early access credits (per-send, else the
+      agent's own, plus the deployment default) gets 400 ``model.not_allowed``.
+      The executor checks the same list again and is the enforcement.
     * Guest turn gate (feat/byok-guest-backend): the frozen
       ``guest_limit_reached`` / ``guest_key_required`` 402 the signup prompt
       keys on. Does NOT increment; ``run_core._reject_if_guest_over_limit``
@@ -162,7 +163,7 @@ async def _run_start_gates(
         payer = await guards.resolve_payer(workspace_id)
         source = await guards.billing_source(payer, agent_id, exclusive_tools=exclusive_tools)
         await guards.assert_within_billing(workspace_id, source, one_active_run=True)
-        refusal = await guards.free_model_refusal(workspace_id, source, model_override)
+        refusal = await guards.free_model_refusal(workspace_id, source, agent_id, model_override)
         if refusal is not None:
             raise refusal
 

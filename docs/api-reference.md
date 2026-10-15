@@ -2474,14 +2474,18 @@ workspace are not bounded.
   `pydantic_ai_model`, and a per-send model picked for that backend is dropped).
   The agent's own tool policy carries over, so a planner opt-in still applies.
 - Only models on `free_model_allowlist` (default `claude-haiku-4-5`,
-  `claude-haiku-4-5-20251001`, `claude-sonnet-4-6`; matched ignoring case and a
-  provider prefix such as `litellm:`) that the metering prices can price. The
+  `claude-haiku-4-5-20251001`, `claude-sonnet-4-6`; matched ignoring case and
+  one leading prefix naming a known provider, such as `litellm:`) that the
+  metering prices can price. The
   per-send model, else the agent's own model, else `pydantic_ai_model` must
   pass, and so must `pydantic_ai_model` itself when the agent is on another
   backend, because that is what the forced run really uses. Otherwise the turn
-  is refused with 400 `model.not_allowed`: the chat route checks the per-send
-  model before any run row exists, and the worker checks all of them and ends
-  the run with that code on its terminal frame before any backend is built. An
+  is refused with 400 `model.not_allowed`: the chat route checks all of them
+  before any run row, stream or turn counter exists, and the worker checks them
+  again and ends the run with that code on its terminal frame before any
+  backend is built. Since `pydantic_ai_model` is always checked, set it and
+  `POCKETPAW_FREE_MODEL_ALLOWLIST` together: a default off the allowlist
+  refuses every free turn. An
   allowlisted model that nothing prices is refused too, since it would bill 0.
   Opus and Fable are not on the default list.
 - At most `free_run_max_turns` (default 20) model requests.

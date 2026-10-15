@@ -104,11 +104,19 @@ class _StubTransport:
 
 
 def _enforce(monkeypatch, mod, *, on: bool) -> None:
-    """Point the billing guard's ``get_settings`` at a stub carrying the flag."""
+    """Point the billing guard's ``get_settings`` at a stub carrying the flag,
+    plus the launch model pair the free-model check reads on every gated turn."""
     from pocketpaw_ee.cloud.credits import guards
 
     monkeypatch.setattr(
-        guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on, credits_enforced=False)
+        guards,
+        "get_settings",
+        lambda: SimpleNamespace(
+            billing_enforced=on,
+            credits_enforced=False,
+            pydantic_ai_model="litellm:claude-haiku-4-5",
+            free_model_allowlist=["claude-haiku-4-5"],
+        ),
     )
 
 

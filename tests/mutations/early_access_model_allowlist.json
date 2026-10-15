@@ -11,7 +11,7 @@
   {
     "label": "the provider prefix is not stripped, so the launch default litellm:claude-haiku-4-5 is refused",
     "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
-    "find": "        return name.rpartition(\":\")[2].strip().lower()\n",
+    "find": "        return (tail if sep and head.lower() in _KNOWN_PROVIDERS else name).strip().lower()\n",
     "replace": "        return name.strip().lower()\n",
     "tests": [
       "tests/cloud/credits/test_early_access_model_allowlist.py"
@@ -29,8 +29,8 @@
   {
     "label": "the HTTP check ignores who is unpaid, so a paid workspace is refused Opus",
     "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
-    "find": "    if exc is None or not await is_platform_funded_free(workspace_id):\n",
-    "replace": "    if exc is None:\n",
+    "find": "            return exc if await is_platform_funded_free(workspace_id) else None\n",
+    "replace": "            return exc\n",
     "tests": [
       "tests/cloud/credits/test_early_access_model_allowlist.py"
     ]
@@ -67,6 +67,24 @@
     "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
     "find": "    if source != \"platform\" or not (settings.billing_enforced or settings.credits_enforced):\n",
     "replace": "    if source != \"platform\":\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "the HTTP check reads only the per-send model, so an agent stored on Opus opens a stream",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    for model in await free_run_models(agent_id, model_override):\n        exc = free_model_denial(model)\n",
+    "replace": "    for model in [model_override] if model_override else []:\n        exc = free_model_denial(model)\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "any prefix chain is stripped, so foo:bar:claude-haiku-4-5 passes as haiku",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        return (tail if sep and head.lower() in _KNOWN_PROVIDERS else name).strip().lower()\n",
+    "replace": "        return name.rpartition(\":\")[2].strip().lower()\n",
     "tests": [
       "tests/cloud/credits/test_early_access_model_allowlist.py"
     ]

@@ -127,6 +127,25 @@ async def test_per_send_opus_override_is_refused_on_chat_http(
     assert backend_factory_spy == []
 
 
+async def test_agent_stored_on_opus_is_refused_on_chat_http(
+    ea_user, haiku_default, backend_factory_spy, monkeypatch
+):
+    """No per-send model: the agent's own Opus is the effective model, so the
+    HTTP seam answers 400 before a run doc, a stream or a turn counter exists.
+
+    Mutation: the HTTP check reads only the per-send model.
+    """
+    ws, uid = ea_user.workspace_id, ea_user.user_id
+    agent_id = await _agent(ws, uid, backend="claude_agent_sdk", model=OPUS)
+
+    resp, submitted = await _post_turn(monkeypatch, ws, uid, agent_id)
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "model.not_allowed"
+    assert submitted == []
+    assert backend_factory_spy == []
+
+
 async def test_forced_run_checks_the_default_it_will_really_run_on(
     ea_user, haiku_default, backend_factory_spy, monkeypatch
 ):
@@ -244,7 +263,7 @@ async def test_allowlist_is_off_while_credits_are_not_enforced(ea_user, monkeypa
         update={"credits_enforced": False, "billing_enforced": False}
     )
     monkeypatch.setattr(guards, "get_settings", lambda: settings)
-    assert await guards.free_model_refusal(ea_user.workspace_id, "platform", OPUS) is None
+    assert await guards.free_model_refusal(ea_user.workspace_id, "platform", None, OPUS) is None
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +284,10 @@ async def test_allowlist_is_off_while_credits_are_not_enforced(ea_user, monkeypa
         ("litellm:claude-opus-4-6", False),
         ("opus", False),
         ("claude-haiku-4-5-evil", False),
+        ("anthropic:claude-haiku-4-5", True),
+        ("foo:claude-haiku-4-5", False),
+        ("foo:bar:claude-haiku-4-5", False),
+        ("litellm:litellm:claude-haiku-4-5", False),
         ("", False),
     ],
 )

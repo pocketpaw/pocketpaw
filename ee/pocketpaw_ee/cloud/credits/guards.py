@@ -30,11 +30,13 @@
 #   the turn cap and the starting wallet, and ``free_run_token_limit`` sizes the
 #   pydantic_ai token limit from it at the model's output price.
 #   ``free_model_denial`` is 400 ``model.not_allowed`` unless the model is on
-#   ``free_model_allowlist`` (ignoring case and a ``provider:`` prefix) and
+#   ``free_model_allowlist`` (ignoring case and a known ``provider:`` prefix) and
 #   priced by the metering ladder, since an unpriced model bills 0. ``run_core``
 #   checks every model in ``free_run_models`` (the one asked for, plus the
-#   deployment default a forced run really uses); the chat HTTP seam checks the
-#   per-send model through ``free_model_refusal``.
+#   deployment default a forced run really uses), and the chat HTTP seam runs
+#   the same list through ``free_model_refusal`` so the refusal is a 400.
+#   ``pydantic_ai_model`` is always on that list: it must be on the allowlist,
+#   or every free turn is refused.
 #
 # ``credits_enforced`` gates only this chat credit check; ``billing_enforced``
 # also turns on the seat, pocket, connector and other paid gates elsewhere.
@@ -430,14 +432,18 @@ def _output_usd_per_million(model: str) -> Decimal | None:
 def free_model_denial(model: str) -> CloudError | None:
     """``ModelNotAllowed`` unless ``model`` may run on early access credits.
 
-    It must be on ``free_model_allowlist`` (exact, ignoring case and a
-    ``provider:`` prefix) and priced by the metering ladder, because an
-    unpriced model bills 0 and so would run free. Says nothing about who pays:
+    It must be on ``free_model_allowlist`` (exact, ignoring case and one
+    leading ``provider:`` prefix naming a provider pydantic_ai knows) and
+    priced by the metering ladder, because an unpriced model bills 0 and so
+    would run free. Says nothing about who pays:
     callers apply it to platform-funded turns on unpaid workspaces only.
     """
 
+    from pocketpaw.agents.pydantic_ai import _KNOWN_PROVIDERS
+
     def bare(name: str) -> str:
-        return name.rpartition(":")[2].strip().lower()
+        head, sep, tail = name.strip().partition(":")
+        return (tail if sep and head.lower() in _KNOWN_PROVIDERS else name).strip().lower()
 
     allowed = {bare(m) for m in get_settings().free_model_allowlist}
     if bare(model) in allowed - {""} and _output_usd_per_million(bare(model)):
@@ -449,20 +455,24 @@ def free_model_denial(model: str) -> CloudError | None:
 
 
 async def free_model_refusal(
-    workspace_id: str, source: CredentialSource, model: str | None
+    workspace_id: str, source: CredentialSource, agent_id: str | None, model_override: str | None
 ) -> CloudError | None:
-    """``free_model_denial(model)`` for a platform-funded turn on an unpaid
-    early-access workspace while the credit gate is on, else None. The chat
-    HTTP seam's check of the per-send model; an empty model is None."""
+    """The first ``free_model_denial`` over ``free_run_models(agent_id,
+    model_override)`` for a platform-funded turn on an unpaid early-access
+    workspace while the credit gate is on, else None. The chat HTTP seam's
+    check, so an agent stored on Opus is refused with a 400 before a run doc,
+    a stream or a turn counter exists; ``run_core`` checks again and enforces.
+    """
     settings = get_settings()
     if source != "platform" or not (settings.billing_enforced or settings.credits_enforced):
         return None
-    if not workspace_id or not model:
+    if not workspace_id:
         return None
-    exc = free_model_denial(model)
-    if exc is None or not await is_platform_funded_free(workspace_id):
-        return None
-    return exc
+    for model in await free_run_models(agent_id, model_override):
+        exc = free_model_denial(model)
+        if exc is not None:
+            return exc if await is_platform_funded_free(workspace_id) else None
+    return None
 
 
 async def free_run_models(agent_id: str | None, model_override: str | None) -> list[str]:
