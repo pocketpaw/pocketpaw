@@ -655,14 +655,16 @@ async def _collect(gen) -> list[tuple[str, dict[str, Any]]]:
 
 @pytest.mark.asyncio
 async def test_degrade_reply_is_the_unavailable_frame_and_never_a_handoff(monkeypatch):
-    """Cap and quota read as ``limit``, a failed provider as ``temporary``; the
-    internal reason itself never reaches the visitor."""
+    """Cap, quota and an unpaid early-access workspace read as ``limit``, a
+    failed provider as ``temporary``; the internal reason itself never reaches
+    the visitor."""
     from pocketpaw_ee.paw_bar import concierge_runtime
 
     handoffs = _spy_handoffs(monkeypatch)
     expected = {
         "spend_cap": _LIMIT,
         "quota": _LIMIT,
+        "early_access": _LIMIT,
         "provider_timeout": _TEMPORARY,
         "provider_error": _TEMPORARY,
     }

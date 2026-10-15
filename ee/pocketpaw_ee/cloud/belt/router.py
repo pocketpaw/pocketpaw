@@ -52,13 +52,20 @@ from pocketpaw_ee.cloud._core.deps import (
     current_user_id,
     current_workspace_id,
     require_action_any_workspace,
+    require_paid_or_early_access_allowed,
 )
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.belt import review as belt_review
 from pocketpaw_ee.cloud.belt import service as belt_service
 from pocketpaw_ee.cloud.license import require_license
 
-router = APIRouter(prefix="/belt", tags=["Belt"], dependencies=[Depends(require_license)])
+# Belt runs spend off the credit ledger, so an unpaid early-access workspace is
+# refused on every route here (403 ``early_access.not_available``).
+router = APIRouter(
+    prefix="/belt",
+    tags=["Belt"],
+    dependencies=[Depends(require_license), Depends(require_paid_or_early_access_allowed)],
+)
 
 
 class AddRepoRequest(BaseModel):

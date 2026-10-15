@@ -2472,6 +2472,34 @@ again. On sign-in and workspace create the grant is best-effort: a ledger
 failure is logged, the request still succeeds, and the next sign-in retries. The user row records the
 claim in `early_access_workspace_id` and `early_access_granted_at`.
 
+### Spend outside the ledger: not in early access yet
+
+Some features spend on models or providers without writing to the credit
+ledger, so the wallet cannot bound them. For a platform-funded early-access
+workspace (the group defined above) they are refused instead, while the run-start
+gate is on (`billing_enforced` or `credits_enforced`). A paid workspace, or any
+workspace once `payments_open` is on, is not affected.
+
+| Surface | What the caller gets |
+|---------|----------------------|
+| Belt: every `/api/v1/belt/...` route | 403 `early_access.not_available` |
+| Belt mandates: every `/api/v1/belt/mandates/...` route, plan approve included | 403 `early_access.not_available` |
+| Studio: `POST /api/v1/studio/generate`, `/edit`, `/video-elements`, `/video-motion-control`, `/music`, `/transcribe` | 403 `early_access.not_available` (history reads stay open) |
+| Foresight: `POST /api/v1/foresight/scenarios`, `POST /api/v1/foresight/backtests`, and the chat agent's `run_scenario` tool | 403 `early_access.not_available` (the tool returns it as `{"ok": false, "error": "early_access.not_available"}`) |
+| Foresight insights with the LLM synthesizer switched on | the pattern synthesizer's rows instead |
+| Chat media tools (`image_generate`, `audio_generate`, `audio_transcribe`, `video_generate`, `generate_site_image`, `generate_site_video`) | a tool error saying the feature is not in early access yet; no provider call |
+| Paw Bar concierge on a site the workspace owns | the visitor gets the `unavailable` frame with reason `limit`; no run, no model call |
+| LiveKit meeting notes | the call runs without the notes bot |
+
+```json
+{"error": {"code": "early_access.not_available", "message": "This is not in early access yet."}}
+```
+
+Routes attach it with the FastAPI dependency
+`pocketpaw_ee.cloud._core.deps.require_paid_or_early_access_allowed`; other
+callers use `credits.guards.early_access_denial` or `assert_early_access_allowed`.
+Any new feature that spends outside the ledger needs the same check.
+
 ### Password sign-up switch
 
 With `password_signup_open` off, the two password sign-up doors refuse:

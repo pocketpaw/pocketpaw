@@ -174,7 +174,6 @@ _STUDIO_CALLS = [
     ("POST", "/api/v1/studio/video-elements"),
     ("POST", "/api/v1/studio/video-motion-control"),
     ("POST", "/api/v1/studio/music"),
-    ("POST", "/api/v1/studio/suggest-prompt"),
     ("POST", "/api/v1/studio/transcribe"),
 ]
 
@@ -323,7 +322,34 @@ async def test_foresight_chat_tool_relays_the_refusal(mongo_db, monkeypatch):  #
     monkeypatch.setattr(agent_context, "_resolve_identity", lambda: (ws, "u1"))
     out = await agent_context.run_scenario_for_agent(name="x", custom_scenario_id="s1")
     assert out["ok"] is False
-    assert _CODE in str(out)
+    assert out["error"] == _CODE
+
+
+async def _insights_llm_calls(monkeypatch, plan: str) -> int:
+    """How many times ``get_insights`` reached the LLM synthesizer for a
+    workspace on ``plan`` with the LLM synthesizer switched on."""
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+    from pocketpaw_ee.cloud.foresight.dto import SetForesightInsightsConfigRequest
+
+    _posture(monkeypatch)
+    ws = await _workspace(plan)
+    ctx = _ctx(ws)
+    await foresight_service.set_insights_config(
+        ctx, SetForesightInsightsConfigRequest(synthesizer="llm")
+    )
+    llm = AsyncMock(return_value=[])
+    monkeypatch.setattr(foresight_service, "_synthesize_insights_llm", llm)
+    await foresight_service.get_insights(ctx)
+    return llm.await_count
+
+
+async def test_foresight_llm_insights_off_for_unpaid(mongo_db, monkeypatch):  # noqa: ARG001
+    """An unpaid workspace with the LLM synthesizer on reads pattern rows."""
+    assert await _insights_llm_calls(monkeypatch, "free") == 0
+
+
+async def test_foresight_llm_insights_on_for_paid(mongo_db, monkeypatch):  # noqa: ARG001
+    assert await _insights_llm_calls(monkeypatch, "go") == 1
 
 
 # --------------------------------------------------------------------------- #

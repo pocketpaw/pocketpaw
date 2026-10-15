@@ -43,7 +43,8 @@
 # no check before and no ledger row after. Putting generation on the AGENT's path
 # means a retry loop can spend with no human in between. The per-call ceiling here
 # (``_MAX_IMAGES_PER_CALL``) is a floor, not a meter — real metering is SM-2 and
-# has to land before this is enabled broadly.
+# has to land before this is enabled broadly. Until then an unpaid early-access
+# workspace is refused before any generation (``media._early_access_refusal``).
 
 from __future__ import annotations
 
@@ -52,6 +53,8 @@ import logging
 import time
 import uuid
 from typing import Any
+
+from pocketpaw_ee.agent.mcp_servers.media import _early_access_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +124,8 @@ async def _generate_site_image_handler(args: dict) -> dict:
     workspace_id, _user_id = _identity()
     if not workspace_id:
         return _error_response("No active workspace — cannot generate site media.")
+    if (refusal := await _early_access_refusal(workspace_id)) is not None:
+        return refusal
 
     # THE ACTUAL GUARD, and it is not the surface allow-list. ``allow_mcp_tool_ids``
     # defaults to None = NO restriction, and most surface specs set no profile at
@@ -293,6 +298,8 @@ async def _generate_site_video_handler(args: dict) -> dict:
     workspace_id, _user_id = _identity()
     if not workspace_id:
         return _error_response("No active workspace — cannot generate site media.")
+    if (refusal := await _early_access_refusal(workspace_id)) is not None:
+        return refusal
 
     owner = await pockets_service.get_pocket_workspace(pocket_id)
     if owner != workspace_id:
