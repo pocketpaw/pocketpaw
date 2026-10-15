@@ -21,12 +21,11 @@
 # On link, on enable, on a settings change, and for every bound site after a
 # reconnect, the provider's ``site_setup`` hook runs (idempotent; it may write
 # readonly settings that pass their field's check; stored with an atomic $set).
-# A failure is stored as ``setup_error`` (``setup_failed``, or the ``setup_error`` of
-# an ``ActionRefused("setup_required")`` the hook raised) and the site reads ``setup_required``;
-# it never fails the request. The gateway also stores one (``mark_setup_error``)
-# when a handler finds the provider-side setup gone (a deleted sheet); a later
-# successful call clears it (``clear_setup_error``). ``claim_binding_lease``
-# serialises provider writes that must not interleave (the vault's lease pattern).
+# A failure is stored as ``setup_error`` (``setup_failed``, or an ``ActionRefused``'s)
+# and the site reads ``setup_required``; it never fails the request. The gateway also
+# stores one (``mark_setup_error``) when a handler finds the provider-side setup gone
+# (a deleted sheet); a later successful call clears it (``clear_setup_error``).
+# ``claim_binding_lease`` serialises provider writes that must not interleave.
 #
 # Status (``binding_status``), first match wins: disabled (has actions, none on),
 # needs_connection / needs_reconnect (connect kinds), setup_required (a setup
@@ -44,7 +43,8 @@
 # A PUT that changes a remote select (``options_source="remote"``) must pick from
 # the provider's live list (field_options.py); unreachable is a 502, never accepted.
 # A select with ``depends_on`` loads its list against the PUT's new value of those
-# settings (the binding's own settings are untouched until the PUT passes).
+# settings, or on the options route against draft query values checked the same
+# way (``_with_drafts``); neither touches the stored settings until a PUT passes.
 # Moving a binding to another connection (PUT or the OAuth callback) drops its
 # stored remote values: they name things in the old account.
 
@@ -54,7 +54,9 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
@@ -66,6 +68,7 @@ from pocketpaw_ee.integrations.providers.base import (
     ActionRefused,
     IntegrationProvider,
     SettingOption,
+    SettingsField,
 )
 
 logger = logging.getLogger(__name__)
@@ -321,12 +324,22 @@ async def list_for_pocket(
 
 
 async def options_for_field(
-    *, workspace_id: str, user_id: str, pocket_id: str, provider_id: str, key: str
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    provider_id: str,
+    key: str,
+    drafts: Mapping[str, str] | None = None,
 ) -> list[SettingOption]:
     """``GET .../integrations/{provider}/fields/{key}/options``: a select's choices.
 
     A static select answers its declared options; a remote one asks the provider
-    (cached). Unknown, hidden or non-select fields are a 404."""
+    (cached). Unknown, hidden or non-select fields are a 404. ``drafts`` (the
+    query string) may carry unsaved values for the field's ``depends_on`` keys;
+    other keys are ignored. Each draft must pass its own field's check, so a
+    draft remote parent must be one of that parent's options (422
+    ``invalid_settings``). Drafts only shape this load; nothing is stored."""
     provider = provider_or_404(provider_id)
     await require_edit(workspace_id, user_id, pocket_id)
     spec = settings_rules.field(provider, key)
@@ -335,15 +348,73 @@ async def options_for_field(
     if not settings_rules.is_remote_select(spec):
         return list(spec.options)
     row = await _row(workspace_id, pocket_id, provider.id)
+    conn = await connection_for(row) if row is not None else None
+    binding = row
+    if spec.depends_on and drafts and any(dep in drafts for dep in spec.depends_on):
+        binding = await _with_drafts(
+            row, provider, spec, drafts, workspace_id, pocket_id, user_id, conn
+        )
     return await field_options.load(
         provider,
         spec,
         workspace_id=workspace_id,
         pocket_id=pocket_id,
         user_id=user_id,
-        binding=row,
-        conn=await connection_for(row) if row is not None else None,
+        binding=binding,
+        conn=conn,
     )
+
+
+def _pending(row: Any, settings: dict[str, Any]) -> Any:
+    """``row`` with ``settings`` swapped in, for a provider hook only (never saved)."""
+    if row is None:
+        return SimpleNamespace(settings=settings)
+    return row.model_copy(update={"settings": settings})
+
+
+async def _with_drafts(
+    row: Any,
+    provider: IntegrationProvider,
+    spec: SettingsField,
+    drafts: Mapping[str, str],
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+    conn: Any | None,
+) -> Any:
+    """The binding as the provider should see it with ``spec``'s draft parents
+    applied, each checked like a PUT would (a remote parent against its own
+    cached list, loaded with the drafts already accepted)."""
+    pending = dict(getattr(row, "settings", None) or {})
+    for dep in spec.depends_on:
+        if dep not in drafts:
+            continue
+        raw = drafts[dep]
+        if not isinstance(raw, str) or not raw.strip():
+            pending.pop(dep, None)
+            continue
+        if raw.strip() == pending.get(dep):
+            continue  # the saved value, checked when it was stored
+        parent = settings_rules.field(provider, dep)
+        if parent is None:
+            raise ValidationError(settings_rules.INVALID, f"Unknown setting {dep!r}.")
+        allowed = None
+        if settings_rules.is_remote_select(parent):
+            options = await field_options.load(
+                provider,
+                parent,
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                user_id=user_id,
+                binding=_pending(row, dict(pending)),
+                conn=conn,
+            )
+            allowed = {o.value for o in options}
+        try:
+            pending[dep] = settings_rules.check_value(parent, raw, allowed)
+        except ValueError as exc:
+            raise ValidationError(settings_rules.INVALID, str(exc)) from None
+    return _pending(row, pending)
 
 
 async def _remote_allowed(

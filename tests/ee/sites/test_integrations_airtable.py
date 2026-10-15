@@ -395,6 +395,24 @@ async def test_table_options_follow_the_picked_base(beanie_test_db, air):
 
 
 @pytest.mark.asyncio
+async def test_a_draft_base_lists_its_tables_before_it_is_saved(beanie_test_db, air):
+    async with _client() as c:
+        pid, _ = await _linked(c, air, table=None)
+        put = await c.put(_url(pid), json={"settings": {"base_id": BASE_A}})
+        assert put.status_code == 200, put.text
+        draft = await c.get(f"{_url(pid)}/fields/table_name/options", params={"base_id": BASE_B})
+        foreign = await c.get(f"{_url(pid)}/fields/table_name/options", params={"base_id": BASE_RO})
+        saved = await _options(c, pid, "table_name")
+    assert draft.status_code == 200, draft.text
+    assert draft.json()["options"] == [{"value": TBL_B, "label": "B table"}]
+    # A base the grant can't edit is not a base option: refused, its tables never asked.
+    assert (foreign.status_code, foreign.json()["error"]["code"]) == (422, "invalid_settings")
+    assert not any(BASE_RO in path for _, path, _, _ in air.api_calls)
+    assert [o["value"] for o in saved.json()["options"]] == [TBL_LEADS, TBL_OTHER]
+    assert (await _binding()).settings == {"base_id": BASE_A}
+
+
+@pytest.mark.asyncio
 async def test_put_checks_the_table_against_the_new_base(beanie_test_db, air):
     async with _client() as c:
         pid, _ = await _linked(c, air)

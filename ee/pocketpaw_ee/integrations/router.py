@@ -10,7 +10,7 @@
 #   PUT    /sites/by-pocket/{pocket_id}/integrations/{provider}
 #   DELETE /sites/by-pocket/{pocket_id}/integrations/{provider}   204, grant survives
 #   GET    /sites/by-pocket/{pocket_id}/integrations/{provider}/fields/{key}/options
-#                                                        {options} (select choices; 409/502)
+#          ?<depends_on key>=<draft>                     {options} (select choices; 409/422/502)
 #   GET    /sites/by-pocket/{pocket_id}/integrations/newsletter/export.csv  (owner)
 #   GET    /sites/by-pocket/{pocket_id}/orders?limit&cursor
 #
@@ -186,16 +186,21 @@ async def field_options(
     pocket_id: str,
     provider: str,
     key: str,
+    request: Request,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
 ) -> FieldOptionsView:
-    """A select's choices; remote ones come from the provider (cached 60s)."""
+    """A select's choices; remote ones come from the provider (cached 60s).
+
+    Query params named after the field's ``depends_on`` keys are unsaved parent
+    values (``?base_id=app…``), validated, never stored; other keys are ignored."""
     options = await bindings.options_for_field(
         workspace_id=ctx.workspace_id or "",
         user_id=ctx.user_id,
         pocket_id=pocket_id,
         provider_id=provider,
         key=key,
+        drafts=dict(request.query_params),
     )
     return FieldOptionsView(options=[{"value": o.value, "label": o.label} for o in options])
 

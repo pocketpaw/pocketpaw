@@ -8,7 +8,8 @@
 # from the same cached list, 502 rather than an unvalidated value, 409 without a
 # connection, an unchanged value never re-checked, every item of a multi select
 # re-checked), a relink (PUT or OAuth callback) dropping stored remote values,
-# single-flight loads, and a builtin with no binding. The ``demo`` provider's
+# single-flight loads, a builtin with no binding, and draft ``depends_on`` parents
+# as query params (validated, never saved, cached apart). The ``demo`` provider's
 # ``board`` field is the fixture; helpers come from test_integrations.py.
 from __future__ import annotations
 
@@ -527,3 +528,123 @@ async def test_a_builtin_remote_select_loads_with_no_binding(beanie_test_db, mon
     assert resp.json() == {"options": [{"value": "weekly", "label": "Weekly"}]}
     assert seen == {"binding": None, "get_token": None, "connection": None, "key": "cadence"}
     assert put.status_code == 200 and put.json()["settings"] == {"cadence": "weekly"}
+
+
+# ------------------------------------------------------------- draft parents
+
+
+def _dependent(monkeypatch) -> dict:
+    """Give demo a ``column`` select that depends on ``board``; the hook answers
+    ``board`` from DEMO_BOARDS and ``column`` per the board the binding carries."""
+    from pocketpaw_ee.integrations.providers.base import SettingOption, SettingsField
+    from pocketpaw_ee.integrations.providers.demo import DEMO_BOARDS, DemoProvider
+
+    state: dict = {"calls": [], "seen": []}
+    monkeypatch.setattr(
+        DemoProvider,
+        "settings_fields",
+        (
+            SettingsField(key="note", label="Note", type="text", max_length=120),
+            SettingsField(key="board", label="Board", type="select", options_source="remote"),
+            SettingsField(
+                key="column",
+                label="Column",
+                type="select",
+                options_source="remote",
+                depends_on=("board",),
+            ),
+        ),
+    )
+
+    async def _hook(self, binding, ctx, key):
+        state["calls"].append(key)
+        if key == "board":
+            return list(DEMO_BOARDS)
+        board = (getattr(binding, "settings", None) or {}).get("board") or ""
+        state["seen"].append(board)
+        return [SettingOption(f"col_{board}", f"Column of {board}")] if board else []
+
+    monkeypatch.setattr(DemoProvider, "field_options", _hook)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_a_draft_parent_loads_the_child_list_without_saving(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.models.integration import SiteIntegration
+
+    state = _dependent(monkeypatch)
+    pid = await _pocket()
+    async with _client() as c:
+        await _bound(c, pid)
+        saved = await c.get(_options_url(pid, key="column"))
+        draft = await c.get(_options_url(pid, key="column"), params={"board": "brd_roadmap"})
+    assert saved.json() == {"options": []}
+    assert draft.status_code == 200, draft.text
+    assert draft.json() == {
+        "options": [{"value": "col_brd_roadmap", "label": "Column of brd_roadmap"}]
+    }
+    # The draft board was checked against the board list first.
+    assert state["calls"] == ["column", "board", "column"]
+    row = await SiteIntegration.find_one(SiteIntegration.provider == "demo")
+    assert "board" not in (row.settings or {})
+
+
+@pytest.mark.asyncio
+async def test_a_draft_parent_outside_its_own_list_is_422(beanie_test_db, monkeypatch):
+    state = _dependent(monkeypatch)
+    pid = await _pocket()
+    async with _client() as c:
+        await _bound(c, pid)
+        resp = await c.get(_options_url(pid, key="column"), params={"board": "brd_secret"})
+    assert (resp.status_code, resp.json()["error"]["code"]) == (422, "invalid_settings")
+    # The provider was never asked for the child list of an unvetted id.
+    assert state["calls"] == ["board"] and state["seen"] == []
+
+
+@pytest.mark.asyncio
+async def test_query_keys_outside_depends_on_are_ignored(beanie_test_db, monkeypatch):
+    state = _dependent(monkeypatch)
+    pid = await _pocket()
+    async with _client() as c:
+        await _bound(c, pid)
+        put = await c.put(_put_url(pid), json={"settings": {"board": "brd_launch"}})
+        assert put.status_code == 200, put.text
+        child = await c.get(
+            _options_url(pid, key="column"), params={"note": "x", "other": "brd_roadmap"}
+        )
+        # A non-dependent field ignores even a would-be parent key.
+        board = await c.get(_options_url(pid), params={"board": "brd_secret"})
+    assert child.json()["options"] == [{"value": "col_brd_launch", "label": "Column of brd_launch"}]
+    assert board.status_code == 200 and len(board.json()["options"]) == 3
+    assert state["seen"] == ["brd_launch"]
+
+
+@pytest.mark.asyncio
+async def test_draft_and_saved_parents_cache_apart(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.integrations import field_options
+
+    state = _dependent(monkeypatch)
+    pid = await _pocket()
+    async with _client() as c:
+        conn_id = await _bound(c, pid)
+        await c.put(_put_url(pid), json={"settings": {"board": "brd_launch"}})
+        saved = await c.get(_options_url(pid, key="column"))
+        draft = await c.get(_options_url(pid, key="column"), params={"board": "brd_roadmap"})
+        again = await c.get(_options_url(pid, key="column"), params={"board": "brd_roadmap"})
+        # Drafting the saved value is the saved entry: no re-check, no new load.
+        same = await c.get(_options_url(pid, key="column"), params={"board": "brd_launch"})
+        # A blank draft clears the parent for this load.
+        cleared = await c.get(_options_url(pid, key="column"), params={"board": ""})
+        saved_again = await c.get(_options_url(pid, key="column"))
+    assert saved.json()["options"][0]["value"] == "col_brd_launch"
+    assert draft.json()["options"][0]["value"] == "col_brd_roadmap"
+    assert again.json() == draft.json()
+    assert same.json() == saved.json() == saved_again.json()
+    assert cleared.json() == {"options": []}
+    assert state["seen"] == ["brd_launch", "brd_roadmap", ""]
+    column_keys = {k for k in field_options._cache if k[4] == "column"}
+    assert column_keys == {
+        (WS, pid, "demo", conn_id, "column", "brd_launch"),
+        (WS, pid, "demo", conn_id, "column", "brd_roadmap"),
+        (WS, pid, "demo", conn_id, "column", ""),
+    }

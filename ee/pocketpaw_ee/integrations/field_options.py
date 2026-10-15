@@ -14,9 +14,10 @@
 #     values dropped (and values with a comma for a ``multi`` field), a missing
 #     label falls back to the value, capped at ``MAX_OPTIONS``
 #   * cached in process for ``TTL_SECONDS`` per (workspace, pocket, provider,
-#     connection, key, the binding's values of the field's ``depends_on``), i.e.
-#     per binding + key; relinking another connection or picking another base is a
-#     new key. The cache is bounded (``MAX_ENTRIES``, oldest out first).
+#     connection, key, the effective values of the field's ``depends_on``: saved,
+#     or a validated draft from the options route), i.e. per binding + key;
+#     relinking another connection or picking another base is a new key. The
+#     cache is bounded (``MAX_ENTRIES``, oldest out first).
 #   * single-flight: concurrent misses for one key share one provider call
 
 from __future__ import annotations

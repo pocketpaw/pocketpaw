@@ -4389,6 +4389,41 @@ Response `200`: the full site response, carrying `ai_training_allowed`.
 It only changes the training lines of `robots.txt`. Like the badge switch, the value is
 stored now and **reaches the live site on the next publish**.
 
+## Sites — Integration select options
+
+### `GET /sites/by-pocket/{pocket_id}/integrations/{provider}/fields/{key}/options`
+
+The choices for one `select` setting of a site's integration, as
+`{"options": [{"value", "label"}]}`. A static select answers its declared
+options; a remote one (`options_source: "remote"`) asks the provider and is
+cached for 60 s per binding, field and parent values. Needs edit access to the
+pocket (`fabric.read` in the workspace).
+
+**Draft parents.** A field with `depends_on` (Airtable's `table_name` depends on
+`base_id`) lists against its parents' values. By default those are the saved
+settings; the settings sheet can pass unsaved ones as query params named after
+the `depends_on` keys:
+
+```
+GET .../integrations/airtable/fields/table_name/options?base_id=appXXXXXXXXXXXXXX
+```
+
+- Only the field's own `depends_on` keys are read; every other query key is ignored.
+- Each draft passes its parent field's check, the same one a `PUT` runs. A remote
+  parent must be one of that parent's own options for this binding, so a caller
+  can't make the provider fetch an arbitrary id.
+- A blank value (`?base_id=`) lists as if the parent were unset. A value equal to
+  the saved one is not re-checked.
+- Drafts are never stored, and the cache keys on the effective parent values, so
+  draft and saved lists never mix.
+
+| Status | `error.code` | When |
+|---|---|---|
+| 404 | `*.not_found` | unknown provider or field, or a hidden / non-select field |
+| 409 | `not_connected` | a connect-kind integration without a live connection |
+| 422 | `invalid_settings` | a draft parent fails its field's check |
+| 502 | `provider_error` | the provider failed (not cached) |
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and
