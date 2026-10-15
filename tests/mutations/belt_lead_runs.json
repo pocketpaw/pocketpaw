@@ -279,5 +279,51 @@
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_ladder"
     ]
+  },
+  {
+    "label": "the lead poll never asks for the issue state",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "\"--json\", \"comments,state\"]",
+    "replace": "\"--json\", \"comments\"]",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot"
+    ]
+  },
+  {
+    "label": "a closed feature issue keeps the run tracking",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            if raw.get(\"state\") == \"CLOSED\":\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot",
+      "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_is_never_nudged_or_relaunched"
+    ]
+  },
+  {
+    "label": "a missing issue state closes the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if raw.get(\"state\") == \"CLOSED\":",
+    "replace": "if raw.get(\"state\") != \"OPEN\":",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_silent_lead_is_nudged_then_relaunched_then_flagged"
+    ]
+  },
+  {
+    "label": "a closed lead keeps its slot",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        await _patch(store, run_ref, station_pending=False, headless_state=None, lead=lead)\n        merged = [p for p in prs",
+    "replace": "        await _patch(store, run_ref, station_pending=False, lead=lead)\n        merged = [p for p in prs",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot"
+    ]
+  },
+  {
+    "label": "the closed summary does not say the issue closed",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        why = f\"feature issue #{lead.get('issue')} was closed\"",
+    "replace": "        why = f\"feature lead #{lead.get('issue')} ended\"",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot"
+    ]
   }
 ]

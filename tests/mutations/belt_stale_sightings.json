@@ -160,5 +160,52 @@
     "tests": [
       "tests/cloud/test_belt_stale_sightings.py::test_a_gh_failure_counts_as_blocked"
     ]
+  },
+  {
+    "label": "Depends on: none with a note reads the note's refs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        if re.match(r\"none\\b\", _NOTE.split(head[1], 1)[0].strip(\" *_.\"), re.IGNORECASE):\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency",
+      "tests/cloud/test_belt_stale_sightings.py::test_depends_on_none_with_a_note_is_not_blocked"
+    ]
+  },
+  {
+    "label": "a ref in the Depends on note counts",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        section = [_NOTE.split(_BULLET.sub(\"\", s), 1)[0] for s in section]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency",
+      "tests/cloud/test_belt_stale_sightings.py::test_depends_on_a_ref_with_a_note_blocks_on_the_ref_only"
+    ]
+  },
+  {
+    "label": "a list bullet reads as the note dash",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "_NOTE.split(_BULLET.sub(\"\", s), 1)[0]",
+    "replace": "_NOTE.split(s, 1)[0]",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
+  },
+  {
+    "label": "the note starts at any parenthesis, cutting a link's URL",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "_NOTE = re.compile(r\"\\s\\(|\\s-\\s\")",
+    "replace": "_NOTE = re.compile(r\"\\(|\\s-\\s\")",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
+  },
+  {
+    "label": "a dash note still counts its refs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "_NOTE = re.compile(r\"\\s\\(|\\s-\\s\")",
+    "replace": "_NOTE = re.compile(r\"\\s\\(\")",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
   }
 ]
