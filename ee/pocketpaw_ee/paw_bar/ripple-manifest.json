@@ -4126,6 +4126,16 @@
           "type": "string",
           "required": false,
           "description": "Title above gauge."
+        },
+        "currency": {
+          "type": "string",
+          "required": false,
+          "description": "ISO 4217 code for money gauges (\"USD\"). Formats value, target, over and to go; never put a symbol in the numbers. Shows the value, not a percent."
+        },
+        "unit": {
+          "type": "string",
+          "required": false,
+          "description": "Plain suffix for every amount when there is no currency (\"GB\", \"steps\"). Shows the value, not a percent. Shares always print up to one decimal (72.8%)."
         }
       }
     },
@@ -4849,7 +4859,7 @@
       "type": "bill-split",
       "category": "composite",
       "staticSafe": true,
-      "description": "Split a bill with tip: subtotal, tip_percent, people with optional extras (drinks). Widget does the cents-exact maths, cards, totals; visitor edits everything. Bind value.",
+      "description": "Split a bill with tip: subtotal, tip_percent, people with optional extras (drinks). Widget does the cents-exact maths, rows, totals; visitor edits everything. Bind value.",
       "props": {
         "title": {
           "type": "string",
@@ -4864,17 +4874,20 @@
         "subtotal": {
           "type": "number",
           "required": true,
-          "description": "The bill before tip and before tax, e.g. 186.4."
+          "description": "The bill before tip and before tax, e.g. 186.4.",
+          "data": true
         },
         "tax": {
           "type": "number",
           "required": false,
-          "description": "Tax ON TOP of subtotal, shared in proportion to what each person had. Omit when the subtotal already includes tax."
+          "description": "Tax ON TOP of subtotal, shared in proportion to what each person had. Omit when the subtotal already includes tax.",
+          "data": true
         },
         "tip_percent": {
           "type": "number",
           "required": false,
-          "description": "Percent of subtotal: 18 means 18%. Default 18."
+          "description": "Percent of subtotal: 18 means 18%. Default 18.",
+          "data": true
         },
         "tip_options": {
           "type": "number[]",
@@ -4884,7 +4897,8 @@
         "people": {
           "type": "Array<{ id: string; name: string; extras?: number }>",
           "required": true,
-          "description": "2 to 12 people. `extras` is what that person had on top of the shared part (drinks), as an amount. The rest of the subtotal is split evenly."
+          "description": "2 to 12 people. `extras` is what that person had on top of the shared part (drinks), as an amount. The rest of the subtotal is split evenly.",
+          "data": true
         },
         "extras_label": {
           "type": "string",

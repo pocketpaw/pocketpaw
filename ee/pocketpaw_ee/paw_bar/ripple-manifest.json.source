@@ -59,6 +59,12 @@ height description), "order-status" (shorter title, map height and tiles
 descriptions), "pipeline-dashboard" (shorter description, sales or hiring) and
 "sankey" (max height description); gauge's data flags come along with it.
 sources-bar changed only its example and org-chart nothing, so neither is pulled.
+Two more are swapped the same way, each alone, from branch feat/widget-polish-4 at
+d226eb7 (generatedAt 2026-10-15T14:57:48.631Z, upstream sha256
+aaf32ff364371db66258c6e679a90ef57a0ae31c6ec9542ab9dc9e9dcf2cc49d): "gauge" (new
+optional currency and unit) and "bill-split" ("rows" for "cards" in its description);
+bill-split's data flags come along with it. The other wave-4 widgets changed only
+their examples or nothing, so none is pulled.
 interval-workout's optional per-exercise "figure" (#216) is not pulled: nothing here
 checks exercise rows, and the widget matches figures by name. The server never reads the examples, and one carries a
 sample Stripe-style key that GitHub push protection refuses.
