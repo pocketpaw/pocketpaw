@@ -2582,9 +2582,11 @@ Every platform-paid agent run on an unpaid early-access workspace (not a BYOK
 turn, not a paid workspace) reserves an estimate on one platform-wide meter
 before the model is called: the `daily_usage` row with `meter:
 "early_access_credits"`, `subject_type: "workspace"`, `subject_id:
-"__platform__"` and the UTC `day`. The estimate is the wallet the run starts on,
-in whole credits rounded up, because the run's token limit is sized so it cannot
-spend more. If the reservation would take the day past
+"__platform__"` and the UTC `day`. The estimate is `free_run_reserve_credits`
+(default 100, env `POCKETPAW_FREE_RUN_RESERVE_CREDITS`), or the wallet the run
+starts on in whole credits rounded up when that is smaller. It is a per-run hold,
+not the most the run may spend, so many users chatting at once do not fill the
+ceiling with holds while real spend is low. If the reservation would take the day past
 `daily_free_ceiling_credits`, or the meter or the control row cannot be read,
 the run ends at once with 503 `early_access.paused` (terminal `error` frame,
 run `failed`) and no model call. Paid and BYOK runs never touch the meter.
@@ -2595,6 +2597,11 @@ dropped before the model call releases all of it, and spend past the estimate
 is added even above the ceiling, so the next reservations see it. Each run is
 reconciled once, however often it is billed. The meter therefore reads
 "credits spent today plus credits held by runs in flight".
+
+The ceiling is a soft burn-rate limit, not a hard cap: a run that spends more
+than its hold still finishes, so runs already in flight can take the day past the
+ceiling by up to (concurrent free runs) x (run spend minus the hold). Each user's
+one-time grant still bounds what that user can ever spend.
 
 Operators change the switches with `PUT /api/v1/platform/launch-controls`
 (`platform.settings.write`, audited as `platform.launch_controls.write`) and read

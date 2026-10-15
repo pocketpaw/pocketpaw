@@ -2757,6 +2757,18 @@ class Settings(BaseSettings):
             "Set via POCKETPAW_FREE_RUN_MAX_TURNS."
         ),
     )
+    free_run_reserve_credits: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Credits one platform-funded free run reserves on the daily early-access "
+            "ceiling (credits.guards.reserve_free_run) while it is in flight, or its "
+            "wallet when that is smaller. bill_run then moves the meter to the real "
+            "spend, overrun included, so the ceiling is a soft burn-rate limit: runs "
+            "already in flight may pass it. Higher holds more of the ceiling per "
+            "concurrent run. Set via POCKETPAW_FREE_RUN_RESERVE_CREDITS."
+        ),
+    )
     free_model_allowlist: list[str] = Field(
         default=["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-6"],
         description=(

@@ -14,10 +14,17 @@
     "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
   },
   {
-    "label": "the estimate is one credit, not the wallet the run may spend",
+    "label": "the estimate is one credit, not the per-run hold",
     "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
-    "find": "    estimate = max(1, metering.credits_ceil(bounds.balance_micro))\n",
+    "find": "    estimate = max(1, min(metering.credits_ceil(bounds.balance_micro), reserve))\n",
     "replace": "    estimate = 1\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "a run holds its whole starting wallet, so concurrency alone trips the pause",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    estimate = max(1, min(metering.credits_ceil(bounds.balance_micro), reserve))\n",
+    "replace": "    estimate = max(1, metering.credits_ceil(bounds.balance_micro))\n",
     "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
   },
   {
@@ -46,6 +53,13 @@
     "file": "ee/pocketpaw_ee/cloud/chat/runs/service.py",
     "find": "        {\"$set\": {\"early_access_reserved_credits\": 0, \"early_access_reserved_day\": \"\"}},\n",
     "replace": "        {\"$set\": {\"early_access_reserved_unused\": 0}},\n",
+    "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
+  },
+  {
+    "label": "the reservation reads the clock twice, so a claim across midnight is refunded on the wrong day",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        cap=ceiling_credits,\n        day=day,\n",
+    "replace": "        cap=ceiling_credits,\n",
     "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
   }
 ]

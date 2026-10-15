@@ -554,8 +554,12 @@ async def try_spend(
     amount: int = 1,
     cap: int | None,
     fail_open: bool = False,
+    day: str | None = None,
 ) -> bool:
-    """Claim ``amount`` of ``meter`` for ``subject_id`` today. True = allowed.
+    """Claim ``amount`` of ``meter`` for ``subject_id`` on ``day`` (default
+    today). True = allowed. A caller that records the day to refund on later
+    passes the same ``day`` here, so a claim made across UTC midnight is
+    refunded on the row it incremented.
 
     ``cap``: ``None`` uncapped (nothing is counted), ``0`` disabled, ``n`` cap.
     A missing ``subject_id`` is refused: an uncharged claim is exactly what a
@@ -569,7 +573,7 @@ async def try_spend(
         logger.warning("daily %s refused — no %s to charge", meter, subject_type)
         return False
 
-    key = _key(subject_type, subject_id, meter, today())
+    key = _key(subject_type, subject_id, meter, day or today())
     now = datetime.now(UTC)
     try:
         coll = DailyUsage.get_pymongo_collection()
@@ -685,6 +689,7 @@ async def reserve_early_access(run_id: str, credits: int, *, ceiling_credits: in
         meter=DailyMeter.EARLY_ACCESS_CREDITS,
         amount=credits,
         cap=ceiling_credits,
+        day=day,
     ):
         return False
     try:

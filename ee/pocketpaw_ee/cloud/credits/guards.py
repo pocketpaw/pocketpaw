@@ -31,8 +31,9 @@
 #   limit from it. ``free_model_denial`` (400 ``model.not_allowed``) admits only
 #   allowlisted, priced models, checked over ``free_run_models`` by ``run_core``
 #   and, as ``free_model_refusal``, by the chat HTTP seam. ``reserve_free_run``
-#   then reserves the run on the daily early-access ceiling (503
-#   ``early_access.paused`` past it or when unreadable; ``bill_run`` reconciles).
+#   then holds ``free_run_reserve_credits`` (or the smaller wallet) on the daily
+#   early-access ceiling (503 ``early_access.paused`` past it or when
+#   unreadable; ``bill_run`` reconciles to the real spend, overrun included).
 #
 # ``credits_enforced`` gates only this chat credit check; ``billing_enforced``
 # also turns on the seat, pocket, connector and other paid gates elsewhere.
@@ -472,7 +473,7 @@ async def free_model_refusal(
 
 
 async def reserve_free_run(run_id: str, bounds: FreeRunBounds) -> CloudError | None:
-    """Reserve a free run's estimate on today's early-access ceiling, or refuse.
+    """Reserve a free run's hold on today's early-access ceiling, or refuse.
 
     Call once per run, after ``free_run_bounds`` returned ``bounds`` and the
     model check passed; it writes, so the check-only HTTP seam must not call
@@ -487,11 +488,12 @@ async def reserve_free_run(run_id: str, bounds: FreeRunBounds) -> CloudError | N
     controls = await get_launch_controls()
     if controls.read_failed:
         return EarlyAccessPaused()
-    # ponytail: the estimate is the whole starting wallet, the most the token
-    # limit lets this run spend, so a fresh 1,000-credit wallet holds 1,000 of
-    # the ceiling until it bills (about 25 such runs at once fill 25,000).
-    # Narrow it to a per-run figure if launch concurrency trips the pause.
-    estimate = max(1, metering.credits_ceil(bounds.balance_micro))
+    # ponytail: a fixed per-run hold, not the wallet the token limit allows, so
+    # concurrency alone cannot fill the ceiling. bill_run adds any overrun, so
+    # in-flight runs may pass the ceiling: a soft burn-rate limit. Clamp the
+    # free-run token limit to the same figure if a hard ceiling is ever needed.
+    reserve = get_settings().free_run_reserve_credits
+    estimate = max(1, min(metering.credits_ceil(bounds.balance_micro), reserve))
     if not await metering.reserve_early_access(
         run_id, estimate, ceiling_credits=controls.daily_free_ceiling_credits
     ):

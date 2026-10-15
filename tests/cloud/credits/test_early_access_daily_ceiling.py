@@ -1,6 +1,6 @@
 # tests/cloud/credits/test_early_access_daily_ceiling.py: the global daily free
 # ceiling. Every platform-funded run on an unpaid early-access workspace reserves
-# its bounded estimate (the wallet it starts on, in whole credits) against one
+# a per-run hold (``free_run_reserve_credits``, or its smaller wallet) on one
 # platform meter (``DailyMeter.EARLY_ACCESS_CREDITS``, subject
 # ``("workspace", "__platform__")``) before the model is called. A reservation
 # past ``launch_controls.daily_free_ceiling_credits`` refuses the run with 503
@@ -161,6 +161,28 @@ async def test_a_zero_ceiling_refuses_every_free_run(ea_user, early_access_postu
     assert seen == []
 
 
+async def test_a_run_holds_the_per_run_reserve_not_its_whole_wallet(
+    ea_user, early_access_posture, monkeypatch
+):
+    """Two fresh wallets fit under a ceiling of one wallet, because each run
+    holds ``free_run_reserve_credits``, not the wallet it may spend: the pause
+    follows spend, not how many users chat at once.
+
+    Mutation: reserve the whole starting wallet again.
+    """
+    reserve = GRANT // 2 - 1
+    monkeypatch.setattr(early_access_posture, "free_run_reserve_credits", reserve)
+    await _ceiling(GRANT)
+
+    end_a, _ = await _run(monkeypatch, ea_user, "r-a")
+    end_b, seen_b = await _run(monkeypatch, await _another_user(), "r-b")
+
+    assert end_a.event == "stream_end", end_a.data
+    assert end_b.event == "stream_end", end_b.data
+    assert len(seen_b) == 1
+    assert await _used() == reserve * 2
+
+
 # ---------------------------------------------------------------------------
 # Reconcile and release at bill_run
 # ---------------------------------------------------------------------------
@@ -211,6 +233,40 @@ async def test_bill_run_charges_spend_past_the_estimate(ea_user, mongo_db):
     actual = -(-result.micro_charged // 1_000_000)
     assert actual > reserved
     assert await _used() == actual
+
+
+async def test_a_reservation_across_utc_midnight_lands_on_the_day_it_records(
+    ea_user, mongo_db, monkeypatch
+):
+    """The clock passes midnight inside the reservation. The meter row it
+    increments and the day recorded for the refund must be the same day, or the
+    refund misses and the new day stays over-counted.
+
+    Mutation: let ``try_spend`` read the clock again.
+    """
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    clock = iter(["2026-10-15", "2026-10-16"])
+    monkeypatch.setattr(metering, "today", lambda: next(clock, "2026-10-16"))
+    await _doc(ea_user, "r-midnight", usage=_USAGE).insert()
+
+    assert await metering.reserve_early_access("r-midnight", 5, ceiling_credits=100) is True
+
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == "r-midnight")
+    day = doc.early_access_reserved_day
+
+    async def _on(d: str) -> int:
+        return await metering.used(
+            subject_type="workspace",
+            subject_id=metering.PLATFORM_SUBJECT,
+            meter=DailyMeter.EARLY_ACCESS_CREDITS,
+            day=d,
+        )
+
+    assert await _on(day) == 5
+    assert await _on("2026-10-15") + await _on("2026-10-16") == 5
 
 
 async def test_a_run_refused_before_the_model_call_releases_its_reservation(
