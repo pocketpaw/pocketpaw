@@ -106,5 +106,14 @@
     "tests": [
       "tests/cloud/growth/social/test_accounts.py"
     ]
+  },
+  {
+    "label": "media: a post's media path is no longer checked for a public URL",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if not is_public_media_url(item.path):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
   }
 ]

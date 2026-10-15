@@ -37,9 +37,13 @@
 # org row, and ``check_telegram`` sweeps the bot's pending ``/connect`` messages
 # onto every unexpired row whose code they name (across workspaces, so confirming
 # the batch never drops another tenant's) before finishing the caller's connect.
-# Posting checks every target (owned by the profile's org, a postable platform,
-# a channel where the platform needs one) before Postiz is asked to publish, so
-# a bad target never leaves a half-sent post. The posts list never creates an org.
+# Posting checks the media (public URL, one video or up to four images), the
+# idea and every target (owned by the profile's org, a postable platform, a
+# channel where the platform needs one) before Postiz is asked to publish, so a
+# bad target never leaves a half-sent post. Media rides the first value entry,
+# thread parts follow; a video is dropped for platforms outside VIDEO_PLATFORMS.
+# An upload whose stored path is private is refused. The posts list never
+# creates an org.
 
 from __future__ import annotations
 
@@ -64,13 +68,19 @@ from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.social.domain import (
     CHANNEL_PLATFORMS,
     DESCRIPTION_FIELDS,
+    MAX_MEDIA_BYTES,
+    MEDIA_TYPES,
     POSTABLE_PLATFORMS,
     SOCIAL_ACCOUNT_PLATFORMS,
+    VIDEO_PLATFORMS,
     AnalysisOutcome,
     AnalysisRequest,
     SocialAnalysis,
     SocialIdea,
     SocialProfile,
+    is_public_media_url,
+    media_kind,
+    sniff_media,
 )
 from pocketpaw_ee.cloud.growth.social.dto import (
     AddPulseCompaniesRequest,
@@ -102,6 +112,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialChannelResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialMediaResponse,
     SocialPostCreated,
     SocialPostListResponse,
     SocialPostResponse,
@@ -1413,9 +1424,8 @@ async def disconnect_account(ctx: RequestContext, profile_id: str | None, accoun
 
 
 async def _owned_accounts(
-    workspace_id: str, profile_id: str | None, postiz: PostizClient, account_id: str
+    workspace_id: str, profile: _ProfileDoc, postiz: PostizClient, account_id: str
 ) -> tuple[_PostizOrgDoc, dict[str, dict[str, Any]]]:
-    profile = await _require_profile_doc(workspace_id, profile_id)
     org = await _postiz_org(workspace_id, str(profile.id))
     if org is None:
         raise NotFound("social_account", account_id)
@@ -1431,7 +1441,8 @@ async def list_channels(
 ) -> SocialChannelListResponse:
     workspace_id = _require_workspace(ctx)
     postiz = _require_postiz()
-    org, owned = await _owned_accounts(workspace_id, profile_id, postiz, account_id)
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    org, owned = await _owned_accounts(workspace_id, profile, postiz, account_id)
     integration = owned.get(account_id)
     if integration is None:
         raise NotFound("social_account", account_id)
@@ -1452,13 +1463,68 @@ async def list_channels(
     return SocialChannelListResponse(items=items)
 
 
+MEDIA_NOT_PUBLIC = (
+    "Media can't be posted yet: Postiz stores uploads at a private address. "
+    "Configure public storage (e.g. Cloudflare R2) for Postiz."
+)
+POST_SETTINGS: dict[str, dict[str, Any]] = {"x": {"who_can_reply_post": "everyone"}}
+
+
+def _media_not_public() -> ValidationError:
+    return ValidationError("social.media_not_public", MEDIA_NOT_PUBLIC)
+
+
+async def upload_media(
+    ctx: RequestContext, profile_id: str | None, data: bytes
+) -> SocialMediaResponse:
+    workspace_id = _require_workspace(ctx)
+    if len(data) > MAX_MEDIA_BYTES:
+        raise ValidationError("social.media_too_large", "Media must be 200 MB or smaller.")
+    content_type = sniff_media(data)
+    if content_type is None:
+        raise ValidationError(
+            "social.media_unsupported_type",
+            "Upload a PNG, JPEG, WebP or GIF image, or an MP4 video.",
+        )
+    ext, kind = MEDIA_TYPES[content_type]
+    postiz = _require_postiz()
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    org = await _ensure_postiz_org(postiz, workspace_id, profile)
+    try:
+        stored = await postiz.upload(decrypt(org.api_key_enc), f"media.{ext}", data, content_type)
+    except PostizError as exc:
+        raise _upstream(exc) from None
+    if not is_public_media_url(stored["path"]):
+        raise _media_not_public()
+    return SocialMediaResponse(id=stored["id"], path=stored["path"], kind=kind)
+
+
+def _check_post_media(body: CreateSocialPostRequest) -> bool:
+    """Refuse private or mixed media; True when the post carries a video."""
+    for item in body.media:
+        if not is_public_media_url(item.path):
+            raise _media_not_public()
+    kinds = [media_kind(m.path) for m in body.media]
+    if "video" in kinds and len(kinds) > 1:
+        raise ValidationError(
+            "social.media_mixed", "Attach one video on its own, or up to 4 images."
+        )
+    return "video" in kinds
+
+
 async def create_post(
     ctx: RequestContext, profile_id: str | None, body: CreateSocialPostRequest
 ) -> CreateSocialPostResponse:
     body = CreateSocialPostRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
+    has_video = _check_post_media(body)
     postiz = _require_postiz()
-    org, owned = await _owned_accounts(workspace_id, profile_id, postiz, body.targets[0].account_id)
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    if body.idea_id is not None:
+        idea = await _fetch_idea_in_workspace(workspace_id, body.idea_id)
+        if idea.profile != str(profile.id):
+            raise NotFound("social_idea", body.idea_id)
+    org, owned = await _owned_accounts(workspace_id, profile, postiz, body.targets[0].account_id)
     platforms: dict[str, str] = {}
     for target in body.targets:
         if target.account_id not in owned:
@@ -1475,15 +1541,20 @@ async def create_post(
                 f"Pick a channel to post to in {_platform_label(platform)}.",
             )
         platforms[target.account_id] = platform
+    media = [{"id": m.id, "path": m.path} for m in body.media]
+    thread = [{"content": part, "image": []} for part in body.parts]
+    skipped = {a for a, p in platforms.items() if has_video and p not in VIDEO_PLATFORMS}
     posts = []
     for target in body.targets:
-        settings: dict[str, Any] = {"__type": platforms[target.account_id]}
+        platform = platforms[target.account_id]
+        settings: dict[str, Any] = {"__type": platform, **POST_SETTINGS.get(platform, {})}
         if target.channel:
             settings["channel"] = target.channel
+        first = {"content": body.content, "image": [] if target.account_id in skipped else media}
         posts.append(
             {
                 "integration": {"id": target.account_id},
-                "value": [{"content": body.content, "image": []}],
+                "value": [first, *thread],
                 "settings": settings,
             }
         )
@@ -1501,7 +1572,9 @@ async def create_post(
     # no-event: Growth › Social has no realtime subscriber; the composer polls the posts list.
     post_ids = {str(c.get("integration")): str(c["postId"]) for c in created if c.get("postId")}
     items = [
-        SocialPostCreated(account_id=a, platform=platforms[a], post_id=post_ids[a])
+        SocialPostCreated(
+            account_id=a, platform=platforms[a], post_id=post_ids[a], media_skipped=a in skipped
+        )
         for a in platforms
         if a in post_ids
     ]
@@ -1564,6 +1637,7 @@ __all__ = [
     "check_telegram",
     "connect_account",
     "create_post",
+    "upload_media",
     "list_channels",
     "list_posts",
     "disconnect_account",

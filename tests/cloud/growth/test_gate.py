@@ -1038,6 +1038,7 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/accounts/telegram/check"): "growth.manage",
             ("DELETE", "/growth/social/accounts/{account_id}"): "growth.manage",
             ("GET", "/growth/social/accounts/{account_id}/channels"): "growth.read",
+            ("POST", "/growth/social/media"): "growth.manage",
             ("POST", "/growth/social/posts"): "growth.manage",
             ("GET", "/growth/social/posts"): "growth.read",
         }

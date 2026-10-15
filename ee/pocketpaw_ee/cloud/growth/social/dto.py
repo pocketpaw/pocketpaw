@@ -13,7 +13,9 @@
 # anything that is not then an http(s) URL with a host is a 422. ``category``
 # is free text up to 60 characters. Idea edits need at least one field; script
 # beats and hashtags are trimmed and capped. A post names 1–10 distinct
-# accounts and trimmed, non-empty content of at most 10000 characters.
+# accounts and trimmed, non-empty content of at most 10000 characters, plus up
+# to 25 thread parts held to the same rule and up to 4 media items; whether the
+# media is public and unmixed is the service's check, so it carries an error code.
 
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ from pydantic import BaseModel, Field, StringConstraints, field_validator, model
 from pocketpaw_ee.cloud.growth.social.domain import (
     DEFAULT_IDEA_COUNT,
     MAX_IDEA_COUNT,
+    MAX_POST_IMAGES,
     AnalysisStatus,
     BusinessModel,
     IdeaFormat,
@@ -447,9 +450,17 @@ _PostContent = Annotated[
 ]
 
 
+class SocialPostMedia(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    path: str = Field(min_length=1, max_length=2048)
+
+
 class CreateSocialPostRequest(BaseModel):
     content: _PostContent
     targets: list[SocialPostTarget] = Field(min_length=1, max_length=10)
+    parts: list[_PostContent] = Field(default_factory=list, max_length=25)
+    media: list[SocialPostMedia] = Field(default_factory=list, max_length=MAX_POST_IMAGES)
+    idea_id: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def _unique_accounts(self) -> CreateSocialPostRequest:
@@ -463,10 +474,17 @@ class SocialPostCreated(BaseModel):
     account_id: str
     platform: str
     post_id: str
+    media_skipped: bool = False
 
 
 class CreateSocialPostResponse(BaseModel):
     items: list[SocialPostCreated]
+
+
+class SocialMediaResponse(BaseModel):
+    id: str
+    path: str
+    kind: Literal["image", "video"]
 
 
 class SocialPostResponse(BaseModel):

@@ -7820,7 +7820,7 @@ here, posting included, takes `?profile_id=` like the rest.
 
 | Route | What it does |
 |---|---|
-| `GET /accounts` (`growth.read`) | `{items: [{id, platform, name, username, picture, disabled, can_post, needs_channel}], platforms: [{id, label, available}], configured}`. `platform` is the Postiz provider id, `username` the account handle (or `null`). `can_post` is true when "post now" can publish to the account (Slack only for now); `needs_channel` is true when each post must name a channel (Slack). `configured: false` means this deployment has no Postiz; `items` is empty then. |
+| `GET /accounts` (`growth.read`) | `{items: [{id, platform, name, username, picture, disabled, can_post, needs_channel}], platforms: [{id, label, available}], configured}`. `platform` is the Postiz provider id, `username` the account handle (or `null`). `can_post` is true when "post now" can publish to the account (Slack and X for now); `needs_channel` is true when each post must name a channel (Slack). `configured: false` means this deployment has no Postiz; `items` is empty then. |
 | `POST /accounts/connect` (`growth.manage`) | `{platform}` → `{url, telegram}`. For every platform but Telegram, `url` is the platform's authorize URL and `telegram` is `null`: open the URL in the browser; after consent it returns to `<origin>/growth/social/accounts?added=<platform>`. The origin is the caller's (`Origin`, then `Referer`) when it is on the CORS allowlist, else `POCKETPAW_FRONTEND_BASE_URL`; it is never read from the body. For `telegram`, `url` is `null` and `telegram` is `{code, bot_name, expires_at}` (see Telegram below). |
 | `POST /accounts/telegram/check` (`growth.manage`) | `{code}` → `{status: "pending" \| "connected", account}`. `account` is the new account (shape as in `items`) once connected, else `null`. Poll it after showing the code. |
 | `DELETE /accounts/{account_id}` (`growth.manage`) | Disconnect one account. `204`. |
@@ -7870,20 +7870,41 @@ Channels add these:
 
 ### Posts — `/api/v1/growth/social/posts`
 
-"Post now" publishes one text post to connected accounts through Postiz.
-Only Slack can be posted to for now.
+"Post now" publishes one post, optionally a thread and media, to connected
+accounts through Postiz. Slack and X can be posted to for now.
 
 | Route | What it does |
 |---|---|
-| `POST /posts` (`growth.manage`) | `{content, targets: [{account_id, channel}]}` → `{items: [{account_id, platform, post_id}]}`. `content` is trimmed and must be 1–10000 characters. `targets` is 1–10 distinct accounts; `channel` is a channel id from the channels route, required for accounts with `needs_channel` and `null` otherwise. Every target is checked before anything is sent, so one bad target refuses the whole post and nothing goes out. Postiz publishes asynchronously: the post starts `queued` and usually becomes `published` within seconds. |
+| `POST /media` (`growth.manage`) | Multipart, one `file` field → `{id, path, kind}`. Stores one image or video in the profile's Postiz org (creating the org on first use, like connect) for a later post. The type is read from the file's bytes, not its name or `Content-Type`: PNG, JPEG, WebP, GIF (`kind: "image"`) or MP4 (`kind: "video"`), at most 200 MB. `path` is the media's URL; pass `{id, path}` back in a post's `media`. |
+| `POST /posts` (`growth.manage`) | `{content, targets: [{account_id, channel}], parts, media, idea_id}` → `{items: [{account_id, platform, post_id, media_skipped}]}`. `content` is trimmed and must be 1–10000 characters. `targets` is 1–10 distinct accounts; `channel` is a channel id from the channels route, required for accounts with `needs_channel` and `null` otherwise. `parts` (optional, ≤ 25, each trimmed and 1–10000 characters) are thread replies after `content`: an X thread, Slack thread replies. `media` (optional) is up to 4 images or exactly one video, each `{id, path}` from the media route; it attaches to `content`, never to the parts. `idea_id` (optional) names the idea of this profile the post came from; it is checked, not changed. Every target, the media and the idea are checked before anything is sent, so one bad one refuses the whole post and nothing goes out. Postiz publishes asynchronously: the post starts `queued` and usually becomes `published` within seconds. |
 | `GET /posts` (`growth.read`) | `{items: [{id, account_id, platform, account_name, content, state, url, error, published_at}]}`: the profile's posts from the last 7 days (and the next day), newest first. `?ids=a,b` returns only those post ids; unknown ids are left out. `state` is `queued \| published \| error \| draft`. `url` is the published post's link when the platform gives one, `error` the failure reason when Postiz reports one, and `published_at` is set only once the post is `published`. A profile with no connected accounts yet gets `{items: []}`. Poll it with `ids` after posting. |
 
 | Status | Code | When |
 |---|---|---|
+X posts go out with replies open to everyone. Images go to every target.
+A video goes only to platforms that take one (X); a Slack target still gets
+the text, without the video, and its item says `media_skipped: true`.
+
+Media must live at a public http(s) URL. Slack fetches the URL itself and
+Postiz's X provider refuses private hosts, so a `path` with another scheme, on
+`localhost`, a `.local` / `.internal` name, or a loopback, private or
+link-local IP is refused (`social.media_not_public`), both when it comes back
+from an upload and when it is sent in a post. A Postiz on local storage
+returns `http://127.0.0.1:...` paths: uploads then fail until Postiz is given
+public storage (e.g. Cloudflare R2).
+
+| Status | Code | When |
+|---|---|---|
 | 503 | `social.accounts_unavailable` | No Postiz configured. |
-| 422 | — | Empty or over-long `content`, no targets or more than 10, or the same account twice. |
+| 422 | — | Empty or over-long `content` or part, more than 25 parts, more than 4 media items, no targets or more than 10, or the same account twice. |
 | 404 | `social_account.not_found` | A target is not one of this profile's accounts. |
-| 422 | `social.post_platform_unsupported` | A target's platform can't be posted to yet ("Posting to X isn't supported yet."). |
+| 404 | `social_idea.not_found` | `idea_id` is unknown, malformed, or another profile's or workspace's idea. |
+| 422 | `social.media_not_public` | A media `path` (posted, or returned by Postiz on upload) is not a public http(s) URL. |
+| 422 | `social.media_mixed` | A video together with any other media item. |
+| 422 | `social.media_unsupported_type` | Upload that isn't a PNG, JPEG, WebP, GIF or MP4. |
+| 422 | `social.media_too_large` | Upload over 200 MB. |
+| 422 | `cloud.encryption_key_missing` | Upload with no `CLOUD_ENCRYPTION_KEY` and no org yet. |
+| 422 | `social.post_platform_unsupported` | A target's platform can't be posted to yet ("Posting to LinkedIn isn't supported yet."). |
 | 422 | `social.channel_required` | A Slack target has no `channel`. |
 | 404 | `social_profile.not_found` | No profile (or an unknown `profile_id`). |
 | 502 | `social.accounts_upstream` | Postiz failed or answered something unexpected. |

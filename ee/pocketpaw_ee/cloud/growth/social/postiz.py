@@ -13,8 +13,9 @@
 # ``complete_connect`` hands Postiz the state plus the chat id. Tests replace the
 # Bot API read through ``set_production_telegram_updates``.
 #
-# Publishing uses the public API too: ``create_posts`` takes a payload the
-# service builds, ``list_posts`` reads a date window, and ``trigger_tool`` runs a
+# Publishing uses the public API too: ``upload`` stores one media file (multipart)
+# and returns its ``{id, path}``, ``create_posts`` takes a payload the service
+# builds, ``list_posts`` reads a date window, and ``trigger_tool`` runs a
 # provider helper such as Slack's channel list.
 
 from __future__ import annotations
@@ -73,12 +74,26 @@ class PostizClient:
         return text
 
     async def _request(
-        self, method: str, path: str, *, body: Any = None, api_key: str | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        body: Any = None,
+        api_key: str | None = None,
+        files: dict[str, Any] | None = None,
+        timeout: float = 20.0,
     ) -> httpx.Response:
-        client = self._client or httpx.AsyncClient(timeout=20.0)
+        client = self._client or httpx.AsyncClient(timeout=timeout)
         headers = {"Authorization": api_key} if api_key else {}
         try:
-            resp = await client.request(method, f"{self._api}{path}", json=body, headers=headers)
+            resp = await client.request(
+                method,
+                f"{self._api}{path}",
+                json=body,
+                files=files,
+                headers=headers,
+                timeout=timeout,
+            )
         except httpx.HTTPError as exc:
             raise PostizError(
                 "postiz.unreachable", self._scrub(f"Postiz request failed: {exc!r}", api_key)
@@ -199,6 +214,23 @@ class PostizClient:
         if not isinstance(body, dict) or "output" not in body:
             raise PostizError("postiz.bad_response", f"Postiz returned no output for {method}.")
         return body["output"]
+
+    async def upload(
+        self, api_key: str, filename: str, data: bytes, content_type: str
+    ) -> dict[str, str]:
+        resp = await self._request(
+            "POST",
+            "/public/v1/upload",
+            api_key=api_key,
+            files={"file": (filename, data, content_type)},
+            timeout=300.0,
+        )
+        body = self._json(resp)
+        media_id = body.get("id") if isinstance(body, dict) else None
+        path = body.get("path") if isinstance(body, dict) else None
+        if not (isinstance(media_id, str) and media_id and isinstance(path, str) and path):
+            raise PostizError("postiz.upload_failed", "Postiz did not store the media.")
+        return {"id": media_id, "path": path}
 
     async def create_posts(self, api_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
         resp = await self._request("POST", "/public/v1/posts", body=payload, api_key=api_key)

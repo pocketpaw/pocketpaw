@@ -4,8 +4,9 @@
 # Every route carries the license gate, ``request_context`` and a per-route
 # RBAC guard (pinned by the guard-coverage test in tests/cloud/growth/
 # test_gate.py): GETs ``growth.read``, workspace-internal writes
-# ``growth.write``, and connecting or disconnecting a social account or posting
-# to one (which reaches an outside platform) ``growth.manage``. The connect route builds the
+# ``growth.write``, and connecting or disconnecting a social account, uploading
+# media or posting (which reach an outside platform) ``growth.manage``. The
+# media upload reads at most one byte past the size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
 # allowlist; it is never taken from the request body.
 
@@ -13,13 +14,13 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
 from pocketpaw_ee.cloud.growth.social import service as social_service
-from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
+from pocketpaw_ee.cloud.growth.social.domain import MAX_MEDIA_BYTES, IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
     CheckTelegramRequest,
     CheckTelegramResponse,
@@ -38,6 +39,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialChannelListResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialMediaResponse,
     SocialPostListResponse,
     SocialProfileListResponse,
     SocialProfileResponse,
@@ -403,6 +405,21 @@ async def list_channels(
 
 
 @router.post(
+    "/media",
+    response_model=SocialMediaResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def upload_media(
+    file: UploadFile = File(...),
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialMediaResponse:
+    """Store one image or MP4 in the profile's Postiz org for a later post."""
+    data = await file.read(MAX_MEDIA_BYTES + 1)
+    return await social_service.upload_media(ctx, profile_id, data)
+
+
+@router.post(
     "/posts",
     response_model=CreateSocialPostResponse,
     dependencies=[Depends(require_action_any_workspace("growth.manage"))],
@@ -412,7 +429,7 @@ async def create_post(
     profile_id: str | None = _PROFILE_ID,
     ctx: RequestContext = Depends(request_context),
 ) -> CreateSocialPostResponse:
-    """Publish one text post now to each target account."""
+    """Publish one post now (with thread parts and media) to each target account."""
     return await social_service.create_post(ctx, profile_id, body)
 
 

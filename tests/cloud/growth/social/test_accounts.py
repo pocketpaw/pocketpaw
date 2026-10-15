@@ -5,10 +5,11 @@
 # errors, tenant and profile isolation, disconnect, the encrypted key, the
 # Telegram code flow (a fake Bot API read through
 # ``set_production_telegram_updates``, including the cross-workspace sweep),
-# posting now (Slack channels, the payload sent, every refusal before Postiz is
-# called, the posts list and tenant isolation), and the Postiz client's JWT
-# signer, create-org failure and the Bot API read's token scrubbing
-# (``httpx.MockTransport``).
+# posting now (Slack channels, X settings, thread parts, media on the first entry,
+# the Slack video skip, the idea link, every refusal before Postiz is called, the
+# posts list and tenant isolation), media upload (sniffing, size, the private-path
+# refusal), and the Postiz client's JWT signer, create-org failure, upload and
+# the Bot API read's token scrubbing (``httpx.MockTransport``).
 
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from pocketpaw_ee.cloud.growth.social.postiz import (
     sign_jwt,
     telegram_updates,
 )
+from pocketpaw_ee.cloud.models.social_idea import SocialIdea
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg
 
 from tests.cloud.growth.social.test_router import BASE, _client
@@ -42,6 +44,10 @@ ACCOUNTS = f"{BASE}/accounts"
 CONNECT = f"{ACCOUNTS}/connect"
 CHECK = f"{ACCOUNTS}/telegram/check"
 POSTS = f"{BASE}/posts"
+MEDIA = f"{BASE}/media"
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
+MP4 = b"\0\0\0\x18ftypmp42" + b"\0" * 32
+CDN = "https://cdn.paw.test/uploads"
 TOKEN = "123:bot-secret"
 LOCAL = {"Origin": "http://localhost:5173"}
 
@@ -59,6 +65,8 @@ class _FakePostiz:
         self.posted: list[tuple[str, dict[str, Any]]] = []
         self.posts: list[dict[str, Any]] = []
         self.listed: list[tuple[str, str, str]] = []
+        self.uploads: list[tuple[str, str, str, int]] = []
+        self.media_base = CDN
 
     async def create_org(self, external_id: str, name: str) -> tuple[str, str]:
         self.created.append((external_id, name))
@@ -98,6 +106,12 @@ class _FakePostiz:
     ) -> Any:
         self.triggered.append((api_key, integration_id, method))
         return self.channels
+
+    async def upload(
+        self, api_key: str, filename: str, data: bytes, content_type: str
+    ) -> dict[str, str]:
+        self.uploads.append((api_key, filename, content_type, len(data)))
+        return {"id": f"m-{len(self.uploads)}", "path": f"{self.media_base}/{filename}"}
 
     async def create_posts(self, api_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
         self.posted.append((api_key, payload))
@@ -280,7 +294,7 @@ async def test_profiles_get_their_own_orgs_and_accounts(w1, postiz):
             "username": "acme",
             "picture": "https://pbs.example/a.png",
             "disabled": False,
-            "can_post": False,
+            "can_post": True,
             "needs_channel": False,
         }
     ]
@@ -417,7 +431,11 @@ async def test_telegram_check_refuses_unknown_expired_and_foreign_codes(w1, w2, 
 async def _connected(client: httpx.AsyncClient, postiz: _FakePostiz, key: str = "key-1") -> None:
     await _profile(client)
     await client.post(CONNECT, json={"platform": "x"}, headers=LOCAL)
-    postiz.integrations[key] = [_integration("sl-1", "slack"), _integration("x-1")]
+    postiz.integrations[key] = [
+        _integration("sl-1", "slack"),
+        _integration("x-1"),
+        _integration("li-1", "linkedin"),
+    ]
 
 
 async def test_accounts_say_whether_they_can_post(w1, postiz):
@@ -425,7 +443,8 @@ async def test_accounts_say_whether_they_can_post(w1, postiz):
     items = (await w1.get(ACCOUNTS)).json()["items"]
     assert [(a["id"], a["can_post"], a["needs_channel"]) for a in items] == [
         ("sl-1", True, True),
-        ("x-1", False, False),
+        ("x-1", True, False),
+        ("li-1", False, False),
     ]
 
 
@@ -451,7 +470,14 @@ async def test_post_now_sends_one_payload_and_maps_the_result(w1, postiz):
     resp = await w1.post(POSTS, json=body)
     assert resp.status_code == 200, resp.text
     assert resp.json() == {
-        "items": [{"account_id": "sl-1", "platform": "slack", "post_id": "post-sl-1"}]
+        "items": [
+            {
+                "account_id": "sl-1",
+                "platform": "slack",
+                "post_id": "post-sl-1",
+                "media_skipped": False,
+            }
+        ]
     }
     [(key, payload)] = postiz.posted
     sent = datetime.fromisoformat(payload.pop("date").replace("Z", "+00:00"))
@@ -471,11 +497,18 @@ async def test_post_now_sends_one_payload_and_maps_the_result(w1, postiz):
     }
 
 
+SLACK: dict[str, Any] = {"content": "hi", "targets": [{"account_id": "sl-1", "channel": "C1"}]}
+
+
+def _media(name: str, base: str = CDN) -> dict[str, str]:
+    return {"id": f"id-{name}", "path": f"{base}/{name}"}
+
+
 @pytest.mark.parametrize(
     ("body", "status", "code"),
     [
         (
-            {"content": "hi", "targets": [{"account_id": "x-1"}]},
+            {"content": "hi", "targets": [{"account_id": "li-1"}]},
             422,
             "social.post_platform_unsupported",
         ),
@@ -496,6 +529,24 @@ async def test_post_now_sends_one_payload_and_maps_the_result(w1, postiz):
         ({"content": "x" * 10001, "targets": [{"account_id": "sl-1", "channel": "C1"}]}, 422, None),
         ({"content": "hi", "targets": []}, 422, None),
         ({"content": "hi", "targets": [{"account_id": "sl-1", "channel": "C1"}] * 2}, 422, None),
+        ({**SLACK, "parts": ["ok", "  "]}, 422, None),
+        ({**SLACK, "parts": ["p"] * 26}, 422, None),
+        ({**SLACK, "media": [_media("a.png")] * 5}, 422, None),
+        ({**SLACK, "media": [_media("a.mp4"), _media("b.png")]}, 422, "social.media_mixed"),
+        ({**SLACK, "media": [_media("a.mp4"), _media("b.mp4")]}, 422, "social.media_mixed"),
+        *[
+            ({**SLACK, "media": [_media("a.png", base)]}, 422, "social.media_not_public")
+            for base in (
+                "http://127.0.0.1:4007/uploads",
+                "http://localhost:4007/uploads",
+                "https://10.0.0.5",
+                "http://192.168.1.2",
+                "http://169.254.169.254",
+                "http://[::1]",
+                "http://postiz.internal",
+                "file:///var/uploads",
+            )
+        ],
     ],
 )
 async def test_post_now_refusals_never_reach_postiz(w1, postiz, body, status, code):
@@ -509,8 +560,108 @@ async def test_post_now_refusals_never_reach_postiz(w1, postiz, body, status, co
 
 async def test_post_now_names_the_platform_it_cannot_post_to(w1, postiz):
     await _connected(w1, postiz)
-    resp = await w1.post(POSTS, json={"content": "hi", "targets": [{"account_id": "x-1"}]})
-    assert resp.json()["error"]["message"] == "Posting to X isn't supported yet."
+    resp = await w1.post(POSTS, json={"content": "hi", "targets": [{"account_id": "li-1"}]})
+    assert resp.json()["error"]["message"] == "Posting to LinkedIn isn't supported yet."
+
+
+async def test_post_to_x_and_slack_with_a_thread_and_images(w1, postiz):
+    await _connected(w1, postiz)
+    images = [_media("a.png"), _media("b.jpg")]
+    body = {**SLACK, "targets": [*SLACK["targets"], {"account_id": "x-1"}]}
+    body |= {"parts": [" two ", "three"], "media": images}
+    resp = await w1.post(POSTS, json=body)
+    assert resp.status_code == 200, resp.text
+    assert [i["media_skipped"] for i in resp.json()["items"]] == [False, False]
+    [(_, payload)] = postiz.posted
+    value = [
+        {"content": "hi", "image": images},
+        {"content": "two", "image": []},
+        {"content": "three", "image": []},
+    ]
+    assert payload["posts"] == [
+        {
+            "integration": {"id": "sl-1"},
+            "value": value,
+            "settings": {"__type": "slack", "channel": "C1"},
+        },
+        {
+            "integration": {"id": "x-1"},
+            "value": value,
+            "settings": {"__type": "x", "who_can_reply_post": "everyone"},
+        },
+    ]
+
+
+async def test_video_skips_platforms_that_cannot_take_it(w1, postiz):
+    await _connected(w1, postiz)
+    video = _media("clip.MP4")
+    body = {**SLACK, "targets": [*SLACK["targets"], {"account_id": "x-1"}], "media": [video]}
+    resp = await w1.post(POSTS, json=body)
+    assert resp.status_code == 200, resp.text
+    skipped = {i["account_id"]: i["media_skipped"] for i in resp.json()["items"]}
+    assert skipped == {"sl-1": True, "x-1": False}
+    [(_, payload)] = postiz.posted
+    assert [p["value"][0]["image"] for p in payload["posts"]] == [[], [video]]
+
+
+async def test_post_links_only_an_idea_of_this_profile(w1, w2, postiz):
+    await _connected(w1, postiz)
+    pid = (await w1.get(f"{BASE}/profile")).json()["id"]
+    own = await SocialIdea(workspace="w1", profile=pid, format="x_post", hook="h").insert()
+    other_profile = await SocialIdea(
+        workspace="w1", profile="p9", format="x_post", hook="h"
+    ).insert()
+    foreign = await SocialIdea(workspace="w2", profile=pid, format="x_post", hook="h").insert()
+    for idea_id in (str(foreign.id), str(other_profile.id), "nope"):
+        resp = await w1.post(POSTS, json={**SLACK, "idea_id": idea_id})
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["error"]["code"] == "social_idea.not_found"
+    assert postiz.posted == []
+    resp = await w1.post(POSTS, json={**SLACK, "idea_id": str(own.id)})
+    assert resp.status_code == 200, resp.text
+    assert "idea_id" not in json.dumps(postiz.posted)
+
+
+async def test_upload_media(w1, postiz):
+    pid = await _profile(w1)
+    resp = await w1.post(MEDIA, params={"profile_id": pid}, files={"file": ("x.bin", PNG)})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"id": "m-1", "path": f"{CDN}/media.png", "kind": "image"}
+    resp = await w1.post(MEDIA, files={"file": ("x.png", MP4, "image/png")})
+    assert resp.json() == {"id": "m-2", "path": f"{CDN}/media.mp4", "kind": "video"}
+    assert postiz.created == [(f"w1:{pid}", "Acme")]
+    assert postiz.uploads == [
+        ("key-1", "media.png", "image/png", len(PNG)),
+        ("key-1", "media.mp4", "video/mp4", len(MP4)),
+    ]
+
+
+async def test_upload_refusals(w1, postiz, monkeypatch):
+    await _profile(w1)
+    resp = await w1.post(MEDIA, files={"file": ("a.png", b"just text")})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "social.media_unsupported_type"
+    postiz.media_base = "http://127.0.0.1:4007/uploads"
+    resp = await w1.post(MEDIA, files={"file": ("a.png", PNG)})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "social.media_not_public"
+    assert "Cloudflare R2" in resp.json()["error"]["message"]
+
+    for module in ("service", "router"):
+        monkeypatch.setattr(f"pocketpaw_ee.cloud.growth.social.{module}.MAX_MEDIA_BYTES", 16)
+    resp = await w1.post(MEDIA, files={"file": ("a.png", PNG)})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "social.media_too_large"
+    assert len(postiz.uploads) == 1
+
+
+async def test_another_workspace_cannot_upload_into_a_profile(w1, w2, postiz):
+    pid = await _profile(w1)
+    await _profile(w2)
+    resp = await w2.post(MEDIA, params={"profile_id": pid}, files={"file": ("a.png", PNG)})
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "social_profile.not_found"
+    assert postiz.uploads == [] and len(postiz.created) == 0
 
 
 def _post(post_id: str, state: str, when: str, **extra: Any) -> dict[str, Any]:
@@ -655,6 +806,30 @@ async def test_create_org_refusal_is_an_error_without_secrets():
     assert "s3cret" not in repr(client)
     claims = json.loads(_unb64(seen[0]["params"].split(".")[1]))
     assert claims == {"id": "w1:p1", "name": "Acme", "saasName": "PocketPaw", "email": ""}
+
+
+async def test_client_upload_is_multipart():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(201, json={"id": "m1", "path": f"{CDN}/m1.png"})
+        return httpx.Response(201, json={"id": "m2"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = PostizClient("http://postiz.test/", "s3cret", client=http)
+        assert await client.upload("key-9", "media.png", PNG, "image/png") == {
+            "id": "m1",
+            "path": f"{CDN}/m1.png",
+        }
+        with pytest.raises(PostizError) as caught:
+            await client.upload("key-9", "media.png", PNG, "image/png")
+    assert caught.value.code == "postiz.upload_failed"
+    assert seen[0].url.path == "/api/public/v1/upload"
+    assert seen[0].headers["authorization"] == "key-9"
+    assert seen[0].headers["content-type"].startswith("multipart/form-data")
+    assert b'name="file"; filename="media.png"' in seen[0].content and PNG in seen[0].content
 
 
 async def test_client_publishing_calls_hit_the_public_api():
