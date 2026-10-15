@@ -7,9 +7,10 @@
 # ``set_production_telegram_updates``, including the cross-workspace sweep),
 # posting now (Slack channels, X settings, thread parts, media on the first entry,
 # the Slack video skip, the idea link, every refusal before Postiz is called, the
-# posts list and tenant isolation), media upload (sniffing, size, the private-path
-# refusal), and the Postiz client's JWT signer, create-org failure, upload and
-# the Bot API read's token scrubbing (``httpx.MockTransport``).
+# posts list and tenant isolation), media upload to a faked public bucket
+# (sniffing, size caps, no bucket, the workspace/profile key), and the Postiz
+# client's JWT signer, create-org failure and the Bot API read's token scrubbing
+# (``httpx.MockTransport``).
 
 from __future__ import annotations
 
@@ -65,8 +66,6 @@ class _FakePostiz:
         self.posted: list[tuple[str, dict[str, Any]]] = []
         self.posts: list[dict[str, Any]] = []
         self.listed: list[tuple[str, str, str]] = []
-        self.uploads: list[tuple[str, str, str, int]] = []
-        self.media_base = CDN
 
     async def create_org(self, external_id: str, name: str) -> tuple[str, str]:
         self.created.append((external_id, name))
@@ -106,12 +105,6 @@ class _FakePostiz:
     ) -> Any:
         self.triggered.append((api_key, integration_id, method))
         return self.channels
-
-    async def upload(
-        self, api_key: str, filename: str, data: bytes, content_type: str
-    ) -> dict[str, str]:
-        self.uploads.append((api_key, filename, content_type, len(data)))
-        return {"id": f"m-{len(self.uploads)}", "path": f"{self.media_base}/{filename}"}
 
     async def create_posts(self, api_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
         self.posted.append((api_key, payload))
@@ -622,46 +615,77 @@ async def test_post_links_only_an_idea_of_this_profile(w1, w2, postiz):
     assert "idea_id" not in json.dumps(postiz.posted)
 
 
-async def test_upload_media(w1, postiz):
+class _FakeBucket:
+    def __init__(self, base: str | None = CDN) -> None:
+        self.base = base
+        self.stored: dict[str, tuple[bytes, str]] = {}
+
+    def public_url(self, key: str) -> str | None:
+        return f"{self.base}/{key}" if self.base else None
+
+    async def put(self, key: str, stream: Any, mime: str) -> None:
+        self.stored[key] = (b"".join([chunk async for chunk in stream]), mime)
+
+
+@pytest.fixture
+def bucket(monkeypatch: pytest.MonkeyPatch) -> _FakeBucket:
+    fake = _FakeBucket()
+    monkeypatch.setattr("pocketpaw.uploads.factory.build_public_adapter", lambda: fake)
+    return fake
+
+
+async def test_upload_media(w1, bucket):
     pid = await _profile(w1)
     resp = await w1.post(MEDIA, params={"profile_id": pid}, files={"file": ("x.bin", PNG)})
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"id": "m-1", "path": f"{CDN}/media.png", "kind": "image"}
+    digest = hashlib.sha256(PNG).hexdigest()
+    key = f"growth-social/w1/{pid}/{digest}.png"
+    assert resp.json() == {"id": digest, "path": f"{CDN}/{key}", "kind": "image"}
     resp = await w1.post(MEDIA, files={"file": ("x.png", MP4, "image/png")})
-    assert resp.json() == {"id": "m-2", "path": f"{CDN}/media.mp4", "kind": "video"}
-    assert postiz.created == [(f"w1:{pid}", "Acme")]
-    assert postiz.uploads == [
-        ("key-1", "media.png", "image/png", len(PNG)),
-        ("key-1", "media.mp4", "video/mp4", len(MP4)),
-    ]
+    assert resp.json()["kind"] == "video"
+    assert resp.json()["path"].endswith(".mp4")
+    assert bucket.stored == {
+        key: (PNG, "image/png"),
+        f"growth-social/w1/{pid}/{hashlib.sha256(MP4).hexdigest()}.mp4": (MP4, "video/mp4"),
+    }
 
 
-async def test_upload_refusals(w1, postiz, monkeypatch):
+async def test_upload_refusals(w1, bucket, monkeypatch):
     await _profile(w1)
-    resp = await w1.post(MEDIA, files={"file": ("a.png", b"just text")})
-    assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "social.media_unsupported_type"
-    postiz.media_base = "http://127.0.0.1:4007/uploads"
-    resp = await w1.post(MEDIA, files={"file": ("a.png", PNG)})
-    assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "social.media_not_public"
-    assert "Cloudflare R2" in resp.json()["error"]["message"]
-
-    for module in ("service", "router"):
-        monkeypatch.setattr(f"pocketpaw_ee.cloud.growth.social.{module}.MAX_MEDIA_BYTES", 16)
+    for data in (b"just text", b"\0\0\0\x18ftypqt  " + b"\0" * 32, b""):
+        resp = await w1.post(MEDIA, files={"file": ("a.png", data)})
+        assert resp.status_code == 422
+        assert resp.json()["error"]["code"] == "social.media_unsupported_type"
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.growth.social.service.max_bytes_for_mime", lambda mime: 16
+    )
     resp = await w1.post(MEDIA, files={"file": ("a.png", PNG)})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "social.media_too_large"
-    assert len(postiz.uploads) == 1
+    assert bucket.stored == {}
 
 
-async def test_another_workspace_cannot_upload_into_a_profile(w1, w2, postiz):
+@pytest.mark.parametrize("base", [None, "http://127.0.0.1:9000/public"])
+async def test_upload_needs_a_public_bucket(w1, monkeypatch, base):
+    await _profile(w1)
+    fake = _FakeBucket(base)
+    monkeypatch.setattr("pocketpaw.uploads.factory.build_public_adapter", lambda: fake)
+    resp = await w1.post(MEDIA, files={"file": ("a.png", PNG)})
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "social.media_storage_unavailable"
+    monkeypatch.setattr("pocketpaw.uploads.factory.build_public_adapter", lambda: None)
+    resp = await w1.post(MEDIA, files={"file": ("a.png", PNG)})
+    assert resp.json()["error"]["code"] == "social.media_storage_unavailable"
+    assert fake.stored == {}
+
+
+async def test_another_workspace_cannot_upload_into_a_profile(w1, w2, bucket):
     pid = await _profile(w1)
     await _profile(w2)
     resp = await w2.post(MEDIA, params={"profile_id": pid}, files={"file": ("a.png", PNG)})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "social_profile.not_found"
-    assert postiz.uploads == [] and len(postiz.created) == 0
+    assert bucket.stored == {}
 
 
 def _post(post_id: str, state: str, when: str, **extra: Any) -> dict[str, Any]:
@@ -806,30 +830,6 @@ async def test_create_org_refusal_is_an_error_without_secrets():
     assert "s3cret" not in repr(client)
     claims = json.loads(_unb64(seen[0]["params"].split(".")[1]))
     assert claims == {"id": "w1:p1", "name": "Acme", "saasName": "PocketPaw", "email": ""}
-
-
-async def test_client_upload_is_multipart():
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        if len(seen) == 1:
-            return httpx.Response(201, json={"id": "m1", "path": f"{CDN}/m1.png"})
-        return httpx.Response(201, json={"id": "m2"})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        client = PostizClient("http://postiz.test/", "s3cret", client=http)
-        assert await client.upload("key-9", "media.png", PNG, "image/png") == {
-            "id": "m1",
-            "path": f"{CDN}/m1.png",
-        }
-        with pytest.raises(PostizError) as caught:
-            await client.upload("key-9", "media.png", PNG, "image/png")
-    assert caught.value.code == "postiz.upload_failed"
-    assert seen[0].url.path == "/api/public/v1/upload"
-    assert seen[0].headers["authorization"] == "key-9"
-    assert seen[0].headers["content-type"].startswith("multipart/form-data")
-    assert b'name="file"; filename="media.png"' in seen[0].content and PNG in seen[0].content
 
 
 async def test_client_publishing_calls_hit_the_public_api():

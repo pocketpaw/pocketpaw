@@ -12,8 +12,7 @@
 # ``CHANNEL_PLATFORMS`` additionally need a channel picked per post and
 # ``VIDEO_PLATFORMS`` accept video. Media must sit at a public http(s) URL
 # (``is_public_media_url``): Slack fetches it itself and Postiz's X provider
-# refuses private hosts. Uploads are sniffed by magic bytes (``sniff_media``),
-# never trusted by name.
+# refuses private hosts. ``MEDIA_EXTENSIONS`` is the upload allowlist.
 
 from __future__ import annotations
 
@@ -102,29 +101,13 @@ POSTABLE_PLATFORMS = frozenset({"slack", "x"})
 CHANNEL_PLATFORMS = frozenset({"slack"})
 VIDEO_PLATFORMS = frozenset({"x"})
 MAX_POST_IMAGES = 4
-MAX_MEDIA_BYTES = 200 * 1024 * 1024
-MEDIA_TYPES: dict[str, tuple[str, str]] = {
-    "image/png": ("png", "image"),
-    "image/jpeg": ("jpg", "image"),
-    "image/webp": ("webp", "image"),
-    "image/gif": ("gif", "image"),
-    "video/mp4": ("mp4", "video"),
+MEDIA_EXTENSIONS: dict[str, str] = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "video/mp4": "mp4",
 }
-
-
-def sniff_media(data: bytes) -> str | None:
-    """The content type the bytes really are, or None when unsupported."""
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data[4:8] == b"ftyp":
-        return "video/mp4"
-    return None
 
 
 def media_kind(path: str) -> str:

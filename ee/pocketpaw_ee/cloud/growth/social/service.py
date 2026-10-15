@@ -42,13 +42,16 @@
 # channel where the platform needs one) before Postiz is asked to publish, so a
 # bad target never leaves a half-sent post. Media rides the first value entry,
 # thread parts follow; a video is dropped for platforms outside VIDEO_PLATFORMS.
-# An upload whose stored path is private is refused. The posts list never
-# creates an org.
+# Media is stored on the deployment's public bucket (not in Postiz, whose storage
+# is local or R2-only), content-addressed under the workspace and profile. The
+# posts list never creates an org.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -68,8 +71,7 @@ from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.social.domain import (
     CHANNEL_PLATFORMS,
     DESCRIPTION_FIELDS,
-    MAX_MEDIA_BYTES,
-    MEDIA_TYPES,
+    MEDIA_EXTENSIONS,
     POSTABLE_PLATFORMS,
     SOCIAL_ACCOUNT_PLATFORMS,
     VIDEO_PLATFORMS,
@@ -80,7 +82,6 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     SocialProfile,
     is_public_media_url,
     media_kind,
-    sniff_media,
 )
 from pocketpaw_ee.cloud.growth.social.dto import (
     AddPulseCompaniesRequest,
@@ -135,6 +136,7 @@ from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as _ProfileDoc
 from pocketpaw_ee.cloud.models.social_pulse import SocialPulse as _PulseDoc
+from pocketpaw_ee.sites.public_assets import kind_for_mime, max_bytes_for_mime, sniff_media_mime
 
 logger = logging.getLogger(__name__)
 
@@ -1463,10 +1465,7 @@ async def list_channels(
     return SocialChannelListResponse(items=items)
 
 
-MEDIA_NOT_PUBLIC = (
-    "Media can't be posted yet: Postiz stores uploads at a private address. "
-    "Configure public storage (e.g. Cloudflare R2) for Postiz."
-)
+MEDIA_NOT_PUBLIC = "Media must be at a public http(s) address. Upload it here first."
 POST_SETTINGS: dict[str, dict[str, Any]] = {"x": {"who_can_reply_post": "everyone"}}
 
 
@@ -1474,29 +1473,47 @@ def _media_not_public() -> ValidationError:
     return ValidationError("social.media_not_public", MEDIA_NOT_PUBLIC)
 
 
+def _media_storage_unavailable() -> CloudError:
+    return CloudError(
+        503,
+        "social.media_storage_unavailable",
+        "Media posting needs a public bucket (S3_PUBLIC_BUCKET).",
+    )
+
+
 async def upload_media(
     ctx: RequestContext, profile_id: str | None, data: bytes
 ) -> SocialMediaResponse:
+    from pocketpaw.uploads.factory import build_public_adapter
+
     workspace_id = _require_workspace(ctx)
-    if len(data) > MAX_MEDIA_BYTES:
-        raise ValidationError("social.media_too_large", "Media must be 200 MB or smaller.")
-    content_type = sniff_media(data)
-    if content_type is None:
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    mime = sniff_media_mime(data[:512])
+    if mime is None or mime not in MEDIA_EXTENSIONS:
         raise ValidationError(
             "social.media_unsupported_type",
             "Upload a PNG, JPEG, WebP or GIF image, or an MP4 video.",
         )
-    ext, kind = MEDIA_TYPES[content_type]
-    postiz = _require_postiz()
-    profile = await _require_profile_doc(workspace_id, profile_id)
-    org = await _ensure_postiz_org(postiz, workspace_id, profile)
-    try:
-        stored = await postiz.upload(decrypt(org.api_key_enc), f"media.{ext}", data, content_type)
-    except PostizError as exc:
-        raise _upstream(exc) from None
-    if not is_public_media_url(stored["path"]):
-        raise _media_not_public()
-    return SocialMediaResponse(id=stored["id"], path=stored["path"], kind=kind)
+    cap = max_bytes_for_mime(mime)
+    if len(data) > cap:
+        raise ValidationError(
+            "social.media_too_large",
+            f"{kind_for_mime(mime).capitalize()}s are capped at {cap // (1024 * 1024)} MB.",
+        )
+    adapter = build_public_adapter()
+    if adapter is None:
+        raise _media_storage_unavailable()
+    digest = hashlib.sha256(data).hexdigest()
+    key = f"growth-social/{workspace_id}/{profile.id}/{digest}.{MEDIA_EXTENSIONS[mime]}"
+    url = adapter.public_url(key)
+    if not url or not is_public_media_url(url):
+        raise _media_storage_unavailable()
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield data
+
+    await adapter.put(key, _body(), mime)
+    return SocialMediaResponse(id=digest, path=url, kind=kind_for_mime(mime))
 
 
 def _check_post_media(body: CreateSocialPostRequest) -> bool:

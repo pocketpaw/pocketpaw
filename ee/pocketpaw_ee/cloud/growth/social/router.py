@@ -6,7 +6,7 @@
 # test_gate.py): GETs ``growth.read``, workspace-internal writes
 # ``growth.write``, and connecting or disconnecting a social account, uploading
 # media or posting (which reach an outside platform) ``growth.manage``. The
-# media upload reads at most one byte past the size cap. The connect route builds the
+# media upload reads at most one byte past the largest size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
 # allowlist; it is never taken from the request body.
 
@@ -20,7 +20,7 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
 from pocketpaw_ee.cloud.growth.social import service as social_service
-from pocketpaw_ee.cloud.growth.social.domain import MAX_MEDIA_BYTES, IdeaStatus, Platform
+from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
     CheckTelegramRequest,
     CheckTelegramResponse,
@@ -49,6 +49,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     UsePulseSuggestionRequest,
 )
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.sites.public_assets import MAX_ASSET_BYTES
 
 router = APIRouter(
     prefix="/growth/social", tags=["Growth"], dependencies=[Depends(require_license)]
@@ -414,8 +415,8 @@ async def upload_media(
     profile_id: str | None = _PROFILE_ID,
     ctx: RequestContext = Depends(request_context),
 ) -> SocialMediaResponse:
-    """Store one image or MP4 in the profile's Postiz org for a later post."""
-    data = await file.read(MAX_MEDIA_BYTES + 1)
+    """Store one image or MP4 on the public bucket for a later post."""
+    data = await file.read(MAX_ASSET_BYTES + 1)
     return await social_service.upload_media(ctx, profile_id, data)
 
 
