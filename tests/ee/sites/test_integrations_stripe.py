@@ -100,6 +100,20 @@ class _FakeStripe:
         if path == "/v2/core/accounts" and request.method == "POST":
             if self.fail_create is not None:
                 return httpx.Response(self.fail_create[0], json=self.fail_create[1])
+            merchant = (body.get("configuration") or {}).get("merchant")
+            if merchant and not (body.get("identity") or {}).get("country"):
+                # Stripe's real answer (live-tested): country comes before merchant.
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "identity_country_required",
+                            "message": "The field identity.country is required before "
+                            "setting configuration.merchant.",
+                        }
+                    },
+                )
             acct = f"acct_{len(self.accounts) + 1:04d}"
             self.bodies[acct] = body
             self.accounts[acct] = _v2_account(acct, body)
@@ -236,6 +250,7 @@ async def test_connect_creates_a_controller_account_and_binds_it(beanie_test_db,
         body = stripe.bodies[acct]
         assert body == {
             "dashboard": "full",
+            "identity": {"country": "US"},
             "configuration": {"merchant": {"capabilities": {"card_payments": {"requested": True}}}},
             "defaults": {
                 "responsibilities": {"fees_collector": "stripe", "losses_collector": "stripe"}
@@ -462,6 +477,32 @@ async def test_a_stripe_failure_at_connect_or_resume_is_a_generic_502(beanie_tes
         assert resp.json()["error"]["code"] == "provider_error"
         assert "secret detail" not in resp.text and "nope" not in resp.text
         assert "Try again, or contact support if it keeps happening." in resp.text
+
+
+@pytest.mark.asyncio
+async def test_account_country_comes_from_the_workspace_else_the_platform_default(
+    beanie_test_db, stripe, monkeypatch
+):
+    from pocketpaw_ee.cloud.models.workspace import PartnerProfile, Workspace
+    from pocketpaw_ee.integrations.providers import stripe as mod
+
+    monkeypatch.setenv(mod.DEFAULT_COUNTRY_ENV, "gb")
+    assert await mod._account_country(WS) == "GB"  # not a workspace id: the default
+    ws = Workspace(name="Mugs", slug="mugs-country", owner=OWNER)
+    ws.partner = PartnerProfile(status="active", footer_name="Mugs", country="de")
+    await ws.insert()
+    ws_id = str(ws.id)
+    assert await mod._account_country(ws_id) == "DE"
+    ws.partner = None
+    await ws.save()
+    assert await mod._account_country(ws_id) == "GB"
+    for bad in ("USA", "1A", "u"):
+        monkeypatch.setenv(mod.DEFAULT_COUNTRY_ENV, bad)
+        with pytest.raises(mod.ProviderError):
+            await mod._account_country(ws_id)
+    monkeypatch.delenv(mod.DEFAULT_COUNTRY_ENV)
+    assert await mod._account_country(ws_id) == "US"
+    assert [mod._iso2(v) for v in ("in", " fr ", "ü1", None)] == ["IN", "FR", "", ""]
 
 
 # ------------------------------------------------------------------ checkout

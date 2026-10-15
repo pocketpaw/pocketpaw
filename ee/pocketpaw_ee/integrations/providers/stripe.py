@@ -3,7 +3,9 @@
 # Stripe Connect with Accounts v2 and Account Links, not OAuth. The platform key
 # (``POCKETPAW_STRIPE_SECRET_KEY``) creates one connected account per owner with
 # ``POST /v2/core/accounts`` (merchant configuration requesting card_payments, full
-# Stripe dashboard, fees_collector + losses_collector ``stripe``) and a v2
+# Stripe dashboard, fees_collector + losses_collector ``stripe``, and the required
+# ``identity.country``: the workspace's partner country, else
+# ``POCKETPAW_STRIPE_DEFAULT_COUNTRY``, default US; fixed once created) and a v2
 # ``account_onboarding`` link back to our callback with ``code=<acct id>``. New
 # platforms can't create v1 accounts, so nothing here calls ``POST /v1/accounts``.
 # /v2 calls send JSON and ``V2_STRIPE_VERSION``; /v1 calls stay form-encoded on
@@ -82,6 +84,8 @@ WEBHOOK_SECRET_ENV = "POCKETPAW_STRIPE_CONNECT_WEBHOOK_SECRET"
 # Optional: the signing secret of a thin-event destination ("Your account" scope)
 # carrying ``v2.core.account[...]`` events to the same URL.
 ACCOUNTS_WEBHOOK_SECRET_ENV = "POCKETPAW_STRIPE_ACCOUNTS_WEBHOOK_SECRET"
+# ISO 3166-1 alpha-2 country for new accounts when the workspace has none.
+DEFAULT_COUNTRY_ENV = "POCKETPAW_STRIPE_DEFAULT_COUNTRY"
 API_BASE = "https://api.stripe.com"
 STRIPE_VERSION = "2025-08-27.basil"
 V2_STRIPE_VERSION = "2026-09-30.endive"
@@ -315,15 +319,48 @@ async def _get_account(account_id: str, *, missing_ok: bool = False) -> dict[str
     )
 
 
+def _iso2(value: Any) -> str:
+    """``value`` as an ISO 3166-1 alpha-2 code (two uppercase ASCII letters), else ""."""
+    code = str(value or "").strip().upper()
+    return code if len(code) == 2 and code.isascii() and code.isalpha() else ""
+
+
+async def _account_country(workspace_id: str) -> str:
+    """``identity.country`` for a new account, which Stripe needs before the merchant
+    configuration and which can't change afterwards: the workspace's own country
+    (today only a partner profile carries one), else ``DEFAULT_COUNTRY_ENV``."""
+    from beanie import PydanticObjectId
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        workspace = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 - an unreadable id or lookup falls back to the default
+        workspace = None
+    partner = getattr(workspace, "partner", None)
+    for value in (getattr(partner, "country", None), getattr(partner, "billing_country", None)):
+        if code := _iso2(value):
+            return code
+    raw = os.environ.get(DEFAULT_COUNTRY_ENV, "").strip() or "US"
+    code = _iso2(raw)
+    if not code:
+        logger.warning("stripe: %s is not an ISO 3166-1 alpha-2 code", DEFAULT_COUNTRY_ENV)
+        raise ProviderError("stripe default country is invalid")
+    return code
+
+
 async def _create_account(workspace_id: str, user_id: str) -> str:
     """A v2 merchant account: card payments, the full Stripe dashboard, Stripe
     collects its fees from the account and owns negative balances (so Stripe also
-    collects the requirements, through its hosted onboarding)."""
+    collects the requirements, through its hosted onboarding). ``identity.country``
+    is required before the merchant configuration."""
+    country = await _account_country(workspace_id)
     account = await _stripe(
         "POST",
         "/v2/core/accounts",
         {
             "dashboard": "full",
+            "identity": {"country": country},
             "configuration": {"merchant": {"capabilities": {"card_payments": {"requested": True}}}},
             "defaults": {
                 "responsibilities": {"fees_collector": "stripe", "losses_collector": "stripe"}
