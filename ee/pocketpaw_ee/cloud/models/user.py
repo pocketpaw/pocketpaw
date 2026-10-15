@@ -120,6 +120,9 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     # the ledger grant and is only a fast path: the ledger key is the guarantee.
     early_access_workspace_id: str | None = None
     early_access_granted_at: datetime | None = None
+    # First "notify me when plans open" click (early_access.service.notify_plans).
+    # Set once and never moved, so a repeat click keeps the original time.
+    notify_plans_at: datetime | None = None
 
     class Settings:
         name = "users"
