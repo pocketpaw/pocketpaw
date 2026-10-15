@@ -27,9 +27,11 @@ turn alone (``AgentRouter.create_isolated_backend``), carrying the agent's own
 ToolPolicy and released when the turn ends. Only pydantic_ai reads the
 override, so ``spends_byok_key`` is the one answer to "will this turn spend the
 caller's key"; the cloud's credit gate asks it before letting a turn skip the
-wallet. If the private backend cannot be built, the turn is refused with an
-``error`` event rather than run on the platform's credentials: the caller was
-let through as BYOK, so a silent fallback would be free platform spend.
+wallet. If the private backend for a key-spending turn cannot be built, the
+turn is refused with an ``error`` event rather than run on the platform's
+credentials: the caller was let through as BYOK, so a silent fallback would be
+free platform spend. A backend that ignores the key falls back to the shared
+one, since that turn was gated and billed as platform anyway.
 """
 
 from __future__ import annotations
@@ -931,15 +933,14 @@ class AgentPool:
                 if run_backend is not instance.backend:
                     run_kwargs.pop("model_override", None)
             elif byok_api_key:
+                from pocketpaw.agents.registry import _LEGACY_BACKENDS
+
+                own_backend = instance.backend.settings.agent_backend
                 try:
-                    from pocketpaw.agents.registry import _LEGACY_BACKENDS
                     from pocketpaw.agents.router import AgentRouter
 
                     run_backend = AgentRouter.create_isolated_backend(
-                        _LEGACY_BACKENDS.get(
-                            instance.backend.settings.agent_backend,
-                            instance.backend.settings.agent_backend,
-                        ),
+                        _LEGACY_BACKENDS.get(own_backend, own_backend),
                         instance.backend.settings,
                         settings_override=(
                             byok_settings_override or {"byok_provider_api_key": byok_api_key}
@@ -953,12 +954,16 @@ class AgentPool:
                         ),
                     )
                 except Exception:
+                    # Refuse only where the key would have paid. A backend that
+                    # ignores the override was gated and billed as platform
+                    # already, so the shared backend is the same turn.
+                    byok_build_failed = spends_byok_key(own_backend)
                     logger.warning(
-                        "BYOK: could not build an isolated backend for agent %s; refusing the turn",
+                        "BYOK: could not build an isolated backend for agent %s; %s",
                         agent_id,
+                        "refusing the turn" if byok_build_failed else "using the shared backend",
                         exc_info=True,
                     )
-                    byok_build_failed = True
             if byok_build_failed:
                 yield AgentEvent(type="error", content=BYOK_BACKEND_FAILED_MESSAGE)
                 return

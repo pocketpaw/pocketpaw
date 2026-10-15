@@ -188,3 +188,31 @@ async def test_spends_byok_key(backend, exclusive, spends):
     from pocketpaw.agents.pool import spends_byok_key
 
     assert spends_byok_key(backend, exclusive_tools=exclusive) is spends
+
+
+async def test_a_failed_byok_build_on_a_backend_that_ignores_the_key_falls_back(monkeypatch):
+    """claude_agent_sdk never reads the override, so the cloud gated and billed
+    this turn as platform already. A failed private build then runs it on the
+    shared backend instead of telling the user their key failed.
+
+    Mutation: refuse on every failed build.
+    """
+    from pocketpaw.agents.router import AgentRouter
+
+    shared = _Backend(agent_backend="claude_agent_sdk")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("bad settings key")
+
+    monkeypatch.setattr(AgentRouter, "create_isolated_backend", staticmethod(_boom))
+    pool = AgentPool()
+    inst = _instance(shared)
+
+    async def _get(_aid):
+        return inst
+
+    monkeypatch.setattr(pool, "get", _get)
+    events = [ev async for ev in pool.run("a1", "hi", "session:s1", byok_api_key="sk-user")]
+
+    assert [ev.type for ev in events] == ["done"]
+    assert shared.ran == 1

@@ -148,5 +148,14 @@
     "tests": [
       "tests/cloud/runs/test_run_core_byok_wiring.py::test_a_key_billed_as_platform_still_faces_the_model_catalog"
     ]
+  },
+  {
+    "label": "every failed BYOK build is refused, even on a backend that never spends the key",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "                    byok_build_failed = spends_byok_key(own_backend)\n",
+    "replace": "                    byok_build_failed = True\n",
+    "tests": [
+      "tests/test_agent_pool_backend_lifecycle.py::test_a_failed_byok_build_on_a_backend_that_ignores_the_key_falls_back"
+    ]
   }
 ]
