@@ -143,6 +143,8 @@ class LeadRunner:
         self.launches_left = launches
         self.wall = time.time
         self.ci_by_sha = ci_by_sha or {}  # dev CI runs per merge commit, over ``ci``
+        self.dev_runs: list[dict] = []  # newest dev CI runs, any head (no --commit)
+        self.contains: dict[str, str] = {}  # head sha -> compare status vs the merge
         self.nudge_codes = nudge_codes or [0]  # exit code per ``claude -p --cloud``
         # gh reads to fail transiently, by "pr list" / "issue view": calls left.
         self.fail = dict(fail or {})
@@ -186,6 +188,11 @@ class LeadRunner:
             if at is None:
                 return 1, "", "gh: Not Found (HTTP 404)"
             return 0, json.dumps({"commit": {"committer": {"date": _iso(at)}}}), ""
+        if argv[:2] == ["gh", "api"] and "/compare/" in argv[2]:
+            head = argv[2].split("...")[-1]
+            return 0, json.dumps({"status": self.contains.get(head, "diverged")}), ""
+        if argv[:3] == ["gh", "run", "list"] and "--commit" not in argv:
+            return 0, json.dumps(self.dev_runs), ""
         if argv[:3] == ["gh", "run", "list"]:
             sha = argv[argv.index("--commit") + 1]
             if sha in self.ci_by_sha:
@@ -371,8 +378,36 @@ async def test_lead_is_not_done_until_dev_ci_on_the_merge_is_green(store, dirs, 
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    assert sum(a[:3] == ["gh", "run", "list"] for a, _ in runner.calls) == 4
+    assert sum(a[:3] == ["gh", "run", "list"] and "--commit" in a for a, _ in runner.calls) == 4
     assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+
+
+async def test_a_later_green_dev_run_that_contains_the_merge_lands_the_lead(store, dirs, playbook):
+    # The lane often merges more PRs before it dispatches dev CI, and a red run
+    # on the merge commit is superseded by a later green one that includes it.
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref, ci_by_sha={MERGE_SHA: [RED_RUN]})
+    later = "d" * 40
+    runner.dev_runs = [{**GREEN_RUN, "headSha": later}, {**RED_RUN, "headSha": MERGE_SHA}]
+    runner.contains = {later: "ahead"}
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+
+
+async def test_a_green_dev_run_without_the_merge_does_not_land_the_lead(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref, ci_by_sha={MERGE_SHA: [RED_RUN]})
+    other = "e" * 40
+    runner.dev_runs = [{**GREEN_RUN, "headSha": other}]
+    runner.contains = {other: "diverged"}  # a green head that lacks the merge commit
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert (await store.get_action(run_ref)).status != ActionStatus.EXECUTED
 
 
 async def test_lead_is_not_done_without_a_new_contact_sheet(store, dirs, playbook):

@@ -128,6 +128,13 @@ _SAFE_FEATURE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _FEATURE_DONE = "feature-done"
 _CONTACT_SHEET = "Belt-Contact-Sheet:"
 _CI_DONE_OK = {"success", "neutral", "skipped"}
+
+
+def _run_green(run: dict[str, Any]) -> bool:
+    """One CI run finished and passed (a skip counts, like a check's)."""
+    return run.get("status") == "completed" and run.get("conclusion") in _CI_DONE_OK
+
+
 # gh failures worth a retry (lesson 42): network, timeouts, GitHub 5xx and
 # rate limits. Anything else (a 404, a bad argument) fails at once.
 _TRANSIENT = re.compile(
@@ -709,28 +716,40 @@ class CloudTaskDispatcher:
             return 0.0
 
     async def _dev_green(self, slug: str, base: str, sha: str, cwd: Path) -> bool:
-        """The CI that ran on ``sha`` (a merge commit) on ``base``, any event: at
-        least one run, every one finished green. Unreadable reads as not yet.
+        """Dev CI says the merge commit ``sha`` is green: every run on ``sha``
+        itself finished green, or else the newest finished dev CI head that
+        contains ``sha`` is green. Any event. Unreadable reads as not yet.
 
         Any event, because the fast lane merges with a token that fires no push
-        runs and dispatches dev CI itself (``workflow_dispatch``); a push-only
-        filter never saw a single run, so no lead could land."""
+        runs and dispatches dev CI itself (``workflow_dispatch``). The later-head
+        fallback, because the lane often merges more PRs before it dispatches,
+        and a later green run supersedes a red one on the merge commit."""
         if not _HEX_SHA.match(sha):
             return False
-        # ponytail: runs on the merge commit only. When the lane merges another
-        # PR in the same sweep, CI runs on that later head and this keeps reading
-        # "not yet" until the 8 h timeout; a fallback to the newest dev head that
-        # contains ``sha`` (compare API) is the upgrade if leads start missing it.
         argv = ["gh", "run", "list", "-R", slug, "--commit", sha, "--branch", base]
         argv += ["--limit", "50", "--json", "status,conclusion,name"]
         try:
             runs = json.loads(await self._gh(argv, cwd, "DONE: gh run list") or "[]")
+            if runs and all(_run_green(r) for r in runs):
+                return True
+            argv = ["gh", "run", "list", "-R", slug, "--branch", base, "--limit", "30"]
+            argv += ["--json", "headSha,status,conclusion,name"]
+            recent = json.loads(await self._gh(argv, cwd, "DONE: gh run list") or "[]")
+            heads = list(dict.fromkeys(str(r.get("headSha") or "") for r in recent))
+            for head in heads:  # newest first
+                group = [r for r in recent if r.get("headSha") == head]
+                if head == sha or not _HEX_SHA.match(head):
+                    continue
+                if any(r.get("status") != "completed" for r in group):
+                    continue  # still running: judge an older finished head
+                compare = f"repos/{slug}/compare/{sha}...{head}"
+                out = await self._gh(["gh", "api", compare, "--jq", "."], cwd, "DONE: compare")
+                if (json.loads(out or "{}").get("status") or "") not in {"ahead", "identical"}:
+                    continue  # this head lacks the merge commit
+                return all(_run_green(r) for r in group)
         except Exception:  # noqa: BLE001 — the next poll reads it again
             logger.info("belt cloud: dev CI of %s on %s unreadable", sha, slug, exc_info=True)
-            return False
-        return bool(runs) and all(
-            r.get("status") == "completed" and r.get("conclusion") in _CI_DONE_OK for r in runs
-        )
+        return False
 
     async def _lead_stall(
         self,

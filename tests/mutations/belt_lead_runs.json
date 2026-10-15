@@ -11,8 +11,8 @@
   {
     "label": "a lead lands before dev CI is green",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "        return bool(runs) and all(",
-    "replace": "        return True or all(",
+    "find": "            if runs and all(_run_green(r) for r in runs):\n",
+    "replace": "            if True:\n",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
@@ -242,6 +242,24 @@
     "replace": "hard = False",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_lead_still_working_is_released_only_at_twice_the_timeout"
+    ]
+  },
+  {
+    "label": "a later green dev run never lands a lead whose merge-commit run was red",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                return all(_run_green(r) for r in group)\n",
+    "replace": "                return False\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_later_green_dev_run_that_contains_the_merge_lands_the_lead"
+    ]
+  },
+  {
+    "label": "a green dev head that lacks the merge commit lands the lead",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "not in {\"ahead\", \"identical\"}:",
+    "replace": "not in {\"ahead\", \"identical\", \"diverged\"}:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_green_dev_run_without_the_merge_does_not_land_the_lead"
     ]
   }
 ]
