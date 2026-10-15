@@ -2849,8 +2849,10 @@ async def _deploy_project_site(
     sandbox built for the CURRENT source (``project_build``) is materialized, and a
     source with no finished draft build is a 409 (open the preview, or run a build,
     then publish). Either way paw.js is (re)applied to the bundle's static pages with
-    the live identity (``project_build.apply_paw_client_to_bundle``, idempotent), and
-    the tree goes to ``_deploy_site_doc`` as a prebuilt dir, which deploys it through
+    the live identity (``project_build.apply_paw_client_to_bundle``, idempotent), the
+    lead-form capture placeholders are resolved
+    (``project_build.apply_capture_tokens_to_bundle``), and the tree goes to
+    ``_deploy_site_doc`` as a prebuilt dir, which deploys it through
     ``bundle_deploy`` + the binding provisioner: into the WfP namespace, or (workers
     mode / ``PAW_SITES_PROJECT_DEPLOY_TARGET=account``) as an account-level Worker; a
     no-build bundle is an assets-only Worker (``workerModules: []``). The site's plan
@@ -2899,6 +2901,8 @@ async def _deploy_project_site(
         shipped = project_build.apply_paw_client_to_bundle(
             Path(work), manifest, files_source, site_config
         )
+        # A contact form's capture placeholders get the live identity, as on the html lane.
+        project_build.apply_capture_tokens_to_bundle(Path(work), manifest, site_config)
         doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
         project_build.check_plan_allows(
             manifest,

@@ -136,12 +136,12 @@
     ]
   },
   {
-    "label": "the html create step stops naming the edit tool, so a follow-up change in the same conversation goes back to a second create_html_site and a second site pocket",
+    "label": "the new-site create step stops routing follow-up changes to the file tools, so a change in the same conversation calls start_site_from_template again and mints a second site",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"page' \u2014 is `mcp__pocketpaw_sites_manager__edit_html_file` with the \"",
-    "replace": "            \"page' \u2014 is `create_html_site` again with the \"",
+    "find": "        + \"CHANGES GO THROUGH THE FILE TOOLS. Once the site exists, ANY further change \"",
+    "replace": "        + \"Once the site exists, ANY further change \"",
     "tests": [
-      "tests/cloud/surface/test_sites_handler.py::test_html_create_routes_follow_up_changes_to_the_edit_tool"
+      "tests/cloud/surface/test_sites_handler.py::test_every_create_branch_forbids_the_re_create"
     ]
   },
   {

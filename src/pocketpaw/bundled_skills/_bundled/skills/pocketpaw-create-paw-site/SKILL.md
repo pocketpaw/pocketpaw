@@ -236,25 +236,9 @@ print is display only: never put a price or currency in the button's data.
 - a signup: `<form data-paw-subscribe>` with an `<input type="email" name="email">`
 - anything else: `Paw.call(provider, action, args)` in a small inline script
 
-Booking pages: call `connect_site_integration(pocket_id, 'calendly' | 'cal_com',
-purpose)`. The card asks the owner for their public booking link (no account to
-connect); `list_site_integrations` shows it as `settings.url`. Embed that link with
-the provider's standard inline embed markup, and never invent one.
-
-Forms into a spreadsheet: `connect_site_integration(pocket_id, 'google_sheets', purpose)`,
-then submit with `Paw.call('google_sheets', 'append_row', {fields})` (string values).
-Lead forms into a CRM: `connect_site_integration(pocket_id, 'hubspot', purpose)`, then
-`Paw.call('hubspot', 'create_contact', {email, firstname, lastname, phone, company, message})`.
-Zoho CRM instead: provider `zoho_crm`, `Paw.call('zoho_crm', 'create_lead', {email, first_name, last_name, phone, company, message})`.
-Airtable: provider `airtable`, `Paw.call('airtable', 'create_record', {fields})`; keys must match the table's text field names.
-Indian sellers (INR, UPI): `connect_site_integration(pocket_id, 'razorpay', purpose)`; `data-paw-checkout`
-is Stripe-only, so the button runs `Paw.call('razorpay', 'create_checkout', {product_ref, qty})` and opens `result.url`.
-Shopify stores (`connect_site_integration(pocket_id, 'shopify', purpose)`): product grids from `Paw.call('shopify', 'list_products', {limit, cursor})` (prices in minor units);
-buy buttons call `Paw.call('shopify', 'create_cart_checkout', {variant_id, qty})` and open `result.url`.
-Signups into the owner's Mailchimp or Brevo: `connect_site_integration(pocket_id, 'mailchimp' | 'brevo', purpose)`,
-then `Paw.call('mailchimp' | 'brevo', 'subscribe', {email, first_name, last_name})`; no such account: built-in `newsletter`.
-Blog/news fed from the owner's Notion: `connect_site_integration(pocket_id, 'notion', purpose)`, then render `Paw.call('notion', 'list_entries', {limit, cursor})`
-and `Paw.call('notion', 'get_entry', {id})` client-side, setting text with `textContent` (never `innerHTML`).
+Every other provider (booking embeds, spreadsheets, CRMs, Razorpay, Shopify,
+Mailchimp, Brevo, Notion, Turnstile): `connect_site_integration`'s reply carries
+that provider's exact wiring, action names and args included. Follow it.
 
 ### Changing an html site that already exists
 

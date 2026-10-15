@@ -1,182 +1,18 @@
-# tests/cloud/surface/test_sites_handler.py — Sites surface handler.
+# tests/cloud/surface/test_sites_handler.py — the /sites surface preamble.
 #
-# Updated: 2026-10-02 (feat/sites-card-photo-source, PH-10) — new tests pin the
-# shared `_WHATSAPP_ORDERS_RULE` (when, number handling, no-number, layout) and
-# that it reaches every create branch (step 5a), every refine branch and the
-# brief-driven frontend preamble.
-#
-# Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — the concierge block
-# no longer says a site "ships with" a concierge that is created automatically and
-# on by default; the owner creates it in the dashboard. A new test pins that the
-# block never claims automatic creation, and the publish-tie test's docstring
-# drops the ``ensure_site_widget`` trigger it named.
-# Updated: 2026-09-27 (feat/sites-lean-prompt) — the create preamble no longer
-# embeds design-taste or sites-craft; tests now pin the short art-direction step,
-# the craft floor, the size budget, and html create asking through ask_user.
-# Updated: 2026-09-27 (feat/sites-visual-research) — PHASE 1b rails changed: the
-# research step now opens screenshots and lets a locked reference set the look,
-# so the precedence and one-round assertions became assertions on the new rails
-# (rotation ban, roles, user input outranks, proportionate depth). New tests pin
-# that both archive states name a screenshot tool and that the create preamble
-# tells the agent to look at its draft with preview_site.
-# Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — the react
-# and svelte refine assertions follow the preamble: packages via
-# set_site_dependencies instead of "no way to add a dependency", rolled_back
-# instead of a smoke-test, and the verification.status ready rule.
-#
-# WHAT THIS FILE GUARDS (current state): the /sites preamble's three modes
-# (create / refine / chat), its four engine branches, and the routing that picks
-# between them. The routing tests at the BOTTOM are the ones to read first —
-# they pin that a meta carrying only a ``site_id`` resolves to REFINE and that an
-# unresolvable one fails closed rather than falling into create, which is how the
-# builder used to mint a duplicate site. They seed a real Site row and a real
-# site pocket and go through ``build_preamble``, because the whole defect class
-# only exists on the live path: a test that hands the handler a ``pocket_id``
-# directly tests a wire shape the loading builder never sends.
-#
-# Created: 2026-06-03 — Guards the /sites surface preamble.
-# Updated: 2026-09-23 (feat/sites-design-research) — PHASE 1b now leads with
-# Refero when ``refero_api_token`` is set and falls back to Inspo when a Refero
-# call errors or comes back empty; with no token it is the Inspo step as before.
-# The tests after `test_the_research_step_runs_before_the_tokens_are_locked`
-# pin both states, the fallback wording, and reachability of every named id.
-# Updated: 2026-09-01 (fix/sites-drop-bundled-design-systems) — the bundled
-# DESIGN.md library and its ``pocketpaw_design_systems`` MCP server are gone, so
-# ``test_create_names_design_and_asset_tools`` split in two: the asset half kept
-# its stock/palette assertions under a truthful name, and the design half became
-# an INVERSE guard — no create preamble on any engine may name a design-system
-# tool id. A third test pins the replacement instruction, because deleting the
-# retriever without saying where tokens come from would leave the model on its
-# own defaults, which is the repetition the removal is meant to end.
-# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — four tests at the BOTTOM
-# of this file pin the two preambles that route to the new react edit tool: the
-# react create step now says a follow-up change is
-# `edit_react_component`, NOT a second `create_react_site` (the re-create is what
-# minted a SECOND site pocket), and a react refine routes to
-# `_react_refine_preamble` instead of the rippleSpec merge path a react pocket has
-# nothing to merge into. The fourth test pins that ripple/svelte/no-engine refine is
-# byte-for-byte unchanged, so the fork cannot leak into the engine it was not
-# written for.
-# Updated: 2026-06-03 (pm) — Bundled skills now load on the SDK backend (local
-# plugin via the SDK `plugins=` option), so the preamble PREFERS the
-# `pocketpaw-create-site` skill and keeps the raw MCP tools only as a fallback.
-# Updated: 2026-06-03 (feat/sites-landing-brain, Task P4) — the preamble now
-# prefers the dedicated `pocketpaw-create-paw-site` marketing brain and stamps
-# `pattern="landing"`. It also drops the `form-layout` lead-form nudge: the
-# `form`/`newsletter` widgets nest an invalid `<form>` inside the static
-# template's outer POST form (the broken-dashboard render). The lead-form test
-# now pins the FLAT-native-input guidance instead of a form widget.
-# Updated: 2026-06-04 (feat/sites-refine-surface) — the /sites surface now has
-# TWO modes. The gallery (no pocket_id) still gets the create-a-new-site
-# preamble; the per-site refine chat (meta carries a pocket_id) gets a
-# LANDING-AWARE REFINE preamble that edits the existing published pocket via
-# the merge/edit path instead of rebuilding from scratch. The create-mode tests
-# below pin the no-pocket_id branch; the new refine-mode tests pin the
-# pocket_id branch (existing-site orientation, edit tool, the same 5 SSR rules,
-# and that it does NOT say "build a new site").
-# Updated: 2026-06-04 (feat/sites-svelte-engine) — the CREATE branch now forks on
-# `meta.engine` ("ripple" | "svelte"), set by the /sites create UI's "Use Svelte
-# pages" toggle. The engine-routing tests at the bottom pin that `engine="svelte"`
-# yields a create preamble preferring the `pocketpaw-create-svelte-site` skill
-# (and the `create_svelte_site` MCP fallback) and NOT preferring create-paw-site,
-# while the default (engine None / "ripple") create preamble is unchanged — still
-# names `pocketpaw-create-paw-site`. The toggle does not touch the refine branch.
-# These tests assert the create-mode preamble carries:
-#   1. The orientation — surface kind="sites", talk "site" not "pocket".
-#   2. The preferred path — the `pocketpaw-create-paw-site` marketing brain.
-#   3. The fallback path — the create MCP tool + the publish MCP tool — still
-#      present so the flow never breaks when the skill is unavailable.
-#   4. A lead-capture form with named fields, built FLAT (no form widget) so the
-#      published static site captures leads out of the box.
-# Updated: 2026-06-05 (feat/sites-svelte-engine, consolidated PR) — aligned the
-# svelte-engine create test with the strengthened preamble: the directive moved
-# from "prefer" to "this track is MANDATORY ... Use the skill", so the test now
-# pins "mandatory" instead of "prefer".
-# Updated: 2026-07-06 (feat/sites-crew-create-flow, SC-crew) — the CREATE branch
-# now optionally runs a guided two-phase authoring-crew flow behind the
-# `settings.sites_crew_enabled` flag (default OFF). The crew tests at the bottom
-# pin: (1) flag OFF → the create branch is BYTE-FOR-BYTE `_create_preamble` for
-# both ripple and svelte metas, and refine is untouched; (2) flag ON → a create
-# meta returns the crew preamble carrying the two-phase structure (interview +
-# build), the design-system / stock / palette MCP tool ids, the "just build it"
-# escape hatch, and the correct engine skill (`pocketpaw-create-svelte-site` on
-# the svelte track, `pocketpaw-create-paw-site` otherwise). The flag is toggled
-# via monkeypatch of `pocketpaw.config.get_settings` (not process env).
-# Updated: 2026-07-06 (feat/sites-crew-frontend-brief, SC-2) — added the
-# `_frontend_preamble(meta, brief)` tests: it renders the Frontend stage's build
-# instructions FROM a structured `DesignBrief` (the crew baton). The new tests pin
-# (1) sitemap roles/headings + copy injection from a hand-authored brief, (2)
-# engine ROUTING (svelte → create_svelte_site & not the ripple landing tool;
-# ripple → create_landing_site & not create_svelte_site), (3) the static-site
-# (SSR) rules language survives for a landing brief, and (4) that `build_preamble`
-# is UNCHANGED for the live create/refine paths (compared byte-for-byte against
-# calling `_create_preamble`/`_refine_preamble` directly), proving the new helper
-# is additive and not silently wired into the dispatch.
-# Updated: 2026-07-04 (feat/sites-chat-mode, CHAT-BE) — the /sites/[siteId] surface
-# now carries a Build/Chat mode. The refine branch (pocket_id present) forks on
-# `meta.mode`: "build" (default — today's behavior) keeps the mutate-and-republish
-# refine preamble; "chat" routes to a NO-MUTATION Q&A preamble that answers
-# questions about the existing site WITHOUT calling pocket_specialist__edit,
-# without republishing, and without creating pockets. The new chat-mode tests at
-# the bottom pin: (a) chat + pocket_id yields a Q&A preamble that does NOT instruct
-# the edit tool / mutation; (b) build (or unset) + pocket_id is byte-identical to
-# the existing refine preamble (regression guard); (c) create path (no pocket_id)
-# is unaffected by mode.
-# Updated: 2026-07-14 (fix/sites-unified-create-preamble) — the three create
-# preambles + the `sites_crew_enabled` flag collapsed into ONE always-on
-# `_create_preamble`. Every create (no pocket_id) now carries the clarity gate
-# (PHASE 1 + `ask_user` chips + "just build it" escape) and the design phase,
-# regardless of engine. The build step forks on `meta.engine`: DEFAULT/unset →
-# HTML (`create_html_site`); "svelte" → `create_svelte_site`; "ripple" → the
-# pocket-specialist landing spec. The old flag tests are gone; the create tests
-# below pin the always-asks behavior + per-engine build tool, and the refine/chat
-# tests are unchanged.
-#
-# Updated: 2026-07-17 (feat/sites-draft-first-create) — added
-# test_create_is_draft_first_publish_on_request: the create preamble now stops at a
-# reviewable DRAFT and offers to publish, gating the publish tool on an EXPLICIT
-# go-live request instead of auto-publishing off a plain "create a site". Asserts the
-# draft/preview framing + the explicit-go-live gate across all engines, and that the
-# publish tool is still named (the on-request path) so an explicit publish is unbroken.
-#
-# Updated: 2026-08-02 (fix/concierge-tools-for-site-agent) — added the concierge
-# awareness block at the bottom. The reported bug ("the agent building sites
-# sometimes does not know about concierge at all") was failure mode (2) AWARENESS
-# and it was TOTAL: "concierge" appeared zero times in every /sites preamble, zero
-# times in the sites MCP tool descriptions, and zero times in the bundled skills,
-# so whether the agent mentioned one was decided by model sampling alone. The new
-# tests are parametrized across all FIVE dispatched (engine, mode) combinations —
-# determinism is the fix, so spot-checking one mode would not prove it — and they
-# also pin the block's two honest limits: it must not claim a draft already has a
-# concierge (provisioning is live-publish-only) and must not name a configuration
-# tool that does not exist (catalog/actions are owner-authored only).
-
-# Updated: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — the html
-# refine branch was denying a tool that exists. ``edit_html_file`` shipped in
-# db083bfc without touching the handler, so the preamble kept telling the agent an
-# html site had no edit tool and the agent relayed that to users. Three tests here
-# changed: ``test_html_refine_admits_it_has_no_edit_tool`` became
-# ``test_html_refine_routes_the_edit_to_the_html_edit_tool`` (it had been
-# certifying the stale prompt as correct on every run), and two new ones pin the
-# publish step html now earns and the unknown-engine fallback that listed html as
-# uneditable. The gate that should have caught this gained its missing direction:
-# ``test_every_registered_edit_tool_is_named_by_its_refine_branch`` fails when a
-# REGISTERED tool goes unnamed, where the existing gate only failed when a NAMED
-# tool was unregistered.
-# Updated: 2026-09-16 (feat/sites-inspo-design-research) — five tests at the
-# BOTTOM pin `PHASE 1b`, the create-preamble step that grounds the design
-# direction in an archive of real shipped pages. They run the gate in BOTH
-# directions, which is the point: absent by default (the control — an external
-# MCP server is opt-in per deploy, so an unconditional block would command a tool
-# most installs do not have), present once `POCKETPAW_SITES_MCP_SERVERS` grants
-# it, and absent again when the setting names a DIFFERENT server. The other two
-# pin what keeps a reference archive from flattening every site: the embedded
-# design system still outranks it on any visual value, and the rotation ban
-# survives it. `_INSPO_TOOLS` records that server's real tool names so the step
-# cannot drift into naming one that does not exist — the external-server
-# analogue of `test_every_tool_a_refine_branch_names_is_a_registered_tool`,
-# which cannot help here because an external server's tools are unknown until
-# the client connects.
+# Guards the four modes (create / import-create / refine / chat) and the routing
+# between them. Create: every new site is a project started from a template through
+# the `pocketpaw-site` skill and the project tools, whatever create-time engine
+# hint arrives (`CREATE_ENGINE_TEMPLATE` maps html / ripple -> static, react ->
+# vite-react-hono, svelte -> sveltekit), and no old create tool or authoring skill
+# is named. Refine still forks on the engine the site was built with and names that
+# engine's edit tool. The routing tests at the BOTTOM pin that a meta carrying only
+# a ``site_id`` resolves to REFINE and that an unresolvable one fails closed rather
+# than falling into create; they seed a real Site row and pocket and go through
+# ``build_preamble``, because that defect only exists on the live path. Also
+# pinned: draft-first publishing, the research and art-direction steps, the craft
+# floor and size budget, the concierge block, the WhatsApp orders rule, and the
+# per-engine refine rules (packages, verify, ask mechanism).
 
 from __future__ import annotations
 
@@ -234,24 +70,136 @@ async def test_sites_handler_create_mode_when_no_pocket_id() -> None:
 
 
 async def test_create_default_engine_is_html() -> None:
-    """No engine hint → the DEFAULT create engine is html: the build step authors
-    a static HTML/CSS bundle via `create_html_site`, NOT the ripple or svelte
-    tracks."""
+    """Kept by name for history: a create with no hint is now a PROJECT that starts
+    from the `static` template (hand-written HTML, no build) through the
+    `pocketpaw-site` skill, not the old `create_html_site` track."""
     preamble = (
         await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     ).text
 
-    assert 'engine="html"' in preamble
-    assert "mcp__pocketpaw_sites_manager__create_html_site" in preamble
+    assert 'engine="project"' in preamble
+    assert "template=" not in preamble.split("\n", 1)[0]
+    assert "Start from `static`" in preamble
+    assert "pocketpaw-site" in preamble
     assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    # html is MANDATED — create_html_site is the persist tool and the preamble
-    # explicitly forbids switching engines for a normal create.
-    lower = preamble.lower()
-    assert "do not switch engines" in lower
-    assert "must use" in lower
-    # The svelte/ripple tools appear ONLY after the html one (i.e. in the
-    # do-not-use / explicit-exception context, never as the primary path).
-    assert preamble.index("create_html_site") < preamble.index("create_svelte_site")
+
+
+_CREATE_HINTS = (None, "html", "ripple", "svelte", "react", "project", "solid")
+
+_OLD_CREATE_TOOLS = (
+    "mcp__pocketpaw_sites_manager__create_html_site",
+    "mcp__pocketpaw_sites_manager__create_svelte_site",
+    "mcp__pocketpaw_sites_manager__create_react_site",
+    "mcp__pocketpaw_sites_manager__create_landing_site",
+    "mcp__pocketpaw_sites_manager__create_dynamic_site",
+    "mcp__pocketpaw_pocket_specialist__create",
+    "edit_html_file",
+    "edit_svelte_component",
+    "edit_react_component",
+)
+
+_OLD_CREATE_SKILLS = (
+    "pocketpaw-create-paw-site",
+    "pocketpaw-create-svelte-site",
+    "pocketpaw-create-react-site",
+    "pocketpaw-create-dynamic-site",
+    "pocketpaw-create-project-site",
+)
+
+
+@pytest.mark.parametrize("engine", _CREATE_HINTS)
+async def test_every_new_site_routes_to_the_site_skill_and_project_tools(
+    engine: str | None,
+) -> None:
+    """One create flow: whatever hint the create screen sends, the build step loads
+    `pocketpaw-site` and drives the project tools. No old create or edit tool and no
+    old authoring skill is named, so the preamble cannot point at a tool the create
+    profile denies (``surface_registry._SITES_LEGACY_AUTHORING_DENY``)."""
+    preamble = await _preamble_for(engine)
+
+    assert 'engine="project"' in preamble
+    assert 'mode="create"' in preamble
+    assert "`pocketpaw-site`" in preamble
+    for tool in ("list_site_templates", "start_site_from_template", "run_site_build"):
+        assert f"mcp__pocketpaw_sites_manager__{tool}" in preamble, tool
+    assert "patch_site_file" in preamble and "request_site_secret" in preamble
+    for name in _OLD_CREATE_TOOLS + _OLD_CREATE_SKILLS:
+        assert name not in preamble, f"{engine}: names {name}"
+    # Ripple is off on every create, so questions go through ask_user.
+    assert "mcp__pocketpaw_ask__ask_user" in preamble
+    assert "ask-user-questions" not in preamble
+
+
+async def test_create_engine_hints_map_to_templates() -> None:
+    """The documented mapping: html and ripple are the static default (ripple is out
+    for new sites), react and svelte pin their framework starters, and anything else
+    lets the agent pick."""
+    assert sites_handler.CREATE_ENGINE_TEMPLATE == {
+        "html": "static",
+        "ripple": "static",
+        "react": "vite-react-hono",
+        "svelte": "sveltekit",
+    }
+    for engine in (None, "", "project", "solid"):
+        assert sites_handler.create_template_hint(engine) is None, engine
+    assert sites_handler.create_template_hint(" React ") == "vite-react-hono"
+
+
+@pytest.mark.parametrize(
+    ("engine", "template"),
+    [
+        ("html", "static"),
+        ("ripple", "static"),
+        ("react", "vite-react-hono"),
+        ("svelte", "sveltekit"),
+    ],
+)
+async def test_create_preamble_carries_the_template_the_hint_pins(
+    engine: str, template: str
+) -> None:
+    preamble = await _preamble_for(engine)
+    assert f'template="{template}"' in preamble.split("\n", 1)[0]
+    if template == "static":
+        assert "Start from `static`" in preamble
+    else:
+        assert f"start from `{template}`" in preamble
+        assert "Start from `static`" not in preamble
+
+
+async def test_create_without_a_hint_picks_static_unless_a_framework_is_needed() -> None:
+    preamble = await _preamble_for(None)
+    assert "Start from `static` unless the site needs server logic" in preamble
+    assert "the user names a framework" in preamble
+
+
+async def test_new_static_sites_carry_the_lead_form_contract() -> None:
+    """`static` has no server route, so its contact form posts to the capture
+    endpoint with placeholders the project publish resolves
+    (``project_build.apply_capture_tokens_to_bundle``)."""
+    preamble = await _preamble_for(None)
+    assert "On `static` there is no server route" in preamble
+    assert "__CAPTURE_API_BASE__/capture/form" in preamble
+
+
+@pytest.mark.parametrize(
+    ("engine", "tool"),
+    [
+        ("html", "mcp__pocketpaw_sites_manager__edit_html_file"),
+        ("svelte", "mcp__pocketpaw_sites_manager__edit_svelte_component"),
+        ("react", "mcp__pocketpaw_sites_manager__edit_react_component"),
+        ("ripple", "mcp__pocketpaw_pocket_specialist__edit"),
+        ("project", "`patch_site_file`"),
+    ],
+)
+async def test_refine_of_an_existing_site_still_routes_by_its_engine(
+    engine: str, tool: str
+) -> None:
+    """Existing sites keep their lanes: refine names the edit tool of the engine the
+    site was built with and never the new-site skill."""
+    preamble = sites_handler._refine_preamble(SurfaceMeta(pocket_id="pk1"), engine)
+    assert f'engine="{engine}"' in preamble
+    assert tool in preamble
+    assert "pocketpaw-site`" not in preamble
 
 
 async def test_create_is_draft_first_publish_on_request() -> None:
@@ -278,40 +226,12 @@ async def test_create_is_draft_first_publish_on_request() -> None:
         assert "mcp__pocketpaw_sites_manager__publish" in preamble
 
 
-async def test_create_ripple_engine_uses_pocket_specialist_fallback() -> None:
-    """engine="ripple" is the widget-spec track: it prefers the create-paw-site
-    marketing brain, stamps `pattern="landing"`, and keeps the pocket-specialist
-    MCP tool as the fallback."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
-        )
-    ).text
-
-    assert 'engine="ripple"' in preamble
-    assert "pocketpaw-create-paw-site" in preamble
-    assert 'pattern="landing"' in preamble
-    # Fallback path — the pocket specialist create tool + publish.
-    assert "mcp__pocketpaw_pocket_specialist__create" in preamble
-    assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    assert "fall back" in preamble.lower() or "fallback" in preamble.lower()
-
-
 async def _preamble_for(engine: str | None) -> str:
     return (
         await sites_handler.build_preamble(
             WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
         )
     ).text
-
-
-async def test_sites_handler_specifies_flat_lead_capture_form() -> None:
-    """Every create carries the flat-native lead-form rule so the published static
-    site captures leads: fields built FLAT, never a nested form widget."""
-    for engine in (None, "ripple", "react"):
-        lower = (await _preamble_for(engine)).lower()
-        assert "form" in lower
-        assert "flat" in lower
 
 
 async def test_the_tracks_that_author_their_own_form_are_told_where_it_posts() -> None:
@@ -333,19 +253,6 @@ async def test_the_tracks_that_author_their_own_form_are_told_where_it_posts() -
         assert "__CAPTURE_SIGNED_KEY__" in preamble, f"{engine}: no signed key field"
         for field in contact_form.CONTACT_FIELD_NAMES:
             assert field in preamble, f"{engine}: never told to emit {field!r}"
-
-
-async def test_the_ripple_track_is_not_told_to_author_a_form() -> None:
-    """On ripple the form is COMPOSED BY CODE — ``assemble_landing_spec`` builds it
-    from ``contact_form.CONTACT_FIELDS`` and the skill supplies copy only. Handing
-    that track the native-form contract would tell the agent to write markup it has
-    no way to write, and naming the fields would imply it chooses them.
-
-    This is the "the prompt may not command something the agent cannot do" rule
-    applied to markup rather than to a tool."""
-    preamble = await _preamble_for("ripple")
-    assert "__CAPTURE_API_BASE__" not in preamble
-    assert "paw_site_id" not in preamble
 
 
 # --- Refine mode (meta carries a pocket_id — the per-site /sites/[siteId] chat) ---
@@ -449,193 +356,6 @@ async def test_sites_handler_refine_mode_is_landing_aware() -> None:
 # existing ripple marketing brain byte-for-byte.
 
 
-async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> None:
-    """engine="svelte" routes the build step to the Svelte-track skill.
-
-    It prefers `pocketpaw-create-svelte-site`, points the MCP fallback at
-    `create_svelte_site`, stamps engine="svelte", and forbids the ripple-spec
-    machinery — while STILL carrying the shared clarity gate."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
-        )
-    ).text
-    lower = preamble.lower()
-
-    # Still the sites surface, now tagged with the svelte engine + create mode.
-    assert '<surface kind="sites"' in preamble
-    assert 'engine="svelte"' in preamble
-    assert 'mode="create"' in preamble
-    # The shared clarity gate runs on every engine.
-    assert "research real sites" in lower
-
-    # The dedicated Svelte-track authoring skill + the merged design-taste helper.
-    assert "pocketpaw-create-svelte-site" in preamble
-    assert "pocketpaw-design-taste" in preamble
-    # MCP fallback points at the svelte create tool + publish.
-    assert "mcp__pocketpaw_sites_manager__create_svelte_site" in preamble
-    assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    assert "unavailable" in lower
-
-    # It must NOT route to the ripple marketing brain or the html tool here.
-    assert "pocketpaw-create-paw-site" not in preamble
-    assert "create_html_site" not in preamble
-    assert "mcp__pocketpaw_sites_manager__create_landing_site" not in preamble
-    # The svelte track forbids the ripple-spec machinery.
-    assert "no ripplespec" in lower
-
-
-async def test_create_engine_routing_diverges_by_engine() -> None:
-    """The three engines fork ONLY on the build tool — html (default), svelte, and
-    ripple each name their own create tool and never each other's."""
-    html = (
-        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-    ).text
-    svelte = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
-        )
-    ).text
-    ripple = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
-        )
-    ).text
-
-    # Each is a distinct preamble (the fork is real), all in create mode.
-    assert html != svelte != ripple != html
-    for out in (html, svelte, ripple):
-        assert 'mode="create"' in out
-        assert "research real sites" in out.lower()
-
-    # html default → the html tool is the PRIMARY/mandated build path (it names
-    # the svelte/dynamic tools only later, in the do-not-use / exception context).
-    assert "mcp__pocketpaw_sites_manager__create_html_site" in html
-    assert html.index("create_html_site") < html.index("create_svelte_site")
-    # svelte → the svelte tool only, never the html one.
-    assert "mcp__pocketpaw_sites_manager__create_svelte_site" in svelte
-    assert "create_html_site" not in svelte
-    # ripple → the pocket specialist, not the hand-authored tracks.
-    assert "mcp__pocketpaw_pocket_specialist__create" in ripple
-    assert "create_html_site" not in ripple
-    assert "create_svelte_site" not in ripple
-
-
-async def test_create_mode_engine_react_prefers_create_react_site_skill() -> None:
-    """RX-2: engine="react" routes the build step to the React-track skill.
-
-    It names `pocketpaw-create-react-site`, points at `create_react_site`, stamps
-    engine="react", and forbids the ripple-spec machinery — while STILL carrying
-    the shared clarity gate."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-    lower = preamble.lower()
-
-    assert '<surface kind="sites"' in preamble
-    assert 'engine="react"' in preamble
-    assert 'mode="create"' in preamble
-    assert "research real sites" in lower
-
-    # The dedicated React-track authoring skill + the merged design-taste helper.
-    assert "pocketpaw-create-react-site" in preamble
-    assert "pocketpaw-design-taste" in preamble
-    assert "mcp__pocketpaw_sites_manager__create_react_site" in preamble
-    assert "mcp__pocketpaw_sites_manager__publish" in preamble
-
-    # It must NOT route to the other tracks' brains or tools.
-    assert "pocketpaw-create-paw-site" not in preamble
-    assert "pocketpaw-create-svelte-site" not in preamble
-    assert "create_html_site" not in preamble
-    assert "create_svelte_site" not in preamble
-    assert "mcp__pocketpaw_sites_manager__create_landing_site" not in preamble
-    # The react track forbids the ripple-spec machinery.
-    assert "no ripplespec" in lower
-
-
-async def test_react_create_states_the_interactivity_rule() -> None:
-    """The react default is the sharp edge of this engine: the site ships ZERO
-    JavaScript unless the create declares it, so a page authored with a menu
-    toggle or tabs is inert. React is usually chosen BECAUSE of interactivity, so
-    the preamble must state the rule — not leave it to the skill, which the model
-    may or may not load.
-
-    THE MUTATION THAT BREAKS THIS: delete the `interactive=true` sentence from the
-    react `build_step` in handlers/sites.py. Run: every other react assertion
-    still passes and this one fails. (Applied 2026-08-07.)"""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-    lower = preamble.lower()
-
-    assert "interactive=true" in lower
-    # It names what "needs the browser" concretely, so the agent can decide.
-    assert "useeffect" in lower or "onclick" in lower
-    # And it says what happens when the flag is absent.
-    assert "zero javascript" in lower or "no javascript" in lower
-
-
-async def test_react_create_states_the_prerender_rule() -> None:
-    """The prerender rule is engine-shaped, not taste: useEffect does not run at
-    prerender time, so a resting state produced only by an effect bakes the START
-    frame into the deployed HTML. The svelte track carries the same rule for the
-    same reason."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-    lower = preamble.lower()
-
-    assert "prerender" in lower
-    assert "useeffect" in lower
-    assert "markup" in lower
-
-
-async def test_react_create_names_the_reserved_build_shell() -> None:
-    """The generator owns index.html / paw-prerender.mjs and the src/paw/
-    namespace, and REJECTS a source map that writes one (package.json and
-    vite.config.* are the author's since 2026-10-07, and the preamble says so). A
-    preamble that doesn't say so sends the agent into a create error it cannot
-    predict — and those files are what hold the prerender contract."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-
-    assert "src/App.tsx" in preamble
-    for reserved in ("index.html", "paw-prerender.mjs"):
-        assert reserved in preamble, f"the preamble does not name the reserved {reserved}"
-    assert "src/paw/" in preamble
-    assert "package.json and vite.config.* are yours" in preamble
-
-
-async def test_react_create_does_not_promise_a_submit_route() -> None:
-    """There is no server runtime on the react track, so the SvelteKit skeleton's
-    `/api/submit` endpoint does not exist here. Promising it would be the prompt
-    offering a capability the deployment lacks — the same class as naming an
-    absent tool — and the agent would wire a form that silently drops leads.
-
-    The preamble must say so EXPLICITLY rather than merely stay silent: the
-    authoring skill and the svelte track both teach `/api/submit`, so an agent
-    carrying that habit needs it revoked, not omitted."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-    lower = preamble.lower()
-
-    assert "no `/api/submit` route" in lower
-    # And it names the alternative, so revoking the habit leaves somewhere to go.
-    assert "native `<form>`" in lower
-
-
 async def test_react_create_uses_ask_user_tool_not_ripple() -> None:
     """react-create has inline ripple OFF (surface_registry._sites_profile), so the
     ask mechanism must be the `ask_user` MCP tool, NOT a ```ui-spec ripple widget.
@@ -653,35 +373,6 @@ async def test_react_create_uses_ask_user_tool_not_ripple() -> None:
 
     assert "mcp__pocketpaw_ask__ask_user" in preamble
     assert "ask-user-questions" not in preamble
-
-
-async def test_unknown_engine_still_falls_back_to_html() -> None:
-    """An engine string this build predates (or a typo) must not render a
-    half-formed preamble — it falls back to the html default, the same policy
-    sites/engines.py::normalize_engine applies on the publish side."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="solid")
-        )
-    ).text
-
-    assert 'engine="html"' in preamble
-    assert "mcp__pocketpaw_sites_manager__create_html_site" in preamble
-
-
-async def test_html_default_routes_an_explicit_react_ask_to_the_react_tool() -> None:
-    """The html preamble's escape hatch previously sent 'explicitly asks for a
-    React/component build' to `create_svelte_site` — correct only while no react
-    engine existed. Now that it does, an explicit React request must reach the
-    react tool, or the user asks for React and gets Svelte."""
-    preamble = (
-        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-    ).text
-
-    assert "mcp__pocketpaw_sites_manager__create_react_site" in preamble
-    # The react tool is named in the EXCEPTION context, after the mandated html
-    # one — html is still the default engine.
-    assert preamble.index("create_html_site") < preamble.index("create_react_site")
 
 
 async def test_engine_threads_through_meta_from_request() -> None:
@@ -770,29 +461,6 @@ async def test_create_tells_the_agent_to_author_its_own_tokens() -> None:
     assert "best fits this business" in out
     assert "less-obvious fit" not in out
     assert "reseed the accent" not in out
-
-
-async def test_create_clarify_renders_ripple_widget_when_ripple_on() -> None:
-    """Only ripple create keeps inline ripple, so only it asks with an
-    `ask-user-questions` widget. html create asks through the chip tool, like the
-    component engines, because its profile dropped ripple."""
-    out = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
-        )
-    ).text
-    assert "ask-user-questions" in out
-    assert '"target": "chat.send"' in out
-    assert "mcp__pocketpaw_ask__ask_user" not in out
-
-    for engine in (None, "html"):
-        out = (
-            await sites_handler.build_preamble(
-                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
-            )
-        ).text
-        assert "mcp__pocketpaw_ask__ask_user" in out, engine
-        assert "ask-user-questions" not in out, engine
 
 
 async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
@@ -1340,32 +1008,6 @@ async def test_concierge_awareness_does_not_depend_on_the_mcp_tool_id_import() -
 # ---------------------------------------------------------------------------
 # RX-3 — the react EDIT lane reaches the preambles that route to it
 # ---------------------------------------------------------------------------
-
-
-async def test_react_create_step_routes_follow_up_changes_to_the_edit_tool() -> None:
-    """The reported bug in prompt form: with no edit tool named, a follow-up
-    "shorten the hero headline" left the agent one available move — a second
-    ``create_react_site`` — which mints a SECOND site pocket and leaves the site the
-    user is looking at unchanged. The react build step now names the edit tool and
-    forbids the re-create.
-
-    THE MUTATION THAT BREAKS THIS: delete the CHANGES-GO-THROUGH-THE-EDIT-TOOL
-    paragraph from the react ``build_step``.
-    """
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-
-    assert "mcp__pocketpaw_sites_manager__edit_react_component" in preamble
-    lower = preamble.lower()
-    # It says the re-create is wrong, and says WHY (a second site).
-    assert "second `create_react_site`" in preamble or "second create_react_site" in lower
-    assert "second site" in lower
-    # And it teaches the two-call add-a-section shape the tool actually needs.
-    assert "create=true" in lower
-    assert "src/app.tsx" in lower
 
 
 async def test_react_refine_names_the_edit_tool_and_not_the_ripple_merge(mongo_db: object) -> None:
@@ -2124,24 +1766,6 @@ async def test_every_registered_edit_tool_is_named_by_its_refine_branch() -> Non
         )
 
 
-async def test_html_create_routes_follow_up_changes_to_the_edit_tool() -> None:
-    """The create side had the same hole: html got no "changes go through the edit
-    tool" clause, so a follow-up change in the SAME conversation re-created the
-    site. react has carried this clause since RX-3; html now does too.
-
-    THE MUTATION THAT BREAKS THIS: delete the clause from the html build step.
-    Run: the create branch let a follow-up change mint a second site and this
-    failed.
-    """
-    preamble = await _preamble_for(None)  # no engine hint == the html default
-
-    assert HTML_TOOL in preamble
-    assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble
-    assert "SAME pocket_id" in preamble
-    # Create is still the FIRST thing named — this is a create preamble.
-    assert preamble.index("create_html_site") < preamble.index("edit_html_file")
-
-
 # ── PHASE 1b: design research (feat/sites-bundled-design-research) ──────────
 #
 # Rewritten 2026-09-16. This first shipped (#2204) with the archive as an
@@ -2605,58 +2229,15 @@ async def test_a_stamped_pocket_id_still_wins(mongo_db: object) -> None:
     assert RIPPLE_TOOL in stamped
 
 
-async def test_svelte_create_routes_follow_up_changes_to_the_edit_tool() -> None:
-    """The second, INDEPENDENT cause: svelte's create step never forbade the
-    re-create.
-
-    react got this clause in RX-3 and html got it later; svelte and ripple were
-    left behind, and the module header records the html fix as an html fix rather
-    than a general one. On svelte the agent's one available move for "shorten the
-    hero headline" was another ``create_svelte_site``, which mints a SECOND site.
-
-    THE MUTATION THAT BREAKS THIS: delete the clause from the svelte build step.
-    """
-    preamble = await _preamble_for("svelte")
-
-    assert SVELTE_TOOL in preamble
-    assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble
-    assert "SAME pocket_id" in preamble
-    lower = preamble.lower()
-    assert "second site" in lower
-    # Named the same way react's clause names it: the re-create is the wrong move.
-    assert "second `create_svelte_site`" in preamble or "second create_svelte_site" in lower
-
-
-async def test_ripple_create_routes_follow_up_changes_to_the_edit_tool() -> None:
-    """Same hole on the ripple track, one engine over.
-
-    Ripple's edit path is the pocket specialist's merge rather than a file-level
-    edit tool, so the clause names that instead — but the failure it prevents is
-    identical: a second ``create_landing_site`` mints a second site pocket and
-    leaves the page the user is looking at unchanged.
-
-    THE MUTATION THAT BREAKS THIS: delete the clause from the ripple build step.
-    """
-    preamble = await _preamble_for("ripple")
-
-    assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble
-    assert RIPPLE_TOOL in preamble
-    assert "SAME pocket_id" in preamble
-    assert "second site" in preamble.lower()
-
-
 async def test_every_create_branch_forbids_the_re_create() -> None:
-    """The gate that stops this being fixed one engine at a time AGAIN.
-
-    Every engine that can create a site from chat can also be changed from chat,
-    so every create branch must say so. A fifth engine joins this by existing.
-    """
-    for engine in (None, "html", "svelte", "react", "ripple"):
+    """Every create can be changed from chat, so every create hint must route a
+    follow-up change to the file tools on the SAME site, never a second
+    ``start_site_from_template`` (which mints a second site)."""
+    for engine in _CREATE_HINTS:
         preamble = await _preamble_for(engine)
-        assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble, (
-            f"the {engine or 'default'} create branch never forbids the re-create, "
-            "so a follow-up change in the same conversation mints a second site"
-        )
+        assert "CHANGES GO THROUGH THE FILE TOOLS" in preamble, engine
+        assert "never a second `start_site_from_template`" in preamble, engine
+        assert "SECOND site" in preamble, engine
 
 
 async def test_every_create_branch_builds_whatsapp_orders_from_a_supplied_number() -> None:

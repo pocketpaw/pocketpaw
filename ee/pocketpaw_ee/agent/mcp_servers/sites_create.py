@@ -1,286 +1,34 @@
-# sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
-# create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
+# sites_create.py — the per-engine Paw Site tools on the ``pocketpaw_sites_manager``
+# MCP server, plus the engine-neutral secrets and integrations tools.
 #
-# Updated: 2026-09-27 (feat/sites-visual-research) — NEW ``preview_site`` tool: a
-# screenshot of the site's current DRAFT, returned as image blocks the agent can
-# look at (desktop or phone width, full page, tiled). ``verify_site`` answers
-# "does it build and load"; nothing answered "does it look right", so drafts went
-# to the user unseen. The draft document comes from the same places the editor
-# and the card capture read (``draft_markup`` for html / an already-built tree,
-# the cached preview render for svelte and react), and Cloudflare Browser
-# Rendering takes the picture. Nothing is stored.
+# Old-engine create tools: ``create_landing_site`` (ripple: copy in, structure
+# assembled in code by ``landing_assembler``), ``create_dynamic_site`` (ripple spec
+# with D1 bindings), ``create_svelte_site``, ``create_react_site`` and
+# ``create_html_site`` (the agent authors a ``{path: contents}`` source map). Their
+# edit tools are ``edit_svelte_component``, ``edit_react_component`` and
+# ``edit_html_file``; ``read_site_source`` is their reader. New sites no longer use
+# any of these: the /sites create profile denies them and routes every new site to
+# the project tools (``sites_project.py``) and the ``pocketpaw-site`` skill. They
+# stay registered for refining sites that already exist on those engines.
 #
-# Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — tool
-# descriptions caught up with PP-1/PP-2: the "no way to add a dependency" /
-# "react + vite and NOTHING else" claims are gone, each source-engine create/edit
-# names ``set_site_dependencies`` (and where to import client-only packages), and
-# each appends ``VERIFY_CONTRACT`` so the agent calls a draft ready only on
-# ``verification.status == passed``. edit_svelte_component's ok=false text now
-# describes the rolled_back verdict and the staged browser-layer failure.
-# Updated: 2026-09-24 (feat/sites-verify-pipeline, PP-2) — every create_{svelte,react,
-# html}_site, edit_{svelte,react}_component, edit_html_file and set_site_dependencies
-# result carries ``verification`` (contract §5). Creates and ``verify_site`` wait for
-# the full verdict under a hard deadline (``_verification_for``); EDITS run only the
-# static check synchronously (``_edit_verification`` → ``verify.verify_edit``), enqueue
-# the build + browser layers, and get that verdict back on the NEXT edit-tool or
-# ``preview_site`` result as ``previous_verification`` (``_with_previous_verification``).
-# An unreferenced ``create=true`` half step skips verification. ripple creates return
-# ``unverified``/``engine_not_verifiable`` honestly. ``edit_svelte_component`` reports
-# a failed STATIC check as data (``ok: false``, ``status: rolled_back``, the verdict)
-# and has no preview_url (no local preview deploy). Every edit tool call logs its
-# elapsed ms (``sites.edit_tool:``). A create with live-data bindings refuses npm packages
-# (``engine_unsupported``) — dynamic svelte cannot carry them yet.
+# Shared by every engine: ``verify_site`` / ``preview_site`` (the three-layer
+# verdict and a screenshot of the draft), ``set_site_dependencies`` (the only writer
+# of ``paw.dependencies.json``), ``list_site_assets``, ``request_site_secret`` /
+# ``list_site_secrets`` (names and status only, never values), and
+# ``list_site_integrations`` / ``connect_site_integration`` (one-click Connect: the
+# owner taps Connect on a chat card; no tool takes or returns a credential).
 #
-# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — authors can declare
-# npm packages. New tool ``set_site_dependencies`` (add ``[{name, range?}]`` /
-# remove ``[name]``) resolves each request against the npm registry (any public
-# package, version, range or dist-tag since 2026-10-07) and writes the result as the
-# reserved ``paw.dependencies.json``; it is the only writer of that file.
-# ``create_{svelte,react,html}_site`` gained an optional
-# ``dependencies`` param that runs the same resolver before the pocket is persisted:
-# a rejected package lands in ``rejected`` with its reason and the create still
-# succeeds without it. A ``source`` map that hand-writes the manifest is refused;
-# package.json / vite.config.* / svelte.config.js / bunfig.toml / .npmrc are
-# author-writable (the generator merges them with its toolchain).
-# ``edit_svelte_component`` on a pocket
-# that declares packages persists the draft without the local preview build and says
-# so (``site`` is null) — installing those packages is sandbox-only.
-#
-# Updated: 2026-09-11 (feat/sites-svelte-edit-create, SC-1) — ``edit_svelte_component``
-# gained ``create``, closing the last hole of the set RX-3 and HE-10 closed for react
-# and html. It was the FIRST edit lane to ship and the last to be able to mint a file:
-# its ``component_path`` had to already exist, so "add an about page" to a live svelte
-# site had no reachable tool on this server. Two things made that worse than a missing
-# feature. Its description was also the only one of the three WITHOUT the "NEVER call
-# `create_<engine>_site` again" warning, so the blocked agent's next move was a second
-# ``create_svelte_site`` — a second pocket at a second url, leaving the site the user
-# was looking at untouched — and the /sites surface denies the file built-ins, so there
-# was no fallback. The description now also teaches the shape unique to this track: a
-# SvelteKit page is TWO files (``+page.svelte`` plus the ``+page.ts`` carrying its own
-# prerender flag, which the root page's page-level flag does not cascade to), so adding
-# one is three calls counting the link. Path policy lives in ``sites/svelte_paths.py``.
-#
-# Updated: 2026-09-01 (fix/sites-html-orphan-create) — ``edit_html_file`` carries the
-# same ``unreferenced`` key and its own warning, naming the wiring step this track
-# actually has: a LINK from an existing page, not an import.
-#
-# Updated: 2026-09-01 (fix/sites-react-orphan-create — a create that renders nothing
-# stopped narrating as a finished change). ``edit_react_component``'s success body now
-# carries ``unreferenced`` and, when it is true, a ``message`` that LEADS with the
-# outstanding second call and forbids reporting the section as added. The skill already
-# taught the two-call contract in prose; what was missing was feedback inside the loop,
-# so an agent that made call 1 and stopped read an unqualified "Saved to the site's
-# draft" and had no reason to make call 2. Advice, not an error: ``ok`` stays true and
-# the file really was written, so the agent must not retry the create.
-#
-# Updated: 2026-08-19 (fix/sites-read-source-tool — the edit lane could write but not
-# read) — added ``read_site_source`` + ``_read_site_source_handler``, the READ half the
-# three edit tools in this file were written against and never had. Each of them prefers
-# an ``edits`` diff whose ``old_string`` must be copied VERBATIM from the current file,
-# and each told the agent to "read it first" while naming no tool that could: /sites
-# filters out ``get_pocket`` (wrong server, hard whitelist) and drops the file/shell
-# built-ins. So the only reachable form was a blind ``new_source`` rewrite — the shape
-# that silently drops a capture form's hidden ``paw_*`` inputs. All three descriptions
-# now name ``read_site_source`` and spell out the read → copy → ``edits`` flow, because
-# a description is the only prompt real estate this surface has. Two modes: a manifest
-# (paths + sizes), or a batch read (``file_paths``) that returns a JSON metadata block
-# plus one plain-text block per file with the contents verbatim, never JSON-escaped, so
-# a large file is not inflated past Claude Code's MCP output cap.
-#
-# Updated: 2026-08-11 (RX-3 — the react track gets an EDIT lane) — added a SEVENTH
-# tool ``edit_react_component`` plus its handler, mirroring
-# ``make_edit_svelte_component_tool``'s shape (identity → record_tool_call →
-# input validation → plan gate → service → draft-framed success body). It closes a
-# hole this file was half of: ``edit_svelte_component`` was the ONLY edit tool
-# registered, so on a react site the agent's only move for "shorten the hero
-# headline" was to call ``create_react_site`` again, minting a SECOND site pocket.
-# Three things about it differ from the svelte edit tool, all deliberate:
-#   * DRAFT-ONLY, with no ``SmokeGateFailed`` branch to map. Nothing is built, so
-#     nothing can fail a smoke gate — and a react publish enqueues its build and
-#     returns before any outcome exists, so there would be nothing to roll back to
-#     anyway. The success body says draft and publishing stays the user's call.
-#   * A ``create`` flag, because ``set_react_source_file`` (like its svelte peer)
-#     refuses a path that is not already in the map, and "add a testimonials
-#     section" needs a NEW file plus an ``src/App.tsx`` edit. It requires
-#     ``new_source`` and requires the path to be ABSENT, so it cannot overwrite a
-#     real component.
-#   * It runs ``_require_sites_plan_or_error``. ``edit_svelte_component`` does not,
-#     which is an asymmetry in that tool rather than a precedent for this one.
-# The reserved-path guard is the load-bearing part: without the same normalization
-# create uses, an edit could shadow the prerender shell (index.html,
-# paw-prerender.mjs, ``src/paw/``) or hand-write paw.dependencies.json. So the policy
-# lives in ``pocketpaw_ee.sites.react_paths`` and both writers call it — the
-# constants below are re-exports.
-#
-# Updated: 2026-08-07 (RX-2 — the agent can select the react engine) — added a
-# FIFTH create tool ``create_react_site`` for the Paw Sites "react track" (the
-# engine RX-1 registered). It mirrors ``create_html_site`` (the agent IS the
-# author; a {relative_path: file_contents} source MAP is persisted verbatim via
-# ``agent_create(engine="react", source=<map>, type_="site", pattern="landing",
-# ripple_spec=None, trusted=True)`` — no ``assemble_*`` step, no rippleSpec, no
-# catalog gate) with two react-specific differences:
-#
-#   * VALIDATION is two-sided. The required key is the ``src/App.tsx``
-#     composition root (both generated entries import it by that exact path), and
-#     the map is ALSO rejected when it writes a generator-owned path — the build
-#     shell (index.html / package.json / vite.config.ts / paw-prerender.mjs) or
-#     the ``src/paw/`` namespace. paw-sites' react-scaffold.ts throws on the same
-#     collision; checking here turns a build-time throw far from the authoring
-#     turn into an actionable create error.
-#   * There is an ``interactive`` argument, the react spelling of MT-1's
-#     per-site ``keeps_client_bundle``. Edited (feat/sites-js-by-default): it is
-#     now TRI-STATE. Omitting it persists ``None`` — no declaration — and publish
-#     resolves that from ``sites_keep_client_bundle_default`` (True by default),
-#     so an unflagged interactive component now HYDRATES instead of silently
-#     doing nothing. It is still forwarded explicitly when the agent passes it,
-#     because an explicit True/False beats the setting in both directions and
-#     ``False`` is the only way to ship a page with no bundle at all. Coercing
-#     the omitted case to ``False`` here (the pre-edit behaviour) would record a
-#     decision the agent never made and hold every react site out of the default.
-#
-# This is OPT-IN like html was: the description steers the agent here ONLY on an
-# explicit React request or a genuine interactivity need; the default create stays
-# create_html_site. The authoring brain is the bundled
-# ``pocketpaw-create-react-site`` skill, which composes with (never restates)
-# ``pocketpaw-design-taste``.
-#
-# Updated: 2026-07-17 (fix/sites-draft-visible — a DRAFT lists in the gallery) —
-# every create handler (landing / svelte / html / dynamic) now mints a DRAFT Site
-# doc right after the pocket is persisted, via the shared best-effort helper
-# ``_mint_draft_site`` → ``sites.service.create_draft_site``. Draft-first create
-# (pocketpaw#1744) persisted the site POCKET but no Site doc, and the /sites gallery
-# lists Site docs — so a plain create appeared in neither the All nor the Draft
-# filter until a publish first minted one. Minting the draft doc (``deployed=False``
-# — a draft, NOT a deploy, NO build, NO billing) keyed on the stable per-pocket id
-# publish upserts makes the draft list immediately and flip live in place on a later
-# publish (one doc per pocket). Best-effort: the pocket already exists (the primary
-# contract), so a mint failure logs and returns rather than failing the create.
-#
-# Updated 2026-06-14 (feat/dynamic-sites-authoring — Paw Sites "Dynamic track",
-# RFC 12 A2) — added the create tool ``create_dynamic_site``. It mirrors
-# ``create_svelte_site`` (the agent IS the author; the payload is persisted
-# verbatim via ``agent_create`` with ``trusted=True`` and the post-create
-# session-bind + SSE side effects on the SAME ``pocketpaw_sites_manager`` server;
-# it also runs the same identity → record_tool_call → validate →
-# _require_sites_plan_or_error plan gate the other create handlers do) but the
-# payload is a rippleSpec carrying the DYNAMIC blocks (``objects`` / ``sources`` /
-# ``actions`` / ``auth``) that back the published site with the customer's own live
-# Cloudflare D1. There is no ``assemble_*`` step. It persists via
-# ``agent_create(type_="site", pattern="dynamic", ripple_spec=<spec>,
-# engine="ripple", trusted=True)``: a dynamic site IS a ripple-engine site whose
-# spec carries the dynamic declarations as sibling keys, so publish_pocket carries
-# them through generator_client.build() unchanged and the paw-sites generator
-# scaffolds the D1 migration + read/write remote functions off the same spec.
-# ``_validate_dynamic_spec`` fails the create CLOSED on a spec that isn't actually
-# dynamic (no objects, or no sources/actions/auth) so the agent fixes it instead
-# of persisting a static page through the dynamic tool.
-#
-# Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — create_svelte_site
-# now accepts a DYNAMIC svelte site. The ``source`` envelope may carry live-data
-# bindings (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the
-# {path: contents} file map: the per-value string check now EXEMPTS those binding
-# keys (their values are lists/bools), the JSON schema's ``source`` is loosened to
-# ``additionalProperties: true``, and the handler stamps ``pattern="dynamic"`` when
-# any binding is present (else ``pattern="landing"`` for a static marketing site —
-# unchanged). The generator (generator_client._split_svelte_source) peels the
-# bindings out of ``source`` at publish and passes them as flat siblings on the
-# DSV-1 GenerateInput. Required-file validation is untouched — binding keys never
-# satisfy a §4.3 required FILE key, so they are simply ignored by the missing-keys
-# check.
-#
-# Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — the create handlers now
-# call _require_sites_plan_or_error(workspace_id) right after input validation,
-# delegating to the shared sites.service.require_sites_plan gate. Sites is the
-# "sites" plan feature (go+); these create tools reach agent_create directly and
-# bypassed the REST router's require_plan_feature("sites") gate, so a free-plan
-# workspace could create + (then publish) a live site that GET /sites 403'd. On a
-# disallowed plan the handler now returns the plan.feature_denied MCP error
-# ("Sites requires the Go plan — upgrade, or switch workspace") so the chat
-# agent surfaces the upgrade message instead of a phantom-created site.
-# Updated: 2026-06-25 (decouple-sites-from-fabric) — the gate moved off the
-# overloaded "fabric" flag onto the dedicated "sites" flag (go+); the Fabric
-# ontology keeps "fabric" (enterprise-only).
-#
-# Updated: 2026-06-04 (feat/sites-svelte-engine) — added the SECOND deterministic
-# create tool ``create_svelte_site`` for the Paw Sites "Svelte track". It mirrors
-# ``create_landing_site`` (same direct ``agent_create`` persistence, same
-# session-bind + SSE side effects, same one server) but the payload is a
-# hand-written SvelteKit ``source`` MAP ``{relative_path: file_contents}`` (the
-# pocketpaw-create-svelte-site skill authors it via the design skills) instead of
-# a ``content`` copy object. There is no ``assemble_*`` step — the agent IS the
-# author — so the tool persists ``source`` verbatim via ``agent_create(
-# engine="svelte", source=<map>, type_="site", pattern="landing",
-# ripple_spec=None, trusted=True)``. ``trusted=True`` is correct here for a
-# different reason than the landing tool: there is NO rippleSpec to gate at all
-# (the catalog walk only runs on a non-null spec), so the source files pass
-# straight through to persistence and the generator materializes them at publish.
-#
-# Updated: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added a THIRD
-# tool ``edit_svelte_component`` for targeted edits of a PUBLISHED svelte site.
-# It takes ``pocket_id`` + ``component_path`` + the FULL ``new_source`` for one
-# file, and delegates to ``sites_service.edit_svelte_component`` (persist the one
-# file via the pockets service, then republish; roll back + leave the prior
-# deploy if the rebuild's smoke gate fails). It registers on the SAME
-# ``pocketpaw_sites_manager`` server as create + publish (see sites.py) so the
-# create → publish → edit hops sit side by side for the chat agent.
-#
-# Updated: 2026-06-18 (fix/sites-edit-draft-not-publish, BUG 2) — an edit now
-# stages a DRAFT PREVIEW, not a live publish, so the success result no longer
-# narrates "published"/"republished"/"live at". ``_edit_svelte_component_handler``
-# returns ``{ok, status:"draft", is_live:false, site:{..., preview_url, deployed},
-# component_path, message}`` with a message that says the change is a draft preview
-# (not live), the url is a PREVIEW (not the published site), and the user must click
-# "Submit for review" to publish. The tool docstring the agent reads was reworded to
-# match. The create + publish tools are unchanged (publish is a real live deploy).
-#
-# Updated: 2026-06-18 (feat/sites-diff-edit, P3) — ``edit_svelte_component`` now
-# accepts a TARGETED diff: ``edits=[{old_string, new_string}, ...]`` (search/replace
-# blocks like the built-in Edit tool) as an ALTERNATIVE to the full ``new_source``,
-# so the agent emits ONLY the change for a small edit instead of regenerating the
-# whole file (the dominant edit-latency cost). Exactly one of ``edits`` /
-# ``new_source`` is required (``new_source`` dropped from the schema's ``required``).
-# The handler validates the diff SHAPE (a non-empty list of string {old_string,
-# new_string} dicts) and forwards both fields to ``sites_service.edit_svelte_component``,
-# which applies the blocks to the pocket's CURRENT source (apply_edits) — a 0/>1
-# match raises ValidationError, relayed to the agent by code so it can retry. The
-# tool description steers the agent to PREFER ``edits`` for small changes and reserve
-# ``new_source`` for large rewrites.
-#
-# This is the decisive bypass of the dashboard-built ``pocket_specialist``
-# create machinery. The agent-mode pocket_specialist path (draft kit / plan kit /
-# subagent delegation + the validate-redraft loop) kept downgrading landing
-# sites to generic hero+grid+card widgets no matter what the prompt whitelisted,
-# because the LLM owned the page STRUCTURE. Here, the LLM provides COPY ONLY and
-# this tool assembles the marketing-widget structure in code (``landing_assembler
-# .assemble_landing_spec``), then persists it DIRECTLY through the pockets
-# service's ``agent_create`` — NO pocket_specialist, NO validate/redraft loop, NO
-# subagent. The structure cannot be downgraded.
-#
-# Mirrors the sibling ``sites.py`` (publish) server: ``create_sdk_mcp_server``
-# with an SDK import-guard, ``SERVER_NAME`` / ``*_TOOL_ID`` allowlist constants,
-# and ContextVar-sourced identity (the same ``current_workspace_id`` /
-# ``current_user_id`` accessors in ``ee.cloud.chat.agent_service`` the publish +
-# pocket-specialist servers read). Tool id namespaces under the SAME
-# ``pocketpaw_sites_manager`` server (``mcp__pocketpaw_sites_manager__
-# create_landing_site``) so the create + publish hops sit side by side for the
-# chat agent — the SKILL produces copy → create_landing_site → publish.
-#
-# Updated: 2026-07-12 (feat/sites-html-create-tool, HE-6) — added a FOURTH create
-# tool ``create_html_site`` for the Paw Sites "html track". It mirrors
-# ``create_svelte_site`` (the agent IS the author; a raw {relative_path:
-# file_contents} source MAP is persisted verbatim via ``agent_create(
-# engine="html", source=<map>, type_="site", pattern="landing", ripple_spec=None,
-# trusted=True)`` — no ``assemble_*`` step, no rippleSpec, no catalog gate) but the
-# map is plain HTML/CSS/JS with NO SvelteKit scaffold and NO bundler. Validation is
-# lighter than svelte's §4.3: the only required key is the entry ``index.html`` (the
-# edge serves it at the root); ``_missing_html_keys`` fails the create CLOSED
-# without it. html has NO live-data binding siblings (that is the svelte/ripple
-# dynamic track), so the whole map is {path: str} and every value must be a content
-# string — no exemption list. Publishing an html site skips the Node build entirely
-# (generator_client.needs_node_build("html") is False). This is OPT-IN: the tool
-# description steers the agent to it ONLY on an explicit raw/plain-HTML request; the
-# default marketing brain stays create_landing_site (ripple). The default flip is
-# HE-12, gated behind HE-11.
+# Invariants:
+#   * every handler resolves identity from the chat ContextVars, records the call,
+#     and runs ``_require_sites_plan_or_error`` (the same ``sites`` plan gate the
+#     publish path and the REST router use) before it writes;
+#   * creates persist a DRAFT and mint a draft Site doc (``_mint_draft_site``); they
+#     never publish. Edits stage a draft too, and report ``verification`` per the
+#     verify contract (static check now, build and browser verdict on the next call);
+#   * ``_INTEGRATION_NEXT_STEPS`` has one wiring line per registered provider, in
+#     client (paw.js / ``Paw.call``) and server (``pawCall`` with
+#     ``env.PAW_GATEWAY_TOKEN``) form where both exist. A provider added to the
+#     registry without a line fails ``test_integration_next_steps_cover_every_provider``.
 """Agent-side MCP surface for DETERMINISTIC Paw Site landing-page creation.
 
 A landing site is built from an LLM ``content`` copy object. This tool:
@@ -3990,14 +3738,113 @@ _INTEGRATION_WIRING = (
     "Paw.call(provider, action, args). Project Workers call the gateway server-side "
     "with env.PAW_GATEWAY_TOKEN."
 )
-# Providers wired another way than paw.js / the gateway: their next step replaces
-# ``_INTEGRATION_WIRING`` in the connect_site_integration message.
+
+#: The server half every gateway provider shares: framework templates call the same
+#: action from server code through the paw-integrations recipe's ``pawCall``.
+_SERVER_CALL = (
+    " Server code (framework templates): apply the paw-integrations recipe and call "
+    "pawCall(env, {call}) per request{then}; the platform sets env.PAW_GATEWAY_TOKEN, so "
+    "never request it or write it into a file."
+)
+
+
+def _gateway_wiring(client: str, call: str, then: str = "") -> str:
+    """A provider's wiring line: the paw.js form, then the same call server-side."""
+    return (
+        "Client (paw.js is injected into any page that uses it): "
+        + client
+        + (_SERVER_CALL.format(call=call, then=then))
+    )
+
+
+#: The wiring line ``connect_site_integration`` returns for each provider, so the
+#: per-provider detail lives here and not in a skill. One entry per registered
+#: provider (``test_integration_next_steps_cover_every_provider``); the action names
+#: and args are the providers' own ``ActionSpec`` models, not prose.
 _INTEGRATION_NEXT_STEPS = {
+    "newsletter": _gateway_wiring(
+        '<form data-paw-subscribe> with an <input type="email" name="email">, or '
+        "Paw.call('newsletter', 'subscribe', {email}).",
+        "'newsletter', 'subscribe', { email }",
+    ),
+    "stripe": _gateway_wiring(
+        'a buy button is <button data-paw-checkout="<catalog product id>"> (add '
+        'data-qty="2" for a fixed quantity). The price is read from the catalog at '
+        "checkout, so a printed price is display only: never put a price or currency "
+        "in the button.",
+        "'stripe', 'create_checkout', { product_ref, qty }",
+        " and redirect to result.url",
+    ),
+    "razorpay": _gateway_wiring(
+        "data-paw-checkout is Stripe only, so the buy button runs "
+        "Paw.call('razorpay', 'create_checkout', {product_ref, qty}) and opens "
+        "result.url. Send the catalog product id, never a price.",
+        "'razorpay', 'create_checkout', { product_ref, qty }",
+        " and redirect to result.url",
+    ),
+    "shopify": _gateway_wiring(
+        "a product grid renders Paw.call('shopify', 'list_products', {limit, cursor}) "
+        "(prices are in minor units); a buy button runs Paw.call('shopify', "
+        "'create_cart_checkout', {variant_id, qty}) and opens result.url.",
+        "'shopify', 'list_products' | 'create_cart_checkout', args",
+    ),
+    "google_sheets": _gateway_wiring(
+        "the form submits Paw.call('google_sheets', 'append_row', {fields}) with "
+        "string values; each key becomes a column.",
+        "'google_sheets', 'append_row', { fields }",
+    ),
+    "hubspot": _gateway_wiring(
+        "the lead form submits Paw.call('hubspot', 'create_contact', {email, "
+        "firstname, lastname, phone, company, message}).",
+        "'hubspot', 'create_contact', args",
+    ),
+    "zoho_crm": _gateway_wiring(
+        "the lead form submits Paw.call('zoho_crm', 'create_lead', {email, "
+        "first_name, last_name, phone, company, message}).",
+        "'zoho_crm', 'create_lead', args",
+    ),
+    "airtable": _gateway_wiring(
+        "the form submits Paw.call('airtable', 'create_record', {fields}); keys must "
+        "match the table's text field names.",
+        "'airtable', 'create_record', { fields }",
+    ),
+    "mailchimp": _gateway_wiring(
+        "the signup form submits Paw.call('mailchimp', 'subscribe', {email, "
+        "first_name, last_name}).",
+        "'mailchimp', 'subscribe', args",
+    ),
+    "brevo": _gateway_wiring(
+        "the signup form submits Paw.call('brevo', 'subscribe', {email, first_name, last_name}).",
+        "'brevo', 'subscribe', args",
+    ),
+    "notion": _gateway_wiring(
+        "a blog or news list renders Paw.call('notion', 'list_entries', {limit, "
+        "cursor}) and an entry page Paw.call('notion', 'get_entry', {id}); set text "
+        "with textContent, never innerHTML.",
+        "'notion', 'list_entries' | 'get_entry', args",
+    ),
     "supabase": "Once the owner picks a project, its URL and publishable key are "
     "provisioned as the SUPABASE_URL and SUPABASE_ANON_KEY site secrets; apply the "
     "supabase recipe and skip its step that requests them. SUPABASE_SERVICE_ROLE_KEY "
     "is off by default: only if an admin job needs it, ask the owner to turn on Admin "
     "access for Supabase in Connections.",
+    "calendly": "Search the web for Calendly's current inline embed snippet and use "
+    "it with the owner's link: in the page HTML on static, in a page component on a "
+    "framework template. There are no gateway calls.",
+    "cal_com": "Search the web for Cal.com's current inline embed snippet and use it "
+    "with the owner's link: in the page HTML on static, in a page component on a "
+    "framework template. There are no gateway calls.",
+    "turnstile": "Nothing to write: paw.js shows the challenge itself when a write "
+    "call (data-paw-checkout, data-paw-subscribe, Paw.call) needs one, and server "
+    "calls with env.PAW_GATEWAY_TOKEN skip it. The widget is made for the site's "
+    "address, so after a FIRST publish, publish once more to put it on the live page.",
+    "social_login": "Visitor sign-in with Google or GitHub, framework templates "
+    "only: apply the better-auth, paw-integrations and paw-social-login recipes "
+    "(site plan). The buttons are plain links, "
+    '<a href="/api/paw-auth/start?provider=google&callbackURL=/account">, one per '
+    "provider the owner turned on (list_site_integrations, settings.providers). No "
+    "OAuth client id or secret goes anywhere. On a static site, say sign-in needs a "
+    "framework template.",
 }
 
 
@@ -4079,8 +3926,8 @@ async def _connect_site_integration_handler(args: dict) -> dict:
                 "list_site_integrations shows it as settings.url once set. "
             )
             + f"Put {provider.name}'s standard inline embed markup in the page with that "
-            "link. Never invent a link."
-        )
+            "link. Never invent a link. " + _INTEGRATION_NEXT_STEPS.get(provider.id, "")
+        ).strip()
     elif view.status == "connected":
         wiring = _INTEGRATION_NEXT_STEPS.get(provider.id, _INTEGRATION_WIRING)
         message = f"{provider.name} is ready on this site. " + wiring

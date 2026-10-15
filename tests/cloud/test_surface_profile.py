@@ -1,24 +1,10 @@
 # test_surface_profile.py — SurfaceProfile descriptor + resolve_profile resolver.
 #
-# Created: 2026-06-05 (feat/surface-profile-bias-kill) — RED-first tests for the
-# new typed SurfaceProfile primitive and its per-kind resolver, the data
-# backbone of the "ripple-default bias" fix.
-#
-# Modified: 2026-06-05 (feat/sites-svelte-engine) — RED-first tests for making
-# ``resolve_profile`` META-AWARE on the /sites row. The static table from PR 1
-# turned ripple OFF for /sites UNCONDITIONALLY, but /sites has THREE modes and
-# only ONE should lose ripple:
-#   * create + svelte  (meta.engine == "svelte", no pocket_id)  → ripple OFF,
-#     deny the two ripple-create tools, surface the create-svelte-site skill.
-#   * create + ripple  (meta.engine None/"ripple", no pocket_id) → ripple ON,
-#     NO deny — this is the default marketing brain that AUTHORS a ripple page.
-#   * refine           (meta.pocket_id set, any engine)          → ripple ON,
-#     NO deny — edits the existing ripple landing spec via pocket_specialist__edit.
-# refine WINS over engine (a pocket_id present means refine even if engine=="svelte").
-# The svelte-create assertions below stay GREEN (the static row already matched
-# that case); the ripple-create + refine assertions are the RED drivers — they
-# expect ``ripple_mode="on"`` / empty deny but the static table returns "off"
-# with the deny set for every /sites meta today.
+# /sites is meta-aware: a NEW-site create (no pocket, no site id, no brief) is
+# always a project, so it drops ripple, denies the old per-engine authoring tools
+# and loads the ``pocketpaw-site`` skill whatever create-time engine hint it has;
+# a REFINE (pocket set) keeps ripple only for a ripple site or an unknown engine.
+# Every other kind falls through to the ripple-on default.
 
 from __future__ import annotations
 
@@ -38,40 +24,21 @@ def _own_deny(profile) -> frozenset[str]:
 
 
 def test_sites_profile_turns_ripple_off():
-    """The /sites SVELTE-CREATE surface hand-authors a Svelte Paw Site — the
-    ripple LAW is wrong there, so its profile turns ripple off.
-
-    NOTE (feat/sites-svelte-engine): this asserts the SVELTE-create mode only.
-    The original PR-1 version passed a bare ``SurfaceMeta()`` (which now resolves
-    to the ripple-CREATE mode that KEEPS ripple), so it was the over-reach that
-    turned ripple off for ALL /sites. It is now pinned to ``engine="svelte"`` so
-    it stays a valid svelte-omit assertion and does not contradict
-    ``test_resolve_profile_sites_ripple_create_keeps_ripple``."""
-    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
-    assert isinstance(profile, SurfaceProfile)
-    assert profile.ripple_mode == "off"
+    """A new-site create hand-authors files, so its profile turns ripple off for
+    every create-time engine hint, ripple included."""
+    for engine in (None, "html", "ripple", "svelte", "react", "project"):
+        profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine=engine))
+        assert isinstance(profile, SurfaceProfile)
+        assert profile.ripple_mode == "off", engine
 
 
 def test_sites_profile_declares_deny_set_and_skill():
-    """The SVELTE-create /sites profile denies the ripple-authoring MCP tools
-    and surfaces the svelte-site skill so the agent is physically unable to
-    fall back to a ripple landing page.
-
-    NOTE (feat/sites-svelte-engine): pinned to ``engine="svelte"`` for the same
-    reason as ``test_sites_profile_turns_ripple_off`` — the deny set + skill
-    belong to the svelte-create mode, not to every /sites meta."""
+    """The create profile denies the old per-engine authoring tools and surfaces the
+    one platform skill, so the agent cannot fall back to an old create track."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
-    assert (
-        _own_deny(profile)
-        == frozenset(
-            {
-                "mcp__pocketpaw_sites_manager__create_landing_site",
-                "mcp__pocketpaw_pocket_specialist__create",
-            }
-        )
-        | _SITES_BUILTIN_DENY
-    )
-    assert "pocketpaw-create-svelte-site" in profile.skill_names
+    assert _own_deny(profile) == _OLD_AUTHORING_DENY | _SITES_BUILTIN_DENY
+    assert "pocketpaw-site" in profile.skill_names
+    assert "pocketpaw-create-svelte-site" not in profile.skill_names
 
 
 def test_generic_profile_keeps_ripple_on():
@@ -105,22 +72,20 @@ def test_default_profile_has_no_denies_or_skills():
 
 
 # ---------------------------------------------------------------------------
-# /sites is META-AWARE: only the svelte-create mode loses ripple.
-# (feat/sites-svelte-engine)
-#
-# The PR-1 static row turned ripple OFF for /sites for EVERY meta. That is
-# wrong: /sites carries three modes, distinguished by ``meta``:
-#   * svelte create  — engine="svelte", no pocket_id  → ripple OFF + deny set.
-#   * ripple create  — engine None/"ripple", no pocket_id → ripple ON, no deny.
-#   * refine         — pocket_id set (any engine)      → ripple ON, no deny.
-# ``resolve_profile`` must read ``meta`` to tell them apart, with refine winning
-# over engine (pocket_id present ⇒ refine even if engine=="svelte").
+# /sites is META-AWARE: create (any engine hint) vs refine (the site's own engine).
 # ---------------------------------------------------------------------------
 
 
-_RIPPLE_CREATE_DENY = frozenset(
+_OLD_AUTHORING_DENY = frozenset(
     {
         "mcp__pocketpaw_sites_manager__create_landing_site",
+        "mcp__pocketpaw_sites_manager__create_dynamic_site",
+        "mcp__pocketpaw_sites_manager__create_html_site",
+        "mcp__pocketpaw_sites_manager__create_svelte_site",
+        "mcp__pocketpaw_sites_manager__create_react_site",
+        "mcp__pocketpaw_sites_manager__edit_html_file",
+        "mcp__pocketpaw_sites_manager__edit_svelte_component",
+        "mcp__pocketpaw_sites_manager__edit_react_component",
         "mcp__pocketpaw_pocket_specialist__create",
     }
 )
@@ -132,29 +97,19 @@ _SITES_BUILTIN_DENY = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"
 
 
 def test_resolve_profile_sites_svelte_create_disables_ripple():
-    """GUARD (passes today): the svelte-CREATE mode (engine="svelte", no
-    pocket_id) hand-authors SvelteKit, so ripple is OFF, the two ripple-create
-    tools are denied, and the create-svelte-site skill is surfaced. This is the
-    ONLY /sites mode that loses ripple."""
+    """A svelte hint on a new site only picks the sveltekit template in the
+    preamble; the profile is the shared create profile."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
     assert profile.ripple_mode == "off"
-    assert _own_deny(profile) == _RIPPLE_CREATE_DENY | _SITES_BUILTIN_DENY
-    assert "pocketpaw-create-svelte-site" in profile.skill_names
+    assert _own_deny(profile) == _OLD_AUTHORING_DENY | _SITES_BUILTIN_DENY
 
 
-def test_resolve_profile_sites_ripple_create_keeps_ripple():
-    """RED DRIVER (fails today): the ripple-CREATE mode AUTHORS a ripple
-    marketing landing page, so it KEEPS ripple on and denies NOTHING. Both the
-    default (``engine=None``) and the explicit ``engine="ripple"`` resolve the
-    same way. The PR-1 static table wrongly returns ``ripple_mode="off"`` with
-    the deny set for these."""
-    # ``engine=None`` is html create since 2026-09-27 (ripple off, asks via ask_user).
-    for meta in (SurfaceMeta(engine="ripple"),):
-        profile = resolve_profile(SurfaceKind.SITES, meta)
-        assert profile.ripple_mode == "on", f"ripple-create meta {meta!r} must keep ripple"
-        assert _own_deny(profile) == _SITES_BUILTIN_DENY, (
-            f"ripple-create meta {meta!r} denies only the file/shell built-ins"
-        )
+def test_resolve_profile_sites_ripple_create_no_longer_keeps_ripple():
+    """Ripple is out for new sites: a ripple hint maps to the static template and
+    gets the same ripple-off create profile."""
+    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="ripple"))
+    assert profile.ripple_mode == "off"
+    assert _own_deny(profile) == _OLD_AUTHORING_DENY | _SITES_BUILTIN_DENY
 
 
 def test_resolve_profile_sites_refine_keeps_ripple():

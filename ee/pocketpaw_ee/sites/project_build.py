@@ -32,7 +32,8 @@
 # Invariants: nothing here runs author code on this host; the content hash is the
 # source alone, so the site config (the Site doc's id + signed key) never moves it:
 # a draft keeps the paw.js it was built with, and publish re-applies paw.js
-# with the live config (:func:`apply_paw_client_to_bundle`, idempotent). The build log
+# with the live config (:func:`apply_paw_client_to_bundle`, idempotent) and resolves
+# the lead-form capture placeholders (:func:`apply_capture_tokens_to_bundle`). The build log
 # is scrubbed (``verify_diagnostics.scrub_log_text``) before it is stored;
 # ``preview_mode`` is ``"full"`` when the assets are the whole site or a draft Worker
 # serves the build (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``; its fallback
@@ -371,6 +372,49 @@ def apply_paw_client_to_bundle(
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
     return True
+
+
+def apply_capture_tokens_to_bundle(
+    root: Path, manifest: Mapping[str, Any], site_config: Any
+) -> int:
+    """Publish-time lead-form placeholders over a materialized bundle under ``root``.
+
+    A contact form on a project site's static pages is written to the same native
+    capture contract the html lane uses (``__CAPTURE_API_BASE__``, ``__SITE_ID__``,
+    ``__CAPTURE_SIGNED_KEY__``; ``generator_client._resolve_capture_tokens``), and
+    the author never has the real values. Replace them in the .html pages of the
+    assets dir with the live site config. Returns how many pages changed; a site with
+    no capture config (no signed key yet) is left alone. Idempotent: a resolved page
+    has no placeholders left."""
+    from pocketpaw_ee.sites import paw_client
+
+    cfg = paw_client.client_config(site_config)
+    rel = safe_rel(manifest.get("assetsDir"))
+    if cfg is None or rel is None or rel == ".":
+        return 0
+    assets_dir = root.joinpath(*rel.split("/"))
+    if not assets_dir.is_dir():
+        return 0
+    values = {
+        "__CAPTURE_API_BASE__": cfg["api"],
+        "__SITE_ID__": cfg["siteId"],
+        "__CAPTURE_SIGNED_KEY__": cfg["siteKey"],
+    }
+    changed = 0
+    for page in assets_dir.rglob("*"):
+        if not page.is_file() or page.is_symlink() or page.suffix.lower() not in (".html", ".htm"):
+            continue
+        try:
+            text = page.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        resolved = text
+        for token, value in values.items():
+            resolved = resolved.replace(token, value)
+        if resolved != text:
+            page.write_bytes(resolved.encode("utf-8"))
+            changed += 1
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +1025,7 @@ __all__ = [
     "STATIC_OUT_DIR",
     "STATIC_ROOT_EXCLUDES",
     "TEMPLATE_MANIFEST",
+    "apply_capture_tokens_to_bundle",
     "apply_paw_client_to_bundle",
     "build_no_build_draft",
     "build_record_key",

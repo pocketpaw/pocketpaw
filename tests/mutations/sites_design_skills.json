@@ -1,9 +1,9 @@
 [
   {
-    "label": "the create profile stops naming the design skills — svelte/react create advertises four skills in <design-skills> that a non-empty skill_names allowlist makes unloadable, so every trigger fires into nothing",
+    "label": "the create profile stops naming the design skills: the create preamble advertises skills in <design-skills> that a non-empty skill_names allowlist makes unloadable, so every trigger fires into nothing",
     "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
-    "find": "            skill_names=frozenset({authoring_skill}) | _SITES_CREATE_DESIGN_SKILLS,",
-    "replace": "            skill_names=frozenset({authoring_skill}),",
+    "find": "        skill_names=frozenset({_SITES_CREATE_SKILL}) | _SITES_CREATE_DESIGN_SKILLS,",
+    "replace": "        skill_names=frozenset({_SITES_CREATE_SKILL}),",
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_create_skill_names_cover_the_advertised_skills"
     ]

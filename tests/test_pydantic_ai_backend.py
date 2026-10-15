@@ -2134,7 +2134,7 @@ async def test_a_restricted_run_does_not_reuse_the_unrestricted_agent():
 async def test_the_real_sites_deny_set_removes_the_ripple_fallback():
     """Pinned to the LIVE ``/sites`` profile, not a hand-written double.
 
-    ``/sites`` svelte-create denies ``pocket_specialist__create`` so the agent
+    ``/sites`` new-site create denies ``pocket_specialist__create`` so the agent
     cannot fall back to building a rippleSpec landing page — prose-only "do not
     call the ripple tool" routing was proven to fail (claude_sdk:1865). On this
     backend that same capability is the bridged ``create_pocket``, so matching
@@ -2145,7 +2145,7 @@ async def test_the_real_sites_deny_set_removes_the_ripple_fallback():
     registry = pytest.importorskip(
         "pocketpaw_ee.cloud.surface.surface_registry", reason="pocketpaw-ee not installed"
     )
-    deny = registry._SITES_SVELTE_CREATE_DENY | registry._SITES_BUILTIN_DENY
+    deny = registry._SITES_LEGACY_AUTHORING_DENY | registry._SITES_BUILTIN_DENY
 
     backend = _backend_with_model(TestModel())
     backend._custom_tools = _bridged("create_pocket", "shell", "read_file", "web_search")

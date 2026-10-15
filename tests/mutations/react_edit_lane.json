@@ -278,15 +278,6 @@
     ]
   },
   {
-    "label": "the react create step stops naming the edit tool, so a follow-up change goes back to a second create_react_site and a second site pocket",
-    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"`mcp__pocketpaw_sites_manager__edit_react_component` with the SAME \"",
-    "replace": "            \"`create_react_site` again with the SAME \"",
-    "tests": [
-      "tests/cloud/surface/test_sites_handler.py::test_react_create_step_routes_follow_up_changes_to_the_edit_tool"
-    ]
-  },
-  {
     "label": "the orphan-create signal is hardcoded off: a component nothing imports reports a clean success, which is the 2026-09-01 incident exactly",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    unreferenced = create and not react_path_is_referenced(",

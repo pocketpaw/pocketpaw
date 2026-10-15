@@ -195,7 +195,7 @@ class TestRegistration:
         create = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="project"))
         assert set(SITES_PROJECT_TOOL_IDS) <= set(create.allow_mcp_tool_ids or ())
         assert create.ripple_mode == "off"
-        assert "pocketpaw-create-project-site" in (create.skill_names or set())
+        assert "pocketpaw-site" in (create.skill_names or set())
         refine = resolve_profile(
             SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine="project")
         )
@@ -892,10 +892,9 @@ def test_create_and_refine_preambles_route_project_sites() -> None:
     from pocketpaw_ee.cloud.surface import SurfaceMeta
     from pocketpaw_ee.cloud.surface.handlers import sites as handler
 
-    assert handler._preamble_engine("project", default="html") == "project"
     create = handler._create_preamble(SurfaceMeta(engine="project"))
     assert 'engine="project"' in create
-    assert "pocketpaw-create-project-site" in create
+    assert "`pocketpaw-site`" in create
     assert "start_site_from_template" in create and "run_site_build" in create
     assert "request_site_secret" in create
     assert "create_html_site" not in create
@@ -905,6 +904,6 @@ def test_create_and_refine_preambles_route_project_sites() -> None:
     assert "mcp__pocketpaw_ask__ask_user" in refine
     assert "edit_html_file" not in refine
 
-    # The html default names the project route for full-stack asks.
+    # Every new site is a project now, the html default included.
     html = handler._create_preamble(SurfaceMeta())
-    assert "pocketpaw-create-project-site" in html
+    assert 'engine="project"' in html and "start_site_from_template" in html

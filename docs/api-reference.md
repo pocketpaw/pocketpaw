@@ -5752,11 +5752,42 @@ filter is the access check, and there is no plan gate because nothing is mutated
 
 ### Project sites (`engine: "project"`)
 
-A project site is a whole repo started from a paw-sites base template (Astro,
-TanStack Start, Vite + React + Hono, Next, SvelteKit on Cloudflare Workers). Twelve
-tools on the same server create and edit it (`ee/pocketpaw_ee/agent/mcp_servers/sites_project.py`);
-every one refuses a pocket of any other engine. The bundled skill
-`pocketpaw-create-project-site` teaches the loop and the template routing.
+A project site is a whole repo started from a paw-sites base template: `static`
+(hand-written HTML and CSS, no build step) or a framework (Astro, TanStack Start,
+Vite + React + Hono, Next, SvelteKit on Cloudflare Workers). Twelve tools on the same
+server create and edit it (`ee/pocketpaw_ee/agent/mcp_servers/sites_project.py`);
+every one refuses a pocket of any other engine.
+
+**Every new site is a project.** The /sites create turn loads the bundled
+`pocketpaw-site` skill (the platform contract: the loop, integrations, secrets, plan
+rules) and these tools; the old `create_*_site` tools, the three old-engine edit
+tools and the pocket specialist's create are denied on that turn
+(`surface_registry._SITES_LEGACY_AUTHORING_DENY`). The agent starts from `static`
+unless the site needs server logic, accounts or a database, or the user names a
+framework. A create-time engine hint from the UI picks the template
+(`handlers/sites.py::CREATE_ENGINE_TEMPLATE`):
+
+| Hint (`meta.engine`) | Template |
+|------|------|
+| `html`, `ripple` | `static` |
+| `react` | `vite-react-hono` |
+| `svelte` | `sveltekit` |
+| `project`, none, anything else | the agent picks (`static` by default) |
+
+Refine of an existing html, svelte, react or ripple site is unchanged: it routes by
+the site's own engine to that engine's edit tool. Import-create (a captured design
+brief) still routes on the brief's engine.
+
+**Lead forms on `static`.** A contact form uses the native capture contract
+(`__CAPTURE_API_BASE__`, `__SITE_ID__`, `__CAPTURE_SIGNED_KEY__`); a project publish
+resolves those placeholders in the static pages with the live identity
+(`project_build.apply_capture_tokens_to_bundle`).
+
+**Integrations.** `connect_site_integration` answers with that provider's wiring line
+(`sites_create._INTEGRATION_NEXT_STEPS`, one per registered provider): the client form
+(`data-paw-checkout`, `data-paw-subscribe`, `Paw.call(provider, action, args)`) and the
+server form (`pawCall(env, provider, action, args)` through the `paw-integrations`
+recipe, authenticated by `env.PAW_GATEWAY_TOKEN`).
 
 | Tool | Args | What it does |
 |------|------|--------------|

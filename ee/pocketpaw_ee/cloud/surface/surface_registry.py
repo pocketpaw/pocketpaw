@@ -20,10 +20,12 @@
 # built-in or a granted id (/code denies the backend-disk built-ins, ``Agent`` and
 # ``Skill``; /other-hand denies the two pocket-creation ids); ``exclusive_tools``
 # (the public concierge) offers only the allow-listed tools. ``skill_names`` is an
-# exact ALLOWLIST that suppresses the bundled plugin, so /sites create names its
-# design skills explicitly (sourced from handlers/sites.py so advertised ==
-# allowed). A deny-only profile still needs a ``system_message_override`` that
-# states the surface's own deliverable, or the trained-in default wins.
+# exact ALLOWLIST that suppresses the bundled plugin, so /sites create names
+# ``pocketpaw-site`` and its design skills explicitly (sourced from
+# handlers/sites.py so advertised == allowed) and denies the old per-engine
+# authoring tools; refine keeps them. A deny-only profile still needs a
+# ``system_message_override`` that states the surface's own deliverable, or the
+# trained-in default wins.
 # ``POCKETPAW_SITES_MCP_SERVERS`` grants external MCP servers to /sites alone.
 
 from __future__ import annotations
@@ -153,16 +155,24 @@ def _route_for(kind: SurfaceKind) -> str:
 # off the module-import path.
 # ---------------------------------------------------------------------------
 
-# The two ripple-authoring MCP tool ids the /sites hand-authored-component CREATE
-# modes forbid. Named for svelte because it was the only such mode until RX-2
-# added react; both share the set (see ``_SITES_AUTHORING_SKILL``), and the name
-# is kept rather than churned because it crosses into two test modules.
+# The old per-engine authoring tools a NEW-site create turn must not be offered.
+# Every new site is a project (``handlers/sites.py::_create_preamble``), so the five
+# ``create_*_site`` tools, the pocket specialist's create and the three old-engine
+# edit tools are denied there. They stay registered and allowed on REFINE, where an
+# existing html / svelte / react / ripple site still edits through them.
 # Spelled out here (the EE layer is the source of truth); they cross to the OSS
 # backend as a plain ``frozenset[str]`` via ``deny_mcp_tool_ids`` — never as an
 # imported ``pocketpaw_ee`` symbol (import-linter forbids EE→OSS imports).
-_SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
+_SITES_LEGACY_AUTHORING_DENY: frozenset[str] = frozenset(
     {
         "mcp__pocketpaw_sites_manager__create_landing_site",
+        "mcp__pocketpaw_sites_manager__create_dynamic_site",
+        "mcp__pocketpaw_sites_manager__create_html_site",
+        "mcp__pocketpaw_sites_manager__create_svelte_site",
+        "mcp__pocketpaw_sites_manager__create_react_site",
+        "mcp__pocketpaw_sites_manager__edit_html_file",
+        "mcp__pocketpaw_sites_manager__edit_svelte_component",
+        "mcp__pocketpaw_sites_manager__edit_react_component",
         "mcp__pocketpaw_pocket_specialist__create",
     }
 )
@@ -839,39 +849,21 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
     )
 
 
-# The bundled authoring skill each hand-authored-component create engine needs.
-# These two engines drop ripple (they write markup, not a widget spec), so the
-# agent's whole authoring brain arrives as a skill — an entry that names nothing
-# real leaves the surface with ZERO skills (see
-# ``test_every_surface_skill_name_resolves_to_a_real_skill``).
-#
-# Each skill composes with ``pocketpaw-design-taste`` rather than restating it:
-# design taste is engine-agnostic and reaches the agent EMBEDDED in the preamble
-# (``handlers/sites.py::_design_taste_system``), so it is deliberately absent from
-# this map — naming it here would ship the same bytes twice per turn.
-_SITES_AUTHORING_SKILL: dict[str, str] = {
-    "svelte": "pocketpaw-create-svelte-site",
-    "react": "pocketpaw-create-react-site",
-    # A whole repo from a base template (engine ``project``); edits files, not widgets.
-    "project": "pocketpaw-create-project-site",
-}
+#: The one authoring skill a NEW-site create turn loads: the platform contract for a
+#: project started from a template (``static`` by default). The old per-engine
+#: authoring skills are not named, and ``skill_names`` is an exact allowlist, so they
+#: cannot load on a create turn; refine keeps the wholesale bundled plugin.
+_SITES_CREATE_SKILL = "pocketpaw-site"
 
-# 2026-09-08 — the create-scoped design skills the svelte/react branch must ALSO
-# name. ``skill_names`` is an exact allowlist, not an addition: a non-empty set
-# suppresses the wholesale bundled plugin (``claude_sdk._should_load_bundled_plugin``
-# returns ``enabled and not skill_names``), so this branch has always run with
-# exactly ONE skill and every other bundled skill withheld. That suppression is
-# the feature — it is what stops ``pocketpaw-create-pocket`` firing on "build an
-# app with components and nice design" mid-site-build — so widening it back to the
-# full bundled set is NOT the fix. Naming the four create-scoped design skills
-# takes this branch from one skill to five and leaves the other bundled skills
-# withheld, which is the intent.
+# The create-scoped design skills the create branch must ALSO name. ``skill_names``
+# is an exact allowlist, not an addition: a non-empty set suppresses the wholesale
+# bundled plugin (``claude_sdk._should_load_bundled_plugin`` returns ``enabled and
+# not skill_names``). That suppression is the feature (it stops
+# ``pocketpaw-create-pocket`` firing mid-site-build), so the fix for a missing skill
+# is to name it here, never to widen back to the full bundled set.
 #
-# It is sourced from ``handlers/sites.py`` rather than re-listed here because the
-# create preamble ADVERTISES these same names, and a preamble naming a skill this
-# set omits would point the agent at something it cannot load. One list, two
-# readers, pinned by
-# ``test_sites_create_skill_names_cover_the_advertised_skills``.
+# Sourced from ``handlers/sites.py`` because the create preamble ADVERTISES these
+# same names; pinned by ``test_sites_create_skill_names_cover_the_advertised_skills``.
 _SITES_CREATE_DESIGN_SKILLS: frozenset[str] = sites.create_design_skill_names()
 
 #: Engines whose refine edits a ``source`` map (no widget spec), so refine drops ripple.
@@ -879,76 +871,47 @@ _SITES_SOURCE_REFINE_ENGINES: frozenset[str] = frozenset({"html", "svelte", "rea
 
 
 def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
-    """/sites is META-AWARE — inline ripple stays ON only where the site IS a ripple
-    spec (ripple create, ripple refine, or a refine whose engine is unknown).
+    """/sites is META-AWARE. Three shapes:
 
-      * refine (``meta.pocket_id`` set) of an html / svelte / react site edits a
-        ``source`` map, not a widget spec → DROP ripple (about 10k tokens of widget
-        catalog + delegation rule per turn the edit never uses). It asks through
-        ``ask_user``, exactly like html create. On refine ``meta.engine`` is the
-        SOURCE POCKET's engine, stamped server-side by
-        ``run_core._resolve_entity_profile``; refine of a ripple site, or one whose
-        engine could not be read, KEEPS ripple (sites default). Refine wins over the
-        create branches below: a ``pocket_id`` present is never a create.
-      * create + svelte/react (``meta.engine`` in ``_SITES_AUTHORING_SKILL``, no
-        ``pocket_id``) hand-authors components → DROP ripple, deny the two
-        ripple-create tools, surface that engine's authoring skill.
-      * create + html (``engine`` None/"html", no ``pocket_id``) → DROP ripple
-        (it asks through ``ask_user``); create + ripple → KEEP ripple.
+      * REFINE (``meta.pocket_id`` or ``meta.site_id`` set: the page of an existing
+        site). ``meta.engine`` is the SOURCE POCKET's engine, stamped server-side by
+        ``run_core._sites_refine_meta``. html / svelte / react / project sites edit a
+        ``source`` map, so they DROP ripple and ask through ``ask_user``; a ripple
+        site, or one whose engine could not be read, KEEPS ripple. Every sites tool
+        stays allowed, including the old per-engine edit tools, and skills stay
+        wholesale. A ``site_id`` alone counts as refine because ``build_preamble``
+        resolves it to the site's pocket; treating it as a create would deny the edit
+        tools the refine preamble names.
+      * IMPORT-CREATE (``meta.brief_id``): ``_frontend_preamble`` still routes on the
+        brief's engine and names the old create tools, so this keeps the earlier
+        create profile: ripple off, no deny, wholesale skills.
+      * CREATE (none of those): every new site is a project. Ripple off, the old
+        authoring tools denied (``_SITES_LEGACY_AUTHORING_DENY``), and exactly the
+        ``pocketpaw-site`` skill plus the create-scoped design skills. The create
+        hint in ``meta.engine`` only picks a template in the preamble; it never
+        changes this profile.
 
-    All modes scope to the sites authoring tools + general. The component-create
-    modes additionally deny the two ripple-create tools (deny runs AFTER allow).
-
-    react (RX-2) joins svelte rather than getting its own branch: the two differ
-    only in WHICH authoring skill they name. Sharing the branch is what keeps the
-    ripple_mode and the deny set from drifting apart between them — and the
-    ``ripple_on`` fork in ``handlers/sites.py::_create_preamble`` reads the same
-    split, so the preamble's ask-mechanism instruction matches what the surface
-    actually grants.
+    All shapes scope to the sites authoring tools and deny the file/shell built-ins
+    (no /sites mode authors on disk).
     """
     sites_allow = _mcp_tool_ids().sites_allow
-    if meta.pocket_id is not None and meta.engine in _SITES_SOURCE_REFINE_ENGINES:
+    if meta.pocket_id is not None or meta.site_id is not None:
+        return SurfaceProfile(
+            ripple_mode="off" if meta.engine in _SITES_SOURCE_REFINE_ENGINES else "on",
+            allow_mcp_tool_ids=sites_allow,
+            deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
+        )
+    if meta.brief_id is not None:
         return SurfaceProfile(
             ripple_mode="off",
             allow_mcp_tool_ids=sites_allow,
             deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
         )
-    authoring_skill = _SITES_AUTHORING_SKILL.get(meta.engine or "")
-    if meta.pocket_id is None and authoring_skill is not None:
-        return SurfaceProfile(
-            ripple_mode="off",
-            deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY,
-            allow_mcp_tool_ids=sites_allow,
-            # The BUNDLED skill's real name. svelte's was "create-svelte-site"
-            # until 2026-07-31, which matched nothing — and a non-empty
-            # skill_names suppresses the wholesale bundled plugin, so this
-            # surface ran with ZERO skills and the agent authored sites by hand
-            # instead of through the sites tools. Guarded by
-            # test_every_surface_skill_name_resolves_to_a_real_skill.
-            #
-            # UNION the create-scoped design skills (2026-09-08): because the set
-            # is an exact allowlist, the authoring skill alone would leave the
-            # create preamble's <design-skills> block naming four skills this
-            # branch cannot load. The other bundled skills stay withheld.
-            skill_names=frozenset({authoring_skill}) | _SITES_CREATE_DESIGN_SKILLS,
-        )
-    # html create (the default engine) hand-authors a static page, so it has no use
-    # for inline ripple: the widget catalog rode every html create only to render one
-    # ask widget. It asks through ``ask_user`` like svelte/react (2026-09-27,
-    # feat/sites-lean-prompt). Skills stay wholesale (no ``skill_names``).
-    if meta.pocket_id is None and (meta.engine or "html") == "html":
-        return SurfaceProfile(
-            ripple_mode="off",
-            allow_mcp_tool_ids=sites_allow,
-            deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
-        )
-    # Ripple-create + refine: keep ripple + the sites tool scope, but still drop the
-    # file/shell built-ins — no /sites mode authors on disk (refine edits the ripple
-    # spec through the pocket MCP tools, not the file system).
     return SurfaceProfile(
-        ripple_mode="on",
+        ripple_mode="off",
         allow_mcp_tool_ids=sites_allow,
-        deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
+        deny_mcp_tool_ids=_SITES_LEGACY_AUTHORING_DENY | _SITES_BUILTIN_DENY,
+        skill_names=frozenset({_SITES_CREATE_SKILL}) | _SITES_CREATE_DESIGN_SKILLS,
     )
 
 

@@ -18,21 +18,12 @@
     ]
   },
   {
-    "label": "the svelte create branch loses its anti-recreate clause, so a follow-up change in the same conversation mints a second site",
+    "label": "the new-site create step stops forbidding a second start_site_from_template, so a follow-up change in the same conversation mints a second site",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            + \"CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further \"\r\n            \"change the user asks for in this conversation — 'make the hero \"",
-    "replace": "            + \"\"",
+    "find": "        \"`write_site_files` on the SAME pocket_id, never a second \"",
+    "replace": "        \"`write_site_files` on the SAME pocket_id, or a fresh \"",
     "tests": [
-      "tests/cloud/surface/test_sites_handler.py"
-    ]
-  },
-  {
-    "label": "the ripple create branch loses its anti-recreate clause, so a follow-up change in the same conversation mints a second site",
-    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"track — the page is a widget spec, not hand-authored markup.\\n\"\r\n            \"CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further \"\r\n            \"change the user asks for in this conversation — 'change the phone \"",
-    "replace": "            \"track — the page is a widget spec, not hand-authored markup.\\n\"\r\n            \"\"",
-    "tests": [
-      "tests/cloud/surface/test_sites_handler.py"
+      "tests/cloud/surface/test_sites_handler.py::test_every_create_branch_forbids_the_re_create"
     ]
   }
 ]

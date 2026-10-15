@@ -4,7 +4,7 @@
 # an in-process build that never spends a sandbox, paw.js in a never-published draft's
 # preview (its key minted only on this lane, never sent to a sandbox), publish as an
 # assets-only Worker, ``project-build --site-config`` behind its generator version
-# guard, and the
+# guard, the lead-form capture placeholders resolved at publish, and the
 # PAW_GATEWAY_TOKEN binding. Daytona, Cloudflare and the paw-sites CLI are faked.
 from __future__ import annotations
 
@@ -575,6 +575,75 @@ async def test_publish_deploys_an_assets_only_worker_without_a_sandbox(
     assert 'data-site-key="site_key_live"' in call["index"]
     assert call["client"] == CLIENT
     assert call["agents"] is False
+
+
+FORM_PAGE = (
+    '<form method="POST" action="__CAPTURE_API_BASE__/capture/form">'
+    '<input type="hidden" name="paw_site_id" value="__SITE_ID__">'
+    '<input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__">'
+    '<input name="email"></form>'
+)
+
+
+def test_publish_resolves_the_lead_form_placeholders(tmp_path):
+    """A static page's contact form is written with the native capture placeholders;
+    publish swaps in the live identity, like the html lane does."""
+    root = tmp_path / "bundle"
+    (root / "dist" / "about").mkdir(parents=True)
+    (root / "dist" / "index.html").write_text(FORM_PAGE)
+    (root / "dist" / "about" / "index.html").write_text("<p>No form here</p>")
+    (root / "dist" / "styles.css").write_text("/* __SITE_ID__ stays in css */")
+    manifest = {"assetsDir": "dist"}
+
+    assert project_build.apply_capture_tokens_to_bundle(root, manifest, SITE_CONFIG) == 1
+    page = (root / "dist" / "index.html").read_text()
+    assert 'action="https://api.paw.test/api/v1/capture/form"' in page
+    assert 'value="site1"' in page and 'value="site_key_abc"' in page
+    assert "__" not in page.replace("paw_", "")
+    assert (root / "dist" / "about" / "index.html").read_text() == "<p>No form here</p>"
+    assert "__SITE_ID__" in (root / "dist" / "styles.css").read_text()
+    # Idempotent, and a site with no capture config yet is left alone.
+    assert project_build.apply_capture_tokens_to_bundle(root, manifest, SITE_CONFIG) == 0
+    bare = tmp_path / "bare"
+    (bare / "dist").mkdir(parents=True)
+    (bare / "dist" / "index.html").write_text(FORM_PAGE)
+    assert project_build.apply_capture_tokens_to_bundle(bare, manifest, {"siteId": "s"}) == 0
+    assert (bare / "dist" / "index.html").read_text() == FORM_PAGE
+
+
+@pytest.mark.asyncio
+async def test_a_static_site_publishes_its_contact_form_wired(beanie_test_db, monkeypatch):
+    form_site = {**NOBUILD, "index.html": f"<html><body>{FORM_PAGE}</body></html>"}
+    pocket_id = await _make_pocket(form_site)
+    site_id = str(sites_service._live_object_id("ws1", pocket_id))
+    monkeypatch.setattr(sites_service, "_default_artifact_store", lambda: _Store())
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "wfp")
+    monkeypatch.setenv("PAW_CAPTURE_API_BASE", "https://api.paw.test/api/v1")
+    pages: list[str] = []
+
+    async def _deploy_bundle(cf, *, script_name, build_dir, **_kw):
+        pages.append((Path(build_dir) / ".paw/static/index.html").read_text())
+        return SimpleNamespace(script_name=script_name, modules=0, assets=3, warnings=[])
+
+    monkeypatch.setattr(bundle_deploy, "deploy_bundle", _deploy_bundle)
+    await sites_service._deploy_site_doc(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        site_id=site_id,
+        signed_key="site_key_live",
+        site_name="Bakery",
+        ripple_spec=None,
+        theme={},
+        engine="project",
+        source=dict(form_site),
+        pattern="landing",
+        cloudflare=SimpleNamespace(),
+    )
+    (page,) = pages
+    assert 'action="https://api.paw.test/api/v1/capture/form"' in page
+    assert f'name="paw_site_id" value="{site_id}"' in page
+    assert 'name="paw_key" value="site_key_live"' in page
 
 
 # --------------------------------------------------------------- gateway token

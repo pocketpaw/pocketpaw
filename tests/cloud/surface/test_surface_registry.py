@@ -1,18 +1,13 @@
-# tests/cloud/surface/test_surface_registry.py — SR-2 registry guarantees.
-# Updated: 2026-09-27 (feat/sites-lean-prompt) — html create drops ripple; the
-# create preamble names design-taste and sites-craft instead of embedding them.
-# Updated: 2026-09-06 (feat/fx-mcp-server) — the /sites toolbelt pins FX_TOOL_IDS too.
+# tests/cloud/surface/test_surface_registry.py — the declarative SURFACES registry.
 #
-# Created: 2026-06-22 (feat/surface-registry-backend-profiles, SR-2) — guards the
-# two SR-2 additions to the declarative SURFACES registry:
-#   1. ``_assert_registry_complete`` — the startup consistency check that the
-#      registry is a clean 1:1 with ``SurfaceKind`` (no orphan rows, no dupes,
-#      no missing kinds). Tests inject a mutated row list and assert it RAISES.
-#   2. The SITES meta-fork now lives on the SITES row's ``profile_resolver``.
-#      We re-pin the three-mode branching through the public ``resolve_profile``
-#      to prove the registry sources the EXACT pre-SR-2 behavior: svelte-create
-#      drops ripple + denies the two ripple-create tools; ripple-create and
-#      refine keep ripple and deny nothing (refine wins over engine).
+# Guards ``_assert_registry_complete`` (a clean 1:1 with ``SurfaceKind``) and the
+# /sites meta-fork on the SITES row's ``profile_resolver``: a NEW-site create drops
+# ripple, denies the old per-engine authoring tools and loads exactly
+# ``pocketpaw-site`` plus the create-scoped design skills, whatever create-time
+# engine hint it carries; refine (a pocket or a site id) keeps every sites tool and
+# forks ripple on the site's own engine; import-create keeps the earlier profile.
+# Also pins the /sites authoring toolbelt allow-list and that every skill a profile
+# names resolves to a real skill.
 
 from __future__ import annotations
 
@@ -27,11 +22,30 @@ from pocketpaw_ee.cloud.surface.surface_registry import (
     generic,
 )
 
-_SITES_SVELTE_CREATE_DENY = frozenset(
+# The old per-engine authoring tools a new-site create turn is never offered.
+# Mirrors surface_registry._SITES_LEGACY_AUTHORING_DENY.
+_SITES_LEGACY_AUTHORING_DENY = frozenset(
     {
         "mcp__pocketpaw_sites_manager__create_landing_site",
+        "mcp__pocketpaw_sites_manager__create_dynamic_site",
+        "mcp__pocketpaw_sites_manager__create_html_site",
+        "mcp__pocketpaw_sites_manager__create_svelte_site",
+        "mcp__pocketpaw_sites_manager__create_react_site",
+        "mcp__pocketpaw_sites_manager__edit_html_file",
+        "mcp__pocketpaw_sites_manager__edit_svelte_component",
+        "mcp__pocketpaw_sites_manager__edit_react_component",
         "mcp__pocketpaw_pocket_specialist__create",
     }
+)
+
+# Every create-time engine hint the /sites UI can send for a new site.
+_CREATE_METAS = (
+    SurfaceMeta(),
+    SurfaceMeta(engine="html"),
+    SurfaceMeta(engine="ripple"),
+    SurfaceMeta(engine="svelte"),
+    SurfaceMeta(engine="react"),
+    SurfaceMeta(engine="project"),
 )
 
 # The file/shell built-ins every /sites mode drops (a dedicated sites agent has no
@@ -93,72 +107,59 @@ def test_completeness_check_fails_on_orphan_kind():
 # ---------------------------------------------------------------------------
 
 
-def test_sites_svelte_create_drops_ripple_and_denies():
-    """svelte-create (engine="svelte", no pocket_id) → ripple OFF + deny set +
-    the svelte authoring skill. The ONLY /sites mode that loses ripple."""
-    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
-    assert isinstance(profile, SurfaceProfile)
-    assert profile.ripple_mode == "off"
-    # svelte-create denies the two ripple-create tools AND the file/shell built-ins.
-    assert _own_deny(profile) == _SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY
-    # The BUNDLED name. This asserted "create-svelte-site" until 2026-07-31 —
-    # a literal never checked against a real skill, so the test passed for a
-    # year while the surface loaded no skills at all.
-    # ``test_every_surface_skill_name_resolves_to_a_real_skill`` is what stops
-    # a name and a reality diverging again.
-    assert "pocketpaw-create-svelte-site" in profile.skill_names
-
-
-def test_sites_react_create_drops_ripple_and_denies():
-    """RX-2: react-create (engine="react", no pocket_id) behaves exactly like
-    svelte-create — ripple OFF, the same deny set, and its OWN authoring skill.
-
-    react hand-authors markup, so it must not keep the ripple widget path; and
-    the ``ripple_on`` fork in ``handlers/sites.py::_create_preamble`` reads the
-    same split, so a profile that kept ripple here would leave the preamble
-    telling the agent to use the ask_user tool it no longer needs — and vice
-    versa, which is the worse direction (a ui-spec block on a ripple-off surface
-    renders as raw JSON at the user)."""
-    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="react"))
-    assert isinstance(profile, SurfaceProfile)
-    assert profile.ripple_mode == "off"
-    assert _own_deny(profile) == _SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY
-    assert "pocketpaw-create-react-site" in profile.skill_names
-    # It must NOT hand the react agent the svelte brain.
-    assert "pocketpaw-create-svelte-site" not in profile.skill_names
-
-
-def test_sites_component_engines_get_exactly_one_authoring_skill():
-    """Each hand-authored engine surfaces its OWN authoring brain and only that one.
-
-    ``skill_names`` is not additive in effect: a non-empty set SUPPRESSES the
-    wholesale bundled plugin, so this set is the COMPLETE skill surface for that
-    run. Two authoring brains would be contradictory instructions; the
-    engine-agnostic design-taste system deliberately is NOT here because it reaches
-    the agent EMBEDDED in the preamble, and naming it would ship the same bytes
-    twice.
-
-    Widened 2026-09-08: the set is now the one authoring brain UNION the
-    create-scoped design skills. The invariant this test protects did not change —
-    exactly one AUTHORING brain, and the rest of the bundled set still withheld.
-    The design skills are not authoring brains: they carry no build procedure and
-    no tool sequence, so they cannot contradict the engine's."""
-    for engine, expected, other in (
-        ("svelte", "pocketpaw-create-svelte-site", "pocketpaw-create-react-site"),
-        ("react", "pocketpaw-create-react-site", "pocketpaw-create-svelte-site"),
-    ):
-        profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine=engine))
-        assert profile.skill_names == frozenset({expected}) | _SITES_CREATE_DESIGN_SKILLS, (
-            f"engine={engine}"
+def test_sites_create_is_one_profile_for_every_engine_hint():
+    """Every new site is a project, so every create-time engine hint resolves to the
+    SAME profile: ripple off, the old authoring tools denied on top of the file/shell
+    built-ins, and exactly the ``pocketpaw-site`` skill plus the design skills."""
+    for meta in _CREATE_METAS:
+        profile = resolve_profile(SurfaceKind.SITES, meta)
+        assert isinstance(profile, SurfaceProfile)
+        assert profile.ripple_mode == "off", f"{meta!r}"
+        assert _own_deny(profile) == _SITES_LEGACY_AUTHORING_DENY | _SITES_BUILTIN_DENY, f"{meta!r}"
+        assert profile.skill_names == frozenset({"pocketpaw-site"}) | _SITES_CREATE_DESIGN_SKILLS, (
+            f"{meta!r}"
         )
-        # The other engine's brain must never leak in.
-        assert other not in profile.skill_names, f"engine={engine}"
-        # The suppression is the point: naming a narrow set is what keeps
-        # pocketpaw-create-pocket from firing on "build an app with components
-        # and nice design" in the middle of a site build.
-        assert "pocketpaw-create-pocket" not in profile.skill_names, f"engine={engine}"
-        # design-taste is a named design skill now that create stops embedding it.
-        assert "pocketpaw-design-taste" in profile.skill_names, f"engine={engine}"
+
+
+def test_sites_create_never_offers_an_old_engine_authoring_skill():
+    """``skill_names`` is an exact allowlist, so naming only ``pocketpaw-site`` is what
+    makes the old per-engine authoring skills (and create-pocket) unloadable on a
+    new-site turn."""
+    old = {
+        "pocketpaw-create-paw-site",
+        "pocketpaw-create-svelte-site",
+        "pocketpaw-create-react-site",
+        "pocketpaw-create-dynamic-site",
+        "pocketpaw-create-project-site",
+        "pocketpaw-edit-react-site",
+        "pocketpaw-create-pocket",
+    }
+    for meta in _CREATE_METAS:
+        names = resolve_profile(SurfaceKind.SITES, meta).skill_names
+        assert not (old & names), f"{meta!r} leaks {sorted(old & names)}"
+        assert "pocketpaw-design-taste" in names, f"{meta!r}"
+
+
+def test_sites_create_keeps_the_project_tools():
+    """The deny must not touch the tools the create preamble commands."""
+    from pocketpaw_ee.agent.mcp_servers.sites_project import SITES_PROJECT_TOOL_IDS
+
+    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta())
+    assert set(SITES_PROJECT_TOOL_IDS) <= set(profile.allow_mcp_tool_ids or ())
+    assert not set(SITES_PROJECT_TOOL_IDS) & set(profile.deny_mcp_tool_ids)
+    for kept in ("publish", "verify_site", "preview_site", "connect_site_integration"):
+        tid = f"mcp__pocketpaw_sites_manager__{kept}"
+        assert tid in (profile.allow_mcp_tool_ids or ()), tid
+        assert tid not in profile.deny_mcp_tool_ids, tid
+
+
+def test_sites_import_create_keeps_the_old_create_profile():
+    """Import-create (a captured brief) still routes on the brief's engine through the
+    old create tools, so it must not inherit the new-site deny."""
+    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(brief_id="b1"))
+    assert profile.ripple_mode == "off"
+    assert _own_deny(profile) == _SITES_BUILTIN_DENY
+    assert profile.skill_names == frozenset()
 
 
 def test_sites_create_skill_names_cover_the_advertised_skills():
@@ -167,7 +168,7 @@ def test_sites_create_skill_names_cover_the_advertised_skills():
     Two halves have to agree. ``handlers/sites.py::_design_skills_note("create")``
     NAMES design skills in the preamble and tells the agent to reach them with the
     ``Skill`` tool; ``_sites_profile`` decides which skills the run can actually
-    materialize. On svelte/react create the second half is an exact allowlist, so a
+    materialize. On create the second half is an exact allowlist, so a
     name advertised but not allowed is an instruction the agent cannot follow — the
     failure mode the whole ``skill_names`` mechanism exists to prevent, pointed the
     other way.
@@ -183,10 +184,10 @@ def test_sites_create_skill_names_cover_the_advertised_skills():
     }
     assert advertised, "the create preamble must advertise at least one design skill"
 
-    for engine in ("svelte", "react"):
-        profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine=engine))
+    for meta in _CREATE_METAS:
+        profile = resolve_profile(SurfaceKind.SITES, meta)
         missing = advertised - profile.skill_names
-        assert not missing, f"engine={engine} advertises unloadable skills: {sorted(missing)}"
+        assert not missing, f"{meta!r} advertises unloadable skills: {sorted(missing)}"
 
     # And the note the agent actually reads names exactly those.
     note = sites_handler._design_skills_note("create")
@@ -207,26 +208,6 @@ def test_sites_refine_wins_over_react_engine():
     assert profile.skill_names == frozenset()
 
 
-def test_sites_html_create_drops_ripple():
-    """html-create hand-authors a static page, so it drops inline ripple (and the
-    widget catalog that rode along only to render one ask widget) and asks through
-    ``ask_user``. It surfaces no dedicated skill. The preamble's ``ripple_on`` fork
-    reads the same split."""
-    for meta in (SurfaceMeta(), SurfaceMeta(engine="html")):
-        profile = resolve_profile(SurfaceKind.SITES, meta)
-        assert profile.ripple_mode == "off", f"{meta!r}"
-        assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"{meta!r}"
-        assert profile.skill_names == frozenset(), f"{meta!r}"
-
-
-def test_sites_ripple_create_keeps_ripple():
-    """ripple-create (engine "ripple", no pocket_id) -> ripple ON. Denies only the
-    file/shell built-ins (no ripple-create tool deny)."""
-    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="ripple"))
-    assert profile.ripple_mode == "on"
-    assert _own_deny(profile) == _SITES_BUILTIN_DENY
-
-
 def test_sites_refine_keeps_ripple_and_wins_over_engine():
     """refine (pocket_id set) of a ripple site, or one whose engine is unknown → ripple
     ON: it edits a ripple spec. A source-engine refine (svelte / react / html) drops it.
@@ -239,7 +220,7 @@ def test_sites_refine_keeps_ripple_and_wins_over_engine():
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"refine {meta!r} must keep ripple"
         assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"refine {meta!r}"
-    for engine in ("svelte", "react", "html"):
+    for engine in ("svelte", "react", "html", "project"):
         meta = SurfaceMeta(pocket_id="pkt_1", engine=engine)
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "off", f"refine {meta!r} must drop ripple"
@@ -247,13 +228,33 @@ def test_sites_refine_keeps_ripple_and_wins_over_engine():
         assert profile.skill_names == frozenset(), f"refine {meta!r}"
 
 
+def test_sites_refine_keeps_the_old_engine_edit_tools():
+    """Existing html / svelte / react / ripple sites still edit through their own
+    tools, so no refine denies them, including a refine that arrives with only the
+    site id (``build_preamble`` resolves it to the pocket)."""
+    for meta in (
+        SurfaceMeta(pocket_id="pkt_1", engine="html"),
+        SurfaceMeta(pocket_id="pkt_1", engine="svelte"),
+        SurfaceMeta(pocket_id="pkt_1", engine="react"),
+        SurfaceMeta(pocket_id="pkt_1", engine="ripple"),
+        SurfaceMeta(site_id="site_1"),
+    ):
+        profile = resolve_profile(SurfaceKind.SITES, meta)
+        assert not (_SITES_LEGACY_AUTHORING_DENY & profile.deny_mcp_tool_ids), f"{meta!r}"
+        assert _SITES_LEGACY_AUTHORING_DENY - {"mcp__pocketpaw_pocket_specialist__create"} <= set(
+            profile.allow_mcp_tool_ids or ()
+        ), f"{meta!r}"
+        assert profile.skill_names == frozenset(), f"{meta!r}"
+
+
 def test_sites_all_modes_drop_file_and_shell_builtins():
     """A dedicated sites agent never authors on disk — every /sites mode drops
     Bash/Read/Write/Edit/Glob/Grep/Agent, and NONE drop WebSearch/WebFetch/Skill
     (the agent still researches copy + loads the create-site skills)."""
     metas = (
-        SurfaceMeta(),  # ripple-create
-        SurfaceMeta(engine="svelte"),  # svelte-create
+        SurfaceMeta(),  # create
+        SurfaceMeta(engine="svelte"),  # create with a framework hint
+        SurfaceMeta(brief_id="b1"),  # import-create
         SurfaceMeta(pocket_id="pkt_1"),  # refine
     )
     kept = {"WebSearch", "WebFetch", "Skill"}
@@ -292,8 +293,8 @@ _TOOLBELT_IDS = (
 
 
 def _sites_create_metas():
-    """The two /sites CREATE modes (ripple + svelte) — both need the toolbelt."""
-    return (SurfaceMeta(), SurfaceMeta(engine="ripple"), SurfaceMeta(engine="svelte"))
+    """The /sites CREATE metas: every one needs the toolbelt."""
+    return _CREATE_METAS
 
 
 def test_sites_allowlist_includes_authoring_toolbelt():
@@ -392,11 +393,11 @@ def test_every_surface_skill_name_resolves_to_a_real_skill():
     unknown = sorted(referenced - known)
     assert not unknown, f"surface profiles name skills that do not exist: {unknown}"
 
-    # The scan must actually REACH the /sites authoring skills. Without this, a
+    # The scan must actually REACH the /sites authoring skill. Without this, a
     # refactor that stops surfacing them entirely leaves the loop above scanning a
     # smaller set, finding no unknown names, and passing — the same blindness in a
     # different disguise.
-    for expected in ("pocketpaw-create-svelte-site", "pocketpaw-create-react-site"):
+    for expected in ("pocketpaw-site",):
         assert expected in referenced, (
             f"{expected} is no longer reachable from any resolved profile — either "
             "the surface stopped surfacing it, or this scan stopped seeing it"
