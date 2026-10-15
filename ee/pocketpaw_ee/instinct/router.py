@@ -31,6 +31,9 @@
 #     ``station_pending`` or no diff) is never approved here: the single approve
 #     is a 409, bulk-approve reports it in ``missing``; the cloud station lands
 #     it through ``auto_approve`` once its PR merges.
+#   * Approving a Belt change or a mandate shift plan (``_code_change``,
+#     ``_belt_plan``) for an unpaid early-access workspace is a 403
+#     ``early_access.not_available`` before any mutation; the executors re-check.
 #   * The store is per workspace (``_store``): an HTTP request has no
 #     ``current_workspace`` ContextVar, so every read and write is scoped to the
 #     caller's workspace explicitly.
@@ -350,6 +353,18 @@ def _belt_plan_blob(action: Any) -> dict[str, Any] | None:
         return None
     blob = params.get("_belt_plan")
     return blob if isinstance(blob, dict) else None
+
+
+async def _assert_early_access_for_belt(action: Any, workspace_id: str) -> None:
+    """403 ``early_access.not_available`` before approving a Belt change or a
+    mandate shift plan for an unpaid early-access workspace, so the action
+    stays pending and no executor runs. The executors re-check, which covers
+    the approve paths outside this router (Mission Control)."""
+    if _belt_plan_blob(action) is None and _code_change_blob(action) is None:
+        return
+    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed
+
+    await assert_early_access_allowed(workspace_id)
 
 
 def _assert_belt_plan_workspace(action: Any, current_workspace: str) -> None:
@@ -1522,6 +1537,7 @@ async def bulk_approve_actions(
             # into three of the four dispatch paths and silently miss the
             # fourth.
             _assert_gated_workspaces(action, workspace_id)
+            await _assert_early_access_for_belt(action, workspace_id)
 
     approved, missing, bulk_id = await store.bulk_approve(
         [i for i in req.ids if i not in queued], approver=approver_id, note=req.note
@@ -2370,6 +2386,7 @@ async def approve_action(
     # workspace. ``_assert_gated_workspaces`` runs EVERY gated kind's guard, so
     # a kind can never be wired into the dispatch but missed here.
     _assert_gated_workspaces(before, workspace_id)
+    await _assert_early_access_for_belt(before, workspace_id)
     if _is_queued_station_run(before):
         raise ConflictError(
             "belt.run_queued",

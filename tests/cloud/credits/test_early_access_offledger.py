@@ -507,3 +507,182 @@ async def test_livekit_notes_bot_spawned_for_paid(mongo_db, monkeypatch, _liveki
     ws = await _workspace("go")
     await create_room("g-paid", ws, "u1")
     _livekit.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# Belt approve paths and the mandate service chokepoints. The routers above are
+# not the only way in: the Instinct tray approves a shift plan or a Belt change,
+# Mission Control goes straight to the executors, and the cadence scheduler and
+# autopilot loop call the service.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def instinct_store(tmp_path, monkeypatch):
+    from pocketpaw.instinct.store import InstinctStore
+
+    store = InstinctStore(tmp_path / "ea.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    return store
+
+
+async def _belt_action(store, ws: str, key: str):
+    from pocketpaw.instinct.models import ActionTrigger
+
+    if key == "_belt_plan":
+        blob = {
+            "kind": "belt_plan",
+            "schema": 1,
+            "workspace_id": ws,
+            "mandate_id": "m1",
+            "shift_id": "s1",
+            "requested_by": "u1",
+            "plan": {"tasks": []},
+        }
+    else:
+        blob = {
+            "kind": "code_change",
+            "schema": 2,
+            "workspace_id": ws,
+            "requested_by": "u1",
+            "repo": "/srv/acme",
+            "base_branch": "main",
+            "diff": "",
+        }
+    trigger = ActionTrigger(type="agent", source="belt:mandate", reason="ea")
+    return await store.propose(ws, "Belt", "", "", trigger, parameters={key: blob}, workspace_id=ws)
+
+
+def _instinct_app(ws: str, store) -> FastAPI:
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    from pocketpaw_ee.instinct.router import router
+
+    app = _app(router, ws)
+    app.dependency_overrides[current_workspace_id] = lambda: ws
+    return app
+
+
+@pytest.fixture
+def plan_executor(monkeypatch) -> list[str]:
+    """The mandate plan executor, spied: a refused approve never reaches it."""
+    seen: list[str] = []
+
+    async def spy(action, *, human_event_id=None, dispatcher=None):  # noqa: ARG001
+        seen.append(str(action.id))
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.mandates.executor.execute_approved_plan", spy)
+    return seen
+
+
+async def _approve(ws: str, store, action_id: str, *, bulk: bool):
+    app = _instinct_app(ws, store)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=store):
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://t") as client:
+            if bulk:
+                return await client.post(
+                    "/api/v1/instinct/actions/bulk-approve", json={"ids": [action_id]}
+                )
+            return await client.post(f"/api/v1/instinct/actions/{action_id}/approve")
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+async def test_instinct_approve_refuses_an_unpaid_shift_plan(
+    mongo_db, monkeypatch, instinct_store, plan_executor, bulk
+):  # noqa: ARG001
+    from pocketpaw.instinct.models import ActionStatus
+
+    _posture(monkeypatch)
+    ws = await _workspace("free", exhausted=False)
+    action = await _belt_action(instinct_store, ws, "_belt_plan")
+
+    res = await _approve(ws, instinct_store, action.id, bulk=bulk)
+
+    assert res.status_code == 403, res.text
+    assert _code(res) == _CODE
+    assert plan_executor == []
+    assert (await instinct_store.get_action(action.id)).status == ActionStatus.PENDING
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+async def test_instinct_approve_runs_a_paid_shift_plan(
+    mongo_db, monkeypatch, instinct_store, plan_executor, bulk
+):  # noqa: ARG001
+    _posture(monkeypatch)
+    ws = await _workspace("go")
+    action = await _belt_action(instinct_store, ws, "_belt_plan")
+
+    res = await _approve(ws, instinct_store, action.id, bulk=bulk)
+
+    assert res.status_code == 200, res.text
+    assert plan_executor == [action.id]
+
+
+@pytest.mark.parametrize(("plan", "denied"), [("free", True), ("go", False)])
+async def test_plan_executor_checks_early_access(
+    mongo_db, monkeypatch, instinct_store, plan, denied
+):  # noqa: ARG001
+    """Mission Control approves without the instinct router; the executor
+    refuses on its own and fails the action with the early-access reason."""
+    from pocketpaw_ee.cloud.mandates import executor as mandate_executor
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    _posture(monkeypatch)
+    ws = await _workspace(plan)
+    action = await _belt_action(instinct_store, ws, "_belt_plan")
+    revalidate = AsyncMock(return_value={"exists": False})
+    monkeypatch.setattr(mandate_service, "executor_revalidate", revalidate)
+
+    await mandate_executor.execute_approved_plan(action)
+
+    failed = await instinct_store.get_action(action.id)
+    assert ("not in early access" in (failed.error or "")) is denied
+    assert revalidate.await_count == (0 if denied else 1)
+
+
+@pytest.mark.parametrize(("plan", "denied"), [("free", True), ("go", False)])
+async def test_belt_executor_checks_early_access(
+    mongo_db, monkeypatch, instinct_store, plan, denied
+):  # noqa: ARG001
+    from pocketpaw_ee.cloud.belt import executor as belt_executor
+
+    _posture(monkeypatch)
+    ws = await _workspace(plan)
+    action = await _belt_action(instinct_store, ws, "_code_change")
+    opener = MagicMock()
+
+    await belt_executor.execute_approved_change(action, pr_opener=opener)
+
+    failed = await instinct_store.get_action(action.id)
+    # The paid twin passes the gate and fails on its empty diff instead.
+    assert ("not in early access" in (failed.error or "")) is denied
+    assert failed.error
+    opener.assert_not_called()
+
+
+async def test_trigger_shift_refuses_an_unpaid_workspace(mongo_db, monkeypatch):  # noqa: ARG001
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    _posture(monkeypatch)
+    free, paid = await _workspace("free"), await _workspace("go")
+    with pytest.raises(CloudError) as caught:
+        await mandate_service.trigger_shift(free, "u1", "m-missing")
+    assert caught.value.code == _CODE
+    # The paid workspace gets past the deny and stops on the missing mandate.
+    with pytest.raises(CloudError) as caught:
+        await mandate_service.trigger_shift(paid, "u1", "m-missing")
+    assert caught.value.code != _CODE
+
+
+@pytest.mark.parametrize(("plan", "calls"), [("free", 0), ("go", 1)])
+async def test_autopilot_cycle_skips_an_unpaid_workspace(mongo_db, monkeypatch, plan, calls):  # noqa: ARG001
+    from pocketpaw_ee.cloud.mandates.autopilot import run_autopilot_cycle
+
+    _posture(monkeypatch)
+    ws = await _workspace(plan)
+    sim = SimpleNamespace(react=AsyncMock(return_value=[]))
+
+    filed = await run_autopilot_cycle(ws, "m1", users=1, user_sim=sim)
+
+    assert filed == 0
+    assert sim.react.await_count == calls

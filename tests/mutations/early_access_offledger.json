@@ -97,5 +97,50 @@
     "tests": [
       "tests/cloud/credits/test_early_access_offledger.py"
     ]
+  },
+  {
+    "label": "instinct approve skips the early-access check on Belt actions",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed\n\n    await assert_early_access_allowed(workspace_id)\n",
+    "replace": "    return\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "mandate plan executor dispatches for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "        denied = await early_access_denial(workspace_id)\n",
+    "replace": "        denied = None\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "belt executor applies for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "    denied = await early_access_denial(workspace_id)\n",
+    "replace": "    denied = None\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "trigger_shift calls the foreman for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    await assert_early_access_allowed(workspace_id)\n\n    doc = await _fetch_mandate(workspace_id, mandate_id)\n    if doc.status != \"active\":\n",
+    "replace": "    doc = await _fetch_mandate(workspace_id, mandate_id)\n    if doc.status != \"active\":\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "autopilot cycle runs personas for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/mandates/autopilot.py",
+    "find": "    if await early_access_denial(workspace_id) is not None:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
   }
 ]

@@ -362,7 +362,15 @@ async def run_autopilot_cycle(
     through the EXISTING ``service.file_feedback`` path (not raw HTTP), so each
     item becomes a Sighting the next shift's foreman cites, with
     ``source="autopilot:<persona>"``."""
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
     from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    # Persona reactions are model calls off the credit ledger. A loop started
+    # before the launch flip (or rehydrated at boot) files nothing for an
+    # unpaid early-access workspace.
+    if await early_access_denial(workspace_id) is not None:
+        logger.info("autopilot: %s skipped, not in early access", mandate_id)
+        return 0
 
     sim: UserSim = user_sim or resolve_user_sim()
 
