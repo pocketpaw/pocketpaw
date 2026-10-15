@@ -1090,3 +1090,111 @@ def test_queued_lead_row_is_a_lead_before_launch() -> None:
 
 def test_task_run_row_has_null_lead() -> None:
     assert _run_summary(_row_action(), {"task": "fix the bug"})["lead"] is None
+
+
+# -- a closed feature issue ends the run ---------------------------------------
+# Live 2026-10-15: creative-apps #798 closed by hand and #1037 closed by its own
+# PR both stayed "running" for hours, holding a slot while dev CI was red. A
+# closed issue finishes the run as done at the next poll: no nudge, no relaunch.
+
+
+class IssueStateRunner(LeadRunner):
+    """``LeadRunner`` whose ``gh issue view`` answers ``state`` (one per poll
+    from ``states``, holding the last) only when the call asks for it."""
+
+    def __init__(self, *, states: list[str], **kw):
+        super().__init__(**kw)
+        self.states = states
+
+    async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
+        code, out, err = await super().__call__(
+            argv, cwd=cwd, timeout=timeout, stdin=stdin, on_line=on_line
+        )
+        if argv[:3] == ["gh", "issue", "view"] and code == 0 and "--json" in argv:
+            fields = argv[argv.index("--json") + 1].split(",")
+            if "comments" in fields:
+                data = json.loads(out)
+                state = self._next(self.states)
+                if "state" in fields:
+                    data["state"] = state
+                out = json.dumps(data)
+        return code, out, err
+
+
+def _in_flight(action) -> int:
+    row = _run_summary(action, action.parameters["_code_change"])
+    budget = Budget(max_tasks_per_shift=3, max_in_flight=3)
+    return mandate_service._headroom(budget, [row], datetime.now(UTC))["in_flight"]
+
+
+async def test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    # A merged slice, no feature-done PR, no contact sheet: the done rule waits.
+    runner = IssueStateRunner(states=["CLOSED"], prs=[[_lead_pr(31, run_ref, state="MERGED")]])
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert "feature issue #93 was closed" in str(action.outcome)
+    cc = action.parameters["_code_change"]
+    assert cc["station_pending"] is False and "headless_state" not in cc
+    assert _in_flight(action) == 0
+    assert not _nudges(runner) and len(_launch_briefs(runner)) == 1
+    assert not any(a[:3] == ["gh", "issue", "edit"] for a, _ in runner.calls)
+
+
+async def test_an_open_feature_issue_keeps_the_stall_ladder(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = IssueStateRunner(states=["OPEN"])  # silent, issue open: today's ladder
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    lead = action.parameters["_code_change"]["lead"]
+    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "relaunch", "needs-human"]
+
+
+async def test_an_open_feature_issue_with_the_done_rule_met_still_lands(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    done = _done_runner(run_ref)
+    runner = IssueStateRunner(states=["OPEN"], prs=done.prs, comments=done.comments)
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert "was closed" not in str(action.outcome)
+
+
+async def test_a_closed_feature_issue_is_never_nudged_or_relaunched(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    # Silent from launch; the issue closes at the poll the first stall rung
+    # would fire on (30 min in), so the rung must never run.
+    runner = IssueStateRunner(states=["OPEN"] * 30 + ["CLOSED"])
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert not _nudges(runner) and len(_launch_briefs(runner)) == 1
+    assert action.parameters["_code_change"]["lead"]["stalls"] == []
+    assert not any(a[:3] == ["gh", "issue", "edit"] for a, _ in runner.calls)
+
+
+async def test_a_lead_closed_after_a_nudge_is_not_relaunched(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    # Nudged at 30 min, then the issue closes before the relaunch rung at 60.
+    runner = IssueStateRunner(states=["OPEN"] * 45 + ["CLOSED"])
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert len(_nudges(runner)) == 1 and len(_launch_briefs(runner)) == 1

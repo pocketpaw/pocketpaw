@@ -348,3 +348,46 @@ async def test_off_github_nothing_is_checked(tmp_path):
         raise AssertionError(f"unexpected argv {argv}")
 
     assert await patrols.open_dependencies(str(tmp_path), [_src(31)], gh=gitlab) == {}
+
+
+# ---------------------------------------------------------------------------
+# A note after the Depends on refs is not a dependency
+# ---------------------------------------------------------------------------
+# Live 2026-10-15: creative-apps #873 said "Depends on: none (#763 is lane-wide,
+# not a dependency)" and never launched in 13 h: the #763 in the note blocked
+# it. Only refs before a parenthesis or a " - " note count; "none" is none.
+
+
+@pytest.mark.parametrize(
+    ("body", "refs"),
+    [
+        ("Depends on: none (#763 is lane-wide, not a dependency)", []),
+        ("**Depends on:** None - #763 is lane-wide", []),
+        ("Depends on: none (#763 is lane-wide)\n#412 is a sibling, not a blocker", []),
+        ("Depends on: #12 (see #763)", [f"{SLUG}#12"]),
+        ("Depends on: #12, #13 - both lane-wide, see #763", [f"{SLUG}#12", f"{SLUG}#13"]),
+        ("## Depends on\n\n- #12 (see #763)\n  - #13 - after #764\n", [f"{SLUG}#12", f"{SLUG}#13"]),
+        ("Depends on: [#12](https://github.com/acme/app/issues/12)", [f"{SLUG}#12", "acme/app#12"]),
+    ],
+    ids=["none-paren", "none-dash", "none-ends-section", "ref-paren", "refs-dash", "list", "link"],
+)
+def test_a_depends_on_note_names_no_dependency(body, refs):
+    assert patrols.depends_on_refs(body, SLUG) == refs
+
+
+async def test_depends_on_none_with_a_note_is_not_blocked(tmp_path):
+    issue = _issue(873, "feature-lead")
+    issue["body"] = "Feature\n\nDepends on: none (#763 is lane-wide, not a dependency)"
+    gh = FakeGh([issue], states={763: "OPEN", 873: "OPEN"})
+
+    assert await patrols.open_dependencies(str(tmp_path), [_src(873)], gh=gh) == {}
+
+
+async def test_depends_on_a_ref_with_a_note_blocks_on_the_ref_only(tmp_path):
+    issue = _issue(31, "suite")
+    issue["body"] = "Depends on: #12 (see #763)"
+    gh = FakeGh([issue], states={12: "OPEN", 31: "OPEN", 763: "OPEN"})
+
+    found = await patrols.open_dependencies(str(tmp_path), [_src(31)], gh=gh)
+
+    assert found == {_src(31): [f"{SLUG}#12"]}
