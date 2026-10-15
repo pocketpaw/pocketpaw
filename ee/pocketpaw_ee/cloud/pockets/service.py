@@ -2129,6 +2129,50 @@ async def engines_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[
     return {str(row["_id"]): row.get("engine") for row in rows}
 
 
+async def site_database_inputs_for_pockets(
+    workspace_id: str, pocket_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Map each given ``pocket_id`` to the pocket fields that say whether its site owns
+    a D1 database, in ONE query: ``{pattern, ripple_spec, site_meta}``, the keyword
+    inputs of ``sites.engines.site_has_database``.
+
+    The sibling of ``engines_for_pockets`` for the sites list/status capabilities.
+    Projected to ``pattern``, the three rippleSpec keys that make a spec dynamic
+    (``sources`` / ``actions`` / ``auth``) and ``site_meta.project.recipes``, so a
+    gallery never pulls a full rippleSpec or source map. Tenant-scoped on
+    ``workspace``; malformed and missing ids are absent from the map."""
+    if not pocket_ids:
+        return {}
+    oids: list[PydanticObjectId] = []
+    for pid in pocket_ids:
+        try:
+            oids.append(PydanticObjectId(pid))
+        except (InvalidId, TypeError, ValueError):
+            continue
+    if not oids:
+        return {}
+    collection = _PocketDoc.get_pymongo_collection()
+    rows = await collection.find(
+        {"workspace": workspace_id, "_id": {"$in": oids}},
+        {
+            "_id": 1,
+            "pattern": 1,
+            "rippleSpec.sources": 1,
+            "rippleSpec.actions": 1,
+            "rippleSpec.auth": 1,
+            "site_meta.project.recipes": 1,
+        },
+    ).to_list(length=None)
+    return {
+        str(row["_id"]): {
+            "pattern": row.get("pattern"),
+            "ripple_spec": row.get("rippleSpec"),
+            "site_meta": row.get("site_meta"),
+        }
+        for row in rows
+    }
+
+
 async def site_render_inputs(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
     """The fields that decide a site pocket's render, tenant-scoped, in wire spelling.
 
@@ -2246,8 +2290,39 @@ async def get_for_wire(pocket_id: str, user_id: str) -> dict:
 
 #: The authored fields that make up a site. A duplicate, and later a template
 #: "use", copies exactly these; everything else (sharing, team, agents, tools,
-#: connectors, the Site deployment row) belongs to the original.
-SITE_SNAPSHOT_FIELDS = ("engine", "pattern", "rippleSpec", "source", "keeps_client_bundle")
+#: connectors, the Site deployment row) belongs to the original. ``site_meta`` is
+#: carried only through :func:`site_meta_snapshot`.
+SITE_SNAPSHOT_FIELDS = (
+    "engine",
+    "pattern",
+    "rippleSpec",
+    "source",
+    "keeps_client_bundle",
+    "site_meta",
+)
+
+
+def site_meta_snapshot(site_meta: Any) -> dict[str, Any] | None:
+    """The part of a pocket's ``site_meta`` a copy may carry: ``project.template``,
+    ``project.framework`` and ``project.recipes`` (what the repo was started from and
+    which recipes are applied). Nothing else crosses, so a future site-specific id or
+    secret stored under ``site_meta`` never leaks into a duplicate or a template.
+    ``None`` when there is no project part (every non-project pocket)."""
+    project = site_meta.get("project") if isinstance(site_meta, dict) else None
+    if not isinstance(project, dict):
+        return None
+    template = project.get("template")
+    framework = project.get("framework")
+    recipes = project.get("recipes")
+    return {
+        "project": {
+            "template": template if isinstance(template, str) else None,
+            "framework": framework if isinstance(framework, str) else None,
+            "recipes": [r for r in recipes if isinstance(r, str)]
+            if isinstance(recipes, list)
+            else [],
+        }
+    }
 
 
 async def copy_site_snapshot(
@@ -2303,6 +2378,10 @@ async def copy_site_snapshot(
         rippleSpec=snap["rippleSpec"],
         source=snap["source"],
         keeps_client_bundle=snap["keeps_client_bundle"],
+        # Re-filtered on write too: a template saved before ``site_meta`` was a
+        # snapshot field reads None here, and a stored snapshot is never trusted to
+        # hold only the project part.
+        site_meta=site_meta_snapshot(snap["site_meta"]),
         template_id=template_id,
         template_version=template_version,
         # SF-2 — the caller's cohort when given, else the create-time stamp.
@@ -2330,7 +2409,8 @@ async def read_site_snapshot(workspace_id: str, user_id: str, pocket_id: str) ->
     """Read a site pocket's ``SITE_SNAPSHOT_FIELDS`` for a copy, after authorizing it.
 
     The one read path behind ``duplicate_pocket`` and saving a site as a template.
-    Returns the five snapshot fields plus the source's raw ``source_gated`` stamp,
+    Returns the snapshot fields (``site_meta`` reduced to its project part by
+    ``site_meta_snapshot``) plus the source's raw ``source_gated`` stamp,
     ``name`` and ``visibility``. The values are the document's own, not copies;
     ``copy_site_snapshot`` deep-copies on write.
 
@@ -2356,6 +2436,7 @@ async def read_site_snapshot(workspace_id: str, user_id: str, pocket_id: str) ->
         "rippleSpec": source.rippleSpec,
         "source": source.source,
         "keeps_client_bundle": source.keeps_client_bundle,
+        "site_meta": site_meta_snapshot(source.site_meta),
         "source_gated": source.source_gated,
         "name": source.name,
         "visibility": source.visibility,

@@ -119,6 +119,9 @@ from pocketpaw_ee.sites.engines import (
     has_write_back_lane,
     is_source_engine,
     normalize_engine,
+    site_capabilities,
+    site_has_database,
+    spec_is_dynamic,
     write_back_lane,
 )
 from pocketpaw_ee.sites.export import (
@@ -1201,12 +1204,8 @@ def _is_dynamic(pattern: str | None, ripple_spec: dict[str, Any] | None) -> bool
     stamped — a spec declaring any top-level ``sources`` / ``actions`` (or
     ``auth``) is also dynamic, mirroring the generator's own classifier. Anything
     else (a static landing / brochure pocket) is NOT dynamic and has no D1 to
-    read."""
-    if pattern == "dynamic":
-        return True
-    if not isinstance(ripple_spec, dict):
-        return False
-    return bool(ripple_spec.get("sources") or ripple_spec.get("actions") or ripple_spec.get("auth"))
+    read. The rule itself is ``engines.spec_is_dynamic``, shared with ``has_database``."""
+    return spec_is_dynamic(pattern, ripple_spec)
 
 
 def _dynamic_objects(ripple_spec: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1557,7 +1556,12 @@ def _canonical_plan_tier(stored: str | None) -> str:
     return _site_plans.canonical_site_tier_key(stored) or stored
 
 
-def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
+def _to_response(
+    doc: _SiteDoc,
+    pattern: str = "",
+    engine: str = "",
+    capabilities: dict[str, bool] | None = None,
+) -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     created_at = getattr(doc, "createdAt", None)
     return SiteResponse(
@@ -1597,6 +1601,9 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # resolved by the caller from Pocket.engine (sibling of pattern above). ""
         # when unresolved, so the gallery's engine badge is empty-safe.
         engine=engine,
+        # The site's edit/build flags (``engines.site_capabilities``), resolved by the
+        # caller alongside ``engine``. None when the pocket was not resolved.
+        capabilities=capabilities,
         # charge-first: the Dodo checkout link a PAID-tier publish returns, read
         # for a free/live publish and for any list/status read (those docs are
         # loaded from Mongo, where the PrivateAttr defaults to None).
@@ -10449,14 +10456,68 @@ async def get_native_artifact(
 
     ``_store`` (defaults to the filesystem artifact store) and ``_pool`` (defaults to the
     process arq pool) are injectable seams so the path is unit-testable without disk or
-    Redis."""
+    Redis.
+
+    Every answer carries the site's ``capabilities`` (``engines.site_capabilities``),
+    whichever engine lane produced it."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
-    from pocketpaw_ee.sites import generator_client
 
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
-    from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
+    result = await _native_artifact_for_pocket(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        pocket=pocket,
+        builder_origin=builder_origin,
+        _store=_store,
+        _pool=_pool,
+        _arm=_arm,
+    )
+    result["capabilities"] = await _pocket_capabilities(workspace_id, pocket_id, pocket)
+    return result
+
+
+async def _pocket_capabilities(
+    workspace_id: str, pocket_id: str, pocket: dict[str, Any]
+) -> dict[str, bool]:
+    """``engines.site_capabilities`` for a pocket already in hand (a wire dict).
+
+    ``has_database`` also reads the canonical Site's ``d1_database_id``. That read is
+    best-effort: a failure leaves the pocket's own signals (dynamic spec, D1 recipe)
+    to answer rather than failing the preview the flags ride on."""
+    d1_database_id = ""
+    try:
+        doc = await _canonical_site_doc(workspace_id, pocket_id)
+        d1_database_id = (getattr(doc, "d1_database_id", "") or "") if doc is not None else ""
+    except Exception:  # noqa: BLE001 — a flag must not fail the preview read
+        logger.debug("sites.capabilities: no Site read for %s", pocket_id, exc_info=True)
+    ripple_spec = pocket.get("rippleSpec")
+    return site_capabilities(
+        pocket.get("engine"),
+        has_database=site_has_database(
+            d1_database_id=d1_database_id,
+            site_meta=pocket.get("siteMeta") or pocket.get("site_meta"),
+            pattern=pocket.get("pattern"),
+            ripple_spec=ripple_spec if isinstance(ripple_spec, dict) else None,
+        ),
+    )
+
+
+async def _native_artifact_for_pocket(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    pocket: dict[str, Any],
+    builder_origin: str | None,
+    _store: Any | None,
+    _pool: Any | None,
+    _arm: Any | None,
+) -> dict[str, Any]:
+    """The engine lanes behind ``get_native_artifact`` (see its docstring), for a
+    pocket the caller has already read and authorized."""
+    from pocketpaw_ee.sites import generator_client
+    from pocketpaw_ee.sites.engines import has_native_edit_lane
 
     # NATIVE-EDIT engines only (not is_source_engine): this shadow-renders an ARMED
     # BUILD, so the engine has to be one the generator builds and arms — svelte, and
@@ -12305,6 +12366,13 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     pattern = patterns.get(pocket_id) or ""
     engines = await pockets_service.engines_for_pockets(workspace_id, [pocket_id])
     engine = engines.get(pocket_id) or ""
+    capabilities = (
+        await _capabilities_for_pockets(
+            workspace_id,
+            engines,
+            {pocket_id: (getattr(doc, "d1_database_id", "") or "") if doc is not None else ""},
+        )
+    ).get(pocket_id)
 
     # PP-2: verification of the CURRENT source, counts only (contract §6). The summary
     # never raises and never carries a message — see verify.status_summary.
@@ -12328,6 +12396,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
         pattern=pattern,
         engine=engine,
+        capabilities=capabilities,
         # SC-1: the same screenshot the list row carries, so a by-pocket status
         # read can show the page too. None when there is no deployed site, no
         # capture has landed yet, or the doc predates the field.
@@ -12532,14 +12601,46 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
     pocket_ids = [doc.pocket_id for doc in docs]
     patterns = await pockets_service.patterns_for_pockets(workspace_id, pocket_ids)
     engines = await pockets_service.engines_for_pockets(workspace_id, pocket_ids)
+    capabilities = await _capabilities_for_pockets(
+        workspace_id,
+        engines,
+        {doc.pocket_id: getattr(doc, "d1_database_id", "") or "" for doc in docs},
+    )
     return [
         _to_response(
             doc,
             patterns.get(doc.pocket_id) or "",
             engines.get(doc.pocket_id) or "",
+            capabilities.get(doc.pocket_id),
         )
         for doc in docs
     ]
+
+
+async def _capabilities_for_pockets(
+    workspace_id: str,
+    engines: dict[str, str | None],
+    d1_database_ids: dict[str, str],
+) -> dict[str, dict[str, bool]]:
+    """``engines.site_capabilities`` for every pocket ``engines_for_pockets`` resolved,
+    with ``has_database`` from the Site's own D1 id and the pocket's database inputs
+    (ONE extra projected read for the whole batch). A pocket that did not resolve is
+    absent, so its response reads ``capabilities: None`` like its ``engine: ""``."""
+    if not engines:
+        return {}
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    inputs = await pockets_service.site_database_inputs_for_pockets(workspace_id, list(engines))
+    return {
+        pocket_id: site_capabilities(
+            engine,
+            has_database=site_has_database(
+                d1_database_id=d1_database_ids.get(pocket_id),
+                **inputs.get(pocket_id, {}),
+            ),
+        )
+        for pocket_id, engine in engines.items()
+    }
 
 
 async def site_pocket_ids(workspace_id: str) -> set[str]:

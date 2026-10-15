@@ -282,6 +282,9 @@ async def test_html_draft_has_a_preview_url_without_any_build(beanie_test_db):
     assert result.get("build_status") == "none"
     url = result.get("preview_url")
     assert isinstance(url, str) and urlsplit(url).path == "/"
+    from pocketpaw_ee.sites.engines import site_capabilities
+
+    assert result["capabilities"] == site_capabilities("html", has_database=False)
 
 
 @pytest.mark.asyncio
@@ -296,6 +299,10 @@ async def test_a_pending_build_reports_a_null_preview_url(beanie_test_db):
 
     assert result["build_status"] == "queued"
     assert "preview_url" in result and result["preview_url"] is None
+    # Capabilities ride the pending answer too, not only a served one.
+    from pocketpaw_ee.sites.engines import site_capabilities
+
+    assert result["capabilities"] == site_capabilities("react", has_database=False)
 
 
 # ---------------------------------------------------------------------------

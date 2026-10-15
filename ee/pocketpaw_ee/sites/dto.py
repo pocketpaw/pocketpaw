@@ -118,6 +118,10 @@ class SiteResponse(BaseModel):
     # Ripple) without a second per-site fetch. "" when the pocket predates the
     # engine field or could not be resolved (the card shows no engine badge).
     engine: str = ""
+    # The site's edit/build flags (``engines.site_capabilities``): {select, text,
+    # code, build_log, design, sections, has_database}. Set on the list read for
+    # every resolved pocket, whatever its engine; None where ``engine`` is "".
+    capabilities: dict[str, bool] | None = None
     # charge-first: the Dodo annual-checkout link for a PAID-tier publish. A paid
     # publish creates the site as PENDING (deployed=False) and returns this link
     # the caller redirects the buyer to; the site deploys + goes live only after
@@ -524,6 +528,9 @@ class SiteStatusResponse(BaseModel):
     # from Pocket.engine — the same field the list response carries, so a by-pocket
     # status read can badge the engine too. "" when unresolved / pre-engine row.
     engine: str = ""
+    # The same ``capabilities`` the list row carries (``engines.site_capabilities``).
+    # None when the pocket could not be resolved.
+    capabilities: dict[str, bool] | None = None
     # SC-1: the stored URL of a screenshot of the pocket's live site — the same
     # field the list response carries, so a by-pocket status read can show the
     # page too. None until a capture lands (and whenever one failed, the site has
@@ -1082,8 +1089,10 @@ class NativeArtifactResponse(BaseModel):
     # exactly what is live and its drafts were purged (``preview_url`` is the live
     # site's URL, or None). None until a build finished.
     preview_mode: str | None = None
-    # The engine's edit/build capability flags (``engines.engine_capabilities``):
-    # {select, text, code, build_log}. Set for project pockets; None elsewhere for now.
+    # The site's edit/build capability flags (``engines.site_capabilities``):
+    # {select, text, code, build_log, design, sections, has_database}, on every
+    # engine's answer. ``preview_mode`` above stays a sibling: it is a property of a
+    # finished build, not of the engine.
     capabilities: dict[str, bool] | None = None
 
 

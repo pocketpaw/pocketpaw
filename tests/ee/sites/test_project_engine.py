@@ -190,6 +190,8 @@ def test_project_is_a_known_engine_with_its_own_capabilities():
         "text": False,
         "code": True,
         "build_log": True,
+        "design": False,
+        "sections": False,
     }
 
 
@@ -501,7 +503,32 @@ async def test_native_artifact_queues_then_serves_the_project_draft(beanie_test_
     via_route = await sites_service.get_native_artifact(
         workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _store=store, _pool=pool
     )
-    assert via_route["capabilities"]["build_log"] is True
+    assert via_route["capabilities"] == engines.site_capabilities("project", has_database=False)
+
+
+@pytest.mark.asyncio
+async def test_native_artifact_reports_the_d1_recipe_as_a_database(beanie_test_db):
+    _view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id="ws1",
+        owner_id="u1",
+        name="Proj",
+        type_="site",
+        pattern="landing",
+        ripple_spec=None,
+        engine="project",
+        source=dict(SOURCE),
+        trusted=True,
+        site_meta={
+            "project": {"template": "astro", "framework": "astro", "recipes": ["d1-drizzle"]}
+        },
+    )
+    assert err is None, err
+
+    result = await sites_service.get_native_artifact(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _store=_Store(), _pool=_Pool()
+    )
+
+    assert result["capabilities"] == engines.site_capabilities("project", has_database=True)
 
 
 @pytest.mark.asyncio

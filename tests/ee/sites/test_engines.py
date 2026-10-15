@@ -1,5 +1,8 @@
 # tests/ee/sites/test_engines.py — unit tests for the canonical engine-capability
-# module (ee/pocketpaw_ee/sites/engines.py).
+# module (ee/pocketpaw_ee/sites/engines.py). Also pins the per-engine
+# ``engine_capabilities`` wire shape, ``site_has_database``, the unknown-engine
+# warning, and an AST scan that fails on any engine literal in the backend source
+# that is not in ``engines.KNOWN_ENGINES``.
 #
 # Created 2026-07-10 (HE-2). Covers all three modeled engines (ripple / svelte /
 # html) plus the empty / missing / unknown-engine fallback contract that the
@@ -321,3 +324,192 @@ def test_react_combines_all_three_capabilities_uniquely() -> None:
     assert engines.is_source_engine("react") is True
     assert engines.needs_node_build("react") is True
     assert engines.emits_server_worker("react") is False
+
+
+# --------------------------------------------------------- site capabilities (P0-c)
+
+_EXPECTED_CAPABILITIES = {
+    "ripple": {
+        "select": True, "text": False, "code": False, "build_log": False,
+        "design": False, "sections": True,
+    },
+    "svelte": {
+        "select": True, "text": True, "code": True, "build_log": False,
+        "design": True, "sections": True,
+    },
+    "html": {
+        "select": True, "text": True, "code": True, "build_log": False,
+        "design": False, "sections": False,
+    },
+    "react": {
+        "select": True, "text": False, "code": True, "build_log": False,
+        "design": False, "sections": True,
+    },
+    "project": {
+        "select": False, "text": False, "code": True, "build_log": True,
+        "design": False, "sections": False,
+    },
+}  # fmt: skip
+
+
+class TestEngineCapabilities:
+    def test_every_known_engine_has_a_pinned_shape(self) -> None:
+        assert set(_EXPECTED_CAPABILITIES) == engines.KNOWN_ENGINES
+
+    @pytest.mark.parametrize("engine", sorted(_EXPECTED_CAPABILITIES))
+    def test_shape_per_engine(self, engine: str) -> None:
+        assert engines.engine_capabilities(engine) == _EXPECTED_CAPABILITIES[engine]
+
+    def test_project_keeps_its_original_four_flags(self) -> None:
+        caps = engines.engine_capabilities("project")
+        assert {k: caps[k] for k in ("select", "text", "code", "build_log")} == {
+            "select": False,
+            "text": False,
+            "code": True,
+            "build_log": True,
+        }
+
+    def test_design_matches_the_frontend_inspector_rule(self) -> None:
+        """paw-enterprise ``hasInspectorRail`` is svelte only."""
+        designers = {e for e in engines.KNOWN_ENGINES if engines.engine_capabilities(e)["design"]}
+        assert designers == {"svelte"}
+
+    @pytest.mark.parametrize("value", [None, ""])
+    def test_legacy_empty_engine_reads_as_ripple(self, value: str | None) -> None:
+        assert engines.engine_capabilities(value) == _EXPECTED_CAPABILITIES["ripple"]
+
+    @pytest.mark.parametrize("has_database", [True, False])
+    def test_site_capabilities_adds_has_database(self, has_database: bool) -> None:
+        caps = engines.site_capabilities("project", has_database=has_database)
+        assert caps == {**_EXPECTED_CAPABILITIES["project"], "has_database": has_database}
+
+
+class TestSiteHasDatabase:
+    def test_nothing_means_no_database(self) -> None:
+        assert engines.site_has_database() is False
+
+    def test_a_bound_d1_id(self) -> None:
+        assert engines.site_has_database(d1_database_id="db-1") is True
+
+    def test_the_d1_recipe(self) -> None:
+        meta = {"project": {"template": "astro", "recipes": ["kv", "d1-drizzle"]}}
+        assert engines.site_has_database(site_meta=meta) is True
+
+    def test_other_recipes_are_not_a_database(self) -> None:
+        meta = {"project": {"template": "astro", "recipes": ["kv", "r2", 3]}}
+        assert engines.site_has_database(site_meta=meta) is False
+
+    def test_a_dynamic_pattern(self) -> None:
+        assert engines.site_has_database(pattern="dynamic") is True
+
+    @pytest.mark.parametrize("key", ["sources", "actions", "auth"])
+    def test_a_spec_that_declares_data(self, key: str) -> None:
+        assert engines.site_has_database(pattern="landing", ripple_spec={key: {"x": 1}}) is True
+
+    def test_a_static_landing_spec(self) -> None:
+        assert engines.site_has_database(pattern="landing", ripple_spec={"ui": {}}) is False
+
+    @pytest.mark.parametrize("meta", [None, {}, {"project": None}, {"project": {"recipes": "d1"}}])
+    def test_malformed_site_meta_is_no_database(self, meta: object) -> None:
+        assert engines.site_has_database(site_meta=meta) is False  # type: ignore[arg-type]
+
+    def test_publish_and_capabilities_share_the_dynamic_rule(self) -> None:
+        from pocketpaw_ee.sites import service as sites_service
+
+        for pattern, spec in [("dynamic", None), ("landing", {"actions": [1]}), (None, {})]:
+            assert sites_service._is_dynamic(pattern, spec) is engines.spec_is_dynamic(
+                pattern, spec
+            )
+
+
+# ------------------------------------------------------------- strict engine guard
+
+
+class TestUnknownEngineWarning:
+    def test_project_is_known(self) -> None:
+        assert engines.normalize_engine("project") == "project"
+
+    def test_unknown_value_warns_once_and_still_reads_as_ripple(self, caplog) -> None:
+        engines._WARNED_UNKNOWN.discard("vue-test")
+        with caplog.at_level("WARNING", logger="pocketpaw_ee.sites.engines"):
+            assert engines.normalize_engine("vue-test") == "ripple"
+            assert engines.normalize_engine("vue-test") == "ripple"
+        warnings = [r for r in caplog.records if "vue-test" in r.getMessage()]
+        assert len(warnings) == 1
+
+    @pytest.mark.parametrize("value", [None, ""])
+    def test_legacy_empty_engine_does_not_warn(self, value: str | None, caplog) -> None:
+        with caplog.at_level("WARNING", logger="pocketpaw_ee.sites.engines"):
+            assert engines.normalize_engine(value) == "ripple"
+        assert not caplog.records
+
+
+def _engine_literals() -> dict[str, list[str]]:
+    """Every engine string literal in the backend source, found by AST: a comparison
+    of a name/attribute/``.get("engine")`` called ``engine`` against a string (or a
+    tuple/set/list of strings), an ``engine=`` keyword, an ``"engine": ...`` dict
+    entry and a ``... .get("engine") or "x"`` default. Strings inside prompts and
+    docstrings are not code and are not matched."""
+    import ast
+    from pathlib import Path
+
+    import pocketpaw_ee
+
+    import pocketpaw
+
+    roots = [Path(pocketpaw_ee.__file__).parent, Path(pocketpaw.__file__).parent]
+
+    def is_engine(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id == "engine"
+        if isinstance(node, ast.Attribute):
+            return node.attr == "engine"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            return (
+                node.func.attr == "get"
+                and bool(node.args)
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "engine"
+            )
+        if isinstance(node, ast.BoolOp):
+            return any(is_engine(v) for v in node.values)
+        return False
+
+    def strings(node: ast.AST) -> list[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return [node.value]
+        if isinstance(node, ast.Tuple | ast.Set | ast.List):
+            return [s for elt in node.elts for s in strings(elt)]
+        return []
+
+    found: dict[str, list[str]] = {}
+    for root in roots:
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                values: list[str] = []
+                if isinstance(node, ast.Compare):
+                    sides = [node.left, *node.comparators]
+                    if any(is_engine(s) for s in sides):
+                        values = [v for s in sides if not is_engine(s) for v in strings(s)]
+                elif isinstance(node, ast.keyword) and node.arg == "engine":
+                    values = strings(node.value)
+                elif isinstance(node, ast.Dict):
+                    for k, v in zip(node.keys, node.values, strict=True):
+                        if isinstance(k, ast.Constant) and k.value == "engine":
+                            values += strings(v)
+                elif isinstance(node, ast.BoolOp) and is_engine(node):
+                    values = [v for s in node.values for v in strings(s)]
+                line = getattr(node, "lineno", 0)
+                for value in values:
+                    found.setdefault(value, []).append(f"{path.name}:{line}")
+    return found
+
+
+def test_every_engine_literal_in_the_codebase_is_known() -> None:
+    """A new engine must be registered in ``engines.KNOWN_ENGINES``; until it is, every
+    predicate quietly treats it as ripple. ``""`` is the legacy "unset" value."""
+    found = _engine_literals()
+    assert {"ripple", "svelte", "html", "react", "project"} <= set(found), sorted(found)
+    unknown = {v: where[:3] for v, where in found.items() if v and v not in engines.KNOWN_ENGINES}
+    assert not unknown, f"engine literals not in engines.KNOWN_ENGINES: {unknown}"
