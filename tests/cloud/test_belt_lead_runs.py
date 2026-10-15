@@ -27,6 +27,8 @@
 # LESSON 45: on startup a run whose tracker died on a TRACK error (inside its
 # timeout) is tracked again with the error cleared; an errored run is never
 # counted in flight.
+# ROW: a lead run's console row carries ``lead`` (feature, app, PRs, session and
+# stall counts, contact sheet) off the tracker's blob; a task run's is null.
 
 from __future__ import annotations
 
@@ -34,6 +36,7 @@ import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,6 +44,7 @@ pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud.belt import cloud_station  # noqa: E402
 from pocketpaw_ee.cloud.belt.cloud_station import CloudTaskDispatcher  # noqa: E402
+from pocketpaw_ee.cloud.belt.service import _run_summary  # noqa: E402
 from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
 from pocketpaw_ee.cloud.mandates.domain import Budget  # noqa: E402
 
@@ -1028,3 +1032,61 @@ async def test_an_outage_past_the_lead_timeout_still_ends_it(store, dirs, playbo
     assert action.rejected_reason.startswith("feature lead not done after 8h")
     assert any(a[:3] == ["gh", "issue", "edit"] and "needs-human" in a for a, _ in runner.calls)
     assert "headless_error" not in action.parameters["_code_change"]
+
+
+# -- the console row ------------------------------------------------------------
+
+_ROW_PR = {
+    "number": 1122,
+    "url": f"https://github.com/{SLUG}/pull/1122",
+    "state": "MERGED",
+    "branch": f"lead/{FEATURE}-1122",
+    "done": False,
+    "merge_sha": MERGE_SHA,
+    "merged_at": "2026-10-15T10:00:00Z",
+}
+_ROW_SHEET = "Belt-Contact-Sheet: https://example.com/sheet.png"
+
+
+def _row_action() -> SimpleNamespace:
+    return SimpleNamespace(id="act-1", status=SimpleNamespace(value="pending"))
+
+
+def test_lead_run_row_carries_lead() -> None:
+    blob = {
+        "recipe": "feature-lead",
+        "task": "Lead #93",
+        "lead": {
+            "feature": FEATURE,
+            "packet": PACKET,
+            "issue": 93,
+            "branch": f"lead/{FEATURE}",
+            "prs": [_ROW_PR],
+            "sessions": [{"session_url": f"https://claude.ai/code/{SID}", "at": 1.0}],
+            "stalls": [],
+            "heartbeat_at": 2.0,
+            "contact_sheet": _ROW_SHEET,
+        },
+    }
+    lead = _run_summary(_row_action(), blob)["lead"]
+    assert lead["feature"] == FEATURE
+    assert lead["app"] == "flare"
+    assert lead["issue"] == 93
+    assert lead["branch"] == f"lead/{FEATURE}"
+    assert lead["prs"] == [_ROW_PR]
+    assert lead["sessions"] == 1
+    assert lead["stalls"] == 0
+    assert lead["contact_sheet"] == _ROW_SHEET
+
+
+def test_queued_lead_row_is_a_lead_before_launch() -> None:
+    # Planned with the recipe, not launched yet: no ``lead`` dict on the blob.
+    lead = _run_summary(_row_action(), {"recipe": "feature-lead", "task": "Lead #7"})["lead"]
+    assert lead is not None
+    assert lead["feature"] is None
+    assert lead["prs"] == []
+    assert lead["contact_sheet"] is None
+
+
+def test_task_run_row_has_null_lead() -> None:
+    assert _run_summary(_row_action(), {"task": "fix the bug"})["lead"] is None

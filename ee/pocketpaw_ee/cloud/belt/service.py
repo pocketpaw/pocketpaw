@@ -25,7 +25,9 @@
 #     ``commit_sha``) and mandate provenance (``mandate_id`` / ``shift_no`` /
 #     ``headless_error`` / ``headless_state`` / ``redevelop``) are read
 #     STRUCTURALLY off the blob; ``error`` is the failure reason (``Action.error``, else
-#     ``headless_error``). The mandates digest reads this same list.
+#     ``headless_error``); ``lead`` is a feature lead's feature, PRs, session and
+#     stall counts and contact sheet, off the cloud station's ``lead`` blob (null on
+#     a task run). The mandates digest reads this same list.
 #   * ``save_run_feed`` / ``get_run_feed`` — a run stage's step feed (what one
 #     station step did), one ``BeltRunFeed`` row per (workspace, run, stage),
 #     kept out of the Action blob that ``list_runs`` reads in bulk. The read
@@ -776,6 +778,36 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
             for s in blob.get("screenshots") or []
             if isinstance(s, dict)
         ],
+        "lead": _lead_row(blob),
+    }
+
+
+# A feature-lead run's recipe (``cloud_station.LEAD_RECIPE``, ``mandates.domain.LEAD_RUN_KIND``);
+# a literal here because importing either module from this one is heavy or circular.
+_LEAD_RECIPE = "feature-lead"
+_PACKET_APP = re.compile(r"docs/blueprints/([\w.-]+)/features/")
+
+
+def _lead_row(blob: dict[str, Any]) -> dict[str, Any] | None:
+    """A feature lead's progress, read off the ``lead`` dict the cloud station's
+    tracker writes (``feature`` / ``packet`` / ``issue`` / ``branch`` / ``prs`` /
+    ``sessions`` / ``stalls`` / ``contact_sheet``); ``None`` on a task run. A lead
+    still queued (no launch, so no ``lead`` dict yet) reads with empty fields."""
+    if blob.get("recipe") != _LEAD_RECIPE:
+        return None
+    lead = blob.get("lead")
+    lead = lead if isinstance(lead, dict) else {}
+    app = _PACKET_APP.match(str(lead.get("packet") or ""))
+    prs = lead.get("prs")
+    return {
+        "feature": lead.get("feature") or None,
+        "app": app.group(1) if app else None,
+        "issue": lead.get("issue"),
+        "branch": lead.get("branch") or None,
+        "prs": [p for p in prs if isinstance(p, dict)] if isinstance(prs, list) else [],
+        "sessions": len(lead.get("sessions") or []),
+        "stalls": len(lead.get("stalls") or []),
+        "contact_sheet": lead.get("contact_sheet") or None,
     }
 
 
