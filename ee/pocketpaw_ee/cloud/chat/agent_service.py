@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     # ``_resolve_about_member`` so importing this module never drags in the
     # people service (and its journal accessor) for chat paths that never
     # render an about-block.
+    from pocketpaw_ee.cloud.byok.service import TurnCredentials
     from pocketpaw_ee.cloud.people.domain import Person
 
 from pocketpaw.agents.backend import ImageAttachment
@@ -799,6 +800,12 @@ class ScopeContext:
     #: ``None`` is the legacy path. Copied onto ``ctx`` by ``execute_run``
     #: exactly like ``model_override`` beside it.
     tools_enabled: bool | None = None
+    #: Who pays for this turn, resolved by ``execute_run`` BEFORE its credit
+    #: gate (``credits.guards.resolve_payer``) so the gate and the loop act on
+    #: one answer. ``_drive_agent_loop`` spends it instead of resolving again;
+    #: ``None`` (every other caller) makes the loop resolve for itself. Can
+    #: carry a plaintext provider key: never log or serialize it.
+    turn_credentials: TurnCredentials | None = None
 
 
 # ---------------------------------------------------------------------------

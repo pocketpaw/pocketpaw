@@ -2433,6 +2433,15 @@ ceiling sees `credits.insufficient`. A run already in flight is never stopped;
 a completed run is always billed, so the last run before the cap can take the
 wallet below 0.
 
+Who pays is decided before the check. Both the chat route and the worker resolve
+the workspace's stored provider key first. A turn on the workspace's own key
+(BYOK) skips the balance and quota check, so it runs at a wallet of 0, and its
+run debits nothing: the run doc records `credential_source: "byok"`, and billing
+keeps the token usage but charges 0 credits. Any other turn, including one where
+looking up the key fails, is `credential_source: "platform"`: gated and charged.
+A stored gateway address the egress guard rejects refuses the turn with 422
+`byok.base_url_rejected` (route) or that code on the terminal frame (worker).
+
 `payments_open` (default off) tells the server whether customers can pay. While
 it is off, a workspace on the `free` plan whose ledger holds no applied `top_up`
 or `subscription_grant` is platform-funded early access, the group the

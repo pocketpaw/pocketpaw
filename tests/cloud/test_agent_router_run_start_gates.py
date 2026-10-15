@@ -74,6 +74,14 @@ def _install(monkeypatch, *, billing: bool, fail: set[str], barrier: asyncio.Bar
     monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_quota", _quota)
     monkeypatch.setattr("pocketpaw_ee.cloud.auth.guest_gates.assert_guest_turn_allowed", _guest)
     monkeypatch.setattr("pocketpaw_ee.cloud.metering.service.used", _used)
+
+    async def _platform(_ws):
+        from pocketpaw_ee.cloud.byok.service import TurnCredentials
+
+        return TurnCredentials(source="platform")
+
+    # No stored key: the billing leg gates as platform, hermetically.
+    monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _platform)
     return started
 
 
@@ -139,15 +147,15 @@ async def test_the_billing_leg_is_the_shared_guard(monkeypatch):
     _install(monkeypatch, billing=True, fail=set())
     asked: list[str] = []
 
-    async def _over(ws):
-        asked.append(ws)
+    async def _over(ws, source="platform"):
+        asked.append((ws, source))
         return InsufficientCredits(requested=1, available=0)
 
     monkeypatch.setattr("pocketpaw_ee.cloud.credits.guards.over_billing_limit", _over)
 
     with pytest.raises(InsufficientCredits) as caught:
         await mod._run_start_gates("w1", "u1", "w1")
-    assert asked == ["w1"]
+    assert asked == [("w1", "platform")]
     assert caught.value.code == "credits.insufficient"
 
 
@@ -158,4 +166,22 @@ async def test_an_empty_workspace_skips_billing_like_the_guard(monkeypatch):
     workspace before it gets here."""
     started = _install(monkeypatch, billing=True, fail={"balance", "quota"})
     await mod._run_start_gates("", "u1", "")
+    assert "balance" not in started and "quota" not in started
+
+
+async def test_a_byok_turn_skips_the_wallet(monkeypatch):
+    """The billing leg resolves who pays first and hands the answer to the
+    guard, so a workspace on its own key is not refused for an empty wallet.
+
+    Mutation: call the guard without the resolved source.
+    """
+    from pocketpaw_ee.cloud.byok.service import TurnCredentials
+
+    started = _install(monkeypatch, billing=True, fail={"balance", "quota"})
+
+    async def _byok(_ws):
+        return TurnCredentials(source="byok", api_key="k", provider="anthropic")
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _byok)
+    await mod._run_start_gates("w1", "u1", "w1")
     assert "balance" not in started and "quota" not in started

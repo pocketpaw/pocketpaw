@@ -1,98 +1,35 @@
-# ee/pocketpaw_ee/cloud/metering/service.py — the compute-cost metering business
-# logic (BC-3, the Meter + Price primitives). Reads a finished ``ChatRunDoc``'s
-# token-usage, resolves its real USD compute cost, converts that to integer
-# credits via the rate card, and debits the workspace wallet EXACTLY ONCE.
+# ee/pocketpaw_ee/cloud/metering/service.py: compute-cost metering (BC-3, the
+# Meter and Price primitives) and the one daily usage primitive.
 #
-# Updated 2026-10-01 (fix/canon-daily-caps, CN-3): this module also owns the ONE
-#   daily usage primitive — ``try_spend`` / ``refund`` / ``used`` over the single
-#   ``DailyUsage`` collection — plus the per-meter cap resolvers. It replaces six
-#   copy-pasted ``$inc``-upsert-and-rollback budgets (turn, upload, file
-#   comprehension, transcription, illustration, guest turn). Cap semantics are
-#   now one rule for every meter: ``None`` = uncapped, ``0`` = disabled,
-#   ``n > 0`` = cap. Each meter still reads its old env var, and the resolvers
-#   translate the legacy values so no deployment changes behaviour (a turn or
-#   upload env of ``0`` still means uncapped). See "DAILY CAPS" below.
+# Billing. ``resolve_cost(usage, at=)`` turns a run's ``usage`` into USD: a
+# reported ``total_cost_usd`` wins when > 0 (keyless / OAuth backends often
+# report 0), else ``usage_tracker.price_run`` prices the tokens at the run's OWN
+# moment (``at`` is required: the sweeper bills late and prices are dated), else
+# 0. ``load_rate_card()`` is the Price (markup and credit value from settings).
+# ``bill_run(run_doc)`` converts the cost to micro-credits and debits the
+# workspace once, keyed ``run:{run_id}``, with ``allow_negative=True`` (the
+# compute already happened; hard-blocking is the run-start gate's job). A run
+# with ``credential_source == "byok"`` is never debited, because the workspace's
+# own key paid the provider; its cost is still resolved and returned. The
+# debit ``ref`` carries cost, source, model and ``total_tokens``.
+# ``bill_run_now`` bills a run the moment its executor returns; the sweeper
+# stays the backstop and the ledger key makes a double bill a no-op. Both are
+# off in the WU-F ``live`` spend mode, where LiteLLM is the only meter.
 #
-# Module-level ``async def`` API (NOT a class, per EE cloud rule, mirroring
-# ``credits.service`` / ``billing.service``). Public API:
-#   * ``resolve_cost(usage, at=)`` — the Meter: a run's ``usage`` dict ->
-#                                ``ComputeCost`` (USD). Reported ``total_cost_usd``
-#                                wins when > 0; else the dated price lookup; else
-#                                0.0. ``at`` is the run's OWN moment and is
-#                                required — see "PRICES ARE DATED" below.
-#   * ``load_rate_card()``     — build the ``RateCard`` (the Price primitive) from
-#                                runtime settings (POCKETPAW_BILLING_MARKUP /
-#                                POCKETPAW_CREDIT_USD).
-#   * ``bill_run(run_doc)``    — compute credits and debit the wallet once, keyed
-#                                on ``run:{run_id}`` (BC-1's idempotency guard),
-#                                then mark the run billed via
-#                                ``chat.runs.service.mark_billed`` (the doc's
-#                                owner). Returns a ``BillResult``.
+# Exactly once: BC-1's unique ``(workspace, idempotency_key)`` index is the real
+# guard; the run's ``billed`` flag only keeps each sweep bounded. That flag is
+# written through ``chat.runs.service.mark_billed`` (EE Rule 2: metering never
+# writes ``ChatRunDoc``). ``_prompt_tokens`` decides from the payload whether
+# ``input_tokens`` already includes the cached portion.
 #
-# COST AUTHORITY: the production backend runs keyless / OAuth, so it frequently
-# emits ``total_cost_usd = None`` or ``0`` even though tokens were consumed. The
-# AUTHORITATIVE fallback is ``src/pocketpaw/usage_tracker.price_run`` — the same
-# ladder the runtime usage tracker bills against. We therefore only trust a
-# reported cost when it is strictly positive; otherwise we re-derive it.
+# Daily caps. ``try_spend`` / ``refund`` / ``used`` over the single
+# ``DailyUsage`` collection, plus the per-meter cap resolvers, for every daily
+# budget (turn, upload, comprehension, transcription, illustration, guest
+# turn). One rule: ``None`` = uncapped, ``0`` = disabled, ``n > 0`` = cap; each
+# resolver maps its legacy env var onto it. See "DAILY CAPS" below.
 #
-# PRICES ARE DATED, AND THIS METER RUNS LATE. ``resolve_cost`` takes ``at``, the
-# run's own moment, and it is a required argument rather than a defaulted one on
-# purpose. Billing happens on the sweeper AFTER the run, capped at 200 runs a
-# tick, so a backlog can span hours or days; ``claude-sonnet-5`` was $2.00/MTok
-# through 2026-08-31 and $3.00 from 2026-09-01. Pricing at ``now()`` would bill
-# every backlogged run at today's rate and look entirely plausible doing it. It
-# is the same argument the sweeper's ``_emit_run_completed`` already makes for
-# the ledger's ``ts``: the run's moment, never the sweep's.
-#
-# TOKEN SHAPE: producers do not agree on whether ``usage["input_tokens"]``
-# includes the cached portion, so ``_prompt_tokens`` decides from the payload
-# rather than guessing — see its docstring. Getting this wrong is not academic;
-# handing the price library cache buckets larger than their own total is a hard
-# error, and handing it a pre-subtracted remainder undercounts the bill.
-#
-# EXACTLY-ONCE: the debit's ``idempotency_key=f"run:{run_id}"`` + BC-1's unique
-# ``(workspace, idempotency_key)`` index means a re-bill (sweeper double-run,
-# crash between the debit and the ``billed`` flag write, two workers) is a no-op
-# at the ledger. The ``billed`` flag is the cheap filter that keeps each sweep
-# bounded; the ledger key is the real guard. ``allow_negative=True`` — a completed
-# run is always billed (the compute already happened), so an overage drives the
-# balance legitimately negative rather than being blocked here. Hard-blocking is a
-# separate concern at run START, not at bill time.
-#
-# Rule 10 — only ``CloudError`` subclasses propagate (none raised on the happy
-# path; an unknown-model run bills 0, it does not error). Rule 6 — the meter
-# tolerates a missing / malformed usage dict (treats it as no usage).
-#
-# ENTITY BOUNDARY (EE Rule 2): metering READS ``run_doc.usage`` (a value read is
-# fine), but the ``billed`` flag WRITE belongs to the chat.runs entity (the sole
-# owner of ``ChatRunDoc``). ``bill_run`` calls ``chat.runs.service.mark_billed``
-# rather than mutating + saving the foreign document itself.
-#
-# Created 2026-06-24 (integration/billing-credits, BC-3): new entity.
-# Updated 2026-09-02 (feat/bill-on-completion): added ``bill_run_now``, called by
-#   both run executors the moment ``execute_run`` returns. Nothing charged at
-#   completion before, so the wallet, the allowance meter and the activity list
-#   were all a sweep interval stale after every run — a customer who checked
-#   immediately saw the state from before their own message. The sweeper is
-#   unchanged and is still the backstop: ``bill_run`` is idempotent on
-#   ``run:{run_id}``, so a run billed at completion is a no-op on the tick, and a
-#   run this misses is picked up by it. Gated OFF in the WU-F ``live`` mode for
-#   the same reason the sweep is — exactly one meter charges.
-# Updated 2026-06-24 (B3 review fix): ``bill_run`` no longer does
-# ``run_doc.billed=True; run_doc.save()`` directly (a foreign cross-entity write).
-# It now delegates the flag write to ``chat.runs.service.mark_billed(run_id)``.
-# Updated 2026-07-11 (feat/llm-cost-attribution): ``bill_run`` now records the run's
-# ``total_tokens`` on the debit ``ref`` (alongside cost/source/model). The token
-# volume is a REAL per-run figure the backend reports onto ``ChatRunDoc.usage`` in
-# every metering mode (it is NOT the blocked LiteLLM SpendLogs path), so persisting
-# it lets the ledger-sourced usage graph surface real token volume instead of a
-# hardcoded 0 — the follow-up the usage-graph module header named. Purely additive
-# ledger metadata: no change to the debited amount, the idempotency key, or the
-# exactly-once guard; legacy entries with no ``ref.total_tokens`` simply read 0.
-# Updated 2026-09-02 (fix/metering-dated-pricing): ``resolve_cost`` gained the
-# required ``at`` keyword and now calls ``usage_tracker.price_run``, which prices
-# cache writes, applies the >200k long-context tier and honours effective dates.
-# An unpriced run is its own ``CostSource`` and logs at WARNING instead of DEBUG.
+# Module-level ``async def`` API. Only ``CloudError`` subclasses propagate; a
+# missing or malformed usage dict is treated as no usage.
 
 from __future__ import annotations
 
@@ -384,6 +321,10 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
     the flag write is harmless: the next sweep re-bills, BC-1's ``run:{run_id}``
     key makes that debit a no-op, and the flag is then set.
 
+    A ``byok`` run (``run_doc.credential_source``) is never debited: the
+    workspace's own key paid the provider. Its cost is still resolved and
+    returned and its usage stays on the run doc, so analytics see it.
+
     ``rate_card`` may be injected (tests / a future per-workspace card); it
     defaults to the settings-derived card.
     """
@@ -397,6 +338,9 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
     micro = card.to_micro_credits(
         cost.cost_usd_exact if cost.cost_usd_exact is not None else cost.cost_usd
     )
+    byok = run_doc.credential_source == "byok"
+    if byok:
+        micro = 0
     # Real per-run token volume (see ``_total_tokens``) — stamped on the debit ref
     # so the ledger-sourced usage graph can surface it. Mode-agnostic; never the
     # blocked LiteLLM path.
@@ -437,10 +381,11 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
         balance_after = await credits_service.balance(workspace)
         debited = False
         logger.debug(
-            "metering.bill_run: run=%s workspace=%s is genuinely free "
-            "(cost_usd=%.6f, source=%s) — marking billed, no debit",
+            "metering.bill_run: run=%s workspace=%s %s "
+            "(cost_usd=%.6f, source=%s), marking billed, no debit",
             run_id,
             workspace,
+            "ran on its own key" if byok else "is genuinely free",
             cost.cost_usd,
             cost.source,
         )

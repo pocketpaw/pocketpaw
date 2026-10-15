@@ -12,6 +12,8 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
   a run the sweeper already ended. ``mark_completed`` / ``mark_terminal`` record
   the backend's ``usage`` and trigger a spend ingest; ``mark_billed`` is the
   metering service's write, made here so metering never writes this document.
+  ``set_credential_source`` records who paid the provider (``platform`` or
+  ``byok``), which ``bill_run`` reads to decide whether to debit.
 - Reads for other modules return value objects, never the Beanie document:
   ``RunActivityRow`` for the agent-activity board, ``StrandedReply`` for a
   failed / cancelled / interrupted run's partial text (runs with an
@@ -28,7 +30,7 @@ import logging
 import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
@@ -277,6 +279,14 @@ async def record_card_breaches(run_id: str, breaches: dict[str, int]) -> None:
     rows = {f"card_breaches.{cid}": int(n) for cid, n in breaches.items() if _CARD_ID_RE.match(cid)}
     if rows:
         await ChatRunDoc.get_pymongo_collection().update_one({"run_id": run_id}, {"$set": rows})
+
+
+async def set_credential_source(run_id: str, source: Literal["platform", "byok"]) -> None:
+    """Record who pays the provider for this run. One conditional write; a
+    missing run is a no-op, and the field's ``platform`` default then bills it."""
+    await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id}, {"$set": {"credential_source": source}}
+    )
 
 
 async def mark_billed(run_id: str) -> None:

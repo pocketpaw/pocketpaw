@@ -1,70 +1,30 @@
-"""Enterprise agent chat — ``POST /cloud/chat/{scope}/{scope_id}/agent``.
+"""Enterprise agent chat: ``POST /cloud/chat/{scope}/{scope_id}/agent``.
 
 Streams a typed SSE sequence in the response body while persisting the user
-message, submitting a ``Run`` to the configured executor, and tailing the
-run's Redis Stream so durability sits underneath the wire shape the
-frontend already speaks.
+message, submitting a ``Run`` to the configured executor, and tailing the run's
+Redis Stream, so durability sits underneath the wire shape the frontend speaks.
 
-Changes: 2026-10-01 (CN-3, fix/canon-daily-caps) — ``_run_start_gates`` no
-longer inlines ``billing_enforced`` + ``check_balance`` + ``check_quota``; it
-gathers ``credits.guards.assert_within_billing`` (the one billing gate run_core
-already uses) beside the guest and turn checks. Balance-before-quota precedence
-is kept inside that one coroutine. One drift, inherited from the guard: an
-empty workspace is not billed-checked (the route rejects an empty workspace
-upstream, so no live change). The daily turn pre-check now reads the shared
-``metering`` daily counter instead of ``turn_budget``.
+This is the single chokepoint that starts a chat run. ``scope_workspace_id``
+comes from ``resolve_scope_context``, which is handed the authenticated
+``workspace_id`` as ``expected_workspace_id`` (a scope doc whose workspace
+disagrees is rejected). Then ``_run_start_gates`` runs the read-only run-start
+checks BEFORE any DB write, so a refused turn leaves no run and no message:
 
-Changes: 2026-09-01 (feat/byok-guest-backend) — ``post_agent_chat`` gained a
-CHECK-ONLY guest turn gate beside the billing fast-reject: a guest at their
-daily turn cap (or with no usable stored key) gets a clean pre-stream 402
-whose body carries the frozen top-level ``code``/``kind`` contract. The
-executor owns the single atomic spend (``run_core._reject_if_guest_over_limit``).
+* who pays (``credits.guards.resolve_payer``), then the credit gate
+  (``assert_within_billing``: balance, then monthly quota, 402
+  ``credits.insufficient`` / ``credits.quota_exceeded``). A no-op unless
+  ``billing_enforced`` or ``credits_enforced``, and skipped for a turn on the
+  workspace's own key.
+* the guest turn gate (check-only; the executor owns the atomic spend).
+* the workspace daily turn ceiling (check-only, fails open).
 
-Changes: 2026-06-30 (feat/billing-quota-enforcement, chunk 3) — the run-start
-credit gate now also enforces the MONTHLY QUOTA. Beside the existing BC-4
-``check_balance`` call (inside the same ``if get_settings().billing_enforced:``
-block, before ``create_run``/submit), ``post_agent_chat`` now also
-``await credits_service.check_quota(workspace_id)`` so a workspace that has spent
-up to its monthly ceiling gets a clean 402 ``credits.quota_exceeded`` with NO DB
-trace — the same universal cap the executor enforces in
-``run_core.execute_run``, mirrored here for the synchronous HTTP path.
-``check_balance`` is unchanged and stays FIRST (balance <= 0 is the secondary
-guard). Both are no-ops when the flag is OFF.
+The executor (``run_core.execute_run``) repeats these on every path into it
+(HTTP, WebSocket, queued, resumed) and is the enforcement; this route answers a
+clean pre-stream error. In-flight runs are never affected.
 
-Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``post_agent_chat``
-threads the authenticated ``workspace_id`` into ``resolve_scope_context`` via
-``expected_workspace_id``, matching the run worker. The HTTP route already
-validates the workspace (the ``current_workspace_id`` dependency rejects an
-empty one with 400); passing it lets the resolver fall back to it when a scope
-doc's ``workspace`` field is empty and reject a scope whose non-empty doc
-workspace disagrees with the caller's (cross-tenant guard). Keeps the
-synchronous request path consistent with the worker that actually attaches the
-run identity.
-
-Changes: 2026-06-24 (BC-4, integration/billing-credits) — credit hard-block at
-run-start. This module is the SINGLE chokepoint that starts a new chat run
-(``create_run`` + executor submit), so the credit gate sits here, right after
-scope resolution and BEFORE any DB write. When ``billing_enforced`` or
-``credits_enforced`` is on, a workspace at balance <= 0 gets 402
-(``credits.insufficient``) and NO run / user message is persisted; in-flight
-runs (already past this point) are never affected. Both flags are OFF by
-default so OSS / self-host (no ledger) are unaffected. See ``credits.service.check_balance``.
-
-Changes: 2026-06-18 (PERF-6, feat/sites-minimal-context) — window the history
-fed to the agent on the SITES EDIT/REFINE surface only. The sites builder got
-progressively slower per edit because ``load_history_for_scope`` loads the FULL
-accumulating scope history every turn, so the LLM re-processed ever-more context
-per refine. ``_window_history_for_surface`` now caps the loaded history to the
-last ``SITES_REFINE_HISTORY_TURNS`` turns (kept for pronoun referents like "make
-it bigger") when ``_is_sites_refine_surface`` matches (kind=sites + a refine
-``pocket_id`` in the surface meta — the same discriminator the sites preamble /
-profile resolver use). Every other surface (general pocket/dm/group chat, the
-sites-create gallery, legacy clients with no surface hint) keeps the FULL
-history — the windowing is a strict no-op off the sites-refine surface. The
-``<pocket-summary>`` block already carries the pocket's current state to the
-agent, so injecting the raw component source is intentionally left out of this
-change (it would add a build/DB read on the shared chat path); the windowing is
-the core latency win.
+On the sites edit/refine surface only, ``_window_history_for_surface`` caps the
+history fed to the agent to the last ``SITES_REFINE_HISTORY_TURNS`` turns; every
+other surface gets the full history.
 """
 
 from __future__ import annotations
@@ -157,7 +117,10 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
 
     * Balance + quota (BC-4 / chunk 3): ``credits.guards.assert_within_billing``,
       a no-op unless ``billing_enforced`` or ``credits_enforced``; balance
-      before quota inside it.
+      before quota inside it. Who pays is resolved first inside the same
+      check (``credits.guards.resolve_payer``): a turn on the workspace's own
+      key skips the wallet, a resolver failure is gated as platform, and a
+      gateway address the egress guard rejects raises its 422.
     * Guest turn gate (feat/byok-guest-backend): the frozen
       ``guest_limit_reached`` / ``guest_key_required`` 402 the signup prompt
       keys on. Does NOT increment; ``run_core._reject_if_guest_over_limit``
@@ -168,12 +131,18 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
       be right.
     """
     from pocketpaw_ee.cloud.auth.guest_gates import assert_guest_turn_allowed
-    from pocketpaw_ee.cloud.credits.guards import assert_within_billing
+    from pocketpaw_ee.cloud.credits.guards import assert_within_billing, resolve_payer
+
+    async def _billing() -> None:
+        # Advisory here: the executor resolves again on its own ctx and that
+        # answer is the one that gates and bills the run.
+        payer = await resolve_payer(workspace_id)
+        await assert_within_billing(workspace_id, payer.source)
 
     checks = [
         # Flag-gated no-op unless billing_enforced or credits_enforced;
-        # balance then quota inside.
-        assert_within_billing(workspace_id),
+        # balance then quota inside, skipped for a BYOK turn.
+        _billing(),
         assert_guest_turn_allowed(user_id, scope_workspace_id),
         _assert_under_daily_turns(scope_workspace_id),
     ]

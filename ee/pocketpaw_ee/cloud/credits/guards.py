@@ -2,13 +2,21 @@
 # agent-run seam calls, so an over-budget workspace is refused the same way
 # everywhere and no model call happens on a refusal.
 #
-# * ``over_billing_limit(workspace)`` is the core. A no-op (None) unless
-#   ``billing_enforced`` or ``credits_enforced`` is on. When enforced it runs
+# * ``over_billing_limit(workspace, source=...)`` is the core. A no-op (None)
+#   unless ``billing_enforced`` or ``credits_enforced`` is on, and always a
+#   no-op for ``source="byok"``: a turn on the workspace's own provider key
+#   costs us nothing, so the wallet does not gate it. When enforced it runs
 #   ``check_balance`` (wallet <= 0, 402 ``credits.insufficient``) first, then
 #   ``check_quota`` (monthly ceiling reached, 402 ``credits.quota_exceeded``), and
 #   returns the first CloudError that trips, or None. It never raises those two
 #   itself; any other exception (a real infra failure) propagates. An empty
-#   workspace id is a no-op: there is no wallet to attribute.
+#   workspace id is a no-op: there is no wallet to attribute. ``source``
+#   defaults to ``"platform"``; the two chat seams pass the value
+#   ``resolve_payer`` gave them, every other caller keeps the default.
+# * ``resolve_payer(workspace)`` decides who pays before the gate: the
+#   BYOK resolver's answer, or platform when the resolver fails (gated and
+#   charged, never free). It lets ``GatewayEgressRejected`` through, because
+#   that one is a refusal of the turn, not a failure to degrade.
 # * ``assert_within_billing(workspace)`` raises that error for HTTP routes, where
 #   ``_core.http`` maps it to ``{"error": {"code", "message"}}``. Call it before
 #   any local ``try/except Exception`` so the 402 is not swallowed into a 500.
@@ -29,12 +37,13 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pocketpaw.config import get_settings  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.byok.service import TurnCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +54,38 @@ def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
 
 
-async def over_billing_limit(workspace_id: str) -> CloudError | None:
+CredentialSource = Literal["platform", "byok"]
+
+
+async def resolve_payer(workspace_id: str) -> TurnCredentials:
+    """Who pays for this turn, decided before the credit gate.
+
+    The BYOK resolver's answer, or ``platform`` credentials when it fails for
+    any reason, so a broken resolver gates and charges the turn rather than
+    letting it run free. ``GatewayEgressRejected`` propagates: the stored
+    gateway address must not be dialed, and degrading would run the tenant's
+    turn on our key, so the caller refuses the turn instead.
+
+    The returned value can carry a plaintext key. Never log it.
+    """
+    from pocketpaw_ee.cloud.byok import service as byok_service
+
+    try:
+        return await byok_service.resolve_turn_credentials(workspace_id)
+    except byok_service.GatewayEgressRejected:
+        raise
+    except Exception:
+        logger.exception(
+            "byok: resolve_turn_credentials failed for workspace=%s; gating and "
+            "charging this turn as platform",
+            workspace_id,
+        )
+        return byok_service.TurnCredentials(source="platform")
+
+
+async def over_billing_limit(
+    workspace_id: str, source: CredentialSource = "platform"
+) -> CloudError | None:
     """Return the billing rejection for ``workspace_id``, or None to proceed.
 
     The pure, transport-agnostic core of the run-start billing gate. A no-op
@@ -57,7 +97,9 @@ async def over_billing_limit(workspace_id: str) -> CloudError | None:
     CloudErrors); if both pass it returns None.
 
     An uncapped plan (Enterprise, ``monthly_ceiling`` is None) never trips the
-    quota leg (``check_quota`` no-ops there). An empty ``workspace_id`` returns
+    quota leg (``check_quota`` no-ops there). ``source="byok"`` returns None:
+    the workspace's own key pays the provider, so neither its balance nor its
+    quota applies. An empty ``workspace_id`` returns
     None: there is no wallet to attribute, and the run-transport callers already
     validate a non-empty workspace upstream. Only the two credit CloudErrors are
     caught here — any other exception (a real infra failure) propagates, exactly
@@ -66,7 +108,7 @@ async def over_billing_limit(workspace_id: str) -> CloudError | None:
     settings = get_settings()
     if not (settings.billing_enforced or settings.credits_enforced):
         return None
-    if not workspace_id:
+    if not workspace_id or source == "byok":
         return None
 
     from pocketpaw_ee.cloud._core.errors import InsufficientCredits, QuotaExceeded
@@ -82,7 +124,7 @@ async def over_billing_limit(workspace_id: str) -> CloudError | None:
     return None
 
 
-async def assert_within_billing(workspace_id: str) -> None:
+async def assert_within_billing(workspace_id: str, source: CredentialSource = "platform") -> None:
     """Raise the billing rejection (402 CloudError) when over budget; else no-op.
 
     For HTTP routes: the raised ``InsufficientCredits`` / ``QuotaExceeded`` is a
@@ -90,7 +132,7 @@ async def assert_within_billing(workspace_id: str) -> None:
     local ``try/except Exception`` in the handler so the 402 isn't swallowed into
     a generic 500. Flag-gated and Enterprise-safe via ``over_billing_limit``.
     """
-    exc = await over_billing_limit(workspace_id)
+    exc = await over_billing_limit(workspace_id, source)
     if exc is not None:
         raise exc
 
@@ -101,6 +143,7 @@ async def reject_if_over_billing(
     run_id: str,
     transport: Any,
     log_label: str | None = None,
+    source: CredentialSource = "platform",
 ) -> bool:
     """Reject an over-budget run on the run/stream transport. Returns True if it did.
 
@@ -114,7 +157,7 @@ async def reject_if_over_billing(
     writing the rejection must not turn a clean 402-equivalent block into an
     unhandled crash that takes the worker down.
     """
-    exc = await over_billing_limit(workspace_id)
+    exc = await over_billing_limit(workspace_id, source)
     if exc is None:
         return False
 
@@ -165,4 +208,5 @@ __all__ = [
     "is_platform_funded_free",
     "over_billing_limit",
     "reject_if_over_billing",
+    "resolve_payer",
 ]
