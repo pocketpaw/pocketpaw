@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     # Type-only — the runtime read imports ``get_person`` lazily inside
@@ -806,6 +806,11 @@ class ScopeContext:
     #: ``None`` (every other caller) makes the loop resolve for itself. Can
     #: carry a plaintext provider key: never log or serialize it.
     turn_credentials: TurnCredentials | None = None
+    #: Who the credit gate and ``bill_run`` treat as paying: ``byok`` only when
+    #: ``turn_credentials`` is BYOK and the agent's backend spends the key
+    #: (``credits.guards.billing_source``). Set by ``execute_run``; ``None``
+    #: elsewhere, where readers fall back to ``turn_credentials``.
+    credential_source: Literal["platform", "byok"] | None = None
 
 
 # ---------------------------------------------------------------------------

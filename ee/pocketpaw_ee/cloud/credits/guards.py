@@ -17,6 +17,14 @@
 #   BYOK resolver's answer, or platform when the resolver fails (gated and
 #   charged, never free). It lets ``GatewayEgressRejected`` through, because
 #   that one is a refusal of the turn, not a failure to degrade.
+# * ``billing_source(creds, agent_id, exclusive_tools=...)`` is the source the
+#   gate and ``bill_run`` act on. ``byok`` only when the resolver said so AND
+#   the backend that will serve the turn really spends the key
+#   (``pocketpaw.agents.pool.spends_byok_key``: pydantic_ai, or a
+#   deny-by-default run). A stored key on any other backend runs on our
+#   credentials, so it is gated and charged as platform. Reads the Agent
+#   document, never the pool, so a refused turn builds no backend; any lookup
+#   failure answers platform.
 # * ``assert_within_billing(workspace)`` raises that error for HTTP routes, where
 #   ``_core.http`` maps it to ``{"error": {"code", "message"}}``. Call it before
 #   any local ``try/except Exception`` so the 402 is not swallowed into a 500.
@@ -81,6 +89,40 @@ async def resolve_payer(workspace_id: str) -> TurnCredentials:
             workspace_id,
         )
         return byok_service.TurnCredentials(source="platform")
+
+
+async def billing_source(
+    creds: TurnCredentials, agent_id: str | None, *, exclusive_tools: bool = False
+) -> CredentialSource:
+    """Who the credit gate and ``bill_run`` treat as paying for this turn.
+
+    ``byok`` only when ``creds`` is a BYOK answer AND the backend that will
+    serve ``agent_id`` spends the key. Otherwise ``platform``: a stored key on
+    a backend that ignores it would let the turn skip the wallet while it runs
+    on our credentials. A missing or unreadable agent answers ``platform``.
+    """
+    if creds.source != "byok":
+        return "platform"
+    if exclusive_tools:
+        return "byok"
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw.agents.pool import spends_byok_key  # type: ignore[import-untyped]
+        from pocketpaw_ee.cloud.models.agent import Agent
+
+        doc = await Agent.get(PydanticObjectId(agent_id)) if agent_id else None
+        if doc is None:
+            return "platform"
+        backend = doc.config.model_dump().get("backend")
+        return "byok" if spends_byok_key(backend) else "platform"
+    except Exception:
+        logger.warning(
+            "byok: could not read agent %s's backend; gating this turn as platform",
+            agent_id,
+            exc_info=True,
+        )
+        return "platform"
 
 
 async def over_billing_limit(
@@ -205,6 +247,7 @@ async def is_platform_funded_free(workspace_id: str) -> bool:
 
 __all__ = [
     "assert_within_billing",
+    "billing_source",
     "is_platform_funded_free",
     "over_billing_limit",
     "reject_if_over_billing",

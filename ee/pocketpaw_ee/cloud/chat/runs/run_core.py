@@ -2036,9 +2036,12 @@ async def _drive_agent_loop(
         #
         # A BYOK turn is not left unchecked; ``provider_allows_model`` below is
         # the check that belongs to it.
+        # ``ctx.credential_source`` (set by ``execute_run``) wins when present:
+        # a stored key on a backend that ignores it runs on our gateway, so the
+        # catalog applies to it.
         if (
             ctx.model_override
-            and byok_creds.source != "byok"
+            and (getattr(ctx, "credential_source", None) or byok_creds.source) != "byok"
             and await _model_is_unknown_to_gateway(ctx.model_override)
         ):
             yield (
@@ -2768,11 +2771,14 @@ async def _requires_own_key(ctx: ScopeContext) -> bool:
 async def _resolve_payer_or_refuse(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
     """Decide who pays for this run before the credit gate. True if refused.
 
-    Stores the answer on ``ctx.turn_credentials`` (the credit gate and
-    ``_drive_agent_loop`` both read it) and stamps it on the run doc as
-    ``credential_source`` (``bill_run`` debits 0 for ``byok``). A resolver
-    failure degrades to platform inside ``credits.guards.resolve_payer``, so
-    the run is gated and charged, never free.
+    Stores the credentials on ``ctx.turn_credentials`` (``_drive_agent_loop``
+    spends them) and the billing answer on ``ctx.credential_source``, which the
+    credit gate reads and the run doc records (``bill_run`` debits 0 for
+    ``byok``). The billing answer is ``byok`` only when the agent's backend
+    really spends the key (``credits.guards.billing_source``); a stored key on
+    any other backend is gated and charged as platform. A resolver failure
+    degrades to platform inside ``credits.guards.resolve_payer``, so the run is
+    gated and charged, never free.
 
     A gateway address the egress guard rejects is refused here, with the same
     ``byok.base_url_rejected`` code the loop uses, rather than gated as
@@ -2807,8 +2813,13 @@ async def _resolve_payer_or_refuse(spec: RunSpec, ctx: ScopeContext, transport: 
         except Exception:
             logger.debug("egress stream ttl set failed for %s", spec.run_id, exc_info=True)
         return True
+    ctx.credential_source = await guards.billing_source(
+        ctx.turn_credentials,
+        ctx.target_agent_id,
+        exclusive_tools=bool(getattr(ctx.resolved_profile, "exclusive_tools", False)),
+    )
     try:
-        await run_service.set_credential_source(spec.run_id, ctx.turn_credentials.source)
+        await run_service.set_credential_source(spec.run_id, ctx.credential_source)
     except Exception:
         logger.warning("credential_source stamp failed for %s", spec.run_id, exc_info=True)
     return False
@@ -2838,13 +2849,12 @@ async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transpo
     """
     from pocketpaw_ee.cloud.credits import guards
 
-    creds = getattr(ctx, "turn_credentials", None)
     return await guards.reject_if_over_billing(
         ctx.workspace_id,
         run_id=spec.run_id,
         transport=transport,
         log_label=spec.run_id,
-        source=creds.source if creds is not None else "platform",
+        source=getattr(ctx, "credential_source", None) or "platform",
     )
 
 

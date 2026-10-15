@@ -2437,9 +2437,16 @@ Who pays is decided before the check. Both the chat route and the worker resolve
 the workspace's stored provider key first. A turn on the workspace's own key
 (BYOK) skips the balance and quota check, so it runs at a wallet of 0, and its
 run debits nothing: the run doc records `credential_source: "byok"`, and billing
-keeps the token usage but charges 0 credits. Any other turn, including one where
-looking up the key fails, is `credential_source: "platform"`: gated and charged.
-A stored gateway address the egress guard rejects refuses the turn with 422
+keeps the token usage but charges 0 credits. A turn counts as BYOK only when the
+backend serving it spends the key: an agent on `pydantic_ai`, or any agent on a
+deny-by-default surface (the concierge), which always runs on `pydantic_ai`. A
+key stored for an agent on any other backend (for example `claude_agent_sdk`)
+does not pay for that agent's turns, so they are `credential_source:
+"platform"`, like every other turn, including one where looking up the key
+fails: gated and charged. If the per-turn backend for the key cannot be built,
+the turn ends with an `error` frame instead of running on platform credentials.
+With both billing flags off the route skips the key lookup entirely. A stored
+gateway address the egress guard rejects refuses the turn with 422
 `byok.base_url_rejected` (route) or that code on the terminal frame (worker).
 
 `payments_open` (default off) tells the server whether customers can pay. While

@@ -169,22 +169,70 @@ async def test_an_empty_workspace_skips_billing_like_the_guard(monkeypatch):
     assert "balance" not in started and "quota" not in started
 
 
+async def _byok(_ws):
+    from pocketpaw_ee.cloud.byok.service import TurnCredentials
+
+    return TurnCredentials(source="byok", api_key="k", provider="anthropic")
+
+
 async def test_a_byok_turn_skips_the_wallet(monkeypatch):
     """The billing leg resolves who pays first and hands the answer to the
-    guard, so a workspace on its own key is not refused for an empty wallet.
+    guard, so a turn its own key pays for is not refused for an empty wallet.
+    A deny-by-default surface is served by pydantic_ai, which spends the key,
+    so no agent lookup is needed.
 
     Mutation: call the guard without the resolved source.
     """
-    from pocketpaw_ee.cloud.byok.service import TurnCredentials
-
     started = _install(monkeypatch, billing=True, fail={"balance", "quota"})
-
-    async def _byok(_ws):
-        return TurnCredentials(source="byok", api_key="k", provider="anthropic")
-
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _byok)
-    await mod._run_start_gates("w1", "u1", "w1")
+    await mod._run_start_gates("w1", "u1", "w1", exclusive_tools=True)
     assert "balance" not in started and "quota" not in started
+
+
+async def test_a_byok_answer_without_a_spending_backend_is_gated(monkeypatch):
+    """A stored key alone does not skip the wallet: with no agent whose backend
+    spends it, the turn runs on our credentials and is gated as platform.
+
+    Mutation: gate on ``resolve_payer``'s source instead of ``billing_source``.
+    """
+    started = _install(monkeypatch, billing=True, fail={"balance"})
+    monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _byok)
+    with pytest.raises(_Balance):
+        await mod._run_start_gates("w1", "u1", "w1", agent_id=None)
+    assert "balance" in started
+
+
+async def test_billing_off_skips_the_payer_lookup(monkeypatch):
+    """With both billing flags off there is nothing to gate, so the route does
+    not read, decrypt or egress-check a stored key on every chat POST.
+
+    Mutation: resolve the payer before checking the flags.
+    """
+    _install(monkeypatch, billing=False, fail=set())
+    resolved: list[str] = []
+
+    async def _spy(ws):
+        resolved.append(ws)
+        return await _byok(ws)
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _spy)
+    await mod._run_start_gates("w1", "u1", "w1", agent_id="a1")
+    assert resolved == []
+
+
+async def test_only_a_deny_by_default_surface_is_exclusive():
+    """The route's exclusivity answer comes from the surface's base profile.
+    Mutation: return False unconditionally (the concierge would be gated on
+    the bound agent's backend while pydantic_ai serves it on the key)."""
+    from pocketpaw_ee.cloud.surface import SurfaceKind, SurfaceMeta, resolve_profile
+
+    exclusive = [k for k in SurfaceKind if resolve_profile(k, SurfaceMeta()).exclusive_tools]
+    assert exclusive, "no deny-by-default surface left to test"
+    ctx = SimpleNamespace(kind=exclusive[0], meta=SurfaceMeta())
+    assert mod._surface_is_exclusive(ctx) is True
+    generic = SimpleNamespace(kind=SurfaceKind.GENERIC, meta=SurfaceMeta())
+    assert mod._surface_is_exclusive(generic) is False
+    assert mod._surface_is_exclusive(None) is False
 
 
 async def test_a_rejected_gateway_address_is_refused_not_gated_as_platform(monkeypatch):

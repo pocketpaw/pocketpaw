@@ -1,7 +1,9 @@
 # tests/cloud/credits/test_early_access_byok.py: who pays is decided before the
 # credit gate. A workspace with its own stored key (the Ripple guest handoff,
-# the Otherhand kiosk) runs at a wallet of 0 and its run debits nothing, while a
-# resolver that crashes leaves the turn gated and charged as platform spend.
+# the Otherhand kiosk) runs at a wallet of 0 and its run debits nothing, but
+# only when its agent's backend spends the key (pydantic_ai). A key stored for
+# an agent on any other backend, or a resolver that crashes, leaves the turn
+# gated and charged as platform spend. Agents are real documents.
 #
 # Same posture and harness as ``test_early_access_cap.py`` (its fixtures reach
 # this file through ``conftest.py``)
@@ -43,7 +45,18 @@ async def _store_key(monkeypatch, workspace_id: str) -> None:
     await byok_service.set_key(workspace_id, _KEY, provider="anthropic", validate=False)
 
 
-def _wire_executor(monkeypatch, ws: str, uid: str) -> tuple[Any, list[Any]]:
+async def _agent(ws: str, uid: str, backend: str = "pydantic_ai") -> str:
+    """Insert a real Agent document on ``backend``; return its id."""
+    from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
+
+    doc = Agent(
+        workspace=ws, name="A", slug=f"a-{backend}", owner=uid, config=AgentConfig(backend=backend)
+    )
+    await doc.insert()
+    return str(doc.id)
+
+
+def _wire_executor(monkeypatch, ws: str, uid: str, agent_id: str) -> tuple[Any, list[Any]]:
     """Stub scope resolution, the stream and the agent; return (transport, seen ctx)."""
     from pocketpaw_ee.cloud.chat.runs import run_core
     from pocketpaw_ee.cloud.chat.runs import service as run_service
@@ -58,7 +71,7 @@ def _wire_executor(monkeypatch, ws: str, uid: str) -> tuple[Any, list[Any]]:
             scope_id="s1",
             workspace_id=ws,
             user_id=uid,
-            target_agent_id="a1",
+            target_agent_id=agent_id,
             members=[uid],
             session_id=None,
             intent=None,
@@ -140,7 +153,7 @@ async def test_byok_run_at_wallet_zero_proceeds_and_bills_zero(
     balance_before = await credits_service.balance_micro(ws)
     assert balance_before <= 0
     await _store_key(monkeypatch, ws)
-    transport, seen = _wire_executor(monkeypatch, ws, uid)
+    transport, seen = _wire_executor(monkeypatch, ws, uid, await _agent(ws, uid))
     monkeypatch.setattr(metering, "load_rate_card", _rate_card)
 
     spec = _spec(ws, uid, "r-byok")
@@ -187,7 +200,7 @@ async def test_resolver_failure_is_gated_and_charged_as_platform(
         raise RuntimeError("resolver down")
 
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _boom)
-    transport, seen = _wire_executor(monkeypatch, ws, uid)
+    transport, seen = _wire_executor(monkeypatch, ws, uid, await _agent(ws, uid))
 
     spec = _spec(ws, uid, "r-resolver-down")
     await run_service.create_run(spec)
@@ -223,7 +236,7 @@ async def test_gateway_egress_rejection_refuses_the_turn_not_the_wallet(
         raise GatewayEgressRejected("That gateway address is not allowed.")
 
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _rejected)
-    transport, seen = _wire_executor(monkeypatch, ws, uid)
+    transport, seen = _wire_executor(monkeypatch, ws, uid, await _agent(ws, uid))
 
     spec = _spec(ws, uid, "r-egress")
     await run_service.create_run(spec)
@@ -238,12 +251,89 @@ async def test_gateway_egress_rejection_refuses_the_turn_not_the_wallet(
     assert doc is not None and doc.status == "failed"
 
 
+async def test_a_stored_key_on_a_backend_that_ignores_it_is_gated_and_charged(
+    ea_user, early_access_posture, backend_factory_spy, monkeypatch
+):
+    """A real, decrypting key is stored, but the agent runs on claude_agent_sdk,
+    which never reads the BYOK override: the turn would run on our credentials.
+    It is gated by the wallet (refused at 0) and stamped platform, so billing it
+    debits.
+
+    Mutation: let ``billing_source`` answer the resolver's ``byok`` whatever
+    the backend.
+    """
+    from pocketpaw_ee.cloud.chat.runs import run_core
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    ws, uid = ea_user.workspace_id, ea_user.user_id
+    await drain_wallet(ws, uid)
+    await _store_key(monkeypatch, ws)
+    agent_id = await _agent(ws, uid, backend="claude_agent_sdk")
+    transport, seen = _wire_executor(monkeypatch, ws, uid, agent_id)
+
+    spec = _spec(ws, uid, "r-sdk-key")
+    await run_service.create_run(spec)
+    await run_core.execute_run(spec)
+
+    end = await _terminal(transport, spec.run_id)
+    assert end.event == "error"
+    assert end.data["code"] == "credits.insufficient"
+    assert seen == []
+    assert backend_factory_spy == []
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == spec.run_id)
+    assert doc is not None and doc.status == "failed"
+    assert doc.credential_source == "platform"
+
+    doc.usage = dict(_USAGE)
+    await doc.save()
+    result = await metering.bill_run(doc, rate_card=_rate_card())
+    assert result.debited is True and result.micro_charged > 0
+
+
+@pytest.mark.parametrize("backend", ["claude_code", "claude_agent_sdk"])
+async def test_a_legacy_or_sdk_backend_with_a_key_is_admitted_and_billed_when_funded(
+    ea_user, early_access_posture, monkeypatch, backend
+):
+    """Funded wallet, stored key, a backend that ignores it (including the
+    legacy ``claude_code`` name): the turn runs and its bill debits.
+
+    Mutation: canonicalise without ``_LEGACY_BACKENDS``, or bill ``byok``.
+    """
+    from pocketpaw_ee.cloud.chat.runs import run_core
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    ws, uid = ea_user.workspace_id, ea_user.user_id
+    await _store_key(monkeypatch, ws)
+    agent_id = await _agent(ws, uid, backend=backend)
+    transport, seen = _wire_executor(monkeypatch, ws, uid, agent_id)
+    monkeypatch.setattr(metering, "load_rate_card", _rate_card)
+    balance_before = await credits_service.balance_micro(ws)
+
+    spec = _spec(ws, uid, f"r-{backend}")
+    await run_service.create_run(spec)
+    await run_core.execute_run(spec)
+
+    end = await _terminal(transport, spec.run_id)
+    assert end.event == "stream_end", end.data
+    assert len(seen) == 1
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == spec.run_id)
+    assert doc.credential_source == "platform"
+    result = await metering.bill_run_now(spec.run_id)
+    assert result is not None and result.debited is True
+    assert await credits_service.balance_micro(ws) < balance_before
+
+
 # ---------------------------------------------------------------------------
 # Seam 2: chat HTTP fast-reject
 # ---------------------------------------------------------------------------
 
 
-async def _post_turn(monkeypatch, ws: str, uid: str) -> tuple[Any, list[str]]:
+async def _post_turn(monkeypatch, ws: str, uid: str, agent_id: str) -> tuple[Any, list[str]]:
     from fastapi import FastAPI
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud.chat import agent_router as mod
@@ -263,8 +353,8 @@ async def _post_turn(monkeypatch, ws: str, uid: str) -> tuple[Any, list[str]]:
             workspace_id=ws,
             user_id=uid,
             members=[uid],
-            target_agent_id="a1",
-            agent_ids_in_scope=["a1"],
+            target_agent_id=agent_id,
+            agent_ids_in_scope=[agent_id],
             pocket_tool_specs=[],
             session_id=None,
             pocket_id=None,
@@ -309,7 +399,7 @@ async def test_byok_chat_http_at_wallet_zero_is_admitted(
     await drain_wallet(ws, uid)
     await _store_key(monkeypatch, ws)
 
-    resp, submitted = await _post_turn(monkeypatch, ws, uid)
+    resp, submitted = await _post_turn(monkeypatch, ws, uid, await _agent(ws, uid))
 
     assert resp.status_code == 200, resp.text
     assert len(submitted) == 1
@@ -327,9 +417,29 @@ async def test_chat_http_resolver_failure_returns_402(
 
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _boom)
 
-    resp, submitted = await _post_turn(monkeypatch, ws, uid)
+    resp, submitted = await _post_turn(monkeypatch, ws, uid, await _agent(ws, uid))
 
     assert resp.status_code == 402
     assert resp.json()["error"]["code"] == "credits.insufficient"
     assert submitted == []
     assert backend_factory_spy == []
+
+
+async def test_chat_http_key_on_a_backend_that_ignores_it_returns_402(
+    ea_user, early_access_posture, monkeypatch
+):
+    """The route gates the same way the executor does: a stored key on a
+    claude_agent_sdk agent does not skip the wallet.
+
+    Mutation: drop ``billing_source`` from the route's billing leg.
+    """
+    ws, uid = ea_user.workspace_id, ea_user.user_id
+    await drain_wallet(ws, uid)
+    await _store_key(monkeypatch, ws)
+
+    agent_id = await _agent(ws, uid, backend="claude_agent_sdk")
+    resp, submitted = await _post_turn(monkeypatch, ws, uid, agent_id)
+
+    assert resp.status_code == 402
+    assert resp.json()["error"]["code"] == "credits.insufficient"
+    assert submitted == []

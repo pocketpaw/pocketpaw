@@ -385,3 +385,22 @@ async def test_credentials_resolved_by_the_gate_are_reused_not_resolved_again(mo
     pool, _ = await _drive(monkeypatch, ctx, creds=RuntimeError("must not resolve twice"))
     assert pool.run_called is True
     assert pool.run_kwargs.get("byok_api_key") == _PLAINTEXT
+
+
+async def test_a_key_billed_as_platform_still_faces_the_model_catalog(monkeypatch):
+    """A stored key on a backend that ignores it is billed as platform
+    (``ctx.credential_source``), so the turn runs on our gateway and a model id
+    the gateway does not list is refused, as for any platform turn. Mutation:
+    key the catalog check on ``turn_credentials.source`` alone."""
+
+    async def _unknown(_model):
+        return True
+
+    monkeypatch.setattr(run_core, "_model_is_unknown_to_gateway", _unknown)
+    ctx = _ctx(model_override="claude-made-up-9")
+    ctx.turn_credentials = TurnCredentials(source="byok", api_key=_PLAINTEXT, provider="anthropic")
+    ctx.credential_source = "platform"
+    pool, out = await _drive(monkeypatch, ctx, creds=RuntimeError("must not resolve twice"))
+    assert pool.run_called is False
+    errors = [d for name, d in out if name == "error"]
+    assert errors and errors[0]["code"] == "model.not_available"

@@ -47,7 +47,7 @@
   {
     "label": "the catalog check is dropped \u2014 a per-send model is free text billed to the platform key",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
-    "find": "            and byok_creds.source != \"byok\"\n            and await _model_is_unknown_to_gateway(ctx.model_override)",
+    "find": "            and (getattr(ctx, \"credential_source\", None) or byok_creds.source) != \"byok\"\n            and await _model_is_unknown_to_gateway(ctx.model_override)",
     "replace": "            and False\n            and await _model_is_unknown_to_gateway(ctx.model_override)",
     "tests": [
       "tests/cloud/runs/test_run_core_model_catalog.py::test_a_model_the_gateway_never_heard_of_is_refused"

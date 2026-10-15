@@ -10,11 +10,13 @@ comes from ``resolve_scope_context``, which is handed the authenticated
 disagrees is rejected). Then ``_run_start_gates`` runs the read-only run-start
 checks BEFORE any DB write, so a refused turn leaves no run and no message:
 
-* who pays (``credits.guards.resolve_payer``), then the credit gate
-  (``assert_within_billing``: balance, then monthly quota, 402
+* who pays (``credits.guards.resolve_payer`` and ``billing_source``), then
+  the credit gate (``assert_within_billing``: balance, then monthly quota, 402
   ``credits.insufficient`` / ``credits.quota_exceeded``). A no-op unless
   ``billing_enforced`` or ``credits_enforced``, and skipped for a turn on the
-  workspace's own key.
+  workspace's own key when the serving backend spends it. The surface is
+  resolved before these gates, because a deny-by-default surface changes
+  which backend serves the turn.
 * the guest turn gate (check-only; the executor owns the atomic spend).
 * the workspace daily turn ceiling (check-only, fails open).
 
@@ -57,6 +59,7 @@ from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 from pocketpaw_ee.cloud.surface import (
     SurfaceContext,
     SurfaceKind,
+    resolve_profile,
     resolve_surface_context,
 )
 
@@ -105,7 +108,14 @@ async def _assert_under_daily_turns(workspace_id: str) -> None:
         raise DailyTurnLimitError(cap)
 
 
-async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: str) -> None:
+async def _run_start_gates(
+    workspace_id: str,
+    user_id: str,
+    scope_workspace_id: str,
+    *,
+    agent_id: str | None = None,
+    exclusive_tools: bool = False,
+) -> None:
     """The read-only run-start checks, run concurrently, first failure wins.
 
     Precedence is the declared order, the order these ran in when they were
@@ -117,10 +127,13 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
 
     * Balance + quota (BC-4 / chunk 3): ``credits.guards.assert_within_billing``,
       a no-op unless ``billing_enforced`` or ``credits_enforced``; balance
-      before quota inside it. Who pays is resolved first inside the same
-      check (``credits.guards.resolve_payer``): a turn on the workspace's own
-      key skips the wallet, a resolver failure is gated as platform, and a
-      gateway address the egress guard rejects raises its 422.
+      before quota inside it. When neither flag is on the leg returns before
+      resolving anything. Otherwise who pays is resolved first
+      (``credits.guards.resolve_payer`` then ``billing_source``): a turn on the
+      workspace's own key skips the wallet only when ``agent_id``'s backend
+      (or a deny-by-default ``exclusive_tools`` run) spends that key, a
+      resolver failure is gated as platform, and a gateway address the egress
+      guard rejects raises its 422.
     * Guest turn gate (feat/byok-guest-backend): the frozen
       ``guest_limit_reached`` / ``guest_key_required`` 402 the signup prompt
       keys on. Does NOT increment; ``run_core._reject_if_guest_over_limit``
@@ -131,13 +144,18 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
       be right.
     """
     from pocketpaw_ee.cloud.auth.guest_gates import assert_guest_turn_allowed
-    from pocketpaw_ee.cloud.credits.guards import assert_within_billing, resolve_payer
+    from pocketpaw_ee.cloud.credits import guards
 
     async def _billing() -> None:
         # Advisory here: the executor resolves again on its own ctx and that
-        # answer is the one that gates and bills the run.
-        payer = await resolve_payer(workspace_id)
-        await assert_within_billing(workspace_id, payer.source)
+        # answer is the one that gates and bills the run. Billing off means
+        # nothing to gate, so skip the key read, decrypt and egress check.
+        settings = guards.get_settings()
+        if not (settings.billing_enforced or settings.credits_enforced):
+            return
+        payer = await guards.resolve_payer(workspace_id)
+        source = await guards.billing_source(payer, agent_id, exclusive_tools=exclusive_tools)
+        await guards.assert_within_billing(workspace_id, source)
 
     checks = [
         # Flag-gated no-op unless billing_enforced or credits_enforced;
@@ -150,6 +168,23 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
     for outcome in await asyncio.gather(*checks, return_exceptions=True):
         if isinstance(outcome, BaseException):
             raise outcome
+
+
+def _surface_is_exclusive(surface_context: SurfaceContext | None) -> bool:
+    """Whether the surface's base profile is deny-by-default (``exclusive_tools``).
+
+    The base profile only: a pocket-entity override that turns exclusivity on is
+    folded in by the executor, not here, so for that rare turn the route can
+    gate a stored key as platform where the executor would not. A lookup error
+    answers True, the lenient side, since the executor gates again.
+    """
+    if surface_context is None:
+        return False
+    try:
+        return bool(resolve_profile(surface_context.kind, surface_context.meta).exclusive_tools)
+    except Exception:
+        logger.debug("surface profile lookup failed; treating as exclusive", exc_info=True)
+        return True
 
 
 async def _assert_own_key_if_kiosk_requires_it(ctx: Any) -> None:
@@ -280,23 +315,31 @@ async def post_agent_chat(
     # They are independent, so ``_run_start_gates`` runs them concurrently and
     # raises the FIRST failure in that declared order. A turn failing several
     # checks gets the same error it always did.
-    await _run_start_gates(workspace_id, user_id, ctx.workspace_id)
-
-    transport = get_stream_transport()
-    # Resolve the surface-aware context preamble AFTER scope is resolved
-    # (so we have ``workspace_id`` / ``user_id`` confirmed) and BEFORE any
-    # other prompt assembly. The resolver never raises — failures fall
-    # back to a GENERIC context with an empty preamble, which
-    # ``build_dynamic_context`` then treats as the legacy three-line
-    # shape. Older clients that send neither ``surface`` nor
-    # ``surface_meta`` land here as ``{surface: None, meta: {}}`` and
-    # produce a GENERIC context with a placeholder preamble that the
-    # router still attaches; the chat continues to work either way.
+    #
+    # The surface is resolved first, because a deny-by-default surface (the
+    # concierge) is served by pydantic_ai and so spends a stored key whatever
+    # the bound agent's backend is; the billing leg needs that answer.
+    #
+    # Surface: resolved AFTER scope (so ``workspace_id`` / ``user_id`` are
+    # confirmed) and BEFORE any prompt assembly. The resolver never raises:
+    # failures fall back to a GENERIC context with an empty preamble, which
+    # ``build_dynamic_context`` treats as the legacy three-line shape. Older
+    # clients that send neither ``surface`` nor ``surface_meta`` land here as
+    # ``{surface: None, meta: {}}`` and get a GENERIC context.
     ctx.surface_context = await resolve_surface_context(
         ctx.workspace_id,
         user_id,
         {"surface": body.surface, "meta": body.surface_meta or {}},
     )
+    await _run_start_gates(
+        workspace_id,
+        user_id,
+        ctx.workspace_id,
+        agent_id=ctx.target_agent_id,
+        exclusive_tools=_surface_is_exclusive(ctx.surface_context),
+    )
+
+    transport = get_stream_transport()
 
     # Kiosk BYOK fast-reject (2026-09-12). UX ONLY — see the docstring.
     #
