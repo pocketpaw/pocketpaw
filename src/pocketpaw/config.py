@@ -2757,6 +2757,21 @@ class Settings(BaseSettings):
             "Set via POCKETPAW_FREE_RUN_MAX_TURNS."
         ),
     )
+    free_model_allowlist: list[str] = Field(
+        default=["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-6"],
+        description=(
+            "Models a platform-funded turn on an unpaid early-access workspace may "
+            "use (credits.guards.free_model_denial). Matched exactly, ignoring case "
+            "and one known provider prefix such as litellm:. The per-send model, the "
+            "agent's own model and the model the forced pydantic_ai run really "
+            "uses must all be on it, and priced by the metering ladder, else the "
+            "turn is refused with 400 model.not_allowed. Paid workspaces and BYOK "
+            "turns are not limited. Applies only while credits_enforced or "
+            "billing_enforced is on. pydantic_ai_model is always checked, so it "
+            "must be on this list or every free turn is refused: change the two "
+            "together. Set via POCKETPAW_FREE_MODEL_ALLOWLIST as a JSON list."
+        ),
+    )
     early_access_grant_credits: int = Field(
         default=1_000,
         ge=0,

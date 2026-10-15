@@ -333,7 +333,9 @@ async def test_a_legacy_or_sdk_backend_with_a_key_is_admitted_and_billed_when_fu
 # ---------------------------------------------------------------------------
 
 
-async def _post_turn(monkeypatch, ws: str, uid: str, agent_id: str) -> tuple[Any, list[str]]:
+async def _post_turn(
+    monkeypatch, ws: str, uid: str, agent_id: str, *, model: str | None = None
+) -> tuple[Any, list[str]]:
     from fastapi import FastAPI
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud.chat import agent_router as mod
@@ -385,10 +387,10 @@ async def _post_turn(monkeypatch, ws: str, uid: str, agent_id: str) -> tuple[Any
     app.dependency_overrides[require_license] = lambda: None
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
-        resp = await client.post(
-            "/cloud/chat/session/s1/agent",
-            json={"content": "hello", "client_message_id": "c-http-byok"},
-        )
+        body: dict[str, Any] = {"content": "hello", "client_message_id": "c-http-byok"}
+        if model is not None:
+            body["model"] = model
+        resp = await client.post("/cloud/chat/session/s1/agent", json=body)
     return resp, submitted
 
 

@@ -68,7 +68,12 @@ def _install(monkeypatch, *, billing: bool, fail: set[str], barrier: asyncio.Bar
 
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.credits.guards.get_settings",
-        lambda: SimpleNamespace(billing_enforced=billing, credits_enforced=False),
+        lambda: SimpleNamespace(
+            billing_enforced=billing,
+            credits_enforced=False,
+            pydantic_ai_model="litellm:claude-haiku-4-5",
+            free_model_allowlist=["claude-haiku-4-5"],
+        ),
     )
     monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_balance", _balance)
     monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_quota", _quota)

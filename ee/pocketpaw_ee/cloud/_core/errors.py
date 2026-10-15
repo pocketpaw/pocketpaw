@@ -618,6 +618,22 @@ class EarlyAccessNotAvailable(CloudError):
         )
 
 
+class ModelNotAllowed(CloudError):
+    """A platform-funded early-access turn asked for a model it may not use (400).
+
+    Not on ``free_model_allowlist``, or nothing prices it (an unpriced model
+    bills 0). Paid workspaces and BYOK turns never see it.
+    """
+
+    def __init__(self, model: str) -> None:
+        super().__init__(
+            400,
+            "model.not_allowed",
+            f"'{model}' isn't available with early access credits yet. "
+            "Pick another model from the menu.",
+        )
+
+
 class RateLimited(CloudError):
     """Rate limit exceeded (429)."""
 
@@ -657,6 +673,7 @@ __all__ = [
     "Forbidden",
     "InsufficientCredits",
     "Internal",
+    "ModelNotAllowed",
     "NoActiveSubscription",
     "NotFound",
     "PocketLimitError",

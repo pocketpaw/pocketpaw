@@ -117,6 +117,7 @@ async def _run_start_gates(
     *,
     agent_id: str | None = None,
     exclusive_tools: bool = False,
+    model_override: str | None = None,
 ) -> None:
     """The read-only run-start checks, run concurrently, first failure wins.
 
@@ -136,7 +137,10 @@ async def _run_start_gates(
       (or a deny-by-default ``exclusive_tools`` run) spends that key, a
       resolver failure is gated as platform, and a gateway address the egress
       guard rejects raises its 422. An unpaid early-access workspace with a
-      chat run already active gets 429 ``credits.run_in_progress``.
+      chat run already active gets 429 ``credits.run_in_progress``, and a
+      model it may not use on early access credits (per-send, else the
+      agent's own, plus the deployment default) gets 400 ``model.not_allowed``.
+      The executor checks the same list again and is the enforcement.
     * Guest turn gate (feat/byok-guest-backend): the frozen
       ``guest_limit_reached`` / ``guest_key_required`` 402 the signup prompt
       keys on. Does NOT increment; ``run_core._reject_if_guest_over_limit``
@@ -159,6 +163,9 @@ async def _run_start_gates(
         payer = await guards.resolve_payer(workspace_id)
         source = await guards.billing_source(payer, agent_id, exclusive_tools=exclusive_tools)
         await guards.assert_within_billing(workspace_id, source, one_active_run=True)
+        refusal = await guards.free_model_refusal(workspace_id, source, agent_id, model_override)
+        if refusal is not None:
+            raise refusal
 
     checks = [
         # Flag-gated no-op unless billing_enforced or credits_enforced;
@@ -340,6 +347,7 @@ async def post_agent_chat(
         ctx.workspace_id,
         agent_id=ctx.target_agent_id,
         exclusive_tools=_surface_is_exclusive(ctx.surface_context),
+        model_override=body.model,
     )
 
     transport = get_stream_transport()
