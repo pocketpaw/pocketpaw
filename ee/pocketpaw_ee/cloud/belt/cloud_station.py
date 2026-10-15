@@ -56,7 +56,8 @@
 #           ``Belt-Lead: <run id>`` is kept on ``lead.prs``; none is reviewed or
 #           fixed by Belt (the lead's critics are its review). DONE: a merged
 #           ``feature-done`` PR, green dev CI on its merge commit and a
-#           ``Belt-Contact-Sheet:`` issue comment since the launch. STALL: no
+#           ``Belt-Contact-Sheet:`` issue comment since the launch, or the feature
+#           issue closed (done at once, never nudged or relaunched). STALL: no
 #           ``lead/<feature>`` commit, PR update or issue comment for LEAD_STALL:
 #           a ``claude -p --cloud`` nudge, then a resume relaunch, then
 #           ``needs-human`` and the run released. LEAD_TIMEOUT (8 h) settles the same
@@ -586,8 +587,9 @@ class CloudTaskDispatcher:
         self, store: Any, run_ref: str, blob: dict[str, Any], slug: str, worker: dict[str, str]
     ) -> None:
         """Poll a feature lead to its end (see the header): its ``Belt-Lead`` PRs
-        onto ``lead.prs``, the done rule, the stall ladder and the 8 h timeout,
-        all on the wall clock from ``cloud.launched_at`` so a resume keeps them."""
+        onto ``lead.prs``, the done rule, a closed feature issue, the stall ladder
+        and the 8 h timeout, all on the wall clock from ``cloud.launched_at`` so a
+        resume keeps them."""
         lead: dict[str, Any] = blob.setdefault("lead", {})
         cloud = blob.get("cloud") or {}
         launched = cloud.get("launched_at")
@@ -603,7 +605,7 @@ class CloudTaskDispatcher:
             expired = now - launched >= self.lead_timeout_seconds
             try:
                 prs, pr_at = await self._lead_prs(slug, run_ref, cwd)
-                argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "comments"]
+                argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "comments,state"]
                 raw = json.loads(await self._gh(argv, cwd, "TRACK: gh issue view") or "{}")
             except (CloudStationError, ValueError) as exc:
                 # GitHub is down past the retries: skip this poll, not the lead.
@@ -625,6 +627,11 @@ class CloudTaskDispatcher:
             done = _newest_done(prs)
             if done and sheet and await self._dev_green(slug, base, done["merge_sha"], cwd):
                 await self._land_lead(store, run_ref, blob, slug, done, sheet)
+                return
+            # A closed feature issue (by hand, or by its own PR) is done: the
+            # done rule may wait hours on a dev CI other lines turned red.
+            if raw.get("state") == "CLOSED":
+                await self._lead_closed(store, run_ref, blob, prs)
                 return
             said = max((_epoch(c.get("createdAt")) for c in comments), default=0.0)
             branch = await self._branch_at(slug, str(lead.get("branch") or ""), cwd)
@@ -878,6 +885,42 @@ class CloudTaskDispatcher:
             branch=str(done.get("branch") or ""),
         )
         logger.info("belt cloud: feature lead %s landed on %s", run_ref, slug)
+
+    async def _lead_closed(
+        self, store: Any, run_ref: str, blob: dict[str, Any], prs: list[dict[str, Any]]
+    ) -> None:
+        """Finish a lead whose feature issue is closed as done, whatever the done
+        rule still waits on, so it frees its slot. No nudge, relaunch or label."""
+        lead = blob["lead"]
+        why = f"feature issue #{lead.get('issue')} was closed"
+        approved = await store.auto_approve(
+            run_ref, approver="system:fast-lane", verdict="closed", reasoning=why
+        )
+        if approved is None:  # someone resolved it meanwhile; theirs stands
+            return
+        await _patch(store, run_ref, station_pending=False, headless_state=None, lead=lead)
+        merged = [p for p in prs if p["state"] == "MERGED"]
+        await store.mark_executed(
+            run_ref, f"Feature lead done: {why}; {len(merged)} PR(s) merged through the fast lane."
+        )
+        last = max(merged, key=lambda p: p.get("merged_at") or "", default={})
+        await _persist_run_result(
+            store=store,
+            action_id=run_ref,
+            branch=str(lead.get("branch") or ""),
+            files_changed=0,
+            pr_url=last.get("url"),
+            commit_sha=last.get("merge_sha") or None,
+        )
+        await _emit_run_updated(
+            workspace_id=str(blob.get("workspace_id") or ""),
+            action_id=run_ref,
+            status="landed",
+            stage="done",
+            pr_url=last.get("url"),
+            branch=str(lead.get("branch") or ""),
+        )
+        logger.info("belt cloud: feature lead %s done: %s", run_ref, why)
 
     # -- launch ---------------------------------------------------------------
 

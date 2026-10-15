@@ -14,7 +14,8 @@
 # (open and merged), never reviewed (no ``belt/review``) and never fixed.
 # DONE: a merged ``feature-done`` PR, every dev CI run of its merge commit
 # green, and a ``Belt-Contact-Sheet:`` comment on the issue since the launch;
-# any one missing keeps the run tracking.
+# any one missing keeps the run tracking. A closed feature issue finishes the
+# run as done at the next poll and frees its slot, never nudged or relaunched.
 # STALL: 30 min with no lead-branch commit, PR update or issue comment: a
 # ``claude -p --cloud <session>`` nudge, then a relaunch with the resume brief,
 # then ``needs-human`` on the issue and the run released, the reason naming the

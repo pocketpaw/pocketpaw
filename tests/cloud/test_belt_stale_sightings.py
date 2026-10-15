@@ -7,7 +7,8 @@
 # sighted again. Until the patrol runs, the backlog skips a closed issue. And an
 # issue whose live body names a ``Depends on`` issue still open (``#N``,
 # ``owner/repo#N``, a heading over a list, no colon) is blocked: neither the
-# foreman nor the due check takes it, and a gh failure blocks too.
+# foreman nor the due check takes it, and a gh failure blocks too. A ref in a
+# note after the refs (`` (`` or `` - ``) is not a dependency; ``none`` is none.
 # Real store (mongomock), real trigger, mock foreman; gh is a fake executor.
 
 from __future__ import annotations

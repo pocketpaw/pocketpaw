@@ -25,7 +25,8 @@
 #                    ``open_pr_closes`` (each issue an OPEN PR closes),
 #                    ``open_issues`` (also Clef's duplicate check), and
 #                    ``open_dependencies``: an issue whose live body names a
-#                    ``Depends on`` issue still open is blocked (fail safe).
+#                    ``Depends on`` issue still open is blocked (fail safe);
+#                    a ref in the line's trailing note, or after ``none``, is not.
 #                    ``flag_needs_spec`` comments on a ``github:`` source issue
 #                    and labels it ``needs-spec`` (once) for the auto plan gate.
 #   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
@@ -587,13 +588,17 @@ async def closed_issues(repo_id: str, gh: GhFn | None = None) -> set[str]:
 # on #412``, a ``## Depends on`` heading) and the lines under it, up to a blank
 # line or a heading; a heading with no reference may sit a blank line above its
 # list. A reference is ``#N`` (the issue's own repo), ``owner/repo#N`` or an
-# issue / PR URL; the first ``_DEPENDS_REFS_CAP`` count.
+# issue / PR URL; the first ``_DEPENDS_REFS_CAP`` count. Only refs before a
+# line's note count (`` (`` or `` - `` after its list bullet), and a line that
+# says ``none`` names no dependency, its note and the lines under it included.
 _DEPENDS_HEAD = re.compile(r"^[\s>*_#-]*depends\s+on\b[\s*_:]*(.*)$", re.IGNORECASE)
 _DEPENDS_REF = re.compile(
     r"(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/|([\w.-]+/[\w.-]+)?#)(\d+)"
 )
 _SECTION_END = re.compile(r"^(?:#{1,6}\s|\*\*[^*]+\*\*:?$)")
 _DEPENDS_REFS_CAP = 10
+_BULLET = re.compile(r"^[\s>*_+-]+")
+_NOTE = re.compile(r"\s\(|\s-\s")
 
 
 def depends_on_refs(body: str, slug: str) -> list[str]:
@@ -605,6 +610,8 @@ def depends_on_refs(body: str, slug: str) -> list[str]:
         head = _DEPENDS_HEAD.match(line)
         if not head:
             continue
+        if re.match(r"none\b", _NOTE.split(head[1], 1)[0].strip(" *_."), re.IGNORECASE):
+            continue
         section, rest = [head[1]], lines[i + 1 :]
         if not _DEPENDS_REF.search(head[1]):
             while rest and not rest[0].strip():
@@ -613,6 +620,7 @@ def depends_on_refs(body: str, slug: str) -> list[str]:
             if not nxt.strip() or _SECTION_END.match(nxt.strip()) or _DEPENDS_HEAD.match(nxt):
                 break
             section.append(nxt)
+        section = [_NOTE.split(_BULLET.sub("", s), 1)[0] for s in section]
         for m in _DEPENDS_REF.finditer("\n".join(section)):
             refs.append(f"{(m[1] or m[2] or slug).lower()}#{m[3]}")
     return list(dict.fromkeys(refs))[:_DEPENDS_REFS_CAP]
