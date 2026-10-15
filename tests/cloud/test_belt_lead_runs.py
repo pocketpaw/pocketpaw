@@ -599,6 +599,24 @@ async def test_a_lead_quiet_before_the_timeout_gets_the_ladder_not_the_timeout(
     assert "not done after" not in (action.rejected_reason or "")
 
 
+async def test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_ladder(
+    store, dirs, playbook
+):
+    # A lead whose sheet is up is finished: it waits on dev CI (red here, for
+    # other lines' failures), so a quiet branch is not a stall. No nudge, no
+    # relaunch of a session with nothing left to do; the timeout settles it.
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref, ci_by_sha={MERGE_SHA: [RED_RUN]})
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert not _nudges(runner) and len(_launch_briefs(runner)) == 1
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert (action.rejected_reason or "").startswith("feature lead not done after 8h")
+
+
 async def test_lead_timeouts_read_the_env(monkeypatch, tmp_path):
     monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR", str(tmp_path))
     monkeypatch.setenv("POCKETPAW_FACTORY_CLOUD_LEAD_TIMEOUT", "100")

@@ -270,5 +270,14 @@
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_later_green_run_of_another_workflow_does_not_land_the_lead"
     ]
+  },
+  {
+    "label": "a finished lead waiting on CI gets nudged and relaunched",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            if not sheet and now - heard >= self.lead_stall_seconds:",
+    "replace": "            if now - heard >= self.lead_stall_seconds:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_ladder"
+    ]
   }
 ]

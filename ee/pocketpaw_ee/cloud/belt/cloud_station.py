@@ -644,7 +644,9 @@ class CloudTaskDispatcher:
                     *(float(s.get("at") or 0) for s in lead.get("stalls") or []),
                 ]
             )
-            if now - heard >= self.lead_stall_seconds:
+            # A lead whose contact sheet is up has finished and waits on dev CI:
+            # a quiet branch then is not a stall, and the timeout settles it.
+            if not sheet and now - heard >= self.lead_stall_seconds:
                 if not await self._lead_stall(store, run_ref, blob, slug, worker, cwd, active):
                     return
             await self.sleep(self.poll_seconds)
