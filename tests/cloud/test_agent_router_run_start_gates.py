@@ -185,3 +185,32 @@ async def test_a_byok_turn_skips_the_wallet(monkeypatch):
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _byok)
     await mod._run_start_gates("w1", "u1", "w1")
     assert "balance" not in started and "quota" not in started
+
+
+async def test_a_rejected_gateway_address_is_refused_not_gated_as_platform(monkeypatch):
+    """A stored gateway address the egress guard rejects refuses the turn with
+    its own 422, rather than degrading to platform and spending our key or
+    showing a wallet refusal.
+
+    Mutation: let ``resolve_payer`` swallow ``GatewayEgressRejected``.
+    """
+    from pocketpaw_ee.cloud.byok.service import GatewayEgressRejected
+
+    _install(monkeypatch, billing=True, fail=set())
+
+    async def _rejected(_ws):
+        raise GatewayEgressRejected("That gateway address is not allowed.")
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _rejected)
+    with pytest.raises(GatewayEgressRejected) as caught:
+        await mod._run_start_gates("w1", "u1", "w1")
+    assert caught.value.code == "byok.base_url_rejected"
+
+
+async def test_turn_credentials_never_print_the_key():
+    """``ctx.turn_credentials`` lives on the run context, so its repr must not
+    carry the plaintext key. Mutation: drop ``repr=False`` on ``api_key``."""
+    from pocketpaw_ee.cloud.byok.service import TurnCredentials
+
+    creds = TurnCredentials(source="byok", api_key="sk-secret-value", provider="anthropic")
+    assert "sk-secret-value" not in repr(creds)

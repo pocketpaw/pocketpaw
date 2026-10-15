@@ -34,7 +34,8 @@
     "find": "    except byok_service.GatewayEgressRejected:\n        raise\n",
     "replace": "",
     "tests": [
-      "tests/cloud/credits/test_early_access_byok.py::test_gateway_egress_rejection_refuses_the_turn_not_the_wallet"
+      "tests/cloud/credits/test_early_access_byok.py::test_gateway_egress_rejection_refuses_the_turn_not_the_wallet",
+      "tests/cloud/test_agent_router_run_start_gates.py::test_a_rejected_gateway_address_is_refused_not_gated_as_platform"
     ]
   },
   {
@@ -72,6 +73,15 @@
     "tests": [
       "tests/cloud/test_agent_router_run_start_gates.py::test_a_byok_turn_skips_the_wallet",
       "tests/cloud/credits/test_early_access_byok.py::test_byok_chat_http_at_wallet_zero_is_admitted"
+    ]
+  },
+  {
+    "label": "the run context prints the plaintext key",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "    api_key: str | None = field(default=None, repr=False)\n",
+    "replace": "    api_key: str | None = None\n",
+    "tests": [
+      "tests/cloud/test_agent_router_run_start_gates.py::test_turn_credentials_never_print_the_key"
     ]
   }
 ]
