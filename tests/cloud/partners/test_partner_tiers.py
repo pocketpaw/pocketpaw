@@ -53,7 +53,7 @@ from tests.cloud.partners.test_partners import (
     _workspace,
 )
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("payments_open")]
 
 
 @pytest.fixture(autouse=True)

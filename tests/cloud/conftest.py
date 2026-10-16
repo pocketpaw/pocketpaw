@@ -195,6 +195,33 @@ def _site_pages_are_serving(monkeypatch):
     yield
 
 
+@pytest.fixture
+def payments_open(monkeypatch):
+    """Open payments, live Dodo mode, for ``billing.service``.
+
+    The production default is closed (early access): no checkout opens and no
+    webhook grants. Suites that exercise paid flows request this. It resolves
+    ``pocketpaw.config.get_settings`` at call time, so a test that patches the
+    config still sees its own settings with the two payment keys flipped.
+    """
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.billing import service as billing_service
+
+    import pocketpaw.config as config
+
+    flip = {"payments_open": True, "dodo_environment": "live_mode"}
+
+    def _open(*a, **k):
+        settings = config.get_settings(*a, **k)
+        if hasattr(settings, "model_copy"):
+            return settings.model_copy(update=flip)
+        # Some suites patch the config with a bare namespace.
+        return SimpleNamespace(**{**vars(settings), **flip})
+
+    monkeypatch.setattr(billing_service, "get_settings", _open)
+
+
 @pytest.fixture(autouse=True)
 def recording_bus():
     """Install a RecordingBus for every test.

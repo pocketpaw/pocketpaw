@@ -32,6 +32,16 @@
 # It is still RECORDED, with ``credits_granted=0``: the gate stops us handing over
 # credits, not from keeping the receipt a later reversal has to join through.
 #
+# PAYMENTS CLOSED: while ``payments_open`` is off (early access) nobody can pay.
+# ``require_payments_open`` refuses every checkout we create (top-up, plan
+# subscribe, partner pay link) with 403 ``payments.closed``, and ``handle_webhook``
+# grants nothing for a ``payment.succeeded`` or ``subscription.active|renewed``:
+# it records the payment (``credits_granted=0``), logs at ERROR for a human, and
+# acks 200 so Dodo stops retrying. Grants need ``payments_open`` AND
+# ``dodo_environment == "live_mode"``: Dodo's payload has no mode field, and the
+# webhook secret is per-environment, so the configured environment is the mode.
+# Reversals and downgrades (cancel, dunning) still run, since they only take back.
+#
 # Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
 # Updated 2026-10-02 (feat/partners-sell, PH-2): ``site_plan_price_usd`` — what one
 #   period of a site tier costs THIS workspace. Monthly rungs return
@@ -322,7 +332,13 @@ from beanie.operators import In
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from pocketpaw_ee.cloud._core.errors import ConflictError, NoActiveSubscription, ValidationError
+from pocketpaw.config import get_settings  # type: ignore[import-untyped]
+from pocketpaw_ee.cloud._core.errors import (
+    ConflictError,
+    Forbidden,
+    NoActiveSubscription,
+    ValidationError,
+)
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     BillingSubscriptionGranted,
@@ -527,6 +543,50 @@ def _default_provider() -> IPaymentsProvider:
 
 
 # ---------------------------------------------------------------------------
+# Payments closed (early access)
+# ---------------------------------------------------------------------------
+
+
+def require_payments_open() -> None:
+    """Refuse to start any purchase while payments are closed (403 ``payments.closed``).
+
+    The client hides upgrade and pricing while ``payments_open`` is off; this is
+    the server half, so calling the API directly opens no checkout either.
+    """
+    if not get_settings().payments_open:
+        raise Forbidden("payments.closed", "Payments are not open yet.")
+
+
+def _webhook_grants_allowed() -> bool:
+    """Whether a verified delivery may grant credits or change a plan.
+
+    Needs payments open AND the live Dodo environment: a test-mode delivery
+    (paid with a public test card) must never mint real credits.
+    """
+    settings = get_settings()
+    return bool(settings.payments_open) and settings.dodo_environment == "live_mode"
+
+
+async def _refuse_closed_delivery(event: GatewayEvent | SubscriptionEvent) -> dict:
+    """Ack a grant-bearing delivery that arrived while payments are closed, granting nothing.
+
+    A ``payment.succeeded`` is recorded with ``credits_granted=0`` (the review
+    record, and what a later refund joins through). Logged at ERROR: money moved
+    at the gateway for something we do not sell yet. 200 so Dodo stops retrying.
+    """
+    if isinstance(event, GatewayEvent) and event.workspace_id:
+        await _record_payment(event)
+    logger.error(
+        "billing.webhook: %s while payments are closed (event_id=%s, workspace=%s); "
+        "recorded, NOTHING granted, no plan change; needs a human review",
+        event.type,
+        event.event_id,
+        event.workspace_id,
+    )
+    return {"ok": True, "granted": False}
+
+
+# ---------------------------------------------------------------------------
 # Checkout
 # ---------------------------------------------------------------------------
 
@@ -548,6 +608,7 @@ async def create_topup(
     see ``_inr_base_credits``). ``workspace_id`` is stamped onto the gateway
     metadata so the success webhook can route the grant back to the right wallet.
     """
+    require_payments_open()
     # Rule 6 — validate at entry.
     if (
         not isinstance(amount_credits, int)
@@ -588,6 +649,7 @@ async def create_partner_client_checkout(
     ``OneTimeCheckout``; its ``gateway_ref`` (Dodo's payment id) is what the
     webhook matches the payment on, so a checkout without one is refused.
     """
+    require_payments_open()
     currency = (currency or "").upper()
     if currency not in _GRANT_CURRENCIES:
         raise ValidationError("billing.invalid_currency", "currency must be USD or INR")
@@ -968,6 +1030,7 @@ async def subscribe(
     cancel-then-create — see the body — so a plan switch replaces the old
     subscription instead of stacking on top of it.
     """
+    require_payments_open()
     # Rule 6 — validate at entry.
     if not workspace_id:
         raise ValidationError("billing.invalid_workspace", "workspace_id is required")
@@ -1202,6 +1265,13 @@ async def handle_webhook(
     # SECURITY: signature is verified inside the provider BEFORE the body is
     # parsed. A bad signature raises BadRequest here → 400, no grant.
     event = prov.verify_and_parse_webhook(payload=payload, headers=headers)
+
+    # PAYMENTS CLOSED: nothing that grants credits or upgrades a plan applies.
+    if not _webhook_grants_allowed() and (
+        (isinstance(event, GatewayEvent) and event.type == _SUCCESS_EVENT)
+        or (isinstance(event, SubscriptionEvent) and event.type in _SUB_GRANT_EVENTS)
+    ):
+        return await _refuse_closed_delivery(event)
 
     # Route by the normalized event shape. A recurring subscription delivery is a
     # SubscriptionEvent (BC-7); money going back out is a ReversalEvent (M1);
@@ -2897,6 +2967,7 @@ __all__ = [
     "create_partner_client_checkout",
     "create_topup",
     "handle_webhook",
+    "require_payments_open",
     "site_plan_debit_key",
     "subscribe",
     "sweep_subscription_grace",
