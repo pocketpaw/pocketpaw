@@ -34,6 +34,10 @@
 # ``max_in_flight`` (unset = ``max_tasks_per_shift``). Shifts overlap: one starts
 # while earlier work is in flight or at a gate, its task budget the headroom
 # under the cap, never over ``max_tasks_per_shift``; a full line refuses a shift.
+# One shift PLANS at a time per mandate: ``trigger_shift`` claims the mandate's
+# ``shift_lock`` (atomic, expiring, off the Beanie model) before it reads the line,
+# and a second shift meanwhile gets ``409 mandate.shift_planning``. Under it the
+# backlog also counts in flight every issue a pending run owns (``_owned_issues``).
 #
 # LEAD LINES (charter ``run_kind == "feature-lead"``): the shift plans without the
 # foreman, one ``feature-lead`` run per line of free feature issues (``lead_planner``),
@@ -58,7 +62,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
 
-from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud.mandates import events as mandate_events
 from pocketpaw_ee.cloud.mandates.domain import (
@@ -1158,6 +1162,7 @@ async def _backlog(
     history_plan_ids: tuple[str, ...] = (),
     persist: bool = False,
     repo_id: str = "",
+    owned: set[int] | None = None,
 ) -> dict[str, Any]:
     """The mandate's OPEN sightings and the planned tasks behind them.
 
@@ -1176,7 +1181,8 @@ async def _backlog(
     patrol resolves it, and one whose live issue body names a ``Depends on``
     issue still open is ``blocked`` (``patrols.open_dependencies``, fail safe:
     an unreadable body or ref blocks), so neither the foreman nor the due check
-    takes it as work.
+    takes it as work. A ``github:`` sighting whose issue number is in ``owned``
+    (``_owned_issues``: a pending run of the mandate owns it) is in flight too.
 
     Returns ``{"open": [...], "tasks": [...], "teaching": [...]}``: open entries
     (highest severity, then oldest) are ``{id, patrol, severity, summary, new,
@@ -1252,7 +1258,10 @@ async def _backlog(
             {"shift_no": t["shift_no"], "title": t["title"], "status": t["status"]}
             for t in citing.get(str(s.id), [])
         ]
-        open_pr = closing.get(str(s.evidence.get("source") or ""))
+        source = str(s.evidence.get("source") or "")
+        open_pr = closing.get(source)
+        number = source.rpartition("#")[2] if source.startswith("github:") else ""
+        owned_now = number.isdigit() and int(number) in (owned or ())
         entries.append(
             {
                 "id": str(s.id),
@@ -1260,7 +1269,9 @@ async def _backlog(
                 "severity": s.severity,
                 "summary": s.summary,
                 "new": since is None or _aware(s.ts) > _aware(since),
-                "in_flight": open_pr is not None or any(c["status"] in _IN_FLIGHT for c in cites),
+                "in_flight": open_pr is not None
+                or owned_now
+                or any(c["status"] in _IN_FLIGHT for c in cites),
                 "open_pr": open_pr,
                 "blocked": blocked.get(str(s.evidence.get("source") or ""), []),
                 "tasks": cites,
@@ -1292,6 +1303,8 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     Terminal shapes:
       * line at its cap → ValidationError(422) before any shift row, so a full
         line is never held by a half-open shift.
+      * another shift of the mandate planning (its ``shift_lock`` held) →
+        ConflictError(409) before any shift row.
       * tasks planned   → ShiftDoc(state="in_gate", plan_action_id=...) and a
         pending Instinct Action; the chain opened with ``agent.proposed`` —
         the approve/reject paths close it (executor / router).
@@ -1303,13 +1316,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         with the violations recorded on its outcome. # no-event on the raise
         path beyond the shift-started emit: the shift row carries the state.
     """
-    from uuid import uuid4
-
-    from pocketpaw_ee.cloud.belt import service as belt_service
     from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed
-    from pocketpaw_ee.cloud.mandates import foreman as foreman_mod
-    from pocketpaw_ee.cloud.mandates import patrols as mandate_patrols
-    from pocketpaw_ee.cloud.mandates import soul_link
 
     # The foreman call spends off the credit ledger; the cadence scheduler
     # reaches this without the router's deny, so it is checked here too.
@@ -1321,6 +1328,91 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
             "mandate.paused", "This mandate is paused — resume it before running a shift"
         )
     _require_lead_station(doc.charter)
+
+    # One shift plans at a time: two that read the line together plan the same
+    # work twice. The claim comes before the capacity read, so everything the
+    # plan is built from is read under it.
+    token = await _claim_shift(workspace_id, doc)
+    if token is None:
+        raise ConflictError(
+            "mandate.shift_planning", "No action: a shift is already planning for this mandate"
+        )
+    try:
+        return await _shift(workspace_id, user_id, mandate_id, doc)
+    finally:
+        await _release_shift(workspace_id, doc, token)
+
+
+# How long a shift's ``shift_lock`` holds. A shift releases it when it returns;
+# the expiry only frees a mandate whose shift crashed holding it.
+_SHIFT_LOCK_SECONDS = 15 * 60.0
+
+
+async def _claim_shift(workspace_id: str, doc: MandateDoc) -> str | None:
+    """Claim the mandate's ``shift_lock`` (``{token, expires_at}``) in one
+    ``find_one_and_update``: free or expired, it becomes this shift's. Returns
+    the token, or None while another shift holds an unexpired lock.
+
+    The field is NOT on the Beanie model, on purpose: ``doc.save()`` ``$set``s
+    every model field, so a stale MandateDoc saved mid-shift would clear it."""
+    from uuid import uuid4
+
+    now = _utcnow()
+    token = uuid4().hex
+    lock = {"token": token, "expires_at": now + timedelta(seconds=_SHIFT_LOCK_SECONDS)}
+    # no-event: lock bookkeeping; the shift row announces the shift.
+    claimed = await MandateDoc.get_pymongo_collection().find_one_and_update(
+        {
+            "_id": doc.id,
+            "workspace": workspace_id,
+            "$or": [{"shift_lock": None}, {"shift_lock.expires_at": {"$lt": now}}],
+        },
+        {"$set": {"shift_lock": lock}},
+    )
+    return token if claimed is not None else None
+
+
+async def _release_shift(workspace_id: str, doc: MandateDoc, token: str) -> None:
+    """Free the lock this shift holds (``token``), never a later shift's.
+    Never raises: a lock left behind expires."""
+    try:
+        # no-event: lock bookkeeping.
+        await MandateDoc.get_pymongo_collection().update_one(
+            {"_id": doc.id, "workspace": workspace_id, "shift_lock.token": token},
+            {"$unset": {"shift_lock": ""}},
+        )
+    except Exception:  # noqa: BLE001 — the expiry frees it
+        logger.warning("mandate: shift lock of %s not released", doc.id, exc_info=True)
+
+
+async def _owned_issues(workspace_id: str, mandate_id: str) -> set[int]:
+    """Every feature issue a PENDING run of the mandate owns, read fresh off the
+    store (no runs window): a lead's ``lead.issues`` or ``lead.issue``, or, before
+    the station launched it, the issues its task names
+    (``cloud_station.lead_issue_numbers``). A launched lead is still pending."""
+    from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.cloud.belt.cloud_station import lead_issue_numbers
+    from pocketpaw_ee.cloud.belt.headless import _CODE_CHANGE_PARAM_KEY
+
+    store = get_instinct_store(workspace_id=workspace_id or None)
+    owned: set[int] = set()
+    for action in await store.pending(pocket_id=workspace_id, workspace_id=workspace_id):
+        blob = (action.parameters or {}).get(_CODE_CHANGE_PARAM_KEY)
+        if isinstance(blob, dict) and blob.get("mandate_id") == mandate_id:
+            owned.update(lead_issue_numbers(blob))
+    return owned
+
+
+async def _shift(
+    workspace_id: str, user_id: str, mandate_id: str, doc: MandateDoc
+) -> dict[str, Any]:
+    """``trigger_shift`` past its checks, under the mandate's shift lock."""
+    from uuid import uuid4
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.mandates import foreman as foreman_mod
+    from pocketpaw_ee.cloud.mandates import patrols as mandate_patrols
+    from pocketpaw_ee.cloud.mandates import soul_link
 
     # 0. CAPACITY — the shift's budget is the line's headroom under its
     #    in-flight cap. A full line opens no shift row, so nothing holds it.
@@ -1397,6 +1489,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         history_plan_ids=tuple(h.plan_action_id for h in history_docs if h.plan_action_id),
         persist=True,
         repo_id=doc.surface.repo_id,
+        owned=await _owned_issues(workspace_id, mandate_id),
     )
     # The foreman plans from the open sightings nothing works yet; the in-flight
     # ones ride apart so it never plans them again (``drop_in_flight`` enforces).

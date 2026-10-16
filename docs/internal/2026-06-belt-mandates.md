@@ -149,6 +149,21 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   line's `capacity`. With 8 lines and the 60 s tick, a tick can start up to 8
   shifts, one per line, each within its own headroom; the cap, not the tick,
   bounds the runs in flight.
+- **One shift plans at a time per line.** Shifts overlap in time, never in
+  planning: `trigger_shift` claims the mandate's `shift_lock` (`{token,
+  expires_at}`) with one `find_one_and_update` before it reads the line, and
+  frees it when the shift returns or raises. A second shift for the same
+  mandate meanwhile, from the route, the scheduler or a restart, is refused
+  (`409 mandate.shift_planning`, "No action: a shift is already planning") and
+  opens no shift row. The lock expires after 15 minutes, so a shift that
+  crashed holding it frees the line on its own. `shift_lock` lives off the
+  Beanie model, so a `MandateDoc.save()` from a charter edit never clears it.
+  Without the lock, two shifts 0.4 s apart both read the line before either
+  filed its runs and gave each feature two leads (2026-10-17). Under the lock,
+  `_backlog` also counts in flight every `github:` issue a PENDING run of the
+  mandate owns, read off the store with no runs window
+  (`service._owned_issues`): a lead's `lead.issues` or `lead.issue`, or the
+  issues its task names before the station launched it.
 - **`issue_labels`** (optional, at most 20) scopes the `issues` patrol on a
   GitHub-bound repo: an open issue is sighted when it carries one of these
   labels, compared case-insensitively (see *The `issues` patrol on GitHub*).
@@ -1224,7 +1239,9 @@ tracker does not start a second fixer on that head. Relaunches carry over on
 `POCKETPAW_FACTORY_CLOUD_RELAUNCHES`, and its no-PR clock counts from the last
 relaunch. A run that adopted a PR (`adopted_pr`) polls it by number. A released run is rejected, so it is never resumed. A feature
 lead is never resumed beside a newer pending lead on the same repo and feature
-issue (a launched one, newer by `created_at`): it is released instead, so one
+issue (a launched one, newer by `created_at`, then by action id, because SQLite
+stamps `created_at` to the second and two shifts can file in the same one): it
+is released instead, so one
 feature never gets two leads on its `lead/<feature>` branch, and the release
 is not a failed attempt for the issue's breaker. A landed run is
 no longer pending, so its tester is never relaunched; with the tester on, its

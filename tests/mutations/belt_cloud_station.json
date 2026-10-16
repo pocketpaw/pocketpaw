@@ -504,10 +504,11 @@
   {
     "label": "an errored lead is resumed beside the newer lead on its feature issue",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "if newer is not None and newer.created_at > action.created_at:",
+    "find": "if newer is not None and _age(newer) > _age(action):",
     "replace": "if False:",
     "tests": [
-      "tests/cloud/test_belt_lead_runs.py::test_resume_releases_an_errored_lead_the_planner_already_replaced"
+      "tests/cloud/test_belt_lead_runs.py::test_resume_releases_an_errored_lead_the_planner_already_replaced",
+      "tests/cloud/test_belt_lead_runs.py::test_resume_releases_the_older_of_two_line_leads_filed_in_the_same_second"
     ]
   },
   {

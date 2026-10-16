@@ -1,0 +1,68 @@
+[
+  {
+    "label": "a second concurrent shift plans instead of refusing",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "return token if claimed is not None else None",
+    "replace": "return token",
+    "tests": [
+      "tests/cloud/test_belt_shift_lock.py::test_two_concurrent_shifts_plan_each_issue_once",
+      "tests/cloud/test_belt_shift_lock.py::test_a_held_lock_refuses_and_a_crashed_shifts_lock_expires"
+    ]
+  },
+  {
+    "label": "a crashed shift's lock never expires",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "{\"shift_lock.expires_at\": {\"$lt\": now}}",
+    "replace": "{\"shift_lock.expires_at\": {\"$lt\": now - timedelta(days=1)}}",
+    "tests": [
+      "tests/cloud/test_belt_shift_lock.py::test_a_held_lock_refuses_and_a_crashed_shifts_lock_expires"
+    ]
+  },
+  {
+    "label": "a finished shift never frees its lock",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "\"shift_lock.token\": token}",
+    "replace": "\"shift_lock.token\": \"someone else\"}",
+    "tests": [
+      "tests/cloud/test_belt_shift_lock.py::test_two_concurrent_shifts_plan_each_issue_once",
+      "tests/cloud/test_belt_shift_lock.py::test_a_held_lock_refuses_and_a_crashed_shifts_lock_expires"
+    ]
+  },
+  {
+    "label": "an issue a pending run owns is planned again",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "owned_now = number.isdigit() and int(number) in (owned or ())",
+    "replace": "owned_now = False",
+    "tests": [
+      "tests/cloud/test_belt_shift_lock.py::test_the_planner_skips_issues_a_pending_run_owns"
+    ]
+  },
+  {
+    "label": "a queued lead's task issues are not read before its launch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "return _launched_issues(blob) or _lead_numbers(str(blob.get(\"task\") or \"\"))",
+    "replace": "return _launched_issues(blob)",
+    "tests": [
+      "tests/cloud/test_belt_shift_lock.py::test_the_planner_skips_issues_a_pending_run_owns"
+    ]
+  },
+  {
+    "label": "a launched line lead owns only its first issue",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "issues = lead.get(\"issues\") or ([lead[\"issue\"]] if lead.get(\"issue\") else [])",
+    "replace": "issues = [lead[\"issue\"]] if lead.get(\"issue\") else []",
+    "tests": [
+      "tests/cloud/test_belt_shift_lock.py::test_the_planner_skips_issues_a_pending_run_owns",
+      "tests/cloud/test_belt_lead_runs.py::test_resume_releases_a_line_lead_when_a_newer_run_owns_one_of_its_issues"
+    ]
+  },
+  {
+    "label": "two runs filed in the same second tie and both resume",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "return (action.created_at, str(action.id))",
+    "replace": "return (action.created_at, \"\")",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_resume_releases_the_older_of_two_line_leads_filed_in_the_same_second"
+    ]
+  }
+]

@@ -224,6 +224,9 @@ class MandateDoc(TimestampedDocument):
     upstream: list[UpstreamPin] = Field(default_factory=list)
     # The crew roster; empty = the factory's env defaults run every task.
     crew: list[CrewMember] = Field(default_factory=list)
+    # ``shift_lock`` ({token, expires_at}) is deliberately NOT a field: only
+    # ``service._claim_shift`` / ``_release_shift`` write it, raw, because
+    # ``save()`` ``$set``s every model field and would clear a live lock.
 
     class Settings:
         name = "mandates"

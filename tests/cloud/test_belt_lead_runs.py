@@ -2428,3 +2428,44 @@ async def test_resume_releases_a_line_lead_when_a_newer_run_owns_one_of_its_issu
     released = await store.get_action(old)
     assert released.status == ActionStatus.REJECTED
     assert f"superseded by run {new}" in released.rejected_reason
+
+
+async def test_resume_releases_the_older_of_two_line_leads_filed_in_the_same_second(
+    store, dirs, playbook
+):
+    """The 2026-10-17 race: two shifts filed line leads on the same issues within
+    one second, and SQLite stamps ``created_at`` to the second, so neither run
+    read as newer and both were resumed. The tie breaks on the action id (its
+    hex millisecond stamp): the later-filed run is kept, the earlier released."""
+    import aiosqlite
+
+    repo, launch = dirs
+    cloud = {"session_url": CLOUD_URL, "launched_at": time.time() - 600}
+    old = await _queue_lead(store, repo, task=LINE_TASK)
+    await cloud_station._patch(
+        store, old, headless_state="cloud", cloud=cloud, lead={"issue": 93, "issues": [93, 94]}
+    )
+    new = await _queue_lead(store, repo, task=LINE_TASK)
+    await cloud_station._patch(
+        store, new, headless_state="cloud", cloud=cloud, lead={"issue": 93, "issues": [93, 94]}
+    )
+    assert old < new
+    async with aiosqlite.connect(store._db_path) as db:
+        sql = "UPDATE instinct_actions SET created_at = '2026-10-16 19:51:20' WHERE id IN (?, ?)"
+        await db.execute(sql, (old, new))
+        await db.commit()
+    disp = _lead_dispatcher(LeadRunner(), launch, workspaces_for=_ws)
+    tracked: list[str] = []
+
+    async def spy(store_, ref, *a, **k):
+        tracked.append(ref)
+
+    disp._track_lead = spy  # type: ignore[method-assign]
+
+    assert await disp.resume_all() == 1
+
+    assert tracked == [new]
+    released = await store.get_action(old)
+    assert released.status == ActionStatus.REJECTED
+    assert f"superseded by run {new}" in released.rejected_reason
+    assert (await store.get_action(new)).status == ActionStatus.PENDING

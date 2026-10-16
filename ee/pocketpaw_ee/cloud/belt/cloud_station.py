@@ -26,7 +26,8 @@
 #           landed run files bugs and one ``Belt-Test`` PR; it never holds the land.
 #   RESUME  at startup every launched run with no diff is tracked again (never
 #           relaunched), as is one whose tracker died on a TRACK error (lesson 45);
-#           a lead one of whose issues has a newer pending lead is released instead.
+#           a lead one of whose issues has a newer pending lead is released instead
+#           ("newer" is ``(created_at, id)``: SQLite stamps seconds, the id milliseconds).
 #   LEAD    ``recipe == "feature-lead"``: one session per line of feature issues
 #           (``lead.issues``; the first flat on ``lead``, all on ``lead.features`` when
 #           several), briefed from the clone's ``docs/factory/lead.md``, each issue and
@@ -363,21 +364,43 @@ def _features(lead: dict[str, Any]) -> list[dict[str, Any]]:
     return kept or [lead]
 
 
-def _lead_issues(blob: dict[str, Any]) -> list[tuple[str, int]]:
-    """A lead run's repo and feature issues (``lead.issues``, else ``lead.issue``);
-    [] for a task run or a lead with no issue yet."""
+def _launched_issues(blob: dict[str, Any]) -> list[int]:
+    """The feature issues a launch resolved onto a lead (``lead.issues``, else
+    ``lead.issue``); [] for a task run or a lead not launched yet."""
     lead = (blob.get("lead") or {}) if _is_lead(blob) else {}
     issues = lead.get("issues") or ([lead["issue"]] if lead.get("issue") else [])
-    return [(str(blob.get("repo") or ""), int(n)) for n in issues if n]
+    return [int(n) for n in issues if n]
+
+
+def lead_issue_numbers(blob: dict[str, Any]) -> list[int]:
+    """Every feature issue a lead run owns: the launched ones, else the ones its
+    task names (a queued lead the station has not launched); [] for a task run."""
+    if not _is_lead(blob):
+        return []
+    return _launched_issues(blob) or _lead_numbers(str(blob.get("task") or ""))
+
+
+def _lead_issues(blob: dict[str, Any]) -> list[tuple[str, int]]:
+    """A launched lead run's repo and feature issues (``_launched_issues``)."""
+    return [(str(blob.get("repo") or ""), n) for n in _launched_issues(blob)]
+
+
+def _age(action: Any) -> tuple[Any, str]:
+    """A run's filing order: ``created_at``, then its id. SQLite stamps
+    ``created_at`` to the second and two shifts can file in the same one; the id
+    carries the filing millisecond in fixed-width hex, so it breaks the tie."""
+    # ponytail: lexical id order is time order while the hex stamp is 11 digits
+    # (until the year 2527); a random suffix decides within one millisecond.
+    return (action.created_at, str(action.id))
 
 
 def _newest_leads(actions: list[Any]) -> dict[tuple[str, int], Any]:
-    """The newest pending lead run (by ``created_at``) per repo and feature issue."""
+    """The newest pending lead run (``_age``) per repo and feature issue."""
     newest: dict[tuple[str, int], Any] = {}
     for action in actions:
         blob = (action.parameters or {}).get(_CODE_CHANGE_PARAM_KEY)
         for key in _lead_issues(blob) if isinstance(blob, dict) else []:
-            if key not in newest or action.created_at > newest[key].created_at:
+            if key not in newest or _age(action) > _age(newest[key]):
                 newest[key] = action
     return newest
 
@@ -583,8 +606,8 @@ class CloudTaskDispatcher:
                         await self._start(f"review-{action.id}", work)
                     continue
                 owners = [newest[k] for k in _lead_issues(blob) if k in newest]
-                newer = max(owners, key=lambda a: a.created_at, default=None)
-                if newer is not None and newer.created_at > action.created_at:
+                newer = max(owners, key=_age, default=None)
+                if newer is not None and _age(newer) > _age(action):
                     # The planner gave an issue a newer lead: one lead per feature.
                     try:
                         why = f"superseded by run {newer.id} on the same feature issue"

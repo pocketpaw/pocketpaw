@@ -463,8 +463,8 @@
   {
     "label": "an open PR closing the issue never puts its sighting in flight",
     "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
-    "find": "\"in_flight\": open_pr is not None or any(",
-    "replace": "\"in_flight\": any(",
+    "find": "\"in_flight\": open_pr is not None\n",
+    "replace": "\"in_flight\": False\n",
     "tests": [
       "tests/cloud/test_belt_github_issues_patrol.py::test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight",
       "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_does_not_plan_an_issue_an_open_pr_closes"
