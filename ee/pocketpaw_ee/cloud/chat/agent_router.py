@@ -315,11 +315,6 @@ async def post_agent_chat(
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
     transport = get_stream_transport()
-    # Snapshot the scope's stop token as the request arrives. A stop that lands
-    # before ``create_run`` (nothing to cancel yet) changes it; see the check
-    # after ``create_run``.
-    stop_key = _scope_stop_key(workspace_id, scope, scope_id)
-    stop_token_at_start = await transport.scope_stop_token(stop_key)
 
     try:
         # Thread the authenticated workspace (fix/worker-trusts-spec-workspace).
@@ -393,6 +388,13 @@ async def post_agent_chat(
     # lives in the executor (``run_core._requires_own_key``), which reads the
     # server-resolved context. Never move the gate here and delete that one.
     await _assert_own_key_if_kiosk_requires_it(ctx)
+
+    # Snapshot the scope's stop token once the turn has passed every fast-reject
+    # gate (those must answer without touching Redis). A stop that lands before
+    # ``create_run`` (nothing to cancel yet) changes it; see the check after
+    # ``create_run``.
+    stop_key = _scope_stop_key(workspace_id, scope, scope_id)
+    stop_token_at_start = await transport.scope_stop_token(stop_key)
 
     # Supersede any prior in-flight run for this scope. ``request_cancel``
     # writes the cancel flag in Redis so a worker in another process notices.
