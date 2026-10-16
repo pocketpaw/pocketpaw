@@ -23,6 +23,8 @@
 #
 # The template picks the title (empty = the event's default), which catalogue
 # fields show, in catalogue order, and whether the link button shows.
+# ``neutral_card`` gives the settings preview that same content as one plain
+# ``{title, fields, link_label}`` block, whatever the platform.
 
 from __future__ import annotations
 
@@ -513,6 +515,23 @@ def render(
     raise ValueError(f"unknown platform {platform!r}")
 
 
+def neutral_card(
+    event: str, data: dict[str, Any] | None, template: Any = None, *, link: str = ""
+) -> dict[str, Any]:
+    """The same title, fields and link a chat platform would show, as plain text,
+    for the settings preview: ``{title, fields: [{label, value}], link_label}``.
+    ``link_label`` is None when the template hides the link or there is none."""
+    etype = event_type(event)
+    title_raw, fields, show_link = _template(template)
+    return {
+        "title": _plain(title_raw or DEFAULT_TITLES.get(etype, "Notification")),
+        "fields": [
+            {"label": FIELD_LABELS[k], "value": v} for k, v in lead_fields(etype, data, fields)
+        ],
+        "link_label": _LINK_TEXT if show_link and link else None,
+    }
+
+
 __all__ = [
     "DEFAULT_TEMPLATE_FIELDS",
     "DEFAULT_TITLES",
@@ -522,6 +541,7 @@ __all__ = [
     "TITLE_MAX",
     "event_type",
     "lead_fields",
+    "neutral_card",
     "render",
     "sample_data",
 ]

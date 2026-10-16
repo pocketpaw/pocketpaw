@@ -20,6 +20,8 @@
 #   POST   /sites/{site_id}/lead-notifications/webhooks/{webhook_id}/secret
 #   POST   /sites/{site_id}/lead-notifications/webhooks/{webhook_id}/test
 #   POST   /sites/{site_id}/lead-notifications/preview      (render a sample; no network)
+#
+# Webhook URLs are secrets: no response carries one (``url_hint`` only).
 #   GET    /lead-notifications/platforms                    (field + platform catalogue)
 #
 # PUBLIC: /lead-notifications/confirm/{token}, the link in the confirm email.
@@ -75,7 +77,8 @@ class WebhookCreate(BaseModel):
 
 
 class WebhookPatch(BaseModel):
-    """Partial: omitted fields are left as they are. ``platform_override: null``
+    """Partial: omitted fields are left as they are. ``url`` is write-only (no
+    response returns it; send it only to change it). ``platform_override: null``
     goes back to the detected platform; ``rearm`` switches a disabled one back on."""
 
     url: str | None = Field(default=None, max_length=2048)
@@ -87,7 +90,10 @@ class WebhookPatch(BaseModel):
 
 
 class PreviewRequest(BaseModel):
-    # Omitted: detected from ``url`` (json when neither is given).
+    # A saved destination to preview (its platform and template unless given);
+    # the client never holds a saved URL.
+    webhook_id: str | None = Field(default=None, max_length=64)
+    # Omitted: the destination's, else detected from ``url`` (json when none).
     platform: str | None = None
     url: str | None = Field(default=None, max_length=2048)
     template: WebhookTemplateBody | None = None
@@ -262,6 +268,7 @@ async def preview_lead_notification(
         url=body.url,
         template=_template(body.template),
         event=body.event,
+        webhook_id=body.webhook_id,
     )
 
 

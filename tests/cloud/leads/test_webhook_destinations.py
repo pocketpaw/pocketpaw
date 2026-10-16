@@ -9,6 +9,10 @@
 #   * health is per destination: one switched off doesn't stop the others
 #   * routes: add / patch / delete / rotate / test / preview / platforms, member
 #     403, another workspace's site 404; preview makes no network call
+#   * webhook URLs are secrets: no response carries one (``url_hint`` only), they
+#     are encrypted at rest, outbox rows hold a fingerprint, a plaintext row reads
+#     and is sealed on write; the first destination turns the webhook sink on;
+#     preview by destination id with a neutral card; tests are throttled
 
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from pocketpaw_ee.cloud._core.errors import Forbidden, ValidationError
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, RateLimited, ValidationError
 from pocketpaw_ee.cloud.leads import notification_settings as ns
 from pocketpaw_ee.cloud.leads import webhook_destinations as wd
 from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
@@ -83,10 +87,11 @@ async def test_legacy_webhook_reads_as_destination_and_migrates_on_write(sent) -
     state = await ns.get_settings(ws, str(site.id))
     assert [h["id"] for h in state["webhooks"]] == ["legacy"]
     legacy = state["webhooks"][0]
-    assert legacy["url"] == JSON_HOOK and legacy["platform"] == "json"
+    assert legacy["url_hint"] == wd.url_hint(JSON_HOOK) and legacy["platform"] == "json"
     assert legacy["failure_count"] == 3 and legacy["has_secret"]
     # Older clients still read the flat fields.
-    assert state["webhook_url"] == JSON_HOOK and state["webhook_failure_count"] == 3
+    assert state["webhook_url_hint"] == wd.url_hint(JSON_HOOK)
+    assert state["webhook_failure_count"] == 3
 
     # A row queued before the upgrade carries the old ref and still delivers.
     await outbox.enqueue(
@@ -272,8 +277,11 @@ async def test_health_is_per_destination(sent) -> None:
     for _ in range(wd.WEBHOOK_DISABLE_THRESHOLD):
         await ns.record_webhook_result(ws, sid, ok=False, webhook_id=a)
     state = await ns.get_settings(ws, sid)
-    statuses = {h["url"]: (h["status"], h["failure_count"]) for h in state["webhooks"]}
-    assert statuses == {SLACK: ("disabled", 10), JSON_HOOK: ("active", 0)}
+    statuses = {h["url_hint"]: (h["status"], h["failure_count"]) for h in state["webhooks"]}
+    assert statuses == {
+        wd.url_hint(SLACK): ("disabled", 10),
+        wd.url_hint(JSON_HOOK): ("active", 0),
+    }
 
     await _capture(ws, site, await _lead(ws, site, email="v@x.com"))
     await outbox.process_due()
@@ -298,9 +306,205 @@ async def test_patch_url_and_override_mint_a_secret_shown_for_json_only() -> Non
     back = await wd.update_webhook(ws, sid, hid, platform_override=None)
     assert back["webhook"]["platform"] == "slack" and back["secret"] is None
     moved = await wd.update_webhook(ws, sid, hid, url=JSON_HOOK)
-    assert moved["secret"] and moved["webhook"]["url"] == JSON_HOOK
+    assert moved["secret"] and moved["webhook"]["url_hint"] == wd.url_hint(JSON_HOOK)
     with pytest.raises(Forbidden):
         await wd.update_webhook(ws, sid, hid, url="https://localhost/x")
+
+
+GCHAT = "https://chat.googleapis.com/v1/spaces/AAA/messages?key=K3y&token=T0k3nSecret"
+
+
+def _no_url_in(obj) -> None:
+    """No response field is called ``url``/``webhook_url`` and no secret part leaks."""
+    dumped = json.dumps(obj, default=str)
+    for secret_part in ("/T1/B1/xyz", "K3y", "T0k3nSecret", "/AAA/", "catch/1/abc"):
+        assert secret_part not in dumped, secret_part
+
+    def walk(node):
+        if isinstance(node, dict):
+            assert "url" not in node and "webhook_url" not in node, sorted(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(obj)
+
+
+async def test_no_response_carries_a_webhook_url() -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    sid = str(site.id)
+    added = await wd.add_webhook(ws, sid, url=SLACK)
+    _no_url_in(added)
+    _no_url_in(await wd.add_webhook(ws, sid, url=GCHAT))
+    hid = added["webhook"]["id"]
+    _no_url_in(await wd.update_webhook(ws, sid, hid, label="Sales"))
+    _no_url_in(await wd.update_webhook(ws, sid, hid, url=JSON_HOOK))
+    _no_url_in(await wd.rotate_webhook(ws, sid, hid))
+    _no_url_in(await ns.rotate_webhook_secret(ws, sid))
+    state = await ns.get_settings(ws, sid)
+    _no_url_in(state)
+    assert state["webhook_url_hint"] == wd.url_hint(JSON_HOOK)
+    assert [h["url_hint"] for h in state["webhooks"]] == [
+        "hooks.zapier.com/…/••••/abc",
+        "chat.googleapis.com/…/••••cret",
+    ]
+    assert state["webhooks"][1]["platform"] == "google_chat"
+
+
+def test_url_hint_is_the_host_and_a_short_tail() -> None:
+    assert wd.url_hint("https://hooks.slack.com/services/T1/B1/abcdXb2") == (
+        "hooks.slack.com/…/••••dXb2"
+    )
+    assert wd.url_hint("https://example.com") == "example.com"
+    assert wd.url_hint("https://u:p@example.com:8443/a/b?token=zzzz1234") == (
+        "example.com:8443/…/••••1234"
+    )
+    assert wd.url_hint("") == ""
+
+
+async def test_url_is_encrypted_at_rest_and_outbox_rows_hold_a_fingerprint(sent) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    sid = str(site.id)
+    await ns.update_settings(ws, sid, events={"lead_captured": ["webhook"]})
+    await wd.add_webhook(ws, sid, url=SLACK)
+    raw = await _raw(site)
+    hook = raw["webhooks"][0]
+    assert hook["url"] == "" and hook["url_enc"]
+    assert SLACK not in json.dumps(raw, default=str)
+    assert hook["url_fp"] == wd.fingerprint(SLACK) and hook["url_hint"] == wd.url_hint(SLACK)
+
+    await _capture(ws, site, await _lead(ws, site, email="v@x.com"))
+    coll = NotificationOutboxItem.get_pymongo_collection()
+    rows = await coll.find({"sink": "webhook"}).to_list(None)
+    assert rows and all(r["target"] == f"fp:{hook['url_fp']}" for r in rows)
+    assert SLACK not in json.dumps(rows, default=str)
+    await outbox.process_due()
+    assert len(_hooks(sent, SLACK)) == 1  # the send decrypted it
+
+    # A duplicate is still caught, on the fingerprint.
+    with pytest.raises(ValidationError) as exc:
+        await wd.add_webhook(ws, sid, url=SLACK)
+    assert exc.value.code == "lead_notifications.duplicate_webhook"
+
+
+async def test_a_plaintext_row_reads_delivers_and_is_sealed_by_the_next_write(sent) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    sid = str(site.id)
+    await wd.add_webhook(ws, sid, url=JSON_HOOK)
+    coll = SiteNotificationSettings.get_pymongo_collection()
+    # Rewrite it the way a pre-encryption build stored it.
+    await coll.update_one(
+        {"workspace": ws, "site_id": sid},
+        {
+            "$set": {
+                "webhooks.0.url": SLACK,
+                "webhooks.0.url_enc": "",
+                "webhooks.0.url_fp": "",
+                "webhooks.0.url_hint": "",
+            }
+        },
+    )
+    state = await ns.get_settings(ws, sid)
+    assert state["webhooks"][0]["url_hint"] == wd.url_hint(SLACK)
+    assert state["webhooks"][0]["platform"] == "slack"
+    # A row queued back then, with the plain URL as its target, still delivers.
+    await outbox.enqueue(
+        workspace=ws,
+        kind="lead_captured",
+        sink="webhook",
+        target=SLACK,
+        payload={"event_type": "lead.captured", "data": {"name": "Sam"}},
+        webhook_ref=f"site:{sid}:{state['webhooks'][0]['id']}",
+    )
+    await outbox.process_due()
+    assert len(_hooks(sent, SLACK)) == 1
+
+    await wd.add_webhook(ws, sid, url=DISCORD)
+    hook = (await _raw(site))["webhooks"][0]
+    assert hook["url"] == "" and hook["url_enc"]
+    assert hook["url_fp"] == wd.fingerprint(SLACK)
+    assert wd.url_of((await ns.settings_for(site)).webhooks[0]) == SLACK
+
+
+async def test_the_first_destination_switches_the_webhook_sink_on() -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    sid = str(site.id)
+    await ns.update_settings(ws, sid, events={"handoff": ["push"]})
+    first = await wd.add_webhook(ws, sid, url=SLACK, events=["lead_captured", "handoff"])
+    assert first["events"]["lead_captured"] == ["email", "push", "webhook"]
+    assert first["events"]["handoff"] == ["push", "webhook"]
+    assert "webhook" not in first["events"]["booking"]
+    # Only the first one: a later add leaves the owner's routing alone.
+    await ns.update_settings(ws, sid, events={"handoff": ["push"]})
+    second = await wd.add_webhook(ws, sid, url=DISCORD)
+    assert second["events"]["handoff"] == ["push"]
+
+
+async def test_preview_a_saved_destination_by_id() -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    sid = str(site.id)
+    added = await wd.add_webhook(
+        ws, sid, url=DISCORD, template={"title": "Ping", "fields": ["name", "email"]}
+    )
+    hid = added["webhook"]["id"]
+    out = await wd.preview_for(ws, sid, webhook_id=hid)
+    assert out["platform"] == "discord"
+    assert out["body"]["embeds"][0]["title"] == "Ping"
+    assert out["card"] == {
+        "title": "Ping",
+        "fields": [
+            {"label": "Name", "value": "Priya Sharma"},
+            {"label": "Email", "value": "priya@example.com"},
+        ],
+        "link_label": "Open in Paw",
+    }
+    hidden = await wd.preview_for(
+        ws, sid, webhook_id=hid, template={"fields": ["phone"], "show_link": False}
+    )
+    assert hidden["card"]["fields"] == [{"label": "Phone", "value": "+1 555 010 1234"}]
+    assert hidden["card"]["link_label"] is None
+    with pytest.raises(NotFound):
+        await wd.preview_for(ws, sid, webhook_id="nope")
+
+
+def test_scrub_urls_keeps_only_scheme_and_host() -> None:
+    text = "ConnectError: https://u:pw@hooks.slack.com/services/T1/B1/xyz?a=1 failed"
+    assert outbox.scrub_urls(text) == "ConnectError: https://hooks.slack.com/… failed"
+
+
+async def test_a_send_crash_logs_no_webhook_url(sent, monkeypatch, caplog) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    sid = str(site.id)
+    hid = (await wd.add_webhook(ws, sid, url=SLACK))["webhook"]["id"]
+
+    async def boom(*_a, **_k):
+        raise RuntimeError(f"connect failed for {SLACK}")
+
+    monkeypatch.setattr(outbox, "_send_webhook", boom)
+    await wd.send_webhook_test(ws, sid, hid)
+    with caplog.at_level("WARNING"):
+        await outbox.process_due()
+    assert "outbox send crashed" in caplog.text
+    assert "/T1/B1/xyz" not in caplog.text
+    assert all(r.exc_info is None for r in caplog.records if "crashed" in r.getMessage())
+
+
+async def test_destination_test_send_is_throttled() -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    sid = str(site.id)
+    hid = (await wd.add_webhook(ws, sid, url=SLACK))["webhook"]["id"]
+    assert (await wd.send_webhook_test(ws, sid, hid))["queued"] is True
+    with pytest.raises(RateLimited):
+        await wd.send_webhook_test(ws, sid, hid)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +557,9 @@ async def test_routes_admin_member_and_cross_tenant(sent) -> None:
         assert patch.status_code == 200 and patch.json()["webhook"]["label"] == "CRM"
         rotated = await admin.post(f"{base}/webhooks/{hid}/secret")
         assert rotated.status_code == 200 and rotated.json()["secret"] != add.json()["secret"]
+        saved = await admin.post(f"{base}/preview", json={"webhook_id": hid})
+        assert saved.status_code == 200 and saved.json()["platform"] == "json"
+        assert saved.json()["card"]["fields"] == [{"label": "Name", "value": "Priya Sharma"}]
         test = await admin.post(f"{base}/webhooks/{hid}/test")
         assert test.status_code == 200 and test.json()["queued"] is True
 

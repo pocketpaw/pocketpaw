@@ -5216,7 +5216,7 @@ another workspace is a `404`.
   "webhooks": [
     {
       "id": "3f9c2a1b7d4e",
-      "url": "https://hooks.slack.com/services/T0/B0/xyz",
+      "url_hint": "hooks.slack.com/…/••••/xyz",
       "label": "Sales channel",
       "platform": "slack",
       "detected_platform": "slack",
@@ -5234,7 +5234,7 @@ another workspace is a `404`.
     }
   ],
   "max_webhooks": 5,
-  "webhook_url": "https://hooks.slack.com/services/T0/B0/xyz",
+  "webhook_url_hint": "hooks.slack.com/…/••••/xyz",
   "has_webhook_secret": true,
   "webhook_secret": null,
   "webhook_disabled_at": null,
@@ -5260,7 +5260,10 @@ reported a permanent bounce; re-add the address to try again). `email_enabled`
 is false while the server has no Cloudflare email credentials.
 
 `webhooks` lists the site's webhook destinations (see "Webhook destinations").
-The flat `webhook_url`, `has_webhook_secret`, `webhook_disabled_at` and
+A webhook URL is a secret (a chat app's incoming-webhook URL is the channel's
+credential): no response ever carries one. Each destination shows `url_hint`
+(host, `/…/`, `••••` and the last 4 characters) and the URL is stored encrypted.
+The flat `webhook_url_hint`, `has_webhook_secret`, `webhook_disabled_at` and
 `webhook_failure_count` describe the FIRST destination and stay for older
 clients. A site saved before destinations existed shows its single webhook as
 the destination with id `legacy`.
@@ -5337,7 +5340,9 @@ until it is re-armed, its URL changes or its secret is rotated.
 ```
 
 Only `url` is required. The URL goes through the same SSRF check as above
-(`403`). Returns the settings (as `GET`) plus `webhook` (the new destination)
+(`403`), is stored encrypted and is never returned (`url_hint` instead). The
+site's FIRST destination also turns the `webhook` sink on for each of its
+`events` in the routing matrix, in the same write. Returns the settings (as `GET`) plus `webhook` (the new destination)
 and `secret`: the signing secret, shown **once**, for a `json` destination, and
 `null` for the chat apps. `422 lead_notifications.too_many_webhooks` past 5,
 `lead_notifications.duplicate_webhook` for a URL already added, and
@@ -5346,8 +5351,8 @@ and `secret`: the signing secret, shown **once**, for a `json` destination, and
 
 #### `PATCH /sites/{site_id}/lead-notifications/webhooks/{webhook_id}`
 
-Partial: any of `url`, `label`, `platform_override` (`null` goes back to the
-detected platform), `template`, `events`, plus `"rearm": true` to switch a
+Partial: any of `url` (write-only: send it only to change the URL),
+`label`, `platform_override` (`null` goes back to the detected platform), `template`, `events`, plus `"rearm": true` to switch a
 disabled destination back on. A new URL is SSRF-checked, re-arms, and mints a
 new secret. Returns the same shape as add; `secret` is non-null only when a new
 secret was minted for a destination that is (or just became) `json`. `404` for
@@ -5367,22 +5372,35 @@ one co-signs for 24 hours) and re-arms it.
 
 Queues one `notification.test` delivery to that destination. Returns
 `{"queued": true, "webhook_id": "…", "platform": "slack"}`. `422
-lead_notifications.webhook_disabled` while it is switched off.
+lead_notifications.webhook_disabled` while it is switched off, `429
+lead_notifications.webhook_test_rate_limited` within 30 seconds of the last test.
 
 #### `POST /sites/{site_id}/lead-notifications/preview`
 
 ```json
-{"platform": null, "url": "https://hooks.slack.com/services/T0/B0/x",
+{"webhook_id": null, "platform": null, "url": "https://hooks.slack.com/services/T0/B0/x",
  "template": {"title": "", "fields": ["name", "email"], "show_link": true},
  "event": "lead_captured"}
 ```
 
 Renders what a destination would get for a made-up lead on this site, with no
-network call. `platform` wins; without it the platform is detected from `url`
-(`json` when neither is given). `event` is `lead_captured`, `handoff`,
-`booking`, `test` or `lead_updated`. Returns
-`{"platform": "slack", "event": "lead_captured", "signed": false, "body": {…}}`,
-where `body` is the exact JSON that would be posted.
+network call. `webhook_id` previews a saved destination (its platform and
+template unless given; `404` for an unknown id), so the client never needs the
+URL. Otherwise `platform` wins, then the platform detected from `url` (a URL
+being typed into the add form), `json` when none is given. `event` is
+`lead_captured`, `handoff`, `booking`, `test` or `lead_updated`. Returns:
+
+```json
+{"platform": "slack", "event": "lead_captured", "signed": false, "body": {"…": "…"},
+ "card": {"title": "New lead",
+          "fields": [{"label": "Name", "value": "Priya Sharma"},
+                     {"label": "Email", "value": "priya@example.com"}],
+          "link_label": "Open in Paw"}}
+```
+
+`body` is the exact JSON that would be posted; `card` is the same title, fields
+and link as plain text, whatever the platform (`link_label` is `null` when the
+template hides the link).
 
 #### `GET /lead-notifications/platforms`
 

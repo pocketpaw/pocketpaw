@@ -23,17 +23,31 @@
 # before destinations existed carries "site:<site_id>" and means ``legacy``.
 # URLs pass ``validate_webhook_url`` (DNS included) on save and the outbox's
 # SSRF check again on send.
+#
+# A webhook URL is a SECRET: a chat-app incoming-webhook URL is the channel's
+# credential. It is stored as Fernet ``url_enc`` + a keyed ``url_fp`` (dedupe,
+# and the outbox row's ``target``, so no outbox row holds it) + ``url_hint``
+# (``hooks.slack.com/…/••••Xb2``), decrypted only by ``target`` at send time. No
+# response carries it: the wire has ``url_hint`` only, and changing the URL is a
+# write-only PATCH. A row with plaintext ``url`` (written before this) reads
+# transparently and is sealed by the next write (``_prepare`` / ``migrate_legacy``).
+#
+# The first destination a site adds also switches the ``webhook`` sink on for its
+# events, in the same update as the push. A per-destination test send is
+# throttled (``TEST_INTERVAL``).
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
-from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import NotFound, RateLimited, ValidationError
 from pocketpaw_ee.cloud.leads import notification_settings as ns
 from pocketpaw_ee.cloud.models.lead_notifications import (
+    DEFAULT_EVENT_SINKS,
     LEAD_EVENTS,
     LEGACY_WEBHOOK_ID,
     MAX_WEBHOOKS,
@@ -44,6 +58,7 @@ from pocketpaw_ee.cloud.models.lead_notifications import (
 from pocketpaw_ee.cloud.notifications import webhook_formats, webhook_platforms
 
 WEBHOOK_DISABLE_THRESHOLD = 10
+TEST_INTERVAL = timedelta(seconds=30)
 LABEL_MAX = 80
 UNSET: Any = object()
 _LEGACY_FIELDS = (
@@ -94,12 +109,71 @@ def find(settings: SiteNotificationSettings, webhook_id: str) -> LeadWebhook | N
     return next((d for d in destinations(settings) if d.id == webhook_id), None)
 
 
+def url_of(dest: LeadWebhook) -> str:
+    """The destination's real URL: decrypted, or a pre-encryption plaintext row."""
+    if dest.url_enc:
+        from pocketpaw_ee.cloud.auth.sso import crypto
+
+        try:
+            return crypto.decrypt(dest.url_enc)
+        except Exception:  # noqa: BLE001 — a key change: unusable, reads as unset
+            return ""
+    return dest.url
+
+
+def fingerprint(url: str) -> str:
+    from pocketpaw_ee.cloud.auth.sso import crypto
+
+    return crypto.keyed_digest(url, purpose="lead-webhook-url")
+
+
+def url_hint(url: str | None) -> str:
+    """``https://hooks.slack.com/services/T0/B0/abcdXb2`` -> ``hooks.slack.com/…/••••dXb2``:
+    the host and the last 4 characters of path + query, never more."""
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except ValueError:
+        return "…"
+    host = (parsed.hostname or "") + (f":{port}" if port else "")
+    rest = ((parsed.path or "") + (f"?{parsed.query}" if parsed.query else "")).rstrip("/")
+    return f"{host}/…/••••{rest[-4:]}" if rest else host
+
+
+def sealed(url: str) -> dict[str, str]:
+    """The stored form of ``url``: ciphertext, fingerprint, hint, no plaintext."""
+    from pocketpaw_ee.cloud.auth.sso import crypto
+
+    return {
+        "url": "",
+        "url_enc": crypto.encrypt(url),
+        "url_fp": fingerprint(url),
+        "url_hint": url_hint(url),
+    }
+
+
+def fp_of(dest: LeadWebhook) -> str:
+    return dest.url_fp or fingerprint(url_of(dest))
+
+
+def hint_of(dest: LeadWebhook) -> str:
+    return dest.url_hint or url_hint(url_of(dest))
+
+
+def row_target(dest: LeadWebhook) -> str:
+    """The outbox row's ``target`` for this destination: its fingerprint, never
+    the URL. The send re-reads the URL and checks it still has this fingerprint."""
+    return f"fp:{fp_of(dest)}"
+
+
 def platform_of(dest: LeadWebhook) -> str:
-    return webhook_platforms.effective_platform(dest.url, dest.platform_override)
+    return webhook_platforms.effective_platform(url_of(dest), dest.platform_override)
 
 
 def is_active(dest: LeadWebhook) -> bool:
-    return bool(dest.url and dest.secret_enc and dest.disabled_at is None)
+    return bool(url_of(dest) and dest.secret_enc and dest.disabled_at is None)
 
 
 def ref(site_id: str, dest: LeadWebhook) -> str:
@@ -113,12 +187,13 @@ def parse_ref(rest: str) -> tuple[str, str]:
 
 
 def wire(dest: LeadWebhook) -> dict[str, Any]:
+    """The owner-facing shape. Never the URL: ``url_hint`` only."""
     return {
         "id": dest.id,
-        "url": dest.url,
+        "url_hint": hint_of(dest),
         "label": dest.label,
         "platform": platform_of(dest),
-        "detected_platform": webhook_platforms.detect_platform(dest.url),
+        "detected_platform": webhook_platforms.detect_platform(url_of(dest)),
         "platform_override": dest.platform_override,
         "template": dest.template.model_dump(mode="json"),
         "events": list(dest.events),
@@ -221,7 +296,7 @@ async def migrate_legacy(key: dict[str, str]) -> None:
             return
         legacy = LeadWebhook(
             id=LEGACY_WEBHOOK_ID,
-            url=raw["webhook_url"],
+            **sealed(raw["webhook_url"]),
             secret_enc=raw.get("webhook_secret_enc") or "",
             secret_prev_enc=raw.get("webhook_secret_prev_enc") or "",
             secret_rotated_at=raw.get("webhook_secret_rotated_at"),
@@ -246,9 +321,25 @@ async def migrate_legacy(key: dict[str, str]) -> None:
             return
 
 
+async def seal_plaintext(key: dict[str, str]) -> None:
+    """Encrypt any destination still holding a plaintext ``url`` (written before
+    encryption). Each update is conditional on that plaintext, so it is idempotent."""
+    coll = ns._coll()
+    raw = await coll.find_one(key, {"webhooks": 1}) or {}
+    for hook in raw.get("webhooks") or []:
+        plain = hook.get("url") or ""
+        if not plain or hook.get("url_enc"):
+            continue
+        await coll.update_one(
+            {**key, "webhooks": {"$elemMatch": {"id": hook.get("id"), "url": plain}}},
+            {"$set": {f"webhooks.$.{k}": v for k, v in sealed(plain).items()}},
+        )
+
+
 async def _prepare(site) -> SiteNotificationSettings:
     await ns._ensure_row(site)
     await migrate_legacy(ns._key(site))
+    await seal_plaintext(ns._key(site))
     return await ns.settings_for(site)
 
 
@@ -269,14 +360,11 @@ async def add(
     tpl = clean_template(template)
     dest_events = _clean_events(events)
     current = await _prepare(site)
-    if any(d.url == clean_url for d in current.webhooks):
-        raise ValidationError(
-            "lead_notifications.duplicate_webhook", "That webhook URL is already added."
-        )
+    fp = fingerprint(clean_url)
     secret, secret_enc = _mint()
     dest = LeadWebhook(
         id=webhook_id or uuid.uuid4().hex[:12],
-        url=clean_url,
+        **sealed(clean_url),
         label=dest_label,
         platform_override=override,
         template=tpl,
@@ -284,20 +372,57 @@ async def add(
         secret_enc=secret_enc,
         created_at=_now(),
     )
-    result = await ns._coll().update_one(
-        {
+    for _ in range(3):
+        if any(fp_of(d) == fp for d in current.webhooks):
+            raise _duplicate()
+        if len(current.webhooks) >= MAX_WEBHOOKS:
+            raise _too_many()
+        query: dict[str, Any] = {
             **ns._key(site),
-            "webhooks.url": {"$ne": clean_url},
+            "webhooks.url_fp": {"$ne": fp},
             f"webhooks.{MAX_WEBHOOKS - 1}": {"$exists": False},
-        },
-        {"$push": {"webhooks": dest.model_dump()}},
+        }
+        update: dict[str, Any] = {"$push": {"webhooks": dest.model_dump()}}
+        if not current.webhooks:
+            # The first destination switches the webhook sink on for its events
+            # in this same update, so the owner needn't also flip the matrix.
+            query["webhooks.0"] = {"$exists": False}
+            await _route_first(site, dest_events, update)
+        result = await ns._coll().update_one(query, update)
+        if getattr(result, "modified_count", 0) == 1:
+            return dest, secret
+        current = await ns.settings_for(site)  # lost a race: look again
+    raise _too_many()
+
+
+async def _route_first(site, events: list[str], update: dict[str, Any]) -> None:
+    """Add ``webhook`` to each of ``events``' sinks (an event the row doesn't
+    list yet gets the defaults plus webhook), into ``update``."""
+    stored = (await ns._coll().find_one(ns._key(site), {"events": 1}) or {}).get("events") or {}
+    add_to: dict[str, Any] = {}
+    set_: dict[str, Any] = {}
+    for event in events:
+        if event in stored:
+            add_to[f"events.{event}"] = "webhook"
+        else:
+            set_[f"events.{event}"] = [*DEFAULT_EVENT_SINKS, "webhook"]
+    if add_to:
+        update["$addToSet"] = add_to
+    if set_:
+        update["$set"] = set_
+
+
+def _duplicate() -> ValidationError:
+    return ValidationError(
+        "lead_notifications.duplicate_webhook", "That webhook URL is already added."
     )
-    if getattr(result, "modified_count", 0) == 0:
-        raise ValidationError(
-            "lead_notifications.too_many_webhooks",
-            f"A site can send to at most {MAX_WEBHOOKS} webhooks.",
-        )
-    return dest, secret
+
+
+def _too_many() -> ValidationError:
+    return ValidationError(
+        "lead_notifications.too_many_webhooks",
+        f"A site can send to at most {MAX_WEBHOOKS} webhooks.",
+    )
 
 
 async def update(
@@ -321,14 +446,13 @@ async def update(
     before = platform_of(dest)
     sets: dict[str, Any] = {}
     secret: str | None = None
-    new_url = dest.url
-    if url is not None and url.strip() and url.strip() != dest.url:
+    new_url = url_of(dest)
+    if url is not None and url.strip() and url.strip() != new_url:
         new_url = await _clean_url(url)
-        if any(d.url == new_url and d.id != webhook_id for d in current.webhooks):
-            raise ValidationError(
-                "lead_notifications.duplicate_webhook", "That webhook URL is already added."
-            )
-        sets["url"] = new_url
+        new_fp = fingerprint(new_url)
+        if any(fp_of(d) == new_fp and d.id != webhook_id for d in current.webhooks):
+            raise _duplicate()
+        sets.update(sealed(new_url))
         rearm = True
     if label is not None:
         sets["label"] = _clean_label(label)
@@ -341,7 +465,7 @@ async def update(
     if events is not None:
         sets["events"] = _clean_events(events)
     after = webhook_platforms.effective_platform(new_url, override)
-    if "url" in sets or not dest.secret_enc or (after == "json" and before != "json"):
+    if "url_enc" in sets or not dest.secret_enc or (after == "json" and before != "json"):
         secret, sets["secret_enc"] = _mint()
         sets.update(secret_prev_enc="", secret_rotated_at=None)
     if rearm:
@@ -431,6 +555,8 @@ class SiteWebhookTarget:
     template: LeadWebhookTemplate = field(default_factory=LeadWebhookTemplate)
     site_id: str = ""
     site_name: str = ""
+    # What the outbox row's ``target`` must equal (``row_target``).
+    match: str = ""
 
 
 async def target(workspace_id: str, site_id: str, webhook_id: str) -> SiteWebhookTarget | None:
@@ -444,7 +570,8 @@ async def target(workspace_id: str, site_id: str, webhook_id: str) -> SiteWebhoo
     if dest is None or not is_active(dest):
         return None
     return SiteWebhookTarget(
-        url=dest.url,
+        url=url_of(dest),
+        match=row_target(dest),
         secrets=signing_secrets(dest.secret_enc, dest.secret_prev_enc, dest.secret_rotated_at),
         platform=platform_of(dest),
         template=dest.template,
@@ -476,7 +603,7 @@ def event_rows(
                 "workspace": site.workspace,
                 "kind": kind,
                 "sink": "webhook",
-                "target": dest.url,
+                "target": row_target(dest),
                 "payload": {**envelope, "link": link},
                 "webhook_ref": ref(str(site.id), dest),
             }
@@ -537,6 +664,12 @@ async def send_webhook_test(workspace_id: str, site_id: str, webhook_id: str) ->
             "lead_notifications.webhook_disabled",
             "This webhook is switched off after repeated failures. Re-arm it first.",
         )
+    marker = f"webhook_test:{site.workspace}:{site.id}:{dest.id}"
+    if not await outbox.claim_marker(marker, TEST_INTERVAL):
+        raise RateLimited(
+            "lead_notifications.webhook_test_rate_limited",
+            "A test was just sent to this webhook. Try again in a few seconds.",
+        )
     envelope = new_event_envelope(
         "notification.test", data={"site_id": str(site.id), "site_name": site.name}
     )
@@ -544,7 +677,7 @@ async def send_webhook_test(workspace_id: str, site_id: str, webhook_id: str) ->
         workspace=site.workspace,
         kind="lead_notifications_test",
         sink="webhook",
-        target=dest.url,
+        target=row_target(dest),
         payload={**envelope, "link": email_mod.lead_url(str(site.id))},
         webhook_ref=ref(str(site.id), dest),
     )
@@ -559,10 +692,19 @@ async def preview_for(
     url: str | None = None,
     template: Any = None,
     event: str = "lead_captured",
+    webhook_id: str | None = None,
 ) -> dict[str, Any]:
+    """Render a sample. ``webhook_id`` previews a saved destination (its platform
+    and template unless given), so the client never needs the URL."""
     from pocketpaw_ee.cloud.notifications import email as email_mod
 
     site = await ns._load(workspace_id, site_id)
+    if webhook_id:
+        dest = find(await ns.settings_for(site), webhook_id)
+        if dest is None:
+            raise NotFound("lead_notification_webhook", webhook_id)
+        platform = platform or platform_of(dest)
+        template = dest.template if template is None else template
     return preview(
         platform=platform,
         url=url,
@@ -586,17 +728,24 @@ def preview(
         raise ValidationError("lead_notifications.unknown_event", f"Unknown event '{event}'.")
     etype = webhook_formats.event_type(event)
     data = webhook_formats.sample_data(event, site_name)
+    tpl = clean_template(template)
     body, _headers = webhook_formats.render(
         chosen,
         etype,
         data,
-        clean_template(template),
+        tpl,
         site_name=site_name,
         link=link,
         event_id="evt_sample",
         created_at="2026-10-10T09:30:00+00:00",
     )
-    return {"platform": chosen, "event": event, "signed": chosen == "json", "body": body}
+    return {
+        "platform": chosen,
+        "event": event,
+        "signed": chosen == "json",
+        "body": body,
+        "card": webhook_formats.neutral_card(etype, data, tpl, link=link),
+    }
 
 
 def catalogue() -> dict[str, Any]:
@@ -630,6 +779,7 @@ def catalogue() -> dict[str, Any]:
 
 __all__ = [
     "UNSET",
+    "TEST_INTERVAL",
     "WEBHOOK_DISABLE_THRESHOLD",
     "SiteWebhookTarget",
     "add",
@@ -639,6 +789,9 @@ __all__ = [
     "destinations",
     "event_rows",
     "find",
+    "fingerprint",
+    "fp_of",
+    "hint_of",
     "is_active",
     "migrate_legacy",
     "parse_ref",
@@ -651,9 +804,14 @@ __all__ = [
     "remove_webhook",
     "rotate",
     "rotate_webhook",
+    "row_target",
+    "seal_plaintext",
+    "sealed",
     "send_webhook_test",
     "target",
     "update",
     "update_webhook",
+    "url_hint",
+    "url_of",
     "wire",
 ]
