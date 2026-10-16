@@ -22,10 +22,12 @@
 # wave.json or one outside the clone never launches. A closed feature issue
 # finishes the run as done at the next poll and frees its slot, never nudged or
 # relaunched.
-# STALL: 30 min with no lead-branch commit, PR update or issue comment: a
-# ``claude -p --cloud <session>`` nudge, then a relaunch with the resume brief,
-# then ``needs-human`` on the issue and the run released, the reason naming the
-# rungs that ran ("after two nudges" when no relaunch did). Activity holds it off.
+# LIVENESS: live (a sign of work in the last 30 min, or a CI wait), exited (the
+# session's own end state; no reader exists today, so tests inject one) or
+# unverifiable. STALL: an unverifiable quiet lead gets a ``claude -p --cloud
+# <session>`` nudge each window and nothing else; the 8 h budget ends it. Only an
+# exited one is relaunched with the resume brief, then labelled ``needs-human``
+# and released if it exits quiet again. Activity resets the ladder.
 # WAITING: a quiet lead whose RECORD.md ``Next:`` names CI or the lane while a run
 # on the base is live or ended inside the window gets no rung (the viewer-playback
 # and photo-edit leads); a silent lead with no such evidence still climbs.
@@ -182,6 +184,7 @@ class LeadRunner:
         # whether ``lead/<f>`` is on origin at all (a first launch: not yet).
         self.behind = [0]
         self.lead_branch = True
+        self.labels: list[str] = []  # the feature issue's labels (a request's check)
 
     @staticmethod
     def _next(seq: list):
@@ -218,6 +221,7 @@ class LeadRunner:
             return 0, json.dumps(self._next(self.prs)), ""
         if argv[:3] == ["gh", "issue", "view"]:
             data = {"comments": self._next(self.comments), "title": "Text shapes"}
+            data["labels"] = [{"name": n} for n in self.labels]
             return 0, json.dumps({**data, "body": self.issue_body}), ""
         if argv[:3] == ["gh", "api", "graphql"]:  # the lead branch's last commit + RECORD.md
             at = self._next(self.commits)
@@ -267,6 +271,11 @@ def _lead_dispatcher(runner: LeadRunner, launch: Path, **kw) -> CloudTaskDispatc
         poll_seconds=60.0,
         **kw,
     )
+
+
+async def _ended(session_url: str) -> str:
+    """A session-state read that proves every session ended."""
+    return "ended"
 
 
 def _launch_briefs(runner: LeadRunner) -> list[str]:
@@ -373,6 +382,84 @@ async def test_a_lead_branch_past_the_hard_limit_is_refused_not_failed(
     assert action.status == ActionStatus.REJECTED
     assert action.rejected_reason.startswith(note)
     assert "headless_error" not in action.parameters["_code_change"]
+
+
+def _writes(runner: LeadRunner) -> list[list[str]]:
+    return [
+        a for a, _ in runner.calls if a[:3] in (["gh", "issue", "comment"], ["gh", "issue", "edit"])
+    ]
+
+
+async def test_each_note_label_and_release_runs_once_under_a_request_id(
+    store, dirs, playbook, monkeypatch
+):
+    """A refusal posts a note, labels the issue and releases the run, each under
+    a request id kept on the blob. A retry skips the done ones; one whose answer
+    was lost (still ``sent``) is checked first and repeated only if it did not
+    land. Mutation: dropping the done check posts the note twice."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref)
+    runner.behind = [151]
+    disp = _lead_dispatcher(runner, launch)
+    await disp.run(run_ref, workspace_id=WS)
+
+    blob = (await store.get_action(run_ref)).parameters["_code_change"]
+    reqs = blob["requests"]
+    assert sorted(r["kind"] for r in reqs.values()) == ["label", "note", "release"]
+    assert {r["state"] for r in reqs.values()} == {"done"}
+    (note_id,) = [rid for rid, r in reqs.items() if r["kind"] == "note"]
+    (note,) = [a[-1] for a in _writes(runner) if a[2] == "comment"]
+    assert f"<!-- belt-request: {note_id} -->" in note
+    stale = cloud_station.StaleBaseError(SLUG, "Belt: stale")
+
+    seen = len(runner.calls)
+    await disp._refuse(store, run_ref, blob, stale)
+    assert not _writes(SimpleNamespace(calls=runner.calls[seen:]))
+
+    # Every answer lost: the note is on the issue and the label too, so nothing repeats.
+    blob["requests"] = {k: {**r, "state": "sent"} for k, r in reqs.items()}
+    runner.comments, runner.labels = [[{"body": note, "createdAt": _iso(0)}]], ["needs-human"]
+    seen, rejects = len(runner.calls), []
+    real_reject = store.reject
+
+    async def reject(*args, **kwargs):
+        rejects.append(args)
+        return await real_reject(*args, **kwargs)
+
+    monkeypatch.setattr(store, "reject", reject)
+    await disp._refuse(store, run_ref, blob, stale)
+    assert not _writes(SimpleNamespace(calls=runner.calls[seen:])) and not rejects
+    assert {r["state"] for r in blob["requests"].values()} == {"done"}
+
+    # Lost, and the check says it never landed: only then is it repeated.
+    blob["requests"] = {k: {**r, "state": "sent"} for k, r in reqs.items()}
+    runner.comments, runner.labels = [[]], []
+    seen = len(runner.calls)
+    await disp._refuse(store, run_ref, blob, stale)
+    assert [a[2] for a in _writes(SimpleNamespace(calls=runner.calls[seen:]))] == [
+        "comment",
+        "edit",
+    ]
+
+
+async def test_a_lost_relaunch_is_never_launched_twice(store, dirs, playbook):
+    """A relaunch has no read-back: a sent one whose answer was lost counts as
+    done, and the next exited rung releases instead of starting a second session."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+    disp = _lead_dispatcher(runner, launch, session_end=_ended)
+    rid = cloud_station.hashlib.sha1(f"{run_ref}:relaunch:session-1".encode()).hexdigest()[:12]
+    lost = {rid: {"kind": "relaunch", "target": "session-1", "state": "sent", "at": 0}}
+    await cloud_station._patch(store, run_ref, requests=lost)
+
+    await disp.run(run_ref, workspace_id=WS)
+
+    assert len(_launch_briefs(runner)) == 1
+    lead = (await store.get_action(run_ref)).parameters["_code_change"]["lead"]
+    assert [s["kind"] for s in lead["stalls"]] == ["relaunch", "needs-human"]
+    assert "answer was lost" in lead["stalls"][0]["error"]
 
 
 async def test_a_first_launch_has_no_lead_branch_to_measure(store, dirs, playbook):
@@ -585,7 +672,10 @@ async def test_lead_prs_get_no_review_and_no_fixer(store, dirs, playbook):
 # -- stall ------------------------------------------------------------------
 
 
-async def test_silent_lead_is_nudged_then_relaunched_then_flagged(store, dirs, playbook):
+async def test_a_silent_lead_nobody_can_prove_ended_is_only_nudged(store, dirs, playbook):
+    """Silence is no proof the session ended (lessons 123, 133): an unverifiable
+    lead gets a warning rung (a nudge with the resume text) each quiet window,
+    never a relaunch or a release; the 8 h budget settles it."""
     repo, launch = dirs
     run_ref = await _queue_lead(store, repo)
     runner = LeadRunner()  # no commit, no PR, no comment: ever
@@ -593,28 +683,47 @@ async def test_silent_lead_is_nudged_then_relaunched_then_flagged(store, dirs, p
     disp = _lead_dispatcher(runner, launch)
     await disp.run(run_ref, workspace_id=WS)
 
-    # Stall 1 at 30 min: one nudge into the live session, with the resume text.
-    (nudge,) = _nudges(runner)
-    assert nudge[1:4] == ["-p", "--cloud", "session_L1"]
-    assert f"docs/leads/{FEATURE}/RECORD.md" in nudge[-1]
-    assert "continue from the last stage" in nudge[-1]
-    # Stall 2: a relaunch whose brief says to resume from RECORD.md.
+    nudges = _nudges(runner)
+    assert nudges[0][1:4] == ["-p", "--cloud", "session_L1"]
+    assert f"docs/leads/{FEATURE}/RECORD.md" in nudges[0][-1]
+    assert "continue from the last stage" in nudges[0][-1]
+    assert len(nudges) == 15 and len(_launch_briefs(runner)) == 1  # one per 30 min to 8 h
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith("feature lead not done after 8h")
+    lead = action.parameters["_code_change"]["lead"]
+    assert [s["kind"] for s in lead["stalls"]] == ["nudge"] * 15 + ["timeout"]
+    assert lead["liveness"] == "unverifiable"
+    gaps = [b["at"] - a["at"] for a, b in zip(lead["stalls"], lead["stalls"][1:], strict=False)]
+    assert all(g >= 1800 for g in gaps)  # each rung waits a full stall window
+
+
+async def test_a_lead_whose_session_ended_is_relaunched_then_flagged(store, dirs, playbook):
+    """Proof the session ended (its own end state) is the only thing that
+    relaunches a lead, and a relaunched lead whose session ends quiet again is
+    labelled needs-human and released. No nudge goes into an ended session."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+
+    await _lead_dispatcher(runner, launch, session_end=_ended).run(run_ref, workspace_id=WS)
+
+    assert not _nudges(runner)
     first, again = _launch_briefs(runner)
     assert "continue from the last stage" not in first
     assert "continue from the last stage" in again and PLAYBOOK.strip() in again
-    # Stall 3: needs-human on the issue and the run released.
-    assert any(a[:3] == ["gh", "issue", "edit"] and "needs-human" in a for a, _ in runner.calls)
+    assert _flagged(runner)
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.REJECTED
-    assert action.rejected_reason == "feature lead silent 30m after a nudge and a relaunch"
+    assert action.rejected_reason == "feature lead session ended, silent 30m after a relaunch"
     lead = action.parameters["_code_change"]["lead"]
-    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "relaunch", "needs-human"]
+    assert [s["kind"] for s in lead["stalls"]] == ["relaunch", "needs-human"]
+    assert lead["liveness"] == "exited"
     assert [s["session_url"] for s in lead["sessions"]] == [
         "https://claude.ai/code/session_L1",
         "https://claude.ai/code/session_L2",
     ]
-    gaps = [b["at"] - a["at"] for a, b in zip(lead["stalls"], lead["stalls"][1:], strict=False)]
-    assert all(g >= 1800 for g in gaps)  # each step waits a full stall window
+    assert lead["stalls"][1]["at"] - lead["stalls"][0]["at"] >= 1800
 
 
 async def test_a_relaunch_on_a_stale_lead_branch_is_refused(store, dirs, playbook):
@@ -625,7 +734,7 @@ async def test_a_relaunch_on_a_stale_lead_branch_is_refused(store, dirs, playboo
     runner = LeadRunner()
     runner.behind = [3, 151]
 
-    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+    await _lead_dispatcher(runner, launch, session_end=_ended).run(run_ref, workspace_id=WS)
 
     assert len(_launch_briefs(runner)) == 1 and len(_rev_lists(runner)) == 2
     action = await store.get_action(run_ref)
@@ -649,7 +758,9 @@ async def test_lead_activity_holds_off_the_stall(store, dirs, playbook):
     await disp.run(run_ref, workspace_id=WS)
 
     assert not _nudges(runner) and len(_launch_briefs(runner)) == 1
-    assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert action.parameters["_code_change"]["lead"]["liveness"] == "live"
 
 
 async def test_lead_has_8h_and_no_no_pr_rule(store, dirs, playbook):
@@ -703,9 +814,7 @@ async def test_a_lead_still_working_is_released_only_at_twice_the_timeout(store,
     )
 
 
-async def test_a_lead_quiet_before_the_timeout_gets_the_ladder_not_the_timeout(
-    store, dirs, playbook
-):
+async def test_a_lead_quiet_before_the_timeout_is_nudged_until_the_timeout(store, dirs, playbook):
     repo, launch = dirs
     run_ref = await _queue_lead(store, repo)
     runner = LeadRunner()
@@ -714,12 +823,12 @@ async def test_a_lead_quiet_before_the_timeout_gets_the_ladder_not_the_timeout(
 
     await disp.run(run_ref, workspace_id=WS)
 
-    # Quiet at 5 h is a stall, not a timeout: the 8 h clock has not run out, so
-    # the ladder (nudge, relaunch, then needs-human) settles it.
-    assert _nudges(runner)
+    # Quiet at 5 h gets warning rungs; with no proof its session ended, only
+    # the 8 h budget releases it.
+    assert 5 <= len(_nudges(runner)) <= 6 and len(_launch_briefs(runner)) == 1
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.REJECTED
-    assert "not done after" not in (action.rejected_reason or "")
+    assert action.rejected_reason.startswith("feature lead not done after 8h")
 
 
 async def test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_ladder(
@@ -849,8 +958,8 @@ async def test_a_silent_lead_with_no_wait_in_evidence_still_climbs_the_ladder(
 
     action = await store.get_action(run_ref)
     lead = action.parameters["_code_change"]["lead"]
-    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "relaunch", "needs-human"]
-    assert action.rejected_reason == "feature lead silent 30m after a nudge and a relaunch"
+    assert [s["kind"] for s in lead["stalls"]][:2] == ["nudge", "nudge"]
+    assert action.rejected_reason.startswith("feature lead not done after 8h")
     assert _flagged(runner)
 
 
@@ -1225,28 +1334,29 @@ async def test_a_settled_lead_is_no_longer_tracked(store, dirs, playbook, settle
     assert not cc["lead"].get("stalls") and "headless_error" not in cc
 
 
-async def test_activity_after_a_nudge_resets_the_ladder(store, dirs, playbook):
-    """A lead the nudge revived starts the ladder over on its next quiet
-    window: a nudge again, never a relaunch of a session that just worked."""
+async def test_activity_after_a_relaunch_resets_the_ladder(store, dirs, playbook):
+    """A relaunched lead that then worked starts the ladder over on its next
+    quiet window: a relaunch again, never the release meant for a relaunch
+    that never showed a sign of work."""
     repo, launch = dirs
     run_ref = await _queue_lead(store, repo)
     runner = LeadRunner()
-    disp = _lead_dispatcher(runner, launch)
+    disp = _lead_dispatcher(runner, launch, session_end=_ended)
     start = runner.wall()
-    # Silent to 30 min (a nudge), one commit at 40 min, then silent for good.
+    # Silent to 30 min (a relaunch), one commit at 40 min, then silent for good.
     runner.commits = [None] * 40 + [start + 2400]
 
     await disp.run(run_ref, workspace_id=WS)
 
     lead = (await store.get_action(run_ref)).parameters["_code_change"]["lead"]
-    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "nudge", "relaunch", "needs-human"]
+    assert [s["kind"] for s in lead["stalls"]] == ["relaunch", "relaunch", "needs-human"]
     assert lead["stalls"][1]["at"] >= start + 2400 + 1800  # a full quiet window after it
 
 
 async def test_a_failed_nudge_never_leads_to_a_relaunch(store, dirs, playbook):
-    """A nudge that exits non-zero is recorded and counts as a rung, but it
-    proves nothing about the session: the next rung nudges again instead of
-    relaunching beside a session that may still be live."""
+    """A nudge that exits non-zero ("session not found") is kept as the rung's
+    error, but it is no proof the session ended: the next rung nudges again,
+    and the lead is never relaunched beside a session that may still be live."""
     repo, launch = dirs
     run_ref = await _queue_lead(store, repo)
     runner = LeadRunner(nudge_codes=[1, 0])
@@ -1255,12 +1365,10 @@ async def test_a_failed_nudge_never_leads_to_a_relaunch(store, dirs, playbook):
 
     action = await store.get_action(run_ref)
     stalls = action.parameters["_code_change"]["lead"]["stalls"]
-    assert [s["kind"] for s in stalls] == ["nudge", "nudge", "needs-human"]
+    assert [s["kind"] for s in stalls][:2] == ["nudge", "nudge"]
     assert "session not found" in stalls[0]["error"] and "error" not in stalls[1]
     assert len(_launch_briefs(runner)) == 1  # never relaunched
-    assert action.status == ActionStatus.REJECTED
-    # The reason names the rungs that ran: no relaunch on this path.
-    assert action.rejected_reason == "feature lead silent 30m after two nudges"
+    assert action.rejected_reason.startswith("feature lead not done after 8h")
 
 
 async def test_the_nudge_holds_the_launch_lock(store, dirs, playbook):
@@ -1283,12 +1391,12 @@ async def test_a_fresh_run_starts_the_ladder_over(store, dirs, playbook):
     await cloud_station._patch(store, run_ref, lead={"feature": FEATURE, "stalls": old})
     runner = LeadRunner()
 
-    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+    await _lead_dispatcher(runner, launch, session_end=_ended).run(run_ref, workspace_id=WS)
 
     lead = (await store.get_action(run_ref)).parameters["_code_change"]["lead"]
-    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "relaunch", "needs-human"]
+    assert [s["kind"] for s in lead["stalls"]] == ["relaunch", "needs-human"]
     assert all(s["at"] > 2.0 for s in lead["stalls"])  # none of the old run's
-    assert len(_nudges(runner)) == 1 and len(_launch_briefs(runner)) == 2
+    assert len(_launch_briefs(runner)) == 2
 
 
 @pytest.mark.parametrize("read", ["pr list", "issue view"])
@@ -1440,12 +1548,12 @@ async def test_an_open_feature_issue_keeps_the_stall_ladder(store, dirs, playboo
     run_ref = await _queue_lead(store, repo)
     runner = IssueStateRunner(states=["OPEN"])  # silent, issue open: today's ladder
 
-    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+    await _lead_dispatcher(runner, launch, session_end=_ended).run(run_ref, workspace_id=WS)
 
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.REJECTED
     lead = action.parameters["_code_change"]["lead"]
-    assert [s["kind"] for s in lead["stalls"]] == ["nudge", "relaunch", "needs-human"]
+    assert [s["kind"] for s in lead["stalls"]] == ["relaunch", "needs-human"]
 
 
 async def test_an_open_feature_issue_with_the_done_rule_met_still_lands(store, dirs, playbook):
@@ -1750,6 +1858,43 @@ async def test_a_slice_done_with_gaps_is_done_and_counted(store, dirs, playbook)
     assert [s["gaps"] for s in slices] == [[], [77, 78]]
     assert sum(bool(s["done"] and s["gaps"]) for s in slices) == 1
     assert "1 with gaps" in str(action.outcome)
+
+
+async def test_done_and_slice_done_comments_become_typed_records(store, dirs, playbook):
+    """Each slice-done line and the contact sheet land on ``lead.records``:
+    outcome, summary, files, report url and the comment id they came from."""
+    repo, launch = dirs
+    _wave(launch)
+    run_ref = await _queue_lead(store, repo)
+    runner = _sliced_runner(run_ref)
+    future = time.time() + 3600
+    s1 = _slice_done("S1", 902, future, " gaps: #77")
+    spec = f"https://github.com/{SLUG}/blob/dev/docs/shapes.md"  # a link, not a file
+    s1["body"] = f"Shapes render.\nTouched `Sources/Flare/Shape.swift`, see {spec}\n" + s1["body"]
+    sheet = {**_sheet(future), "id": "IC_sheet"}
+    runner.comments = [
+        [{**_slice_done("contract", 901, future), "id": "IC_c"}, {**s1, "id": "IC_s1"}, sheet]
+    ]
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    records = (await store.get_action(run_ref)).parameters["_code_change"]["lead"]["records"]
+    by = {r.get("slice", r["kind"]): r for r in records}
+    assert set(by) == {"contract", "S1", "done"}
+    assert by["S1"] == {
+        "kind": "slice",
+        "slice": "S1",
+        "outcome": "done with gaps",
+        "report_url": _run_url(902),
+        "summary": (
+            f"Shapes render. Touched `Sources/Flare/Shape.swift`, see {spec} Slice S1 is done."
+        ),
+        "files": ["Sources/Flare/Shape.swift"],
+        "comment_id": "IC_s1",
+    }
+    assert by["contract"]["outcome"] == "done" and by["contract"]["comment_id"] == "IC_c"
+    assert by["done"]["report_url"] == CLOUD_URL and by["done"]["comment_id"] == "IC_sheet"
+    assert by["done"]["files"] == []
 
 
 async def test_a_done_slice_run_is_not_read_again(store, dirs, playbook):

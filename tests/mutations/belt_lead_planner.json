@@ -164,8 +164,8 @@
   {
     "label": "the released lead's reason always names a relaunch",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                f\"feature lead silent {minutes:.0f}m after {_rungs(ladder)}\",",
-    "replace": "                f\"feature lead silent {minutes:.0f}m after a nudge and a relaunch\",",
+    "find": "                f\"feature lead session ended, silent {minutes:.0f}m after {_rungs(ladder)}\",",
+    "replace": "                f\"feature lead session ended, silent {minutes:.0f}m after a nudge and a relaunch\",",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
@@ -272,7 +272,7 @@
   {
     "label": "a timed-out lead is not labelled needs-human",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "        await _patch(store, run_ref, lead=lead)\n        await self._flag_issue(slug, str(lead.get(\"issue\") or \"\"), cwd)\n        session = (lead.get(\"sessions\") or [{}])[-1].get(\"session_url\")",
+    "find": "        await _patch(store, run_ref, lead=lead)\n        await self._flag_issue(store, run_ref, blob, slug, str(lead.get(\"issue\") or \"\"), cwd)\n        session = (lead.get(\"sessions\") or [{}])[-1].get(\"session_url\")",
     "replace": "        await _patch(store, run_ref, lead=lead)\n        session = (lead.get(\"sessions\") or [{}])[-1].get(\"session_url\")",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"

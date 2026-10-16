@@ -293,7 +293,7 @@
   {
     "label": "the impossible issue is not labelled needs-human",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "await self._flag_issue(slug, issue.group(1), cwd)",
+    "find": "await self._flag_issue(store, run_ref, blob, slug, issue.group(1), cwd)",
     "replace": "pass",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_a_worker_that_says_impossible_is_released_without_a_relaunch"
@@ -359,8 +359,8 @@
   {
     "label": "a tool that cannot start fails the launch",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "        except Exception as exc:  # noqa: BLE001 — a pack section is a hint; the launch goes on\n",
-    "replace": "        except ValueError as exc:  # noqa: BLE001 — a pack section is a hint; the launch goes on\n",
+    "find": "        except Exception as exc:  # noqa: BLE001 \u2014 a pack section is a hint; the launch goes on\n",
+    "replace": "        except ValueError as exc:  # noqa: BLE001 \u2014 a pack section is a hint; the launch goes on\n",
     "tests": [
       "tests/cloud/test_belt_lead_pack.py::test_a_missing_failing_or_slow_tool_drops_only_its_section"
     ]
