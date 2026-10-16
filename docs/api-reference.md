@@ -2456,7 +2456,15 @@ gateway address the egress guard rejects refuses the turn with 422
 `payments_open` (default off) tells the server whether customers can pay. While
 it is off, a workspace on the `free` plan whose ledger holds no applied `top_up`
 or `subscription_grant` is platform-funded early access, the group the
-early-access limits apply to.
+early-access limits apply to. The server also takes no money while it is off:
+`POST /billing/topup`, `POST /billing/subscribe` and `POST /api/v1/partners/pay-link`
+return 403 `payments.closed` (an approved plan-change proposal records that as a
+failed outcome), and the Dodo
+webhook grants no credits and changes no plan for `payment.succeeded` or
+`subscription.active` / `subscription.renewed`. Such a delivery is recorded with
+`credits_granted=0`, logged at ERROR for review, and acked 200. Webhook grants
+also need `POCKETPAW_DODO_ENVIRONMENT=live_mode`, since the payload carries no
+mode of its own. Refunds, disputes, cancels and dunning still apply.
 
 ### Free-run bounds
 
