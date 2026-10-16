@@ -15,12 +15,15 @@
 # (``Follow-up to #12``) is prefixed with its own ``#<n>``, since the station
 # takes the FIRST ``#N`` in title + why. No free issue stands the shift down.
 #
-# NEVER TWICE: an issue labelled ``needs-human`` is skipped (the stall ladder
-# and the lead timeout label it, then release the run, which frees the
-# sighting), read off the LIVE labels (``labels``) the caller passes, else the
-# ones filed with the sighting; so is an issue with a rejected or failed lead
-# task (``tasks``, the citing tasks ``service._backlog`` lists). A human re-files
-# the issue to try it again.
+# NEVER TWICE, UNTIL RE-ARMED: an issue labelled ``needs-human`` is skipped,
+# read off the LIVE labels (``labels``) the caller passes, else the ones filed
+# with the sighting. The station's only way to end a lead short of done (the
+# stall ladder's last rung, the lead timeout) labels the issue ``needs-human``,
+# then rejects the run; a human removes the label to retry. So a ``rejected``
+# citing task (``tasks``, the ones ``service._backlog`` lists) holds the issue
+# only while the label is on, and a re-armed lead released again is held again.
+# A ``failed`` or ``develop failed`` task never went through that path, so no
+# label marks it and nobody has looked: it holds the issue for good.
 #
 # The plan needs no human: each feature issue comes from an approved blueprint
 # and packet, so the shift trigger approves it as ``APPROVER``.
@@ -41,8 +44,13 @@ _SOURCE = re.compile(r"^github:([\w.-]+/[\w.-]+)#(\d+)$")
 # The station's issue reference (``cloud_station._ISSUE``).
 _ISSUE_REF = re.compile(r"(?<![\w/&])#(\d+)\b")
 _NEEDS_HUMAN = "needs-human"
-# A citing task in one of these ended without a feature: never planned again.
-_ENDED = frozenset({"rejected", "failed", "develop failed"})
+# A citing lead task in one of these died outside the station's release path,
+# so no ``needs-human`` label asks a human to look: it holds the issue for good.
+# A ``rejected`` one (released, or rejected by hand) defers to the label.
+# ponytail: if the release's label write fails, a rejected task with no label
+# frees the issue next shift; reading the label's add time off the issue's events
+# (after the run started) would close that.
+_FAILED = frozenset({"failed", "develop failed"})
 _PRIORITY = {"p1": 1, "p2": 2, "p3": 3}
 _UNRANKED = len(_PRIORITY) + 1
 
@@ -64,10 +72,10 @@ def _labels(sighting: dict[str, Any]) -> list[str]:
 
 
 def _held(sighting: dict[str, Any]) -> bool:
-    """Labelled ``needs-human``, or a citing lead task rejected or failed."""
+    """Labelled ``needs-human``, or a citing lead task that failed."""
     if _NEEDS_HUMAN in {str(lb).strip().lower() for lb in _labels(sighting)}:
         return True
-    return any(str(t.get("status") or "") in _ENDED for t in sighting.get("tasks") or [])
+    return any(str(t.get("status") or "") in _FAILED for t in sighting.get("tasks") or [])
 
 
 def _task(sighting: dict[str, Any], number: str) -> PlannedTask:

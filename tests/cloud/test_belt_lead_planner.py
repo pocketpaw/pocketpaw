@@ -10,10 +10,12 @@
 # approved with no human and no Clef, as ``system:lead-planner``, through the
 # auto gate's approve path, with the gate flag off or on. A task mandate (the
 # default) still goes to the foreman and the manual plan gate.
-# NEVER TWICE: an issue labelled ``needs-human`` (live, off the open issue list:
-# the stall ladder and the lead timeout label it after the sighting was filed)
-# or with a rejected or failed lead task is not planned again, and neither is
-# one whose lead run is still in flight. A title naming another issue (``#12``)
+# NEVER TWICE, UNTIL RE-ARMED: an issue labelled ``needs-human`` (live, off the
+# open issue list: the stall ladder and the lead timeout label it, then reject
+# the run) is not planned, nor is one whose lead run is still in flight or whose
+# lead failed outside that release path (never labelled). A released lead's
+# issue is planned again once a human takes the label off, and held again when
+# that lead is released too. A title naming another issue (``#12``)
 # is prefixed with its own number, so the lead is briefed on the right issue.
 # CLOUD ONLY: a lead mandate is refused (422) at create and at trigger unless
 # the cloud develop station is the wired dispatcher; the local station has no
@@ -164,13 +166,48 @@ def test_an_issue_labelled_needs_human_is_not_planned_again():
     assert _numbers(lead_planner.plan(1, [held, cleared, stale], 5)) == ["s2"]
 
 
-@pytest.mark.parametrize("status", ["rejected", "develop failed", "failed"])
-def test_an_issue_with_a_failed_lead_task_is_not_planned_again(status):
+@pytest.mark.parametrize("status", ["develop failed", "failed"])
+def test_a_failed_lead_that_never_got_needs_human_is_held(status):
+    """A lead that died without the station's release path was never labelled
+    and nobody looked: no label to remove, so it stays held."""
     failed = _s(1, "p1", age_h=5)
     failed["tasks"] = [{"shift_no": 1, "title": "Feature 1", "status": status}]
+    failed["labels"] = ["feature-lead", "p1"]
     landed_earlier = _s(2, "p2", age_h=4)
     landed_earlier["tasks"] = [{"shift_no": 1, "title": "Feature 2", "status": "dispatched"}]
     assert _numbers(lead_planner.plan(2, [failed, landed_earlier], 5)) == ["s2"]
+
+
+def _released(n: int, *statuses: str, live: tuple[str, ...]) -> dict:
+    """Issue ``n`` whose citing lead tasks ended in ``statuses`` (shift 1, 2, ...),
+    its live labels ``live``."""
+    s = _s(n, "p1", "needs-human")
+    s["tasks"] = [
+        {"shift_no": i, "title": f"Feature {n}", "status": st}
+        for i, st in enumerate(statuses, start=1)
+    ]
+    s["labels"] = ["feature-lead", "p1", *live]
+    return s
+
+
+def test_a_released_lead_is_held_while_needs_human_is_on():
+    assert lead_planner.plan(2, [_released(1, "rejected", live=("needs-human",))], 5).no_action
+
+
+def test_a_released_lead_a_human_re_armed_is_planned_again():
+    """The station labelled it and rejected the run; a human took the label off."""
+    assert _numbers(lead_planner.plan(2, [_released(1, "rejected", live=())], 5)) == ["s1"]
+
+
+def test_a_re_armed_lead_released_again_is_held_again():
+    """No loop: the second release labels the issue again; only a second
+    removal frees it, and a re-armed lead that then failed stays held."""
+    again = _released(1, "rejected", "rejected", live=("needs-human",))
+    assert lead_planner.plan(3, [again], 5).no_action
+    cleared = _released(2, "rejected", "rejected", live=())
+    assert _numbers(lead_planner.plan(3, [cleared], 5)) == ["s2"]
+    died = _released(3, "rejected", "develop failed", live=())
+    assert lead_planner.plan(3, [died], 5).no_action
 
 
 def test_a_title_naming_another_issue_leads_with_its_own_number():
@@ -422,32 +459,61 @@ async def test_a_lead_whose_run_is_in_flight_is_not_planned_again(
     assert _refs(blob) == [[ids[10]], [ids[15]]]
 
 
+def _label(monkeypatch, gh: FakeGh, n: int, on: bool) -> None:
+    """Put ``needs-human`` on issue ``n`` (the station's release) or take it off
+    (a human re-arming it); the next shift reads the open issue list afresh."""
+    (issue,) = [i for i in gh.issues if i["number"] == n]
+    issue["labels"] = [lb for lb in issue["labels"] if lb["name"] != "needs-human"]
+    if on:
+        issue["labels"].append({"name": "needs-human", "color": "d93f0b", "description": ""})
+    monkeypatch.setattr(patrols, "_OPEN_ISSUES", {})
+
+
+async def _plan_refs(store, out: dict) -> list:  # noqa: F811
+    return _refs((await store.get_action(out["shift"]["plan_action_id"])).parameters["_belt_plan"])
+
+
 @pytest.mark.usefixtures("graph", "journal", "cloud_station_wired")
-async def test_a_released_or_failed_lead_is_not_planned_again(
+async def test_a_released_lead_is_held_until_a_human_re_arms_it(
     tmp_path,
     mongo_db,
     monkeypatch,
     store,  # noqa: F811
 ):
-    """#16's lead was released (rejected), #11's failed: the next shift plans
-    neither, though both sightings are open and neither run is in flight."""
+    """#16's lead was released (labelled needs-human, run rejected), #11's
+    failed. Held while the label is on; a human takes it off and the next shift
+    plans #16 again, never #11. A second release holds #16 again."""
+    gh = _lead_gh()
     mid, ids = await _lead_mandate(
         tmp_path,
         monkeypatch,
-        _lead_gh(),
+        gh,
         run_kind="feature-lead",
         budget={"max_tasks_per_shift": 2, "max_in_flight": 10},
     )
     first = await mandate_service.trigger_shift(WS, USER, mid)
     plan_id = first["shift"]["plan_action_id"]
     released = await _run_for(store, mid, plan_id, 1, headless_state=None)
+    _label(monkeypatch, gh, 16, on=True)
     await store.reject(released.id, reason="feature lead silent 30m after two nudges")
     await _run_for(store, mid, plan_id, 2, headless_error="TRACK: gh pr list failed")
 
     second = await mandate_service.trigger_shift(WS, USER, mid)
+    assert await _plan_refs(store, second) == [[ids[10]], [ids[15]]]
+    for i in (1, 2):  # #10 and #15 go in flight
+        await _run_for(store, mid, second["shift"]["plan_action_id"], i, headless_state="cloud")
 
-    blob = (await store.get_action(second["shift"]["plan_action_id"])).parameters["_belt_plan"]
-    assert _refs(blob) == [[ids[10]], [ids[15]]]
+    _label(monkeypatch, gh, 16, on=False)
+    third = await mandate_service.trigger_shift(WS, USER, mid)
+    assert await _plan_refs(store, third) == [[ids[16]], [ids[17]]]
+
+    again = await _run_for(store, mid, third["shift"]["plan_action_id"], 1, headless_state=None)
+    _label(monkeypatch, gh, 16, on=True)
+    await store.reject(again.id, reason="feature lead not done after 8h")
+    await _run_for(store, mid, third["shift"]["plan_action_id"], 2, headless_state="cloud")
+
+    fourth = await mandate_service.trigger_shift(WS, USER, mid)
+    assert fourth["shift"]["state"] == "stood_down"
 
 
 @pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")

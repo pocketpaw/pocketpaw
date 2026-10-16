@@ -198,19 +198,37 @@
     ]
   },
   {
-    "label": "a rejected or failed lead is planned again",
+    "label": "a failed lead is planned again",
     "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
-    "find": "    return any(str(t.get(\"status\") or \"\") in _ENDED for t in sighting.get(\"tasks\") or [])",
+    "find": "    return any(str(t.get(\"status\") or \"\") in _FAILED for t in sighting.get(\"tasks\") or [])",
     "replace": "    return False",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
     ]
   },
   {
-    "label": "a develop failure is not an ended lead",
+    "label": "a develop failure defers to the label",
     "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
-    "find": "_ENDED = frozenset({\"rejected\", \"failed\", \"develop failed\"})",
-    "replace": "_ENDED = frozenset({\"rejected\", \"failed\"})",
+    "find": "_FAILED = frozenset({\"failed\", \"develop failed\"})",
+    "replace": "_FAILED = frozenset({\"failed\"})",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "a failed run defers to the label",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "_FAILED = frozenset({\"failed\", \"develop failed\"})",
+    "replace": "_FAILED = frozenset({\"develop failed\"})",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "a released lead a human re-armed is held forever",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "_FAILED = frozenset({\"failed\", \"develop failed\"})",
+    "replace": "_FAILED = frozenset({\"rejected\", \"failed\", \"develop failed\"})",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
     ]
