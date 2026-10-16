@@ -513,8 +513,8 @@
   {
     "label": "a timed-out lead's contact sheet is ignored and the issue labelled needs-human",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "if any(r.get(\"kind\") == \"done\" for r in records):",
-    "replace": "if False:",
+    "find": "            if any(r.get(\"kind\") == \"done\" for r in mine):",
+    "replace": "            if False:",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_lead_whose_contact_sheet_is_up_at_the_timeout_closes_its_issue"
     ]
@@ -558,8 +558,8 @@
   {
     "label": "every slice done with no sheet at the timeout posts no note",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "await self._note(store, run_ref, blob, slug, issue, f\"#{issue} sheet\", text, cwd)",
-    "replace": "pass",
+    "find": "                    await self._note(\n                        store, run_ref, blob, slug, issue, f\"#{issue} sheet\", text, cwd\n                    )",
+    "replace": "                    pass",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_v3_lead_with_every_slice_done_and_no_sheet_at_the_timeout_is_asked_for_it"
     ]

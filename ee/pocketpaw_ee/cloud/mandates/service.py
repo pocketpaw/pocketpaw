@@ -36,7 +36,7 @@
 # under the cap, never over ``max_tasks_per_shift``; a full line refuses a shift.
 #
 # LEAD LINES (charter ``run_kind == "feature-lead"``): the shift plans without the
-# foreman, one ``feature-lead`` run per free feature issue (``lead_planner``),
+# foreman, one ``feature-lead`` run per line of free feature issues (``lead_planner``),
 # and the plan is approved as ``system:lead-planner`` through the auto gate's
 # approve path (``_lead_gate``); task mandates keep the foreman and their gate.
 #
@@ -1245,7 +1245,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     ``POCKETPAW_BELT_PLAN_GATE=auto`` a proposed plan goes through ``_auto_gate``
     before this returns, so the shift may already be ``done``. A lead mandate
     (charter ``run_kind == "feature-lead"``) skips the foreman: ``lead_planner``
-    plans one ``feature-lead`` run per free feature issue and ``_lead_gate``
+    plans one ``feature-lead`` run per line of free feature issues and ``_lead_gate``
     approves it as ``system:lead-planner`` (no Clef, no human).
 
     Terminal shapes:
@@ -1363,8 +1363,8 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     claimed = [o for o in backlog["open"] if o["in_flight"]]
     lead = doc.charter.run_kind == LEAD_RUN_KIND
     if lead:
-        # A lead line plans without the foreman: one feature-lead run per free
-        # feature issue, p1 first, then oldest, up to the shift's budget.
+        # A lead line plans without the foreman: one feature-lead run per line of
+        # free feature issues, p1 first, then oldest, up to the shift's budget.
         plan = await _lead_plan(
             workspace_id,
             mandate_id,
@@ -1528,7 +1528,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     trigger = ActionTrigger(
         type="agent",
         source="belt:lead-planner" if lead else "belt:mandate-foreman",
-        reason="feature-lead shift plan — one lead run per free feature issue"
+        reason="feature-lead shift plan — one lead run per line of free feature issues"
         if lead
         else "shift plan proposed by the mandate foreman — requires human approval",
     )
@@ -1953,7 +1953,7 @@ async def _lead_plan(
             # no-event: the trip's count, so a human removing the label re-arms it.
             d.evidence = {**d.evidence, "lead_breaker_at": len(s["failed"])}
             await d.save()
-    return lead_planner.plan(shift_no, sightings, budget)
+    return lead_planner.plan(shift_no, sightings, budget, lead_planner.line_max())
 
 
 def _require_lead_station(charter: Charter) -> None:
@@ -1979,7 +1979,7 @@ async def _lead_gate(
     ``system:lead-planner``. Returns the shift's state; never raises."""
     from pocketpaw_ee.cloud.mandates import lead_planner
 
-    reason = "feature-lead plan: one lead run per free feature issue of an approved blueprint"
+    reason = "feature-lead plan: one lead run per line of free feature issues, approved blueprints"
     record = {
         "decision": "approved",
         "rule": "lead_plan",

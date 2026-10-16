@@ -128,8 +128,8 @@
   {
     "label": "the budget is not applied",
     "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
-    "find": "    tasks = [_task(s, number) for s, number in issues[: max(0, budget)]]",
-    "replace": "    tasks = [_task(s, number) for s, number in issues]",
+    "find": "    tasks = [_task(group, line) for line, group in groups[: max(0, budget)]]",
+    "replace": "    tasks = [_task(group, line) for line, group in groups]",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
     ]
@@ -155,8 +155,8 @@
   {
     "label": "the why does not point at the issue",
     "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
-    "find": "        why=f\"Feature issue #{number}\" + (f\": {url}\" if url else \"\"),",
-    "replace": "        why=f\"Feature issue {url}\",",
+    "find": "        why = f\"Feature issue #{number}\" + (f\": {urls}\" if urls else \"\")",
+    "replace": "        why = f\"Feature issue {urls}\"",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
     ]
@@ -209,7 +209,7 @@
   {
     "label": "a title naming another issue keeps it first",
     "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
-    "find": "    if first and first[1] != number:\n        title = f\"#{number} {title}\"",
+    "find": "    if found and found[1] != number:\n        title = f\"#{number} {title}\"",
     "replace": "    if False:\n        title = f\"#{number} {title}\"",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
@@ -218,8 +218,8 @@
   {
     "label": "a title naming its own issue is prefixed again",
     "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
-    "find": "    if first and first[1] != number:",
-    "replace": "    if first:",
+    "find": "    if found and found[1] != number:",
+    "replace": "    if found:",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
     ]
@@ -272,8 +272,8 @@
   {
     "label": "a timed-out lead is not labelled needs-human",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "        await self._flag_issue(store, run_ref, blob, slug, issue, cwd)\n        await self._release(store, run_ref, blob, why)",
-    "replace": "        await self._release(store, run_ref, blob, why)",
+    "find": "                await self._flag_issue(store, run_ref, blob, slug, issue, cwd)\n                parts.append((issue, _NEEDS_HUMAN))",
+    "replace": "                parts.append((issue, _NEEDS_HUMAN))",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
@@ -438,6 +438,69 @@
     "replace": "    return await _flag(source, reason, NEEDS_HUMAN, \"d93f0b\", gh) == \"labelled\"",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "a line's issues each get their own lead",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "        group = filling.get(line) if line else None\n",
+    "replace": "        group = None\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "a line lead takes every issue of its line",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "        if group is None or len(group) >= max(1, line_max):",
+    "replace": "        if group is None:",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the default line max is one issue",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "LINE_MAX = 3\n",
+    "replace": "LINE_MAX = 1\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the line max ignores the env",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "    return max(1, int(raw)) if raw.lstrip(\"-\").isdigit() else LINE_MAX",
+    "replace": "    return LINE_MAX",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the line label groups every issue",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "    return next((lb for lb in lines if lb.startswith(_LINE) and lb != _LINE), \"\")",
+    "replace": "    return \"line:all\"",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "a line lead cites only its first issue",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "        evidence_refs=[str(s[\"id\"]) for s, _ in group],",
+    "replace": "        evidence_refs=[str(group[0][0][\"id\"])],",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "the shift ignores the line max setting",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    return lead_planner.plan(shift_no, sightings, budget, lead_planner.line_max())",
+    "replace": "    return lead_planner.plan(shift_no, sightings, budget, 1)",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py::test_a_line_lead_owns_each_of_its_issues"
     ]
   }
 ]

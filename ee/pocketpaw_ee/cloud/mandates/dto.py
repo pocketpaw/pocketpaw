@@ -93,7 +93,7 @@ class CharterRequest(BaseModel):
     recipes: dict[str, str] = Field(default_factory=dict)
     # The GitHub ``issues`` patrol takes an open issue carrying one of these.
     issue_labels: list[str] = Field(default_factory=list, max_length=20)
-    # ``feature-lead``: one lead run per free feature issue, no foreman, no
+    # ``feature-lead``: one lead run per line of free feature issues, no foreman, no
     # human plan gate (``lead_planner``). ``task`` keeps the foreman.
     run_kind: RunKind = "task"
 

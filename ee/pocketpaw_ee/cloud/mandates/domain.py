@@ -49,7 +49,7 @@ CrewSetup = Literal["owner", "strict"]
 MandateStatus = Literal["active", "paused"]
 ShiftState = Literal["planning", "in_gate", "executing", "done", "stood_down"]
 # What a shift plans: ``task`` (the foreman's judgment) or ``feature-lead`` (one
-# lead run per free feature issue, planned without the LLM: ``lead_planner``).
+# lead run per line of free feature issues, planned without the LLM: ``lead_planner``).
 RunKind = Literal["task", "feature-lead"]
 # The run kind's recipe on each planned task; the cloud station's ``LEAD_RECIPE``.
 LEAD_RUN_KIND = "feature-lead"
@@ -115,7 +115,7 @@ class Charter(BaseModel):
     ``["line:flare"]``). Empty = the GitHub patrol takes nothing.
 
     ``run_kind`` ``"feature-lead"`` marks a lead mandate: each shift plans one
-    ``feature-lead`` run per free feature issue (``lead_planner``), skipping the
+    ``feature-lead`` run per line of free feature issues (``lead_planner``), skipping the
     foreman, and the plan is approved as ``system:lead-planner``. ``"task"``
     (the default) is the foreman and the plan gate.
     """

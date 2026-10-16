@@ -1,12 +1,15 @@
 # tests/cloud/test_belt_lead_planner.py — the feature-lead shift plan.
 #
 # A charter with ``run_kind: "feature-lead"`` marks a lead mandate. Its shift
-# skips the foreman: ``lead_planner`` plans ONE ``feature-lead`` run per free
-# feature issue (not in flight, not blocked by an open dependency, not closed),
-# p1 before p2 before p3 before unlabelled, then oldest first, up to the shift's
-# budget (the line's headroom). Each task's title is the issue title, its why a
-# one-line ``#<n>`` pointer (what the cloud station reads the lead's issue
-# from), its recipe ``feature-lead`` and its evidence the sighting. The plan is
+# skips the foreman: ``lead_planner`` plans ONE ``feature-lead`` run per line of
+# free feature issues (not in flight, not blocked by an open dependency, not
+# closed), p1 before p2 before p3 before unlabelled, then oldest first, grouped
+# by ``line:<app>`` up to ``POCKETPAW_BELT_LINE_LEAD_MAX`` (3; 1 = one issue a
+# lead; no line label = alone), up to the shift's budget in runs (the line's
+# headroom). Each task's title is the first issue's title, its why a one-line
+# ``#<n>`` pointer naming every issue (what the cloud station reads the lead's
+# issues from), its recipe ``feature-lead`` and its evidence every sighting, so
+# each issue counts in flight and each failure counts per issue. The plan is
 # approved with no human and no Clef, as ``system:lead-planner``, through the
 # auto gate's approve path, with the gate flag off or on. A task mandate (the
 # default) still goes to the foreman and the manual plan gate.
@@ -253,6 +256,100 @@ def test_a_title_naming_another_issue_leads_with_its_own_number():
     assert cloud_station._ISSUE.search(f"{task.title}\n\n{task.why}").group(1) == "40"
     plain = lead_planner.plan(1, [_s(41)], 3).tasks[0]
     assert plain.title == "Feature 41"  # no other issue named: the title as filed
+
+
+# ---------------------------------------------------------------------------
+# line leads: one run per line, up to N features
+# ---------------------------------------------------------------------------
+
+
+def _groups(plan) -> list[list[str]]:
+    return [t.evidence_refs for t in plan.tasks]
+
+
+def test_issues_on_one_line_share_a_lead_in_todays_order():
+    """Free issues of a ``line:<app>`` label go to one lead, up to 3 (the
+    default), in today's order (p1 first, then oldest); the next ones of the
+    line get the next lead. An issue with no line label leads alone. Mutation:
+    grouping ignored plans one run per issue."""
+    sightings = [
+        _s(1, "p2", "line:flare", age_h=5),
+        _s(2, "p1", "line:flare", age_h=3),
+        _s(3, "p1", "Line:Halo", age_h=2),  # the label matches case-insensitively
+        _s(4, "p3", "line:flare", age_h=6),
+        _s(5, "p1", "line:flare", age_h=4),
+        _s(6, "p2", age_h=9),  # no line: alone
+        _s(7, "p3", "line:halo", age_h=1),
+    ]
+    plan = lead_planner.plan(1, sightings, 10)
+    assert _groups(plan) == [["s5", "s2", "s1"], ["s3", "s7"], ["s6"], ["s4"]]
+
+
+def test_a_line_lead_names_every_issue_and_leads_with_the_first():
+    a, b = _s(16, "p1", "line:flare", age_h=4), _s(11, "p1", "line:flare", age_h=3)
+    b["evidence"]["title"] = "Follow-up to #12: brushes"
+    (task,) = lead_planner.plan(1, [a, b], 3).tasks
+    assert task.recipe == LEAD_RUN_KIND
+    assert task.evidence_refs == ["s16", "s11"]
+    assert task.title == "Feature 16 + 1 more on line:flare"
+    assert task.why == (
+        f"Feature issues #16, #11 on line:flare: https://github.com/{SLUG}/issues/16 "
+        f"https://github.com/{SLUG}/issues/11"
+    )
+    assert "\n" not in task.why
+    text = f"{task.title}\n\n{task.why}"
+    assert cloud_station._ISSUE.search(text).group(1) == "16"  # the station's lead.issue
+    assert cloud_station._lead_numbers(text) == [16, 11]
+    assert task.expected_outcome.startswith("#16, #11 shipped by their feature lead")
+
+
+@pytest.mark.parametrize(
+    ("n", "groups"),
+    [(2, [["s1", "s2"], ["s3", "s4"], ["s5"]]), (4, [["s1", "s2", "s3", "s4"], ["s5"]])],
+)
+def test_the_line_max_caps_the_features_per_lead(n, groups):
+    """Mutation: the cap dropped puts all five on one lead."""
+    sightings = [_s(i, "p1", "line:flare", age_h=10 - i) for i in range(1, 6)]
+    assert _groups(lead_planner.plan(1, sightings, 10, line_max=n)) == groups
+
+
+def test_the_budget_counts_leads_not_features():
+    """The in-flight cap counts runs (sessions): 2 of headroom is 2 leads."""
+    sightings = [_s(i, "p1", "line:flare", age_h=10 - i) for i in range(1, 8)]
+    assert _groups(lead_planner.plan(1, sightings, 2)) == [["s1", "s2", "s3"], ["s4", "s5", "s6"]]
+
+
+def test_a_line_max_of_one_keeps_one_lead_per_issue():
+    """``POCKETPAW_BELT_LINE_LEAD_MAX=1`` restores the one-issue lead, its title
+    and why exactly as before."""
+    sightings = [_s(1, "p2", "line:flare", age_h=5), _s(2, "p1", "line:flare", age_h=3)]
+    plan = lead_planner.plan(1, sightings, 10, line_max=1)
+    assert _groups(plan) == [["s2"], ["s1"]]
+    assert [(t.title, t.why) for t in plan.tasks] == [
+        ("Feature 2", f"Feature issue #2: https://github.com/{SLUG}/issues/2"),
+        ("Feature 1", f"Feature issue #1: https://github.com/{SLUG}/issues/1"),
+    ]
+
+
+@pytest.mark.parametrize(("env", "n"), [(None, 3), ("1", 1), ("5", 5), ("0", 1), ("x", 3)])
+def test_the_line_max_reads_the_env(monkeypatch, env, n):
+    if env is None:
+        monkeypatch.delenv("POCKETPAW_BELT_LINE_LEAD_MAX", raising=False)
+    else:
+        monkeypatch.setenv("POCKETPAW_BELT_LINE_LEAD_MAX", env)
+    assert lead_planner.line_max() == n
+
+
+def test_the_breaker_counts_per_issue_on_a_line():
+    """Two issues of one line: #1's leads failed 3 times, #2's once. #1 is held
+    and named by ``trips``; #2 still gets a lead, alone. Mutation: a line held
+    whole when one issue trips plans nothing."""
+    tripped = _failed(1, 3)
+    tripped["labels"].append("line:flare")
+    once = _failed(2, 1)
+    once["labels"].append("line:flare")
+    assert _groups(lead_planner.plan(4, [tripped, once], 5)) == [["s2"]]
+    assert [s["id"] for s, _ in lead_planner.trips([tripped, once])] == ["s1"]
 
 
 def test_the_run_kind_is_the_cloud_stations_lead_recipe():
@@ -654,6 +751,81 @@ async def test_the_breaker_flag_counts_a_label_already_on():
     gh.views = {11: {"labels": []}}
     assert await patrols.flag_needs_human(f"github:{SLUG}#11", "why", gh=gh) is True
     assert _comments(gh, 11) == ["why"]
+
+
+def _line_gh() -> FakeGh:
+    """``_lead_gh`` with lines: #16, #11 and #10 on line:flare, #15 on line:halo."""
+    gh = _lead_gh()
+    lines = {16: "flare", 11: "flare", 10: "flare", 15: "halo"}
+    for issue in gh.issues:
+        if issue["number"] in lines:
+            label = {"name": f"line:{lines[issue['number']]}", "color": "fff", "description": ""}
+            issue["labels"].append(label)
+    return gh
+
+
+@pytest.mark.usefixtures("graph", "journal", "cloud_station_wired")
+async def test_a_line_lead_owns_each_of_its_issues(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    store,  # noqa: F811
+):
+    """One lead takes #16, #11 and #10 of line:flare (p1, p1, p2). While it is
+    in flight none of them is planned again; the next lead is #15 of line:halo.
+    Mutation: citing only the first issue frees #11 and #10 for the second shift."""
+    monkeypatch.delenv("POCKETPAW_BELT_LINE_LEAD_MAX", raising=False)
+    mid, ids = await _lead_mandate(
+        tmp_path,
+        monkeypatch,
+        _line_gh(),
+        run_kind="feature-lead",
+        budget={"max_tasks_per_shift": 1, "max_in_flight": 10},
+    )
+    first = await mandate_service.trigger_shift(WS, USER, mid)
+    assert await _plan_refs(store, first) == [[ids[16], ids[11], ids[10]]]
+    await _run_for(store, mid, first["shift"]["plan_action_id"], 1, headless_state="cloud")
+
+    second = await mandate_service.trigger_shift(WS, USER, mid)
+
+    assert await _plan_refs(store, second) == [[ids[15]]]
+
+
+@pytest.mark.usefixtures("graph", "journal", "cloud_station_wired")
+async def test_a_failed_line_lead_counts_against_each_of_its_issues(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    store,  # noqa: F811
+):
+    """#16's leads failed twice before. A line lead on #16, #11 and #10 fails:
+    #16 trips at 3 and is held with needs-human, while #11 and #10, one failure
+    each, get the next lead together. Mutation: a failure counted once per run,
+    not per issue, never trips #16."""
+    monkeypatch.delenv("POCKETPAW_BELT_LINE_LEAD_MAX", raising=False)
+    gh = FlagGh(_line_gh().issues, states={13: "CLOSED", 412: "OPEN"}, views={16: {"labels": []}})
+    gh.prs = [{"number": 160, "body": "Fixes #14"}]
+    mid, ids = await _lead_mandate(
+        tmp_path,
+        monkeypatch,
+        gh,
+        run_kind="feature-lead",
+        budget={"max_tasks_per_shift": 1, "max_in_flight": 10},
+    )
+    old = await SightingDoc.get(ids[16])
+    old.evidence = {**old.evidence, "lead_failed": ["old-a", "old-b"]}
+    await old.save()
+    first = await mandate_service.trigger_shift(WS, USER, mid)
+    assert await _plan_refs(store, first) == [[ids[16], ids[11], ids[10]]]
+    await _run_for(store, mid, first["shift"]["plan_action_id"], 1, headless_error="LAUNCH: x")
+
+    second = await mandate_service.trigger_shift(WS, USER, mid)
+
+    assert await _plan_refs(store, second) == [[ids[11], ids[10]]]
+    assert ["gh", "issue", "edit", "16", "-R", SLUG, "--add-label", "needs-human"] in gh.calls
+    assert len((await SightingDoc.get(ids[16])).evidence["lead_failed"]) == 3
+    for n in (11, 10):
+        assert len((await SightingDoc.get(ids[n])).evidence["lead_failed"]) == 1
 
 
 @pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")

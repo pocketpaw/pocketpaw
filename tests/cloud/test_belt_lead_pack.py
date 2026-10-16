@@ -224,6 +224,54 @@ async def test_the_pack_holds_its_cap(store, dirs, playbook, ws):
     assert "soul line:" in pack and "soul paw-os-shared:" in pack  # no section crowded out
 
 
+async def test_a_line_lead_gets_one_pack_per_feature_under_the_cap(dirs, ws):
+    """Three features: one pack each (loom on its own title), one heading and
+    one fence, the sections trimmed per feature so the whole stays under 3,000.
+    Mutation: caps not divided by the feature count goes over."""
+    _, launch = dirs
+    long = "word " * 200
+    big = {
+        "scope": [
+            {"path": f"Sources/A{i}/{long[:80]}.swift", "symbol": f"S{i}"} for i in range(12)
+        ],
+        "rules": [{"kind": "k", "from": "C", "description": long} for _ in range(9)],
+        "owners": [long] * 8,
+    }
+    runner = PackRunner(
+        answers={
+            LOOM: big,
+            KB: [{"title": long[:120], "summary": long}] * 5,
+            UV: lambda soul: [{"content": long}] * 5,
+        }
+    )
+    feats = [
+        {
+            "issue": 90 + i,
+            "feature": f"feat-{i}",
+            "packet": f"docs/blueprints/flare/features/feat-{i}.md",
+            "title": f"Feature title {i}",
+        }
+        for i in range(3)
+    ]
+    disp = _dispatcher(runner, launch)
+
+    pack = await disp._lead_pack(
+        _request("Line"),
+        "qbtrix/creative-core",
+        launch,
+        {**feats[0], "features": feats},
+        str(ws / "line.soul"),
+    )
+
+    assert len(pack) <= 3000
+    assert pack.startswith(HEAD) and pack.count("</untrusted>") == 1
+    for f in feats:
+        assert f"Feature #{f['issue']} {f['feature']}:" in pack
+    assert pack.count("soul paw-os-shared:") == 3  # no feature's souls crowded out
+    queries = [a[-1] for a in _tool_calls(runner, LOOM)]
+    assert [q.split()[:3] for q in queries] == [["Feature", "title", str(i)] for i in range(3)]
+
+
 async def test_a_packet_linked_outside_the_clone_is_never_read(store, dirs, playbook, ws):
     _, launch = dirs
     secret = ws / "outside.md"

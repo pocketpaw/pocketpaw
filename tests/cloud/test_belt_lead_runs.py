@@ -2,9 +2,11 @@
 # plus the tracker robustness every cloud run gets (batch-1 lessons 42 and 45).
 #
 # A run whose blob carries ``recipe == "feature-lead"`` is a lead: ONE cloud
-# session per feature issue that opens many ``Belt-Lead:`` PRs and reports on
-# its ``lead/<feature>`` branch. Every subprocess goes through the injected
-# runner, so git, the pty launcher, ``claude -p --cloud`` and gh are scripted.
+# session per line of feature issues that opens many ``Belt-Lead:`` PRs and
+# reports on each ``lead/<feature>`` branch. LINE LEADS (several issues): the
+# brief lists each feature, each branch is measured, the run lands once every
+# feature is done, and the timeout parks each issue on its own records. Git, the
+# pty launcher, ``claude -p --cloud`` and gh all go through a scripted runner.
 #
 # BRIEF: loaded from ``docs/factory/lead.md`` in the launch clone, then the
 # feature issue, the packet path, the run id, the status branch and the
@@ -38,13 +40,12 @@
 # gets a rebase-first rule in the brief; more than 150 and the launch or relaunch
 # is refused: a note and ``needs-human`` on the issue, the run released (never a
 # develop failure). No lead branch yet is nothing to measure.
-# RESUME: a launched lead is tracked again as a lead, never relaunched; one whose
-# feature issue has a newer pending lead is released (not a failure), not tracked.
+# RESUME: a launched lead (an old one-issue blob too) is tracked again, never
+# relaunched; one an issue of which has a newer pending lead is released.
 # LESSON 42: a transient gh failure is retried with backoff; a permanent one
 # fails at once; a transient one past the retries ends the tracker.
 # LESSON 45: on startup a run whose tracker died on a TRACK error (inside its
-# timeout) is tracked again with the error cleared; an errored run is never
-# counted in flight.
+# timeout) is tracked again with the error cleared, never counted in flight.
 # ROW: a lead run's console row carries ``lead`` (feature, app, PRs, session and
 # stall counts, contact sheet, slices) off the tracker's blob; a task run's is null.
 
@@ -123,6 +124,7 @@ def _lead_pr(
     sha: str = MERGE_SHA,
     merged: str = "2026-01-01T00:00:00Z",
     slices: str = "",
+    feature: str = FEATURE,
 ) -> dict:
     labels = [{"name": "fast-lane"}] + ([{"name": "feature-done"}] if done else [])
     slice_line = f"Slice: {slices}\n" if slices else ""
@@ -130,9 +132,9 @@ def _lead_pr(
         "number": number,
         "url": f"https://github.com/{SLUG}/pull/{number}",
         "state": state,
-        "body": f"Swarm slice.\n\nBelt-Lead: {run_ref}\nFeature: {FEATURE}\n{slice_line}",
+        "body": f"Swarm slice.\n\nBelt-Lead: {run_ref}\nFeature: {feature}\n{slice_line}",
         "labels": labels,
-        "headRefName": f"lead/{FEATURE}-{number}",
+        "headRefName": f"lead/{feature}-{number}",
         "updatedAt": _iso(at) if at else "2020-01-01T00:00:00Z",
         "mergeCommit": {"oid": sha} if state == "MERGED" else None,
         "mergedAt": merged if state == "MERGED" else None,
@@ -2171,3 +2173,255 @@ def test_lead_run_row_carries_its_slices() -> None:
     assert lead["app"] == "flare" and lead["prs"] == []  # the old fields stay
     queued = _run_summary(_row_action(), {"recipe": "feature-lead", "task": "Lead #7"})["lead"]
     assert queued["slices"] == []
+
+
+# -- line leads: several features in one run ----------------------------------
+
+PACKET_B = "docs/blueprints/flare/features/brushes.md"
+FEATURE_B = "brushes"
+LINE_TASK = (
+    "Text shapes + 1 more on line:flare\n\n"
+    f"Feature issues #93, #94 on line:flare: https://github.com/{SLUG}/issues/93 "
+    f"https://github.com/{SLUG}/issues/94"
+)
+
+
+class LineRunner(LeadRunner):
+    """``LeadRunner`` for one lead on #93 (text-shapes) and #94 (brushes): each
+    issue answers its own title, packet link, state and comments (``issues``,
+    one comments list per view, holding the last), and ``git rev-list`` answers
+    per lead branch (``behind_by``)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.issues = {
+            "93": {"title": "Text shapes", "body": f"Packet: {PACKET}", "comments": [[]]},
+            "94": {"title": "Brushes", "body": f"Packet: {PACKET_B}", "comments": [[]]},
+        }
+        self.behind_by: dict[str, int] = {}
+
+    async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
+        if argv[:3] == ["gh", "issue", "view"] and argv[3] in self.issues:
+            self.calls.append((list(argv), cwd))
+            row = self.issues[argv[3]]
+            data = {k: row[k] for k in ("title", "body")} | {
+                "comments": self._next(row["comments"]),
+                "state": row.get("state", "OPEN"),
+                "labels": [{"name": n} for n in self.labels],
+            }
+            return 0, json.dumps(data), ""
+        if "rev-list" in argv:
+            self.calls.append((list(argv), cwd))
+            branch = argv[-1].split("..")[0].removeprefix("refs/remotes/origin/")
+            return 0, f"{self.behind_by.get(branch, 0)}\n", ""
+        return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin)
+
+
+def _line_runner(run_ref: str, *, done: tuple[str, ...] = ("93", "94")) -> LineRunner:
+    """Each issue in ``done`` has its merged ``feature-done`` PR (green dev CI)
+    and its contact sheet; the others have nothing."""
+    future = time.time() + 3600
+    runner = LineRunner()
+    prs = []
+    if "93" in done:
+        prs.append(_lead_pr(31, run_ref, state="MERGED", done=True))
+        runner.issues["93"]["comments"] = [[_sheet(future)]]
+    if "94" in done:
+        prs.append(_lead_pr(32, run_ref, state="MERGED", done=True, feature=FEATURE_B))
+        runner.issues["94"]["comments"] = [[_sheet(future)]]
+    runner.prs = [prs]
+    return runner
+
+
+def _views(runner: LeadRunner) -> set[str]:
+    return {a[3] for a, _ in runner.calls if a[:3] == ["gh", "issue", "view"]}
+
+
+async def test_a_line_lead_brief_lists_every_feature(store, dirs, playbook):
+    """One session for #93 and #94: the brief's ``Features:`` section lists each
+    as ``#n <title> <packet>``, with each feature's status branch and RECORD,
+    each lead branch is measured against the base, and the run keeps
+    ``lead.issues`` with ``lead.issue`` the first. Both done: the run lands."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref)
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    (brief,) = _launch_briefs(runner)
+    assert f"Features:\n- #93 Text shapes {PACKET}\n- #94 Brushes {PACKET_B}\n" in brief
+    for feature in (FEATURE, FEATURE_B):
+        assert f"lead/{feature}" in brief and f"docs/leads/{feature}/RECORD.md" in brief
+    assert "`Feature: <feature>`" in brief and "comment on #94" in brief
+    assert [a[-1] for a in _rev_lists(runner)] == [
+        f"refs/remotes/origin/lead/{FEATURE}..origin/dev",
+        f"refs/remotes/origin/lead/{FEATURE_B}..origin/dev",
+    ]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED, action.rejected_reason
+    lead = action.parameters["_code_change"]["lead"]
+    assert lead["issues"] == [93, 94] and lead["issue"] == 93
+    assert [f["feature"] for f in lead["features"]] == [FEATURE, FEATURE_B]
+    assert lead["feature"] == FEATURE and lead["branch"] == f"lead/{FEATURE}"
+
+
+async def test_a_line_lead_lands_only_when_every_feature_is_done(store, dirs, playbook):
+    """#93 is done, #94 has nothing: the run keeps tracking (nudges on the quiet
+    feature) instead of landing on the first feature's done rule."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref, done=("93",))
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status != ActionStatus.EXECUTED
+    assert _views(runner) >= {"93", "94"}  # every poll reads each issue
+
+
+async def test_a_line_lead_at_the_timeout_parks_each_issue(store, dirs, playbook):
+    """At the timeout ``_park`` decides per issue: #93's contact sheet is up, so
+    #93 is closed as completed; #94 is not done, so #94 alone gets needs-human.
+    The run is released, never a failure. Mutation: parking by the first issue
+    closes #93 and leaves #94 unlabelled; parking by the run labels #93."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref, done=("93",))
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert [c[3] for c in _closes(runner)] == ["93"]
+    labelled = [a[3] for a, _ in runner.calls if a[:3] == ["gh", "issue", "edit"]]
+    assert labelled == ["94"]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    reason = action.rejected_reason or ""
+    assert reason.startswith("feature lead not done after 8h")
+    assert "#93 closed as completed" in reason and "#94 needs-human" in reason
+    _never_a_failure(action)
+
+
+async def test_a_line_lead_with_every_feature_sheet_up_at_the_timeout_finishes(
+    store, dirs, playbook
+):
+    """Both sheets up, dev CI red: at the timeout both issues close and the run
+    finishes as done, never labelled."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref)
+    runner.ci = [[RED_RUN]]
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert sorted(c[3] for c in _closes(runner)) == ["93", "94"]
+    assert not _flagged(runner)
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert "#93, #94" in str(action.outcome)
+
+
+async def test_a_line_lead_pr_counts_only_for_the_feature_it_names(store, dirs, playbook):
+    """#94's sheet is up but only #93's ``feature-done`` PR merged: #94 is not
+    done, so the run never lands; at the timeout both sheets close their
+    issues. Mutation: every PR counting for every feature lands the run."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref, done=("93",))
+    runner.issues["94"]["comments"] = [[_sheet(time.time() + 3600)]]
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert sorted(c[3] for c in _closes(runner)) == ["93", "94"]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert "closed as completed" in str(action.outcome)
+
+
+async def test_a_stale_second_feature_branch_refuses_the_launch_on_its_issue(store, dirs, playbook):
+    """Each feature's ``lead/<feature>`` is measured: brushes is 151 behind, so
+    no session starts, #94 gets the note and needs-human, #93 nothing."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref)
+    runner.behind_by = {f"lead/{FEATURE_B}": 151}
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert not _launch_briefs(runner)
+    writes = [(a[2], a[3]) for a in _writes(runner)]
+    assert writes == [("comment", "94"), ("edit", "94")]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith(f"Belt: lead/{FEATURE_B} is 151 commits behind")
+
+
+async def test_a_line_lead_rebase_hint_names_only_the_stale_branch(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref)
+    runner.behind_by = {f"lead/{FEATURE_B}": 60}
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    (brief,) = _launch_briefs(runner)
+    assert f"rebase lead/{FEATURE_B} onto origin/dev: it is 60 commits behind" in brief
+    assert f"rebase lead/{FEATURE} onto" not in brief
+
+
+async def test_resume_of_an_old_single_issue_blob_tracks_its_one_issue(store, dirs, playbook):
+    """A blob from before line leads (``lead.issue`` only, no ``issues`` or
+    ``features``) resumes as a one-feature lead on that issue and lands."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref)
+    lead = {"feature": FEATURE, "packet": PACKET, "issue": 93, "branch": f"lead/{FEATURE}"}
+    await cloud_station._patch(
+        store,
+        run_ref,
+        headless_state="cloud",
+        cloud={"session_url": CLOUD_URL, "launched_at": time.time()},
+        lead=lead,
+    )
+
+    assert await _lead_dispatcher(runner, launch, workspaces_for=_ws).resume_all() == 1
+
+    assert not _launch_briefs(runner) and _views(runner) == {"93"}
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+
+
+async def test_resume_releases_a_line_lead_when_a_newer_run_owns_one_of_its_issues(
+    store, dirs, playbook
+):
+    """#2555 per issue: the old run on #93 and #94 is superseded by a newer run
+    that owns #94, released (never tracked), the newer one tracked."""
+    import aiosqlite
+
+    repo, launch = dirs
+    old = await _queue_lead(store, repo, task=LINE_TASK)
+    cloud = {"session_url": CLOUD_URL, "launched_at": time.time() - 600}
+    await cloud_station._patch(
+        store, old, headless_state="cloud", cloud=cloud, lead={"issue": 93, "issues": [93, 94]}
+    )
+    async with aiosqlite.connect(store._db_path) as db:
+        sql = "UPDATE instinct_actions SET created_at = datetime('now', '-1 hour') WHERE id = ?"
+        await db.execute(sql, (old,))
+        await db.commit()
+    new = await _queue_lead(store, repo)
+    await cloud_station._patch(
+        store, new, headless_state="cloud", cloud=cloud, lead={"issue": 94, "issues": [94, 95]}
+    )
+    disp = _lead_dispatcher(LeadRunner(), launch, workspaces_for=_ws)
+    tracked: list[str] = []
+
+    async def spy(store_, ref, *a, **k):
+        tracked.append(ref)
+
+    disp._track_lead = spy  # type: ignore[method-assign]
+
+    assert await disp.resume_all() == 1
+
+    assert tracked == [new]
+    released = await store.get_action(old)
+    assert released.status == ActionStatus.REJECTED
+    assert f"superseded by run {new}" in released.rejected_reason
