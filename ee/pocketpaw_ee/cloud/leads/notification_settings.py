@@ -253,8 +253,9 @@ async def _wire(site: _SiteDoc, *, webhook_secret: str | None = None) -> dict[st
         ],
         "webhooks": [wd.wire(d) for d in dests],
         "max_webhooks": MAX_WEBHOOKS,
-        # Legacy single-webhook fields: the first destination.
-        "webhook_url": first.url if first else None,
+        # Legacy single-webhook fields: the first destination. Never its URL
+        # (a secret); ``webhook_url_hint`` is the display form.
+        "webhook_url_hint": wd.hint_of(first) if first else None,
         "has_webhook_secret": bool(first and first.secret_enc),
         "webhook_secret": webhook_secret,
         "webhook_disabled_at": first.disabled_at if first else None,

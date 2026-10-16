@@ -23,8 +23,12 @@
 #
 # Webhooks and Slack go out through ``sites.safe_fetch.SafeFetcher.post``: DNS is
 # resolved and checked at send time (failing closed), and the connection is
-# pinned to the checked address, so rebinding can't redirect it. A webhook row's
-# target is re-read at send time from ``webhook_ref``: "workspace:<id>", or
+# pinned to the checked address, so rebinding can't redirect it. A site
+# destination's row holds only the URL's fingerprint (``fp:<hex>``) as ``target``:
+# the URL is a secret, decrypted at send time, and must still match it. A crash
+# is logged with URLs scrubbed from the message and no traceback (httpx errors
+# quote the URL). A webhook row's target is re-read at send time from
+# ``webhook_ref``: "workspace:<id>", or
 # "site:<site_id>:<webhook_id>" for one site destination ("site:<site_id>", from
 # rows queued before destinations existed, means the ``legacy`` one). A json
 # target gets the signed envelope (a workspace webhook saved before signing
@@ -320,6 +324,8 @@ async def _post(fetcher, url: str, body: str, headers: dict[str, str]) -> Outcom
 class _Target:
     url: str
     secrets: list[str]
+    # The row ``target`` this destination answers to (its URL, or a fingerprint).
+    match: str = ""
     platform: str = "json"
     template: Any = None
     site_id: str = ""
@@ -333,7 +339,7 @@ async def _webhook_target(item: NotificationOutboxItem) -> _Target | None:
         from pocketpaw_ee.cloud.notifications import service as notifications_service
 
         found = await notifications_service.webhook_target(ident)
-        return _Target(url=found[0], secrets=list(found[1])) if found else None
+        return _Target(url=found[0], secrets=list(found[1]), match=found[0]) if found else None
     if kind == "site":
         from pocketpaw_ee.cloud.leads import webhook_destinations
 
@@ -343,6 +349,7 @@ async def _webhook_target(item: NotificationOutboxItem) -> _Target | None:
             return None
         return _Target(
             url=dest.url,
+            match=dest.match,
             secrets=dest.secrets,
             platform=dest.platform,
             template=dest.template,
@@ -378,7 +385,8 @@ async def _send_webhook(item: NotificationOutboxItem, fetcher) -> Outcome:
     from pocketpaw_ee.cloud.notifications import webhook_signing
 
     target = await _webhook_target(item)
-    if target is None or target.url != item.target:
+    # A row queued before fingerprints carries the URL itself; both mean "unchanged".
+    if target is None or item.target not in (target.match, target.url):
         return Outcome(
             "dead", "webhook removed, changed or switched off", counts_against_webhook=False
         )
@@ -653,8 +661,23 @@ async def deliver(item: NotificationOutboxItem, client: httpx.AsyncClient, fetch
     except TimeoutError:
         return Outcome("retry", f"deadline: no answer in {SEND_DEADLINE_SECONDS:.0f}s")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("outbox send crashed for %s", item.id, exc_info=True)
+        # No traceback: an httpx error's text (and its chain) quotes the URL,
+        # and a webhook URL is a credential.
+        logger.warning(
+            "outbox send crashed for %s: %s: %s",
+            item.id,
+            type(exc).__name__,
+            scrub_urls(str(exc)),
+        )
         return Outcome("retry", f"crash: {type(exc).__name__}")
+
+
+_URL_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)(?:[^/\s@]*@)?([^/\s?#'\"]+)[^\s'\"]*")
+
+
+def scrub_urls(text: str) -> str:
+    """``text`` with every URL cut to its scheme and host (no credentials)."""
+    return _URL_RE.sub(r"\1\2/…", text)
 
 
 async def _handle(item: NotificationOutboxItem, client, fetcher, now: datetime | None) -> None:

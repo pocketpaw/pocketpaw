@@ -19,10 +19,13 @@
 # ``confirm_nonce`` is rotated on every (re)send, so a stale link can't confirm.
 #
 # Webhooks: ``webhooks`` holds up to ``MAX_WEBHOOKS`` destinations, each with its
-# own URL, platform override, message template, events, Fernet-encrypted signing
-# secret (the previous one co-signs for a grace window after a rotation) and
-# failure counter (10 consecutive dead deliveries switch that one destination
-# off until it is re-armed). The flat ``webhook_*`` fields are the pre-list
+# own URL (a secret: a chat webhook URL is the channel's credential, so it is
+# stored as Fernet ``url_enc`` plus a keyed ``url_fp`` for dedupe and a display
+# ``url_hint``; a row written before that carries plaintext ``url``), platform
+# override, message template, events, Fernet-encrypted signing secret (the
+# previous one co-signs for a grace window after a rotation) and failure counter
+# (10 consecutive dead deliveries switch that one destination off until it is
+# re-armed). The flat ``webhook_*`` fields are the pre-list
 # single webhook: readers see it as destination id ``legacy`` and the first
 # webhook write moves it into the list. Nothing else writes them.
 #
@@ -75,7 +78,12 @@ class LeadWebhookTemplate(BaseModel):
 
 class LeadWebhook(BaseModel):
     id: str
-    url: str
+    # Plaintext URL of a row written before encryption (read transparently, and
+    # sealed on the next write). New rows leave it "" and use the three below.
+    url: str = ""
+    url_enc: str = ""
+    url_fp: str = ""
+    url_hint: str = ""
     label: str = ""
     # None: use the platform detected from the URL.
     platform_override: WebhookPlatform | None = None
