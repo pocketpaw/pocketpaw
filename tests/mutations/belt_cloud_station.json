@@ -509,5 +509,68 @@
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_resume_releases_an_errored_lead_the_planner_already_replaced"
     ]
+  },
+  {
+    "label": "a timed-out lead's contact sheet is ignored and the issue labelled needs-human",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if any(r.get(\"kind\") == \"done\" for r in records):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_whose_contact_sheet_is_up_at_the_timeout_closes_its_issue"
+    ]
+  },
+  {
+    "label": "the timeout closes a done feature's issue as not planned",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "\"--reason\", \"completed\"]",
+    "replace": "\"--reason\", \"not planned\"]",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_whose_contact_sheet_is_up_at_the_timeout_closes_its_issue"
+    ]
+  },
+  {
+    "label": "a closed done feature's run is released instead of finished",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "await self._lead_closed(store, run_ref, blob, lead.get(\"prs\") or [], why=done)",
+    "replace": "await self._release(store, run_ref, blob, why)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_whose_contact_sheet_is_up_at_the_timeout_closes_its_issue"
+    ]
+  },
+  {
+    "label": "a v2 lead (no slices) at the timeout is asked for its sheet instead of labelled",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if ids and set(ids) <= said:",
+    "replace": "if set(ids) <= said:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_lead_has_8h_and_no_no_pr_rule"
+    ]
+  },
+  {
+    "label": "one slice's done line reads as every slice done at the timeout",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if ids and set(ids) <= said:",
+    "replace": "if ids and set(ids) & said:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_v3_lead_with_a_slice_left_at_the_timeout_is_labelled_needs_human"
+    ]
+  },
+  {
+    "label": "every slice done with no sheet at the timeout posts no note",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "await self._note(store, run_ref, blob, slug, issue, f\"#{issue} sheet\", text, cwd)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_v3_lead_with_every_slice_done_and_no_sheet_at_the_timeout_is_asked_for_it"
+    ]
+  },
+  {
+    "label": "every slice done with no sheet at the timeout is labelled needs-human",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                logger.info(\"belt cloud: sheet note on #%s failed\", issue, exc_info=True)\n",
+    "replace": "                logger.info(\"belt cloud: sheet note on #%s failed\", issue, exc_info=True)\n            await self._flag_issue(store, run_ref, blob, slug, issue, cwd)\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_v3_lead_with_every_slice_done_and_no_sheet_at_the_timeout_is_asked_for_it"
+    ]
   }
 ]

@@ -321,8 +321,8 @@
   {
     "label": "the closed summary does not say the issue closed",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "        why = f\"feature issue #{lead.get('issue')} was closed\"",
-    "replace": "        why = f\"feature lead #{lead.get('issue')} ended\"",
+    "find": "        why = why or f\"feature issue #{lead.get('issue')} was closed\"",
+    "replace": "        why = why or f\"feature lead #{lead.get('issue')} ended\"",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot"
     ]
@@ -713,7 +713,7 @@
   {
     "label": "a refusal leaves no note",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "            await self._once(store, run_ref, blob, \"note\", f\"#{issue}\", note, noted)",
+    "find": "            await self._note(store, run_ref, blob, exc.slug, issue, f\"#{issue}\", str(exc), cwd)",
     "replace": "            pass",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"

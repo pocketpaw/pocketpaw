@@ -32,8 +32,8 @@
 # on the base is live or ended inside the window gets no rung (the viewer-playback
 # and photo-edit leads); a silent lead with no such evidence still climbs.
 # TIMEOUT: 8 h from the launch (from the last progress while waiting), and no 1 h
-# no-PR rule; a timed-out lead is labelled ``needs-human`` and released like the
-# ladder's last rung.
+# no-PR rule; a timed-out lead is parked like the ladder's last rung: a sheet closes
+# the issue, all slices done asks for it, else ``needs-human``; never a failure.
 # STALE BASE: a ``lead/<feature>`` on origin more than 40 commits behind the base
 # gets a rebase-first rule in the brief; more than 150 and the launch or relaunch
 # is refused: a note and ``needs-human`` on the issue, the run released (never a
@@ -64,6 +64,7 @@ pytest.importorskip("pocketpaw_ee")
 from pocketpaw_ee.cloud.belt import cloud_station  # noqa: E402
 from pocketpaw_ee.cloud.belt.cloud_station import CloudTaskDispatcher  # noqa: E402
 from pocketpaw_ee.cloud.belt.service import _run_summary  # noqa: E402
+from pocketpaw_ee.cloud.mandates import lead_planner  # noqa: E402
 from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
 from pocketpaw_ee.cloud.mandates.domain import Budget  # noqa: E402
 
@@ -594,6 +595,13 @@ async def test_a_later_green_dev_run_that_contains_the_merge_lands_the_lead(stor
     assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
 
 
+def _ran_to_the_timeout(action) -> bool:
+    """The done rule never landed the lead: it ran to the timeout (which, with
+    its sheet up, then closes the issue, #2556)."""
+    lead = action.parameters["_code_change"]["lead"]
+    return "contact_sheet" not in lead and lead["stalls"][-1]["kind"] == "timeout"
+
+
 async def test_a_green_dev_run_without_the_merge_does_not_land_the_lead(store, dirs, playbook):
     repo, launch = dirs
     run_ref = await _queue_lead(store, repo)
@@ -604,7 +612,7 @@ async def test_a_green_dev_run_without_the_merge_does_not_land_the_lead(store, d
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    assert (await store.get_action(run_ref)).status != ActionStatus.EXECUTED
+    assert _ran_to_the_timeout(await store.get_action(run_ref))
 
 
 async def test_a_later_green_run_of_another_workflow_does_not_land_the_lead(store, dirs, playbook):
@@ -620,7 +628,7 @@ async def test_a_later_green_run_of_another_workflow_does_not_land_the_lead(stor
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    assert (await store.get_action(run_ref)).status != ActionStatus.EXECUTED
+    assert _ran_to_the_timeout(await store.get_action(run_ref))
 
 
 async def test_lead_is_not_done_without_a_new_contact_sheet(store, dirs, playbook):
@@ -832,12 +840,26 @@ async def test_a_lead_quiet_before_the_timeout_is_nudged_until_the_timeout(store
     assert action.rejected_reason.startswith("feature lead not done after 8h")
 
 
-async def test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_ladder(
+def _never_a_failure(action) -> None:
+    """A timed-out lead never counts toward the planner's circuit breaker,
+    which counts only ``lead_planner.FAILED`` runs."""
+    cc = action.parameters["_code_change"]
+    assert action.status.value not in lead_planner.FAILED
+    assert "headless_error" not in cc and cc["lead"]["stalls"][-1]["kind"] == "timeout"
+
+
+def _closes(runner: LeadRunner) -> list[list[str]]:
+    return [a for a, _ in runner.calls if a[:3] == ["gh", "issue", "close"]]
+
+
+async def test_a_lead_whose_contact_sheet_is_up_at_the_timeout_closes_its_issue(
     store, dirs, playbook
 ):
-    # A lead whose sheet is up is finished: it waits on dev CI (red here, for
-    # other lines' failures), so a quiet branch is not a stall. No nudge, no
-    # relaunch of a session with nothing left to do; the timeout settles it.
+    """#2556: a lead whose sheet is up is finished. It waits on dev CI (red
+    here, for other lines' failures) with no nudge or relaunch, and at the
+    timeout its issue is closed as completed and the run finished as done,
+    never labelled ``needs-human`` (5 done features were parked that way).
+    Mutation: dropping the sheet check labels it needs-human."""
     repo, launch = dirs
     run_ref = await _queue_lead(store, repo)
     runner = _done_runner(run_ref, ci_by_sha={MERGE_SHA: [RED_RUN]})
@@ -846,8 +868,12 @@ async def test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_lad
 
     assert not _nudges(runner) and len(_launch_briefs(runner)) == 1
     action = await store.get_action(run_ref)
-    assert action.status == ActionStatus.REJECTED
-    assert (action.rejected_reason or "").startswith("feature lead not done after 8h")
+    assert action.status == ActionStatus.EXECUTED
+    assert "contact sheet" in str(action.outcome)
+    (close,) = _closes(runner)
+    assert close[3:] == ["93", "-R", SLUG, "--reason", "completed"]
+    assert not _flagged(runner)
+    _never_a_failure(action)
 
 
 # -- waiting, not stalled ------------------------------------------------------
@@ -1779,6 +1805,53 @@ async def test_a_v3_lead_waits_for_every_slice_and_the_sheet(store, dirs, playbo
 
     assert _issue_views(runner) == 3  # no S1 line, then no sheet, then done
     assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+
+
+async def test_a_v3_lead_with_every_slice_done_and_no_sheet_at_the_timeout_is_asked_for_it(
+    store, dirs, playbook
+):
+    """#2556: every slice has its ``Belt-Slice-Done:`` line but no sheet is up
+    at the timeout. One note asks for the sheet; the issue stays open and is
+    never labelled ``needs-human``; the run is released. Mutation: reading one
+    slice's line as enough here posts the note for the partial lead below."""
+    repo, launch = dirs
+    _wave(launch)
+    run_ref = await _queue_lead(store, repo)
+    runner = _sliced_runner(run_ref, sheet=False)
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert "contact sheet" in (action.rejected_reason or "")
+    (note,) = [a[-1] for a in _writes(runner) if a[2] == "comment"]
+    assert note.splitlines()[0].startswith("Belt: every slice") and "Belt-Contact-Sheet:" in note
+    reqs = action.parameters["_code_change"]["requests"]
+    (rid,) = [k for k, r in reqs.items() if r["kind"] == "note"]
+    assert f"<!-- belt-request: {rid} -->" in note
+    assert not _flagged(runner) and not _closes(runner)
+    _never_a_failure(action)
+
+
+async def test_a_v3_lead_with_a_slice_left_at_the_timeout_is_labelled_needs_human(
+    store, dirs, playbook
+):
+    """#2556: a lead that is not done (S1 has no ``Belt-Slice-Done:`` line, no
+    sheet) keeps today's timeout: ``needs-human`` and released, no note, no close."""
+    repo, launch = dirs
+    _wave(launch)
+    run_ref = await _queue_lead(store, repo)
+    runner = _sliced_runner(run_ref, sheet=False)
+    runner.comments = [[_slice_done("contract", 901, time.time() + 3600)]]
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert (action.rejected_reason or "").startswith("feature lead not done after 8h")
+    assert _flagged(runner) and not _closes(runner)
+    assert not [a for a in _writes(runner) if a[2] == "comment"]
+    _never_a_failure(action)
 
 
 async def test_a_slice_done_line_from_before_the_launch_does_not_count(store, dirs, playbook):

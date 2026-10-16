@@ -43,10 +43,10 @@
 #           naming CI or the lane while a base run is live), exited (the session's own
 #           end state: ``session_end``, which nothing can read today) or unverifiable.
 #           A quiet unverifiable lead only gets a nudge per window; an exited one is
-#           relaunched, then flagged and released. LEAD_TIMEOUT (8 h, from the last
-#           progress while waiting) is the budget, not a liveness call; a lead still
-#           working stops at 2x. Notes, labels, releases and relaunches run once each
-#           under a request id on ``blob.requests``; a retry checks first.
+#           relaunched, then parked. LEAD_TIMEOUT (8 h, from the last progress while
+#           waiting) is the budget, not a liveness call; a working lead stops at 2x.
+#           PARK: a sheet closes the issue as completed, every slice done asks for the
+#           sheet, else ``needs-human``; then release. Writes run once per request id.
 # Only git, gh, the launcher and PACK tools run here; an approved escalated diff lands on the line.
 
 from __future__ import annotations
@@ -792,19 +792,17 @@ class CloudTaskDispatcher:
         *,
         hard: bool = False,
     ) -> None:
-        """Out of time: settle like the stall ladder's last rung (label the issue
-        ``needs-human``, release the run). Never as a develop failure: a failed
-        run stops counting in flight while its session may still be committing,
-        and the next shift would launch a second lead on the same feature."""
+        """Out of time: settle like the stall ladder's last rung (``_park``).
+        Never as a develop failure: a failed run stops counting in flight while
+        its session may still be committing, and the next shift would launch a
+        second lead on the same feature."""
         lead = blob["lead"]
         lead["stalls"] = [*(lead.get("stalls") or []), {"kind": "timeout", "at": self.wall()}]
         await _patch(store, run_ref, lead=lead)
-        await self._flag_issue(store, run_ref, blob, slug, str(lead.get("issue") or ""), cwd)
         session = (lead.get("sessions") or [{}])[-1].get("session_url")
         hours = self.lead_timeout_seconds * (2 if hard else 1) / 3600
-        await self._release(
-            store, run_ref, blob, f"feature lead not done after {hours:g}h (session {session})"
-        )
+        why = f"feature lead not done after {hours:g}h (session {session})"
+        await self._park(store, run_ref, blob, slug, cwd, why)
 
     async def _lead_prs(
         self, slug: str, run_ref: str, cwd: Path
@@ -1011,14 +1009,9 @@ class CloudTaskDispatcher:
             entry["kind"] = _NEEDS_HUMAN
             lead["stalls"] = [*stalls, entry]
             await _patch(store, run_ref, lead=lead)
-            await self._flag_issue(store, run_ref, blob, slug, str(lead.get("issue") or ""), cwd)
             minutes = self.lead_stall_seconds / 60
-            await self._release(
-                store,
-                run_ref,
-                blob,
-                f"feature lead session ended, silent {minutes:.0f}m after {_rungs(ladder)}",
-            )
+            why = f"feature lead session ended, silent {minutes:.0f}m after {_rungs(ladder)}"
+            await self._park(store, run_ref, blob, slug, cwd, why)
             return False
         if not exited:
             entry["kind"] = "nudge"
@@ -1081,23 +1074,91 @@ class CloudTaskDispatcher:
         cwd = Path(self.launch_dir).expanduser()
         issue = str((blob.get("lead") or {}).get("issue") or "")
         await _patch(store, run_ref, lead=blob.get("lead"))  # a retry reads the same issue
-
-        async def note(rid: str) -> None:
-            body = f"{exc}\n\n{_REQUEST_MARK}{rid} -->"
-            argv = ["gh", "issue", "comment", issue, "-R", exc.slug, "--body", body]
-            await self._ok(argv, cwd, "LAUNCH: note the stale base")
-
-        async def noted(rid: str) -> bool:
-            argv = ["gh", "issue", "view", issue, "-R", exc.slug, "--json", "comments"]
-            raw = json.loads(await self._ok(argv, cwd, "LAUNCH: read the note") or "{}")
-            return any(rid in str(c.get("body") or "") for c in raw.get("comments") or [])
-
         try:
-            await self._once(store, run_ref, blob, "note", f"#{issue}", note, noted)
+            await self._note(store, run_ref, blob, exc.slug, issue, f"#{issue}", str(exc), cwd)
         except Exception:  # noqa: BLE001 — the label and the release still tell a human
             logger.info("belt cloud: stale-base note on #%s failed", issue, exc_info=True)
         await self._flag_issue(store, run_ref, blob, exc.slug, issue, cwd)
         await self._release(store, run_ref, blob, str(exc))
+
+    async def _note(
+        self,
+        store: Any,
+        run_ref: str,
+        blob: dict[str, Any],
+        slug: str,
+        issue: str,
+        target: str,
+        text: str,
+        cwd: Path,
+    ) -> None:
+        """Comment ``text`` on issue ``issue`` once (a request named ``target``,
+        checked against the issue's comments by the request id it carries)."""
+
+        async def note(rid: str) -> None:
+            body = f"{text}\n\n{_REQUEST_MARK}{rid} -->"
+            argv = ["gh", "issue", "comment", issue, "-R", slug, "--body", body]
+            await self._ok(argv, cwd, "NOTE: comment on the issue")
+
+        async def noted(rid: str) -> bool:
+            argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "comments"]
+            raw = json.loads(await self._ok(argv, cwd, "NOTE: read the comments") or "{}")
+            return any(rid in str(c.get("body") or "") for c in raw.get("comments") or [])
+
+        await self._once(store, run_ref, blob, "note", target, note, noted)
+
+    async def _park(
+        self, store: Any, run_ref: str, blob: dict[str, Any], slug: str, cwd: Path, why: str
+    ) -> None:
+        """End a lead short of the done rule (the timeout, the ladder's last
+        rung) by what ``lead.records`` says. A contact sheet: the feature issue
+        is closed as completed and the run finished as done. A ``Belt-Slice-Done``
+        for every slice and no sheet: one note asks for the sheet, the run is
+        released and the issue left open, unlabelled. Else ``needs-human`` and
+        released. Close, note and label each run once under a request id; none
+        is a develop failure, so none counts toward the planner's breaker."""
+        lead = blob["lead"]
+        issue = str(lead.get("issue") or "")
+        records = lead.get("records") or []
+        said = {r.get("slice") for r in records if r.get("kind") == "slice"}
+        if any(r.get("kind") == "done" for r in records):
+
+            async def close(rid: str) -> None:
+                argv = ["gh", "issue", "close", issue, "-R", slug, "--reason", "completed"]
+                await self._ok(argv, cwd, "DONE: close the issue")
+
+            async def closed(rid: str) -> bool:
+                argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "state"]
+                raw = json.loads(await self._ok(argv, cwd, "DONE: read the issue") or "{}")
+                return raw.get("state") == "CLOSED"
+
+            try:
+                await self._once(store, run_ref, blob, "close", f"#{issue}", close, closed)
+            except Exception:  # noqa: BLE001 — a done feature is never parked needs-human
+                # ponytail: the issue stays open and unlabelled, so the next shift
+                # launches a lead that finds the sheet; a retry queue would close it.
+                logger.info("belt cloud: closing #%s on %s failed", issue, slug, exc_info=True)
+                await self._release(store, run_ref, blob, f"{why}; its contact sheet is up")
+                return
+            done = f"feature issue #{issue} closed as completed: its contact sheet is up"
+            await self._lead_closed(store, run_ref, blob, lead.get("prs") or [], why=done)
+            return
+        ids = lead.get("slice_ids") or []
+        if ids and set(ids) <= said:
+            text = (
+                "Belt: every slice of this feature has its Belt-Slice-Done line; post the "
+                "Belt-Contact-Sheet: comment to finish it."
+            )
+            try:
+                await self._note(store, run_ref, blob, slug, issue, f"#{issue} sheet", text, cwd)
+            except Exception:  # noqa: BLE001 — the release still frees the slot
+                logger.info("belt cloud: sheet note on #%s failed", issue, exc_info=True)
+            await self._release(
+                store, run_ref, blob, f"{why}; every slice is done, the contact sheet is missing"
+            )
+            return
+        await self._flag_issue(store, run_ref, blob, slug, issue, cwd)
+        await self._release(store, run_ref, blob, why)
 
     async def _land_lead(
         self,
@@ -1163,12 +1224,18 @@ class CloudTaskDispatcher:
         logger.info("belt cloud: feature lead %s landed on %s", run_ref, slug)
 
     async def _lead_closed(
-        self, store: Any, run_ref: str, blob: dict[str, Any], prs: list[dict[str, Any]]
+        self,
+        store: Any,
+        run_ref: str,
+        blob: dict[str, Any],
+        prs: list[dict[str, Any]],
+        *,
+        why: str = "",
     ) -> None:
         """Finish a lead whose feature issue is closed as done, whatever the done
         rule still waits on, so it frees its slot. No nudge, relaunch or label."""
         lead = blob["lead"]
-        why = f"feature issue #{lead.get('issue')} was closed"
+        why = why or f"feature issue #{lead.get('issue')} was closed"
         approved = await store.auto_approve(
             run_ref, approver="system:fast-lane", verdict="closed", reasoning=why
         )
