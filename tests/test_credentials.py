@@ -1,12 +1,6 @@
-# Unit tests for encrypted credential storage and security hardening.
-#
-# Created: 2026-02-06
-# Tests: CredentialStore, config save/load separation, plaintext migration,
-#         file permissions, and log secret scrubbing.
-# Updated 2026-06-24: expected SECRET_FIELDS now includes the Dodo billing
-#         secrets (dodo_payments_api_key, dodo_webhook_secret).
-# Updated 2026-10-02 (PH-6): ... and msg91_platform_authkey (partner lead WhatsApp).
-# Updated 2026-10-03 (AV-3): ... and the four ai_visibility_* provider secrets.
+# Unit tests for encrypted credential storage and security hardening:
+# CredentialStore, config save/load separation, plaintext migration, file
+# permissions, log secret scrubbing, and the exact SECRET_FIELDS list.
 
 import json
 import logging
@@ -551,6 +545,7 @@ class TestSecretFieldsList:
             "lens_api_token",
             "cf_email_api_token",
             "msg91_platform_authkey",
+            "wa_notify_access_token",
             "ai_visibility_openai_api_key",
             "ai_visibility_perplexity_api_key",
             "ai_visibility_anthropic_api_key",
