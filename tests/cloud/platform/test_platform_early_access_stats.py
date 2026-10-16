@@ -157,7 +157,7 @@ async def test_series_cap_share_meter_and_controls(mongo_db):  # noqa: ARG001
         subject_id=metering.PLATFORM_SUBJECT,
         meter=DailyMeter.EARLY_ACCESS_CREDITS,
         amount=300,
-        cap=None,
+        cap=25_000,
     )
     await controls_service.update_launch_controls(
         {"signups_paused": True, "daily_free_ceiling_credits": 5_000}, operator_id="ops"
