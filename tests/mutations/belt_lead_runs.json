@@ -278,7 +278,7 @@
     "find": "            if not (sheet or waiting) and now - heard >= self.lead_stall_seconds:",
     "replace": "            if not waiting and now - heard >= self.lead_stall_seconds:",
     "tests": [
-      "tests/cloud/test_belt_lead_runs.py::test_a_lead_that_posted_its_contact_sheet_waits_for_ci_without_the_ladder"
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_whose_contact_sheet_is_up_at_the_timeout_closes_its_issue"
     ]
   },
   {
