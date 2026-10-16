@@ -42,12 +42,16 @@ supervised turn that ends without ``done`` demotes its session (``mark_crashed``
 every step of the backend's generator (and its final ``aclose``) runs in one
 Context so spans held across ``yield`` attach and detach cleanly, and that
 ``aclose`` is time-bounded with a cancel during it deferred, so it never skips
-the sink/turn/supervisor bookkeeping after it.
+the sink/turn/supervisor bookkeeping after it. The agent event generator is
+closed explicitly when the loop exits (a stop breaks out of it), before any
+terminal write, so a cancelled run is fully torn down by the time its status
+says so.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import json
 import logging
@@ -2639,7 +2643,9 @@ async def _iter_agent_events(
     async def _is_cancelled() -> bool:
         return await transport.is_cancelled(spec.run_id)
 
-    async for ev in _drive_agent_loop(
+    # ``aclosing`` so closing THIS generator closes the loop under it at once;
+    # an ``async for`` alone would leave the inner one to the GC finalizer.
+    loop_events = _drive_agent_loop(
         ctx,
         user_content=spec.content,
         attachments_in=list(spec.attachments) if spec.attachments else None,
@@ -2657,8 +2663,24 @@ async def _iter_agent_events(
         # prompt carries the ACTIVE FLOW ID and build_studio_flow persists into
         # the flow project the user is on. None on every non-studio run.
         flow_context=spec.flow_context,
-    ):
-        yield ev
+    )
+    async with contextlib.aclosing(loop_events):
+        async for ev in loop_events:
+            yield ev
+
+
+async def _close_agent_events(agent_events: Any, run_id: str) -> None:
+    """``aclose`` the agent event generator; best-effort, a no-op once it ended.
+
+    ``_drive_agent_loop`` bounds its own teardown waits, so this cannot hang on
+    a wedged backend close."""
+    aclose = getattr(agent_events, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        logger.warning("closing the agent event stream failed for %s", run_id, exc_info=True)
 
 
 async def _handle_interrupted_cleanup(
@@ -3162,8 +3184,9 @@ async def execute_run(spec: RunSpec) -> None:
         # ``stream_end`` frame and the persisted run doc carry actual counts instead
         # of the old hardcoded ``{}``.
         usage: dict[str, Any] = {}
+        agent_events = _iter_agent_events(spec, ctx)
         try:
-            async for event_name, event_data in _iter_agent_events(spec, ctx):
+            async for event_name, event_data in agent_events:
                 if await transport.is_cancelled(spec.run_id):
                     # Keep the text this event carries before leaving. The check
                     # runs BEFORE the event is handled, so a bare break discards
@@ -3247,7 +3270,15 @@ async def execute_run(spec: RunSpec) -> None:
                 {"code": "agent.run_failed", "message": str(exc)},
             )
         finally:
-            await _stop_heartbeat(heartbeat)
+            # A ``break`` (user stop, backend error frame) leaves the generator
+            # suspended; close it here so the backend and its bookkeeping in
+            # ``_drive_agent_loop``'s ``finally`` are torn down before the
+            # terminal write a superseding turn waits on, not whenever the GC
+            # finalizer gets to it.
+            try:
+                await _close_agent_events(agent_events, spec.run_id)
+            finally:
+                await _stop_heartbeat(heartbeat)
 
     # Check cancellation AFTER the agent loop. _drive_agent_loop now checks the
     # cancel flag internally (via _iter_agent_events -> real _is_cancelled callback

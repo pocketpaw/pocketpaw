@@ -29,6 +29,20 @@ clean pre-stream error. In-flight runs are never affected.
 On the sites edit/refine surface only, ``_window_history_for_surface`` caps the
 history fed to the agent to the last ``SITES_REFINE_HISTORY_TURNS`` turns; every
 other surface gets the full history.
+
+A new message supersedes the scope's active run: it requests the cancel, then
+waits up to ``SUPERSEDE_WAIT_SECONDS`` for that run to reach a terminal status
+before loading history, so the cancelled run's partial reply is in the history
+and the two runs never overlap on the scope. A timeout logs and goes ahead.
+
+``/agent/stop`` cancels the scope's active run and also leaves a pending-stop
+token on the transport (``PENDING_STOP_TTL_SECONDS``). ``post_agent_chat`` reads
+that token when the request arrives and again right after ``create_run``; a
+changed token means the user hit stop while this run was still being created,
+so the run is cancelled before the executor starts it. Stop writes the token
+BEFORE it looks for the run, so one side always sees the other. The caller may
+stop a run they own, or any run in a scope they can open
+(``resolve_scope_context``, the same check that admits a message).
 """
 
 from __future__ import annotations
@@ -81,6 +95,19 @@ Scope = Literal["dm", "group", "pocket", "session"]
 # the window size is tunable in one place.
 SITES_REFINE_HISTORY_TURNS = 2
 _SITES_REFINE_HISTORY_ROWS = 2 * SITES_REFINE_HISTORY_TURNS
+
+# How long a new message waits for the run it supersedes to wind down. The
+# worker polls the cancel flag about once a second, then persists the partial
+# reply and the terminal status; past this bound the new turn starts anyway.
+SUPERSEDE_WAIT_SECONDS = 5.0
+
+# How long a stop that found no run stays pending for a run still being created.
+# Only requests already in flight when the stop landed can match it.
+PENDING_STOP_TTL_SECONDS = 30
+
+
+def _scope_stop_key(workspace_id: str, scope: str, scope_id: str) -> str:
+    return f"{workspace_id}:{scope}:{scope_id}"
 
 
 async def _assert_under_daily_turns(workspace_id: str) -> None:
@@ -287,6 +314,13 @@ async def post_agent_chat(
     user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
+    transport = get_stream_transport()
+    # Snapshot the scope's stop token as the request arrives. A stop that lands
+    # before ``create_run`` (nothing to cancel yet) changes it; see the check
+    # after ``create_run``.
+    stop_key = _scope_stop_key(workspace_id, scope, scope_id)
+    stop_token_at_start = await transport.scope_stop_token(stop_key)
+
     try:
         # Thread the authenticated workspace (fix/worker-trusts-spec-workspace).
         # The HTTP route already validated it via ``current_workspace_id``; the
@@ -350,8 +384,6 @@ async def post_agent_chat(
         model_override=body.model,
     )
 
-    transport = get_stream_transport()
-
     # Kiosk BYOK fast-reject (2026-09-12). UX ONLY — see the docstring.
     #
     # The browser gets a clean pre-stream 402 with the code the key prompt
@@ -364,11 +396,23 @@ async def post_agent_chat(
 
     # Supersede any prior in-flight run for this scope. ``request_cancel``
     # writes the cancel flag in Redis so a worker in another process notices.
+    # The worker only polls that flag, so wait for the run to finish winding
+    # down: it persists its partial reply before its terminal status, and the
+    # history loaded below must include that reply. A re-POST of the same
+    # ``client_message_id`` is the same turn, not a new one, so it is left alone.
     prior = await run_service.find_active_run_for_scope(
         workspace_id=workspace_id, context_type=scope, scope_id=scope_id
     )
-    if prior is not None:
+    if prior is not None and not (
+        body.client_message_id and prior.client_message_id == body.client_message_id
+    ):
         await transport.request_cancel(prior.run_id)
+        if not await run_service.wait_until_terminal(prior.run_id, timeout=SUPERSEDE_WAIT_SECONDS):
+            logger.warning(
+                "superseded run %s still active after %.1fs; starting the new turn anyway",
+                prior.run_id,
+                SUPERSEDE_WAIT_SECONDS,
+            )
 
     # Load history BEFORE persisting the new user message so it excludes this turn.
     history = await load_history_for_scope(ctx)
@@ -429,6 +473,12 @@ async def post_agent_chat(
     if run.run_id != spec.run_id:
         spec = spec.model_copy(update={"run_id": run.run_id})
     run_id = run.run_id
+    # A stop that arrived while this request was still creating the run found
+    # nothing to cancel; it left a new token instead. Cancel before the executor
+    # starts so the run ends at its first cancel check, before any model call.
+    if await transport.scope_stop_token(stop_key) != stop_token_at_start:
+        logger.info("stop landed before run %s existed; cancelling it", run_id)
+        await transport.request_cancel(run_id)
     await get_executor().submit(spec)
 
     async def gen() -> AsyncIterator[bytes]:
@@ -480,18 +530,54 @@ async def post_agent_chat(
 async def post_agent_chat_stop(
     scope: Scope,
     scope_id: str,
-    user_id: str = Depends(current_user_id),  # noqa: ARG001
+    user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
 ) -> dict[str, Any]:
     """Cancel the active run for this scope. Idempotent — returns ``ok`` even
     when no run is in flight so the frontend's fire-and-forget stop button
-    doesn't surface a 404 toast."""
-    prior = await run_service.find_active_run_for_scope(
-        workspace_id=workspace_id, context_type=scope, scope_id=scope_id
+    doesn't surface a 404 toast.
+
+    The caller must own the run or be able to open the scope; otherwise the
+    scope resolver's own 403/404 is returned and nothing is cancelled. The
+    pending-stop token is written before the run lookup: a run created after
+    the lookup sees the token, a run created before it is found here.
+    """
+    transport = get_stream_transport()
+    find = run_service.find_active_run_for_scope
+    run = await find(workspace_id=workspace_id, context_type=scope, scope_id=scope_id)
+    scope_checked = False
+    if run is None or run.user_id != user_id:
+        await _assert_scope_access(scope, scope_id, user_id, workspace_id)
+        scope_checked = True
+
+    await transport.request_scope_stop(
+        _scope_stop_key(workspace_id, scope, scope_id), PENDING_STOP_TTL_SECONDS
     )
-    if prior is not None:
-        await get_stream_transport().request_cancel(prior.run_id)
+    run = await find(workspace_id=workspace_id, context_type=scope, scope_id=scope_id)
+    if run is not None:
+        if run.user_id != user_id and not scope_checked:
+            await _assert_scope_access(scope, scope_id, user_id, workspace_id)
+        await transport.request_cancel(run.run_id)
     return {"status": "ok"}
+
+
+async def _assert_scope_access(scope: str, scope_id: str, user_id: str, workspace_id: str) -> None:
+    """Raise unless ``user_id`` may open this scope, by the same resolver that
+    admits a message to it. A 400 from that resolver is an agent-selection
+    problem raised after its membership checks passed, so it is not a denial."""
+    try:
+        await resolve_scope_context(
+            scope=scope,
+            scope_id=scope_id,
+            user_id=user_id,
+            agent_id_hint=None,
+            expected_workspace_id=workspace_id,
+        )
+    except InvalidScope:
+        raise CloudError(400, "scope.invalid", "Invalid scope") from None
+    except CloudError as exc:
+        if exc.status_code != 400:
+            raise
 
 
 async def _ensure_scope_session(ctx: ScopeContext) -> str | None:

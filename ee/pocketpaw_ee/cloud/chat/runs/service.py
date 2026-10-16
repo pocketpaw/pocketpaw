@@ -14,6 +14,8 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
   metering service's write, made here so metering never writes this document.
   ``set_credential_source`` records who paid the provider (``platform`` or
   ``byok``), which ``bill_run`` reads to decide whether to debit.
+  ``wait_until_terminal`` polls a run until it leaves the active statuses, so a
+  turn that supersedes it can wait out a cancel the worker has not seen yet.
   ``set_early_access_reservation`` records what a free run reserved against the
   daily early-access ceiling; ``take_early_access_reservation`` hands it to
   ``bill_run`` exactly once (an atomic claim that zeroes it).
@@ -29,6 +31,7 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Iterable
@@ -352,6 +355,26 @@ async def find_active_run_for_scope(
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .first_or_none()
     )
+
+
+async def wait_until_terminal(run_id: str, *, timeout: float, interval: float = 0.1) -> bool:
+    """Poll ``run_id`` until it leaves ``ACTIVE_RUN_STATUSES``; False on timeout.
+
+    A cancel is a flag the worker polls, so a cancelled run keeps going until it
+    notices, then writes its partial reply and its terminal status (in that
+    order). A caller that must not overlap it, or must read history that
+    includes its partial, waits here. A missing doc counts as finished.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+        if doc is None or doc.status not in ACTIVE_RUN_STATUSES:
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(interval, remaining))
 
 
 async def find_stale_running(older_than: datetime) -> list[ChatRunDoc]:

@@ -1,6 +1,11 @@
 """Transport abstraction for chat-run events. Backend selected by
 ``POCKETPAW_CLOUD_STREAM_TRANSPORT``. ``sse_tail`` is the one stream -> SSE
-loop, shared by the chat run stream and the Belt run feed stream."""
+loop, shared by the chat run stream and the Belt run feed stream.
+
+Besides the per-run event log and cancel flag, a transport holds one short-lived
+"stop requested" token per chat scope (``request_scope_stop`` /
+``scope_stop_token``). A stop that lands before the run exists has no run id to
+flag; the token lets the request that is still creating that run notice it."""
 
 from __future__ import annotations
 
@@ -40,6 +45,8 @@ class RunStreamTransport(Protocol):
     async def request_cancel(self, run_id: str) -> None: ...
     async def is_cancelled(self, run_id: str) -> bool: ...
     async def stream_exists(self, run_id: str) -> bool: ...
+    async def request_scope_stop(self, scope_key: str, ttl_seconds: int) -> None: ...
+    async def scope_stop_token(self, scope_key: str) -> str | None: ...
 
 
 def sse_frame(entry_id: str, event: str, data: dict[str, Any]) -> bytes:

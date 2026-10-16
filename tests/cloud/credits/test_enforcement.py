@@ -90,6 +90,9 @@ class _StubTransport:
     async def request_cancel(self, run_id: str) -> None:
         self.cancelled.append(run_id)
 
+    async def scope_stop_token(self, scope_key: str) -> str | None:  # noqa: ARG002
+        return None
+
     def read_events(self, run_id: str, *, after: str = "0", block_ms: int = 15000) -> AsyncIterator:  # noqa: ARG002
         async def _gen() -> AsyncIterator:
             from pocketpaw_ee.cloud.chat.runs.transport import StreamEvent
