@@ -59,8 +59,9 @@ def test_the_site_skill_carries_the_platform_contract() -> None:
     ):
         assert tool in text, tool
     assert "ONCE" in text and "AGENTS.md" in text
-    # The template rule: static by default, a framework only when needed or named.
-    assert "`static` is the default" in text
+    # The template rule: static for content pages only, a framework for apps,
+    # npm packages, server needs, or when the user named one.
+    assert "`static` only for content pages" in text
     assert "server logic" in text and "named the framework" in text
     # Integrations, written once for client and server.
     for phrase in (
@@ -84,6 +85,23 @@ def test_the_site_skill_carries_the_platform_contract() -> None:
         "create_landing_site",
     ):
         assert old not in text, old
+
+
+def test_the_site_skill_sends_client_heavy_apps_to_a_framework() -> None:
+    """Regression: a complex browser 3D game (three.js / React Three Fiber) was
+    built on the no-build `static` starter because the template rule only named
+    SERVER needs. Apps and npm-package needs are framework triggers too."""
+    text = _site_skill().read_text("utf-8")
+    lower = text.lower()
+    assert "no npm packages, no bundler" in lower
+    for trigger in ("a game", "3d/webgl", "canvas", "simulation", "dashboard"):
+        assert trigger in lower, trigger
+    assert "needs npm packages" in lower
+    assert "@react-three/fiber" in lower
+    assert "prefer `vite-react-hono`" in text
+    assert "when unsure between `static` and a framework" in lower
+    assert "pick the framework" in lower
+    assert "state the template you chose and a one-line reason" in lower
 
 
 def _registered_providers():

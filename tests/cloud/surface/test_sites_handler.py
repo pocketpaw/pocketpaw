@@ -168,8 +168,34 @@ async def test_create_preamble_carries_the_template_the_hint_pins(
 
 async def test_create_without_a_hint_picks_static_unless_a_framework_is_needed() -> None:
     preamble = await _preamble_for(None)
-    assert "Start from `static` unless the site needs server logic" in preamble
+    assert "Start from `static` only for content pages" in preamble
+    assert "server logic" in preamble
     assert "the user names a framework" in preamble
+
+
+async def test_create_without_a_hint_sends_client_heavy_apps_to_a_framework() -> None:
+    """Regression: on Auto (no hint) a complex browser 3D game (three.js / React
+    Three Fiber, menus, many systems) was built on the no-build `static` starter,
+    because the rule only listed SERVER needs as framework triggers. An app (game,
+    3D/WebGL, canvas, simulation, editor, dashboard) or a need for npm packages and
+    a bundler must pick a framework template too, `vite-react-hono` by default."""
+    preamble = await _preamble_for(None)
+    lower = preamble.lower()
+    # static is for content pages only, with no npm packages and no bundler.
+    assert "`static` only for content pages" in preamble
+    assert "no npm packages, no bundler" in lower
+    # Client-side app triggers, not just server needs.
+    for trigger in ("a game", "3d/webgl", "canvas", "simulation", "dashboard"):
+        assert trigger in lower, trigger
+    assert "needs npm packages" in lower
+    assert "three" in lower and "@react-three/fiber" in lower
+    # The client-heavy default, and the named framework still wins.
+    assert "prefer `vite-react-hono`" in preamble
+    assert "a named framework still wins" in lower
+    # When in doubt, frameworks win; and the choice is said out loud.
+    assert "when unsure between `static` and a framework" in lower
+    assert "pick the framework" in lower
+    assert "state the template you chose and a one-line reason" in lower
 
 
 async def test_new_static_sites_carry_the_lead_form_contract() -> None:

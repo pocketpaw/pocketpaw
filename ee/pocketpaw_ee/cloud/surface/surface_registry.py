@@ -850,7 +850,7 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
 
 
 #: The one authoring skill a NEW-site create turn loads: the platform contract for a
-#: project started from a template (``static`` by default). The old per-engine
+#: project started from a template (``static`` for content pages). The old per-engine
 #: authoring skills are not named, and ``skill_names`` is an exact allowlist, so they
 #: cannot load on a create turn; refine keeps the wholesale bundled plugin.
 _SITES_CREATE_SKILL = "pocketpaw-site"

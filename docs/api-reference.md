@@ -5924,8 +5924,12 @@ every one refuses a pocket of any other engine.
 rules) and these tools; the old `create_*_site` tools, the three old-engine edit
 tools and the pocket specialist's create are denied on that turn
 (`surface_registry._SITES_LEGACY_AUTHORING_DENY`). The agent starts from `static`
-unless the site needs server logic, accounts or a database, or the user names a
-framework. A create-time engine hint from the UI picks the template
+only for content pages (landing, portfolio, brochure, event; no npm packages, no
+bundler) and picks a framework template when the site is an app (game, 3D/WebGL,
+canvas, simulation, editor, dashboard), needs npm packages, needs server logic,
+accounts or a database, or the user names a framework; `vite-react-hono` is the
+default for a client-heavy app with no server needs, and when unsure it picks the
+framework. It names the template and a one-line reason before starting. A create-time engine hint from the UI picks the template
 (`handlers/sites.py::CREATE_ENGINE_TEMPLATE`):
 
 | Hint (`meta.engine`) | Template |

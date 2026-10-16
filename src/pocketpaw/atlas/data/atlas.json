@@ -2326,9 +2326,9 @@
       ],
       "kind": "skill",
       "name": "pocketpaw-site",
-      "narrative": "Build a NEW Paw Site. Every new site is a repo started from a paw-sites template: `static` (hand-written HTML and CSS, no build step) by default, or a framework template (Astro, TanStack Start, Vite + React + Hono, Next, SvelteKit) when the site needs server logic, user accounts or its own database, or the user names a framework. This skill is the platform contract: the build loop, integrations (paw.js and the gateway), secrets and plan rules. Framework and library knowledge comes from the template's AGENTS.md and the web.",
+      "narrative": "Build a NEW Paw Site: a repo started from a paw-sites template, `static` (no build) for content pages or a framework template (Astro, TanStack Start, Vite + React + Hono, Next, SvelteKit) for apps, games, npm packages, server logic or a named framework. The platform contract: the build loop, integrations (paw.js and the gateway), secrets and plan rules.",
       "requires": [],
-      "summary": "Build a NEW Paw Site.",
+      "summary": "Build a NEW Paw Site: a repo started from a paw-sites template, `static` (no build) for content pages or a framework template (Astro, TanStack Start, Vite + React + Hono, Next, SvelteKit) for apps,…",
       "surface": ""
     },
     {

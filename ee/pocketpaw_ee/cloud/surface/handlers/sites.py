@@ -4,8 +4,9 @@
 # Modes (``build_preamble``):
 #   * CREATE (no pocket): ``_create_preamble``. Every new site is a PROJECT started
 #     from a paw-sites template and built with the project tools through the
-#     ``pocketpaw-site`` skill: ``static`` (no build) by default, a framework template
-#     only for server logic, accounts or a database, or when the user names one. A
+#     ``pocketpaw-site`` skill: ``static`` (no build) only for content pages, a
+#     framework template for an app (game, 3D, canvas, dashboard...), npm packages,
+#     server logic, accounts or a database, or when the user names one. A
 #     create-time ``meta.engine`` is only a template hint (``CREATE_ENGINE_TEMPLATE``:
 #     html and ripple -> static, react -> vite-react-hono, svelte -> sveltekit).
 #   * IMPORT-CREATE (``brief_id``): ``_frontend_preamble`` builds from a captured
@@ -978,9 +979,11 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     phases and the draft-first rule are the same for every site; only the template
     the agent starts from varies:
 
-    * ``static`` (hand-written HTML and CSS, no build) by default;
-    * a framework template when the brief needs server logic, user accounts or a
-      database, or the user names a framework;
+    * ``static`` (hand-written HTML and CSS, no build) only for content pages;
+    * a framework template when the site is an app rather than a page (game,
+      3D/WebGL, canvas, simulation, editor, dashboard), needs npm packages and a
+      bundler, needs server logic, user accounts or a database, or the user names a
+      framework (``vite-react-hono`` for a client-heavy app with no server needs);
     * a framework the user picked in the create screen, carried as ``meta.engine``
       and mapped by :func:`create_template_hint` (html and ripple map to ``static``).
 
@@ -1006,10 +1009,21 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         )
     else:
         pick = (
-            "Start from `static` unless the site needs server logic, user accounts or "
-            "its own database, or the user names a framework; then pick that template "
-            "by `when_to_use`. A described business, or a wish for a 'nice' or "
-            "'modern' site, is NOT such a need: stay on `static`."
+            "Start from `static` only for content pages: landing and marketing pages, "
+            "portfolios, brochures, event or waitlist pages, a few pages with small "
+            "sprinkles of vanilla JS; no npm packages, no bundler. Pick a framework "
+            "template by `when_to_use` when ANY of these hold: the site is an app "
+            "rather than a page (a game, 3D/WebGL or canvas, a simulation, an editor, "
+            "a tool, a dashboard, a multi-view app with client routing or real state); "
+            "it needs npm packages (three, @react-three/fiber, chart or editor "
+            "libraries, physics, animation beyond a CDN snippet); it needs server "
+            "logic, user accounts or its own database; or the user names a framework. "
+            "For a client-heavy app with no server needs, prefer `vite-react-hono`; a "
+            "named framework still wins. When unsure between `static` and a framework "
+            "for something interactive, pick the framework. A described business, or "
+            "a wish for a 'nice' or 'modern' site, is not a reason to leave `static`. "
+            "Before calling `start_site_from_template`, state the template you chose "
+            "and a one-line reason in your reply."
         )
     build_step = (
         "BUILD via the `pocketpaw-site` skill. Invoke it by intent (no slash "
