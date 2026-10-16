@@ -2448,7 +2448,9 @@ class Settings(BaseSettings):
         default="test_mode",
         description=(
             "Dodo Payments environment — 'test_mode' (default) or 'live_mode'. "
-            "Selects the API base URL the DodoPayments client targets. Set via "
+            "Selects the API base URL the DodoPayments client targets. Webhook "
+            "deliveries grant credits or change plans only in 'live_mode' with "
+            "payments_open on, so a test-card payment never mints credits. Set via "
             "POCKETPAW_DODO_ENVIRONMENT."
         ),
     )
@@ -2740,8 +2742,12 @@ class Settings(BaseSettings):
             "workspace on the free plan with no purchased top_up or "
             "subscription_grant in its ledger is platform-funded early access "
             "(credits.guards.is_platform_funded_free), and the early-access "
-            "guards apply to it. Flip it together with live payment provider "
-            "credentials. The platform settings route refuses writes to it. "
+            "guards apply to it. While False the billing service also refuses "
+            "every checkout (top-up, subscribe, partner pay link) with 403 "
+            "payments.closed, and the Dodo webhook grants no credits and changes "
+            "no plan. Flip it together with live payment provider credentials "
+            "(dodo_environment=live_mode). The platform settings route refuses "
+            "writes to it. "
             "Default False. Set via POCKETPAW_PAYMENTS_OPEN."
         ),
     )
