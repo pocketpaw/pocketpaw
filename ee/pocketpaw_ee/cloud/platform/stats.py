@@ -443,7 +443,9 @@ async def _unpaid_burn_by_day(since: datetime) -> dict[str, int]:
         "workspace", {"cause": {"$in": list(_PAID_CAUSES)}, "applied": True}
     )
     # global-read: platform stats, every tenant by design.
-    non_free = [str(w.id) for w in await Workspace.find({"plan": {"$ne": "free"}}).to_list()]
+    non_free = [
+        str(w.id) for w in await Workspace.find({"plan": {"$nin": [None, "free"]}}).to_list()
+    ]
     match = _spend_match(since) | {"workspace": {"$nin": [*paid, *non_free]}}
     cursor = CreditLedgerEntry.get_pymongo_collection().aggregate(
         [
