@@ -38,7 +38,8 @@
 # gets a rebase-first rule in the brief; more than 150 and the launch or relaunch
 # is refused: a note and ``needs-human`` on the issue, the run released (never a
 # develop failure). No lead branch yet is nothing to measure.
-# RESUME: a launched lead is tracked again as a lead, never relaunched.
+# RESUME: a launched lead is tracked again as a lead, never relaunched; one whose
+# feature issue has a newer pending lead is released (not a failure), not tracked.
 # LESSON 42: a transient gh failure is retried with backoff; a permanent one
 # fails at once; a transient one past the retries ends the tracker.
 # LESSON 45: on startup a run whose tracker died on a TRACK error (inside its
@@ -1064,6 +1065,61 @@ async def test_resume_tracks_a_launched_lead_as_a_lead(store, dirs, playbook):
 
     assert not _launch_briefs(runner)
     assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+
+
+async def test_resume_releases_an_errored_lead_the_planner_already_replaced(store, dirs, playbook):
+    """#2554: an errored lead whose issue the planner gave a newer lead is
+    released at startup, never tracked next to it, and never counted as a
+    failed attempt against the issue's breaker."""
+    repo, launch = dirs
+    lead = {"feature": FEATURE, "packet": PACKET, "issue": 93, "branch": f"lead/{FEATURE}"}
+    old = await _queue_lead(store, repo)
+    await cloud_station._patch(
+        store,
+        old,
+        headless_state=None,
+        headless_error="TRACK: gh pr list failed (exit 1)",
+        cloud={"session_url": CLOUD_URL, "launched_at": time.time() - 600},
+        lead=lead,
+    )
+    import aiosqlite
+
+    # SQLite stamps created_at to the second: make the old run an hour older.
+    async with aiosqlite.connect(store._db_path) as db:
+        sql = "UPDATE instinct_actions SET created_at = datetime('now', '-1 hour') WHERE id = ?"
+        await db.execute(sql, (old,))
+        await db.commit()
+    new = await _queue_lead(store, repo)
+    await cloud_station._patch(
+        store,
+        new,
+        headless_state="cloud",
+        cloud={"session_url": CLOUD_URL, "launched_at": time.time()},
+        lead=dict(lead),
+    )
+    runner = _done_runner(new)
+    disp = _lead_dispatcher(runner, launch, workspaces_for=_ws)
+    tracked: list[str] = []
+    track = disp._track_lead
+
+    async def spy(store_, ref, *a, **k):
+        tracked.append(ref)
+        if ref == new:
+            await track(store_, ref, *a, **k)
+
+    disp._track_lead = spy  # type: ignore[method-assign]
+
+    assert await disp.resume_all() == 1
+
+    assert tracked == [new]
+    assert (await store.get_action(new)).status == ActionStatus.EXECUTED
+    released = await store.get_action(old)
+    assert released.status == ActionStatus.REJECTED
+    assert not any(a[:3] == ["gh", "issue", "edit"] for a, _ in runner.calls)
+    from pocketpaw_ee.cloud.mandates import lead_planner
+
+    row = _run_summary(released, released.parameters["_code_change"])
+    assert mandate_service._task_status(row) not in lead_planner.FAILED
 
 
 async def _ws() -> list[str]:

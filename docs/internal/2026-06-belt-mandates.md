@@ -1213,7 +1213,11 @@ on `fixes`, and each entry records the head it was launched on, so a resumed
 tracker does not start a second fixer on that head. Relaunches carry over on
 `relaunches`, so a resumed run never gets more than
 `POCKETPAW_FACTORY_CLOUD_RELAUNCHES`, and its no-PR clock counts from the last
-relaunch. A run that adopted a PR (`adopted_pr`) polls it by number. A released run is rejected, so it is never resumed. A landed run is
+relaunch. A run that adopted a PR (`adopted_pr`) polls it by number. A released run is rejected, so it is never resumed. A feature
+lead is never resumed beside a newer pending lead on the same repo and feature
+issue (a launched one, newer by `created_at`): it is released instead, so one
+feature never gets two leads on its `lead/<feature>` branch, and the release
+is not a failed attempt for the issue's breaker. A landed run is
 no longer pending, so its tester is never relaunched; with the tester on, its
 PR tracker is resumed when `tester.state` is `open` or unknown (no PR seen yet)
 and `tester.at` is inside the run timeout (the newest 200 executed runs per

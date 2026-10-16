@@ -25,7 +25,8 @@
 #   TESTER  ``POCKETPAW_FACTORY_CLOUD_TESTER=1`` + a ``tester`` seat: one session per
 #           landed run files bugs and one ``Belt-Test`` PR; it never holds the land.
 #   RESUME  at startup every launched run with no diff is tracked again (never
-#           relaunched), as is one whose tracker died on a TRACK error (lesson 45).
+#           relaunched), as is one whose tracker died on a TRACK error (lesson 45);
+#           a lead whose feature issue has a newer pending lead is released instead.
 #   LEAD    ``recipe == "feature-lead"``: one session per feature issue, briefed from
 #           the clone's ``docs/factory/lead.md``, the issue, the packet, the run id and a
 #           PACK built on this Mac (``loom orient``, ``kb search``, ``soul recall``; 3k cap).
@@ -336,6 +337,24 @@ def _resumable(blob: dict[str, Any]) -> bool:
     )
 
 
+def _lead_issue(blob: dict[str, Any]) -> tuple[str, int] | None:
+    """A lead run's repo and feature issue, or None for a task run or a lead
+    with no issue yet."""
+    issue = (blob.get("lead") or {}).get("issue") if _is_lead(blob) else None
+    return (str(blob.get("repo") or ""), int(issue)) if issue else None
+
+
+def _newest_leads(actions: list[Any]) -> dict[tuple[str, int], Any]:
+    """The newest pending lead run (by ``created_at``) per repo and feature issue."""
+    newest: dict[tuple[str, int], Any] = {}
+    for action in actions:
+        blob = (action.parameters or {}).get(_CODE_CHANGE_PARAM_KEY)
+        key = _lead_issue(blob) if isinstance(blob, dict) else None
+        if key and (key not in newest or action.created_at > newest[key].created_at):
+            newest[key] = action
+    return newest
+
+
 @dataclass
 class CloudTaskDispatcher:
     """The headless dispatcher's cloud twin: files the queued run, launches a
@@ -495,8 +514,10 @@ class CloudTaskDispatcher:
     async def resume_all(self) -> int:
         """Track again every run a restart orphaned (``_resumable``), from its PR,
         and with the tester on every landed run's tester PR (``_tester_resumable``):
-        nothing is launched. Returns how many; never raises. Any other run with a
-        review still pending (its tracker ended) has that review settled."""
+        nothing is launched. Returns how many; never raises. A lead superseded by
+        a newer pending lead on the same feature issue is released, not tracked:
+        one lead per feature. Any other run with a review still pending (its
+        tracker ended) has that review settled."""
         from pocketpaw.instinct.models import ActionStatus
         from pocketpaw.stores import get_instinct_store
 
@@ -521,6 +542,7 @@ class CloudTaskDispatcher:
             except Exception:  # noqa: BLE001 — one unreadable workspace skips only itself
                 logger.warning("belt cloud: resume could not read %s", ws, exc_info=True)
                 continue
+            newest = _newest_leads(actions)
             for action in actions:
                 blob = (action.parameters or {}).get(_CODE_CHANGE_PARAM_KEY)
                 if not isinstance(blob, dict):
@@ -532,6 +554,15 @@ class CloudTaskDispatcher:
                         orphans += 1
                         work = self._settle_orphan(store, action.id, dict(blob))
                         await self._start(f"review-{action.id}", work)
+                    continue
+                newer = newest.get(_lead_issue(blob))
+                if newer is not None and newer.created_at > action.created_at:
+                    # The planner gave the issue a newer lead: one lead per feature.
+                    try:
+                        why = f"superseded by run {newer.id} on the same feature issue"
+                        await self._release(store, action.id, dict(blob), why)
+                    except Exception:  # noqa: BLE001 — the next restart tries again
+                        logger.warning("belt cloud: %s not released", action.id, exc_info=True)
                     continue
                 if f"belt-cloud-{action.id}" in live:
                     continue  # already tracked in this process
