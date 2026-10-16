@@ -1,38 +1,23 @@
-"""Platform-wide stats rollup — the operator dashboard (chunk 8 of the Paw Admin PRD).
+"""Platform-wide stats: the operator dashboard and the early-access launch read.
 
-Created: 2026-09-16 (feat/platform-stats-revenue) — chunk 8, bundled with
-chunk 9 (revenue.py) as one read-only aggregations PR.
+Read-only and platform-wide, not per-tenant: no workspace path parameter,
+because both screens roll up every tenant. Gated at ``platform.stats.read``
+(SUPPORT), and every load is audited once (see ``dashboard`` for why one call,
+not five).
 
-Read-only, and platform-wide, not per-tenant: there is no workspace path
-parameter here, because the whole point of this screen is a rollup over every
-tenant. Gated at ``platform.stats.read`` (SUPPORT), and every load is audited
-once — see the docstring on ``dashboard`` for why ONE call, not five.
+``GET /stats/dashboard`` reads ``platform_daily_rollup``. ``CreditLedgerEntry``
+has only workspace-prefixed indexes, so "platform spend last month" would be a
+full scan of the hot metering write path; the rollup is the only way to ask it.
+Nothing writes the rollup yet (the nightly job is a separate follow-up), so an
+empty collection is a normal state: ``rollup_count == 0`` and ``as_of`` None,
+never a 500. Its live "today" block scans the ledger for the current UTC day
+only, and no parameter can widen that window.
 
-WHY A ROLLUP COLLECTION EXISTS AT ALL. Verified against the live models
-(``ee/pocketpaw_ee/cloud/models/credit.py``): ``CreditLedgerEntry`` carries
-exactly three indexes and every one is workspace-prefixed (``workspace``,
-``(workspace, idempotency_key)``, ``(workspace, createdAt)``). A query shaped
-``{createdAt: {$gte, $lt}}`` with no workspace term — which is exactly what
-"platform spend last month" is — can use none of them, so it is a full
-collection scan of the hot metering write path. ``platform_daily_rollup``
-(``cloud/models/platform_rollup.py``) is the only way to ask that question; see
-the design doc's §3.1 for the full verification.
-
-SCOPE OF THIS PR: THE READ SIDE ONLY. The master PRD's chunk-8 row also lists a
-nightly arq job and a backfill script that WRITE ``platform_daily_rollup``.
-Neither is built here — this PR's deliverables are the model, the dashboard
-read endpoint, and tests, and a nightly-job PR is a natural, separately
-reviewable follow-up rather than something to fold in unannounced. Until that
-job ships, this endpoint runs against an EMPTY collection in every real
-deployment, which is exactly why "the job has never run" is treated as a normal
-state below (``rollup_count == 0``, ``newest_rollup_day`` and ``as_of`` both
-``None``) rather than an error or a 500 — the screen must be able to say "no
-data yet" truthfully from day one, before the job exists.
-
-The live "today" block is the one exception to "reads from the rollup only": it
-queries ``CreditLedgerEntry`` directly, for the current UTC day alone, and no
-query parameter can widen that window (§3.4) — that is the one unindexed
-platform-wide scan this screen accepts, because it is bounded to a single day.
+``GET /stats/early-access`` is the launch read EA-16 draws: signups, credits
+burned on unpaid workspaces, notify-me and waitlist per UTC day, the share of
+granted users at or below zero, today's early-access meter against the ceiling,
+and the launch controls. All live queries, no rollup; ``days`` is capped at 90
+because the burn series is the same unindexed ledger scan, bounded by its window.
 """
 
 from __future__ import annotations
@@ -42,17 +27,23 @@ import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.billing.plans import _TIER_ORDER, BASE_PLAN_KEY
-from pocketpaw_ee.cloud.credits.service import _SPEND_CAUSES
-from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
+from pocketpaw_ee.cloud.credits.service import _PAID_CAUSES, _SPEND_CAUSES
+from pocketpaw_ee.cloud.launch_controls import service as launch_controls_service
+from pocketpaw_ee.cloud.launch_controls.dto import LaunchControlsResponse
+from pocketpaw_ee.cloud.metering import service as metering_service
+from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.platform_rollup import PlatformDailyRollup
 from pocketpaw_ee.cloud.models.user import User
+from pocketpaw_ee.cloud.models.waitlist import WaitlistEntry
 from pocketpaw_ee.cloud.models.workspace import Workspace
 from pocketpaw_ee.cloud.platform import audit
+from pocketpaw_ee.guards.abac import PLAN_FEATURES
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +160,17 @@ class DashboardOut(BaseModel):
     errors: list[str]
 
 
+def _spend_match(since: datetime) -> dict:
+    """Applied spend debits created at or after ``since``: the one definition of
+    "spend" both the live today block and the early-access burn series read."""
+    return {
+        "cause": {"$in": list(_SPEND_CAUSES)},
+        "applied": True,
+        "amount_delta_micro": {"$lt": 0},
+        "createdAt": {"$gte": since},
+    }
+
+
 async def _today_block() -> TodayOut:
     """Live spend for the current UTC day, across every tenant.
 
@@ -180,15 +182,9 @@ async def _today_block() -> TodayOut:
     """
     now = datetime.now(UTC)
     day_start = datetime(now.year, now.month, now.day, tzinfo=UTC)
-    query = {
-        "cause": {"$in": list(_SPEND_CAUSES)},
-        "applied": True,
-        "amount_delta_micro": {"$lt": 0},
-        "createdAt": {"$gte": day_start},
-    }
     cursor = CreditLedgerEntry.get_pymongo_collection().aggregate(
         [
-            {"$match": query},
+            {"$match": _spend_match(day_start)},
             {
                 "$group": {
                     "_id": None,
@@ -408,6 +404,173 @@ async def dashboard(
         request=request,
     )
 
+    return result
+
+
+# --- early-access launch read --------------------------------------------------
+
+
+class EarlyAccessDayOut(BaseModel):
+    date: str
+    signups: int
+    credits_burned: int
+    notify: int
+    waitlist: int
+
+
+class EarlyAccessTodayOut(BaseModel):
+    meter: int
+    ceiling: int
+
+
+class EarlyAccessStatsOut(BaseModel):
+    days: list[EarlyAccessDayOut]
+    cap_share: float
+    today: EarlyAccessTodayOut | None
+    controls: LaunchControlsResponse
+    errors: list[str]
+
+
+async def _unpaid_burn_by_day(since: datetime) -> dict[str, int]:
+    """Micro-credits spent per UTC day on unpaid workspaces since ``since``.
+
+    Unpaid mirrors the database legs of ``guards.is_platform_funded_free``: a
+    workspace whose plan resolves to ``free`` (no plan, or one outside the
+    catalog, counts as free) and whose ledger holds no applied paid credits.
+    The ``payments_open`` leg is left out so the series still means something
+    after payments open.
+    """
+    # global-read: platform stats, every tenant by design.
+    paid = await CreditLedgerEntry.get_pymongo_collection().distinct(
+        "workspace", {"cause": {"$in": list(_PAID_CAUSES)}, "applied": True}
+    )
+    # Paid means a catalog tier other than the base one. A missing, unknown or
+    # retired plan string resolves to free in ``entitlements_from_plan``, so it
+    # stays in the series here too.
+    paid_tiers = [k for k in PLAN_FEATURES if k != BASE_PLAN_KEY]
+    # global-read: platform stats, every tenant by design.
+    non_free = [
+        str(w)
+        for w in await Workspace.get_pymongo_collection().distinct(
+            "_id", {"plan": {"$in": paid_tiers}}
+        )
+    ]
+    match = _spend_match(since) | {"workspace": {"$nin": [*paid, *non_free]}}
+    cursor = CreditLedgerEntry.get_pymongo_collection().aggregate(
+        [
+            {"$match": match},
+            {
+                "$group": {
+                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}},
+                    "micro": {"$sum": {"$subtract": [0, "$amount_delta_micro"]}},
+                }
+            },
+        ]
+    )
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
+    return {row["_id"]: int(row["micro"]) async for row in cursor}
+
+
+async def _cap_share() -> float:
+    """Granted users whose granted workspace is at or below 0, over all granted."""
+    # global-read: platform stats, every granted user.
+    granted = await User.get_pymongo_collection().distinct(
+        "early_access_workspace_id", {"early_access_granted_at": {"$ne": None}}
+    )
+    granted = [w for w in granted if w]
+    if not granted:
+        return 0.0
+    # global-read: platform stats, the granted workspaces' wallets.
+    funded = await CreditBalance.find(
+        {"workspace": {"$in": granted}, "balance_micro": {"$gt": 0}}
+    ).count()
+    return (len(granted) - funded) / len(granted)
+
+
+def _count_by_day(stamps: list[datetime | None], counts: dict[str, dict[str, int]], key: str):
+    for stamp in stamps:
+        bucket = counts.get(_day_str(stamp.date())) if stamp else None
+        if bucket is not None:
+            bucket[key] += 1
+
+
+@router.get("/early-access", response_model=EarlyAccessStatsOut)
+async def early_access(
+    request: Request,
+    operator: Annotated[User, Depends(require_platform("platform.stats.read"))],
+    days: Annotated[int, Query(ge=1, le=90)] = 14,
+) -> EarlyAccessStatsOut:
+    """Early-access launch numbers for the trailing ``days`` UTC days, today
+    included, every day present (zero-filled). Live queries, audited once."""
+    now = datetime.now(UTC)
+    since = datetime(now.year, now.month, now.day, tzinfo=UTC) - timedelta(days=days - 1)
+    counts = {
+        d: {"signups": 0, "credits_burned": 0, "notify": 0, "waitlist": 0}
+        for d in _date_range(_day_str(since.date()), _day_str(now.date()))
+    }
+    errors: list[str] = []
+
+    # Signups: users by ObjectId time; a kiosk guest row is not a signup.
+    # global-read: platform stats, every user.
+    signup_ids = await User.get_pymongo_collection().distinct(
+        "_id", {"_id": {"$gte": ObjectId.from_datetime(since)}, "is_guest": {"$ne": True}}
+    )
+    _count_by_day([oid.generation_time for oid in signup_ids], counts, "signups")
+
+    # global-read: platform stats, every user.
+    notified = User.get_pymongo_collection().find(
+        {"notify_plans_at": {"$gte": since}}, {"notify_plans_at": 1}
+    )
+    _count_by_day([doc["notify_plans_at"] async for doc in notified], counts, "notify")
+
+    # global-read: platform stats, the waitlist has no tenant.
+    joined = WaitlistEntry.get_pymongo_collection().find(
+        {"created_at": {"$gte": since}}, {"created_at": 1}
+    )
+    _count_by_day([doc["created_at"] async for doc in joined], counts, "waitlist")
+
+    for day, micro in (await _unpaid_burn_by_day(since)).items():
+        if day in counts:
+            counts[day]["credits_burned"] = metering_service.credits_ceil(micro)
+
+    cap_share = 0.0
+    try:
+        cap_share = await _cap_share()
+    except Exception as exc:  # noqa: BLE001 - one broken block must not sink the page
+        logger.exception("platform.stats.early_access: cap share failed")
+        errors.append(f"cap_share: {exc}")
+
+    # Read fresh, like the launch-controls GET, not the 30 s per-process snapshot.
+    launch_controls_service.invalidate_cache()
+    controls = await launch_controls_service.get_launch_controls()
+    if controls.read_failed:
+        errors.append("controls: read failed, showing defaults")
+
+    today: EarlyAccessTodayOut | None = None
+    try:
+        today = EarlyAccessTodayOut(
+            meter=await metering_service.early_access_credits_used_today(),
+            ceiling=controls.daily_free_ceiling_credits,
+        )
+    except Exception as exc:  # noqa: BLE001 - one broken block must not sink the page
+        logger.exception("platform.stats.early_access: meter read failed")
+        errors.append(f"today: {exc}")
+
+    result = EarlyAccessStatsOut(
+        days=[EarlyAccessDayOut(date=d, **v) for d, v in counts.items()],
+        cap_share=cap_share,
+        today=today,
+        controls=LaunchControlsResponse.model_validate(controls, from_attributes=True),
+        errors=errors,
+    )
+    await audit.record_read(
+        operator=operator,
+        action="platform.stats.read",
+        query=f"early-access days={days}",
+        target_type="platform_early_access",
+        request=request,
+    )
     return result
 
 

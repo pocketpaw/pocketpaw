@@ -2677,6 +2677,45 @@ No session is 401. Nothing is emailed; the launch stats count the stamp.
 `notify_plans_at` (the notify call above). Every early-access timestamp here is
 a UTC ISO string with an explicit `+00:00` offset.
 
+### Early-access launch stats
+
+`GET /api/v1/platform/stats/early-access?days=14` (`platform.stats.read`,
+audited once per load as `platform.stats.read`) returns the launch numbers for
+the trailing `days` UTC days, today included (default 14, 1 to 90, otherwise
+422). Every day is present, zero-filled. All live queries, no rollup.
+
+```json
+{
+  "days": [
+    {"date": "2026-10-16", "signups": 12, "credits_burned": 840, "notify": 3, "waitlist": 1}
+  ],
+  "cap_share": 0.25,
+  "today": {"meter": 840, "ceiling": 25000},
+  "controls": {"signups_paused": false, "free_usage_paused": false, "daily_free_ceiling_credits": 25000},
+  "errors": []
+}
+```
+
+- `signups`: users created that day (ObjectId time). Guest rows are not counted.
+- `credits_burned`: applied spend debits (`compute_spend`, `litellm_spend`) on
+  unpaid workspaces, in whole credits rounded up. Unpaid means the workspace's
+  plan resolves to `free` (no plan, or a plan outside the catalog, counts as
+  free) and its ledger holds no applied `top_up` or `subscription_grant`,
+  whether or not payments are open.
+- `notify`: users whose `notify_plans_at` falls that day. `waitlist`: waitlist
+  joins that day.
+- `cap_share`: granted users (`early_access_granted_at` set) whose granted
+  workspace balance is at or below 0, over all granted users. `0.0` when nobody
+  is granted.
+- `today`: the early-access meter (credits spent plus held by runs in flight,
+  see "Daily free ceiling") against `daily_free_ceiling_credits`. `null` when
+  the meter cannot be read.
+- `controls`: the launch controls, read fresh.
+- `errors`: one line per block that failed. Only three blocks degrade this way:
+  cap share (reported as `0.0`), the meter (`today` is `null`) and a control read
+  that fell back to defaults. A failed signup, notify, waitlist or burn query
+  fails the request with a 500.
+
 ## Agent Activity
 
 HR-12a. The workspace-scoped answer to "which of my agents are working
