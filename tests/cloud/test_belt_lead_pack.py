@@ -268,6 +268,10 @@ async def test_a_line_lead_gets_one_pack_per_feature_under_the_cap(dirs, ws):
     for f in feats:
         assert f"Feature #{f['issue']} {f['feature']}:" in pack
     assert pack.count("soul paw-os-shared:") == 3  # no feature's souls crowded out
+    for block in pack.split("\n\n"):  # each soul section holds a third of its cap
+        head, _, rest = block.partition("\n")
+        if head.startswith("soul "):
+            assert len(rest) <= cloud_station._PACK_SOUL // 3 + 30, block
     queries = [a[-1] for a in _tool_calls(runner, LOOM)]
     assert [q.split()[:3] for q in queries] == [["Feature", "title", str(i)] for i in range(3)]
 

@@ -594,7 +594,9 @@ async def test_a_later_green_dev_run_that_contains_the_merge_lands_the_lead(stor
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED
+    assert not _ran_to_the_timeout(action)  # landed by the done rule, not closed at 8 h
 
 
 def _ran_to_the_timeout(action) -> bool:
@@ -1366,7 +1368,7 @@ async def test_the_newest_feature_done_pr_decides_done(store, dirs, playbook):
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
     action = await store.get_action(run_ref)
-    assert action.status == ActionStatus.EXECUTED
+    assert action.status == ActionStatus.EXECUTED and not _ran_to_the_timeout(action)
     cc = action.parameters["_code_change"]
     assert cc["pr_url"].endswith("/pull/35") and cc["commit_sha"] == "c" * 40
 
@@ -1386,8 +1388,9 @@ async def test_newest_done_pr_is_by_merge_time_not_number(store, dirs, playbook)
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
-    assert cc["pr_url"].endswith("/pull/32")
+    action = await store.get_action(run_ref)
+    assert not _ran_to_the_timeout(action)
+    assert action.parameters["_code_change"]["pr_url"].endswith("/pull/32")
 
 
 @pytest.mark.parametrize("settle", ["reject", "approve"])
