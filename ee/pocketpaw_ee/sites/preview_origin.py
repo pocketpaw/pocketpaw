@@ -20,6 +20,10 @@
 #     ``?paw_edit=1`` variant stamped with data-uid (paw-sites ``arm-html``, else the
 #     ``html_uid_stamp`` port) carrying the vendored edit-bridge (``edit_bridge.js``).
 #     Both scripts are pinned to a paw-sites commit (paw-sites-edit-bridge.pin.json).
+#   * any other static draft page asked for with ``?paw_edit=1`` and stored without the
+#     bridge (project drafts) gets the reporter and bridge at serve time, posting to
+#     ``preview_proxy.builder_origin_for`` its pocket. Only this origin adds them; the
+#     stored and published bundles never carry them.
 #   * ``preview_app`` — the ASGI app that serves a draft (a full-mode project draft
 #     with a live draft Worker is reverse-proxied to it by ``preview_proxy``, its
 #     WebSockets too; any other token's WebSocket is refused before accept) — and
@@ -794,11 +798,37 @@ async def preview_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await _send(send, 404, b"Not found", plain, head)
         return
     status, rel = resolved
+    body = files[rel]
+    if edit and _HTML_RE.search(rel):
+        body = await _armed_page(token, body)
     headers = base + [
         ("content-type", _content_type(rel)),
         ("cache-control", _cache_control(rel, status)),
     ]
-    await _send(send, status, files[rel], headers, head)
+    await _send(send, status, body, headers, head)
+
+
+async def _armed_page(token: str, body: bytes) -> bytes:
+    """An ``?paw_edit=1`` page with the runtime reporter and the edit bridge, for a
+    draft that was stored without them (project drafts: no-build and sandbox-built).
+    A page that already carries the bridge (an html draft's ``.paw-edit`` variant, an
+    armed svelte/react build) is served as stored. The origin is resolved per request,
+    the same rule ``preview_proxy`` uses for a proxied draft, so it is never baked
+    into the stored draft, and the bundle that gets published never has it."""
+    if f'id="{_BRIDGE_SCRIPT_ID}"'.encode() in body:
+        return body
+    try:
+        html = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body
+    ref = await asyncio.to_thread(_resolve_ref, token)
+    if ref is None:
+        return body
+    from pocketpaw_ee.sites import preview_proxy
+
+    origin = await asyncio.to_thread(preview_proxy.builder_origin_for, ref[0])
+    html = inject_runtime_reporter(html, origin)
+    return inject_edit_bridge(html, origin).encode("utf-8")
 
 
 def _resolve_ref(token: str) -> tuple[str, str] | None:

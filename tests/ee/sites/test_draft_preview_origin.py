@@ -616,6 +616,60 @@ async def test_the_edit_variant_is_not_addressable_by_path(beanie_test_db):
     assert resp.status_code == 404
 
 
+_PROJECT_STATIC = {
+    "paw.template.json": json.dumps(
+        {
+            "slug": "static",
+            "name": "Static HTML",
+            "target": "assets",
+            "backend": {"builtin": []},
+            "secrets": [],
+            "build": "none",
+        }
+    ),
+    "index.html": (
+        "<!DOCTYPE html><html><head></head><body>"
+        '<h1 data-paw-src="index.html:1:42" data-paw-text="literal">Bakery</h1>'
+        "</body></html>"
+    ),
+}
+
+
+@pytest.mark.asyncio
+async def test_project_draft_preview_arms_the_edit_bridge_only_under_paw_edit(
+    beanie_test_db, monkeypatch
+):
+    """A project (no-build) draft is stored without the bridge; the preview origin adds
+    it to ``?paw_edit=1`` pages, posting to the builder origin, and nothing else."""
+    from pocketpaw_ee.sites import preview_origin, project_build
+
+    monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", ORIGIN)
+    pocket_id = await _make_pocket("project", dict(_PROJECT_STATIC))
+    url = (await _artifact(pocket_id)).get("preview_url")
+    assert isinstance(url, str) and url
+
+    plain = await _fetch(url)
+    armed = await _fetch(url + "?paw_edit=1")
+
+    _assert_public_asset(armed, "text/html")
+    assert 'data-paw-src="index.html:1:42"' in plain.text
+    assert 'id="paw-edit-bridge"' not in plain.text
+    assert armed.text.count('id="paw-edit-bridge"') == 1
+    assert armed.text.count('id="paw-runtime-reporter"') == 1
+    assert f"var ORIGIN = {json.dumps(ORIGIN)};" in armed.text
+    assert armed.text.index("paw-edit-bridge") < armed.text.lower().rindex("</body>")
+    # The vendored bridge speaks the source-tag protocol the project rail needs.
+    for command in ("highlight-src", "begin-inline-edit-src", "apply-src"):
+        assert command in armed.text
+
+    # Neither the stored preview nor the bundle a publish deploys carries it.
+    store = sites_service._default_artifact_store()
+    content_hash = project_build.project_content_hash(_PROJECT_STATIC)
+    for key in (content_hash, project_build.bundle_key(content_hash)):
+        stored = preview_origin.unpack_files(store.read_dist(pocket_id, key))
+        assert all(b"paw-edit-bridge" not in data for data in stored.values()), key
+
+
 @pytest.mark.asyncio
 async def test_hashed_assets_are_immutable_and_unknown_files_404(beanie_test_db):
     _pid, url = await _react_draft()
