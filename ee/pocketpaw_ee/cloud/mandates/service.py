@@ -14,13 +14,13 @@
 # background, or inline for ``plan_policy.decide`` under ``..._PLAN_GATE=auto``,
 # whose ``spec_unclear`` flags issues ``needs-spec``); prepare_plan_resolution +
 # resolve_plan (one path for the route and the auto gate); get_pawprints;
-# set_autopilot; set_crew (each NEW agent readable by the caller, in this
-# workspace, enabled); digest (the morning report, from the reads above).
+# set_autopilot; set_crew (each NEW agent readable by the caller, in this workspace,
+# enabled); update_charter (the line's ``model`` and two budget caps, nothing else);
+# digest (the morning report, from the reads above).
 #
-# The CREW: ``crew_seat_for_task`` seats a plan task on a live dev (``pick_dev``
-# round-robin) or, with ``role``, another live seat (the tester); ``crew_worker``
-# reads that agent's CURRENT model + instructions through
-# ``agents.service.get_for_viewer`` as the seat's ``seated_by``.
+# The CREW: ``crew_seat_for_task`` seats a plan task on a live dev (``pick_dev`` round-robin)
+# or, with ``role``, another live seat (the tester); ``crew_worker`` reads that agent's
+# CURRENT model + instructions through ``agents.service.get_for_viewer`` as ``seated_by``.
 #
 # The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands;
 # the trigger persists that (``resolved_by_run``), since the runs list only
@@ -46,12 +46,8 @@
 # mark_shift, has_continuous_mandate, and list_cadence_due: the scheduler's
 # cross-workspace read of due ACTIVE mandates (daily / weekly by interval;
 # continuous by ``_continuous_due``: headroom under the cap, unworked backlog,
-# at most one shift start per minimum gap; manual never; N+1 reads).
-#
-# Conventions (cloud entity rules): validate body at entry; tenant filter
-# ``workspace=...`` on EVERY request-path find; emit an event on every write (or
-# ``# no-event: <reason>``); errors via ``_core.errors`` CloudError subclasses.
-# Action-blob back-writes go through ``InstinctStore.update_parameters``.
+# at most one shift start per minimum gap; manual never; N+1 reads). Action-blob
+# back-writes go through ``InstinctStore.update_parameters``.
 
 from __future__ import annotations
 
@@ -110,6 +106,7 @@ def _charter_from_request(req: CreateMandateRequest) -> Charter:
         recipes=dict(req.charter.recipes),
         issue_labels=list(req.charter.issue_labels),
         run_kind=req.charter.run_kind,
+        model=req.charter.model,
     )
 
 
@@ -131,6 +128,7 @@ def _charter_to_wire(charter: Charter) -> dict[str, Any]:
         "recipes": dict(charter.recipes),
         "issue_labels": list(charter.issue_labels),
         "run_kind": charter.run_kind,
+        "model": charter.model,
     }
 
 
@@ -838,6 +836,49 @@ async def set_crew(workspace_id: str, user_id: str, mandate_id: str, body: Any) 
         mandate_id,
         workspace_id,
         len(doc.crew),
+    )
+    return {"mandate": await _mandate_detail_wire(doc)}
+
+
+async def update_charter(
+    workspace_id: str, user_id: str, mandate_id: str, body: Any
+) -> dict[str, Any]:
+    """Change a mandate's ``model`` and budget caps (``max_in_flight``,
+    ``max_tasks_per_shift``) and nothing else; only the fields sent change and
+    ``model: null`` clears it. Returns ``{"mandate": <detail>}``. A bad body is
+    a 422, a cross-tenant mandate a 404. Runs already launched keep the model
+    their sessions started on; the next launch reads the new one."""
+    from pydantic import ValidationError as PydanticValidationError
+
+    from pocketpaw_ee.cloud.mandates.dto import PatchCharterRequest
+
+    try:
+        req = PatchCharterRequest.model_validate(body)
+    except PydanticValidationError as exc:
+        raise ValidationError("mandate.charter_invalid", _first_pydantic_msg(exc)) from exc
+
+    doc = await _fetch_mandate(workspace_id, mandate_id)
+    if "model" in req.model_fields_set:
+        doc.charter.model = req.model
+    if req.budget is not None:
+        for name in req.budget.model_fields_set:
+            setattr(doc.charter.budget, name, getattr(req.budget, name))
+    await doc.save()
+    await emit(
+        mandate_events.MandateCharterChanged(
+            data={
+                "workspace_id": workspace_id,
+                "mandate_id": mandate_id,
+                "model": doc.charter.model,
+                "budget": doc.charter.budget.model_dump(),
+            }
+        )
+    )
+    logger.info(
+        "mandate: charter patched on %s (workspace=%s, fields=%s)",
+        mandate_id,
+        workspace_id,
+        sorted(req.model_fields_set),
     )
     return {"mandate": await _mandate_detail_wire(doc)}
 

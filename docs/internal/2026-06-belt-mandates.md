@@ -1,6 +1,6 @@
 <!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
      craft factory built on it: anatomy, charter (cadence, checks, recipes,
-     issue labels), Pulley blocks installed through recipes, patrols (incl.
+     issue labels, model), Pulley blocks installed through recipes, patrols (incl.
      upstream and GitHub issues), the crew (cloud Agents as workers: roster,
      seat rule, per-worker model, instructions and setup; the tester), the
      headless develop station (strict and owner Claude setups, the trust
@@ -153,6 +153,13 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   GitHub-bound repo: an open issue is sighted when it carries one of these
   labels, compared case-insensitively (see *The `issues` patrol on GitHub*).
   Empty means the GitHub patrol takes nothing.
+- **`model`** (optional: `fable`, `opus` or `sonnet`) is the Claude model the
+  line's cloud sessions start on. Set, every cloud launch of the line's runs
+  (worker, lead, fixer, reviewer, tester, relaunch) is `claude --model <model>
+  --cloud "<brief>"`; unset, the argv is unchanged and the session takes the
+  CLI's default. A cloud session keeps the model it was created with: a nudge
+  (`claude -p --cloud <session id>`) only posts a message and carries no model.
+  A change applies to the next launch, never to a session already running.
 - **`checks`** are commands that must pass before a headless diff is attached,
   e.g. `["uv run pytest -q", "uv run ruff check ."]`.
 - **`recipes`** map a name to a deterministic command, e.g.
@@ -578,6 +585,7 @@ the lane merges that PR no run lands, and its sighting stays open and plannable
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
 | GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
 | GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts (each with `approved_by`, the plan Action's approver such as a user id or `system:belt-policy`, and `policy`, the auto gate's `{decision, reason}`; both `null` when they do not apply), sightings-by-patrol, and the `line` block (see *The line: one branch per mandate*; the `{mandate}` that create, crew and autopilot return carries it too) |
+| PATCH | `/belt/mandates/{id}/charter` | `belt.manage` | Change only the line's `model` (`fable\|opus\|sonnet`, `null` clears it) and `budget.max_in_flight` (`null` clears it) / `budget.max_tasks_per_shift`: `{model?, budget?: {max_in_flight?, max_tasks_per_shift?}}` → `{mandate}`. Fields left out stay; any other field, an empty body or a value out of range is `422 mandate.charter_invalid`. Emits `mandate.charter_changed` |
 | PUT | `/belt/mandates/{id}/crew` | `belt.manage` | Replace the crew roster: `{crew: [{agent_id, role: dev\|reviewer\|foreman\|tester, concurrency (1-8), setup?: owner\|strict}]}` → `{mandate}`; see *The crew* below |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
@@ -696,7 +704,8 @@ GitLab path.
   lines file there. They must be filed on creative-core.
 
 Enable it with `"issues"` in `patrols` and `issue_labels` on the charter. No
-route edits an existing mandate's charter or patrols yet, so a live mandate gets
+route edits an existing mandate's patrols or issue labels yet (`PATCH
+.../charter` covers only the model and two budget caps), so a live mandate gets
 them through a new mandate or a direct database edit.
 
 ## Plan-feature gating posture

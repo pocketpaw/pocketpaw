@@ -5,8 +5,8 @@
 # ``CloudTaskDispatcher`` files an approved task as the usual queued run, then:
 #   LAUNCH  one trusted launch clone (``POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR``, never the
 #           bound repo) serves every allowlisted repo, detached at ``origin/<base>``;
-#           the task is injection-screened; ``claude --cloud "<brief>"`` runs under
-#           ``pty_run.py``. A worker opens ONE PR with ``Closes #<issue>``, ``Belt-Run:
+#           the task is injection-screened; ``claude [--model <charter model>] --cloud "<brief>"``
+#           runs under ``pty_run.py``. A worker opens ONE PR with ``Closes #<issue>``, ``Belt-Run:
 #           <run id>``, the label and the charter checks, and no AI attribution.
 #   TRACK   gh finds the PR by its marker (else adopts one closing the issue); the
 #           lane and CI gate it; Clef shadow-scores it; CI ``snapshots`` PNGs are kept.
@@ -1498,7 +1498,10 @@ class CloudTaskDispatcher:
                     orientation=orientation,
                     lessons=_lessons_block(lessons),
                 )
-        argv = [sys.executable, PTY_RUN, claude_cli_argv()[0], "--cloud", brief]
+        # The line's model (charter ``model``): a cloud session keeps the model it
+        # was created on, so a ``-p --cloud <id>`` nudge needs none and carries none.
+        model = ["--model", charter["model"]] if charter.get("model") else []
+        argv = [sys.executable, PTY_RUN, claude_cli_argv()[0], *model, "--cloud", brief]
         seen: deque[str] = deque(maxlen=200)
 
         async def keep(line: str) -> None:

@@ -11,7 +11,9 @@
 # must pass before a headless develop run's diff is attached) and ``recipes``
 # (named commands a plan task can run instead of an LLM develop). Checks and
 # recipes are argv strings split with ``shlex`` and never run through a shell;
-# only ``belt.manage`` (admin) can write a charter.
+# only ``belt.manage`` (admin) can write a charter. ``model`` (fable / opus /
+# sonnet, unset = the CLI default) is the Claude model the line's cloud sessions
+# start on.
 #
 # This module holds BOTH the Beanie documents (MandateDoc / ShiftDoc /
 # SightingDoc) AND the frozen value objects. Per the 4-file entity rule, ONLY
@@ -53,6 +55,8 @@ ShiftState = Literal["planning", "in_gate", "executing", "done", "stood_down"]
 RunKind = Literal["task", "feature-lead"]
 # The run kind's recipe on each planned task; the cloud station's ``LEAD_RECIPE``.
 LEAD_RUN_KIND = "feature-lead"
+# The Claude model a line's cloud sessions start on (``claude --model <alias>``).
+CharterModel = Literal["fable", "opus", "sonnet"]
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +122,10 @@ class Charter(BaseModel):
     ``feature-lead`` run per line of free feature issues (``lead_planner``), skipping the
     foreman, and the plan is approved as ``system:lead-planner``. ``"task"``
     (the default) is the foreman and the plan gate.
+
+    ``model`` is the Claude model every cloud session of the line starts on
+    (``claude --model <model> --cloud``: leads, workers, fixers, reviewers,
+    testers, relaunches). ``None`` launches on the CLI's own default.
     """
 
     goal: str
@@ -130,6 +138,7 @@ class Charter(BaseModel):
     recipes: dict[str, str] = Field(default_factory=dict)
     issue_labels: list[str] = Field(default_factory=list)
     run_kind: RunKind = "task"
+    model: CharterModel | None = None
 
 
 class Surface(BaseModel):
@@ -322,6 +331,7 @@ __all__ = [
     "Budget",
     "Cadence",
     "Charter",
+    "CharterModel",
     "CrewMember",
     "CrewRole",
     "CrewSetup",

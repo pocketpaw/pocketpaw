@@ -5,11 +5,12 @@
 # delegate to ``mandates.service``, return its wire dict. RBAC mirrors the belt
 # console — ``belt.read`` (MEMBER) on reads, ``belt.manage`` (ADMIN) on
 # mutations (create, shift trigger, feedback intake, plan resolve, autopilot,
-# crew).
+# crew, the charter patch).
 # Errors propagate as ``CloudError``; the router never raises HTTPException.
 #
-# Envelopes (UI contract): create, autopilot and crew return ``{"mandate"}``, shift
-# and plan/resolve return ``{"shift"}``; GET detail stays bare. The feedback
+# Envelopes (UI contract): create, autopilot, crew and the charter patch return
+# ``{"mandate"}``, shift and plan/resolve return ``{"shift"}``; GET detail stays
+# bare. The feedback
 # route takes the general ``{text, severity?, source}`` and the teaching
 # ``{kind, reason, shift_no?, task_title?}`` shapes (the service discriminates
 # on ``kind``). ``plan/resolve`` maps the console's per-task verdicts onto the
@@ -201,6 +202,21 @@ async def set_crew(
     concurrency, setup?: owner|strict}]}``; every agent must be readable by the
     caller in this workspace (422 otherwise). Returns ``{"mandate": <detail>}``."""
     return await mandate_service.set_crew(workspace_id, user_id, mandate_id, body)
+
+
+@router.patch("/{mandate_id}/charter")
+async def update_charter(
+    mandate_id: str,
+    body: dict[str, Any],
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Change the line's Claude ``model`` (``fable`` / ``opus`` / ``sonnet``,
+    ``null`` = the CLI default) and its ``budget.max_in_flight`` /
+    ``budget.max_tasks_per_shift`` caps (admin-gated). Only the fields sent
+    change; any other field is a 422. Returns ``{"mandate": <detail>}``."""
+    return await mandate_service.update_charter(workspace_id, user_id, mandate_id, body)
 
 
 @router.get("/{mandate_id}/pawprints")

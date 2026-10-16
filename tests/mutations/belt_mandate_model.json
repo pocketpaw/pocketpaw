@@ -1,0 +1,131 @@
+[
+  {
+    "label": "the charter model never reaches the cloud launch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "model = [\"--model\", charter[\"model\"]] if charter.get(\"model\") else []",
+    "replace": "model = []",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_a_charter_model_rides_the_cloud_launch",
+      "tests/cloud/test_belt_mandate_model.py::test_a_relaunched_lead_keeps_the_model_and_a_nudge_sends_none"
+    ]
+  },
+  {
+    "label": "an unset charter model still adds a --model flag",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "model = [\"--model\", charter[\"model\"]] if charter.get(\"model\") else []",
+    "replace": "model = [\"--model\", charter.get(\"model\") or \"opus\"]",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_no_charter_model_leaves_the_launch_argv_as_it_was"
+    ]
+  },
+  {
+    "label": "the model is written after the brief, not before --cloud",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "claude_cli_argv()[0], *model, \"--cloud\", brief]",
+    "replace": "claude_cli_argv()[0], \"--cloud\", brief, *model]",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_a_charter_model_rides_the_cloud_launch"
+    ]
+  },
+  {
+    "label": "the create path drops the charter model",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        model=req.charter.model,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_create_round_trips_the_model_and_refuses_another"
+    ]
+  },
+  {
+    "label": "the wire charter (GET, charter_for) drops the model",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        \"model\": charter.model,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_create_round_trips_the_model_and_refuses_another",
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_sets_model_and_caps_only"
+    ]
+  },
+  {
+    "label": "any model name is accepted on the charter",
+    "file": "ee/pocketpaw_ee/cloud/mandates/domain.py",
+    "find": "CharterModel = Literal[\"fable\", \"opus\", \"sonnet\"]",
+    "replace": "CharterModel = str",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_create_round_trips_the_model_and_refuses_another",
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_refuses_bad_or_out_of_scope_bodies"
+    ]
+  },
+  {
+    "label": "the patch ignores the model",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    if \"model\" in req.model_fields_set:\n        doc.charter.model = req.model\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_sets_model_and_caps_only"
+    ]
+  },
+  {
+    "label": "an omitted model is cleared by any patch",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    if \"model\" in req.model_fields_set:\n        doc.charter.model = req.model\n",
+    "replace": "    doc.charter.model = req.model\n",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_sets_model_and_caps_only"
+    ]
+  },
+  {
+    "label": "the patch ignores the budget caps",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            setattr(doc.charter.budget, name, getattr(req.budget, name))",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_sets_model_and_caps_only"
+    ]
+  },
+  {
+    "label": "the patch takes fields outside model and the two caps",
+    "file": "ee/pocketpaw_ee/cloud/mandates/dto.py",
+    "find": "class PatchCharterRequest(BaseModel):\n    \"\"\"Body for ``PATCH /belt/mandates/{id}/charter``: the line's ``model`` and\n    two budget caps, nothing else. Only the fields sent change (``model: null``\n    clears it); an empty body or any other field is refused.\"\"\"\n\n    model_config = ConfigDict(extra=\"forbid\")",
+    "replace": "class PatchCharterRequest(BaseModel):\n    model_config = ConfigDict(extra=\"ignore\")",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_refuses_bad_or_out_of_scope_bodies"
+    ]
+  },
+  {
+    "label": "the patch takes budget fields beyond the two caps",
+    "file": "ee/pocketpaw_ee/cloud/mandates/dto.py",
+    "find": "    \"\"\"The two budget caps ``PATCH .../charter`` may change; an omitted one stays.\n    ``max_in_flight: null`` clears it (reads as ``max_tasks_per_shift``).\"\"\"\n\n    model_config = ConfigDict(extra=\"forbid\")",
+    "replace": "    model_config = ConfigDict(extra=\"ignore\")",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_refuses_bad_or_out_of_scope_bodies"
+    ]
+  },
+  {
+    "label": "max_tasks_per_shift can be patched to null",
+    "file": "ee/pocketpaw_ee/cloud/mandates/dto.py",
+    "find": "            raise ValueError(\"max_tasks_per_shift cannot be cleared\")",
+    "replace": "            return v",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_refuses_bad_or_out_of_scope_bodies"
+    ]
+  },
+  {
+    "label": "an empty patch is accepted",
+    "file": "ee/pocketpaw_ee/cloud/mandates/dto.py",
+    "find": "            raise ValueError(\"nothing to change: send model and/or budget caps\")",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_refuses_bad_or_out_of_scope_bodies"
+    ]
+  },
+  {
+    "label": "the charter patch route is open to non-admins",
+    "file": "ee/pocketpaw_ee/cloud/mandates/router.py",
+    "find": "    _user: Any = Depends(require_action_any_workspace(\"belt.manage\")),\n    workspace_id: str = Depends(current_workspace_id),\n    user_id: str = Depends(current_user_id),\n) -> dict[str, Any]:\n    \"\"\"Change the line's Claude ``model``",
+    "replace": "    _user: Any = Depends(require_action_any_workspace(\"belt.read\")),\n    workspace_id: str = Depends(current_workspace_id),\n    user_id: str = Depends(current_user_id),\n) -> dict[str, Any]:\n    \"\"\"Change the line's Claude ``model``",
+    "tests": [
+      "tests/cloud/test_belt_mandate_model.py::test_patch_charter_needs_belt_manage"
+    ]
+  }
+]

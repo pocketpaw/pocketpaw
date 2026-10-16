@@ -51,6 +51,13 @@ class MandateCrewChanged(Event):
     EVENT_TYPE: ClassVar[str] = "mandate.crew_changed"
 
 
+# Fired when ``PATCH .../charter`` changes a mandate's model or budget caps.
+# Payload: {workspace_id, mandate_id, model, budget} (the values after the write).
+@dataclass
+class MandateCharterChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "mandate.charter_changed"
+
+
 # UI contract — fired when a shift's PlanProposal lands as a pending Instinct
 # ``belt_plan`` Action. Payload: {workspace_id, mandate_id, proposal} —
 # ``workspace_id`` drives the audience resolver's workspace fan-out (the same
@@ -85,6 +92,7 @@ __all__ = [
     "BeltPlanResolved",
     "MandateAutopilotChanged",
     "MandateCreated",
+    "MandateCharterChanged",
     "MandateCrewChanged",
     "MandateShiftStarted",
     "MandateShiftUpdated",
