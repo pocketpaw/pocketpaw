@@ -337,10 +337,10 @@ async def test_every_gap_has_text_and_unowned_planned_components_are_gaps(fake):
     } == set(unowned)
 
 
-async def test_features_carry_their_slices_and_apps_count_them(fake, monkeypatch):
+async def test_features_carry_their_slices_and_apps_count_them(fake):
     path = f"{BP}/features/layer-keys.wave.json"
     wave = json.loads(FILES[path]) | {"slices": [{"id": "LK-a"}, {"id": "LK-b"}, {"id": "LK-c"}]}
-    monkeypatch.setitem(FILES, path, json.dumps(wave))
+    fake.files[path] = json.dumps(wave)
     fake.lead_extra = {
         "slices": [
             {"id": "LK-a", "done": True, "run": "r1", "gaps": [5]},
