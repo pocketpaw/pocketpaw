@@ -166,7 +166,7 @@ async def _authenticate(request: Request, site_id: str) -> tuple[Any, str]:
     if key:
         from pocketpaw.sites_capture.ingest import origin_allowed
         from pocketpaw_ee.cloud.auth.site_keys import lookup_site_by_key
-        from pocketpaw_ee.cloud.leads.router import _effective_origins
+        from pocketpaw_ee.cloud.leads.intake import derived_origins
 
         try:
             site = await lookup_site_by_key(key)
@@ -175,9 +175,9 @@ async def _authenticate(request: Request, site_id: str) -> tuple[Any, str]:
         if not _matches(site, site_id):
             raise GatewayError("unauthorized")
         origin = request.headers.get("origin") or None
-        if not origin_allowed(_effective_origins(site), origin) and not await _own_draft(
-            site, origin
-        ):
+        # The site's OWN hosts only (allowlist, url, custom domains): the owner's
+        # extra lead-intake hosts widen lead capture, never who may call integrations.
+        if not origin_allowed(derived_origins(site), origin) and not await _own_draft(site, origin):
             raise GatewayError("origin_denied")
         return site, "site_key"
     raise GatewayError("unauthorized")

@@ -4,7 +4,8 @@
 # needs_reconnect), hosted OAuth (single-use state, callback links the site), owner
 # routes and their authz, the public gateway's gate order (every error code, the
 # site's own draft preview origin admitted and every other preview origin refused,
-# Turnstile on writes only, the PAW_GATEWAY_TOKEN path), the built-in newsletter
+# Turnstile on writes only, the PAW_GATEWAY_TOKEN path, the owner's extra lead-intake
+# hosts never admitted), the built-in newsletter
 # (dedupe + CSV), webhook dedupe + orders, and the agent tools' SSE payload.
 # The ``demo`` provider is the fake connect provider; no network anywhere.
 from __future__ import annotations
@@ -581,6 +582,35 @@ async def test_gateway_auth_gates(beanie_test_db):
         "ok": True,
         "result": {"subscribed": True},
     }
+
+
+@pytest.mark.asyncio
+async def test_gateway_ignores_the_owners_extra_lead_intake_hosts(beanie_test_db):
+    """``Site.lead_intake_origins`` widens lead capture only: an owner-typed,
+    unverified host must not be able to call the site's integrations."""
+    pid = await _pocket()
+    site = await _site(pid)
+    await site.set({"lead_intake_origins": ["forms.partner.test"]})
+    await _link(pid, "newsletter")
+    async with _client() as c:
+        own = await _gw(
+            c,
+            str(site.id),
+            "newsletter",
+            "subscribe",
+            args={"email": "a@b.co"},
+            headers={"x-paw-site-key": SITE_KEY, "origin": ORIGIN},
+        )
+        extra = await _gw(
+            c,
+            str(site.id),
+            "newsletter",
+            "subscribe",
+            args={"email": "a@b.co"},
+            headers={"x-paw-site-key": SITE_KEY, "origin": "https://forms.partner.test"},
+        )
+    assert own.status_code == 200, own.text
+    assert (extra.status_code, _code(extra)) == (403, "origin_denied")
 
 
 class _DraftTokens:

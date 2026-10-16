@@ -4,7 +4,8 @@
 # id, the origin gate with enforce on (verified host and owner extra allowed, an
 # unproved allowed_origins entry and a stranger denied), the verified hosts in
 # ``derived_origins``, the 303 base (verified host, never the caller's Origin),
-# ``lead.captured`` firing with the object id, and the settings view shape.
+# ``lead.captured`` firing with the object id, the settings view shape, and a
+# revoked key (``Site.revoked``, the embed-key kill switch) refused on both paths.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -151,6 +152,16 @@ async def test_json_capture_files_the_lead_under_the_object_id_and_fires_lead_ca
     assert payload["site_name"] == "Example Shop"
 
 
+async def test_a_revoked_key_captures_nothing_on_either_path() -> None:
+    site = await _connected(revoked=True)
+    app = _app()
+    json_resp = await _capture(app, str(site.id), "https://shop.example.com")
+    assert json_resp.status_code == 401
+    form_resp = await _form(app, str(site.id), "https://shop.example.com")
+    assert form_resp.status_code == 401
+    assert await leads_service.list_for_site(WS, str(site.id)) == []
+
+
 async def test_an_unproved_listed_host_is_flagged_unrecognized_by_default() -> None:
     site = await _connected()
     resp = await _capture(_app(), str(site.id), "https://staging.example.com")
@@ -229,7 +240,7 @@ async def test_capture_refuses_a_bad_key_and_an_unknown_or_draft_site() -> None:
 
 
 async def test_settings_view_for_a_connected_site() -> None:
-    site = await _connected(lead_intake_origins=["landing.example.org"])
+    site = await _connected(lead_intake_origins=["landing.example.org"], honeypot_field="hp_trap")
     async with _client(_app()) as c:
         resp = await c.get(f"/api/v1/sites/{site.id}/lead-intake")
     assert resp.status_code == 200, resp.text
@@ -244,6 +255,7 @@ async def test_settings_view_for_a_connected_site() -> None:
         "extra_origins": ["landing.example.org"],
         "enforce_origin": False,
         "max_extra_origins": 20,
+        "honeypot_field": "hp_trap",
     }
 
 

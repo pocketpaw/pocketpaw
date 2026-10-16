@@ -23,8 +23,10 @@
 # the lead's ``origin_unrecognized`` flag judge against; the router resolves it
 # once per request.
 #
-# Writes are targeted ``$set``s, never ``save()``, so a concurrent publish stamp
-# is not rolled back.
+# The view also carries ``honeypot_field`` (the site's bot-trap field name) so the
+# owner's snippets name the field the capture service actually checks. Writes are
+# targeted ``$set``s, never ``save()``, so a concurrent publish stamp is not
+# rolled back.
 
 from __future__ import annotations
 
@@ -232,6 +234,9 @@ async def _view(site: _SiteDoc) -> dict[str, Any]:
         "extra_origins": extra,
         "enforce_origin": bool(site.enforce_origin),
         "max_extra_origins": MAX_EXTRA_ORIGINS,
+        # The hidden field the capture service treats as a bot trap; snippets
+        # must use this exact name.
+        "honeypot_field": site.honeypot_field,
     }
 
 

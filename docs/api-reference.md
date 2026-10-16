@@ -4760,7 +4760,8 @@ Two kinds of site have a capture endpoint:
   The public routes look a site up by `script_name` first, then by object id,
   and only a connected site is reachable by object id. The key is the site's
   `signed_key`, the same public credential its Paw Bar embed already carries
-  (rotating the concierge key rotates it for forms too). A connected site with
+  (rotating the concierge key rotates it for forms too, and a revoked key is
+  refused with `401` on both capture routes). A connected site with
   no key gets one minted the first time this GET runs.
 
 #### `GET /sites/{site_id}/lead-intake`
@@ -4776,7 +4777,8 @@ Two kinds of site have a capture endpoint:
   "derived_origins": ["bright.pages.dev", "brightsmile.com"],
   "extra_origins": ["landing.example.com"],
   "enforce_origin": false,
-  "max_extra_origins": 20
+  "max_extra_origins": 20,
+  "honeypot_field": "company_website"
 }
 ```
 
@@ -4795,7 +4797,8 @@ holding its verified hosts:
   "derived_origins": ["shop.example.com"],
   "extra_origins": ["landing.example.org"],
   "enforce_origin": false,
-  "max_extra_origins": 20
+  "max_extra_origins": 20,
+  "honeypot_field": "company_website"
 }
 ```
 
@@ -4817,7 +4820,11 @@ holding its verified hosts:
   belongs to the knowledge crawl, not to deciding which pages are the site's own.
 - `extra_origins` are the hosts the owner added. They live in their own field
   (`Site.lead_intake_origins`), so a publish or a domain change never drops them,
-  and they only widen lead capture, never the concierge's embed gate.
+  and they only widen lead capture, never the concierge's embed gate or the
+  integrations gateway.
+- `honeypot_field` is the site's bot-trap field name (`Site.honeypot_field`). A
+  snippet should carry it as a hidden, empty input with exactly this name; a
+  submission that fills it is dropped.
 - `allowed_origins` is `derived_origins` followed by `extra_origins`, deduped:
   exactly the set the capture gate checks and the lead's `origin_unrecognized`
   flag is judged against.

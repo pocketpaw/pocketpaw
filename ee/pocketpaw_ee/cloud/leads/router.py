@@ -9,7 +9,8 @@
 #     paw_form_type), answered with a 303 back to the site. Final URL
 #     {captureApiBase}/capture/form.
 #   Both: site exists -> origin gate (only when ``Site.enforce_origin``) ->
-#   constant-time key compare -> payload size cap -> ``leads_service.capture``.
+#   constant-time key compare (a revoked key never matches) -> payload size cap
+#   -> ``leads_service.capture``.
 #   The origin is otherwise RECORDED on the lead (``origin_unrecognized`` judged
 #   against ``intake.resolve_origins``, resolved once per request: for a built
 #   site the allowlist, url host and custom domains; for a connected site its
@@ -27,7 +28,8 @@
 # Collect leads settings (``notifications.manage``, ADMIN, like lead-notifications;
 # ``site_id`` is the object id or the script_name; built and connected sites;
 # logic in ``leads.intake``):
-#   * GET /sites/{site_id}/lead-intake   -> key, site_kind, capture URLs, origin sets
+#   * GET /sites/{site_id}/lead-intake   -> key, site_kind, capture URLs, origin
+#     sets, honeypot_field
 #   * PUT /sites/{site_id}/lead-intake   {extra_origins, enforce_origin}
 #
 # Invariants: the per-IP limiter key is derived from the connection
@@ -166,6 +168,15 @@ async def _redirect_base(site: _SiteDoc, origin: str, known: list[str]) -> str:
     return f"https://{verified[0]}" if verified else ""
 
 
+def _key_matches(site: _SiteDoc, key: str) -> bool:
+    """Constant-time key check. A keyless row never matches (not even an empty
+    key), and neither does a ``revoked`` one: that flag is the embed key's kill
+    switch, and on a connected site the capture key IS the Paw Bar key."""
+    if not site.signed_key or getattr(site, "revoked", False):
+        return False
+    return secrets.compare_digest(key, site.signed_key)
+
+
 @router.post("/sites/{site_id}/capture", response_model=CaptureResponse)
 async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> CaptureResponse:
     """Public ingest. Order: site exists → origin pinned → signed key → payload
@@ -179,8 +190,7 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
     _origin_gate(site, origin, known)
 
     # H1: constant-time compare so the key check can't be probed via timing.
-    # A keyless row never matches, not even an empty key.
-    if not site.signed_key or not secrets.compare_digest(body.signed_key, site.signed_key):
+    if not _key_matches(site, body.signed_key):
         raise HTTPException(401, "Invalid signed key")
 
     # C1: reject oversized payloads before the service touches Mongo. This runs
@@ -259,7 +269,7 @@ async def capture_form(request: Request) -> Response:
     _origin_gate(site, origin, known)
 
     # H1 (same as the JSON path): constant-time compare — no timing side channel.
-    if not site.signed_key or not secrets.compare_digest(key, site.signed_key):
+    if not _key_matches(site, key):
         raise HTTPException(401, "Invalid signed key")
 
     # Open-redirect guard BEFORE any write: a bad redirect fails the whole submit.

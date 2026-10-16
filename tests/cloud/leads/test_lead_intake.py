@@ -139,6 +139,7 @@ async def test_get_returns_key_absolute_urls_and_origin_sets() -> None:
         "extra_origins": [],
         "enforce_origin": False,
         "max_extra_origins": 20,
+        "honeypot_field": "company_website",
     }
 
 
