@@ -43,6 +43,7 @@ from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.models.waitlist import WaitlistEntry
 from pocketpaw_ee.cloud.models.workspace import Workspace
 from pocketpaw_ee.cloud.platform import audit
+from pocketpaw_ee.guards.abac import PLAN_FEATURES
 
 logger = logging.getLogger(__name__)
 
@@ -434,17 +435,25 @@ async def _unpaid_burn_by_day(since: datetime) -> dict[str, int]:
     """Micro-credits spent per UTC day on unpaid workspaces since ``since``.
 
     Unpaid mirrors the database legs of ``guards.is_platform_funded_free``: a
-    workspace on the ``free`` plan (or missing) whose ledger holds no applied
-    paid credits. The ``payments_open`` leg is left out so the series still
-    means something after payments open.
+    workspace whose plan resolves to ``free`` (no plan, or one outside the
+    catalog, counts as free) and whose ledger holds no applied paid credits.
+    The ``payments_open`` leg is left out so the series still means something
+    after payments open.
     """
     # global-read: platform stats, every tenant by design.
     paid = await CreditLedgerEntry.get_pymongo_collection().distinct(
         "workspace", {"cause": {"$in": list(_PAID_CAUSES)}, "applied": True}
     )
+    # Paid means a catalog tier other than the base one. A missing, unknown or
+    # retired plan string resolves to free in ``entitlements_from_plan``, so it
+    # stays in the series here too.
+    paid_tiers = [k for k in PLAN_FEATURES if k != BASE_PLAN_KEY]
     # global-read: platform stats, every tenant by design.
     non_free = [
-        str(w.id) for w in await Workspace.find({"plan": {"$nin": [None, "free"]}}).to_list()
+        str(w)
+        for w in await Workspace.get_pymongo_collection().distinct(
+            "_id", {"plan": {"$in": paid_tiers}}
+        )
     ]
     match = _spend_match(since) | {"workspace": {"$nin": [*paid, *non_free]}}
     cursor = CreditLedgerEntry.get_pymongo_collection().aggregate(

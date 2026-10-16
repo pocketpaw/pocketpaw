@@ -4,7 +4,8 @@
 # Real routes on in-memory Mongo (mongomock-motor); only the session lookup is
 # overridden. Seeds back-dated users, ledger debits, notify stamps, waitlist rows,
 # balances, the early-access meter and the launch controls, then asserts the
-# per-day series, cap share, today's meter and the controls. A user without
+# per-day series, cap share, today's meter and the controls. A failed meter read
+# degrades to ``today: null`` plus an error line. A user without
 # ``platform.stats.read`` is refused.
 from __future__ import annotations
 
@@ -137,6 +138,16 @@ async def test_series_cap_share_meter_and_controls(mongo_db):  # noqa: ARG001
     await _ledger(workspace=topped_up, when=old, micro=1000 * M, cause="top_up")
     await _ledger(workspace=topped_up, when=d1, micro=-300 * M, cause="compute_spend")
     await _ledger(workspace=pro, when=d1, micro=-400 * M, cause="compute_spend")
+    # No plan field and a retired tier both resolve to free, so their burn counts.
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    planless = await _workspace()
+    await Workspace.get_pymongo_collection().update_one(
+        {"_id": ObjectId(planless)}, {"$unset": {"plan": ""}}
+    )
+    legacy = await _workspace(plan="team")
+    await _ledger(workspace=planless, when=d1, micro=-20 * M, cause="compute_spend")
+    await _ledger(workspace=legacy, when=d1, micro=-30 * M, cause="compute_spend")
 
     # Notify-me clicks and waitlist joins.
     await _user(created=old, notify_plans_at=d2 + timedelta(hours=1))
@@ -182,7 +193,7 @@ async def test_series_cap_share_meter_and_controls(mongo_db):  # noqa: ARG001
         "waitlist": 1,
     }
     assert row(d1)["signups"] == 2
-    assert row(d1)["credits_burned"] == 200
+    assert row(d1)["credits_burned"] == 250
     assert row(d1)["notify"] == 0
     assert row(today)["credits_burned"] == 8  # 7 credits and one micro, rounded up
     assert row(today)["waitlist"] == 1
@@ -214,6 +225,24 @@ async def test_empty_deployment_is_zeros(mongo_db):  # noqa: ARG001
     )
     assert body["cap_share"] == 0.0
     assert body["today"] == {"meter": 0, "ceiling": 25_000}
+
+
+async def test_meter_failure_degrades_to_null_today(mongo_db, monkeypatch):  # noqa: ARG001
+    from pocketpaw_ee.cloud.metering import service as metering
+
+    async def boom() -> int:
+        raise RuntimeError("meter down")
+
+    monkeypatch.setattr(metering, "early_access_credits_used_today", boom)
+    operator = await _user(created=datetime.now(UTC) - timedelta(days=30), platform_role="support")
+
+    async with _client(operator) as client:
+        resp = await client.get("/api/v1/platform/stats/early-access")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["today"] is None
+    assert [e for e in body["errors"] if e.startswith("today:")] == ["today: meter down"]
 
 
 async def test_refused_without_platform_stats_read(mongo_db):  # noqa: ARG001

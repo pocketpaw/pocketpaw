@@ -33,5 +33,26 @@
     "find": "    operator: Annotated[User, Depends(require_platform(\"platform.stats.read\"))],\n    days: Annotated[int, Query(ge=1, le=90)] = 14,\n",
     "replace": "    operator: Annotated[User, Depends(lambda: None)],\n    days: Annotated[int, Query(ge=1, le=90)] = 14,\n",
     "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_refused_without_platform_stats_read"]
+  },
+  {
+    "label": "a workspace with no plan field drops out of the unpaid burn",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "\"_id\", {\"plan\": {\"$in\": paid_tiers}}",
+    "replace": "\"_id\", {\"plan\": {\"$ne\": \"free\"}}",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_series_cap_share_meter_and_controls"]
+  },
+  {
+    "label": "a retired plan outside the catalog counts as paid",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "\"_id\", {\"plan\": {\"$in\": paid_tiers}}",
+    "replace": "\"_id\", {\"plan\": {\"$nin\": [None, \"free\"]}}",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_series_cap_share_meter_and_controls"]
+  },
+  {
+    "label": "a failed meter read sinks the whole response",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "    except Exception as exc:  # noqa: BLE001 - one broken block must not sink the page\n        logger.exception(\"platform.stats.early_access: meter read failed\")\n        errors.append(f\"today: {exc}\")\n",
+    "replace": "    except KeyError as exc:\n        errors.append(f\"today: {exc}\")\n",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_meter_failure_degrades_to_null_today"]
   }
 ]
