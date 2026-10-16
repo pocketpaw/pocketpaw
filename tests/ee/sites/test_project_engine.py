@@ -196,6 +196,7 @@ def test_project_is_a_known_engine_with_its_own_capabilities(monkeypatch):
         "design": False,
         "sections": False,
         "structure": False,
+        "upgradable": False,
     }
 
 

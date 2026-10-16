@@ -18,6 +18,7 @@
 # (the engine's :func:`engine_capabilities` plus the site's ``has_database`` and
 # ``data_viewer``) is the wire shape every site read carries, and
 # :func:`site_has_database` is the one answer to "does this site own a D1 database".
+# :func:`is_upgradable` names the engines "Upgrade this site" converts to ``project``.
 """Engine capability predicates for Paw Sites.
 
 Five site-generation engines are modeled:
@@ -322,6 +323,19 @@ def has_spec_edit_lane(engine: str | None) -> bool:
     return not is_source_engine(engine)
 
 
+#: Engines the owner can convert in place into a ``project`` on the ``static`` starter
+#: (``POST /sites/by-pocket/{id}/upgrade``, ``sites.site_upgrade``): their source map
+#: already is a static tree, so the conversion only adds the starter's manifest.
+_UPGRADABLE_ENGINES: frozenset[str] = frozenset({"html"})
+
+
+def is_upgradable(engine: str | None) -> bool:
+    """True when "Upgrade this site" can turn this engine into a ``project``. Only
+    ``html`` (which covers imported sites). Reads the raw value, never
+    :func:`normalize_engine`: an unknown engine must not pass as one of these."""
+    return engine in _UPGRADABLE_ENGINES
+
+
 def engine_capabilities(engine: str | None) -> dict[str, bool]:
     """The edit/build capabilities the frontend gates its tools on, as a wire dict.
 
@@ -339,6 +353,8 @@ def engine_capabilities(engine: str | None) -> dict[str, bool]:
       or the ``data-paw-section`` anchors an armed build stamps (svelte, react).
     * ``structure`` — an element can be deleted, duplicated or moved up / down in its
       source (``POST /sites/by-pocket/{id}/visual-edit``). Project only.
+    * ``upgradable`` — the owner can convert the site into a ``static`` project
+      (:func:`is_upgradable`). Html only.
 
     ``project`` answers ``code``/``build_log`` True and ``design``/``sections`` False.
     Its ``select``/``text``/``structure`` are True only when the generator has
@@ -362,6 +378,7 @@ def engine_capabilities(engine: str | None) -> dict[str, bool]:
         "design": native and write_back,
         "sections": spec or native,
         "structure": visual,
+        "upgradable": is_upgradable(engine),
     }
 
 

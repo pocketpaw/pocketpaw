@@ -332,23 +332,23 @@ def test_react_combines_all_three_capabilities_uniquely() -> None:
 _EXPECTED_CAPABILITIES = {
     "ripple": {
         "select": True, "text": False, "code": False, "build_log": False,
-        "design": False, "sections": True, "structure": False,
+        "design": False, "sections": True, "structure": False, "upgradable": False,
     },
     "svelte": {
         "select": True, "text": True, "code": True, "build_log": False,
-        "design": True, "sections": True, "structure": False,
+        "design": True, "sections": True, "structure": False, "upgradable": False,
     },
     "html": {
         "select": True, "text": True, "code": True, "build_log": False,
-        "design": False, "sections": False, "structure": False,
+        "design": False, "sections": False, "structure": False, "upgradable": True,
     },
     "react": {
         "select": True, "text": False, "code": True, "build_log": False,
-        "design": False, "sections": True, "structure": False,
+        "design": False, "sections": True, "structure": False, "upgradable": False,
     },
     "project": {
         "select": False, "text": False, "code": True, "build_log": True,
-        "design": False, "sections": False, "structure": False,
+        "design": False, "sections": False, "structure": False, "upgradable": False,
     },
 }  # fmt: skip
 

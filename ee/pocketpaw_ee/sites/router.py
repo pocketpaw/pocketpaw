@@ -1,7 +1,8 @@
 # ee/pocketpaw_ee/sites/router.py — REST surface for the Sites control plane.
 #
 # Thin FastAPI handlers over ``sites.service``: publish and preview, the native
-# editing and asset routes, custom domains, slugs and renames, owner settings
+# editing and asset routes, the html-to-project upgrade and its undo
+# (``sites.site_upgrade``), custom domains, slugs and renames, owner settings
 # (metadata, branding, AI visibility, client record and invoices), site-plan
 # requests, analytics and entitlements, transfers, export, delete, origin claims
 # and the foreign-origin concierge.
@@ -34,7 +35,7 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.cloud._core.rate_limit import rate_limit_slug_check
 from pocketpaw_ee.cloud.auth.service import resolve_display_names
-from pocketpaw_ee.sites import import_service, ownership
+from pocketpaw_ee.sites import import_service, ownership, site_upgrade
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
@@ -86,6 +87,8 @@ from pocketpaw_ee.sites.dto import (
     SiteTransferListResponse,
     SiteTransferOfferRequest,
     SiteTransferResponse,
+    SiteUpgradeResponse,
+    SiteUpgradeRevertResponse,
     SiteVersionResponse,
     SlugAvailability,
     SlugRenameRequest,
@@ -824,6 +827,43 @@ async def request_publish_by_pocket(
         to_version_id=str(blob.get("to_version_id") or ""),
         from_version_id=blob.get("from_version_id"),
     )
+
+
+@router.post("/sites/by-pocket/{pocket_id}/upgrade", response_model=SiteUpgradeResponse)
+async def upgrade_site_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteUpgradeResponse:
+    """Upgrade an html site (imported ones included) into a static project in place
+    (``sites.site_upgrade``). Needs edit rights on the pocket, like publish. 422
+    ``sites.upgrade_unsupported`` for any other engine, 422 ``sites.upgrade_no_index``
+    with no root index.html, 409 ``sites.upgrade_file_exists`` when the site already
+    has the starter's paw.template.json or AGENTS.md, 409 ``sites.upgrade_conflict``
+    when an edit raced the upgrade, 503 ``sites.upgrade_starter_unavailable`` when the
+    starter cannot be read. The live site keeps serving until the next publish."""
+    result = await site_upgrade.upgrade_html_site(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteUpgradeResponse(**result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/upgrade/revert", response_model=SiteUpgradeRevertResponse
+)
+async def revert_site_upgrade_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteUpgradeRevertResponse:
+    """Undo the upgrade: back to html with the old source and site_meta. 422
+    ``sites.upgrade_not_upgraded`` when the site was never upgraded, 409
+    ``sites.upgrade_revert_stale`` once it was edited after the upgrade, 409
+    ``sites.upgrade_snapshot_missing`` when the snapshot version is gone."""
+    result = await site_upgrade.revert_html_upgrade(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteUpgradeRevertResponse(**result)
 
 
 @router.post(

@@ -14,7 +14,9 @@ Public API: ``create`` / ``get`` / ``get_for_wire`` / ``can_read`` /
 ``duplicate_pocket`` and the ``copy_site_snapshot`` it writes through; the
 share-link, collaborator, team and agent mutators; the per-pocket backend +
 write/tool allowlist setters; ``merge_spec``; ``site_render_inputs``; the
-``set_{svelte,react,html}_source_file`` edit lane and
+``set_{svelte,react,html}_source_file`` edit lane, ``set_project_source`` and the
+html-to-project upgrade pair (``convert_html_to_project`` / ``restore_upgraded_html``),
+and
 ``set_site_dependency_manifest`` (the only writer of ``paw.dependencies.json``);
 ``scan_source_site_pockets`` + ``migrate_legacy_build_shell``; and the
 ``agent_*`` granular ``rippleSpec.ui`` ops the pocket-specialist drives over MCP.
@@ -2929,6 +2931,96 @@ async def set_project_source(
         "bytes": sum(len(str(v).encode("utf-8")) for v in updated.values()),
         "changed": changed,
     }
+
+
+_UPGRADE_LABEL_BEFORE = "Before the upgrade to a static project"
+_UPGRADE_LABEL_AFTER = "Upgraded to a static project"
+_UPGRADE_LABEL_UNDONE = "Undid the upgrade to a static project"
+
+
+async def convert_html_to_project(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    project: dict[str, Any],
+    upgraded_from: dict[str, Any],
+) -> dict[str, Any]:
+    """Turn an html pocket into a ``project`` pocket in place (the opt-in "Upgrade
+    this site"). ``sites.site_upgrade`` builds the new map and checks it; this layer
+    owns access, the compare-and-set, the undo snapshot, the persist and the event.
+
+    The pocket must still be ``html`` with exactly ``expected_source``, else a 409
+    ``sites.upgrade_conflict`` (an edit landed while the caller was reading). Before
+    anything changes, the old source map is written as its own draft version, and
+    that write is NOT swallowed: an upgrade that cannot be undone does not happen.
+    ``site_meta.upgraded_from`` gets ``upgraded_from`` plus that version's id and
+    number and the old ``site_meta`` (minus any earlier ``upgraded_from``).
+    Returns ``{version_id, version_no}`` of the snapshot."""
+    from pocketpaw_ee.versions import service as versions_service
+
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "html" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while it was being upgraded. Reload it and try again.",
+        )
+    snapshot = await versions_service.write_draft(
+        scope_type="pocket",
+        scope_id=str(doc.id),
+        workspace_id=doc.workspace,
+        content=dict(doc.source),
+        author=user_id,
+        label=_UPGRADE_LABEL_BEFORE,
+    )
+    prior_meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    prior_meta.pop("upgraded_from", None)
+    doc.engine = "project"
+    doc.source = dict(source)
+    doc.site_meta = {
+        **prior_meta,
+        "project": dict(project),
+        "upgraded_from": {
+            **upgraded_from,
+            "version_id": str(snapshot.id),
+            "version_no": snapshot.version_no,
+            "site_meta": prior_meta,
+        },
+    }
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_AFTER)
+    return {"version_id": str(snapshot.id), "version_no": snapshot.version_no}
+
+
+async def restore_upgraded_html(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    site_meta: dict[str, Any],
+) -> None:
+    """Undo :func:`convert_html_to_project`: engine back to ``html``, ``source`` and
+    ``site_meta`` back to what the caller read from the snapshot. The pocket must
+    still be the ``project`` with exactly ``expected_source`` (409
+    ``sites.upgrade_conflict`` otherwise). The restored map is recorded as a draft
+    version like any other edit."""
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while the upgrade was being undone. Reload it and try again.",
+        )
+    doc.engine = "html"
+    doc.source = dict(source)
+    doc.site_meta = dict(site_meta) or None
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_UNDONE)
 
 
 #: Engines whose source map may carry an author dependency manifest.

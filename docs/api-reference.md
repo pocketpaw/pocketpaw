@@ -3357,7 +3357,8 @@ framework config, wrangler config) is also served here, with two extra fields:
   `POST .../visual-edit` (below). On an older generator all three are `false` and
   edits go through files and the agent. `design` and `sections` stay `false`; every
   build keeps a log. Every engine's answer carries `structure` (`false` on all but
-  `project`). Site reads (this one and the site list) also carry two per-site flags:
+  `project`) and `upgradable` (`true` on `html` only: show "Upgrade this site", see
+  `POST .../upgrade` below). Site reads (this one and the site list) also carry two per-site flags:
   `has_database` (the site owns a D1: a bound database, the `d1-drizzle` recipe, or a
   dynamic spec) and `data_viewer` (`has_database` on an engine the data endpoint below
   serves: `ripple`, `svelte` or `project`). Gate the owner's Data tab and the delete
@@ -3560,6 +3561,67 @@ no-build site rebuilds in-process, so `build_status` is already `passed`).
 The generator's `message` is passed through on every refusal. Nothing is saved on any
 non-`200` answer. `PAW_SITES_VISUAL_EDIT=0` turns visual editing (this route, the
 draft tags and the capabilities) off.
+
+#### `POST /sites/by-pocket/{pocket_id}/upgrade`
+
+The owner's opt-in "Upgrade this site": converts an `html` site (hand-written or
+imported) into a `project` site on the `static` starter, in place. Same auth as
+publish: session, `sites` plan feature, `fabric.write`, pockets edit access, workspace
+match. No body.
+
+- The html source map becomes the project's file map unchanged, plus the starter's
+  `paw.template.json` (`"build": "none"`) and `AGENTS.md`. Nothing else in the files
+  is touched (`data-uid` is only stamped on the preview, never stored).
+- The pocket becomes `engine: "project"` with
+  `site_meta.project = {"template": "static", "framework": "static", "recipes": []}`.
+  `pattern` is kept. The Site doc (id, domains, signed key, integrations, leads) is
+  not touched, and the live site keeps serving until the next publish.
+- Undo: the old source is written as its own draft version first (label "Before the
+  upgrade to a static project"), then the new source is versioned like a file write.
+  `site_meta.upgraded_from` keeps `{engine, at, source_hash, version_id, version_no,
+  site_meta}` (`site_meta` is the old one).
+- The draft preview switches to the no-build lane at once: `verification` is the first
+  draft build, normally `passed` already.
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "engine": "project",
+  "template": "static",
+  "added": ["AGENTS.md", "paw.template.json"],
+  "upgraded_from": {
+    "engine": "html",
+    "at": "2026-10-16T09:12:03+00:00",
+    "source_hash": "5d1c…",
+    "version_id": "6710…",
+    "version_no": 7
+  },
+  "verification": {"status": "passed", "build": "passed", "job_id": "…", "preview_mode": "full"}
+}
+```
+
+| Status | Code | When |
+|---|---|---|
+| `422` | `sites.upgrade_unsupported` | the site is not `html` (`capabilities.upgradable` is `false`) |
+| `422` | `sites.upgrade_no_index` | there is no `index.html` at the root |
+| `422` | `sites.project_bad_path` / `_bad_file` / `_too_large` | a path, a non-text file or the size is over the project limits |
+| `409` | `sites.upgrade_file_exists` | the site already has `paw.template.json` or `AGENTS.md`; owner files are never overwritten |
+| `409` | `sites.upgrade_conflict` | an edit landed while the upgrade ran |
+| `503` | `sites.upgrade_starter_unavailable` | the static starter could not be read from the generator |
+
+#### `POST /sites/by-pocket/{pocket_id}/upgrade/revert`
+
+Undo the upgrade while nothing changed since: engine back to `html`, the source from
+the snapshot version, `site_meta` back to what it was. Same auth. Answers
+`{"pocket_id", "engine": "html", "version_no"}` (the snapshot restored from); the
+restored source is recorded as a new draft version.
+
+| Status | Code | When |
+|---|---|---|
+| `422` | `sites.upgrade_not_upgraded` | the site is not an upgraded project |
+| `409` | `sites.upgrade_revert_stale` | the source changed after the upgrade (undoing would lose the edits; restore a version instead) |
+| `409` | `sites.upgrade_snapshot_missing` | the snapshot version is gone |
+| `409` | `sites.upgrade_conflict` | an edit landed while the undo ran |
 
 ### Site images — `/sites/by-pocket/{pocket_id}/assets`
 

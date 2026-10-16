@@ -119,7 +119,8 @@ class SiteResponse(BaseModel):
     # engine field or could not be resolved (the card shows no engine badge).
     engine: str = ""
     # The site's edit/build flags (``engines.site_capabilities``): {select, text,
-    # code, build_log, design, sections, structure, has_database, data_viewer}. Set
+    # code, build_log, design, sections, structure, upgradable, has_database,
+    # data_viewer}. Set
     # on the list read for every resolved pocket, whatever its engine; None where
     # ``engine`` is "".
     capabilities: dict[str, bool] | None = None
@@ -1091,8 +1092,8 @@ class NativeArtifactResponse(BaseModel):
     # site's URL, or None). None until a build finished.
     preview_mode: str | None = None
     # The site's edit/build capability flags (``engines.site_capabilities``):
-    # {select, text, code, build_log, design, sections, structure, has_database,
-    # data_viewer}, on every engine's answer. ``preview_mode`` above stays a
+    # {select, text, code, build_log, design, sections, structure, upgradable,
+    # has_database, data_viewer}, on every engine's answer. ``preview_mode`` above stays a
     # sibling: it is a property of a finished build, not of the engine.
     capabilities: dict[str, bool] | None = None
 
@@ -1600,6 +1601,40 @@ class ProjectFileWriteResponse(BaseModel):
     path: str | None = None
     lockfile_removed: list[str] = Field(default_factory=list)
     verification: dict[str, Any]
+
+
+class SiteUpgradeRecord(BaseModel):
+    """``site_meta.upgraded_from`` as the upgrade answers it: the old engine, when,
+    the digest of the source right after the upgrade (undo needs it unchanged) and
+    the draft version holding the source from before."""
+
+    engine: str
+    at: str
+    source_hash: str
+    version_id: str
+    version_no: int
+
+
+class SiteUpgradeResponse(BaseModel):
+    """POST /sites/by-pocket/{pocket_id}/upgrade. ``added`` is the starter files the
+    upgrade wrote; ``verification`` is the first draft build (the no-build lane, so
+    normally ``passed`` at once), the same shape a project file write answers."""
+
+    pocket_id: str
+    engine: str
+    template: str
+    added: list[str]
+    upgraded_from: SiteUpgradeRecord
+    verification: dict[str, Any]
+
+
+class SiteUpgradeRevertResponse(BaseModel):
+    """POST /sites/by-pocket/{pocket_id}/upgrade/revert. ``version_no`` is the
+    snapshot version the source was restored from."""
+
+    pocket_id: str
+    engine: str
+    version_no: int
 
 
 class VisualEditRequest(BaseModel):
