@@ -1218,10 +1218,17 @@ async def test_two_prs_on_one_repo_share_one_nudge_per_interval(store, dirs):
 
     await asyncio.gather(d.run(first, workspace_id=WS), d.run(second, workspace_id=WS))
 
-    times = runner.dispatched
+    times = list(runner.dispatched)
     assert times and all(b - a >= 300 for a, b in zip(times, times[1:]))
+    # The interleave above seldom puts both PRs due in one interval, so drive the
+    # gate directly: both PRs due at the same poll, for two intervals.
+    for _ in range(2):
+        await d.sleep(300)
+        for r in (first, second):
+            await d._nudge(store, r, SLUG, launch)
+    assert runner.dispatched[len(times) :] == [d.clock() - 300, d.clock()]
     blobs = [(await store.get_action(r)).parameters["_code_change"] for r in (first, second)]
-    assert sum(len(b.get("lane_nudges") or []) for b in blobs) == len(times)
+    assert sum(len(b.get("lane_nudges") or []) for b in blobs) == len(runner.dispatched)
     assert all(b["cloud"]["pr"] in {9, 10} for b in blobs)
 
 
