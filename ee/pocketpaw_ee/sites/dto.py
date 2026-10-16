@@ -119,8 +119,9 @@ class SiteResponse(BaseModel):
     # engine field or could not be resolved (the card shows no engine badge).
     engine: str = ""
     # The site's edit/build flags (``engines.site_capabilities``): {select, text,
-    # code, build_log, design, sections, structure, has_database}. Set on the list read for
-    # every resolved pocket, whatever its engine; None where ``engine`` is "".
+    # code, build_log, design, sections, structure, has_database, data_viewer}. Set
+    # on the list read for every resolved pocket, whatever its engine; None where
+    # ``engine`` is "".
     capabilities: dict[str, bool] | None = None
     # charge-first: the Dodo annual-checkout link for a PAID-tier publish. A paid
     # publish creates the site as PENDING (deployed=False) and returns this link
@@ -1090,9 +1091,9 @@ class NativeArtifactResponse(BaseModel):
     # site's URL, or None). None until a build finished.
     preview_mode: str | None = None
     # The site's edit/build capability flags (``engines.site_capabilities``):
-    # {select, text, code, build_log, design, sections, structure, has_database}, on every
-    # engine's answer. ``preview_mode`` above stays a sibling: it is a property of a
-    # finished build, not of the engine.
+    # {select, text, code, build_log, design, sections, structure, has_database,
+    # data_viewer}, on every engine's answer. ``preview_mode`` above stays a
+    # sibling: it is a property of a finished build, not of the engine.
     capabilities: dict[str, bool] | None = None
 
 

@@ -3357,7 +3357,11 @@ framework config, wrangler config) is also served here, with two extra fields:
   `POST .../visual-edit` (below). On an older generator all three are `false` and
   edits go through files and the agent. `design` and `sections` stay `false`; every
   build keeps a log. Every engine's answer carries `structure` (`false` on all but
-  `project`).
+  `project`). Site reads (this one and the site list) also carry two per-site flags:
+  `has_database` (the site owns a D1: a bound database, the `d1-drizzle` recipe, or a
+  dynamic spec) and `data_viewer` (`has_database` on an engine the data endpoint below
+  serves: `ripple`, `svelte` or `project`). Gate the owner's Data tab and the delete
+  dialog's table list on `data_viewer`; an older backend omits it.
 - Visual-edit stamps live in drafts only. A sandbox draft on a generator with
   `project-build --source-tags` builds twice: untagged for the stored bundle publish
   deploys, tagged for the preview (and the draft Worker). A no-build draft's preview
@@ -3368,6 +3372,33 @@ framework config, wrangler config) is also served here, with two extra fields:
 - `build_reason` on a failed project build is `build_failed:<code>` with the CLI's
   code (`install_failed`, `build_failed`, `output_missing`, `wrangler_failed`,
   `size_limit`, `unknown_framework`, ...), or one of the rungs above.
+
+### Site data — `/sites/by-pocket/{pocket_id}/data`
+
+The owner's read-only view of a site's database. Both reads take `fabric.read` and
+the pockets service's read check (`404` / `403` for a missing or foreign pocket).
+
+- `GET /sites/by-pocket/{pocket_id}/data` →
+  `{pocket_id, available, reason, tables: [{name, fields: {column: type}, primary_key}]}`
+- `GET /sites/by-pocket/{pocket_id}/data/{table}?limit=&offset=` →
+  `{pocket_id, table, available, reason, columns, rows}`. `limit` is capped at
+  `PAW_SITES_DATA_ROW_LIMIT` (default 200); `offset` (default 0, max 1,000,000) pages.
+
+Where the tables come from:
+
+- **Dynamic sites** (`ripple`, `svelte`): the spec's declared `objects`, listed even
+  when the database is unreachable. A table that isn't declared is a `404`.
+- **Project sites** with a database: introspected from the site's D1
+  (`sqlite_master`, then `PRAGMA table_info` for columns and the single-column primary
+  key). SQLite, Cloudflare (`_cf_*`, `d1_migrations`), drizzle (`__drizzle*`) and Paw
+  (`_paw_*`) tables are hidden. A table the database doesn't have is a `404`.
+- Any other site, or a project without a database: `422` `sites.not_dynamic`.
+
+`available: false` comes with a `reason` and no rows: `live_on_cloudflare_only` in
+local mode, `not_published` for a project whose database is created on its first
+publish. In auth tables (`user`, `session`, `account`, `verification` and their
+plurals) a non-null value in a column named like `password`, `token`, `secret`,
+`hash` or `key`, and `verification.value`, reads `"•••"`.
 
 ### Project builds — `/sites/by-pocket/{pocket_id}/builds`
 

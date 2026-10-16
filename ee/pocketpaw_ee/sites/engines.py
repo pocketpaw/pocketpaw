@@ -15,9 +15,9 @@
 # :func:`engine_capabilities` for ``project``, whose visual-edit flags ask the generator
 # (``visual_edit.visual_edit_supported``, cached); everything else is pure.
 # The FE mirror is paw-enterprise ``core/sites/engines.ts``; :func:`site_capabilities`
-# (the engine's :func:`engine_capabilities` plus the site's ``has_database``) is the
-# wire shape every site read carries, and :func:`site_has_database` is the one answer
-# to "does this site own a D1 database".
+# (the engine's :func:`engine_capabilities` plus the site's ``has_database`` and
+# ``data_viewer``) is the wire shape every site read carries, and
+# :func:`site_has_database` is the one answer to "does this site own a D1 database".
 """Engine capability predicates for Paw Sites.
 
 Five site-generation engines are modeled:
@@ -411,10 +411,21 @@ def site_has_database(
     return spec_is_dynamic(pattern, ripple_spec)
 
 
+# Engines whose database the owner's data viewer (GET /sites/by-pocket/{id}/data)
+# can read: the dynamic lanes from their declared ``objects``, project from D1 itself.
+DATA_VIEWER_ENGINES: frozenset[str] = frozenset({"ripple", "svelte", "project"})
+
+
 def site_capabilities(engine: str | None, *, has_database: bool) -> dict[str, bool]:
     """The capabilities a site read carries: :func:`engine_capabilities` plus the
-    per-site ``has_database`` (:func:`site_has_database`)."""
-    return {**engine_capabilities(engine), "has_database": has_database}
+    per-site ``has_database`` (:func:`site_has_database`) and ``data_viewer`` (the
+    site has a database AND the data endpoint serves its engine)."""
+    data_viewer = has_database and normalize_engine(engine) in DATA_VIEWER_ENGINES
+    return {
+        **engine_capabilities(engine),
+        "has_database": has_database,
+        "data_viewer": data_viewer,
+    }
 
 
 def content_key(engine: str | None) -> str:

@@ -1,6 +1,7 @@
 # tests/ee/sites/test_engines.py — unit tests for the canonical engine-capability
 # module (ee/pocketpaw_ee/sites/engines.py). Also pins the per-engine
-# ``engine_capabilities`` wire shape, ``site_has_database``, the unknown-engine
+# ``engine_capabilities`` wire shape, ``site_has_database``, ``site_capabilities``'
+# ``has_database`` / ``data_viewer``, the unknown-engine
 # warning, and an AST scan that fails on any engine literal in the backend source
 # that is not in ``engines.KNOWN_ENGINES``.
 #
@@ -388,7 +389,23 @@ class TestEngineCapabilities:
     @pytest.mark.parametrize("has_database", [True, False])
     def test_site_capabilities_adds_has_database(self, has_database: bool) -> None:
         caps = engines.site_capabilities("project", has_database=has_database)
-        assert caps == {**_EXPECTED_CAPABILITIES["project"], "has_database": has_database}
+        assert caps == {
+            **_EXPECTED_CAPABILITIES["project"],
+            "has_database": has_database,
+            "data_viewer": has_database,
+        }
+
+    @pytest.mark.parametrize(
+        ("engine", "expected"),
+        [("ripple", True), ("svelte", True), ("project", True), ("html", False), ("react", False)],
+    )
+    def test_data_viewer_needs_a_database_on_a_served_engine(
+        self, engine: str, expected: bool
+    ) -> None:
+        """The data endpoint serves the dynamic lanes and project; html / react have
+        no viewer even with a database, and no engine has one without a database."""
+        assert engines.site_capabilities(engine, has_database=True)["data_viewer"] is expected
+        assert engines.site_capabilities(engine, has_database=False)["data_viewer"] is False
 
 
 class TestSiteHasDatabase:

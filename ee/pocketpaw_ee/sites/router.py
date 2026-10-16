@@ -673,12 +673,14 @@ async def site_data_tables_by_pocket(
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
 ) -> SiteDataTablesResponse:
-    """List a DYNAMIC site's data tables for the operator data-view (DS-3):
+    """List a DYNAMIC or database-backed PROJECT site's data tables (DS-3):
     {pocket_id, available, reason, tables}. The table list comes from the pocket
     spec's ``objects`` (the declared D1 tables), so it is populated even when the
     live D1 is not reachable. ``available`` is False with
     ``reason="live_on_cloudflare_only"`` in local/dev mode (no live D1) so the UI
-    degrades cleanly — it can show the schema but explain why no rows load.
+    degrades cleanly — it can show the schema but explain why no rows load. A
+    ``project`` site's tables are introspected from its live D1 (none in local
+    mode, and ``reason="not_published"`` before its database exists).
 
     A NON-dynamic pocket (a static landing / brochure) has no data store, so the
     service raises ValidationError("sites.not_dynamic") → 422. A missing /
@@ -693,6 +695,8 @@ async def site_data_tables_by_pocket(
 async def site_data_rows_by_pocket(
     pocket_id: str,
     table: str,
+    limit: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0, le=1_000_000),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
 ) -> SiteDataRowsResponse:
@@ -705,11 +709,19 @@ async def site_data_rows_by_pocket(
     interpolated into SQL; every value binds through query params. In local/dev
     mode (no live D1) ``available`` is False with
     ``reason="live_on_cloudflare_only"`` and ``rows`` empty, but ``columns`` is
-    still listed from the spec. A NON-dynamic pocket → 422
+    still listed from the spec. ``limit`` (capped server-side) and ``offset`` page
+    the rows. A ``project`` site reads its tables from the live D1 instead (unknown
+    table → 404; ``reason="not_published"`` before its database exists). Auth
+    tables' credential columns read "•••". A NON-dynamic pocket → 422
     ("sites.not_dynamic"); a missing / access-denied pocket → 404 / 403.
     Tenant-scoped on ctx."""
     return await sites_service.read_site_data_table(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, table=table
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        table=table,
+        limit=limit,
+        offset=offset,
     )
 
 

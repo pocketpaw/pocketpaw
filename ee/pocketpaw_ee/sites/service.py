@@ -12221,6 +12221,12 @@ async def _dynamic_pocket_objects(
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     pocket = await pockets_service.get(pocket_id, user_id)
+    return _dynamic_objects_of(pocket)
+
+
+def _dynamic_objects_of(pocket: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """``(content_envelope, objects)`` of a pocket already read, or raise
+    ValidationError("sites.not_dynamic") when it is not a dynamic site."""
     pattern = pocket.get("pattern")
     content = _dynamic_content_envelope(pocket)
     if not _is_dynamic(pattern, content):
@@ -12231,6 +12237,39 @@ async def _dynamic_pocket_objects(
     return content, _dynamic_objects(content)
 
 
+# The reason a project site's data reads unavailable before its first publish: the
+# d1-drizzle recipe is applied, but the database is created on publish.
+_DATA_NOT_PUBLISHED = "not_published"
+
+
+def _is_project_pocket(pocket: dict[str, Any]) -> bool:
+    return normalize_engine(pocket.get("engine")) == "project"
+
+
+async def _project_database_id(workspace_id: str, pocket_id: str, pocket: dict[str, Any]) -> str:
+    """The real D1 id a ``project`` site's data lives in, or "" before publish creates it.
+
+    Raises ValidationError("sites.not_dynamic") when the site has no database at all
+    (``engines.site_has_database`` over the Site's D1 id and the pocket's recipes), the
+    same answer a static site gets. A stored id equal to the legacy derived placeholder
+    was never created on Cloudflare (``binding_provisioner`` replaces it), so it reads
+    as "" too. The Site read is workspace-filtered."""
+    doc = await _canonical_site_doc(workspace_id, pocket_id)
+    stored = ((getattr(doc, "d1_database_id", "") or "") if doc is not None else "").strip()
+    site_meta = pocket.get("siteMeta") or pocket.get("site_meta")
+    if not site_has_database(d1_database_id=stored, site_meta=site_meta):
+        raise ValidationError("sites.not_dynamic", "This site has no database to read.")
+    if not stored or stored == _derive_d1_database_id(workspace_id, pocket_id):
+        return ""
+    return stored
+
+
+def _clamp_rows(limit: int | None) -> int:
+    """The row count one table read returns: the caller's ``limit`` up to the cap."""
+    cap = _data_row_limit()
+    return min(limit, cap) if limit and limit > 0 else cap
+
+
 def _table_columns(obj: dict[str, Any]) -> list[str]:
     """The declared column names of a spec ``objects`` table (DS-3). ``fields`` is
     a {column: type} map; an absent / malformed ``fields`` yields no columns."""
@@ -12239,9 +12278,17 @@ def _table_columns(obj: dict[str, Any]) -> list[str]:
 
 
 async def list_site_data_tables(
-    *, workspace_id: str, user_id: str, pocket_id: str
+    *, workspace_id: str, user_id: str, pocket_id: str, _cloudflare: Any | None = None
 ) -> SiteDataTablesResponse:
-    """List a dynamic site's tables for the operator data-view (DS-3).
+    """List a dynamic or project site's tables for the operator data-view (DS-3).
+
+    A ``project`` site (engine ``project`` with a D1, the d1-drizzle recipe) has no
+    declared ``objects``: its tables are introspected from the live database
+    (``project_data.describe_tables``). Before its first publish the database does
+    not exist yet, so it answers ``available=False`` / ``reason="not_published"``
+    with no tables; local mode answers ``live_on_cloudflare_only`` with no tables. A
+    project without a database is ``sites.not_dynamic``, like a static site. The
+    rest of this docstring is the dynamic lane.
 
     Backs ``GET /sites/by-pocket/{pocket_id}/data``. The table LIST is always read
     from the pocket spec's ``objects`` (the declared D1 tables), so it is populated
@@ -12258,9 +12305,14 @@ async def list_site_data_tables(
     store). A missing / access-denied pocket surfaces as 404 / 403 via the pockets
     service. Tenant-scoped: the pockets read scopes on ``user_id``; the D1 id (when
     a live read happens) is derived per (workspace, pocket)."""
-    _spec, objects = await _dynamic_pocket_objects(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
-    )
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if _is_project_pocket(pocket):
+        return await _list_project_data_tables(
+            workspace_id=workspace_id, pocket_id=pocket_id, pocket=pocket, cf=_cloudflare
+        )
+    _spec, objects = _dynamic_objects_of(pocket)
     tables = [
         SiteDataTableInfo(
             name=obj["name"],
@@ -12278,15 +12330,49 @@ async def list_site_data_tables(
     )
 
 
+async def _list_project_data_tables(
+    *, workspace_id: str, pocket_id: str, pocket: dict[str, Any], cf: Any | None
+) -> SiteDataTablesResponse:
+    """The project lane of ``list_site_data_tables``: tables introspected from D1."""
+    from pocketpaw_ee.sites import project_data
+
+    db_id = await _project_database_id(workspace_id, pocket_id, pocket)
+    if _local_mode() and cf is None:
+        return SiteDataTablesResponse(
+            pocket_id=pocket_id, available=False, reason=_DATA_UNAVAILABLE_LOCAL
+        )
+    if not db_id:
+        return SiteDataTablesResponse(
+            pocket_id=pocket_id, available=False, reason=_DATA_NOT_PUBLISHED
+        )
+    described = await project_data.describe_tables(cf or _cf_client(), db_id)
+    return SiteDataTablesResponse(
+        pocket_id=pocket_id,
+        available=True,
+        reason="",
+        tables=[SiteDataTableInfo(**t) for t in described],
+    )
+
+
 async def read_site_data_table(
     *,
     workspace_id: str,
     user_id: str,
     pocket_id: str,
     table: str,
+    limit: int | None = None,
+    offset: int = 0,
     _cloudflare: Any | None = None,
 ) -> SiteDataRowsResponse:
-    """Read the rows of ONE table of a dynamic site's D1 (DS-3).
+    """Read the rows of ONE table of a dynamic or project site's D1 (DS-3).
+
+    Rows are capped at ``limit`` (itself capped by ``_data_row_limit()``) starting at
+    ``offset``. On every lane, an auth table's credential columns read ``•••``
+    (``project_data.mask_rows``). A ``project`` site validates ``table`` against the
+    tables its database actually has (``project_data.read_table``) and takes its
+    columns from ``PRAGMA table_info``; before publish it answers ``available=False``
+    / ``reason="not_published"``, in local mode ``live_on_cloudflare_only``, both
+    with no columns. The rest of this docstring is the dynamic lane.
 
     Backs ``GET /sites/by-pocket/{pocket_id}/data/{table}``. The flow:
       1. resolve the pocket's declared ``objects`` (a non-dynamic pocket → 400);
@@ -12311,9 +12397,27 @@ async def read_site_data_table(
     read filters on ``workspace`` — a foreign workspace cannot read another
     tenant's data. ``_cloudflare`` is injectable so the path is unit-testable
     without a live D1."""
-    _spec, objects = await _dynamic_pocket_objects(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
-    )
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import project_data
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if _is_project_pocket(pocket):
+        db_id = await _project_database_id(workspace_id, pocket_id, pocket)
+        local = _local_mode() and _cloudflare is None
+        if local or not db_id:
+            return SiteDataRowsResponse(
+                pocket_id=pocket_id,
+                table=table,
+                available=False,
+                reason=_DATA_UNAVAILABLE_LOCAL if local else _DATA_NOT_PUBLISHED,
+            )
+        columns, rows = await project_data.read_table(
+            _cloudflare or _cf_client(), db_id, table, limit=_clamp_rows(limit), offset=offset
+        )
+        return SiteDataRowsResponse(
+            pocket_id=pocket_id, table=table, available=True, reason="", columns=columns, rows=rows
+        )
+    _spec, objects = _dynamic_objects_of(pocket)
 
     # SQL-safety gate: the requested table MUST be one of the spec's declared
     # object names. An unknown table is a 404 — never reaches a query, never
@@ -12346,19 +12450,19 @@ async def read_site_data_table(
     # ``table`` is whitelisted above (it equals a declared object name), so it is
     # safe to embed as the FROM identifier — SQLite/D1 cannot bind an identifier as
     # a placeholder. The LIMIT VALUE binds through ``params``.
-    limit = _data_row_limit()
-    rows = await cf.query_d1(
-        database_id=db_id,
-        sql=f"SELECT * FROM {table} LIMIT ?",  # noqa: S608 — table is whitelisted, value is bound
-        params=[limit],
-    )
+    sql = f"SELECT * FROM {table} LIMIT ?"  # noqa: S608 — table is whitelisted, value is bound
+    params: list[Any] = [_clamp_rows(limit)]
+    if offset > 0:
+        sql += " OFFSET ?"
+        params.append(offset)
+    rows = await cf.query_d1(database_id=db_id, sql=sql, params=params)
     return SiteDataRowsResponse(
         pocket_id=pocket_id,
         table=table,
         available=True,
         reason="",
         columns=columns,
-        rows=rows,
+        rows=project_data.mask_rows(table, rows),
     )
 
 
