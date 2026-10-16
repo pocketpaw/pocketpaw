@@ -346,5 +346,159 @@
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_run_with_no_base_takes_the_bound_repos_branch"
     ]
+  },
+  {
+    "label": "the pack never reaches the lead brief",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        + (f\"{pack}\\n\\n\" if pack else \"\")\n",
+    "replace": "        + \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_lead_brief_carries_loom_kb_and_both_souls"
+    ]
+  },
+  {
+    "label": "a tool that cannot start fails the launch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        except Exception as exc:  # noqa: BLE001 — a pack section is a hint; the launch goes on\n",
+    "replace": "        except ValueError as exc:  # noqa: BLE001 — a pack section is a hint; the launch goes on\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_missing_failing_or_slow_tool_drops_only_its_section"
+    ]
+  },
+  {
+    "label": "a failed or timed-out tool is parsed anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            if code != 0:\n                return f\"{name}: skipped (",
+    "replace": "            if False:\n                return f\"{name}: skipped (",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_missing_failing_or_slow_tool_drops_only_its_section"
+    ]
+  },
+  {
+    "label": "a section cap is lifted",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "_PACK_LOOM, _PACK_KB, _PACK_SOUL = 1100, 500, 500",
+    "replace": "_PACK_LOOM, _PACK_KB, _PACK_SOUL = 9999, 500, 500",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_the_pack_holds_its_cap"
+    ]
+  },
+  {
+    "label": "the pack is not fenced as data",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        return f\"{_PACK_HEAD}\\n{_untrusted(body)}\"",
+    "replace": "        return f\"{_PACK_HEAD}\\n{body}\"",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_lead_brief_carries_loom_kb_and_both_souls",
+      "tests/cloud/test_belt_lead_pack.py::test_the_pack_holds_its_cap"
+    ]
+  },
+  {
+    "label": "the shared team soul is never recalled",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            souls.append(ws / _SHARED_SOUL)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_lead_brief_carries_loom_kb_and_both_souls"
+    ]
+  },
+  {
+    "label": "a line bound to the team soul recalls it twice",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        if ws and (ws / _SHARED_SOUL).resolve() not in [s.resolve() for s in souls]:",
+    "replace": "        if ws:",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_line_bound_to_the_team_soul_recalls_it_once"
+    ]
+  },
+  {
+    "label": "the title rides loom's argv where a flag could read it",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                + [\"--top\", \"12\", \"--\", query],",
+    "replace": "                + [\"--top\", \"12\", query],",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_title_with_quotes_and_semicolons_stays_one_argument"
+    ]
+  },
+  {
+    "label": "kb and soul get the raw title, not its words",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        terms = \" \".join(dict.fromkeys(w.lower() for w in words))[:200] or scope",
+    "replace": "        terms = title",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_title_with_quotes_and_semicolons_stays_one_argument"
+    ]
+  },
+  {
+    "label": "the workspace is never found above the launch clone",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            else next((p for p in launch.parents if (p / \".loom\").is_dir()), None)",
+    "replace": "            else None",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_lead_brief_carries_loom_kb_and_both_souls"
+    ]
+  },
+  {
+    "label": "a pack tool runs with no timeout",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            code, out, err = await self.runner(argv, cwd=cwd, timeout=self.pack_timeout_seconds)",
+    "replace": "            code, out, err = await self.runner(argv, cwd=cwd, timeout=3600.0)",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_real_tool_past_its_timeout_drops_only_its_section"
+    ]
+  },
+  {
+    "label": "a packet linked outside the clone is read",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    if not path.is_file() or not path.resolve().is_relative_to(launch.resolve()):",
+    "replace": "    if not path.is_file():",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_packet_linked_outside_the_clone_is_never_read"
+    ]
+  },
+  {
+    "label": "loom rules are not rendered",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    for rule in [r for r in brief.get(\"rules\") or [] if isinstance(r, dict)][:5]:",
+    "replace": "    for rule in []:",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_lead_brief_carries_loom_kb_and_both_souls"
+    ]
+  },
+  {
+    "label": "loom owners and journeys are not rendered",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    for key in (\"owners\", \"journeys\"):",
+    "replace": "    for key in ():",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_lead_brief_carries_loom_kb_and_both_souls"
+    ]
+  },
+  {
+    "label": "the blast radius is not rendered",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        for label, key in ((\"Scope\", \"scope\"), (\"Blast radius\", \"blast_radius\"))",
+    "replace": "        for label, key in ((\"Scope\", \"scope\"),)",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_lead_brief_carries_loom_kb_and_both_souls"
+    ]
+  },
+  {
+    "label": "a kb line shows the article's markdown heading",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        first = next((x for x in prose if not x.lstrip().startswith(\"#\")), \"\")",
+    "replace": "        first = next(iter(prose), \"\")",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_a_lead_brief_carries_loom_kb_and_both_souls"
+    ]
+  },
+  {
+    "label": "the workspace setting is not read",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        workspace_root=(os.environ.get(\"POCKETPAW_FACTORY_WORKSPACE_ROOT\") or \"\").strip(),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_lead_pack.py::test_pack_settings_read_the_env"
+    ]
   }
 ]
