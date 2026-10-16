@@ -54,7 +54,7 @@ from standardwebhooks import Webhook
 
 from pocketpaw.fabric.journal_store import FabricJournalStore
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("payments_open")]
 
 SECRET = "whsec_" + base64.b64encode(b"billing-test-secret-key-32bytes!").decode()
 USD_PRODUCT = "prod_credits_usd"

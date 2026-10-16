@@ -76,7 +76,7 @@ from soul_protocol.engine.journal import open_journal
 
 from pocketpaw.fabric.journal_store import FabricJournalStore
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("payments_open")]
 
 PHONE = "+919876543210"
 # PH-15: the 1st distinct site sold credits this once (``_calc.MILESTONES``).
