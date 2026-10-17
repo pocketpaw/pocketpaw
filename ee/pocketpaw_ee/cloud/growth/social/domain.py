@@ -8,12 +8,19 @@
 # (docs/design/drafts/2026-10-06-growth-social-setup.md); the frontend builds
 # against the same strings, so a rename here is a breaking change there.
 # ``COMPLETE_REQUIRED_FIELDS`` is what ``POST /social/profile/complete`` demands.
+# ``POSTABLE_PLATFORMS`` are the connected accounts "post now" can publish to;
+# ``CHANNEL_PLATFORMS`` additionally need a channel picked per post and
+# ``VIDEO_PLATFORMS`` accept video. Media must sit at a public http(s) URL
+# (``is_public_media_url``): Slack fetches it itself and Postiz's X provider
+# refuses private hosts. ``MEDIA_EXTENSIONS`` is the upload allowlist.
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, get_args
+from urllib.parse import urlsplit
 
 TeamSize = Literal["solo", "2_10", "11_50", "51_200", "200_plus"]
 MonthlyRevenue = Literal["pre_revenue", "under_1k", "1k_10k", "10k_50k", "50k_250k", "250k_plus"]
@@ -74,6 +81,54 @@ COMPLETE_REQUIRED_FIELDS: tuple[str, ...] = (
     "business_model",
     "category",
 )
+
+SOCIAL_ACCOUNT_PLATFORMS: tuple[tuple[str, str], ...] = (
+    ("x", "X"),
+    ("linkedin", "LinkedIn"),
+    ("linkedin-page", "LinkedIn Page"),
+    ("facebook", "Facebook Page"),
+    ("instagram-standalone", "Instagram"),
+    ("threads", "Threads"),
+    ("youtube", "YouTube"),
+    ("tiktok", "TikTok"),
+    ("reddit", "Reddit"),
+    ("pinterest", "Pinterest"),
+    ("dribbble", "Dribbble"),
+    ("slack", "Slack"),
+    ("telegram", "Telegram"),
+)
+POSTABLE_PLATFORMS = frozenset({"slack", "x"})
+CHANNEL_PLATFORMS = frozenset({"slack"})
+VIDEO_PLATFORMS = frozenset({"x"})
+MAX_POST_IMAGES = 4
+MEDIA_EXTENSIONS: dict[str, str] = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "video/mp4": "mp4",
+}
+
+
+def media_kind(path: str) -> str:
+    return "video" if urlsplit(path).path.lower().endswith(".mp4") else "image"
+
+
+def is_public_media_url(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").rstrip(".")
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not host:
+        return False
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return True
+
 
 DEFAULT_IDEA_COUNT = 6
 MAX_IDEA_COUNT = 12

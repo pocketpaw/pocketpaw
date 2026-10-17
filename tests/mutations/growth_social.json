@@ -70,5 +70,50 @@
     "tests": [
       "tests/cloud/growth/test_gate.py"
     ]
+  },
+  {
+    "label": "tenancy: the Postiz org lookup drops its workspace filter (one workspace reads another's accounts)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    return await _PostizOrgDoc.find_one({\"workspace\": workspace_id, \"profile\": profile})",
+    "replace": "    return await _PostizOrgDoc.find_one({\"profile\": profile})",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
+  },
+  {
+    "label": "tenancy: the pending Telegram code lookup drops its workspace filter (one workspace finishes another's connect)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            \"workspace\": workspace_id,\n            \"profile\": profile,\n            \"telegram_code\": code,\n",
+    "replace": "            \"profile\": profile,\n            \"telegram_code\": code,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
+  },
+  {
+    "label": "tenancy: posting skips the ownership check (a post goes to an account outside the profile's org)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if target.account_id not in owned:\n            raise NotFound(\"social_account\", target.account_id)\n        platform = str(owned[target.account_id].get(\"identifier\") or \"\")\n",
+    "replace": "        platform = str(owned.get(target.account_id, {}).get(\"identifier\") or \"slack\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
+  },
+  {
+    "label": "posting: a missing Slack channel is sent to Postiz anyway",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if platform in CHANNEL_PLATFORMS and not target.channel:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
+  },
+  {
+    "label": "media: a post's media path is no longer checked for a public URL",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if not is_public_media_url(item.path):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
   }
 ]
