@@ -13,8 +13,10 @@
 # unknown formats are normalised (``hook-demo`` → ``hook_demo``) or dropped,
 # hashtags get a leading ``#``, and an unreadable answer is zero ideas, which
 # the service turns into a 502. The same agent draws an idea's media: a poster
-# (sanitised SVG) or a 15-20 s reel (a HyperFrames composition, optionally with
-# a Ripple explainer figure as one beat; ``clean_reel`` enforces the length).
+# (sanitised SVG) or a 15-20 s reel: a HyperFrames composition that opens on a
+# short hook, gives the whole middle to one full-frame anatomy film of the
+# post's physical object (a ``data-anatomy-film`` placeholder the browser draws),
+# and ends on a closing line. ``clean_reel`` enforces the length and the film.
 
 from __future__ import annotations
 
@@ -291,17 +293,17 @@ _MEDIA_BRIEFS = {
         '15 and 20 (e.g. "18") data-width="1080" data-height="1920"; GSAP from '
         "https://cdn.jsdelivr.net/npm/gsap@3 building a paused timeline registered as "
         'window.__timelines = window.__timelines || {{}}; window.__timelines["main"] = tl; '
-        "brand-toned colours, no <audio>, every asset inline or absolute https. Tell it with "
-        "a diagram, not text: a hook of at most six words for the first two seconds, then one "
-        "explainer diagram (below; it is required) filling most of the frame from about two "
-        "seconds until the last two, building itself and then revealing its pins every two "
-        "to three seconds so they carry the story, then a closing line of at most six words. "
-        "No other on-screen text, no paragraphs, no bullet lists. Answer with only the "
-        "HTML.\n\n{ripple}"
+        "brand-toned colours, no <audio>, every asset inline or absolute https. Tell it "
+        "with the film, not text: a hook of at most six words for the first two seconds, "
+        "then the anatomy film element (below; it is required) filling the frame from about "
+        "two seconds until about two seconds before the end, then a closing line of at most "
+        "six words. No other on-screen text, no paragraphs, no bullet lists. Answer with "
+        "only the HTML.\n\n{film}"
     ),
 }
 _POSTER_SIZES = {"x": "1080x1080", "reddit": "1200x628"}
 _SVG_RE = re.compile(r"<svg\b.*?</svg>", re.IGNORECASE | re.DOTALL)
+_FILM_RE = re.compile(r"<[a-zA-Z][^>]*\bdata-anatomy-film\b", re.IGNORECASE)
 _HTML_RE = re.compile(r"(<!doctype html.*?</html>|<html\b.*?</html>)", re.IGNORECASE | re.DOTALL)
 _UNSAFE_SVG = (
     re.compile(r"<(script|foreignObject)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL),
@@ -319,10 +321,10 @@ MAX_EDITED_POSTER_CHARS = 2_000_000
 
 
 def build_media_prompt(profile: SocialProfile, idea: SocialIdea, kind: str) -> str:
-    from pocketpaw_ee.agent.mcp_servers.ripple_beats import RIPPLE_BEATS_BRIEF
+    from pocketpaw_ee.agent.mcp_servers.anatomy_film import ANATOMY_FILM_BRIEF
 
     size = _POSTER_SIZES.get(idea.platform, "1080x1080")
-    lines = [_MEDIA_BRIEFS[kind].format(size=size, ripple=RIPPLE_BEATS_BRIEF), "", "<post>"]
+    lines = [_MEDIA_BRIEFS[kind].format(size=size, film=ANATOMY_FILM_BRIEF), "", "<post>"]
     lines.append(f"Company: {fence(profile.company_name) or '(not given)'}")
     if profile.analysis is not None and profile.analysis.tone:
         lines.append(f"Tone: {fence(profile.analysis.tone)}")
@@ -351,6 +353,8 @@ def clean_reel(text: str) -> str:
     shape, error = validate_motion_graphic(html, 30)
     if not error and not REEL_MIN_S <= shape["durationS"] <= REEL_MAX_S:
         error = f"data-duration {shape['durationS']:g}s is outside {REEL_MIN_S}-{REEL_MAX_S}s"
+    if not error and not _FILM_RE.search(html):
+        error = "no data-anatomy-film element"
     if error:
         logger.warning("growth social reel rejected: %s", error[:200])
         return ""

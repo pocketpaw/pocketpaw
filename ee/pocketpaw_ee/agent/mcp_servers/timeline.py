@@ -36,6 +36,7 @@ import logging
 import re
 from typing import Any
 
+from pocketpaw_ee.agent.mcp_servers.anatomy_film import validate_anatomy_film
 from pocketpaw_ee.agent.mcp_servers.ripple_beats import RIPPLE_BEATS_BRIEF, validate_ripple_beats
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,10 @@ def validate_motion_graphic(html: Any, fps: Any) -> tuple[dict | None, str | Non
     ripple_error = validate_ripple_beats(html)
     if ripple_error is not None:
         return None, ripple_error
+
+    film_error = validate_anatomy_film(html, duration)
+    if film_error is not None:
+        return None, film_error
 
     width, height = dims["data-width"], dims["data-height"]
     return {
