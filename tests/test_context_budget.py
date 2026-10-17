@@ -263,7 +263,7 @@ class TestKbContext:
         import pocketpaw.bootstrap.context_builder as ctx_mod
 
         settings = MagicMock()
-        settings.kb_scope = "test-scope"
+        settings.kb_scopes = ["test-scope"]
         settings.kb_binary = "kb"
         settings.kb_limit = 3
         monkeypatch.setattr("pocketpaw.config.get_settings", lambda: settings)
@@ -275,10 +275,10 @@ class TestKbContext:
             return_value=(b"## Article 1\nauth module details\n", b"")
         )
 
-        async def fake_create_subprocess_exec(*args, **kwargs):
+        async def _fake_proc_runner(*args, **kwargs):
             return fake_proc
 
-        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_proc_runner)
 
         result = await ctx_mod.AgentContextBuilder._get_kb_context("auth")
         assert "auth module details" in result
