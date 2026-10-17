@@ -34,8 +34,10 @@
 #           packet, the run id and a PACK per feature (``loom orient``, ``kb search``,
 #           ``soul recall`` on this Mac; 3k in all). A ``lead/<feature>`` past
 #           LEAD_REBASE_BEHIND commits behind the base gets a rebase rule; past
-#           LEAD_REFUSE_BEHIND the launch is refused: note and ``needs-human`` on that
-#           issue, run released. ``Belt-Lead: <run id>`` PRs go on ``lead.prs`` (never
+#           LEAD_REFUSE_BEHIND it is rebuilt as one commit on the base when it only
+#           changes ``docs/leads/`` records (pushed with a lease, kept on
+#           ``lead.rebuilt``), else the launch is refused: note and ``needs-human`` on
+#           that issue, run released. ``Belt-Lead: <run id>`` PRs go on ``lead.prs`` (never
 #           reviewed or fixed; ``Feature:`` names theirs), each issue's done and
 #           slice-done comments on ``lead.records``. Per feature, DONE v3 (``slice_ids``
 #           from the ``.wave.json``): every slice has a ``Belt-Slice-Done: <slice> <run
@@ -106,6 +108,8 @@ MARKER = "Belt-Run:"
 TEST_MARKER = "Belt-Test:"
 LEAD_MARKER = "Belt-Lead:"
 LEAD_RECIPE = "feature-lead"
+# A stale lead branch changing only paths under this is rebuilt, not refused.
+_LEAD_RECORDS = "docs/leads/"
 # The lead's playbook in the launch clone, its feature packet, the label on its
 # last PR and the comment line that closes the feature.
 _LEAD_PLAYBOOK = Path("docs") / "factory" / "lead.md"
@@ -1173,6 +1177,51 @@ class CloudTaskDispatcher:
         code, out, _ = await self.runner(argv, cwd=launch, timeout=60.0)
         return int(out.strip()) if code == 0 and out.strip().isdigit() else 0
 
+    async def _rebuild_records(self, launch: Path, branch: str, base: str) -> dict[str, str] | None:
+        """A stale lead branch whose changes since its merge base are all under
+        ``docs/leads/`` (its records; the code merged through PRs): rebuilt as ONE
+        commit on ``origin/<base>`` carrying the branch's copies of those paths,
+        built in a temporary index and pushed with a lease on the sha ``_behind``
+        fetched. Returns ``{"from", "to"}`` shas; None when any path is elsewhere
+        (or none differ). A git or push failure (a lost lease) raises."""
+        ref = f"refs/remotes/origin/{branch}"
+        argv = [
+            *_GIT,
+            "diff",
+            "--raw",
+            "-z",
+            "--no-abbrev",
+            "--no-renames",
+            f"origin/{base}...{ref}",
+        ]
+        raw = (await self._ok(argv, launch, "rebuild: git diff")).split("\0")
+        entries = list(zip(raw[0::2], raw[1::2], strict=False))  # (":m m sha sha S", path)
+        if not entries or not all(p.startswith(_LEAD_RECORDS) for _, p in entries):
+            return None
+        rows = "".join(f"{m.split()[1]} {m.split()[3]}\t{p}\0" for m, p in entries)
+        old = (await self._ok([*_GIT, "rev-parse", ref], launch, "rebuild: rev-parse")).strip()
+        tip = (
+            await self._ok([*_GIT, "rev-parse", f"origin/{base}"], launch, "rebuild: rev-parse")
+        ).strip()
+        name, email = self.lead_git_name or "Belt", self.lead_git_email or "belt@pocketpaw.xyz"
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = ["env", f"GIT_INDEX_FILE={Path(tmp) / 'index'}", *_GIT]
+            await self._ok([*idx, "read-tree", tip], launch, "rebuild: read-tree")
+            code, _, err = await self.runner(
+                [*idx, "update-index", "-z", "--index-info"], cwd=launch, timeout=60.0, stdin=rows
+            )
+            if code != 0:
+                raise CloudStationError(f"rebuild: update-index failed: {err.strip()[-400:]}")
+            tree = (await self._ok([*idx, "write-tree"], launch, "rebuild: write-tree")).strip()
+        who = ["-c", f"user.name={name}", "-c", f"user.email={email}"]
+        msg = f"docs(leads): rebuild {branch} records on {base}"
+        argv = [*_GIT, *who, "commit-tree", tree, "-p", tip, "-m", msg]
+        new = (await self._ok(argv, launch, "rebuild: commit-tree")).strip()
+        lease = f"--force-with-lease=refs/heads/{branch}:{old}"
+        argv = [*_GIT, "push", "-q", lease, "origin", f"{new}:refs/heads/{branch}"]
+        await self._ok(argv, launch, "rebuild: git push")
+        return {"from": old, "to": new}
+
     async def _refuse(
         self, store: Any, run_ref: str, blob: dict[str, Any], exc: StaleBaseError
     ) -> None:
@@ -1473,13 +1522,36 @@ class CloudTaskDispatcher:
             for f in feats:  # every feature's own lead branch
                 behind = await self._behind(launch, f["branch"], base)
                 if behind > self.lead_refuse_behind:
-                    raise StaleBaseError(
-                        slug,
+                    note = (
                         f"Belt: {f['branch']} is {behind} commits behind {base} (over "
-                        f"{self.lead_refuse_behind}); rebase it onto {base}, then remove "
-                        "needs-human to relaunch.",
-                        f["issue"],
+                        f"{self.lead_refuse_behind})"
                     )
+                    try:
+                        moved = await self._rebuild_records(launch, f["branch"], base)
+                    except CloudStationError as exc:
+                        raise StaleBaseError(
+                            slug,
+                            f"{note}; it holds only docs/leads/ records, but rebuilding it on "
+                            f"{base} failed ({exc}); rebase it onto {base}, then remove "
+                            "needs-human to relaunch.",
+                            f["issue"],
+                        ) from exc
+                    if moved is None:
+                        raise StaleBaseError(
+                            slug,
+                            f"{note}; rebase it onto {base}, then remove needs-human to relaunch.",
+                            f["issue"],
+                        )
+                    lead.setdefault("rebuilt", {})[f["branch"]] = {**moved, "behind": behind}
+                    logger.info(
+                        "belt cloud: rebuilt records-only %s on %s (%s -> %s) for run %s",
+                        f["branch"],
+                        base,
+                        moved["from"],
+                        moved["to"],
+                        run_ref,
+                    )
+                    continue
                 if behind > self.lead_rebase_behind:
                     stale[f["branch"]] = behind
             code, out, _ = await self.runner([*_GIT, "rev-parse", "HEAD"], cwd=launch, timeout=60.0)

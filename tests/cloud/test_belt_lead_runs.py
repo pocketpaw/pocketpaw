@@ -39,7 +39,9 @@
 # STALE BASE: a ``lead/<feature>`` on origin more than 40 commits behind the base
 # gets a rebase-first rule in the brief; more than 150 and the launch or relaunch
 # is refused: a note and ``needs-human`` on the issue, the run released (never a
-# develop failure). No lead branch yet is nothing to measure.
+# develop failure). One changing only ``docs/leads/`` records is rebuilt instead
+# (real git: one commit on the base, pushed with a lease) and launched; a lost
+# lease is refused. No lead branch yet is nothing to measure.
 # RESUME: a launched lead (an old one-issue blob too) is tracked again, never
 # relaunched; one an issue of which has a newer pending lead is released.
 # LESSON 42: a transient gh failure is retried with backoff; a permanent one
@@ -52,6 +54,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -64,6 +67,7 @@ pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud.belt import cloud_station  # noqa: E402
 from pocketpaw_ee.cloud.belt.cloud_station import CloudTaskDispatcher  # noqa: E402
+from pocketpaw_ee.cloud.belt.develop_station import run_subprocess  # noqa: E402
 from pocketpaw_ee.cloud.belt.service import _run_summary  # noqa: E402
 from pocketpaw_ee.cloud.mandates import lead_planner  # noqa: E402
 from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
@@ -294,7 +298,7 @@ def _sheet(at: float) -> dict:
     return {"createdAt": _iso(at), "body": f"Belt-Contact-Sheet: all green\n{CLOUD_URL}"}
 
 
-def _done_runner(run_ref: str, **kw) -> LeadRunner:
+def _done_runner(run_ref: str, cls: type[LeadRunner] = LeadRunner, **kw) -> LeadRunner:
     """A lead whose feature is done at the first poll: a merged slice, a merged
     ``feature-done`` PR, green dev CI and the contact sheet."""
     future = time.time() + 3600  # after any launch the test makes
@@ -303,7 +307,7 @@ def _done_runner(run_ref: str, **kw) -> LeadRunner:
         _lead_pr(32, run_ref, state="MERGED", done=True),
         {"number": 7, "state": "OPEN", "body": "someone else's", "labels": []},
     ]
-    return LeadRunner(prs=[prs], comments=[[_sheet(future)]], **kw)
+    return cls(prs=[prs], comments=[[_sheet(future)]], **kw)
 
 
 # -- brief ------------------------------------------------------------------
@@ -445,6 +449,141 @@ async def test_each_note_label_and_release_runs_once_under_a_request_id(
         "comment",
         "edit",
     ]
+
+
+class GitLeadRunner(LeadRunner):
+    """``LeadRunner`` with real git on the launch clone and a bare origin; only
+    ``remote get-url`` stays scripted (a local URL would re-point the clone).
+    ``before_push`` runs just before a real ``git push``."""
+
+    before_push: Callable[[], None] | None = None
+
+    async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
+        if argv[0] in ("git", "env") and "get-url" not in argv:
+            self.calls.append((list(argv), cwd))
+            if "push" in argv and self.before_push:
+                self.before_push()
+            return await run_subprocess(argv, cwd=cwd, timeout=timeout, stdin=stdin)
+        return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin, on_line=on_line)
+
+
+def _g(cwd: Path, *args: str) -> str:
+    argv = ["git", "-c", "user.name=T", "-c", "user.email=t@example.com", *args]
+    return subprocess.run(argv, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+RECORD = f"docs/leads/{FEATURE}/RECORD.md"
+
+
+def _stale_lead(tmp: Path, launch: Path, files: dict[str, str]) -> Path:
+    """A bare origin whose ``dev`` holds the playbook and is 3 commits past
+    ``lead/<FEATURE>`` (which adds ``files``), cloned into ``launch``."""
+    origin, work = tmp / "origin.git", tmp / "work"
+    _g(tmp, "init", "-q", "--bare", str(origin))
+    _g(tmp, "init", "-q", "-b", "dev", str(work))
+    (work / "docs" / "factory").mkdir(parents=True)
+    (work / "docs" / "factory" / "lead.md").write_text(PLAYBOOK)
+    _g(work, "add", "-A")
+    _g(work, "commit", "-q", "-m", "playbook")
+    _g(work, "checkout", "-q", "-b", f"lead/{FEATURE}")
+    for rel, text in files.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(text)
+    _g(work, "add", "-A")
+    _g(work, "commit", "-q", "-m", "lead record")
+    _g(work, "checkout", "-q", "dev")
+    for n in range(3):
+        (work / f"dev{n}.txt").write_text(str(n))
+        _g(work, "add", "-A")
+        _g(work, "commit", "-q", "-m", f"dev {n}")
+    _g(work, "push", "-q", str(origin), "dev", f"lead/{FEATURE}")
+    _g(tmp, "clone", "-q", "-b", "dev", str(origin), str(launch))
+    return origin
+
+
+def _stale_dispatcher(runner: LeadRunner, launch: Path) -> CloudTaskDispatcher:
+    return _lead_dispatcher(
+        runner,
+        launch,
+        lead_rebase_behind=1,
+        lead_refuse_behind=2,
+        lead_git_name="Belt",
+        lead_git_email="belt@example.com",
+    )
+
+
+async def test_a_stale_records_only_lead_branch_is_rebuilt_on_the_base_and_launched(
+    store, dirs, tmp_path
+):
+    """A stale ``lead/<f>`` whose only changes are ``docs/leads/`` records is
+    rebuilt by Belt as one commit on ``origin/<base>`` carrying the branch's
+    records, pushed with a lease, and the lead launches with no rebase rule."""
+    repo, launch = dirs
+    files = {RECORD: "# Record\nNext: ship\n", f"docs/leads/{FEATURE}/timeline.tsv": "t\tx\n"}
+    origin = _stale_lead(tmp_path, launch, files)
+    old = _g(origin, "rev-parse", f"lead/{FEATURE}")
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref, cls=GitLeadRunner)
+
+    await _stale_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    (brief,) = _launch_briefs(runner)
+    assert "commits behind" not in brief
+    assert not [a for a, _ in runner.calls if a[:3] in (["gh", "issue", "comment"],)]
+    assert not any(a[:3] == ["gh", "issue", "edit"] and "needs-human" in a for a, _ in runner.calls)
+    new = _g(origin, "rev-parse", f"lead/{FEATURE}")
+    assert new != old
+    assert _g(origin, "rev-parse", f"lead/{FEATURE}^") == _g(origin, "rev-parse", "dev")
+    assert _g(origin, "show", f"lead/{FEATURE}:{RECORD}") == files[RECORD].strip()
+    assert _g(origin, "diff", "--name-only", f"dev..lead/{FEATURE}").split() == sorted(files)
+    action = await store.get_action(run_ref)
+    lead = action.parameters["_code_change"]["lead"]
+    assert lead["rebuilt"] == {f"lead/{FEATURE}": {"from": old, "to": new, "behind": 3}}
+    assert action.status == ActionStatus.EXECUTED
+
+
+async def test_a_stale_lead_branch_with_code_is_still_refused(store, dirs, tmp_path):
+    """Any change outside ``docs/leads/`` keeps the refusal: a human rebases."""
+    repo, launch = dirs
+    origin = _stale_lead(tmp_path, launch, {RECORD: "r\n", "src/app.py": "x = 1\n"})
+    old = _g(origin, "rev-parse", f"lead/{FEATURE}")
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref, cls=GitLeadRunner)
+
+    await _stale_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert not _launch_briefs(runner)
+    assert _g(origin, "rev-parse", f"lead/{FEATURE}") == old
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith(
+        f"Belt: lead/{FEATURE} is 3 commits behind dev (over 2); rebase it onto dev, then "
+        "remove needs-human to relaunch."
+    )
+
+
+async def test_a_records_rebuild_whose_lease_fails_is_refused_not_launched(store, dirs, tmp_path):
+    """Someone pushed ``lead/<f>`` after Belt read it: the lease refuses the
+    push, nothing launches, and the issue note says the rebuild failed."""
+    repo, launch = dirs
+    origin = _stale_lead(tmp_path, launch, {RECORD: "r\n"})
+    moved = _g(origin, "rev-parse", "dev~1")
+    run_ref = await _queue_lead(store, repo)
+    runner = _done_runner(run_ref, cls=GitLeadRunner)
+    runner.before_push = lambda: _g(origin, "update-ref", f"refs/heads/lead/{FEATURE}", moved)
+
+    await _stale_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert not _launch_briefs(runner)
+    assert _g(origin, "rev-parse", f"lead/{FEATURE}") == moved
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    reason = action.rejected_reason
+    assert reason.startswith(f"Belt: lead/{FEATURE} is 3 commits behind dev (over 2)")
+    assert "only docs/leads/ records" in reason and "push" in reason
+    notes = [a[-1] for a, _ in runner.calls if a[:3] == ["gh", "issue", "comment"]]
+    assert len(notes) == 1 and "push" in notes[0]
+    assert any(a[:3] == ["gh", "issue", "edit"] and "needs-human" in a for a, _ in runner.calls)
 
 
 async def test_a_lost_relaunch_is_never_launched_twice(store, dirs, playbook):
