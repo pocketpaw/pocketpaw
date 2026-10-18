@@ -111,6 +111,7 @@ def _charter_from_request(req: CreateMandateRequest) -> Charter:
         issue_labels=list(req.charter.issue_labels),
         run_kind=req.charter.run_kind,
         model=req.charter.model,
+        beta_only=req.charter.beta_only,
     )
 
 
@@ -133,6 +134,7 @@ def _charter_to_wire(charter: Charter) -> dict[str, Any]:
         "issue_labels": list(charter.issue_labels),
         "run_kind": charter.run_kind,
         "model": charter.model,
+        "beta_only": charter.beta_only,
     }
 
 
@@ -847,8 +849,8 @@ async def set_crew(workspace_id: str, user_id: str, mandate_id: str, body: Any) 
 async def update_charter(
     workspace_id: str, user_id: str, mandate_id: str, body: Any
 ) -> dict[str, Any]:
-    """Change a mandate's ``model`` and budget caps (``max_in_flight``,
-    ``max_tasks_per_shift``) and nothing else; only the fields sent change and
+    """Change a mandate's ``model``, budget caps (``max_in_flight``,
+    ``max_tasks_per_shift``) and ``beta_only`` and nothing else; only the fields sent change and
     ``model: null`` clears it. Returns ``{"mandate": <detail>}``. A bad body is
     a 422, a cross-tenant mandate a 404. Runs already launched keep the model
     their sessions started on; the next launch reads the new one."""
@@ -867,6 +869,8 @@ async def update_charter(
     if req.budget is not None:
         for name in req.budget.model_fields_set:
             setattr(doc.charter.budget, name, getattr(req.budget, name))
+    if "beta_only" in req.model_fields_set:
+        doc.charter.beta_only = req.beta_only
     await doc.save()
     await emit(
         mandate_events.MandateCharterChanged(
@@ -875,6 +879,7 @@ async def update_charter(
                 "mandate_id": mandate_id,
                 "model": doc.charter.model,
                 "budget": doc.charter.budget.model_dump(),
+                "beta_only": doc.charter.beta_only,
             }
         )
     )
@@ -1507,6 +1512,7 @@ async def _shift(
             capacity["budget"],
             doc.surface.repo_id,
             backlog["tasks"],
+            doc.charter,
         )
         # The cloud station owns the lead recipe; the charter declares no command.
         charter_wire = {
@@ -2025,16 +2031,19 @@ async def _lead_plan(
     budget: int,
     repo_id: str,
     tasks: list[dict[str, Any]],
+    charter: Charter,
 ) -> Any:
     """The lead planner's plan (``lead_planner.plan``) over the ``free`` backlog
     entries, read back as their sightings for the issue's title, labels and age,
-    each with its issue's LIVE labels off the bound repo's cached open issue list
-    (``needs-human`` lands after the sighting is filed) and its breaker count:
+    each with its issue's LIVE labels off a fresh ``--label`` list per charter
+    ``issue_labels`` label (``needs-human`` lands after the sighting is filed, and
+    a busy repo's open list stops short of old issues) and its breaker count:
     the failed lead runs citing ANY sighting of the same issue (``tasks``, the
     backlog's) plus the ones kept on those sightings (``lead_failed``), so a
     re-filed issue keeps its count. The union is written back on the sighting.
     An issue whose breaker trips is labelled ``needs-human`` with the reason,
-    and the count at the trip is kept as ``lead_breaker_at``."""
+    and the count at the trip is kept as ``lead_breaker_at``. The charter's
+    ``beta_only`` leaves p3 issues out."""
     from pocketpaw_ee.cloud.mandates import lead_planner
     from pocketpaw_ee.cloud.mandates import patrols as mandate_patrols
 
@@ -2042,11 +2051,7 @@ async def _lead_plan(
     docs = await SightingDoc.find(
         SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
     ).to_list()
-    live = {
-        r["number"]: [str(lb.get("name") or "") for lb in r.get("labels") or []]
-        for r in await mandate_patrols.open_issues(repo_id)
-        if isinstance(r.get("number"), int) and isinstance(r.get("labels"), list)
-    }
+    live = await mandate_patrols.labelled_issues(repo_id, list(charter.issue_labels))
     by_source: dict[str, list[SightingDoc]] = {}
     for d in docs:
         by_source.setdefault(str(d.evidence.get("source") or d.id), []).append(d)
@@ -2087,7 +2092,9 @@ async def _lead_plan(
             # no-event: the trip's count, so a human removing the label re-arms it.
             d.evidence = {**d.evidence, "lead_breaker_at": len(s["failed"])}
             await d.save()
-    return lead_planner.plan(shift_no, sightings, budget, lead_planner.line_max())
+    return lead_planner.plan(
+        shift_no, sightings, budget, lead_planner.line_max(), beta_only=charter.beta_only
+    )
 
 
 def _require_lead_station(charter: Charter) -> None:

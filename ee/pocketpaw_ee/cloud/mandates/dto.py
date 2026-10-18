@@ -100,6 +100,8 @@ class CharterRequest(BaseModel):
     run_kind: RunKind = "task"
     # The Claude model the line's cloud sessions start on; unset = the CLI default.
     model: CharterModel | None = None
+    # A lead line plans no ``p3`` issue (out of the beta).
+    beta_only: bool = False
 
     @field_validator("checks")
     @classmethod
@@ -136,14 +138,15 @@ class PatchBudgetRequest(BaseModel):
 
 
 class PatchCharterRequest(BaseModel):
-    """Body for ``PATCH /belt/mandates/{id}/charter``: the line's ``model`` and
-    two budget caps, nothing else. Only the fields sent change (``model: null``
-    clears it); an empty body or any other field is refused."""
+    """Body for ``PATCH /belt/mandates/{id}/charter``: the line's ``model``,
+    two budget caps and ``beta_only``, nothing else. Only the fields sent change
+    (``model: null`` clears it); an empty body or any other field is refused."""
 
     model_config = ConfigDict(extra="forbid")
 
     model: CharterModel | None = None
     budget: PatchBudgetRequest | None = None
+    beta_only: bool = False
 
     @model_validator(mode="after")
     def _something_to_change(self) -> PatchCharterRequest:
@@ -151,7 +154,7 @@ class PatchCharterRequest(BaseModel):
             self.model_fields_set == {"budget"}
             and (self.budget is None or not self.budget.model_fields_set)
         ):
-            raise ValueError("nothing to change: send model and/or budget caps")
+            raise ValueError("nothing to change: send model, budget caps and/or beta_only")
         return self
 
 

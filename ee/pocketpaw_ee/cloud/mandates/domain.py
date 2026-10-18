@@ -123,6 +123,9 @@ class Charter(BaseModel):
     foreman, and the plan is approved as ``system:lead-planner``. ``"task"``
     (the default) is the foreman and the plan gate.
 
+    ``beta_only`` (lead mandates) leaves ``p3`` issues out of the plan: p3 is
+    out of the beta. Off by default.
+
     ``model`` is the Claude model every cloud session of the line starts on
     (``claude --model <model> --cloud``: leads, workers, fixers, reviewers,
     testers, relaunches). ``None`` launches on the CLI's own default.
@@ -139,6 +142,7 @@ class Charter(BaseModel):
     issue_labels: list[str] = Field(default_factory=list)
     run_kind: RunKind = "task"
     model: CharterModel | None = None
+    beta_only: bool = False
 
 
 class Surface(BaseModel):

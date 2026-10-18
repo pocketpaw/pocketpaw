@@ -687,6 +687,25 @@ async def open_issues(repo_id: str, gh: GhFn | None = None) -> list[dict[str, An
     return rows
 
 
+async def labelled_issues(
+    repo_id: str, labels: list[str], gh: GhFn | None = None
+) -> dict[int, list[str]]:
+    """``{number: label names}`` for each OPEN issue on the bound repo carrying
+    one of ``labels``: one ``gh issue list --label`` per label, read fresh (never
+    cached), so the lead planner sees ``needs-human`` the moment it lands and an
+    old issue past the open list's limit still has live labels. Empty off GitHub;
+    a gh failure reads no rows for that label. Never raises."""
+    out: dict[int, list[str]] = {}
+    for label in dict.fromkeys(lb.strip() for lb in labels if lb.strip()):
+        argv = ["gh", "issue", "list", "--state", "open", "--label", label]
+        argv += ["--limit", _GH_STATE_LIMIT, "--json", "number,labels"]
+        _, rows = await _gh_rows({}, repo_id, argv, gh)
+        for r in rows:
+            if isinstance(r.get("number"), int) and isinstance(r.get("labels"), list):
+                out[r["number"]] = [str(lb.get("name") or "") for lb in r["labels"]]
+    return out
+
+
 async def open_pr_closes(repo_id: str, gh: GhFn | None = None) -> dict[str, int]:
     """``{"github:<slug>#<n>": pr}``: each issue an OPEN PR on the bound repo
     closes (``Closes`` / ``Fixes`` / ``Resolves #n`` in its body), keyed like an

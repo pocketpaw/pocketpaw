@@ -137,8 +137,8 @@
   {
     "label": "a sighting without an issue is planned",
     "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
-    "find": "        if found and not _held(s):\n            issues.append((s, found[2]))",
-    "replace": "        if not _held(s):\n            issues.append((s, found[2] if found else \"0\"))",
+    "find": "        if found and not _held(s) and not out_of_beta:\n            issues.append((s, found[2]))",
+    "replace": "        if not _held(s) and not out_of_beta:\n            issues.append((s, found[2] if found else \"0\"))",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
     ]
@@ -497,10 +497,46 @@
   {
     "label": "the shift ignores the line max setting",
     "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
-    "find": "    return lead_planner.plan(shift_no, sightings, budget, lead_planner.line_max())",
-    "replace": "    return lead_planner.plan(shift_no, sightings, budget, 1)",
+    "find": "        shift_no, sightings, budget, lead_planner.line_max(), beta_only=charter.beta_only",
+    "replace": "        shift_no, sightings, budget, 1, beta_only=charter.beta_only",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py::test_a_line_lead_owns_each_of_its_issues"
+    ]
+  },
+  {
+    "label": "p0 ranks with p1",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "_PRIORITY = {\"p0\": 0, \"p1\": 1,",
+    "replace": "_PRIORITY = {\"p0\": 1, \"p1\": 1,",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py::test_a_p0_issue_is_planned_before_every_p1"
+    ]
+  },
+  {
+    "label": "beta-only plans p3 issues",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "        out_of_beta = beta_only and priority(_labels(s)) == _OUT_OF_BETA\n",
+    "replace": "        out_of_beta = False\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py::test_a_beta_only_line_skips_p3_issues"
+    ]
+  },
+  {
+    "label": "the shift never passes beta_only",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        shift_no, sightings, budget, lead_planner.line_max(), beta_only=charter.beta_only",
+    "replace": "        shift_no, sightings, budget, lead_planner.line_max()",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py::test_a_beta_only_line_skips_p3_issues"
+    ]
+  },
+  {
+    "label": "live labels come off the limited open list",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    live = await mandate_patrols.labelled_issues(repo_id, list(charter.issue_labels))\n",
+    "replace": "    live = {r[\"number\"]: [lb[\"name\"] for lb in r[\"labels\"]] for r in await mandate_patrols.open_issues(repo_id)}\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py::test_needs_human_on_an_issue_past_the_open_list_limit_is_skipped"
     ]
   }
 ]

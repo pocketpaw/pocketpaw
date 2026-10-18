@@ -3,7 +3,8 @@
 # A charter with ``run_kind: "feature-lead"`` marks a lead mandate. Its shift
 # skips the foreman: ``lead_planner`` plans ONE ``feature-lead`` run per line of
 # free feature issues (not in flight, not blocked by an open dependency, not
-# closed), p1 before p2 before p3 before unlabelled, then oldest first, grouped
+# closed), p0 before p1 before p2 before p3 before unlabelled, then oldest first
+# (a charter with ``beta_only`` plans no p3), grouped
 # by ``line:<app>`` up to ``POCKETPAW_BELT_LINE_LEAD_MAX`` (3; 1 = one issue a
 # lead; no line label = alone), up to the shift's budget in runs (the line's
 # headroom). Each task's title is the first issue's title, its why a one-line
@@ -13,8 +14,9 @@
 # approved with no human and no Clef, as ``system:lead-planner``, through the
 # auto gate's approve path, with the gate flag off or on. A task mandate (the
 # default) still goes to the foreman and the manual plan gate.
-# NEVER TWICE, UNTIL RE-ARMED: an issue labelled ``needs-human`` (live, off the
-# open issue list: the station's releases label it, then reject the run) is not
+# NEVER TWICE, UNTIL RE-ARMED: an issue labelled ``needs-human`` (live, off a
+# fresh ``--label`` list per charter label, so an old issue past the open list's
+# limit counts too: the station's releases label it, then reject the run) is not
 # planned, nor is one whose lead run is still in flight. A released lead's issue
 # is planned again once a human takes the label off, and held again when that
 # lead is released too. BREAKER: a failed lead is tried again until 3 failures
@@ -30,6 +32,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -123,6 +126,18 @@ def test_one_task_per_issue_p1_first_then_oldest():
     plan = lead_planner.plan(7, sightings, 10)
     assert plan.shift_no == 7 and not plan.no_action
     assert _numbers(plan) == ["s5", "s2", "s6", "s1", "s4", "s3"]
+
+
+def test_a_p0_issue_is_planned_before_every_p1():
+    """A ``p0`` issue jumps the queue however new, and leads its line's group.
+    Mutation: p0 unranked plans the old p1s first."""
+    sightings = [
+        _s(1, "p1", "line:ui", age_h=9),
+        _s(2, "p1", age_h=8),
+        _s(3, "p0", "line:ui", age_h=1),
+    ]
+    assert _groups(lead_planner.plan(1, sightings, 1)) == [["s3", "s1"]]
+    assert _groups(lead_planner.plan(1, sightings, 5)) == [["s3", "s1"], ["s2"]]
 
 
 def test_each_task_is_a_feature_lead_on_its_issue():
@@ -846,6 +861,72 @@ async def test_an_issue_labelled_needs_human_after_its_sighting_is_skipped(
         await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
     ).parameters["_belt_plan"]
     assert _refs(blob) == [[ids[n]] for n in (11, 10, 15, 17)]
+
+
+class LimitedGh(FakeGh):
+    """``FakeGh`` whose unfiltered open issue list stops short of ``hidden`` (an
+    old issue past ``--limit`` on a busy repo), while a ``--label`` list returns
+    every issue carrying that label."""
+
+    hidden: set[int] = set()
+
+    async def __call__(self, argv: list[str]) -> tuple[int, str, str]:
+        if argv[:3] == ["gh", "issue", "list"] and "all" not in argv:
+            self.calls.append(list(argv))
+            if "--label" in argv:
+                want = argv[argv.index("--label") + 1]
+                rows = [i for i in self.issues if want in {lb["name"] for lb in i["labels"]}]
+            else:
+                rows = [i for i in self.issues if i["number"] not in self.hidden]
+            return 0, json.dumps(rows), ""
+        return await super().__call__(argv)
+
+
+@pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
+async def test_needs_human_on_an_issue_past_the_open_list_limit_is_skipped(
+    tmp_path, mongo_db, monkeypatch
+):
+    """The repo has more open issues than the open list returns, so #16 is not
+    on it: the planner reads its labels fresh off a ``--label`` list instead of
+    the stale ones filed with its sighting. Mutation: reading only the
+    unfiltered (or a cached) list plans #16 again."""
+    base = _lead_gh()
+    gh = LimitedGh(base.issues, states=base.states, prs=base.prs)
+    mid, ids = await _lead_mandate(tmp_path, monkeypatch, gh, run_kind="feature-lead")
+    # A read before the label landed warms the cached open list too.
+    await patrols.open_issues(
+        (await mandate_service.get_mandate(WS, USER, mid))["surface"]["repo_id"]
+    )
+    (sixteen,) = [i for i in gh.issues if i["number"] == 16]
+    sixteen["labels"].append({"name": "needs-human", "color": "d93f0b", "description": ""})
+    gh.hidden = {16}
+    # One view answers the patrol and the dependency check, so #16 stays open
+    # and unblocked: only the label can hold it.
+    gh.views = {16: {"state": "OPEN", "body": sixteen["body"], "labels": sixteen["labels"]}}
+
+    out = await mandate_service.trigger_shift(WS, USER, mid)
+
+    blob = (
+        await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
+    ).parameters["_belt_plan"]
+    assert _refs(blob) == [[ids[n]] for n in (11, 10, 15, 17)]
+
+
+@pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
+async def test_a_beta_only_line_skips_p3_issues(tmp_path, mongo_db, monkeypatch):
+    """``PATCH .../charter {"beta_only": true}``: p3 is out of the beta, so the
+    p3 #15 is not planned; off (the default) plans it, as above. Mutation: the
+    flag not reaching the planner plans #15."""
+    mid, ids = await _lead_mandate(tmp_path, monkeypatch, _lead_gh(), run_kind="feature-lead")
+    detail = await mandate_service.update_charter(WS, USER, mid, {"beta_only": True})
+    assert detail["mandate"]["charter"]["beta_only"] is True
+
+    out = await mandate_service.trigger_shift(WS, USER, mid)
+
+    blob = (
+        await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
+    ).parameters["_belt_plan"]
+    assert _refs(blob) == [[ids[n]] for n in (16, 11, 10, 17)]
 
 
 @pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")

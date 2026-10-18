@@ -84,9 +84,9 @@
     ]
   },
   {
-    "label": "the patch takes fields outside model and the two caps",
+    "label": "the patch takes fields outside model, the two caps and beta_only",
     "file": "ee/pocketpaw_ee/cloud/mandates/dto.py",
-    "find": "class PatchCharterRequest(BaseModel):\n    \"\"\"Body for ``PATCH /belt/mandates/{id}/charter``: the line's ``model`` and\n    two budget caps, nothing else. Only the fields sent change (``model: null``\n    clears it); an empty body or any other field is refused.\"\"\"\n\n    model_config = ConfigDict(extra=\"forbid\")",
+    "find": "class PatchCharterRequest(BaseModel):\n    \"\"\"Body for ``PATCH /belt/mandates/{id}/charter``: the line's ``model``,\n    two budget caps and ``beta_only``, nothing else. Only the fields sent change\n    (``model: null`` clears it); an empty body or any other field is refused.\"\"\"\n\n    model_config = ConfigDict(extra=\"forbid\")",
     "replace": "class PatchCharterRequest(BaseModel):\n    model_config = ConfigDict(extra=\"ignore\")",
     "tests": [
       "tests/cloud/test_belt_mandate_model.py::test_patch_charter_refuses_bad_or_out_of_scope_bodies"
@@ -113,7 +113,7 @@
   {
     "label": "an empty patch is accepted",
     "file": "ee/pocketpaw_ee/cloud/mandates/dto.py",
-    "find": "            raise ValueError(\"nothing to change: send model and/or budget caps\")",
+    "find": "            raise ValueError(\"nothing to change: send model, budget caps and/or beta_only\")",
     "replace": "            pass",
     "tests": [
       "tests/cloud/test_belt_mandate_model.py::test_patch_charter_refuses_bad_or_out_of_scope_bodies"

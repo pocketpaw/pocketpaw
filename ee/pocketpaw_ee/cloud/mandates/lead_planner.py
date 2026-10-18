@@ -7,8 +7,9 @@
 #
 # ``plan`` takes the free sightings (the caller has already dropped the ones in
 # flight, blocked by an open dependency or closed: ``service._backlog``), keeps
-# those naming a GitHub issue, orders them p1 before p2 before p3 (issue labels,
-# unlabelled last), then oldest first, and groups them by their ``line:<app>``
+# those naming a GitHub issue, orders them p0 before p1 before p2 before p3
+# (issue labels, unlabelled last; a ``p0`` jumps every queue and leads its line's
+# group), then oldest first, and groups them by their ``line:<app>``
 # label in that order, up to ``line_max`` issues a lead (env
 # ``POCKETPAW_BELT_LINE_LEAD_MAX``, default 3; 1 is one issue a lead). An issue
 # with no line label leads alone. One task per group up to the shift's
@@ -19,10 +20,12 @@
 # group, so each issue counts in flight and each failure counts per issue. A
 # title naming another issue (``Follow-up to #12``) is prefixed with its own
 # ``#<n>``, since the station takes the FIRST ``#N`` in title + why.
+# ``beta_only`` (the charter flag) leaves ``p3`` issues out: p3 is out of the beta.
 #
 # NEVER TWICE, UNTIL RE-ARMED: an issue labelled ``needs-human`` is skipped,
-# read off the LIVE labels (``labels``) the caller passes, else the ones filed
-# with the sighting. The station's ways to end a lead short of done (a release,
+# read off the LIVE labels (``labels``) the caller passes (a fresh ``--label``
+# list per charter label, so a busy repo's open list limit never hides one), else
+# the ones filed with the sighting. The station's ways to end a lead short of done (a release,
 # a stale-base refusal) label the issue ``needs-human``, then reject the run; a
 # human removes the label to retry. A rejected run never counts as a failure.
 #
@@ -61,8 +64,9 @@ _NEEDS_HUMAN = "needs-human"
 # (after the run started) would close that.
 FAILED = frozenset({"failed", "develop failed"})
 BREAKER = 3
-_PRIORITY = {"p1": 1, "p2": 2, "p3": 3}
-_UNRANKED = len(_PRIORITY) + 1
+_PRIORITY = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
+_UNRANKED = 4
+_OUT_OF_BETA = 3
 LINE_MAX = 3
 _LINE = "line:"
 
@@ -75,7 +79,8 @@ def line_max() -> int:
 
 
 def priority(labels: list[str]) -> int:
-    """1 for a ``p1`` issue, 2 for ``p2``, 3 for ``p3`` (the highest wins), 4 unlabelled."""
+    """0 for a ``p0`` issue, 1 for ``p1``, 2 for ``p2``, 3 for ``p3`` (the highest
+    wins), 4 unlabelled."""
     ranks = [_PRIORITY.get(str(lb).strip().lower(), _UNRANKED) for lb in labels or []]
     return min(ranks, default=_UNRANKED)
 
@@ -163,16 +168,23 @@ def _task(group: list[tuple[dict[str, Any], str]], line: str) -> PlannedTask:
 
 
 def plan(
-    shift_no: int, sightings: list[dict[str, Any]], budget: int, line_max: int = LINE_MAX
+    shift_no: int,
+    sightings: list[dict[str, Any]],
+    budget: int,
+    line_max: int = LINE_MAX,
+    *,
+    beta_only: bool = False,
 ) -> PlanProposal:
     """One ``feature-lead`` task per group of up to ``line_max`` free feature
     issues of one line in ``sightings`` (each ``{id, evidence, ts}``, optionally
     the live ``labels``, the issue's ``failed`` lead run ids and
-    ``breaker_at``), p1 first, then oldest, at most ``budget`` tasks."""
+    ``breaker_at``), p0 then p1 first, then oldest, at most ``budget`` tasks;
+    ``beta_only`` drops the p3 ones."""
     issues = []
     for s in sightings:
         found = _SOURCE.match(str((s.get("evidence") or {}).get("source") or ""))
-        if found and not _held(s):
+        out_of_beta = beta_only and priority(_labels(s)) == _OUT_OF_BETA
+        if found and not _held(s) and not out_of_beta:
             issues.append((s, found[2]))
     issues.sort(
         key=lambda pair: (

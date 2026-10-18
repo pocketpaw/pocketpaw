@@ -600,7 +600,7 @@ the lane merges that PR no run lands, and its sighting stays open and plannable
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
 | GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
 | GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts (each with `approved_by`, the plan Action's approver such as a user id or `system:belt-policy`, and `policy`, the auto gate's `{decision, reason}`; both `null` when they do not apply), sightings-by-patrol, and the `line` block (see *The line: one branch per mandate*; the `{mandate}` that create, crew and autopilot return carries it too) |
-| PATCH | `/belt/mandates/{id}/charter` | `belt.manage` | Change only the line's `model` (`fable\|opus\|sonnet`, `null` clears it) and `budget.max_in_flight` (`null` clears it) / `budget.max_tasks_per_shift`: `{model?, budget?: {max_in_flight?, max_tasks_per_shift?}}` → `{mandate}`. Fields left out stay; any other field, an empty body or a value out of range is `422 mandate.charter_invalid`. Emits `mandate.charter_changed` |
+| PATCH | `/belt/mandates/{id}/charter` | `belt.manage` | Change only the line's `model` (`fable\|opus\|sonnet`, `null` clears it) and `budget.max_in_flight` (`null` clears it) / `budget.max_tasks_per_shift`, and `beta_only` (a lead line plans no `p3` issue; off by default): `{model?, budget?: {max_in_flight?, max_tasks_per_shift?}, beta_only?}` → `{mandate}`. Fields left out stay; any other field, an empty body or a value out of range is `422 mandate.charter_invalid`. Emits `mandate.charter_changed` |
 | PUT | `/belt/mandates/{id}/crew` | `belt.manage` | Replace the crew roster: `{crew: [{agent_id, role: dev\|reviewer\|foreman\|tester, concurrency (1-8), setup?: owner\|strict}]}` → `{mandate}`; see *The crew* below |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
@@ -720,7 +720,7 @@ GitLab path.
 
 Enable it with `"issues"` in `patrols` and `issue_labels` on the charter. No
 route edits an existing mandate's patrols or issue labels yet (`PATCH
-.../charter` covers only the model and two budget caps), so a live mandate gets
+.../charter` covers only the model, two budget caps and `beta_only`), so a live mandate gets
 them through a new mandate or a direct database edit.
 
 ## Plan-feature gating posture
