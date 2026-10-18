@@ -36,20 +36,17 @@
 # TIMEOUT: 8 h from the launch (from the last progress while waiting), and no 1 h
 # no-PR rule; a timed-out lead is parked like the ladder's last rung: a sheet closes
 # the issue, all slices done asks for it, else ``needs-human``; never a failure.
-# STALE BASE: a ``lead/<feature>`` on origin more than 40 commits behind the base
-# gets a rebase-first rule in the brief; more than 150 and the launch or relaunch
-# is refused: a note and ``needs-human`` on the issue, the run released (never a
-# develop failure). One changing only ``docs/leads/`` records is rebuilt instead
-# (real git: one commit on the base, pushed with a lease) and launched; a lost
-# lease is refused. No lead branch yet is nothing to measure.
-# RESUME: a launched lead (an old one-issue blob too) is tracked again, never
-# relaunched; one an issue of which has a newer pending lead is released.
-# LESSON 42: a transient gh failure is retried with backoff; a permanent one
-# fails at once; a transient one past the retries ends the tracker.
-# LESSON 45: on startup a run whose tracker died on a TRACK error (inside its
-# timeout) is tracked again with the error cleared, never counted in flight.
-# ROW: a lead run's console row carries ``lead`` (feature, app, PRs, session and
-# stall counts, contact sheet, slices) off the tracker's blob; a task run's is null.
+# STALE BASE: a ``lead/<feature>`` over 40 commits behind gets a rebase rule; over
+# 150 the launch is refused (note, ``needs-human``, released), unless it only
+# changes ``docs/leads/`` records: then it is rebuilt on the base with a lease.
+# RESUME: a launched lead is tracked again, never relaunched; one with a newer
+# pending lead on an issue is released.
+# LESSONS 42/45: a transient gh failure is retried with backoff, a permanent one
+# fails at once; a run whose tracker died on a TRACK error is tracked again.
+# STOP (lesson 182): a release or a human reject queues one stop message into the
+# newest session, recorded on ``stopped``; a failed stop still releases.
+# DONE BEFORE: slices done before the run are skipped; none left, never launched.
+# ROW: a lead run's console row carries ``lead`` off the tracker's blob.
 
 from __future__ import annotations
 
@@ -333,7 +330,16 @@ def _launch_briefs(runner: LeadRunner) -> list[str]:
 
 
 def _nudges(runner: LeadRunner) -> list[list[str]]:
-    return [a for a, _ in runner.calls if "--cloud" in a and "-p" in a]
+    return [
+        a
+        for a, _ in runner.calls
+        if "--cloud" in a and "-p" in a and a[-1] != cloud_station._STOP_TEXT
+    ]
+
+
+def _stops(runner: LeadRunner) -> list[list[str]]:
+    """The stop messages a release queued (``claude -p --cloud <id> <stop text>``)."""
+    return [a for a, _ in runner.calls if "-p" in a and a[-1] == cloud_station._STOP_TEXT]
 
 
 def _sheet(at: float) -> dict:
@@ -1597,9 +1603,90 @@ async def test_a_settled_lead_is_no_longer_tracked(store, dirs, playbook, settle
 
     assert polls[0] == 2
     assert not _nudges(runner) and len(_launch_briefs(runner)) == 1
+    # A human's reject stops the session too (lesson 182); an approve does not.
+    assert len(_stops(runner)) == (settle == "reject")
     assert not any(a[:3] == ["gh", "issue", "edit"] for a, _ in runner.calls)
     cc = (await store.get_action(run_ref)).parameters["_code_change"]
     assert not cc["lead"].get("stalls") and "headless_error" not in cc
+
+
+# -- stopping a released run's session (lesson 182) ---------------------------
+
+
+async def test_a_released_lead_stops_its_session_once(store, dirs, playbook):
+    """Belt's own release (here the 8 h timeout) queues one stop message into the
+    run's newest session and records it on ``stopped``; a second release sends
+    no second one."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()  # silent and never proven ended: nudged to the timeout
+    dispatcher = _lead_dispatcher(runner, launch)
+
+    await dispatcher.run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    (stop,) = _stops(runner)
+    assert stop[1:4] == ["-p", "--cloud", "session_L1"]
+    cc = action.parameters["_code_change"]
+    assert cc["stopped"]["session_url"] == "https://claude.ai/code/session_L1"
+    assert "error" not in cc["stopped"]
+
+    await dispatcher._release(store, run_ref, cc, "released again")
+    assert len(_stops(runner)) == 1
+
+
+async def test_a_human_reject_stops_the_session_once(store, dirs, playbook):
+    """The d1qr case: a run rejected in Instinct as a wrong pick is stopped at
+    the tracker's next poll, and a later Belt release does not stop it again."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+
+    async def on_pr_list() -> None:
+        await store.reject(run_ref, reason="wrong pick", rejector="u1")
+
+    runner.on_pr_list = on_pr_list
+    dispatcher = _lead_dispatcher(runner, launch)
+
+    await dispatcher.run(run_ref, workspace_id=WS)
+
+    assert len(_stops(runner)) == 1
+    cc = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert cc["stopped"]["session_url"].endswith("/session_L1")
+    await dispatcher._release(store, run_ref, cc, "released again")
+    assert len(_stops(runner)) == 1
+
+
+class StopFails(LeadRunner):
+    """A ``LeadRunner`` whose stop message fails: a non-zero exit, or a raise."""
+
+    def __init__(self, how: str, **kw):
+        super().__init__(**kw)
+        self.how = how
+
+    async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
+        if argv[-1:] == [cloud_station._STOP_TEXT]:
+            self.calls.append((list(argv), cwd))
+            if self.how == "raise":
+                raise TimeoutError("claude -p timed out")
+            return 1, "", "Error: Session not found: session_L1"
+        return await super().__call__(argv, cwd=cwd, timeout=timeout, stdin=stdin)
+
+
+@pytest.mark.parametrize("how", ["exit", "raise"])
+async def test_a_failed_stop_still_releases_the_run(store, dirs, playbook, how):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = StopFails(how)
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert len(_stops(runner)) == 1
+    error = action.parameters["_code_change"]["stopped"]["error"]
+    assert ("Session not found" if how == "exit" else "timed out") in error
 
 
 async def test_activity_after_a_relaunch_resets_the_ladder(store, dirs, playbook):
@@ -2040,20 +2127,85 @@ async def test_a_v3_lead_with_a_slice_left_at_the_timeout_is_labelled_needs_huma
     _never_a_failure(action)
 
 
-async def test_a_slice_done_line_from_before_the_launch_does_not_count(store, dirs, playbook):
+async def test_a_partly_done_lead_gets_only_its_open_slices(store, dirs, playbook):
+    """S1 was done before this run (another run's ``Belt-Slice-Done`` line), so
+    the launch drops it: the brief lists contract alone and says to skip S1,
+    ``done_before`` keeps it, and the run lands on contract and the sheet.
+    Mutation: keeping done slices relaunches S1 and waits for a new S1 line."""
     repo, launch = dirs
     _wave(launch)
     run_ref = await _queue_lead(store, repo)
     runner = _sliced_runner(run_ref)
     future = time.time() + 3600
     old = _slice_done("S1", 902, time.time() - 86400)  # another run's line
-    first = [_slice_done("contract", 901, future), old, _sheet(future)]
-    runner.comments = [first, [*first, _slice_done("S1", 902, future)]]
+    runner.comments = [[_slice_done("contract", 901, future), old, _sheet(future)]]
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    assert _issue_views(runner) == 2
-    assert (await store.get_action(run_ref)).status == ActionStatus.EXECUTED
+    (brief,) = _launch_briefs(runner)
+    assert "Slices: contract (the packet's slices)" in brief
+    assert "Already done before this run, so skip: S1." in brief
+    assert _issue_views(runner) == 1  # the launch's read serves the first poll
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED, action.rejected_reason
+    lead = action.parameters["_code_change"]["lead"]
+    assert lead["slice_ids"] == ["contract"] and lead["done_before"] == ["S1"]
+
+
+@pytest.mark.parametrize(
+    "how",
+    ["slice-done lines", "another lead's merged PRs", "a merged PR and a line"],
+)
+async def test_a_lead_whose_slices_are_all_done_is_never_launched(store, dirs, playbook, how):
+    """Every slice was done before this run: no session starts and the run is
+    released with the reason, never a failure and never needs-human."""
+    repo, launch = dirs
+    _wave(launch)
+    run_ref = await _queue_lead(store, repo)
+    past = time.time() - 3600
+    lines = {
+        "slice-done lines": [_slice_done("contract", 901, past), _slice_done("S1", 902, past)],
+        "another lead's merged PRs": [],
+        "a merged PR and a line": [_slice_done("S1", 902, past)],
+    }[how]
+    shipped = {
+        "slice-done lines": "",
+        "another lead's merged PRs": "contract, S1",
+        "a merged PR and a line": "contract",
+    }[how]
+    prs = [_lead_pr(51, "other-run", state="MERGED", slices=shipped)] if shipped else []
+    runner = LeadRunner(prs=[prs], comments=[lines])
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert not _launch_briefs(runner) and not _stops(runner)
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert "every slice of #93 is already done" in action.rejected_reason
+    assert not any(a[:3] == ["gh", "issue", "edit"] for a, _ in runner.calls)
+    assert "headless_error" not in action.parameters["_code_change"]
+
+
+@pytest.mark.parametrize(
+    "pr",
+    [
+        _lead_pr(51, "other-run", state="OPEN", slices="contract, S1"),  # not merged
+        _lead_pr(51, "other-run", state="MERGED", slices="contract, S1", feature="brushes"),
+    ],
+    ids=["open", "other-feature"],
+)
+async def test_an_open_or_other_feature_slice_pr_does_not_skip_the_slice(store, dirs, playbook, pr):
+    repo, launch = dirs
+    _wave(launch)
+    run_ref = await _queue_lead(store, repo)
+    runner = _sliced_runner(run_ref)
+    runner.prs = [[*runner.prs[0], pr]]
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert len(_launch_briefs(runner)) == 1
+    lead = (await store.get_action(run_ref)).parameters["_code_change"]["lead"]
+    assert lead["slice_ids"] == ["contract", "S1"] and "done_before" not in lead
 
 
 @pytest.mark.parametrize(
@@ -2447,6 +2599,28 @@ async def test_a_line_lead_brief_lists_every_feature(store, dirs, playbook):
     assert lead["issues"] == [93, 94] and lead["issue"] == 93
     assert [f["feature"] for f in lead["features"]] == [FEATURE, FEATURE_B]
     assert lead["feature"] == FEATURE and lead["branch"] == f"lead/{FEATURE}"
+
+
+async def test_a_line_lead_drops_a_feature_whose_slices_are_all_done(store, dirs, playbook):
+    """#93's slices were all done before this run, so the run launches on #94
+    alone, as a one-feature lead."""
+    repo, launch = dirs
+    _wave(launch)
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref, done=("94",))
+    past = time.time() - 3600
+    runner.issues["93"]["comments"] = [
+        [_slice_done("contract", 901, past), _slice_done("S1", 902, past)]
+    ]
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    (brief,) = _launch_briefs(runner)
+    assert "#94" in brief and "Features:" not in brief and FEATURE not in brief
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED, action.rejected_reason
+    lead = action.parameters["_code_change"]["lead"]
+    assert lead["issues"] == [94] and lead["feature"] == FEATURE_B and "features" not in lead
 
 
 async def test_a_line_lead_lands_only_when_every_feature_is_done(store, dirs, playbook):

@@ -4,52 +4,47 @@
 # (``POCKETPAW_MANDATE_DISPATCHER=headless`` + ``POCKETPAW_FACTORY_DEVELOP=cloud``).
 # ``CloudTaskDispatcher`` files an approved task as the usual queued run, then:
 #   LAUNCH  one trusted launch clone (``POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR``, never the
-#           bound repo) serves every allowlisted repo, detached at ``origin/<base>``;
-#           the task is injection-screened; ``claude [--model <charter model>] --cloud "<brief>"``
-#           runs under ``pty_run.py``. A worker opens ONE PR with ``Closes #<issue>``, ``Belt-Run:
-#           <run id>``, the label and the charter checks, and no AI attribution.
-#   TRACK   gh finds the PR by its marker (else adopts one closing the issue); the
-#           lane and CI gate it; Clef shadow-scores it; CI ``snapshots`` PNGs are kept.
-#           Green + MERGEABLE nudges the lane once per interval per repo. STUCK
-#           (conflict, red past FIX_GRACE, a failed review) gets one fixer per head,
-#           up to FIX_ATTEMPTS, then the diff escalates. MERGED: approved as
-#           ``system:fast-lane``, executed, then the tester. No PR by NO_PR_TIMEOUT:
-#           a worker's comment releases it (``needs-human``), else a relaunch, then
-#           release. gh reads retry transient failures with backoff (lesson 42); a
-#           rate limit waits for the reset its response headers give, then retries.
-#   REVIEW  ``POCKETPAW_FACTORY_CLOUD_REVIEWER=1``: one reviewer per green head
-#           (REVIEW_CAP in flight) posts ``Belt-Review: pass|fail`` + ``Head: <sha>``;
-#           Belt turns it into the ``belt/review`` status (a fail's items go through
-#           ``clef.judge_review`` to a ``review`` fixer); no verdict in time passes.
-#   LESSONS a merged PR a ``ci``/``review`` fixer got through, and each tester bug, is
-#           one deduplicated lesson in the mandate's soul; a brief recalls the top 5.
-#   TESTER  ``POCKETPAW_FACTORY_CLOUD_TESTER=1`` + a ``tester`` seat: one session per
-#           landed run files bugs and one ``Belt-Test`` PR; it never holds the land.
-#   RESUME  at startup every launched run with no diff is tracked again (never
-#           relaunched), as is one whose tracker died on a TRACK error (lesson 45);
-#           a lead one of whose issues has a newer pending lead is released instead
-#           ("newer" is ``(created_at, id)``: SQLite stamps seconds, the id milliseconds).
-#   LEAD    ``recipe == "feature-lead"``: one session per line of feature issues
-#           (``lead.issues``; the first flat on ``lead``, all on ``lead.features`` when
-#           several), briefed from the clone's ``docs/factory/lead.md``, each issue and
-#           packet, the run id and a PACK per feature (``loom orient``, ``kb search``,
-#           ``soul recall`` on this Mac; 3k in all). A ``lead/<feature>`` past
-#           LEAD_REBASE_BEHIND commits behind the base gets a rebase rule; past
-#           LEAD_REFUSE_BEHIND it is rebuilt as one commit on the base when it only
-#           changes ``docs/leads/`` records (pushed with a lease, kept on
-#           ``lead.rebuilt``), else the launch is refused: note and ``needs-human`` on
-#           that issue, run released. ``Belt-Lead: <run id>`` PRs go on ``lead.prs`` (never
-#           reviewed or fixed; ``Feature:`` names theirs), each issue's done and
-#           slice-done comments on ``lead.records``. Per feature, DONE v3 (``slice_ids``
-#           from the ``.wave.json``): every slice has a ``Belt-Slice-Done: <slice> <run
-#           url>`` since the launch on a ``success`` ci.yml base run holding its last
-#           PR, then ``Belt-Contact-Sheet:``. DONE v2: a merged ``feature-done`` PR, green
-#           dev CI on it and the sheet. DONE too: a closed feature issue. LIVENESS:
-#           live (work inside LEAD_STALL, or a RECORD ``Next:`` naming CI or the lane
-#           while a base run is live), exited (``session_end``, unreadable today) or
-#           unverifiable: a nudge per window; an exited one is relaunched, then parked.
-#           LEAD_TIMEOUT (8 h, from the last progress while waiting) is the budget; a
-#           working lead stops at 2x. The run lands when every feature is done. PARK
+#           bound repo) serves every allowlisted repo, detached at ``origin/<base>``; the
+#           task is injection-screened; ``claude [--model <m>] --cloud "<brief>"`` runs under
+#           ``pty_run.py``. A worker opens ONE PR with ``Closes #<issue>``, ``Belt-Run: <run
+#           id>``, the label and the charter checks, and no AI attribution.
+#   TRACK   gh finds the PR by its marker (else adopts one closing the issue); the lane and
+#           CI gate it; Clef shadow-scores it; CI ``snapshots`` PNGs are kept. Green +
+#           MERGEABLE nudges the lane once per interval per repo. STUCK (conflict, red past
+#           FIX_GRACE, a failed review) gets one fixer per head, up to FIX_ATTEMPTS, then the
+#           diff escalates. MERGED: approved as ``system:fast-lane``, executed, then the
+#           tester. No PR by NO_PR_TIMEOUT: a worker's comment releases it (``needs-human``),
+#           else a relaunch, then release. gh retries transient failures (lesson 42) and
+#           waits out a rate limit to the reset its response headers give.
+#   RELEASE a rejected run (``_release``, or a human's reject the tracker sees) first gets
+#           one stop message queued into its newest session (``_STOP_TEXT``, kept on
+#           ``stopped``); a failed stop is logged, never a failed release (lesson 182).
+#   REVIEW  ``POCKETPAW_FACTORY_CLOUD_REVIEWER=1``: one reviewer per green head (REVIEW_CAP
+#           in flight) posts ``Belt-Review: pass|fail`` + ``Head: <sha>``, turned into the
+#           ``belt/review`` status (a fail's items go through ``clef.judge_review`` to a
+#           ``review`` fixer); no verdict in time passes.
+#   LESSONS a merged PR a ``ci``/``review`` fixer got through, and each tester bug, is one
+#           deduplicated lesson in the mandate's soul; a brief recalls the top 5.
+#   TESTER  ``POCKETPAW_FACTORY_CLOUD_TESTER=1`` + a ``tester`` seat: one session per landed
+#           run files bugs and one ``Belt-Test`` PR; it never holds the land.
+#   RESUME  at startup every launched run with no diff is tracked again (never relaunched),
+#           as is one whose tracker died on a TRACK error (lesson 45); a lead with a newer
+#           pending lead on one of its issues is released (newer: ``(created_at, id)``).
+#   LEAD    ``recipe == "feature-lead"``: one session per line of feature issues (the first
+#           flat on ``lead``, all on ``lead.features``), briefed from ``docs/factory/lead.md``,
+#           each issue and packet, the run id and a 3k PACK (loom, kb, soul). A ``lead/<f>``
+#           past LEAD_REBASE_BEHIND gets a rebase rule; past LEAD_REFUSE_BEHIND it is rebuilt
+#           on the base when it only changes ``docs/leads/`` records, else the launch is
+#           refused (note, ``needs-human``, released). Slices done before the run (a
+#           ``Belt-Slice-Done`` line, or another run's merged ``Slice:`` PR) are skipped
+#           (``done_before``); with none left the run is released unlaunched. ``Belt-Lead``
+#           PRs go on ``lead.prs`` (never reviewed or fixed), done comments on
+#           ``lead.records``. DONE v3: every slice has a ``Belt-Slice-Done: <slice> <run
+#           url>`` since the launch on a green ci.yml base run holding its last PR, then
+#           ``Belt-Contact-Sheet:``; v2: a merged ``feature-done`` PR, green dev CI on it and
+#           the sheet; or a closed issue. LIVENESS: live, exited or unverifiable: a nudge per
+#           window; an exited one is relaunched, then parked. LEAD_TIMEOUT (8 h, from the
+#           last progress while waiting) is the budget; a working lead stops at 2x. PARK
 #           per issue: a sheet closes it, all slices done asks for it, else needs-human.
 # Only git, gh, the launcher and PACK tools run here; an approved escalated diff lands on the line.
 
@@ -127,6 +122,11 @@ _SLICE_DONE_LINE = re.compile(
     r"^[ \t]*Belt-Slice-Done:[ \t]+(\S+)[ \t]+(\S+)(?:[ \t]+gaps:(.*))?", re.M
 )
 _SLICE_LINE = re.compile(r"^Slice:[ \t]*(.+)$", re.M)
+# Queued into a released or rejected run's newest session (``_stop_session``).
+# No CLI command stops or archives a cloud session (``claude stop``/``rm`` are
+# local ``--bg`` only, archive is the web sidebar), so it rides ``-p --cloud``
+# like a nudge and lands at the session's next turn.
+_STOP_TEXT = "Belt released this run. Stop now: end your turn, push nothing more, open no PRs."
 # A repo path a lead's comment names (``Sources/A/B.swift``), and its first link.
 _FILE = re.compile(r"(?<![\w/.:-])((?:[\w-]+/)+[\w.-]+\.[A-Za-z0-9]{1,8})\b")
 _LINK = re.compile(r"https?://[^\s)>\]]+")
@@ -248,6 +248,11 @@ _RELEASER = "system:belt-cloud"
 
 class CloudStationError(RuntimeError):
     """A cloud run that cannot launch or resolve; the message names the step."""
+
+
+class SlicesDoneError(CloudStationError):
+    """A lead launch with no slice left: each was done before the run
+    (``_open_slices``). The run is released, never failed."""
 
 
 class StaleBaseError(CloudStationError):
@@ -572,6 +577,9 @@ class CloudTaskDispatcher:
             except StaleBaseError as exc:
                 await self._refuse(store, run_ref, blob, exc)
                 return
+            except SlicesDoneError as exc:
+                await self._release(store, run_ref, blob, str(exc))
+                return
             cloud = {"session_url": session, "launched_at": self.wall()}
             issue = _ISSUE.search(str(blob.get("task") or ""))
             url = f"https://github.com/{slug}/issues/{issue.group(1)}" if issue else None
@@ -800,7 +808,10 @@ class CloudTaskDispatcher:
         since = launched
         while True:
             action = await store.get_action(run_ref)
-            if getattr(action, "status", None) != "pending":
+            status = getattr(action, "status", None)
+            if status != "pending":
+                if status == "rejected":  # a human's reject stops the session too
+                    await self._stop_session(store, run_ref, blob)
                 return  # a human rejected or approved it meanwhile; theirs stands
             now = self.wall()
             feats = _features(lead)  # a relaunch may re-resolve them
@@ -1191,6 +1202,9 @@ class CloudTaskDispatcher:
             except StaleBaseError as exc:
                 await self._refuse(store, run_ref, blob, exc)
                 return False
+            except SlicesDoneError as exc:
+                await self._release(store, run_ref, blob, str(exc))
+                return False
             except Exception as exc:  # noqa: BLE001 — a failed relaunch is the next stall's
                 entry["error"] = str(exc)[:600]
         lead["stalls"] = [*stalls, entry]
@@ -1550,12 +1564,16 @@ class CloudTaskDispatcher:
         checks = list(charter.get("checks") or [])
         if _is_lead(blob) and not (fix or test or review):
             lead = blob.setdefault("lead", {})
-            feats = await self._lead_features(request, slug, launch)
+            feats = await self._open_slices(
+                run_ref, blob, slug, await self._lead_features(request, slug, launch), launch
+            )
             # The first feature stays flat on ``lead`` (``lead.issue`` & co.), so
             # one-feature readers and older blobs keep working.
             lead.update(feats[0], issues=[f["issue"] for f in feats])
             if len(feats) > 1:
                 lead["features"] = feats
+            else:  # a relaunch may have dropped a feature since
+                lead.pop("features", None)
             stale: dict[str, int] = {}
             for f in feats:  # every feature's own lead branch
                 behind = await self._behind(launch, f["branch"], base)
@@ -2139,10 +2157,12 @@ class CloudTaskDispatcher:
             logger.info("belt cloud: labelling #%s on %s failed", number, slug, exc_info=True)
 
     async def _release(self, store: Any, run_ref: str, blob: dict[str, Any], why: str) -> None:
-        """Reject the run through the store path a human reject takes, so the
-        mandate's line moves on and the run's sighting stays open for the next
-        shift; clears ``headless_state`` so a restart does not resume it. Once
-        per run (a request, checked against the run's status)."""
+        """Stop the run's session (``_stop_session``), then reject the run
+        through the store path a human reject takes, so the mandate's line
+        moves on and the run's sighting stays open for the next shift; clears
+        ``headless_state`` so a restart does not resume it. Once per run (a
+        request, checked against the run's status)."""
+        await self._stop_session(store, run_ref, blob)
 
         async def reject(rid: str) -> None:
             if await store.reject(run_ref, reason=why, rejector=_RELEASER) is None:
@@ -2160,6 +2180,91 @@ class CloudTaskDispatcher:
             return getattr(await store.get_action(run_ref), "status", None) != "pending"
 
         await self._once(store, run_ref, blob, "release", "run", reject, settled)
+
+    async def _stop_session(self, store: Any, run_ref: str, blob: dict[str, Any]) -> None:
+        """Queue ``_STOP_TEXT`` into the run's newest session (``_live_session``)
+        once: a request with no read-back, so a lost answer counts as sent. The
+        attempt is kept on ``stopped`` (``{session_url, at, error?}``). Never
+        raises: a failed stop is logged and kept as its ``error``."""
+        session = _live_session(blob)
+        if not session:
+            return  # a launch refused before any session started
+        sid = session.rsplit("/", 1)[-1]
+
+        async def stop(rid: str) -> None:
+            entry: dict[str, Any] = {"session_url": session, "at": self.wall()}
+            argv = [claude_cli_argv()[0], "-p", "--cloud", sid, _STOP_TEXT]
+            try:
+                async with _LAUNCH_LOCK:  # run from the shared launch clone, as a nudge is
+                    code, _, err = await self.runner(
+                        argv, cwd=Path(self.launch_dir).expanduser(), timeout=300.0
+                    )
+                if code != 0:
+                    entry["error"] = _ESCAPES.sub("", err or "")[-300:] or f"exit {code}"
+            except Exception as exc:  # noqa: BLE001 — a failed stop never holds a release
+                entry["error"] = str(exc)[:300] or type(exc).__name__
+            if "error" in entry:
+                logger.warning("belt cloud: stop of %s failed: %s", session, entry["error"])
+            blob["stopped"] = entry
+            await _patch(store, run_ref, stopped=entry)
+
+        try:
+            await self._once(store, run_ref, blob, "stop", sid, stop)
+        except Exception:  # noqa: BLE001 — the store write failed; the release goes on
+            logger.warning("belt cloud: stop of run %s not recorded", run_ref, exc_info=True)
+
+    async def _open_slices(
+        self,
+        run_ref: str,
+        blob: dict[str, Any],
+        slug: str,
+        feats: list[dict[str, Any]],
+        cwd: Path,
+    ) -> list[dict[str, Any]]:
+        """``feats`` without the slices done before this run, off the shared
+        ``_lead_read``: a ``Belt-Slice-Done`` line on the issue from before the
+        run's first launch (now, on a first launch), or a merged PR of another
+        run whose ``Feature:`` and ``Slice:`` lines name it. Each feature keeps
+        its open ``slice_ids`` and the rest on ``done_before``; one with none
+        open leaves the run; none left raises ``SlicesDoneError``. A v2 feature
+        (no slices) is kept as it is, and a run with no v3 feature reads nothing.
+        ponytail: a merged ``Slice:`` PR counts its slice done though the slice
+        may need more PRs; a slice-done line is the exact signal."""
+        if not any(f.get("slice_ids") for f in feats):
+            return feats
+        read = await self._lead_read(slug, feats, cwd)
+        at = (blob.get("cloud") or {}).get("launched_at")
+        before = at if isinstance(at, int | float) else self.wall()
+        mark = f"{LEAD_MARKER} {run_ref}"
+        shipped = [
+            _pr_row(p)
+            for p in read.prs
+            if p.get("state") == "MERGED"
+            and not any(ln.strip() == mark for ln in str(p.get("body") or "").splitlines())
+        ]
+        kept, gone = [], []
+        for f in feats:
+            ids = list(f.get("slice_ids") or [])
+            comments = (read.issues.get(_issue_no(f)) or {}).get("comments") or []
+            said = _slice_lines([c for c in comments if _epoch(c.get("createdAt")) <= before], 0)
+            merged = {s for p in shipped if p["feature"] == f["feature"] for s in p["slices"]}
+            done = [s for s in ids if s in said or s in merged]
+            if not done:
+                kept.append(f)
+            elif len(done) == len(ids):
+                gone.append(f"#{f['issue']}")
+            else:
+                kept.append(
+                    {**f, "slice_ids": [s for s in ids if s not in done], "done_before": done}
+                )
+        if not kept:
+            raise SlicesDoneError(
+                f"not launched: every slice of {', '.join(gone)} is already done "
+                "(a Belt-Slice-Done line or a merged Slice: PR from before this run)"
+            )
+        if gone:
+            logger.info("belt cloud: run %s skips %s, every slice done", run_ref, ", ".join(gone))
+        return kept
 
     async def _fix(
         self,
@@ -2925,9 +3030,11 @@ def _lead_done(f: dict[str, Any], base: str, line: bool) -> str:
     who = f"- {f['feature']} (#{issue}) done" if line else "- Done"
     if ids:
         app = (_PACKET.match(f["packet"]) or [None, "<app>"])[1]
+        skip = f.get("done_before") or []
         return (
             f"{who}, slice by slice. Slices: {', '.join(ids)} (the packet's slices). "
-            f"A slice is done when a completed, successful ci.yml run on {base} (scoped with "
+            + (f"Already done before this run, so skip: {', '.join(skip)}. " if skip else "")
+            + f"A slice is done when a completed, successful ci.yml run on {base} (scoped with "
             f"`app={app}`, or a full run) contains its last merged PR, the newest one whose "
             f"`Slice:` line names it. Then comment on #{issue} with the line `{_SLICE_DONE} "
             "<slice> <run url>`, ending ` gaps: #<n> #<m>` when the round cap closed it with "
@@ -2970,27 +3077,43 @@ def _lead_prs(rows: list[dict[str, Any]], run_ref: str) -> tuple[list[dict[str, 
     mark = f"{LEAD_MARKER} {run_ref}"
     prs, newest = [], 0.0
     for pr in rows:
-        body = str(pr.get("body") or "")
-        if not any(ln.strip() == mark for ln in body.splitlines()):
+        if not any(ln.strip() == mark for ln in str(pr.get("body") or "").splitlines()):
             continue
-        named = (t.strip("`*") for m in _SLICE_LINE.findall(body) for t in re.split(r"[,\s]+", m))
-        labels = {str(lb.get("name") or "") for lb in pr.get("labels") or []}
-        serves = _FEATURE_LINE.search(body)
         newest = max(newest, _epoch(pr.get("updatedAt")))
-        prs.append(
-            {
-                "number": int(pr["number"]),
-                "url": str(pr.get("url") or ""),
-                "state": str(pr.get("state") or ""),
-                "branch": str(pr.get("headRefName") or ""),
-                "done": _FEATURE_DONE in labels,
-                "merge_sha": str((pr.get("mergeCommit") or {}).get("oid") or ""),
-                "merged_at": str(pr.get("mergedAt") or ""),
-                "slices": list(dict.fromkeys(t for t in named if SLICE_ID.match(t))),
-                "feature": serves.group(1) if serves else "",
-            }
-        )
+        prs.append(_pr_row(pr))
     return sorted(prs, key=lambda p: p["number"]), newest
+
+
+def _pr_row(pr: dict[str, Any]) -> dict[str, Any]:
+    """One lead PR (a ``_lead_read`` row) as ``lead.prs`` keeps it: the feature
+    its ``Feature:`` line names and the slice ids of its ``Slice:`` lines."""
+    body = str(pr.get("body") or "")
+    named = (t.strip("`*") for m in _SLICE_LINE.findall(body) for t in re.split(r"[,\s]+", m))
+    labels = {str(lb.get("name") or "") for lb in pr.get("labels") or []}
+    serves = _FEATURE_LINE.search(body)
+    return {
+        "number": int(pr["number"]),
+        "url": str(pr.get("url") or ""),
+        "state": str(pr.get("state") or ""),
+        "branch": str(pr.get("headRefName") or ""),
+        "done": _FEATURE_DONE in labels,
+        "merge_sha": str((pr.get("mergeCommit") or {}).get("oid") or ""),
+        "merged_at": str(pr.get("mergedAt") or ""),
+        "slices": list(dict.fromkeys(t for t in named if SLICE_ID.match(t))),
+        "feature": serves.group(1) if serves else "",
+    }
+
+
+def _live_session(blob: dict[str, Any]) -> str:
+    """The run's newest cloud session: a lead's last ``sessions`` entry, else a
+    task run's last relaunch, else its first; "" before any launch."""
+    rows = [
+        blob.get("cloud") or {},
+        *(blob.get("relaunches") or []),
+        *((blob.get("lead") or {}).get("sessions") or []),
+    ]
+    urls = [str(r["session_url"]) for r in rows if isinstance(r, dict) and r.get("session_url")]
+    return urls[-1] if urls else ""
 
 
 def _branch_at(read: _LeadRead, lead: dict[str, Any]) -> tuple[float, str]:

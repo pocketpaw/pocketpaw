@@ -156,8 +156,8 @@
   {
     "label": "a settled lead is still tracked",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "            if getattr(action, \"status\", None) != \"pending\":\n                return  # a human rejected",
-    "replace": "            if False:\n                return  # a human rejected",
+    "find": "            if status != \"pending\":\n                if status == \"rejected\"",
+    "replace": "            if False:\n                if status == \"rejected\"",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
@@ -1035,6 +1035,78 @@
     "replace": "                _PACK_SOUL,",
     "tests": [
       "tests/cloud/test_belt_lead_pack.py::test_a_line_lead_gets_one_pack_per_feature_under_the_cap"
+    ]
+  },
+  {
+    "label": "a release leaves the session running",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "status).\"\"\"\n        await self._stop_session(store, run_ref, blob)\n",
+    "replace": "status).\"\"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "a human reject leaves the session running",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                    await self._stop_session(store, run_ref, blob)\n",
+    "replace": "                    pass\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "a second release sends a second stop",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            await self._once(store, run_ref, blob, \"stop\", sid, stop)",
+    "replace": "            await stop(sid)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "a failed stop is not kept",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            blob[\"stopped\"] = entry\n            await _patch(store, run_ref, stopped=entry)",
+    "replace": "            entry.pop(\"error\", None)\n            blob[\"stopped\"] = entry\n            await _patch(store, run_ref, stopped=entry)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "done slices launch again",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            done = [s for s in ids if s in said or s in merged]",
+    "replace": "            done = []",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "another lead's merged Slice: PR does not count",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            done = [s for s in ids if s in said or s in merged]",
+    "replace": "            done = [s for s in ids if s in said]",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "this run's own merged PRs count as done before it",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            and not any(ln.strip() == mark for ln in str(p.get(\"body\") or \"\").splitlines())\n",
+    "replace": "\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "a slice-done line from this run counts as done before it",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if _epoch(c.get(\"createdAt\")) <= before]",
+    "replace": "if True]",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
     ]
   }
 ]

@@ -1027,6 +1027,26 @@ launch (`cloud.launched_at`, or the last relaunch; a resumed run without
    flight and its sighting stays open (only a landed task resolves one), so the
    next shift re-plans it.
 
+**Stopping a released session.** Every release (no PR, a stale base, a lead's
+timeout or last stall rung, a superseded lead) first stops the run's newest
+cloud session. No CLI command stops or archives a cloud session (`claude stop`
+and `claude rm` only manage local `--bg` sessions; archive is the web sidebar),
+so Belt queues one message the way it nudges: `claude -p --cloud <session id>
+"Belt released this run. Stop now: end your turn, push nothing more, open no
+PRs."`. The session reads it at its next turn. It is sent once per session (a
+`stop` request on `requests`) and kept on the blob as `stopped`
+(`{session_url, at, error?}`). A failed send is logged and kept as `error`; it
+never holds the release. A lead a human rejects in Instinct is stopped the same
+way at its tracker's next poll (factory lesson 182).
+
+**Slices done before a lead.** Before a feature lead launches (or relaunches),
+Belt reads the shared lead read for its issues and PRs. A slice counts as done
+when the issue has a `Belt-Slice-Done: <slice>` line from before the run, or a
+merged PR of another run carries `Feature: <feature>` and `Slice: <slice>`. Done
+slices leave `slice_ids` (kept on `done_before`, and the brief says to skip
+them); a feature with none left leaves the run, and a run with none left is
+released without a launch.
+
 The run timeout is checked before the no-PR timeout, so a run whose overall
 timeout has also passed (a resume long after launch) still ends with the usual
 `headless_error`.
