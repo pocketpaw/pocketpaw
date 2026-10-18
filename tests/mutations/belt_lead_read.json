@@ -1,0 +1,111 @@
+[
+  {
+    "label": "every lead read asks GitHub again (no shared cache)",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and now - read.at < self.poll_seconds / 2 and want <= read.keys:",
+    "replace": "and now - read.at < 0 and want <= read.keys:",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "the batch reads only the asking lead's keys",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            keys = sorted(read.asked, key=str)",
+    "replace": "            keys = sorted(want, key=str)",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "a cache missing the caller's keys is reused",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and now - read.at < self.poll_seconds / 2 and want <= read.keys:",
+    "replace": "and now - read.at < self.poll_seconds / 2:",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py",
+      "tests/cloud/test_belt_lead_runs.py::test_a_line_lead_brief_lists_every_feature"
+    ]
+  },
+  {
+    "label": "issues map to the wrong alias",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                raw = repo.get(f\"i{k}\") or {}",
+    "replace": "                raw = repo.get(f\"i{len(issues) - 1 - k}\") or {}",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "a NOT_FOUND alias fails the whole read",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            out = await self._gh(argv, cwd, \"TRACK: gh api graphql\", partial=True)",
+    "replace": "            out = await self._gh(argv, cwd, \"TRACK: gh api graphql\")",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "a GraphQL body with a real error counts as an answer",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    return bool(doc.get(\"data\")) and all(e.get(\"type\") == \"NOT_FOUND\" for e in errors)",
+    "replace": "    return bool(doc.get(\"data\"))",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "a rate limit backs off instead of waiting for the reset",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                self._gh_reset = _empty_until(out) or await self._probe_reset(cwd)",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "a header-less rate limit never probes",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                self._gh_reset = _empty_until(out) or await self._probe_reset(cwd)",
+    "replace": "                self._gh_reset = _empty_until(out)",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "a known reset still takes the doubling backoff",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            if self._gh_reset > self.wall():\n                continue",
+    "replace": "            if False:\n                continue",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "an emptied bucket does not hold the next read",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                self._gh_reset = max(self._gh_reset, _empty_until(out))",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "the reset is read from a non-empty bucket too",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    if headers.get(\"x-ratelimit-remaining\") != \"0\":",
+    "replace": "    if not headers:",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "a missing branch head breaks the read",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    head = read.heads.get((str(lead.get(\"branch\") or \"\"), str(lead.get(\"feature\") or \"\"))) or {}",
+    "replace": "    head = read.heads.get((str(lead.get(\"branch\") or \"\"), str(lead.get(\"feature\") or \"\")))",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py"
+    ]
+  }
+]

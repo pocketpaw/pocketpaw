@@ -15,7 +15,8 @@
 #           up to FIX_ATTEMPTS, then the diff escalates. MERGED: approved as
 #           ``system:fast-lane``, executed, then the tester. No PR by NO_PR_TIMEOUT:
 #           a worker's comment releases it (``needs-human``), else a relaunch, then
-#           release. gh reads retry transient failures with backoff (lesson 42).
+#           release. gh reads retry transient failures with backoff (lesson 42); a
+#           rate limit waits for the reset its response headers give, then retries.
 #   REVIEW  ``POCKETPAW_FACTORY_CLOUD_REVIEWER=1``: one reviewer per green head
 #           (REVIEW_CAP in flight) posts ``Belt-Review: pass|fail`` + ``Head: <sha>``;
 #           Belt turns it into the ``belt/review`` status (a fail's items go through
@@ -144,11 +145,23 @@ _SHARED_SOUL = Path(".soul") / "shared" / "paw-os-shared.soul"
 _TERM = re.compile(r"[A-Za-z0-9]{3,}")
 # A lead's RECORD ``Next:`` that names a wait it cannot shorten: CI or the lane.
 _WAITS_ON_CI = re.compile(r"\bCI\b|\b[Ll]ane\b")
-# The lead branch's last commit time and its RECORD.md, in one read.
-_BRANCH_QUERY = (
-    "query($owner:String!,$name:String!,$ref:String!,$path:String!){"
-    "repository(owner:$owner,name:$name){object(expression:$ref){"
-    "...on Commit{committedDate file(path:$path){object{...on Blob{text}}}}}}}"
+# A lead poll's GitHub read (``_lead_read``): one aliased GraphQL query per repo
+# for every tracked lead: the newest 100 PRs, each feature issue's state and
+# comments (``i<k>``) and each lead branch's last commit and RECORD.md (``b<k>``),
+# in gh's ``--json`` shapes once normalized. 31 issues, 31 blobs and 100 PRs cost
+# 1 point, where one read each cost 73 (docs: 2026-10-18-github-api-limits).
+_LEAD_PRS = (
+    "prs:pullRequests(first:100,states:[OPEN,CLOSED,MERGED],"
+    "orderBy:{field:CREATED_AT,direction:DESC}){nodes{number url state body updatedAt "
+    "mergedAt headRefName mergeCommit{oid} labels(first:50){nodes{name}}}}"
+)
+_LEAD_ISSUE = (
+    "i{k}:issue(number:{n}){{state comments(last:100){{totalCount "
+    "nodes{{id url body createdAt author{{login}}}}}}}}"
+)
+_LEAD_BRANCH = (
+    "b{k}:object(expression:{ref}){{...on Commit{{committedDate "
+    "file(path:{path}){{object{{...on Blob{{text}}}}}}}}}}"
 )
 
 
@@ -158,7 +171,10 @@ def _run_green(run: dict[str, Any]) -> bool:
 
 
 # gh failures worth a retry (lesson 42): network, timeouts, GitHub 5xx and
-# rate limits. Anything else (a 404, a bad argument) fails at once.
+# rate limits. Anything else (a 404, a bad argument) fails at once. A rate limit
+# whose reset is known (``X-RateLimit-Reset`` on an empty bucket) waits for it.
+_RATE_LIMITED = re.compile(r"rate limit", re.IGNORECASE)
+_RATE_PROBE = "query={rateLimit{remaining}}"
 _TRANSIENT = re.compile(
     r"timed? ?out|timeout|connection|reset by peer|\bEOF\b|TLS|HTTP 5\d\d|\b50[0234]\b|"
     r"bad gateway|rate limit|temporar|could not resolve host|network|unexpected end",
@@ -410,6 +426,23 @@ def _newest_leads(actions: list[Any]) -> dict[tuple[str, int], Any]:
 
 
 @dataclass
+class _LeadRead:
+    """One repo's batched lead read (``CloudTaskDispatcher._lead_read``), in gh's
+    ``--json`` shapes: the newest 100 PRs, each issue's ``{state, comments}``
+    (``{}`` when GitHub has no such issue) and each ``(branch, feature)``'s head
+    commit (None when the branch or its RECORD.md is missing). ``asked`` is when
+    a tracker last wanted each key; ``keys`` what ``at`` (``clock``) fetched."""
+
+    prs: list[dict[str, Any]] = field(default_factory=list)
+    issues: dict[int, dict[str, Any]] = field(default_factory=dict)
+    heads: dict[tuple[str, str], dict[str, Any] | None] = field(default_factory=dict)
+    asked: dict[tuple[Any, ...], float] = field(default_factory=dict)
+    keys: set[tuple[Any, ...]] = field(default_factory=set)
+    at: float | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass
 class CloudTaskDispatcher:
     """The headless dispatcher's cloud twin: files the queued run, launches a
     cloud session for it and tracks the session's PR (see the header)."""
@@ -467,6 +500,11 @@ class CloudTaskDispatcher:
     # ``gh_backoff_seconds`` and doubling, before the tracker gives up.
     gh_retries: int = 3
     gh_backoff_seconds: float = 2.0
+    # Wall time GitHub's empty bucket refills (``X-RateLimit-Reset``); until then
+    # every tracker's gh read waits instead of spending a call on a refusal.
+    _gh_reset: float = 0.0
+    # Per repo, the lead read every tracker on it shares (``_lead_read``).
+    _lead_reads: dict[str, _LeadRead] = field(default_factory=dict)
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.monotonic
     wall: Callable[[], float] = time.time
@@ -768,14 +806,9 @@ class CloudTaskDispatcher:
             feats = _features(lead)  # a relaunch may re-resolve them
             line = len(feats) > 1
             try:
-                prs, pr_at = await self._lead_prs(slug, run_ref, cwd)
-                raws = []
-                for f in feats:
-                    issue = str(f.get("issue") or "")
-                    argv = ["gh", "issue", "view", issue, "-R", slug, "--json", "comments,state"]
-                    raws.append(
-                        json.loads(await self._gh(argv, cwd, "TRACK: gh issue view") or "{}")
-                    )
+                read = await self._lead_read(slug, feats, cwd)
+                prs, pr_at = _lead_prs(read.prs, run_ref)
+                raws = [read.issues.get(_issue_no(f)) or {} for f in feats]
             except (CloudStationError, ValueError) as exc:
                 # GitHub is down past the retries: skip this poll, not the lead.
                 logger.warning("belt cloud: lead %s poll skipped: %s", run_ref, exc)
@@ -842,7 +875,7 @@ class CloudTaskDispatcher:
                 return
             branch, steps = 0.0, []
             for f in feats:
-                at, step = await self._branch_at(slug, f, cwd)
+                at, step = _branch_at(read, f)
                 branch, steps = max(branch, at), [*steps, step]
             step = " | ".join(steps)
             # The lead's own signs of work; a stall rung or a relaunch is Belt's.
@@ -913,62 +946,67 @@ class CloudTaskDispatcher:
         why = f"feature lead not done after {hours:g}h (session {session})"
         await self._park(store, run_ref, blob, slug, cwd, why)
 
-    async def _lead_prs(
-        self, slug: str, run_ref: str, cwd: Path
-    ) -> tuple[list[dict[str, Any]], float]:
-        """Every PR (open, merged or closed) whose body has the line ``Belt-Lead:
-        <run_ref>``, by number, each with the feature its ``Feature:`` line names
-        and the slice ids of its ``Slice:`` lines, and the newest ``updatedAt``
-        among them (epoch).
-        ponytail: the newest 100 PRs; a lead that outlives them loses the oldest."""
-        argv = ["gh", "pr", "list", "-R", slug, "--state", "all", "--limit", "100", "--json"]
-        argv.append("number,url,state,body,labels,updatedAt,mergeCommit,mergedAt,headRefName")
-        rows = json.loads(await self._gh(argv, cwd, "TRACK: gh pr list") or "[]")
-        mark = f"{LEAD_MARKER} {run_ref}"
-        prs, newest = [], 0.0
-        for pr in rows:
-            body = str(pr.get("body") or "")
-            if not any(ln.strip() == mark for ln in body.splitlines()):
-                continue
-            named = (
-                t.strip("`*") for m in _SLICE_LINE.findall(body) for t in re.split(r"[,\s]+", m)
-            )
-            labels = {str(lb.get("name") or "") for lb in pr.get("labels") or []}
-            serves = _FEATURE_LINE.search(body)
-            newest = max(newest, _epoch(pr.get("updatedAt")))
-            prs.append(
-                {
-                    "number": int(pr["number"]),
-                    "url": str(pr.get("url") or ""),
-                    "state": str(pr.get("state") or ""),
-                    "branch": str(pr.get("headRefName") or ""),
-                    "done": _FEATURE_DONE in labels,
-                    "merge_sha": str((pr.get("mergeCommit") or {}).get("oid") or ""),
-                    "merged_at": str(pr.get("mergedAt") or ""),
-                    "slices": list(dict.fromkeys(t for t in named if SLICE_ID.match(t))),
-                    "feature": serves.group(1) if serves else "",
-                }
-            )
-        return sorted(prs, key=lambda p: p["number"]), newest
-
-    async def _branch_at(self, slug: str, lead: dict[str, Any], cwd: Path) -> tuple[float, str]:
-        """When the lead's status branch got its last commit (epoch) and the
-        ``Next:`` line of the RECORD.md on it, in one GraphQL read; ``(0.0, "")``
-        when the branch does not exist yet or is unreadable."""
-        branch, feature = str(lead.get("branch") or ""), str(lead.get("feature") or "")
-        if not _SAFE_REF.match(branch) or not _SAFE_FEATURE.match(feature):
-            return 0.0, ""
-        owner, name = slug.split("/", 1)
-        argv = ["gh", "api", "graphql", "-f", f"query={_BRANCH_QUERY}", "-f", f"owner={owner}"]
-        argv += ["-f", f"name={name}", "-f", f"ref={branch}"]
-        argv += ["-f", f"path=docs/leads/{feature}/RECORD.md"]
-        try:
-            data = json.loads(await self._gh(argv, cwd, "STALL") or "{}").get("data") or {}
-        except Exception:  # noqa: BLE001 — no status branch yet reads as no activity
-            return 0.0, ""
-        head = (data.get("repository") or {}).get("object") or {}
-        text = ((head.get("file") or {}).get("object") or {}).get("text")
-        return _epoch(head.get("committedDate")), str(parse_record(text)["next"] or "")
+    async def _lead_read(self, slug: str, feats: list[dict[str, Any]], cwd: Path) -> _LeadRead:
+        """This poll's GitHub read for a lead's ``feats``, shared by every tracker
+        on ``slug``: ONE aliased GraphQL query (``_LEAD_PRS``, ``_LEAD_ISSUE``,
+        ``_LEAD_BRANCH``) for each issue and lead branch any tracker asked for in
+        the last two polls. Reused for half a poll while it holds every key the
+        caller wants; a lead new since the last fetch fetches again. A missing
+        issue reads ``{}`` and a missing branch or RECORD.md None, never an
+        error. ponytail: an issue past 100 comments is read again whole with
+        ``gh issue view``, one point each."""
+        read = self._lead_reads.setdefault(slug, _LeadRead())
+        want: set[tuple[Any, ...]] = set()
+        for f in feats:
+            if number := _issue_no(f):
+                want.add(("issue", number))
+            branch, feature = str(f.get("branch") or ""), str(f.get("feature") or "")
+            if _SAFE_REF.match(branch) and _SAFE_FEATURE.match(feature):
+                want.add(("branch", branch, feature))
+        asked = self.clock()
+        read.asked.update(dict.fromkeys(want, asked))
+        async with read.lock:  # one fetch at a time per repo; the rest reuse it
+            now = self.clock()
+            if read.at is not None and now - read.at < self.poll_seconds / 2 and want <= read.keys:
+                return read
+            read.asked = {k: t for k, t in read.asked.items() if now - t <= 2 * self.poll_seconds}
+            keys = sorted(read.asked, key=str)
+            issues = [int(k[1]) for k in keys if k[0] == "issue"]
+            heads = [(str(k[1]), str(k[2])) for k in keys if k[0] == "branch"]
+            parts = [_LEAD_PRS]
+            parts += [_LEAD_ISSUE.format(k=k, n=n) for k, n in enumerate(issues)]
+            parts += [
+                _LEAD_BRANCH.format(
+                    k=k, ref=json.dumps(b), path=json.dumps(f"{_LEAD_RECORDS}{f}/RECORD.md")
+                )
+                for k, (b, f) in enumerate(heads)
+            ]
+            owner, name = slug.split("/", 1)
+            query = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){"
+            argv = ["gh", "api", "graphql", "-i", "-f", f"query={query}{' '.join(parts)}}}}}"]
+            argv += ["-f", f"owner={owner}", "-f", f"name={name}"]
+            out = await self._gh(argv, cwd, "TRACK: gh api graphql", partial=True)
+            data = json.loads(_split_headers(out)[1] or "{}").get("data") or {}
+            repo = data.get("repository") or {}
+            prs = (repo.get("prs") or {}).get("nodes") or []
+            read.prs = [{**p, "labels": (p.get("labels") or {}).get("nodes") or []} for p in prs]
+            read.issues = {}
+            for k, number in enumerate(issues):
+                raw = repo.get(f"i{k}") or {}
+                comments = raw.get("comments") or {}
+                nodes = comments.get("nodes") or []
+                if int(comments.get("totalCount") or 0) > len(nodes):
+                    argv = ["gh", "issue", "view", str(number), "-R", slug]
+                    argv += ["--json", "comments,state"]
+                    raw = json.loads(await self._gh(argv, cwd, "TRACK: gh issue view") or "{}")
+                    read.issues[number] = raw
+                else:
+                    read.issues[number] = (
+                        {"state": raw.get("state"), "comments": nodes} if raw else {}
+                    )
+            read.heads = {h: repo.get(f"b{k}") for k, h in enumerate(heads)}
+            read.at, read.keys = self.clock(), set(keys)
+        return read
 
     async def _waits_on_ci(self, slug: str, base: str, step: str, now: float, cwd: Path) -> bool:
         """A quiet lead is waiting, not stalled, when its RECORD's ``Next:``
@@ -1780,21 +1818,43 @@ class CloudTaskDispatcher:
             raise CloudStationError(f"{step} failed (exit {code}): {err.strip()[-400:]}")
         return out
 
-    async def _gh(self, argv: list[str], cwd: Path, step: str) -> str:
+    async def _gh(self, argv: list[str], cwd: Path, step: str, *, partial: bool = False) -> str:
         """``_ok`` for a tracker's gh read: a transient failure (``_TRANSIENT``: the
         network, a timeout, a GitHub 5xx or rate limit) is retried ``gh_retries``
         times, waiting ``gh_backoff_seconds`` and doubling (lesson 42); a
-        permanent one, or the last transient one, raises."""
+        permanent one, or the last transient one, raises. A rate limit instead
+        waits for the bucket's reset: from the failed response's headers (``gh
+        api -i``), else from a header probe; never from ``gh api rate_limit``,
+        whose GraphQL count lags. Any read waits first while a bucket is known
+        empty. ``partial``: a GraphQL body whose only errors are NOT_FOUND counts
+        as an answer (``_graphql_data``)."""
         for attempt in range(self.gh_retries + 1):
+            if (wait := self._gh_reset - self.wall()) > 0:
+                logger.info(
+                    "belt cloud: %s waits %.0fs for the GitHub rate-limit reset", step, wait
+                )
+                await self.sleep(min(wait, 3600.0) + 1.0)
             code, out, err = await self.runner(argv, cwd=cwd, timeout=120.0)
-            if code == 0:
+            if code == 0 or (partial and _graphql_data(out)):
+                self._gh_reset = max(self._gh_reset, _empty_until(out))
                 return out
+            if _RATE_LIMITED.search(err or ""):
+                self._gh_reset = _empty_until(out) or await self._probe_reset(cwd)
             if attempt == self.gh_retries or not _TRANSIENT.search(err or ""):
                 raise CloudStationError(f"{step} failed (exit {code}): {err.strip()[-400:]}")
+            if self._gh_reset > self.wall():
+                continue  # the next attempt waits for the reset, not the backoff
             wait = self.gh_backoff_seconds * 2**attempt
             logger.info("belt cloud: %s failed (%s); retrying in %.0fs", step, err[-200:], wait)
             await self.sleep(wait)
         raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _probe_reset(self, cwd: Path) -> float:
+        """The GraphQL bucket's reset when it is empty, read off the headers of
+        a one-field ``gh api -i graphql`` query, else 0."""
+        argv = ["gh", "api", "graphql", "-i", "-f", _RATE_PROBE]
+        _, out, _ = await self.runner(argv, cwd=cwd, timeout=120.0)
+        return _empty_until(out)
 
     # -- track ----------------------------------------------------------------
 
@@ -2893,6 +2953,86 @@ def _resume_text(features: str | list[str], stall_seconds: float) -> str:
         "and continue from the last stage. Push RECORD.md after every stage. Questions go "
         "to the supervisor."
     )
+
+
+def _issue_no(feature: dict[str, Any]) -> int:
+    """A feature's issue number, or 0 when it has none."""
+    issue = str(feature.get("issue") or "")
+    return int(issue) if issue.isdigit() else 0
+
+
+def _lead_prs(rows: list[dict[str, Any]], run_ref: str) -> tuple[list[dict[str, Any]], float]:
+    """Of ``rows`` (``_lead_read``'s PRs), every PR (open, merged or closed) whose
+    body has the line ``Belt-Lead: <run_ref>``, by number, each with the feature
+    its ``Feature:`` line names and the slice ids of its ``Slice:`` lines, and
+    the newest ``updatedAt`` among them (epoch).
+    ponytail: the newest 100 PRs; a lead that outlives them loses the oldest."""
+    mark = f"{LEAD_MARKER} {run_ref}"
+    prs, newest = [], 0.0
+    for pr in rows:
+        body = str(pr.get("body") or "")
+        if not any(ln.strip() == mark for ln in body.splitlines()):
+            continue
+        named = (t.strip("`*") for m in _SLICE_LINE.findall(body) for t in re.split(r"[,\s]+", m))
+        labels = {str(lb.get("name") or "") for lb in pr.get("labels") or []}
+        serves = _FEATURE_LINE.search(body)
+        newest = max(newest, _epoch(pr.get("updatedAt")))
+        prs.append(
+            {
+                "number": int(pr["number"]),
+                "url": str(pr.get("url") or ""),
+                "state": str(pr.get("state") or ""),
+                "branch": str(pr.get("headRefName") or ""),
+                "done": _FEATURE_DONE in labels,
+                "merge_sha": str((pr.get("mergeCommit") or {}).get("oid") or ""),
+                "merged_at": str(pr.get("mergedAt") or ""),
+                "slices": list(dict.fromkeys(t for t in named if SLICE_ID.match(t))),
+                "feature": serves.group(1) if serves else "",
+            }
+        )
+    return sorted(prs, key=lambda p: p["number"]), newest
+
+
+def _branch_at(read: _LeadRead, lead: dict[str, Any]) -> tuple[float, str]:
+    """When the lead's status branch got its last commit (epoch) and the
+    ``Next:`` line of the RECORD.md on it, from ``read``; ``(0.0, "")`` when
+    the branch does not exist yet or was not read."""
+    head = read.heads.get((str(lead.get("branch") or ""), str(lead.get("feature") or ""))) or {}
+    text = ((head.get("file") or {}).get("object") or {}).get("text")
+    return _epoch(head.get("committedDate")), str(parse_record(text)["next"] or "")
+
+
+def _split_headers(out: str) -> tuple[dict[str, str], str]:
+    """``gh api -i`` output as its lower-cased response headers and its body;
+    output without a status line is all body."""
+    if not out.startswith("HTTP/"):
+        return {}, out
+    head, _, body = out.replace("\r\n", "\n").partition("\n\n")
+    pairs = (ln.partition(":") for ln in head.splitlines()[1:])
+    return {k.strip().lower(): v.strip() for k, _, v in pairs}, body
+
+
+def _empty_until(out: str) -> float:
+    """The reset (epoch) of the bucket a ``gh api -i`` response says is empty
+    (``X-RateLimit-Remaining: 0``), else 0."""
+    headers = _split_headers(out)[0]
+    if headers.get("x-ratelimit-remaining") != "0":
+        return 0.0
+    try:
+        return float(headers.get("x-ratelimit-reset") or 0)
+    except ValueError:
+        return 0.0
+
+
+def _graphql_data(out: str) -> bool:
+    """A ``gh api graphql`` body gh failed only because some aliases were
+    NOT_FOUND: it has data, and every error is NOT_FOUND (those aliases read null)."""
+    try:
+        doc = json.loads(_split_headers(out)[1] or "{}")
+    except ValueError:
+        return False
+    errors = doc.get("errors") or []
+    return bool(doc.get("data")) and all(e.get("type") == "NOT_FOUND" for e in errors)
 
 
 def _newest_done(prs: list[dict[str, Any]]) -> dict[str, Any] | None:

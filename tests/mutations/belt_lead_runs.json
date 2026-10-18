@@ -38,8 +38,8 @@
   {
     "label": "branch commits do not count as activity",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                at, step = await self._branch_at(slug, f, cwd)",
-    "replace": "                _, step = await self._branch_at(slug, f, cwd)\n                at = 0.0",
+    "find": "                at, step = _branch_at(read, f)",
+    "replace": "                _, step = _branch_at(read, f)\n                at = 0.0",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
@@ -284,8 +284,8 @@
   {
     "label": "the lead poll never asks for the issue state",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "\"--json\", \"comments,state\"]",
-    "replace": "\"--json\", \"comments\"]",
+    "find": "    \"i{k}:issue(number:{n}){{state comments(last:100)",
+    "replace": "    \"i{k}:issue(number:{n}){{comments(last:100)",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot"
     ]

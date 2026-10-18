@@ -1980,7 +1980,7 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`); `cloud` wires the cloud develop station instead (see *The cloud develop station*) |
 | `POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR` | unset | Cloud mode only, and required there: an existing git clone, already trusted by the claude CLI, that cloud sessions launch from; its origin is re-pointed to each bound repo per launch |
 | `POCKETPAW_FACTORY_CLOUD_PR_LABEL` | `fast-lane` | The label the cloud brief tells the session to put on its PR |
-| `POCKETPAW_FACTORY_CLOUD_POLL` | `60` | Seconds between `gh` polls of a cloud run's PR |
+| `POCKETPAW_FACTORY_CLOUD_POLL` | `60` | Seconds between `gh` polls of a cloud run's PR. Feature leads on one repo share one aliased GraphQL read (their issues, comments, RECORD.md blobs and the newest 100 PRs, 1 point), refetched at most every half poll. A rate-limited read sleeps to the `X-RateLimit-Reset` its response headers give |
 | `POCKETPAW_FACTORY_CLOUD_TIMEOUT` | `14400` | Seconds a cloud run waits for its PR to merge or be refused before it fails back to queued |
 | `POCKETPAW_FACTORY_CLOUD_FIX_GRACE` | `300` | Seconds a cloud run's PR must stay conflicting or red before a fixer session launches |
 | `POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS` | `2` | Fixer sessions per cloud run; past it a still-stuck PR escalates to the per-diff gate |

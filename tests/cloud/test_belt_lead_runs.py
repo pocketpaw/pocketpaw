@@ -54,6 +54,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -198,6 +199,45 @@ class LeadRunner:
     def _next(seq: list):
         return seq.pop(0) if len(seq) > 1 else seq[0]
 
+    async def _lead_read(self, argv, cwd, timeout):
+        """The batched lead read (``_lead_read``), answered by asking this runner
+        for each object its query names: the PR list, each ``i<k>`` issue (its
+        state only when the query asks for it) and each ``b<k>`` lead branch. So
+        scripted answers, ``fail`` and ``on_pr_list`` work as they did per read; a
+        missing issue reads null with a NOT_FOUND error, as GitHub answers."""
+        query = next(a for a in argv if a.startswith("query="))
+
+        async def ask(*sub: str) -> tuple[int, str, str]:
+            return await self(list(sub), cwd=cwd, timeout=timeout)
+
+        code, out, err = await ask("gh", "pr", "list", "-R", SLUG, "--state", "all", "--json")
+        if code:
+            return code, out, err
+        prs = [{**p, "labels": {"nodes": p.get("labels") or []}} for p in json.loads(out)]
+        repo: dict = {"prs": {"nodes": prs}}
+        errors = []
+        for alias, number, state in re.findall(r"(i\d+):issue\(number:(\d+)\)\{(state )?", query):
+            fields = "comments,state" if state else "comments"
+            code, out, err = await ask("gh", "issue", "view", number, "-R", SLUG, "--json", fields)
+            if code and "Could not resolve" in err:
+                repo[alias] = None
+                errors.append({"type": "NOT_FOUND", "path": ["repository", alias]})
+                continue
+            if code:
+                return code, out, err
+            data = json.loads(out)
+            comments = data.get("comments") or []
+            repo[alias] = {"comments": {"totalCount": len(comments), "nodes": comments}}
+            if state:
+                repo[alias]["state"] = data.get("state")
+        for alias, ref in re.findall(r'(b\d+):object\(expression:"([^"]+)"\)', query):
+            code, out, err = await ask("gh", "api", "graphql", "-f", f"ref={ref}")
+            if code:
+                return code, out, err
+            repo[alias] = json.loads(out)["data"]["repository"]["object"]
+        body = json.dumps({"data": {"repository": repo}, **({"errors": errors} if errors else {})})
+        return (1, body, "gh: Could not resolve to an Issue") if errors else (0, body, "")
+
     async def __call__(self, argv, *, cwd, timeout, stdin=None, on_line=None):
         self.calls.append((list(argv), cwd))
         if "get-url" in argv:
@@ -219,6 +259,8 @@ class LeadRunner:
         if "--cloud" in argv:
             n = sum("--cloud" in a and "-p" not in a for a, _ in self.calls)
             return 0, f"Created cloud session: https://claude.ai/code/session_L{n}\r\n", ""
+        if argv[:4] == ["gh", "api", "graphql", "-i"]:
+            return await self._lead_read(argv, cwd, timeout)
         key = " ".join(argv[1:3])
         if self.fail.get(key):
             self.fail[key] -= 1
