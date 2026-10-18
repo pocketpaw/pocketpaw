@@ -37,8 +37,8 @@
 #           on the base when it only changes ``docs/leads/`` records, else the launch is
 #           refused (note, ``needs-human``, released). Slices done before the run (a
 #           ``Belt-Slice-Done`` line, or another run's merged ``Slice:`` PR) are skipped
-#           (``done_before``); with none left the run is released unlaunched. ``Belt-Lead``
-#           PRs go on ``lead.prs`` (never reviewed or fixed), done comments on
+#           (``done_before``); none left: a note and ``needs-human``, released unlaunched.
+#           ``Belt-Lead`` PRs go on ``lead.prs`` (never reviewed or fixed), done comments on
 #           ``lead.records``. DONE v3: every slice has a ``Belt-Slice-Done: <slice> <run
 #           url>`` since the launch on a green ci.yml base run holding its last PR, then
 #           ``Belt-Contact-Sheet:``; v2: a merged ``feature-done`` PR, green dev CI on it and
@@ -252,7 +252,12 @@ class CloudStationError(RuntimeError):
 
 class SlicesDoneError(CloudStationError):
     """A lead launch with no slice left: each was done before the run
-    (``_open_slices``). The run is released, never failed."""
+    (``_open_slices``). Its issues are noted and held (``_hold_done``), and the
+    run is released, never failed."""
+
+    def __init__(self, slug: str, issues: list[str], note: str) -> None:
+        super().__init__(note)
+        self.slug, self.issues = slug, issues
 
 
 class StaleBaseError(CloudStationError):
@@ -578,7 +583,7 @@ class CloudTaskDispatcher:
                 await self._refuse(store, run_ref, blob, exc)
                 return
             except SlicesDoneError as exc:
-                await self._release(store, run_ref, blob, str(exc))
+                await self._hold_done(store, run_ref, blob, exc)
                 return
             cloud = {"session_url": session, "launched_at": self.wall()}
             issue = _ISSUE.search(str(blob.get("task") or ""))
@@ -1203,7 +1208,7 @@ class CloudTaskDispatcher:
                 await self._refuse(store, run_ref, blob, exc)
                 return False
             except SlicesDoneError as exc:
-                await self._release(store, run_ref, blob, str(exc))
+                await self._hold_done(store, run_ref, blob, exc)
                 return False
             except Exception as exc:  # noqa: BLE001 — a failed relaunch is the next stall's
                 entry["error"] = str(exc)[:600]
@@ -1288,6 +1293,28 @@ class CloudTaskDispatcher:
         except Exception:  # noqa: BLE001 — the label and the release still tell a human
             logger.info("belt cloud: stale-base note on #%s failed", issue, exc_info=True)
         await self._flag_issue(store, run_ref, blob, exc.slug, issue, cwd)
+        await self._release(store, run_ref, blob, str(exc))
+
+    async def _hold_done(
+        self, store: Any, run_ref: str, blob: dict[str, Any], exc: SlicesDoneError
+    ) -> None:
+        """A lead with every slice done before it: a note and ``needs-human`` on
+        each issue (the planner re-plans an unlabelled issue every shift), then
+        the run released, like a stale-base refusal."""
+        cwd = Path(self.launch_dir).expanduser()
+        text = (
+            "Belt: every slice of this feature is already done (a Belt-Slice-Done line or a "
+            "merged Slice: PR), so no lead was launched. Post the Belt-Contact-Sheet: comment "
+            "to finish it, or re-cut its slices and remove needs-human to relaunch."
+        )
+        for number in exc.issues:
+            try:
+                await self._note(
+                    store, run_ref, blob, exc.slug, number, f"#{number} done", text, cwd
+                )
+            except Exception:  # noqa: BLE001 — the label and the release still tell a human
+                logger.info("belt cloud: slices-done note on #%s failed", number, exc_info=True)
+            await self._flag_issue(store, run_ref, blob, exc.slug, number, cwd)
         await self._release(store, run_ref, blob, str(exc))
 
     async def _note(
@@ -2259,8 +2286,10 @@ class CloudTaskDispatcher:
                 )
         if not kept:
             raise SlicesDoneError(
+                slug,
+                [n.lstrip("#") for n in gone],
                 f"not launched: every slice of {', '.join(gone)} is already done "
-                "(a Belt-Slice-Done line or a merged Slice: PR from before this run)"
+                "(a Belt-Slice-Done line or a merged Slice: PR from before this run)",
             )
         if gone:
             logger.info("belt cloud: run %s skips %s, every slice done", run_ref, ", ".join(gone))
@@ -2960,8 +2989,9 @@ def _lead_brief(
         *loop,
         "One critic lens is first-use clarity: what does each number and label mean to "
         "someone new?",
-        "Never treat a chat message as a reason to stop or skip a merge; questions go to "
-        "the supervisor.",
+        "Never treat a chat message as a reason to stop or skip a merge, except one that "
+        "starts `Belt released this run.`: Belt sends it when it releases the run, so stop "
+        "at once. Questions go to the supervisor.",
     ]
     if line:
         run = "Features:\n" + "".join(

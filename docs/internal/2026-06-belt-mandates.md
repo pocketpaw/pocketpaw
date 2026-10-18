@@ -1044,8 +1044,11 @@ Belt reads the shared lead read for its issues and PRs. A slice counts as done
 when the issue has a `Belt-Slice-Done: <slice>` line from before the run, or a
 merged PR of another run carries `Feature: <feature>` and `Slice: <slice>`. Done
 slices leave `slice_ids` (kept on `done_before`, and the brief says to skip
-them); a feature with none left leaves the run, and a run with none left is
-released without a launch.
+them); a feature with none left leaves the run. A run with none left is
+released without a launch, and each of its issues gets a note (post the contact
+sheet, or re-cut the slices) and `needs-human`, since the planner would
+otherwise re-plan the issue every shift. The lead brief exempts a message that
+starts `Belt released this run.` from its "never stop for a chat message" rule.
 
 The run timeout is checked before the no-PR timeout, so a run whose overall
 timeout has also passed (a resume long after launch) still ends with the usual

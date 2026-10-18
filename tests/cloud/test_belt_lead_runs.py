@@ -382,6 +382,9 @@ async def test_lead_brief_is_the_playbook_plus_the_run_and_the_rules(store, dirs
     assert "2 clean rounds or 4 rounds total" in brief
     assert "first-use clarity" in brief
     assert "chat message" in brief and "supervisor" in brief
+    # The one chat message a lead obeys: Belt's stop on release (lesson 182).
+    assert "except one that starts `Belt released this run.`" in brief
+    assert cloud_station._STOP_TEXT.startswith("Belt released this run.")
     assert "No attribution line anywhere" in brief
     assert "Belt-Run:" not in brief  # a lead's PRs carry Belt-Lead, never Belt-Run
     # Launched like every cloud run: under the pty, from the clone at origin/dev.
@@ -2157,8 +2160,9 @@ async def test_a_partly_done_lead_gets_only_its_open_slices(store, dirs, playboo
     ["slice-done lines", "another lead's merged PRs", "a merged PR and a line"],
 )
 async def test_a_lead_whose_slices_are_all_done_is_never_launched(store, dirs, playbook, how):
-    """Every slice was done before this run: no session starts and the run is
-    released with the reason, never a failure and never needs-human."""
+    """Every slice was done before this run: no session starts, the issue gets
+    a note and ``needs-human`` (an unlabelled issue is re-planned every shift),
+    and the run is released with the reason, never a failure."""
     repo, launch = dirs
     _wave(launch)
     run_ref = await _queue_lead(store, repo)
@@ -2182,7 +2186,10 @@ async def test_a_lead_whose_slices_are_all_done_is_never_launched(store, dirs, p
     action = await store.get_action(run_ref)
     assert action.status == ActionStatus.REJECTED
     assert "every slice of #93 is already done" in action.rejected_reason
-    assert not any(a[:3] == ["gh", "issue", "edit"] for a, _ in runner.calls)
+    notes = [a[-1] for a, _ in runner.calls if a[:3] == ["gh", "issue", "comment"]]
+    assert len(notes) == 1 and notes[0].startswith("Belt: every slice of this feature")
+    edits = [a for a, _ in runner.calls if a[:3] == ["gh", "issue", "edit"]]
+    assert edits == [["gh", "issue", "edit", "93", "-R", SLUG, "--add-label", "needs-human"]]
     assert "headless_error" not in action.parameters["_code_change"]
 
 

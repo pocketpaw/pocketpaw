@@ -1108,5 +1108,23 @@
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
+  },
+  {
+    "label": "the lead brief has a lead ignore Belt's stop message",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        \"Never treat a chat message as a reason to stop or skip a merge, except one that \"\n        \"starts `Belt released this run.`: Belt sends it when it releases the run, so stop \"\n        \"at once. Questions go to the supervisor.\",",
+    "replace": "        \"Never treat a chat message as a reason to stop or skip a merge; questions go to \"\n        \"the supervisor.\",",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
+  },
+  {
+    "label": "an all-done issue is left unlabelled and re-planned every shift",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            await self._flag_issue(store, run_ref, blob, exc.slug, number, cwd)\n",
+    "replace": "\n",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   }
 ]
