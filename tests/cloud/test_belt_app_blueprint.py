@@ -6,7 +6,8 @@
 # Open cut) and dev's Halo file tree. The GitHub side (issue, run, PRs) is built
 # in each test as it stood when the design doc was written: #1036 open, the lead
 # run pending, no feature-done PR merged. A v3 wave.json's ``slices`` take their
-# status off the lead run (done, done-with-gaps, building, planned).
+# status off the lead run (done, done-with-gaps, building, planned). ``suite_map``
+# joins a hand-made feature map to a status dict: packet status, writing, new.
 
 from __future__ import annotations
 
@@ -259,3 +260,63 @@ def test_slices_are_planned_without_a_live_lead_and_absent_without_any():
     released = {**RUNNING, "status": "rejected", "lead": {"stalls": 0, "prs": prs}}
     assert {s["status"] for s in derive(wave=_sliced(), run=released)["slices"]} == {"planned"}
     assert derive()["slices"] == []
+
+
+# The suite feature map: creative-apps' feature-map.json joined to live status.
+SUITE_MAP = {
+    "version": 1,
+    "layers": [{"id": "kernel", "name": "SuiteKernel"}, {"id": "ui", "name": "SuiteUI"}],
+    "apps": [{"id": "halo", "name": "Halo"}, {"id": "photo", "name": "Photo"}],
+    "features": [
+        {
+            "id": "S8",
+            "name": "Layer tree",
+            "layer": "kernel",
+            "c4": ["suite-kernel LayerTree"],
+            "packet": "suiteui/layer-tree",
+            "adopters": [
+                {"app": "halo", "packet": "halo/layer-keys"},
+                {"app": "photo", "packet": "photo/layers"},
+                {"app": "flare"},
+            ],
+        },
+        {"id": "S13", "name": "Eyedropper", "layer": "ui", "c4": [], "adopters": []},
+        {"id": "A3", "name": "Precomps", "layer": "app", "app": "halo", "packet": "halo/precomps"},
+        {"id": 7, "name": "not an id"},
+        "not a row",
+    ],
+}
+
+
+def test_suite_map_takes_each_status_from_the_packet_alone():
+    live = {"suiteui/layer-tree": "built", "halo/layer-keys": "waiting", "halo/precomps": "stuck"}
+    m = ab.suite_map(SUITE_MAP, live)
+    rows = {f["id"]: f for f in m["features"]}
+    assert list(rows) == ["S8", "S13", "A3"]  # malformed rows are dropped, order kept
+    s8 = rows["S8"]
+    assert (s8["status"], s8["layer"], s8["app"], s8["c4"]) == (
+        "built",
+        "kernel",
+        None,
+        ["suite-kernel LayerTree"],
+    )
+    assert [(a["app"], a["status"]) for a in s8["adopters"]] == [
+        ("halo", "waiting"),  # its own packet's status
+        ("photo", "writing"),  # a packet not on dev yet
+        ("flare", "new"),  # no packet
+    ]
+    assert rows["S13"]["status"] == "new" and rows["S13"]["packet"] is None
+    a3 = rows["A3"]
+    assert (a3["status"], a3["app"], a3["adopters"]) == ("stuck", "halo", [])
+    assert m["layers"] == SUITE_MAP["layers"] and m["apps"] == SUITE_MAP["apps"]
+
+
+def test_suite_map_counts_every_status_over_features_not_adopters():
+    m = ab.suite_map(SUITE_MAP, {"suiteui/layer-tree": "done", "halo/precomps": "done"})
+    assert list(m["counts"]) == list(ab.MAP_STATUSES)
+    assert m["counts"] == dict.fromkeys(ab.MAP_STATUSES, 0) | {"done": 2, "new": 1}
+
+
+def test_suite_map_refuses_a_file_that_is_not_a_map():
+    for raw in (None, [], {"features": "x"}, {"layers": [], "apps": []}):
+        assert ab.suite_map(raw, {}) is None, raw

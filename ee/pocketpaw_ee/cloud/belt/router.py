@@ -27,6 +27,8 @@
 #                                 components, journeys, gaps (``app_blueprint_read``)
 #   * GET  /belt/blueprints/c4?repo=&app= — one app's planned C4 model with a
 #                                 status per component
+#   * GET  /belt/blueprints/suite-map?repo= — the suite feature map (layers, apps,
+#                                 features with adopters) with each row's live status
 #
 # Routes are THIN: they read identity (workspace + user) from the cloud deps,
 # delegate to ``ee.cloud.belt.service``, and return what the service built. RBAC
@@ -319,6 +321,21 @@ async def get_app_blueprint_c4(
     failed. A bad ``app`` is 422; an app with no model is 404."""
     try:
         return await app_blueprint_read.read_c4(workspace_id, repo, app)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/blueprints/suite-map")
+async def get_suite_map(
+    repo: str = Query(min_length=1),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The repo's suite feature map joined to the blueprint's live statuses,
+    off the same 60 s cache. 404 ``belt.suite_map_not_found`` when dev has no
+    readable ``docs/blueprints/suite/feature-map.json``."""
+    try:
+        return await app_blueprint_read.read_suite_map(workspace_id, repo)
     except belt_service.BeltConsoleError as exc:
         raise _to_cloud_error(exc) from exc
 

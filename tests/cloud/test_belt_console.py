@@ -23,8 +23,9 @@
 #     reject / executed / failed) on the WORKSPACE REALTIME BUS (captured via the
 #     conftest recording_bus) with an additional per-stream SSE push; the
 #     audience resolver fans belt_run_updated out to workspace members.
-#   * GET /belt/blueprints and /belt/blueprints/c4 — a member reads the app
-#     blueprint graph and one app's C4 view over B3's fake git and gh; 404
+#   * GET /belt/blueprints, /belt/blueprints/c4 and /belt/blueprints/suite-map — a
+#     member reads the app blueprint graph, one app's C4 view and the suite
+#     feature map over B3's fake git and gh; 404
 #     outside the allowlist, 422 on a bad app id, a status per component and
 #     per component path, stale passed through, 503 with no graph yet.
 #
@@ -1073,6 +1074,33 @@ def test_blueprint_failed_refresh_passes_stale_through(bp, monkeypatch):
         c4 = client.get("/api/v1/belt/blueprints/c4", params={**q, "app": "halo"})
     assert res.status_code == 200 and res.json()["stale"] is True
     assert c4.status_code == 200 and c4.json()["status"]["halo-window"] == "changing"
+
+
+def test_member_reads_the_suite_map(bp):
+    from tests.cloud.test_belt_app_blueprint_read import MAP, suite_map
+
+    bp.files[MAP] = suite_map([("keys", "halo/layer-keys"), ("new", None)])
+    bp.tree()
+    res = _bp_get("blueprints/suite-map", bp)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [f["status"] for f in body["features"]] == ["building", "new"]
+    assert body["layers"] == [{"id": "kernel", "name": "SuiteKernel"}]
+
+
+def test_suite_map_without_a_map_file_is_404(bp):
+    res = _bp_get("blueprints/suite-map", bp)
+    assert res.status_code == 404, res.text
+    assert res.json()["error"]["code"] == "belt.suite_map_not_found"
+
+
+def test_suite_map_repo_outside_the_allowlist_is_404(bp, tmp_path):
+    _make_repo(tmp_path / "elsewhere")
+    with TestClient(_build_app(role="member")) as client:
+        q = {"repo": str(tmp_path / "elsewhere")}
+        res = client.get("/api/v1/belt/blueprints/suite-map", params=q)
+    assert res.status_code == 404 and res.json()["error"]["code"] == "belt.repo_not_found"
+    assert bp.calls == []
 
 
 def test_blueprint_with_no_graph_yet_is_503(bp):

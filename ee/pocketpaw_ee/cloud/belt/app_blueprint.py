@@ -13,7 +13,10 @@
 # Mac-Finish-Wanted line splits the red: a sheet is done, a parked issue whose
 # last word is Mac work is ``waiting``, and only the rest is ``stuck``. A v3
 # feature's wave.json ``slices`` each get a status (done, done-with-gaps,
-# building, planned) off its lead run's ``lead``.
+# building, planned) off its lead run's ``lead``. ``suite_map`` joins the suite
+# feature map (creative-apps ``docs/blueprints/suite/feature-map.json``) to those
+# feature statuses: a row's status comes only from its ``packet`` id, ``writing``
+# when that packet is not in the graph, ``new`` with none; no second status rule.
 
 from __future__ import annotations
 
@@ -274,4 +277,54 @@ def derive_feature(
         "layers": [x for x in (*LAYERS, "unknown") if x in placed],
         "components": list(dict.fromkeys(f"{app}/{c}" for c in comps if c)),
         "gaps": gaps + ([] if owned else ["feature_no_owned"]),
+    }
+
+
+# A suite map row's status: a feature status off its packet, ``writing`` when the
+# packet's wave.json is not on dev yet, ``new`` with no packet.
+MAP_STATUSES = ("done", "built", "building", "waiting", "stuck", "gap", "filed", "planned")
+MAP_STATUSES += ("writing", "new")
+
+
+def suite_map(raw: Any, live: dict[str, str]) -> dict[str, Any] | None:
+    """creative-apps' ``docs/blueprints/suite/feature-map.json`` joined to ``live``
+    (graph feature id to status): ``{layers, apps, features, counts}``, or ``None``
+    when ``raw`` is not a map. Each feature and adopter takes its status from its
+    own ``packet`` (an ``<app>/<feature>`` id) and nothing else; a row without a
+    string ``id`` and ``layer`` is dropped. ``counts`` covers features only."""
+    if not isinstance(raw, dict) or not all(
+        isinstance(raw.get(k), list) for k in ("layers", "apps", "features")
+    ):
+        return None
+
+    def status(packet: Any) -> str:
+        return live.get(packet, "writing") if isinstance(packet, str) and packet else "new"
+
+    def text(v: Any) -> str | None:
+        return v if isinstance(v, str) and v else None
+
+    features = []
+    for f in _dicts(raw["features"]):
+        if not (text(f.get("id")) and text(f.get("layer"))):
+            continue
+        adopters = [
+            {"app": a["app"], "packet": text(a.get("packet")), "status": status(a.get("packet"))}
+            for a in _dicts(f.get("adopters"))
+            if text(a.get("app"))
+        ]
+        c4 = [c for c in f["c4"] if isinstance(c, str)] if isinstance(f.get("c4"), list) else []
+        row = {"id": f["id"], "name": text(f.get("name")) or f["id"], "layer": f["layer"]}
+        row |= {"app": text(f.get("app")), "c4": c4, "packet": text(f.get("packet"))}
+        features.append(row | {"status": status(f.get("packet")), "adopters": adopters})
+    counts = dict.fromkeys(MAP_STATUSES, 0) | Counter(f["status"] for f in features)
+
+    def named(key: str) -> list[dict[str, str]]:
+        rows = (x for x in _dicts(raw[key]) if text(x.get("id")))
+        return [{"id": x["id"], "name": text(x.get("name")) or x["id"]} for x in rows]
+
+    return {
+        "layers": named("layers"),
+        "apps": named("apps"),
+        "features": features,
+        "counts": counts,
     }

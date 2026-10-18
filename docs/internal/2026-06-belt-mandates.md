@@ -1733,7 +1733,19 @@ component id (bare, as in the model) to `failed` when a stuck feature owns it,
 `landed` when it is in `origin/dev`'s tree (a path ending in `/` once any file
 sits under it), else `planned`, so a partial component can mark each file.
 
-Both reads are cached for 60 s per (workspace, repo) behind one lock; a read
+`GET /api/v1/belt/blueprints/suite-map?repo=<path>` (`belt.read`) returns the
+suite feature map, `docs/blueprints/suite/feature-map.json` on `origin/dev`,
+joined to the graph's feature statuses: `{repo, slug, sha, stale, read_at,
+layers: [{id, name}], apps: [{id, name}], features, counts}`. Each feature is
+`{id, name, layer, app, c4, packet, status, adopters: [{app, packet, status}]}`.
+A feature's or adopter's `status` comes only from its `packet` (an
+`<app>/<feature>` id): that feature's graph status when the graph has it,
+`writing` when it doesn't (the wave.json isn't on dev yet), `new` with no
+packet. `counts` has every status, features only. The map is read with the
+graph and served off the same cache entry; a missing or unparsable map is 404
+`belt.suite_map_not_found` and never fails the graph read.
+
+The reads are cached for 60 s per (workspace, repo) behind one lock; a read
 inside the window makes no git or gh call. A failed refresh (git ref lock, gh
 rate limit, or an unexpected error, which is logged) serves the last graph with
 `stale: true`. Feature issues come from `gh issue list --label feature-lead

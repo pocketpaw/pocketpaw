@@ -23,6 +23,9 @@
 # feature ids match ``_ID`` before any path or ref is built; a file over
 # ``MAX_MODEL_BYTES`` is refused unread. ``read_c4`` serves one app's planned
 # model off the same cache entry, with a status per component and per path.
+# ``read_suite_map`` serves the suite feature map (``FEATURE_MAP`` on dev, read with
+# the graph and kept on its entry as parsed JSON, ``None`` when absent or not JSON)
+# joined to the graph's feature statuses by ``app_blueprint.suite_map``.
 
 from __future__ import annotations
 
@@ -60,6 +63,7 @@ _LIST = "--state all --limit 500 --json".split()
 _STATUSES = ("done", "built", "building", "waiting", "stuck", "filed", "planned", "gap")
 _SLICE_STATUSES = ("done", "done-with-gaps", "building", "planned")
 _UNREADY = "belt.blueprint_unavailable"
+FEATURE_MAP = "docs/blueprints/suite/feature-map.json"
 # A component's C4 status by its owners' feature status, first match wins.
 _PAINT = {"stuck": "failed", "waiting": "drift", "building": "changing"}
 # A parked issue's last word was Mac work: it waits on the Mac finisher.
@@ -141,6 +145,28 @@ async def read_c4(workspace_id: str, repo: str, app: str, **io: Any) -> dict[str
             )
     scoped = {"scope": model.get("scope"), "model": model["model"]}
     return {"app": app, "model": scoped, "status": status}
+
+
+async def read_suite_map(workspace_id: str, repo: str, **io: Any) -> dict[str, Any]:
+    """The repo's suite feature map with a live status per feature and adopter:
+    ``{repo, slug, sha, stale, read_at, layers, apps, features, counts}``. 404
+    ``belt.suite_map_not_found`` when dev has no readable map."""
+    graph = await read_blueprint(workspace_id, repo, **io)
+    raw = _CACHE[(workspace_id, graph["repo"])].get("feature_map")
+    live = {f["id"]: f["status"] for f in graph["features"]}
+    joined = ab.suite_map(raw, live)
+    if joined is None:
+        msg = "No suite feature map in this repo."
+        raise BeltConsoleError(404, msg, "belt.suite_map_not_found")
+    head = {k: graph[k] for k in ("repo", "slug", "sha", "stale", "read_at")}
+    return head | joined
+
+
+def _load_json(text: str | None) -> Any:
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None
 
 
 def _git(path: Path) -> Run:
@@ -456,4 +482,5 @@ async def _read(
         "marks": marks,
         "models": c4,
         "paths": on_dev,
+        "feature_map": _load_json(await blob(FEATURE_MAP)),
     }

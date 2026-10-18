@@ -11,6 +11,8 @@
 # ``stalls`` is an int, journey ids sit in a wave's ``note`` and the .md's
 # Journeys section, a test function follows its ``///`` comment. A feature's
 # slices and the app's slice counts come through the same read.
+# ``read_suite_map`` joins docs/blueprints/suite/feature-map.json off the same
+# cache entry; a missing or broken map is a 404 and never fails the graph.
 
 from __future__ import annotations
 
@@ -464,3 +466,62 @@ async def test_c4_paints_a_waiting_feature_amber_not_failed(fake):
     io = {"git": fake.git, "gh": fake.gh, "runs": fake.runs, "touched": fake.touched}
     c4 = await abr.read_c4("ws1", "creative-apps", "halo", **io, now=lambda: 0.0)
     assert c4["status"]["halo-window"] == "drift"  # owned by the waiting halo/layer-keys
+
+
+MAP = "docs/blueprints/suite/feature-map.json"
+
+
+def suite_map(packets):
+    rows = [
+        {"id": f"S{i}", "name": n, "layer": "kernel", "packet": p}
+        for i, (n, p) in enumerate(packets)
+    ]
+    layers = [{"id": "kernel", "name": "SuiteKernel"}]
+    return json.dumps({"version": 1, "layers": layers, "apps": [], "features": rows})
+
+
+async def read_map(fake, t=0.0):
+    io = {"git": fake.git, "gh": fake.gh, "runs": fake.runs, "touched": fake.touched}
+    return await abr.read_suite_map("ws1", "creative-apps", **io, now=lambda: t)
+
+
+async def test_suite_map_joins_the_map_to_the_graph_status(fake):
+    fake.files[MAP] = suite_map(
+        [
+            ("keys", "halo/layer-keys"),
+            ("live", "halo/live-keys"),
+            ("soon", "halo/next"),
+            ("new", None),
+        ]
+    )
+    fake.tree()
+    m = await read_map(fake)
+    assert (m["slug"], m["sha"], m["stale"]) == ("qbtrix/creative-apps", "62a8577", False)
+    assert [f["status"] for f in m["features"]] == ["building", "gap", "writing", "new"]
+    assert m["counts"]["building"] == 1 and m["counts"]["new"] == 1
+
+
+async def test_suite_map_is_read_with_the_blueprint_off_one_cache_entry(fake):
+    fake.files[MAP] = suite_map([("keys", "halo/layer-keys")])
+    fake.tree()
+    await read(fake)
+    n = len(fake.calls)
+    await read_map(fake, t=1.0)
+    assert fake.calls[n:] == []  # inside the TTL: no git or gh call
+    fake.limited = True
+    m = await read_map(fake, t=61.0)  # a failed refresh: the last map, stale
+    assert m["stale"] is True and m["features"][0]["status"] == "building"
+
+
+async def test_suite_map_missing_or_unreadable_is_404_and_the_graph_still_reads(fake):
+    for text in (None, "{not json", json.dumps({"features": "x"})):
+        for name in ("_CACHE", "_LOCKS"):
+            setattr(abr, name, {})
+        fake.files.pop(MAP, None)
+        if text is not None:
+            fake.files[MAP] = text
+        fake.tree()
+        assert (await read(fake))["features"]  # the blueprint read never fails on the map
+        with pytest.raises(BeltConsoleError) as err:
+            await read_map(fake)
+        assert (err.value.status_code, err.value.code) == (404, "belt.suite_map_not_found"), text
