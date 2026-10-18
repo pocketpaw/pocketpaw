@@ -20,8 +20,8 @@
   {
     "label": "the graph read needs belt.manage",
     "file": "ee/pocketpaw_ee/cloud/belt/router.py",
-    "find": "    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.read\")),",
-    "replace": "    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.manage\")),",
+    "find": "async def get_app_blueprint(\n    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.read\")),",
+    "replace": "async def get_app_blueprint(\n    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.manage\")),",
     "tests": [
       "tests/cloud/test_belt_console.py"
     ]
@@ -139,6 +139,24 @@
     "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
     "find": "\"paths\": on_dev,",
     "replace": "\"paths\": {},",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "the suite map read needs belt.manage",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "async def get_suite_map(\n    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.read\")),",
+    "replace": "async def get_suite_map(\n    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.manage\")),",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a repo with no suite map serves an empty one",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "    if joined is None:\n        msg = \"No suite feature map in this repo.\"",
+    "replace": "    if joined is None:\n        joined = {}\n    if False:\n        msg = \"No suite feature map in this repo.\"",
     "tests": [
       "tests/cloud/test_belt_console.py"
     ]

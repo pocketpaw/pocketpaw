@@ -565,5 +565,32 @@
     "tests": [
       "tests/cloud/test_belt_app_blueprint.py"
     ]
+  },
+  {
+    "label": "a packet not on dev yet reads as new",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "return live.get(packet, \"writing\") if isinstance(packet, str) and packet else \"new\"",
+    "replace": "return live.get(packet, \"new\") if isinstance(packet, str) and packet else \"new\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an adopter takes the feature's status, not its own packet's",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "{\"app\": a[\"app\"], \"packet\": text(a.get(\"packet\")), \"status\": status(a.get(\"packet\"))}",
+    "replace": "{\"app\": a[\"app\"], \"packet\": text(a.get(\"packet\")), \"status\": status(f.get(\"packet\"))}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "the counts include adopters",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "Counter(f[\"status\"] for f in features)",
+    "replace": "Counter([f[\"status\"] for f in features] + [a[\"status\"] for f in features for a in f[\"adopters\"]])",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
   }
 ]
