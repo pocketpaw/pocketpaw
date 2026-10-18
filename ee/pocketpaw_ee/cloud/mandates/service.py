@@ -1168,6 +1168,7 @@ async def _backlog(
     persist: bool = False,
     repo_id: str = "",
     owned: set[int] | None = None,
+    issue_labels: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """The mandate's OPEN sightings and the planned tasks behind them.
 
@@ -1185,7 +1186,8 @@ async def _backlog(
     issue is CLOSED (``patrols.closed_issues``) is left out even before the
     patrol resolves it, and one whose live issue body names a ``Depends on``
     issue still open is ``blocked`` (``patrols.open_dependencies``, fail safe:
-    an unreadable body or ref blocks), so neither the foreman nor the due check
+    an unreadable body or ref blocks; the charter's ``issue_labels`` lists carry
+    the bodies of issues past the open list's limit), so neither the foreman nor the due check
     takes it as work. A ``github:`` sighting whose issue number is in ``owned``
     (``_owned_issues``: a pending run of the mandate owns it) is in flight too.
 
@@ -1254,7 +1256,9 @@ async def _backlog(
         closed = await mandate_patrols.closed_issues(repo_id)
         open_docs = [s for s in open_docs if str(s.evidence.get("source") or "") not in closed]
         blocked = await mandate_patrols.open_dependencies(
-            repo_id, [str(s.evidence.get("source") or "") for s in open_docs]
+            repo_id,
+            [str(s.evidence.get("source") or "") for s in open_docs],
+            labels=tuple(issue_labels),
         )
 
     entries = []
@@ -1495,6 +1499,7 @@ async def _shift(
         persist=True,
         repo_id=doc.surface.repo_id,
         owned=await _owned_issues(workspace_id, mandate_id),
+        issue_labels=doc.charter.issue_labels,
     )
     # The foreman plans from the open sightings nothing works yet; the in-flight
     # ones ride apart so it never plans them again (``drop_in_flight`` enforces).
@@ -2785,7 +2790,12 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
                 )
 
         mine = [r for r in runs if r.get("mandate_id") == mandate_id]
-        backlog = (await _backlog(workspace_id, mandate_id, mine, repo_id=m["repo_id"]))["open"]
+        labels = detail["charter"]["issue_labels"]
+        backlog = (
+            await _backlog(
+                workspace_id, mandate_id, mine, repo_id=m["repo_id"], issue_labels=labels
+            )
+        )["open"]
         capacity = _headroom(
             Budget(**detail["charter"]["budget"]),
             mine,
@@ -3047,6 +3057,7 @@ async def _continuous_due(doc: MandateDoc, last: ShiftDoc | None, now: datetime)
         runs,
         since=last.createdAt if last else None,
         repo_id=doc.surface.repo_id,
+        issue_labels=doc.charter.issue_labels,
     )
     work = [o for o in backlog["open"] if not o["in_flight"] and not o["blocked"]]
     if last is not None and last.state == "stood_down":

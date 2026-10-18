@@ -524,6 +524,9 @@ async def _departures(
 _ISSUE_STATES: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _OPEN_PRS: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _OPEN_ISSUES: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# Per charter label, its open issues' bodies: an old issue past the open list's
+# limit still has its ``Depends on:`` read.
+_LABELLED_BODIES: dict[str, dict[str, tuple[float, list[dict[str, Any]]]]] = {}
 _GH_ROWS_TTL = 60.0
 _GH_STATE_LIMIT = "500"
 _GH_PR_LIMIT = "200"
@@ -628,25 +631,30 @@ def depends_on_refs(body: str, slug: str) -> list[str]:
 
 
 async def open_dependencies(
-    repo_id: str, sources: list[str], gh: GhFn | None = None
+    repo_id: str, sources: list[str], gh: GhFn | None = None, labels: tuple[str, ...] = ()
 ) -> dict[str, list[str]]:
     """``{source: refs}`` for each ``github:<owner>/<repo>#<n>`` in ``sources``
     whose LIVE issue body names a ``Depends on`` issue that is not closed yet.
 
-    The body comes off the bound repo's cached open-issue list, else one cached
-    ``gh issue view``; a bound-repo ref's state off the cached ``--state all``
-    list, else a view (a cross-repo ref always). Empty when the bound repo is
-    not on GitHub. Fail safe: an unreadable body blocks as ``["?"]`` and an
-    unknown ref state counts as open. Never raises."""
+    The body comes off the bound repo's cached open-issue list or the cached
+    ``--label`` list of each of ``labels`` (the charter's, which reach issues past
+    the open list's limit), else one cached ``gh issue view``; a bound-repo
+    ref's state off the cached ``--state all`` list, else a view (a cross-repo
+    ref always). Empty when the bound repo is not on GitHub. Fail safe: an
+    unreadable body blocks as ``["?"]`` and an unknown ref state counts as open.
+    Never raises."""
     runner = gh or _default_gh
     bound, states = await _slug_states(repo_id, runner)
     bound = bound.lower()
     if not bound:
         return {}
+    rows = await open_issues(repo_id, runner)
+    for label in dict.fromkeys(lb.strip() for lb in labels if lb.strip()):
+        argv = ["gh", "issue", "list", "--state", "open", "--label", label]
+        argv += ["--limit", _GH_STATE_LIMIT, "--json", "number,body"]
+        rows += (await _gh_rows(_LABELLED_BODIES.setdefault(label, {}), repo_id, argv, runner))[1]
     bodies = {
-        r["number"]: str(r.get("body") or "")
-        for r in await open_issues(repo_id, runner)
-        if isinstance(r.get("number"), int)
+        r["number"]: str(r.get("body") or "") for r in rows if isinstance(r.get("number"), int)
     }
     budget = [_MAX_ISSUE_VIEWS]
     blocked: dict[str, list[str]] = {}

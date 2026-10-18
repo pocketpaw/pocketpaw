@@ -102,6 +102,7 @@ def _fresh_gh_caches(monkeypatch) -> None:
     monkeypatch.setattr(patrols, "_OPEN_PRS", {})
     monkeypatch.setattr(patrols, "_OPEN_ISSUES", {})
     monkeypatch.setattr(patrols, "_ISSUE_VIEWS", {})
+    monkeypatch.setattr(patrols, "_LABELLED_BODIES", {})
 
 
 def _issue_lists(gh: FakeGh) -> list[list[str]]:

@@ -913,6 +913,25 @@ async def test_needs_human_on_an_issue_past_the_open_list_limit_is_skipped(
 
 
 @pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
+async def test_an_issue_past_the_open_list_limit_is_not_blocked(tmp_path, mongo_db, monkeypatch):
+    """#16 is past the open list's limit and no view answers it: its body comes
+    off the charter label's list, so its dependency check reads it and it is
+    planned first. Mutation: bodies only off the unfiltered list block #16 as
+    unreadable."""
+    base = _lead_gh()
+    gh = LimitedGh(base.issues, states=base.states, prs=base.prs)
+    mid, ids = await _lead_mandate(tmp_path, monkeypatch, gh, run_kind="feature-lead")
+    gh.hidden = {16}
+
+    out = await mandate_service.trigger_shift(WS, USER, mid)
+
+    blob = (
+        await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
+    ).parameters["_belt_plan"]
+    assert _refs(blob) == [[ids[n]] for n in (16, 11, 10, 15)]
+
+
+@pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
 async def test_a_beta_only_line_skips_p3_issues(tmp_path, mongo_db, monkeypatch):
     """``PATCH .../charter {"beta_only": true}``: p3 is out of the beta, so the
     p3 #15 is not planned; off (the default) plans it, as above. Mutation: the

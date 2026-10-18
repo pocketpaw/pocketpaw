@@ -538,5 +538,14 @@
     "tests": [
       "tests/cloud/test_belt_lead_planner.py::test_needs_human_on_an_issue_past_the_open_list_limit_is_skipped"
     ]
+  },
+  {
+    "label": "dependency bodies skip the charter label lists",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            labels=tuple(issue_labels),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py::test_an_issue_past_the_open_list_limit_is_not_blocked"
+    ]
   }
 ]
