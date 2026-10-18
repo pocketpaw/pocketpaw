@@ -12,7 +12,10 @@
 # ``waits_on`` ref names, and a RECORD.md (``_PARALLEL`` at a time) only for a lead
 # whose head moved since its last read and whose feature is in a wave file and not
 # closed and done (issue closed, feature-done PR merged, no pending run). A RECORD
-# never changes a status, so a closed, done lead keeps its last read or none. Lead
+# never changes a status, so a closed, done lead keeps its last read or none. An
+# open issue that is ``needs-human`` or whose newest run was rejected or failed has
+# its comments read (``gh issue view``, again only when its ``updatedAt`` moved) for
+# its ``mark``: the last ``Belt-Contact-Sheet:`` or ``Mac-Finish-Wanted:`` line. Lead
 # runs come from ``service.list_runs``; an app row counts its features' slices by
 # status (done-with-gaps apart from done). Cached per (workspace, repo) for ``TTL``
 # behind a single-flight lock; any failed refresh (git, gh, a rate limit, a bug)
@@ -54,11 +57,13 @@ _MATCH = re.compile(r"[^:]*:([^:]+):\s*///(.*)")  # a grep hit, not a context li
 _TEST = re.compile(r"func (test\w+)")
 _JOURNEYS = re.compile(r"^(#+) [^\n]*journeys[^\n]*\n(.*?)(?=^\1 |\Z)", re.M | re.S | re.I)
 _LIST = "--state all --limit 500 --json".split()
-_STATUSES = ("done", "built", "building", "stuck", "filed", "planned", "gap")
+_STATUSES = ("done", "built", "building", "waiting", "stuck", "filed", "planned", "gap")
 _SLICE_STATUSES = ("done", "done-with-gaps", "building", "planned")
 _UNREADY = "belt.blueprint_unavailable"
 # A component's C4 status by its owners' feature status, first match wins.
-_PAINT = {"stuck": "failed", "building": "changing"}
+_PAINT = {"stuck": "failed", "waiting": "drift", "building": "changing"}
+# A parked issue's last word was Mac work: it waits on the Mac finisher.
+_MAC_WANTED = "Mac-Finish-Wanted:"
 _GAP_TEXT = {
     "claimed_ahead": "wave.json says built or done, but no feature-done PR has merged",
     "issue_closed_not_done": "The feature issue is closed, but the feature is not done",
@@ -115,8 +120,9 @@ async def read_blueprint(
 
 async def read_c4(workspace_id: str, repo: str, app: str, **io: Any) -> dict[str, Any]:
     """One app's ``c4-planned.json`` as ``{scope, model}`` and a status per
-    component id: ``failed`` when a stuck feature owns it, ``changing`` when a
-    building one does, ``landed`` when every path is on dev, else ``planned``.
+    component id: ``failed`` when a stuck feature owns it, ``drift`` (amber) when a
+    waiting one does, ``changing`` when a building one does, ``landed`` when every
+    path is on dev, else ``planned``.
     Each component path is a key too: ``landed`` when it is on dev, else
     ``planned``, so a partial component can mark its files one by one."""
     graph = await read_blueprint(workspace_id, repo, **io)
@@ -190,6 +196,30 @@ async def _record(gh: Run, slug: str, feature: str) -> str | None:
         return None
 
 
+async def _mark(gh: Run, slug: str, number: int) -> str | None:
+    """``sheet`` or ``mac``: which of a ``Belt-Contact-Sheet:`` (Belt's done line)
+    or ``Mac-Finish-Wanted:`` line comes last in the issue's comments, else
+    ``None``, as when the read fails short of a rate limit."""
+    from .cloud_station import _CONTACT_SHEET
+
+    argv = ["gh", "issue", "view", str(number), "-R", slug, "--json", "comments"]
+    code, out, err = await gh(argv)
+    if code != 0 and "rate limit" in err.lower():
+        raise ReadFailed(err.strip()[:200])
+    try:
+        comments = _dicts(json.loads(out).get("comments")) if code == 0 else []
+    except (ValueError, AttributeError):
+        comments = []
+    mark = None
+    for c in comments:  # gh lists them oldest first
+        for line in str(c.get("body") or "").splitlines():
+            if line.strip().startswith(_CONTACT_SHEET):
+                mark = "sheet"
+            elif line.strip().startswith(_MAC_WANTED):
+                mark = "mac"
+    return mark
+
+
 def _waits(raw: Any, slug: str, external: set[str]) -> list[str]:
     """``waits_on`` refs as ``owner/repo#n``: a chunk led by an external system's
     id in the app's model (``creative-core #171``) is that sibling repo's."""
@@ -254,7 +284,7 @@ async def _read(
     ci, heads = {}, {}
     if slug:
         leads_argv = ["gh", "issue", "list", "-R", slug, "--label", "feature-lead", *_LIST]
-        for row in await _rows(gh, [*leads_argv, "number,state,labels"]):
+        for row in await _rows(gh, [*leads_argv, "number,state,labels,updatedAt"]):
             issues[row.get("number")] = row
         merged = ["gh", "pr", "list", "-R", slug, "--label", "feature-done", "--state", "merged"]
         for row in await _rows(gh, [*merged, "--limit", "200", "--json", "number,body"]):
@@ -285,7 +315,7 @@ async def _read(
                 {"action_id": row["action_id"], "kind": kind, "feature": fid, "files": files}
             )
 
-    pending, live = {r["feature"] for r in in_flight}, set()
+    pending, live, asked = {r["feature"] for r in in_flight}, set(), set()
     for app, files in apps.items():
         for f, p in files.items():
             wave = ab.parse_wave(await blob(p) or "") if f else None
@@ -294,20 +324,34 @@ async def _read(
             closed = str((issues.get(wave["issue"]) or {}).get("state")).lower() == "closed"
             if not (closed and f in done_prs) or f"{app}/{f}" in pending:
                 live.add(f)
+            # A comment's mark can only turn a would-be stuck feature waiting or done.
+            row = issues.get(wave["issue"]) or {}
+            parked = "needs-human" in {str(x.get("name")) for x in _dicts(row.get("labels"))}
+            released = (leads.get(f"{app}/{f}") or {}).get("status") in ("rejected", "failed")
+            if str(row.get("state")).lower() == "open" and (parked or released):
+                asked.add(wave["issue"])
     seen, kept = prev.get("heads", {}), prev.get("records", {})
     moved = [f for f in heads if f in live and heads[f] != seen.get(f)]
     read_at = {f: heads[f] if f in live else seen.get(f) for f in heads}  # skipped: as last read
     records = {f: kept.get(f) for f in heads}
+    stamp = {n: issues[n].get("updatedAt") for n in asked}
+    marks = {n: m for n, m in prev.get("marks", {}).items() if n in asked and m[0] == stamp[n]}
     gate = asyncio.Semaphore(_PARALLEL)
 
     async def fetch(f: str) -> None:
         async with gate:
             records[f] = await _record(gh, slug, f)
 
+    async def view(n: int) -> None:
+        async with gate:
+            marks[n] = (stamp[n], await _mark(gh, slug, n))
+
     try:
         async with asyncio.TaskGroup() as tg:
             for f in moved:
                 tg.create_task(fetch(f))
+            for n in asked - marks.keys():
+                tg.create_task(view(n))
     except ExceptionGroup as eg:  # the first failure, as a lone read raises it
         raise eg.exceptions[0] from None
 
@@ -333,6 +377,8 @@ async def _read(
             row = issues.get(wave["issue"]) or {}
             labels = [str(x.get("name")) for x in _dicts(row.get("labels"))]
             issue = {"state": str(row.get("state")).lower(), "labels": labels} if row else None
+            if issue and (mark := marks.get(wave["issue"], (None, None))[1]):
+                issue["mark"] = mark
             run, rec, prs = leads.get(f"{app}/{f}"), records.get(f), done_prs.get(f, [])
             feat = ab.derive_feature(
                 app, f, text, rec, model=model, tree=tree, issue=issue, run=run, prs=prs
@@ -407,6 +453,7 @@ async def _read(
         "slug": slug,
         "heads": read_at,
         "records": records,
+        "marks": marks,
         "models": c4,
         "paths": on_dev,
     }

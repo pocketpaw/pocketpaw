@@ -59,21 +59,25 @@ The joins live in one server module:
 | status | rule |
 |---|---|
 | done | the lead run landed (feature-done PR merged, dev CI green on it, contact sheet posted), or the issue closed and a merged `feature-done` PR names the feature |
+| done | the issue's newest `Belt-Contact-Sheet:` / `Mac-Finish-Wanted:` line is the sheet, even when the run was released (supervisor, 8 h cap) |
 | built | a `feature-done` PR merged; dev CI or the contact sheet is still pending |
 | gap | the claim is ahead of the evidence, or the issue closed without done |
+| waiting | issue labelled `needs-human` and its newest of those two lines is `Mac-Finish-Wanted:`: only the Mac finisher's work is left |
 | stuck | issue labelled `needs-human`, 2+ stall rungs, or the run released without done |
 | building | a pending lead run on the issue |
 | filed | `feature_issue` is an open `#N` with no pending lead |
 | planned | `feature_issue` is not a `#N` yet ("file when ready") |
 
 The rules read GitHub first. Flare's features landed before Belt tracked leads, and they still
-derive from issue and PR state.
+derive from issue and PR state. Comments are read only for an open issue that is `needs-human`
+or whose newest run was rejected or failed, and again only when its `updatedAt` moves.
 
 **Component status.** A component is built when each of its `paths` exists in
 `git ls-tree -r origin/dev` (a path ending in `/` counts once any file sits under it). Some
 paths present makes it partial, and none makes it planned. Matching by id cannot work, because
 dev's model has only coarse `*-sources` components. Belt paints `changing` when a building
-feature owns the component, and `failed` when a stuck one does.
+feature owns the component, amber `drift` when a waiting one does, and `failed` when a stuck
+one does.
 
 **Journey status.** Named: the id is in the blueprint's Journeys section or wave.json. Existing:
 the id is in a `///` comment in a `UITests/*JourneyTests*.swift` on dev. Passing, for now: it
@@ -196,7 +200,7 @@ task run:
  "read_at": "2026-10-15T12:00:00Z", "dev_ci": {"sha": "62a8577", "state": "green", "url": "…"},
  "layers": ["tests", "app", "shell", "model", "engine", "other"],
  "apps": [{"id": "halo", "title": "Halo", "counts": {"total": 9, "done": 4, "built": 1,
-   "building": 1, "stuck": 1, "filed": 1, "planned": 1, "gap": 0},
+   "building": 1, "waiting": 0, "stuck": 1, "filed": 1, "planned": 1, "gap": 0},
    "journeys": {"named": 24, "existing": 18, "passing": 15}}],
  "features": [{"id": "halo/layer-keys", "app": "halo", "title": "…", "wave": "3", "order": 10,
    "status": "building", "claimed": "planned",

@@ -322,5 +322,41 @@
     "tests": [
       "tests/cloud/test_belt_app_blueprint_read.py::test_features_carry_their_slices_and_apps_count_them"
     ]
+  },
+  {
+    "label": "a waiting owner paints failed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "\"waiting\": \"drift\"",
+    "replace": "\"waiting\": \"failed\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a Mac-Finish-Wanted line is not a mark",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "                mark = \"mac\"",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a released run's comments are never read",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": ".get(\"status\") in (\"rejected\", \"failed\")",
+    "replace": ".get(\"status\") in ()",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an issue's comments are reread every time",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if n in asked and m[0] == stamp[n]}",
+    "replace": "if False}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
   }
 ]

@@ -92,8 +92,8 @@
   {
     "label": "stuck ranks above gap",
     "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
-    "find": "        (\"gap\", ahead or closed),\n        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),",
-    "replace": "        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),\n        (\"gap\", ahead or closed),",
+    "find": "        (\"gap\", ahead or closed),\n        (\"waiting\", parked and issue.get(\"mark\") == \"mac\"),\n        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),",
+    "replace": "        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),\n        (\"gap\", ahead or closed),\n        (\"waiting\", parked and issue.get(\"mark\") == \"mac\"),",
     "tests": [
       "tests/cloud/test_belt_app_blueprint.py"
     ]
@@ -110,7 +110,7 @@
   {
     "label": "needs-human does not stick",
     "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
-    "find": "stuck = \"needs-human\" in (issue.get(\"labels\") or []) or stalls >= 2",
+    "find": "stuck = parked or stalls >= 2",
     "replace": "stuck = stalls >= 2",
     "tests": [
       "tests/cloud/test_belt_app_blueprint.py"
@@ -528,6 +528,42 @@
     "replace": "if s.get(k)",
     "tests": [
       "tests/cloud/test_belt_app_blueprint.py::test_wave_slices_keep_entries_with_an_id_and_their_waits_keys"
+    ]
+  },
+  {
+    "label": "a contact sheet on a released run is not done",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"done\", issue.get(\"mark\") == \"sheet\"),",
+    "replace": "(\"done\", False),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a parked issue waiting on the Mac is stuck",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"waiting\", parked and issue.get(\"mark\") == \"mac\"),",
+    "replace": "(\"waiting\", False),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "Mac work waits without needs-human",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"waiting\", parked and issue.get(\"mark\") == \"mac\"),",
+    "replace": "(\"waiting\", issue.get(\"mark\") == \"mac\"),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "stuck ranks above waiting",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "        (\"waiting\", parked and issue.get(\"mark\") == \"mac\"),\n        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),",
+    "replace": "        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),\n        (\"waiting\", parked and issue.get(\"mark\") == \"mac\"),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
     ]
   }
 ]

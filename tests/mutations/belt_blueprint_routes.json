@@ -65,8 +65,8 @@
   {
     "label": "a stuck owner does not paint failed",
     "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
-    "find": "_PAINT = {\"stuck\": \"failed\", \"building\": \"changing\"}",
-    "replace": "_PAINT = {\"building\": \"changing\"}",
+    "find": "_PAINT = {\"stuck\": \"failed\", \"waiting\": \"drift\", \"building\": \"changing\"}",
+    "replace": "_PAINT = {\"waiting\": \"drift\", \"building\": \"changing\"}",
     "tests": [
       "tests/cloud/test_belt_console.py"
     ]
@@ -74,8 +74,8 @@
   {
     "label": "a building owner does not paint changing",
     "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
-    "find": "_PAINT = {\"stuck\": \"failed\", \"building\": \"changing\"}",
-    "replace": "_PAINT = {\"stuck\": \"failed\"}",
+    "find": "_PAINT = {\"stuck\": \"failed\", \"waiting\": \"drift\", \"building\": \"changing\"}",
+    "replace": "_PAINT = {\"stuck\": \"failed\", \"waiting\": \"drift\"}",
     "tests": [
       "tests/cloud/test_belt_console.py"
     ]

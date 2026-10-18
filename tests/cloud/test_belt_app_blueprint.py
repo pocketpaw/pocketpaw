@@ -32,6 +32,7 @@ RUNNING = {
     "lead": {"prs": [{"number": 1122, "state": "MERGED", "done": False}], "stalls": 0},
 }
 DONE_PR = {"number": 1129, "state": "MERGED", "done": True}
+REJECTED = {"status": "rejected", "lead": {"stalls": 0}}
 
 
 def derive(wave=LAYER_KEYS, record=RECORD, app="halo", fid="layer-keys", **kw):
@@ -130,6 +131,14 @@ def test_a_feature_with_no_owned_list_is_placed_by_its_record_tasks_else_unknown
         ("stuck", OPEN, {"status": "running", "lead": {"stalls": 2}}, [], "building", 1),
         ("building", OPEN, {"status": "running", "lead": {"stalls": 1}}, [], "building", 1),
         ("stuck", OPEN, {"status": "rejected"}, [], "building", 1),
+        # The issue's newest Belt-Contact-Sheet: / Mac-Finish-Wanted: line (the read's
+        # ``mark``) splits the red: parked on the Mac waits, a released sheet is done.
+        ("waiting", {**OPEN, "labels": ["needs-human"], "mark": "mac"}, None, [], "building", 1),
+        ("waiting", {**OPEN, "labels": ["needs-human"], "mark": "mac"}, REJECTED, [], "planned", 1),
+        ("done", {**OPEN, "mark": "sheet"}, REJECTED, [], "building", 1),
+        ("done", {**OPEN, "labels": ["needs-human"], "mark": "sheet"}, REJECTED, [], "planned", 1),
+        ("stuck", {**OPEN, "labels": ["needs-human"], "mark": None}, REJECTED, [], "building", 1),
+        ("stuck", {**OPEN, "mark": "mac"}, {"status": "running", "lead": {"stalls": 3}}, [], "", 1),
         ("stuck", OPEN, {"status": "failed"}, [], "building", 1),
         ("building", OPEN, {"status": "queued"}, [], "planned", 1),
         ("filed", OPEN, None, [], "planned", 1),

@@ -62,6 +62,7 @@ class Fake:
         self.heads = {"layer-keys": "a1", "easing": "b1", "Bad.Ref": "c1"}
         self.records = {"layer-keys": contents(RECORD), "easing": contents("Stage: 1 plan\n")}
         self.issues = [{"number": 1036, "state": "OPEN", "labels": [{"name": "feature-lead"}]}]
+        self.comments: dict[int, list] = {}  # gh issue view's comments, oldest first
         self.files, self.prs, self.more_runs = dict(FILES), [], []
         self.inflight = self.peak = 0
         self.limited_records = False
@@ -72,13 +73,18 @@ class Fake:
         size = {HUGE: MAX_MODEL_BYTES + 1}
         self.ls = "".join(f"100644 blob {sha(p)} {size.get(p, 10)}\t{p}\n" for p in tree)
 
-    def lead(self, f, state, *, merged=False, run=None):
+    def lead(self, f, state, *, merged=False, run=None, labels=(), comments=()):
         """A Halo feature with a wave file, a lead branch and a RECORD; ``state``
-        ``None`` leaves its issue off the feature-lead list."""
+        ``None`` leaves its issue off the feature-lead list. ``labels`` go on its
+        issue beside ``feature-lead``, ``comments`` (bodies) under it."""
         n = 2000 + len(self.files)
         wave = {"title": f, "wave": "W2", "status": "planned", "feature_issue": f"#{n}"}
         self.files[f"{BP}/features/{f}.wave.json"] = json.dumps(wave)
-        row = {"number": n, "state": state, "labels": [{"name": "feature-lead"}]}
+        names = ["feature-lead", *labels]
+        row = {"number": n, "state": state, "labels": [{"name": x} for x in names]}
+        row["updatedAt"] = "2026-10-18T00:00:00Z"
+        at = "2026-10-17T0{}:00:00Z".format
+        self.comments[n] = [{"createdAt": at(i), "body": b} for i, b in enumerate(comments)]
         self.issues += [row] if state else []
         self.prs += [{"number": n + 5000, "body": f"Feature: halo/{f}\n"}] if merged else []
         lead = {"feature": f, "app": "halo", "prs": [], "stalls": 0}
@@ -129,6 +135,8 @@ class Fake:
                 rows.append({"number": 333, "state": "OPEN"})
         elif argv[1:3] == ["issue", "list"]:
             rows = [{"number": 171, "state": "CLOSED"}]
+        elif argv[1:3] == ["issue", "view"]:
+            rows = {"comments": self.comments.get(int(argv[3]), [])}
         elif argv[1:3] == ["pr", "list"]:
             rows = self.prs
         elif argv[1:3] == ["run", "list"]:
@@ -271,7 +279,8 @@ async def test_an_unexpected_error_serves_stale_or_503_never_a_bare_500(fake):
 async def test_issues_come_from_the_feature_lead_label_and_always_carry_state(fake):
     g = await read(fake)
     lists = [c for c in fake.calls if c[1:3] == ["issue", "list"]]
-    mine = [c for c in lists if "qbtrix/creative-apps" in c and "number,state,labels" in c]
+    fields = "number,state,labels,updatedAt"
+    mine = [c for c in lists if "qbtrix/creative-apps" in c and fields in c]
     assert mine and all(c[c.index("--label") + 1] == "feature-lead" for c in mine)
     assert not any("feature-lead" in c for c in lists if "qbtrix/creative-core" in c)
     lk, live = feature(g, "halo/layer-keys"), feature(g, "halo/live-keys")
@@ -402,3 +411,56 @@ async def test_a_rate_limited_record_read_serves_stale_without_an_error_log(fake
     with caplog.at_level(logging.ERROR, logger=abr.__name__):
         g = await read(fake, t=61.0)
     assert g["stale"] is True and not caplog.records
+
+
+MAC = "Mac-Finish-Wanted: HaloTextJourneyTests is red since #2135, and it is macOS-only."
+SHEET = "Belt-Contact-Sheet: https://github.com/qbtrix/creative-apps/actions/runs/39076534514"
+ASK = "Which base should SE-b build on, dev or the design-seams branch?"
+
+
+def views(fake, since=0):
+    """The issue numbers whose comments were read since call ``since``."""
+    return sorted(int(c[3]) for c in fake.calls[since:] if c[1:3] == ["issue", "view"])
+
+
+async def test_issue_comments_split_parked_on_the_mac_released_done_and_stuck(fake):
+    parked = fake.lead("parked", "OPEN", run="rejected", labels=["needs-human"], comments=[MAC])
+    released = fake.lead("released", "OPEN", run="rejected", comments=[MAC, SHEET])
+    asking = fake.lead("asking", "OPEN", run="rejected", labels=["needs-human"], comments=[ASK])
+    # a sheet, then new Mac-only work: the newest of the two lines decides
+    relapsed = fake.lead("relapsed", "OPEN", labels=["needs-human"], comments=[SHEET, MAC])
+    fake.lead("live", "OPEN", run="running", comments=[SHEET])  # neither parked nor released
+    g = await read(fake)
+    names = ("parked", "released", "asking", "relapsed", "live")
+    got = {f: feature(g, f"halo/{f}")["status"] for f in names}
+    assert got == {
+        "parked": "waiting",
+        "released": "done",
+        "asking": "stuck",
+        "relapsed": "waiting",
+        "live": "building",
+    }
+    assert g["apps"][0]["counts"]["waiting"] == 2
+    nums = [parked["number"], released["number"], asking["number"], relapsed["number"]]
+    assert views(fake) == sorted(nums)  # only an issue a comment can change is read
+
+
+async def test_issue_comments_are_reread_only_when_the_issue_moved(fake):
+    row = fake.lead("parked", "OPEN", run="rejected", labels=["needs-human"], comments=[ASK])
+    assert feature(await read(fake), "halo/parked")["status"] == "stuck"
+    n = len(fake.calls)
+    await read(fake, t=61.0)
+    assert views(fake, n) == []  # same updatedAt: the cached mark stands
+    fake.comments[row["number"]].append({"createdAt": "2026-10-18T01:00:00Z", "body": MAC})
+    row["updatedAt"] = "2026-10-18T01:00:00Z"
+    n = len(fake.calls)
+    g = await read(fake, t=122.0)
+    assert views(fake, n) == [row["number"]] and feature(g, "halo/parked")["status"] == "waiting"
+
+
+async def test_c4_paints_a_waiting_feature_amber_not_failed(fake):
+    fake.issues[0]["labels"].append({"name": "needs-human"})
+    fake.comments[1036] = [{"createdAt": "2026-10-17T23:07:08Z", "body": MAC}]
+    io = {"git": fake.git, "gh": fake.gh, "runs": fake.runs, "touched": fake.touched}
+    c4 = await abr.read_c4("ws1", "creative-apps", "halo", **io, now=lambda: 0.0)
+    assert c4["status"]["halo-window"] == "drift"  # owned by the waiting halo/layer-keys

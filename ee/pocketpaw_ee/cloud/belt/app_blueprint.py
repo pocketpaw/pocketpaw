@@ -9,8 +9,11 @@
 # first; a feature sits on its ``owned`` paths, else its tasks, else "unknown").
 # Status follows section 1: the first rule that holds wins, and the wave.json
 # ``status`` is only a claim (a built or done claim with no merged feature-done PR
-# is the ``claimed_ahead`` gap). A v3 feature's wave.json ``slices`` each get a
-# status (done, done-with-gaps, building, planned) off its lead run's ``lead``.
+# is the ``claimed_ahead`` gap). The issue's newest contact-sheet or
+# Mac-Finish-Wanted line splits the red: a sheet is done, a parked issue whose
+# last word is Mac work is ``waiting``, and only the rest is ``stuck``. A v3
+# feature's wave.json ``slices`` each get a status (done, done-with-gaps,
+# building, planned) off its lead run's ``lead``.
 
 from __future__ import annotations
 
@@ -165,10 +168,15 @@ def feature_status(
     run: dict[str, Any] | None,
     prs: list[dict[str, Any]],
 ) -> tuple[str, list[str]]:
-    """``(status, gap kinds)``. ``issue`` is ``{state, labels}``; ``run`` the newest
-    lead run row (console ``status``, ``lead`` with ``prs`` and the int ``stalls``);
-    ``prs`` the merged feature-done PRs that name the feature, as ``{number,
-    state, done}`` rows like ``lead.prs``."""
+    """``(status, gap kinds)``. ``issue`` is ``{state, labels}``, plus ``mark`` when
+    the read looked at its comments: ``sheet`` or ``mac``, whichever of a
+    ``Belt-Contact-Sheet:`` or ``Mac-Finish-Wanted:`` line came last. ``run`` is the
+    newest lead run row (console ``status``, ``lead`` with ``prs`` and the int
+    ``stalls``); ``prs`` the merged feature-done PRs that name the feature, as
+    ``{number, state, done}`` rows like ``lead.prs``. A sheet is done even when
+    its run was released; ``needs-human`` with Mac work last is ``waiting`` (the
+    Mac finisher's), any other ``needs-human`` or 2+ stalls or a settled run is
+    ``stuck``."""
     issue, run = issue or {}, run or {}
     lead = run.get("lead") or {}
     closed = str(issue.get("state") or "").lower() == "closed"
@@ -176,11 +184,14 @@ def feature_status(
     done_pr = any(p.get("done") and p.get("state") == "MERGED" for p in prs)
     ahead = claimed in ("built", "done") and not done_pr
     stalls = lead.get("stalls") if isinstance(lead.get("stalls"), int) else 0
-    stuck = "needs-human" in (issue.get("labels") or []) or stalls >= 2
+    parked = "needs-human" in (issue.get("labels") or [])
+    stuck = parked or stalls >= 2
     rules = (
         ("done", run.get("status") == "landed" or (closed and done_pr)),
+        ("done", issue.get("mark") == "sheet"),
         ("built", done_pr),
         ("gap", ahead or closed),
+        ("waiting", parked and issue.get("mark") == "mac"),
         ("stuck", stuck or run.get("status") in _SETTLED),
         ("building", bool(run)),
         ("filed", issue_number is not None),
