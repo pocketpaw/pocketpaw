@@ -13,6 +13,8 @@
 # A card past the prompt's ~10k char ceiling still renders; the run records it.
 # A card missing only closing brackets, or with one surplus closer before its
 # state, streams raw and is repaired at its close.
+# A refused card with none passed gets exactly one repair call carrying the
+# refusal; only that call's card frames are shown, metered on the same ledger.
 #
 # Mutations: tests/mutations/concierge_v2_runtime.json ("card streaming" entries) and
 # tests/mutations/concierge_ripple_rules.json ("FL-1 streamed" entries).
@@ -634,6 +636,146 @@ async def test_a_ripple_turn_that_fails_mid_card_rejects_it_before_unavailable(
         ("unavailable", {"type": "unavailable", "reason": "temporary"}),
         ("stream_end", {"assistant_message_id": None, "cancelled": False}),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# The one repair turn: a refused card goes back to the model once
+# --------------------------------------------------------------------------- #
+
+_BAD_CARD = '{"ui":{"type":"nope"}}\n'
+
+
+class _Scripted:
+    """The model seam answering call N with ``replies[N]`` (the last one after)."""
+
+    def __init__(self, *replies: Any) -> None:
+        self.replies = list(replies)
+        self.calls: list[Any] = []
+
+    def build(self, _settings: Any, _spec: str | None = None) -> Any:
+        from pydantic_ai.models.function import FunctionModel
+
+        async def _stream(messages, info):
+            self.calls.append(messages)
+            reply = self.replies[min(len(self.calls), len(self.replies)) - 1]
+            if isinstance(reply, BaseException):
+                raise reply
+            for piece in reply:
+                yield piece
+
+        return FunctionModel(stream_function=_stream, model_name="fake-concierge")
+
+    def prompt(self, n: int) -> str:
+        from pydantic_ai.messages import UserPromptPart
+
+        parts = [p for m in self.calls[n] for p in m.parts if isinstance(p, UserPromptPart)]
+        return str(parts[-1].content)
+
+
+def _script(monkeypatch, *replies: Any) -> _Scripted:
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    rec = _Scripted(*replies)
+    monkeypatch.setattr(concierge_runtime, "_build_model", rec.build)
+    return rec
+
+
+@pytest.mark.asyncio
+async def test_a_refused_card_is_repaired_once_with_the_reason(
+    concierge_client, model, monkeypatch
+):
+    """THE MUTATION THAT BREAKS THIS: drop the repair turn, or send it without the
+    refusal's reason."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+    from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE, rejection_reason
+
+    client, store = concierge_client
+    good = json.dumps(_explainer())
+    rec = _script(
+        monkeypatch,
+        [f"Gears.\n{_fence(_BAD_CARD)}\nAsk me more."],
+        [f"Sure, fixed:\n{_fence(good + chr(10))}"],
+    )
+    ledgers: list[Any] = []
+    real_usage = concierge_runtime._usage
+
+    def _spy(settings, result, spec):
+        ledgers.append(result.usage)
+        return real_usage(settings, result, spec)
+
+    monkeypatch.setattr(concierge_runtime, "_usage", _spy)
+
+    frames = await _ripple_turn(client, store, monkeypatch)
+
+    assert len(rec.calls) == 2
+    reason = rejection_reason(_BAD_CARD, profile=RIPPLE_PROFILE)
+    assert f"refused: {reason}." in rec.prompt(1)
+    cards = [(e, d["card_id"]) for e, d in frames if e in ("card.rejected", "card.final")]
+    assert cards == [("card.rejected", "c1"), ("card.final", "c2")]
+    # The repair's own text never reaches the visitor; its card does, once.
+    text = "".join(d["content"] for e, d in frames if e == "chunk")
+    assert "Sure, fixed" not in text and text.count("Gears.") == 1
+    transcript = await _transcript()
+    assert transcript.count("```pawbar-card") == 1 and "Sure, fixed" not in transcript
+    # One ledger across both calls: the turn is metered as two requests.
+    assert ledgers[-1].requests == 2
+    assert frames[-1][0] == "stream_end"
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_is_refused_too_ends_the_turn(concierge_client, model, monkeypatch):
+    """Exactly one repair: a second refusal is not retried."""
+    client, store = concierge_client
+    rec = _script(monkeypatch, [f"Gears.\n{_fence(_BAD_CARD)}"])
+
+    frames = await _ripple_turn(client, store, monkeypatch)
+
+    assert len(rec.calls) == 2
+    cards = [(e, d["card_id"]) for e, d in frames if e.startswith("card.") and e != "card.delta"]
+    assert cards == [("card.start", "c1"), ("card.rejected", "c1")] + [
+        ("card.start", "c2"),
+        ("card.rejected", "c2"),
+    ]
+    assert frames[-1][0] == "stream_end"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_repair_keeps_the_reply(concierge_client, model, monkeypatch):
+    client, store = concierge_client
+    rec = _script(monkeypatch, [f"Gears.\n{_fence(_BAD_CARD)}"], TimeoutError("read timed out"))
+
+    frames = await _ripple_turn(client, store, monkeypatch)
+
+    assert len(rec.calls) == 2
+    assert "unavailable" not in [e for e, _ in frames]
+    assert frames[-1] == ("stream_end", {"assistant_message_id": None, "cancelled": False})
+    assert await _transcript() == "Gears.\n"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_card_passed_makes_one_call(concierge_client, model, monkeypatch):
+    client, store = concierge_client
+    good = json.dumps(_explainer())
+    rec = _script(monkeypatch, [f"Gears.\n{_fence(_BAD_CARD)}\n{_fence(good + chr(10))}"])
+
+    frames = await _ripple_turn(client, store, monkeypatch)
+
+    assert len(rec.calls) == 1
+    assert "card.final" in [e for e, _ in frames]
+
+
+@pytest.mark.asyncio
+async def test_a_pawbar_sites_refused_card_is_not_repaired(concierge_client, model, monkeypatch):
+    client, store = concierge_client
+    _seed_kb(monkeypatch, {})
+    await _site()  # no concierge_ui_profile: "pawbar"
+    widget = await store.create_widget(_widget())
+    rec = _script(monkeypatch, [f"Hi {_fence(_BAD_CARD)} bye"])
+
+    res = await _chat(client, widget.id)
+
+    assert res.status_code == 200, res.text
+    assert len(rec.calls) == 1
 
 
 @pytest.mark.asyncio

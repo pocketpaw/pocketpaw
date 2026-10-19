@@ -474,3 +474,20 @@ def test_core_plus_the_worst_case_section_stays_under_the_cap():
     assert worst <= _WORST_CHARS < 32_000 - 800
     typical = sorted(len(_paragraph(m)) for m, _ in _CHIPS)[len(_CHIPS) // 2]
     assert len(core) < typical < worst
+
+
+def test_the_free_model_eval_misses_are_spelled_out():
+    """The props DeepSeek guessed wrong in the 2026-10-19 free-model eval: wind is
+    text, a habit icon is one of the manifest's keys (never an emoji), an if
+    condition sits whole in one brace pair, money takes the ask's currency."""
+    weather = widget_relevance.full_line("weather-forecast")
+    assert 'wind?: text like "14 km/h"' in weather
+    habit = widget_relevance.full_line("habit-tracker")
+    manifest = next(w for w in RIPPLE_PROFILE.manifest["widgets"] if w["type"] == "habit-tracker")
+    keys = set(re.findall(r'"([a-z-]+)"', manifest["props"]["habits"]["type"]))
+    named = re.search(r"icon is ([a-z|-]+) or left out, never an emoji", habit)
+    assert named is not None and set(named.group(1).split("|")) == keys
+    core = _paragraph()
+    assert "one brace pair holds the whole expression" in core
+    assert "\"{state.cycle === 'yearly'}\"" in core
+    assert "currency? (the ask's ISO code, e.g. EUR;" in core

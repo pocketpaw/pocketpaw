@@ -38,6 +38,8 @@
 # site. It uses ``card_spec.RIPPLE_PROFILE``, raises the reply cap to
 # ``_RIPPLE_MAX_TOKENS``, always writes the Ripple cards paragraph, streams each card
 # as ``card.*`` frames (``FenceFilter(stream_cards=True)``) and uses ``FRAME_DEMO``.
+# When the checks refuse a streamed card and none passed, one repair call (on the
+# same history and usage ledger) feeds the refusal back; only its card is shown.
 # A ripple site with a ``concierge_store_url`` gets its store read once per turn
 # (``storefront_for_turn``, ``concierge_store``, cached per site) alongside
 # retrieval: its menu becomes <store-menu> and the same data fills menu-order,
@@ -339,6 +341,17 @@ _MAX_TOKENS = 2_000
 # The output cap for a site on the "ripple" card profile: a full-catalog spec
 # runs to thousands of tokens.
 _RIPPLE_MAX_TOKENS = 8_000
+# The one repair turn after a streamed card the checks refused: the refusal goes
+# back to the model with the turn so far, and only its card reaches the visitor.
+_REPAIR_NOTE = (
+    "Your ```pawbar-card was refused: {reason}. Write only the corrected "
+    "```pawbar-card block, with no text before or after it."
+)
+# Why a card refused mid-stream (``card_spec.PartialScan``) was refused.
+_PARTIAL_REASON = (
+    "a string value the card rules refuse (a URL, markup or an expression where it "
+    "is not allowed, or a key repeated in one object)"
+)
 # The provider's per-request timeout (ModelSettings ``timeout``). A stalled
 # provider becomes the ``unavailable`` frame instead of a widget spinning forever.
 _PROVIDER_TIMEOUT_S = 30.0
@@ -1497,9 +1510,10 @@ _RIPPLE_RULES = (
         "number an edit feeds. Seed each kept number with exactly what its expression "
         "gives for the seeded list.",
     ),
-    "   - Expressions: state paths, + - * / % with parentheses, comparisons, || and ??, "
-    "and a ternary only as the whole expression. There is no exponent operator (no ** "
-    "or ^) and no Math functions: write compound growth as repeated multiplication. "
+    "   - Expressions: one brace pair holds the whole expression, e.g. an if "
+    "condition \"{state.cycle === 'yearly'}\". State paths, + - * / % with parentheses, "
+    "comparisons, || and ??, a ternary only as the whole expression; no exponent "
+    "operator (** or ^) and no Math: write growth as repeated multiplication. "
     "Division by zero gives 0.",
     _craft(
         "numbers-in-stat",
@@ -1530,7 +1544,7 @@ _RIPPLE_RULES = (
     "widget also "
     "takes title? (a recipe: name), subtitle?, verdict? {text, status?: "
     "good|warn|bad|info|neutral} (the answer in one sentence, at most 140 chars, "
-    "shown first) and, with money, currency? (an ISO code; never a symbol in a "
+    "shown first) and, with money, currency? (the ask's ISO code, e.g. EUR; never a symbol in a "
     "number). Never write on_checkout or on_book, or an image. "
     "Notes or jotting down is a notes card, never inputs and buttons; music or focus "
     "sounds, a music-player of its preset sounds. "
@@ -1582,13 +1596,13 @@ _RIPPLE_RULES = (
     "   - When a small picture helps explain (how something works), add an illustration. "
     "Put SVG attributes in single quotes (no JSON escaping): "
     "<svg viewBox='0 0 200 120'>...</svg>. Keep it compact: fewer than about 40 "
-    "elements, short path data, no decorative extras; a long drawing gets cut off. "
-    "Every dur 0.5s or more. No {expressions}; a gradient is fill='url(#id)'. The card "
-    "may be dark or light: write text with fill='currentColor', never dark or black. "
+    "elements, short path data, no decorative extras. "
+    "Every dur 0.5s or more. No {expressions}; a gradient is fill='url(#id)'. On a "
+    "dark or light card, text is fill='currentColor'. "
     "Reuse a shape with use href='#id' (plain href, never xlink:href), at most 40 uses, "
     "none pointing at a use. Up to 8 annotations [{id, label (at most 40 chars), note "
     "(at most 280), target}] number notes on parts of the drawing: give each drawing "
-    "part an id and point at it; keep each note to one short sentence. Put on_select "
+    "part an id and point at it; one short sentence per note. Put on_select "
     "on the node beside props, never inside props.",
     "   - A good summary card (copy its shape, never its data): "
     + json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":")),
@@ -2386,6 +2400,10 @@ class FenceFilter:
         self._size = 0  # their total length
         # Every streamed card's body length so far, by card id (``ceiling_breaches``).
         self.card_chars: dict[str, int] = {}
+        # Streamed cards that passed, and why the last refused one was refused
+        # ("" for none): the runner's one repair turn reads both.
+        self.passed = 0
+        self.rejected = ""
         self._partial: Any = None  # its card_spec.PartialScan
         self._swallow = False  # a rejected card's fence is still open
         self._in_str = self._esc = False  # the open card's body is mid JSON string
@@ -2561,6 +2579,11 @@ class FenceFilter:
         self.card_chars[card_id] = self._size
         if self._size > self._profile.max_chars or self._partial.feed(piece):
             self._card_id, self._swallow, self._parts = "", True, []
+            self.rejected = (
+                f"it is longer than {self._profile.max_chars} characters"
+                if self._size > self._profile.max_chars
+                else _PARTIAL_REASON
+            )
             return CardEvent("card.rejected", {"card_id": card_id, "reason": "invalid"})
         self._parts.append(piece)
         self._track_strings(piece)
@@ -2615,7 +2638,13 @@ class FenceFilter:
             return self._noted(body, card)
         obj = _card_object(card)
         if obj is None:
+            from pocketpaw_ee.paw_bar.card_spec import rejection_reason
+
+            self.rejected = rejection_reason(
+                body, verbs=self._verbs, lead_capture=self._lead_capture, profile=self._profile
+            )
             return CardEvent("card.rejected", {"card_id": card_id, "reason": "invalid"})
+        self.passed += 1
         fence = self._noted(body, card)
         return CardEvent("card.final", {"card_id": card_id, "card": obj}, fence)
 
@@ -3035,6 +3064,8 @@ async def run_concierge_v2(
     # Whether the visitor has seen anything (text or a card frame): no retry after.
     shown = False
     fences: FenceFilter | None = None
+    # The first reply's messages and usage, for the one card repair turn.
+    repair_from: tuple[Any, Any] | None = None
     # The site and widget ride the usage the meter prices, whatever the outcome.
     spend_tags = {"site_id": site_id, "widget_id": widget_id}
     usage: dict[str, Any] = {"backend": _BACKEND, **spend_tags}
@@ -3132,6 +3163,11 @@ async def run_concierge_v2(
                             full_text, shown = full_text + text, True
                             yield frame
                     usage = {**_usage(settings, result, model_spec), **spend_tags}
+                    run_usage = result.usage
+                    repair_from = (
+                        result.all_messages(),
+                        run_usage() if callable(run_usage) else run_usage,
+                    )
                 break
             except Exception as exc:
                 if attempt > 1 or shown or not _is_transient(exc):
@@ -3159,6 +3195,31 @@ async def run_concierge_v2(
             text, frame = _piece_frame(piece)
             full_text += text
             yield frame
+        # One repair turn, exactly one: a streamed card the checks refused, with
+        # none passed, goes back to the model with the refusal. Its usage adds to
+        # the first call's (pydantic_ai accumulates into the ledger it is handed),
+        # so the turn is metered as one. Only its card frames are shown: the
+        # visitor already read this turn's text. A failure here keeps the reply.
+        if fences.rejected and not fences.passed and repair_from is not None:
+            try:
+                async with agent.run_stream(
+                    _REPAIR_NOTE.format(reason=fences.rejected),
+                    message_history=repair_from[0],
+                    model_settings=model_settings,
+                    usage=repair_from[1],
+                ) as result:
+                    async for delta in result.stream_text(delta=True, debounce_by=None):
+                        for event in await fences.afeed(delta or ""):
+                            if isinstance(event, CardEvent):
+                                text, frame = _piece_frame(event)
+                                full_text += text
+                                yield frame
+                    usage = _usage(settings, result, model_spec) | spend_tags
+            except Exception:  # noqa: BLE001 — the first reply already stands
+                logger.warning("concierge v2: card repair failed for run %s", run_id, exc_info=True)
+            for piece in fences.close():
+                if isinstance(piece, CardEvent):
+                    yield _piece_frame(piece)[1]
         if contact and not fences.lead_card:
             for piece in contact_reply(
                 lead_capture=lead_capture_on(site), said_something=bool(full_text.strip())

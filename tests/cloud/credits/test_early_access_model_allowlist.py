@@ -4,7 +4,8 @@
 # anywhere (per-send override, agent config) is refused with
 # ``model.not_allowed`` on both seams before any backend is built; an
 # allowlisted model nothing prices is refused too, since it would bill 0. The
-# launch default ``litellm:claude-haiku-4-5`` runs and its run debits. Paid
+# launch default ``litellm:claude-haiku-4-5`` and the free default
+# ``litellm:deepseek/deepseek-v4-flash`` run and their runs debit. Paid
 # workspaces and BYOK turns are untouched.
 #
 # Same harness as ``test_early_access_byok.py``: early-access posture, real
@@ -218,7 +219,10 @@ async def test_default_haiku_runs_and_its_run_debits(ea_user, haiku_default, mon
     assert await credits_service.balance_micro(ws) == balance_before - result.micro_charged
 
 
-@pytest.mark.parametrize("override", ["claude-haiku-4-5-20251001", "claude-sonnet-4-6"])
+@pytest.mark.parametrize(
+    "override",
+    ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "litellm:deepseek/deepseek-v4-flash"],
+)
 async def test_allowed_per_send_models_run(ea_user, haiku_default, monkeypatch, override):
     ws, uid = ea_user.workspace_id, ea_user.user_id
 
@@ -227,6 +231,35 @@ async def test_allowed_per_send_models_run(ea_user, haiku_default, monkeypatch, 
     )
     assert end.event == "stream_end", end.data
     assert len(seen) == 1
+
+
+async def test_default_deepseek_runs_and_its_run_debits(ea_user, haiku_default, monkeypatch):
+    """The free default ``litellm:deepseek/deepseek-v4-flash`` passes the
+    allowlist and is priced through the ladder, so its run is billed for real.
+
+    Mutation: drop deepseek/deepseek-v4-flash from the default allowlist.
+    """
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.metering import service as metering
+
+    ws, uid = ea_user.workspace_id, ea_user.user_id
+    from tests.cloud.credits import test_early_access_byok as harness
+
+    deepseek = "deepseek/deepseek-v4-flash"
+    monkeypatch.setattr(haiku_default, "pydantic_ai_model", f"litellm:{deepseek}")
+    monkeypatch.setattr(harness, "_USAGE", {**harness._USAGE, "model": deepseek})
+    monkeypatch.setattr(metering, "load_rate_card", _rate_card)
+    balance_before = await credits_service.balance_micro(ws)
+
+    end, seen = await _execute(monkeypatch, ws, uid, await _agent(ws, uid), "r-deepseek")
+
+    assert end.event == "stream_end", end.data
+    assert len(seen) == 1
+    result = await metering.bill_run_now("r-deepseek")
+    assert result is not None
+    assert result.debited is True
+    assert result.micro_charged > 0
+    assert await credits_service.balance_micro(ws) == balance_before - result.micro_charged
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +318,13 @@ async def test_allowlist_is_off_while_credits_are_not_enforced(ea_user, monkeypa
         ("opus", False),
         ("claude-haiku-4-5-evil", False),
         ("anthropic:claude-haiku-4-5", True),
+        # The free default: the slash in the id survives the prefix strip.
+        ("deepseek/deepseek-v4-flash", True),
+        ("litellm:deepseek/deepseek-v4-flash", True),
+        ("DeepSeek/DeepSeek-V4-Flash", True),
+        ("openrouter:deepseek/deepseek-v4-flash", True),
+        ("deepseek/deepseek-v4-pro", False),
+        ("deepseek-v4-flash", False),
         ("foo:claude-haiku-4-5", False),
         ("foo:bar:claude-haiku-4-5", False),
         ("litellm:litellm:claude-haiku-4-5", False),

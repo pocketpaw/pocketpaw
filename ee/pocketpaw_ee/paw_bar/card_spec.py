@@ -2855,6 +2855,34 @@ def _render_card(
     return f"{_FENCE}pawbar-card\n{body}{_FENCE}"
 
 
+def rejection_reason(
+    body: str,
+    *,
+    verbs: Iterable[str] | None = HOST_EVENTS,
+    lead_capture: bool = False,
+    profile: CardProfile = PAWBAR_PROFILE,
+) -> str:
+    """Why ``render_card`` dropped ``body``, in the refusing check's own words (a
+    rule and a JSON Pointer, never the card's values), for the concierge's one
+    repair turn. Read the way ``render_card`` reads it (repaired, flat props
+    lifted); a generic line when it is not one spec or the strict walk passes it."""
+    spec = _parse(body, unique=profile.strict)
+    if spec is None and (fixed := _repaired(body, profile)) is not None:
+        spec = _parse(fixed, unique=profile.strict)
+    if not _is_spec(spec):
+        return "it is not one complete JSON object holding ui"
+    try:
+        spec["ui"], _ = _lift_flat_props(spec["ui"], profile)
+        if len(_serialize(spec)) > profile.max_chars:
+            return f"it is longer than {profile.max_chars} characters"
+        _check_strict(spec, _card_verbs(verbs), lead_capture, profile)
+    except _Reject as exc:
+        return f"{exc} (at {exc.path})" if exc.path else str(exc)
+    except Exception:  # noqa: BLE001 — same as render_card: never raises
+        return "a check could not read it"
+    return "it breaks a card rule"
+
+
 def has_lead_form(body: str, profile: CardProfile = PAWBAR_PROFILE) -> bool:
     """Whether a card body holds a send_to_team form, as a Ripple spec node (in
     any flow step too) or a legacy ``{"kind": "form"}`` card. Says nothing about
@@ -3223,6 +3251,7 @@ __all__ = [
     "card_verdict",
     "compact_manifest",
     "has_lead_form",
+    "rejection_reason",
     "render_card",
     "scan_partial",
     "validate_and_hydrate",
