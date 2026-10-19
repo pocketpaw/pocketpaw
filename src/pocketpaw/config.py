@@ -2517,10 +2517,13 @@ class Settings(BaseSettings):
     dodo_checkout_return_base: str = Field(
         default="",
         description=(
-            "Fallback base URL the Dodo subscription CHECKOUT SESSION returns the "
-            "buyer to after pay / cancel, used ONLY when the /billing/subscribe "
-            "request carries no Origin (and no usable Referer) header. The return "
-            "urls become ``{base}/settings/billing?checkout=success|cancel``. Set "
+            "Fallback app base URL the Dodo subscription CHECKOUT SESSION returns "
+            "the buyer to after pay / cancel, used when the /billing/subscribe "
+            "request carries no Origin (and no usable Referer) header, and as the "
+            "redirect target when the return hop is handed an untrusted origin. "
+            "The buyer passes through the backend hop "
+            "``/api/v1/billing/checkout/return/{outcome}`` and lands on "
+            "``{base}/settings/billing?checkout=success|cancel``. Set "
             "via POCKETPAW_DODO_CHECKOUT_RETURN_BASE (e.g. https://app.example.com). "
             "Default empty: when both this and the request Origin are absent the "
             "redirect is omitted (the checkout still works, the buyer just isn't "

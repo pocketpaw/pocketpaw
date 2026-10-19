@@ -2725,6 +2725,44 @@ the trailing `days` UTC days, today included (default 14, 1 to 90, otherwise
   that fell back to defaults. A failed signup, notify, waitlist or burn query
   fails the request with a 500.
 
+## Billing — Checkout return
+
+```
+GET  /api/v1/billing/checkout/return/{outcome}?to=<app origin>
+POST /api/v1/billing/checkout/return/{outcome}?to=<app origin>
+```
+
+Where a plan checkout sends the buyer after paying or cancelling. `POST
+/billing/subscribe` sets the Dodo checkout's `return_url` to
+`<POCKETPAW_PUBLIC_BASE_URL>/api/v1/billing/checkout/return/success?to=<app>` and
+`cancel_url` to the same path ending in `/cancel`. `<app>` is the request's
+`Origin` (or the scheme and host of its `Referer`), falling back to
+`POCKETPAW_DODO_CHECKOUT_RETURN_BASE`. With neither, no return url is set.
+
+The buyer used to be sent straight to `<app>/settings/billing`. Dodo processes
+Indian cards through Razorpay, and Razorpay returns the buyer with a cross-site
+form POST, which a SvelteKit server refuses ("Cross-site POST form submissions
+are forbidden") and a static or Tauri build cannot receive at all. This route
+takes either method and answers `303 See Other`, so the browser follows with a GET:
+
+| Case | Response |
+|------|----------|
+| `to` is trusted | `303` to `<to>/settings/billing?checkout=<outcome>` |
+| `to` missing or untrusted, return base configured | `303` to `<return base>/settings/billing?checkout=<outcome>` |
+| neither | `200` HTML page: "Payment received" or "Payment cancelled", return to the app |
+
+- **No auth, no license.** It is a cross-site navigation with no session. It
+  changes nothing: plans and credits still land only on the signed webhook.
+- **`to` is allowlisted**, never an open redirect. It must be a bare origin
+  (`scheme://host[:port]`, `http`/`https`/`tauri`, no user, path or query) that
+  the CORS policy accepts (`POCKETPAW_API_CORS_ALLOWED_ORIGINS`, the built-in
+  Tauri origins, any localhost), or exactly the configured return base, or the
+  backend's own public origin.
+- **`outcome`** is `success` or `cancel`. Anything else lands on the billing page
+  without a `checkout` flag. It lives in the path because Dodo appends its own
+  `status` and id query params; none of them are forwarded.
+- **The POST body is ignored**, never parsed or logged (it can carry payment ids).
+
 ## Agent Activity
 
 HR-12a. The workspace-scoped answer to "which of my agents are working

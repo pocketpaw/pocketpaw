@@ -106,6 +106,8 @@ ROUTER_MODULES = [
     ("audit", "pocketpaw_ee.cloud.audit.router"),
     ("auth", "pocketpaw_ee.cloud.auth.router"),
     ("billing", "pocketpaw_ee.cloud.billing.router"),
+    # The post-checkout return hop: two public routes, on the allowlist below.
+    ("billing_checkout_return", "pocketpaw_ee.cloud.billing.checkout_return"),
     # Added 2026-09-14 with the router that mounts it. Audited rather than
     # pinned: every route under /platform carries require_platform, which is
     # asserted directly in tests/cloud/platform/test_platform_guard.py rather
@@ -220,6 +222,10 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     # --- static catalogues, no tenant data ---
     "GET /billing/plans": "public price list",
     "GET /billing/site-plans": "public price list",
+    # The gateway returns the buyer cross-site with no session (Razorpay POSTs).
+    # Redirect-only, no state change; `to` is held to the CORS allowlist.
+    "GET /billing/checkout/return/{outcome}": "post-checkout redirect to an allowlisted app",
+    "POST /billing/checkout/return/{outcome}": "same, for gateways that return with a form POST",
     "GET /agents/backends": "static list of backend names",
     "GET /pockets/builtin-widgets": "static widget catalogue",
     "GET /decisions/_ping": "liveness probe",

@@ -42,285 +42,13 @@
 # webhook secret is per-environment, so the configured environment is the mode.
 # Reversals and downgrades (cancel, dunning) still run, since they only take back.
 #
-# Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
-# Updated 2026-10-02 (feat/partners-sell, PH-2): ``site_plan_price_usd`` — what one
-#   period of a site tier costs THIS workspace. Monthly rungs return
-#   ``monthly_price_usd`` unchanged; partner-only rungs return
-#   ``site_plans.partner_price_usd`` for the partner's billing country. The wallet
-#   charge sites for site plans (``sites.service`` purchase and tier change, the
-#   renewal sweeper) read it; the foreign-concierge mint stays on its fixed
-#   monthly rung. With no partner profile a renewal keeps the price last paid only
-#   when that is a real price of the tier; otherwise it refuses.
-#   ``site_plan_change_terms`` is the pure tier-change rule (same period: pay the
-#   gap, keep the date; different period: full price, new period; a running
-#   longer period cannot move to a shorter one). Tier-change debits use their own
-#   key namespace (``site_plan_debit_key(..., change=True)``) so a change on a
-#   renewal's due date can never replay that renewal's debit.
-# Updated 2026-06-24 (security): enforce USD before granting; correct the
-#   bad-signature docstring (raises ``BadRequest`` → 400, not ``ValidationError``).
-# Updated 2026-06-24 (BC-7, the Subscription primitive): added ``subscribe`` (open
-#   a recurring checkout for a plan tier) and extended ``handle_webhook`` to route
-#   verified ``subscription.*`` deliveries. ``subscription.active`` /
-#   ``subscription.renewed`` grant the tier's monthly allotment ADDITIVELY (unused
-#   credits roll over) keyed on the per-renewal event id; ``subscription.active``
-#   also upgrades ``Workspace.plan``; ``subscription.cancelled`` reverts the plan
-#   to ``free`` WITHOUT clawing back granted credits. The Subscription doc tracks
-#   the gateway lifecycle alongside the per-renewal BC-1 grants.
-# Updated 2026-06-24 (B1 review fix): the capture-event emit (BillingTopupCaptured
-#   / BillingSubscriptionGranted) is now gated on ``credits.grant``'s ``created``
-#   flag, NOT the prior balance-delta heuristic (``new_balance == before +
-#   amount``). Under concurrency a racing grant could shift the balance so a
-#   genuine first grant looked like a replay (emit wrongly suppressed) or a replay
-#   looked genuine (spurious emit). ``grant`` now returns a ``GrantResult``; the
-#   created-flag is the authoritative "this grant actually applied" signal.
-# Updated 2026-06-24 (BC-9, per-site annual plan): the subscription webhook
-#   dispatch now FORKS on a ``site_id`` in the verified event metadata. A delivery
-#   WITH a ``site_id`` is a PER-SITE annual sub (each published site has its own
-#   plan) and routes to ``_handle_site_subscription_event``, which updates the
-#   SITE's ``subscription_status`` / ``renewal_date`` (active/renewed →
-#   active; cancelled → cancelled) via the sites service — it NEVER grants
-#   workspace credits and NEVER changes ``Workspace.plan``. A delivery WITHOUT a
-#   ``site_id`` is the unchanged BC-7 workspace-plan path. Same verified-signature
-#   + idempotency guards apply (the per-site path is reached only AFTER
-#   ``verify_and_parse_webhook`` succeeds).
-# Updated 2026-06-24 (feat/charge-first-sites): the per-site ``subscription.active``
-#   delivery now drives CHARGE-FIRST ACTIVATION. A paid-tier site is published as
-#   PENDING (created but NOT deployed live); on the verified ``subscription.active``
-#   the per-site path calls ``sites_service.activate_site``, which runs the deferred
-#   deploy (generate + smoke-gate + Cloudflare/local deploy) and marks the sub
-#   active — so a paid site goes live ONLY after payment confirms. ``activate_site``
-#   is idempotent (an already-active/deployed site is a no-op), so a replayed
-#   ``active`` does not re-deploy. ``renewed`` just refreshes the renewal date (the
-#   site is already live), ``cancelled`` marks the site cancelled WITHOUT undeploying
-#   it in v1.
-# Updated 2026-06-28 (fix/billing-checkout-sessions): ``subscribe`` now takes an
-#   ``origin`` (the buyer's app origin, read off the /subscribe route's Origin /
-#   Referer header) and threads it through ``_checkout_return_urls`` into the
-#   provider's ``return_url`` / ``cancel_url`` so Dodo returns the buyer to
-#   ``{origin}/settings/billing?checkout=success|cancel`` after pay/cancel (the
-#   prior payment-link checkout had nowhere to send the buyer). Falls back to the
-#   ``dodo_checkout_return_base`` config when no origin is present; omits the
-#   redirect entirely if both are absent. The webhook grant + idempotency are
-#   unchanged — they key on the event body's subscription_id + metadata + event_id.
-# Updated 2026-07-08 (feat/billing-cancel-downgrade): two money-management fixes.
-#   (A) ``cancel`` — wire the previously dead-coded provider ``cancel_subscription``
-#   end to end: load the workspace's ACTIVE Subscription row (the ``(workspace)``
-#   index is NON-unique, so select ``status == "active"`` specifically, never a
-#   naive first-match that could pick a stale cancelled row) and tell the gateway to
-#   stop billing it; 402 ``billing.no_active_subscription`` when there is none. The
-#   entitlement revert stays REACTIVE on the ``subscription.cancelled`` webhook — this
-#   only adds the initiation side (no duplicate plan-revert). (B) ``subscribe`` no
-#   longer double-subscribes: when a workspace ALREADY has an active subscription a
-#   plain ``create_subscription`` opened a SECOND parallel Dodo subscription (double
-#   billing). It now runs a GUARDED cancel-then-create — open the NEW checkout FIRST
-#   (a create failure leaves the current sub untouched, no coverage gap), THEN cancel
-#   the OLD subscription at the gateway (billing stops synchronously, so the two are
-#   never both billing). Webhook ``event_id`` idempotency is untouched. See the
-#   ``subscribe`` body for the native-``change_plan`` follow-up note.
-# Updated 2026-07-09 (fix/cancel-webhook-revert-guard): the ``subscription.cancelled``
-#   plan revert is no longer UNCONDITIONAL. Webhook delivery is unordered /
-#   at-least-once, so a ``cancelled(old_sub)`` retry can land AFTER ``active(new_sub)``
-#   during a plan switch and would previously downgrade a paying customer to free
-#   (nothing self-heals it — only ``subscription.active`` re-sets the plan). The
-#   handler now marks THIS sub cancelled first, then reverts to free ONLY when no
-#   OTHER active Subscription row still owns the workspace; a stale/out-of-order
-#   cancel is logged and skipped. Credits are still never clawed back. See the
-#   ``subscribe`` body for the STILL-OPEN downgrade lag-window (checkout→active
-#   webhook) that only the atomic Dodo ``change_plan`` closes.
-#
-# Updated 2026-08-26 (feat/site-plans-as-addons): added ``_site_addon_cart`` +
-#   ``sync_site_addons`` — a paid SITE is now a LINE on the workspace's existing
-#   subscription instead of a subscription of its own. One bill, one renewal date,
-#   one payment method, however many sites the workspace runs.
-#
-#   THE CART IS DECLARATIVE, WHICH IS THE ONLY THing worth knowing before touching
-#   this. Dodo's ``change_plan`` REPLACES the add-on list; sending nothing removes
-#   every add-on the subscription holds. So the cart is rebuilt from the ``Site``
-#   documents on every call and pushed WHOLE — never appended to, never diffed
-#   against gateway state. That also makes cancellation fall out for free: a site
-#   that stops being active stops appearing in the cart, and the next sync drops
-#   its line.
-#
-#   Sites still holding a per-site ``subscription_id`` are EXCLUDED from the cart.
-#   Those are the subscriptions the old rail sold, Dodo is already billing them,
-#   and counting one here too would charge the customer twice for one site.
-#
-#   A workspace with no active subscription is REFUSED (``NoActiveSubscription``)
-#   rather than being sold a standalone per-site subscription — that standalone
-#   subscription is exactly the separate payment this change removes.
-#
-# Updated 2026-09-02 (fix/billing-reversals-and-dunning): two money paths that
-#   were acked and then dropped now do something.
-#
-#   (M1) REVERSALS. ``refund.succeeded`` and ``dispute.lost`` debit the credits
-#   the payment granted (``_handle_reversal_event``). Nothing else moves money:
-#   the other five ``dispute.*`` deliveries are lifecycle, and reversing when a
-#   dispute OPENS would take the credits twice the moment it is later won. This
-#   is not a refund policy — we do not issue refunds, but a chargeback is
-#   involuntary and Dodo is merchant of record, so both paths arrive whether we
-#   consent or not. The balance is allowed to go NEGATIVE, which blocks further
-#   spend until it is settled; writing the shortfall off would make disputing
-#   profitable. Idempotency keys on the webhook event id exactly as the grant
-#   path does.
-#
-#   (M1a) The reversal join needs something to join TO, so ``_record_payment``
-#   moved from the very end of ``handle_webhook`` to above the amount and
-#   currency gates. Every verified success that carries a routable workspace now
-#   leaves a ``Payment`` row whether or not it granted — previously the currency
-#   gate returned first, so the population most likely to demand a refund (the
-#   non-USD charges that take money and grant nothing) was precisely the one
-#   with no record to trace. GRANT BEHAVIOUR IS UNCHANGED; only the record is.
-#   Recording refused payments forced a field split the row wanted anyway:
-#   ``amount_credits`` is what was PAID, ``credits_granted`` is what we actually
-#   handed over, and the second is the cap a clawback runs against.
-#
-#   (M5) DUNNING. ``subscription.on_hold`` stamps a ``grace_until`` and leaves
-#   the plan alone; ``sweep_subscription_grace`` revokes it once the deadline
-#   passes; ``renewed`` / ``active`` clear the state and restore the plan;
-#   ``expired`` / ``failed`` are terminal at the gateway so they suspend at once.
-#   No dunning path ever claws back credits. Owners/admins get an in-app
-#   notice (bell + push) when the hold starts (``billing.payment_failed``) and
-#   when the plan actually drops to free (``billing.plan_downgraded``); a failed
-#   notice never blocks the billing change. The state rides ``subscription.*``
-#   rather than Dodo's ``dunning.*`` events, which are a per-business toggle that
-#   may be off and carry no metadata to route on.
-#
-#   (T-4) REVERSALS CLAIM BEFORE THEY DEBIT. ``_handle_reversal_event`` used to
-#   debit and only then claim the running total under a ``$ne`` filter on the
-#   event id. That filter guards a REDELIVERY of one event and nothing else, so
-#   a refund and a lost dispute on the same payment — routine, because Verifi
-#   RDR resolves disputes by refunding — both read ``credits_reversed`` before
-#   either claimed it, both cleared the same cap, and both debited under their
-#   own idempotency keys: twice the grant clawed back and the wallet driven
-#   negative, which ``check_balance`` turns into a lockout. It needs no second
-#   process; the two deliveries interleave at an ``await`` inside ONE event
-#   loop, so a single-worker deploy was never protected. The claim now runs
-#   first under a conditional ``credits_reversed <= granted - amount`` filter
-#   and the debit only follows a claim that won.
-#
-#   THAT ORDERING OPENS ITS OWN WINDOW, and it is covered twice. A failure
-#   between the claim and the debit leaves a reversal recorded that never took
-#   the credits, and the redelivery carries this delivery's own id so the row
-#   alone cannot tell it from a routine replay. The debit's failure path
-#   RELEASES the claim (``_release_reversal_claim``, skipped when the ledger
-#   already records the movement, since ``debit`` can raise after the balance
-#   moved) so a redelivery re-drives cleanly; and a hard kill, which runs no
-#   ``except``, is caught on redelivery by an identity check plus
-#   ``is_recorded`` that logs at ERROR instead of "already applied". That
-#   check sits ABOVE the ``remaining <= 0`` return on purpose — below it, a
-#   redelivery of a FULL reversal returns before the claim is ever reached and
-#   the alarm is dead code.
-#
-#   THE TRAP THAT MAKES M5 MORE THAN A ONE-LINER: ``_active_subscription`` used
-#   to filter ``status == "active"`` and is now ``_billable_subscription`` over
-#   {active, on_hold}. Writing "on_hold" into that field WITHOUT widening the
-#   predicate makes ``subscribe``'s guard stop seeing the row, skip the
-#   cancel-then-create, and open a SECOND parallel Dodo subscription — the
-#   double-billing defect fixed on 2026-07-08, reintroduced by a status string.
-#   See ``_BILLABLE_STATUSES`` for which question each set answers.
-#
-# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): INR TOP-UPS GRANT. Paw
-#   Partners (Indian print shops / designers) prepay the wallet in rupees, and a
-#   verified INR ``payment.succeeded`` used to be acked and grant nothing. The
-#   currency gate now admits USD and INR ONLY; every other currency keeps the old
-#   ack-record-grant-nothing behaviour.
-#
-#   THE INR RATE is Dodo's own: a USD ``settlement_amount`` on the verified body
-#   is the auditable USD value of the charge, and credits = those cents. Only
-#   when no USD settlement figure is present does the grant fall back to the
-#   configured ``fx_inr_per_usd`` (credits = floor(paise / rate)), or when the
-#   settlement figure sits outside 0.5x-2x of that estimate. Neither figure is
-#   logged: Dodo's settlement figure is stored on the Payment row
-#   (``settlement_amount`` / ``settlement_currency``) and the source that won plus
-#   the rate ride on the base ledger entry's ``ref`` (``conversion``,
-#   ``fx_inr_per_usd``) and are copied onto the row, so a fee netted into the
-#   settlement, or a unit mismatch, is auditable after the fact.
-#
-#   DODO'S PRODUCT ID, NOT METADATA AND NOT THE CHARGE CURRENCY, picks the INR
-#   path: conversion + bulk bonus run only when the verified body's
-#   ``product_cart`` is exactly the INR credits product AND the charge is INR.
-#   Metadata NEVER gates or sizes a grant — Dodo static payment links accept
-#   ``metadata_*`` query params, so a buyer can write any metadata they like
-#   and the webhook signature only proves Dodo sent it, not that we wrote it.
-#   Every INR grant is derived from money actually paid. A USD-product checkout
-#   that Dodo charges in another currency grants nothing (origin/dev behaviour).
-#
-#   BULK BONUS rides a SEPARATE ledger line, ``cause="bulk_bonus"``, keyed on
-#   ``<event_id>:bulk_bonus`` so it is exactly-once on its own — see
-#   ``_INR_BULK_BONUS``. ``credits_granted`` on the Payment row is base + bonus,
-#   which is the reversal cap.
-#
-#   REVERSALS ARE NOW PROPORTIONAL. ``_handle_reversal_event`` used to take a
-#   same-currency refund's stated amount AS credits, which is exact for USD (one
-#   cent, one credit) and a gross over-reversal for INR (a Rs.100 refund is 10,000
-#   paise, not 10,000 credits). It now takes ``floor(granted * refunded / paid)``,
-#   which reduces to the old figure for USD (granted == paid) and reverses base
-#   and bonus pro rata for INR — exactly base + bonus on a full refund, never
-#   more than was granted, rounding down on every partial.
-#
-#   REVIEW FIX (same branch): the reversal cap is stamped from the LEDGER, not
-#   from this delivery's arithmetic. A redelivery recomputes the INR base at the
-#   rate configured NOW and its grant no-ops, so stamping that figure let a rate
-#   change between deliveries inflate ``credits_granted`` past what moved — and a
-#   full refund then drove the wallet negative. The bonus is sized off the base
-#   the ledger holds, the conversion rate rides on the base entry's ``ref``, the
-#   capture emit / log report only what moved on THIS delivery, and a USD
-#   settlement figure outside 0.5x-2x of the FX estimate is distrusted.
-#
-# Updated 2026-10-02 (feat/partners-commissions, PH-13): CLIENT-PAID PARTNER
-#   SITES. A partner sends its client (the shop) a one-time pay link for a
-#   yearly partner plan at list price (``create_partner_client_checkout``, the
-#   same ``create_one_time`` path a top-up takes, on the USD or INR credits
-#   product). The site keeps the server-side record, keyed by the Dodo payment
-#   id returned at creation. On a verified ``payment.succeeded`` that payment id
-#   is looked up FIRST (``_handle_partner_client_payment``): a match never
-#   grants a top-up; it checks amount / currency / product against the record,
-#   gives the site its year on ``CLIENT_BILLING_RAIL`` and grants the partner a
-#   commission (``partner_commission``, key ``<payment_id>:commission``) of
-#   floor(rate x paid US cents, net of tax) — the rate from
-#   ``partners._calc.commission_rate_bps``. INR converts through the PH-4
-#   settlement-in-band-else-FX helper. A refund or lost dispute within 60 days
-#   reverses that commission once and lapses the site (``partner_commission_reversal``).
-#   Metadata never qualifies a payment; a payment whose metadata CLAIMS to be a
-#   partner client payment and matches no record is recorded and NOT granted
-#   (fail closed: if Dodo ever re-keyed a payment, the shop's money would
-#   otherwise land in the partner's wallet as a top-up).
-#
-#   Review fixes (same branch): the CLAWBACK IS ANCHORED ON THE LEDGER, not the
-#   Site record (a deleted site took its records with it and kept the
-#   commission): the reversal finds the partner's workspace through the Payment
-#   row, the 60-day window runs from the commission's ledger entry, and the
-#   running clawback is claimed on the Payment row (``commission_reversed``)
-#   before the debit, so refund + dispute or several partial refunds never take
-#   more than was granted. A PARTIAL refund takes a pro-rata share and leaves the
-#   site's year; only a full refund or a lost dispute lapses it. A refund before
-#   the payment is processed voids the pending record. Pay links pin their charge
-#   currency; a discounted payment is a mismatch; no commission is granted while
-#   the partner is not ACTIVE (the record is flagged ``partner_inactive``, the
-#   shop's year still activates).
-#
-#   SUBSCRIPTION PAYMENTS NO LONGER GRANT AS TOP-UPS. A ``payment.succeeded``
-#   carrying a ``subscription_id`` is a subscription's charge (the subscription
-#   events grant its allotment); it is recorded and acked, never granted as
-#   credits. Before this, nothing stopped the generic top-up grant from also
-#   crediting a subscription payment whose metadata named a workspace. The row is
-#   stamped ``subscription_id``, so a refund of it alarms "needs a human" instead
-#   of reading as a top-up with nothing left to reverse.
-#
-#   Re-check fixes (same branch): partial refunds are SUMMED on the Payment row
-#   (``refunded_minor``, bumped inside the commission claim), so partials that
-#   reach the full amount lapse the year like a full refund; the site lapses
-#   AFTER the claim and before the debit. A claim that loses the cap race re-reads
-#   the row and retries once with the fresh remainder, then alarms (ERROR). The
-#   claim is released on ANY exception (CancelledError too), and a redelivery of
-#   a listed event with no ledger movement alarms. A PARTIAL refund before the
-#   payment is processed no longer voids the record (alarms, left pending). The
-#   flagged-payment alarm names the actual flag.
-# Updated 2026-10-02 (feat/partners-tiers, PH-15): ``site_plan_price_usd`` prices
-#   a partner rung at the partner's volume-tier discount; a client payment's
-#   commission rate reads the partner's volume tier (it was passed the SKU); a
-#   paid client payment then runs ``partners.service.refresh_standing`` (tier
-#   upgrade + milestone rewards; never raises).
+# Also owns plan subscriptions (workspace and per-site), reversals + dunning, and
+# partner site-plan pricing. CHECKOUT RETURN: Dodo's return_url / cancel_url point
+# at the public backend hop ``billing.checkout_return``, never at the app page:
+# Razorpay returns the buyer with a cross-site form POST that a SvelteKit server
+# refuses and a static SPA cannot take. ``checkout_return_target`` allowlists the
+# app origin before that hop answers 303.
+
 from __future__ import annotations
 
 import logging
@@ -694,28 +422,109 @@ def _dodo_product_for_plan(plan_key: str) -> str | None:
     return tier.dodo_product_id if tier is not None else None
 
 
+#: Path of the public return hop (``billing.checkout_return``), under /api/v1.
+CHECKOUT_RETURN_PATH = "/api/v1/billing/checkout/return"
+#: The outcomes the return hop forwards to the app as ``?checkout=<outcome>``.
+CHECKOUT_OUTCOMES = frozenset({"success", "cancel"})
+#: Schemes an app origin may use: the web app, and the Tauri desktop shell.
+_APP_ORIGIN_SCHEMES = frozenset({"http", "https", "tauri"})
+
+
+def _configured_return_base() -> str:
+    """The operator's ``dodo_checkout_return_base``, no trailing slash ("" if unset)."""
+    return (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip().rstrip("/")
+
+
 def _checkout_return_urls(origin: str | None) -> tuple[str | None, str | None]:
     """Build (return_url, cancel_url) for the subscription checkout, or (None, None).
 
-    After paying on Dodo the buyer must land back in the app. The base is the
+    After paying on Dodo the buyer must land back in the app. The app base is the
     buyer's ``origin`` (the route reads it from the Origin / Referer header); when
     that is absent we fall back to the ``dodo_checkout_return_base`` config. If
     BOTH are empty we return (None, None) and the provider omits return_url rather
     than crash — a checkout with no redirect still works, the buyer just isn't
     auto-returned.
-    """
-    base = (origin or "").strip()
-    if not base:
-        from pocketpaw.config import get_settings
 
-        base = (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip()
+    The urls point at the BACKEND return hop, carrying the app base as ``to``, not
+    at the app page: Dodo processes Indian cards through Razorpay, which returns the
+    buyer with a cross-site form POST. A SvelteKit server rejects that on its CSRF
+    origin check and a static SPA / Tauri build has no server to take a POST, so the
+    hop accepts it and answers 303 to ``<to>/settings/billing?checkout=<outcome>``.
+    The outcome rides in the PATH because Dodo appends its own ``status`` query.
+    """
+    from urllib.parse import urlencode
+
+    from pocketpaw_ee.cloud._core.public_url import public_base_url
+
+    base = (origin or "").strip().rstrip("/") or _configured_return_base()
     if not base:
         return None, None
-    base = base.rstrip("/")
+    hop = f"{public_base_url()}{CHECKOUT_RETURN_PATH}"
+    query = urlencode({"to": base})
+    return f"{hop}/success?{query}", f"{hop}/cancel?{query}"
+
+
+def _is_bare_origin(value: str) -> bool:
+    """``scheme://host[:port]`` and nothing else: no userinfo, path, query, fragment."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False
     return (
-        f"{base}/settings/billing?checkout=success",
-        f"{base}/settings/billing?checkout=cancel",
+        parts.scheme in _APP_ORIGIN_SCHEMES
+        and bool(parts.netloc)
+        and "@" not in parts.netloc
+        and parts.path == ""
+        and not parts.query
+        and not parts.fragment
     )
+
+
+def _trusted_return_origin(to: str | None) -> str | None:
+    """``to`` normalized, if this deployment serves an app there, else None.
+
+    The answer comes from the SAME allowlist CORS enforces (configured origins plus
+    the localhost regex), plus the two bases the operator configured: the
+    ``dodo_checkout_return_base`` fallback and the backend's own public origin (a
+    same-origin dashboard). Anything else is refused, so the hop is never an open
+    redirect.
+    """
+    from pocketpaw.api.cors import allowed_origins, origin_allowed
+    from pocketpaw_ee.cloud._core.public_url import public_base_url
+
+    candidate = (to or "").strip().rstrip("/")
+    if not candidate:
+        return None
+    configured = _configured_return_base()
+    if configured and candidate == configured:
+        return candidate
+    if not _is_bare_origin(candidate):
+        return None
+    if candidate == public_base_url():
+        return candidate
+    try:
+        return candidate if origin_allowed(candidate, allowed_origins()) else None
+    except Exception:  # noqa: BLE001 — a settings failure must not open the redirect
+        logger.warning("could not validate checkout return origin", exc_info=True)
+        return None
+
+
+def checkout_return_target(outcome: str, to: str | None) -> str | None:
+    """Where the return hop sends the buyer: the app billing page, or None.
+
+    ``to`` is used only when it is trusted (``_trusted_return_origin``); otherwise
+    the configured ``dodo_checkout_return_base``. None means neither is usable and
+    the hop renders a plain page instead of redirecting. An unknown ``outcome``
+    still lands on the billing page, just without a ``checkout`` flag, so a forged
+    link can never make the app announce a payment.
+    """
+    base = _trusted_return_origin(to) or _configured_return_base()
+    if not base:
+        return None
+    page = f"{base}/settings/billing"
+    return f"{page}?checkout={outcome}" if outcome in CHECKOUT_OUTCOMES else page
 
 
 async def _subscription_with_status(
@@ -2964,6 +2773,7 @@ async def _upsert_subscription(
 __all__ = [
     "cancel",
     "charge_site_plan_credits",
+    "checkout_return_target",
     "create_partner_client_checkout",
     "create_topup",
     "handle_webhook",
