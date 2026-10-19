@@ -265,7 +265,7 @@ class TestSupersede:
 
         monkeypatch.setattr(bj, "_supersede_previous_job", _record)
         monkeypatch.setattr(bj, "_preview_job_outcome", _outcome)
-        monkeypatch.setattr(bj, "_clear_aborted_result", _not_aborted)
+        monkeypatch.setattr(bj, "_clear_retryable_result", _not_aborted)
 
         class _Accepts:
             async def enqueue_job(self, *_a: Any, **_k: Any) -> Any:

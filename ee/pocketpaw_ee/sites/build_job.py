@@ -1,224 +1,42 @@
-# ee/pocketpaw_ee/sites/build_job.py — the ephemeral-build lane's WORKER SIDE: the arq
-# job that carries ONE site build from scaffold to verified artifact, plus the enqueue
-# helper that starts one.
+# ee/pocketpaw_ee/sites/build_job.py — the sites build lane's WORKER SIDE: the arq jobs
+# that build a site in a Daytona sandbox, and the enqueue helpers that start them.
 #
-# Created 2026-08-10 (SL-2 slice 2). The lane's two halves already existed and had no
-# way to meet: ``daytona_runner.run_build`` could produce a verdict and nothing consumed
-# it, ``build_state`` could decide what to write and nothing called it. This is the
-# module that joins them, and it is the FIRST caller ``run_build`` has ever had.
+# Three jobs, all on their own queue (:data:`SITE_BUILD_QUEUE_NAME`, so builds never eat
+# chat's ``max_jobs`` slots; both enqueues and :func:`_preview_job_outcome` must stay on it):
+#   * :func:`run_site_build` — PUBLISH. Scaffold locally (a throwaway temp dir, never the
+#     cached per-pocket build home), build in a fresh sandbox (``run_build``), gate on
+#     ``BuildRunResult.ok`` (never ``classification.deployable``), settle via
+#     ``build_state.settle``, and on a clean build deploy through
+#     ``service.deploy_prebuilt_site`` BEFORE the row settles, so ``built`` always means
+#     serving. A deploy failure after a clean build is :data:`RUNG_DEPLOY_FAILED`.
+#   * :func:`run_site_preview_build` — the DRAFT preview (no Site row). Stores the draft
+#     artifact, then runs the browser harness in the same sandbox; the report (``layers``,
+#     redacted ``diagnostics``) also lands in ``verify_store`` under ``sandbox-<hash>``.
+#   * :func:`run_site_html_verify` — html has no build: generate locally, harness only.
 #
-# Edited 2026-08-10 (SL-3): THIS MODULE NOW HAS A PRODUCTION CALLER, and it finishes the
-# publish rather than only recording a verdict. ``service._enqueue_static_build`` queues a
-# build for the engines whose artifact can be deployed from this lane, and on a clean
-# build the job materialises the artifact and calls ``service.deploy_prebuilt_site`` — the
-# SAME deploy tail the inline path runs (concierge embed → deploy → canonical upsert →
-# knowledge sync + screenshot). One deploy implementation, two places the build can have
-# happened.
+# A dedicated arq function, not the workspace-jobs registry: that registry writes results
+# back into the pocket spec, collapses failures to "job failed", and shares one timeout
+# that is shorter than a build's (:func:`site_build_job_timeout_seconds`).
 #
-# THE DEPLOY RUNS BEFORE THE ROW SETTLES. ``built`` must never mean "built but not
-# serving": a client reads that as done. So a deploy failure after a clean build settles
-# as :data:`RUNG_DEPLOY_FAILED` instead — its own rung, because nothing about the user's
-# build was wrong and blaming it would send them to debug a site that compiles.
+# PREVIEW SINGLE-FLIGHT IS THE JOB ID. :func:`_preview_job_id` / :func:`html_verify_job_id`
+# are deterministic over ``(pocket_id, content_hash)``, so arq refuses a second enqueue of
+# a render in flight. arq also keeps a finished result (and the id) for an hour, so a
+# refused enqueue is inspected (:func:`_preview_job_outcome`), and
+# :func:`_clear_retryable_result` frees the id when that result should not block a
+# rebuild: aborted / superseded (at once — an undo wants that render again), or failed on
+# a :data:`RETRYABLE_FAILURE_RUNGS` rung (host, sandbox or transfer, not the site's
+# source) after a short cooldown so a polling client still sees the failure. A
+# source-caused failure keeps the id: identical inputs would fail identically.
+# A newly accepted job aborts the pocket's previous one (:func:`_supersede_previous_job`).
 #
-# ``deploy_inputs=None`` KEEPS THE SLICE-2 SHAPE REACHABLE: build, classify, record, deploy
-# nothing. That is not dead code — a build queued to verify an artifact is a real use of
-# this lane, and it is what the fault-ladder tests drive.
+# ``build_reason`` / every result ``reason`` is ``"<rung>:<cause>"`` from closed sets,
+# never stderr. Only the preview report's ``diagnostics`` carry parsed, redacted build
+# text (``verify_diagnostics.finalize``), read by the authoring agent alone.
 #
-# Edited 2026-08-24 (SP-2): THE LANE GREW A SECOND JOB — :func:`run_site_preview_build`,
-# for the DRAFT PREVIEW the native editor shadow-renders. Preview used to build inline in
-# the API container (``service._build_native_artifact`` → ``generator.build`` → ``bun``),
-# which in the deployed container fails and surfaces as ``sites.generator_failed``. It now
-# rides the same sandbox this module already drives.
+# The per-site ``captureSignedKey`` is blanked by :func:`scrub_build_input` in both the
+# enqueue helper and the job, so it never enters Redis or a third-party sandbox.
 #
-# IT IS A SEPARATE JOB RATHER THAN A FLAG ON ``run_site_build``, and the reason is the
-# thing a preview does NOT have: a Site row. ``run_site_build`` opens by loading one
-# (``load_build_site``) and every step after that writes to it — ``mark_build_running``,
-# ``_record``, and the ``claim_build_queued`` its enqueue depends on. A DRAFT that was
-# never published has no Site row at all, which is precisely why ``get_native_artifact``
-# works on one. Threading "sometimes there is no row" through the publish job would put a
-# None-check on every write in the lane's most load-bearing function, to serve a caller
-# that also wants a different OUTPUT (``{body_html, css}`` in the artifact store, not a
-# deploy) and a different SINGLE-FLIGHT KEY (the content hash, not the site).
-#
-# THE SINGLE-FLIGHT KEY IS THE CONTENT HASH, AND IT IS THE arq JOB ID. The publish lane
-# guards with a conditional write to the Site row because that is the state it owns; with
-# no row, this lane spends the id instead: ``_preview_job_id`` is deterministic over
-# ``(pocket_id, content_hash)``, so arq itself refuses a second enqueue of a render that
-# is already in flight. That is not a lucky reuse of a refusal — it is the same guard,
-# keyed on the thing that actually distinguishes one preview build from another. Without
-# it a client polling a 15s build every 2s would open a sandbox per poll.
-#
-# ``_mint_job_id``'s warning about deterministic ids still stands and is answered rather
-# than ignored: a completed job's RESULT holds the id for ``keep_result`` (an hour), so a
-# refused enqueue is inspected (:func:`_preview_job_outcome`) instead of assumed to be in
-# flight. A build that already FINISHED and left the store empty is reported as failed,
-# with its reason — not as a build that is still coming. Re-enqueueing there instead
-# would put a polling client in a rebuild loop, one sandbox per build duration, on inputs
-# that just failed.
-#
-# WHICH ENGINES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it is
-# react-only today. The reason is the artifact, not the queue: an adapter-cloudflare build
-# (ripple, dynamic svelte) emits pages rendered by a ``_worker.js`` whose imports sit
-# outside the tarred directory, so the artifact cannot serve — which is why ``truth_lane``
-# refuses to preview one. Widen that predicate only together with the artifact.
-#
-# ┌───────────────────────────────────────────────────────────────────────────────────┐
-# │ WHY A DEDICATED ARQ FUNCTION AND NOT THE WORKSPACE-JOBS REGISTRY.                  │
-# └───────────────────────────────────────────────────────────────────────────────────┘
-#
-# The registry route (``jobs.service.dispatch_job`` → ``execute_workspace_job`` →
-# ``resolve_job``) is the established way to run durable work here, and the D1 provision
-# job rides it. Three facts ruled it out for a build, in increasing order of weight:
-#
-#   1. ITS RESULT CONTRACT IS A POCKET-SPEC WRITEBACK. ``execute_workspace_job`` passes
-#      a job's return through ``validate_job_result`` (state-only) and merges it into the
-#      POCKET's rippleSpec, then stamps ``<action>_status``. A build's outcome belongs on
-#      the SITE row (``build_status`` / ``build_reason``); riding the registry would mean
-#      inventing a meaningless pocket partial to satisfy a contract we do not want.
-#
-#   2. ITS FAILURE PATH DELIBERATELY DESTROYS THE REASON. ``_safe_failure_message``
-#      collapses any non-``CloudError`` raise to the fixed string ``"job failed"`` —
-#      correct there, because a workspace-custom job's exception text is untrusted. But
-#      SL-2 exists precisely to record WHICH rung failed, and a generic message is the
-#      unactionable ``failed`` the whole slice is meant to eliminate.
-#
-#   3. THE TIMEOUT WOULD BE WRONG, AND IT IS ALREADY WRONG AT THE DEFAULTS. Every
-#      registry job shares ONE budget: ``jobs.domain.job_timeout_seconds()``
-#      (``POCKETPAW_JOB_TIMEOUT_SECONDS``, default 900s). A build needs
-#      :func:`site_build_job_timeout_seconds` — the widest per-engine build budget plus
-#      ``run_build``'s own exec slack plus the phases that sit outside the sandbox —
-#      which is 1020s at today's defaults, i.e. ALREADY over the shared 900s. An arq
-#      cancellation at 900s kills the job before the in-sandbox ``timeout(1)`` fires, so
-#      the sentinel is never written and a healthy-but-slow build classifies as
-#      ``infra_lost``: exactly the mis-report ``daytona_build``'s evidence design exists
-#      to prevent. A dedicated ``arq.worker.func(timeout=...)`` derived from the same env
-#      knob keeps the two coupled, which no registry job can do.
-#
-# It registers into the SAME worker process (``chat/runs/worker.py`` ``WorkerSettings``),
-# which is the one arq entrypoint that is actually deployed — ``docs/internal/
-# 2026-05-resumable-runs-deploy.md`` gives the start command and the dynamic-sites
-# runbook confirms the provision job rides it. ``cloud/jobs/worker.py`` is not a second
-# worker; it is the registry's entrypoint function, registered into that same settings
-# class. So this costs no new deploy artifact, exactly like workspace jobs.
-#
-# ── THE ORDER OF THE BODY IS THE CONTRACT ───────────────────────────────────────────
-#
-#   1. SCAFFOLD LOCALLY (``_runner.generate``). Cheap, offline, no install — and doing
-#      it here rather than in the sandbox means a scaffold failure costs no sandbox.
-#   2. READ THE TREE into the ``{path: contents}`` map ``run_build`` uploads.
-#   3. BUILD IN A FRESH SANDBOX (``run_build``), which installs, builds, tars, and
-#      classifies against the sentinel.
-#   4. GATE ON ``BuildRunResult.ok`` — never on ``classification.deployable``. That flag
-#      is derived from the sentinel alone and stays True when the download returns zero
-#      bytes, so gating on it would deploy nothing over something that was working. This
-#      is wiring contract #1 from the SG-7 fault-ladder findings, discharged here.
-#   5. SETTLE via ``build_state.settle`` and persist ``build_status`` + ``build_reason``.
-#
-# A THROWAWAY TEMP DIR, NOT THE PER-POCKET BUILD HOME. ``GeneratorClient`` scaffolds into
-# a stable ``build_home()/<pocket_id>/`` so ``bun install`` caches (PERF-3). This lane
-# must not: that directory carries the PREVIOUS build's ``node_modules`` and
-# ``.svelte-kit``, and step 2 uploads what step 1 leaves on disk — so the cache would put
-# a stale artifact and a 500 MB dependency tree on the wire. Its per-pocket lock is also
-# per-PROCESS, and the worker is a different process from the web app, so the lock does
-# not serialise us against a concurrent local build anyway. The install we pay for lives
-# in the sandbox; there is nothing here worth caching.
-#
-# ``building`` COVERS THE SCAFFOLD, not just the sandbox. ``build_state``'s vocabulary
-# says ``building`` means "a sandbox exists", and strictly the scaffold happens before
-# one does. The row flips on CONSUMPTION instead, because the distinction that earns a
-# state is "is this still waiting in the queue" — that is what ``queued`` was added for —
-# and a fourth state for a step measured in single-digit seconds would buy a UI nothing.
-# The staleness window covers the scaffold either way.
-#
-# ┌───────────────────────────────────────────────────────────────────────────────────┐
-# │ ``build_reason`` IS ALWAYS ``"<rung>:<cause>"`` AND NEVER RAW STDERR.              │
-# └───────────────────────────────────────────────────────────────────────────────────┘
-#
-# Both halves come from closed sets: the rung is a ``BuildOutcome`` (or one of the
-# pre-sandbox rungs below), and the cause is ``BuildClassification.reason``, which the
-# F7 ladder already proves is a lowercase machine-readable identifier for every
-# condition the classifier can reach. ONE format rather than "rung, plus a cause when
-# the user is to blame" so a consumer parses one shape.
-#
-# The stderr tail is NEVER one of those halves. A build's error text is the user's own
-# code and can carry anything a config file can — a pasted token, an absolute path, a
-# customer's source. It goes to the log, which is where an operator needs it, and the
-# row carries only the fixed name. Same reasoning as ``jobs/worker.py``'s
-# ``_safe_failure_message``, reached from the opposite direction: it had to throw the
-# detail away, this has a bounded vocabulary to keep instead.
-#
-# AMENDED 2026-09-24 (PP-2) — ONE READER MAY NOW SEE PARSED BUILD TEXT: the authoring
-# agent, which has to fix the code it wrote. The rule is exactly this:
-#   * ``build_reason`` / ``Site.build_reason`` / the preview result's ``reason`` / every
-#     ``/status`` and UI field stay ``"<rung>:<cause>"`` — unchanged, no stderr, ever.
-#   * The PREVIEW job result's ``diagnostics`` (and the ``sandbox-<hash>`` record in
-#     ``verify_store``) may carry file / line / col / message entries PARSED from the
-#     stderr tail and from the browser harness — but only after
-#     ``verify_diagnostics.finalize``: ``redact_output``, sandbox paths made relative,
-#     ``site_key_*`` scrubbed, capped at 2 KB with a ``truncated`` marker.
-#   * Those diagnostics are read only by ``verify.verify_site`` and returned only in
-#     agent tool results. ``verify.status_summary`` reads counts, never messages.
-#   * The PUBLISH job (``run_site_build``) is untouched: its stderr still goes to the
-#     log alone.
-#
-# ┌───────────────────────────────────────────────────────────────────────────────────┐
-# │ THE PER-SITE CAPTURE KEY IS SCRUBBED BEFORE THE INPUT LEAVES THIS PROCESS.         │
-# └───────────────────────────────────────────────────────────────────────────────────┘
-#
-# ``daytona_runner``'s header records this as an obligation owed by whoever adds the
-# lane's first caller — which is this module. A svelte scaffold substitutes the real
-# per-site ``captureSignedKey`` into ``src/routes/api/submit/+server.ts``, and a canary
-# build found it there and in the compiled server bundle. The decision that the key's
-# exposure is acceptable rests entirely on it living only in a container that is then
-# destroyed; uploading it into a third-party sandbox (and, before that, into a Redis
-# payload) is a different question than the one this lane was cleared for.
-#
-# So :func:`scrub_build_input` blanks it, in BOTH the enqueue helper (so it never enters
-# Redis) and the job (so a direct caller cannot skip the scrub). This costs nothing that
-# is served: the compiled server route is absent from the deployable artifact on the
-# svelte track, and react emits no server route at all. If lead capture comes back, the
-# key must be injected at DEPLOY (wrangler ``[vars]``) rather than restored here.
-#
-# Edited 2026-09-04 (fix/queue-lanes, backend-perf C1): BOTH LANES NOW ENQUEUE ONTO
-# THEIR OWN QUEUE, :data:`SITE_BUILD_QUEUE_NAME`, instead of arq's default. Nothing
-# about a build changed; what changed is which ``max_jobs`` ceiling it competes for.
-# Sharing the default queue meant sharing ONE cluster-wide limit of 10 with chat runs,
-# workspace jobs and both /ship jobs, so ten concurrent publishes left chat with no
-# slot at all and the eleventh request hung silently for up to half an hour.
-#
-# Three call sites move together and MUST stay together: both enqueues and the
-# :func:`_preview_job_outcome` status read. arq scopes a job id to a queue, so a read
-# left pointing at the default queue would find nothing, report ``building`` forever,
-# and the client would poll a job that finished minutes ago.
-#
-# Edited 2026-09-24 (PP-2, feat/sites-verify-pipeline): THE PREVIEW JOB NOW VERIFIES.
-#   * After a clean build, ``run_site_preview_build`` STORES the draft artifact first
-#     (``run_build``'s ``on_artifact`` hook), then runs the paw-sites browser harness in
-#     the SAME sandbox (``after_build`` → ``browser_check.run_in_sandbox``). The draft
-#     preview is therefore up while the browser check runs, and a browser failure never
-#     un-stores it: the page still compiled, and the editor still wants to show it.
-#   * A newly accepted preview / html-verify job ABORTS the pocket's previous one
-#     (:func:`_supersede_previous_job`, a per-pocket Redis pointer; the worker sets
-#     ``allow_abort_jobs``). A render whose job was aborted is re-queued, not read as
-#     failed, when its source comes back (:func:`_clear_aborted_result`).
-#   * Each job logs its queue wait and its build / browser elapsed ms
-#     (``sites.verify: layer=…``).
-#   * Its result gains ``layers`` ({build, browser}), ``diagnostics`` ({errors, warnings})
-#     and ``checked_at``, and the same report is written to ``verify_store`` under
-#     ``sandbox-<content_hash>`` so a later ``verify_site`` of unchanged source spends no
-#     sandbox. A UI pre-warm therefore warms the agent's verdict too.
-#   * NEW job :func:`run_site_html_verify` for html, which has no build: generate the
-#     raw tree locally, open a sandbox, run only the harness. Its id is deterministic over
-#     ``(pocket_id, content_hash)`` for the same single-flight reason the preview job's is.
-#   * :func:`site_preview_job_timeout_seconds` sizes the preview function's arq timeout
-#     as the build budget PLUS ``browser_check.BROWSER_CHECK_BUDGET_SECONDS``, so arq
-#     never reaps a job that is still inside its browser step.
-#   * :func:`wait_for_preview_result` is the verify pipeline's way to block on a job:
-#     ``arq.jobs.Job.result(timeout, poll_delay)`` on this lane's queue.
-# The stderr rule below was amended to say exactly where build text may now go.
-#
-# Changes (2026-10-01, CN-4): the lazy arq pool getter is gone; the pool is the
-# process-wide one in _core.redis_client (get_arq_pool), closed on shutdown.
+# The arq pool is the process-wide one from ``_core.redis_client.get_arq_pool``.
 """SL-2 — the site-build arq job and its enqueue helper."""
 
 from __future__ import annotations
@@ -1699,13 +1517,56 @@ async def preview_capacity_outcome(
     return {"status": "failed", "reason": reason, **report}
 
 
-async def _clear_aborted_result(pool: Any, job_id: str) -> bool:
-    """Free a job id whose last run was ABORTED (superseded), so the same render can be
-    queued again — an undo back to that source must build, not read "failed" for the
-    hour arq keeps the result. ``True`` when a result was cleared. Never raises."""
+#: Rungs (the part of a result ``reason`` before ``:``) that say nothing about the
+#: site's own source: the host, the sandbox or the transfer failed. A render that ended on
+#: one is queued again once :data:`RETRYABLE_FAILURE_COOLDOWN_SECONDS` have passed, rather
+#: than read back as failed for the hour arq keeps the result. Deliberately absent: the
+#: scaffold rungs, ``build_failed``, ``engine_not_buildable`` and ``preview_unreadable``
+#: (a bundle with no readable page), which identical inputs reproduce identically.
+RETRYABLE_FAILURE_RUNGS = frozenset(
+    {
+        RUNG_SANDBOX_UNAVAILABLE,
+        RUNG_ARTIFACT_MISSING,
+        RUNG_ENQUEUE_FAILED,
+        RUNG_DEPLOY_FAILED,
+        "infra_lost",
+        "timed_out",
+    }
+)
+#: How long an infra failure is reported before the next request rebuilds it. The preview
+#: endpoint enqueues on every poll, so without this a persistent outage would rebuild in a
+#: loop and the client would never see the failure.
+RETRYABLE_FAILURE_COOLDOWN_SECONDS = 30.0
+
+
+def _is_retryable_result(info: Any) -> bool:
+    """Should the kept result ``info`` give up its job id to a new enqueue?
+
+    Aborted (``CancelledError``) or superseded: at once — the source came back to it (an
+    undo), so it is wanted after all. Raised otherwise (no sandbox could be created) or
+    failed on a :data:`RETRYABLE_FAILURE_RUNGS` rung: once the cooldown has passed."""
+    if info.success:
+        result = info.result
+        if not isinstance(result, dict) or result.get("status") != "failed":
+            return False
+        reason = str(result.get("reason") or "")
+        if reason == SUPERSEDED_REASON:
+            return True
+        if reason.split(":", 1)[0] not in RETRYABLE_FAILURE_RUNGS:
+            return False
+    elif isinstance(info.result, asyncio.CancelledError):
+        return True
+    finished = info.finish_time.timestamp()
+    return time.time() - finished >= RETRYABLE_FAILURE_COOLDOWN_SECONDS
+
+
+async def _clear_retryable_result(pool: Any, job_id: str) -> bool:
+    """Free a job id whose kept result should not block a rebuild of the same render
+    (:func:`_is_retryable_result`): aborted, superseded, or failed for a reason outside
+    the site's source. ``True`` when a result was cleared. Never raises."""
     try:
         info = await Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME).result_info()
-        if info is None or info.success or not isinstance(info.result, asyncio.CancelledError):
+        if info is None or not _is_retryable_result(info):
             return False
         await pool.delete(result_key_prefix + job_id)
     except Exception:  # noqa: BLE001
@@ -1744,7 +1605,7 @@ async def enqueue_html_verify(
         )
 
     job = await _enqueue()
-    if job is None and await _clear_aborted_result(pool, job_id):
+    if job is None and await _clear_retryable_result(pool, job_id):
         job = await _enqueue()
     if job is None:
         return PreviewBuildEnqueue(job_id=job_id, status="building")
@@ -1826,9 +1687,9 @@ async def enqueue_preview_build(
         )
 
     job = await _enqueue()
-    # A render whose last job was aborted as superseded is queued again, not reported
-    # as failed: the source came back to it (an undo), so it is wanted after all.
-    if job is None and await _clear_aborted_result(pool, job_id):
+    # A render whose last job was aborted / superseded, or failed on the host rather
+    # than on its source, is queued again instead of reported as failed.
+    if job is None and await _clear_retryable_result(pool, job_id):
         job = await _enqueue()
     if job is None:
         status, reason = await _preview_job_outcome(pool, job_id)
