@@ -381,3 +381,45 @@ async def test_http_requires_auth(_gateway, monkeypatch):
 
     assert res.status_code == 401
     assert calls == []
+
+
+# A URL, email or handle with digits in it must survive as one token. The guard
+# used to pull "06" out of "rohitk06.in" and then demand it as a standalone word,
+# so every rewrite that kept the URL intact failed and the user got their own
+# prompt back.
+PORTFOLIO = (
+    "Re create my portfolio here is my original one\n"
+    "https://rohitk06.in\n\n"
+    "we can try some amazing design patterns to make it look super professional "
+    "with motions scroll animations etc etc"
+)
+
+
+def test_guard_accepts_a_rewrite_that_keeps_a_url_with_digits():
+    rewrite = (
+        "Recreate my personal portfolio, based on my current site https://rohitk06.in, "
+        "with motion and scroll animations. Primary action: [how visitors should reach you]."
+    )
+    assert prompt_enhance.missing_terms(PORTFOLIO, rewrite) == []
+
+
+def test_guard_still_requires_the_url_itself():
+    rewrite = "Recreate my personal portfolio with motion and scroll animations."
+    assert prompt_enhance.missing_terms(PORTFOLIO, rewrite) == ["https://rohitk06.in"]
+
+
+@pytest.mark.parametrize(
+    ("original", "rewrite", "token"),
+    [
+        ("Site for @studio42 please", "A site for @studio42, a design studio.", "@studio42"),
+        ("Email hi@bake2go.com for orders", "Orders go to hi@bake2go.com.", "hi@bake2go.com"),
+        ("Landing page for site2024.com", "A landing page for site2024.com.", "site2024.com"),
+    ],
+)
+def test_guard_keeps_handles_emails_and_domains_whole(original, rewrite, token):
+    assert token in prompt_enhance.significant_terms(original)
+    assert prompt_enhance.missing_terms(original, rewrite) == []
+
+
+def test_guard_still_checks_standalone_numbers():
+    assert prompt_enhance.missing_terms("Bakery open since 1998", "A bakery.") == ["1998"]
