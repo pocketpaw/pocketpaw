@@ -1,7 +1,8 @@
 # ee/pocketpaw_ee/sites/router.py — REST surface for the Sites control plane.
 #
-# Thin FastAPI handlers over ``sites.service``: publish and preview, the native
-# editing and asset routes, the html-to-project upgrade and its undo
+# Thin FastAPI handlers over ``sites.service``: publish and preview, the composer's
+# Enhance button (``sites.prompt_enhance``), the native editing and asset routes,
+# the html-to-project upgrade and its undo
 # (``sites.site_upgrade``), custom domains, slugs and renames, owner settings
 # (metadata, branding, AI visibility, client record and invoices), site-plan
 # requests, analytics and entitlements, transfers, export, delete, origin claims
@@ -35,13 +36,15 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.cloud._core.rate_limit import rate_limit_slug_check
 from pocketpaw_ee.cloud.auth.service import resolve_display_names
-from pocketpaw_ee.sites import import_service, ownership, site_upgrade
+from pocketpaw_ee.sites import import_service, ownership, prompt_enhance, site_upgrade
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
+    EnhancePromptRequest,
+    EnhancePromptResponse,
     ForeignConciergeBindRequest,
     ForeignConciergeOrigin,
     ForeignConciergeRebindRequest,
@@ -262,6 +265,26 @@ async def request_site_plan(
         status="pending",
         site_plan_key=tier.key,
         monthly_price_usd=int(tier.monthly_price_usd or 0),
+    )
+
+
+@router.post("/sites/enhance-prompt", response_model=EnhancePromptResponse)
+async def enhance_site_prompt(
+    body: EnhancePromptRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> EnhancePromptResponse:
+    """The composer's Enhance button: a sharper brief that is still the user's
+    idea, or up to three fact questions when the idea is too thin. Always a 200;
+    any failure (no model, gateway error, timeout, guard, rate limit) returns the
+    original prompt with ``changed=false`` so the composer never breaks."""
+    answers = [
+        prompt_enhance.EnhanceAnswer(question=a.question, answer=a.answer)
+        for a in body.answers or []
+    ]
+    result = await prompt_enhance.enhance_prompt(body.prompt, answers or None, user_id=ctx.user_id)
+    return EnhancePromptResponse(
+        prompt=result.prompt, questions=result.questions, changed=result.changed
     )
 
 

@@ -48,6 +48,31 @@ class SitePlanRequestBody(BaseModel):
     site_plan_key: str
 
 
+class EnhancePromptAnswer(BaseModel):
+    """One answer to a question a previous enhance call asked."""
+
+    question: str = Field(max_length=300)
+    answer: str = Field(max_length=1000)
+
+
+class EnhancePromptRequest(BaseModel):
+    """Body for POST /sites/enhance-prompt: the composer text, plus answers when
+    the user is replying to the questions a thin prompt came back with."""
+
+    prompt: str = Field(min_length=1, max_length=4000)
+    answers: list[EnhancePromptAnswer] | None = Field(default=None, max_length=5)
+
+
+class EnhancePromptResponse(BaseModel):
+    """``prompt`` is the brief to put back in the composer (the original when
+    ``changed`` is false); ``questions`` is non-empty only when the prompt was too
+    thin to enhance without asking."""
+
+    prompt: str
+    questions: list[str] = Field(default_factory=list)
+    changed: bool = False
+
+
 class SitePlanRequestResponse(BaseModel):
     """Ack for a filed site-plan request.
 

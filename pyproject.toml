@@ -562,6 +562,8 @@ select = ["E", "F", "I", "UP"]
 # long single-line strings can't be wrapped without changing the rendered prompt.
 "ee/pocketpaw_ee/cloud/studio/style_catalog.py" = ["E501"]
 "ee/pocketpaw_ee/cloud/studio/prompt_soften.py" = ["E501"]
+# Sites Enhance-button system prompt: same reason, one rule per line.
+"ee/pocketpaw_ee/sites/prompt_enhance.py" = ["E501"]
 # Embedded fake-herdr shim: canned JSON envelopes are single-line by
 # nature (an id + result + record) and can't be wrapped without breaking
 # the bash `echo` that emits them.
