@@ -57,10 +57,17 @@ class EnhancePromptAnswer(BaseModel):
 
 class EnhancePromptRequest(BaseModel):
     """Body for POST /sites/enhance-prompt: the composer text, plus answers when
-    the user is replying to the questions a thin prompt came back with."""
+    the user is replying to the questions a thin prompt came back with.
+
+    ``model`` is the composer's picked model, validated like the chat body's
+    per-send ``model`` (it can reach a CLI launch); ``None`` runs the agent's
+    own model. ``agent_id`` names the agent to run on; ``None`` is the
+    workspace's default agent, the one a Sites chat turn talks to."""
 
     prompt: str = Field(min_length=1, max_length=4000)
     answers: list[EnhancePromptAnswer] | None = Field(default=None, max_length=5)
+    model: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$")
+    agent_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class EnhancePromptResponse(BaseModel):
@@ -68,14 +75,17 @@ class EnhancePromptResponse(BaseModel):
     ``changed`` is false); ``questions`` is non-empty only when the prompt was too
     thin to enhance without asking. ``reason`` says why: ``enhanced`` (changed),
     ``questions``, ``unchanged`` (the model had nothing to add), ``failed`` (no
-    model, gateway error, timeout, bad reply, guard failure) or ``rate_limited``.
+    agent, backend error, timeout, bad reply, guard failure), ``rate_limited`` or
+    ``billing`` (out of credits, over quota, or a model early access can't use).
     ``sources`` lists the links in the prompt whose page was read and used for an
     enhanced brief (empty otherwise)."""
 
     prompt: str
     questions: list[str] = Field(default_factory=list)
     changed: bool = False
-    reason: Literal["enhanced", "questions", "unchanged", "failed", "rate_limited"] = "unchanged"
+    reason: Literal["enhanced", "questions", "unchanged", "failed", "rate_limited", "billing"] = (
+        "unchanged"
+    )
     sources: list[str] = Field(default_factory=list)
 
 

@@ -275,15 +275,23 @@ async def enhance_site_prompt(
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> EnhancePromptResponse:
     """The composer's Enhance button: a sharper brief that is still the user's
-    idea, or up to three fact questions when the idea is too thin. Always a 200;
-    any failure (no model, gateway error, timeout, guard, rate limit) returns the
-    original prompt with ``changed=false`` so the composer never breaks, and
-    ``reason`` tells the client which case it was."""
+    idea, or up to three fact questions when the idea is too thin. Runs on the
+    workspace's Sites agent (or ``agent_id``) with the composer's ``model``.
+    Always a 200; any failure (no agent, backend error, timeout, guard, rate
+    limit, credits) returns the original prompt with ``changed=false`` so the
+    composer never breaks, and ``reason`` tells the client which case it was."""
     answers = [
         prompt_enhance.EnhanceAnswer(question=a.question, answer=a.answer)
         for a in body.answers or []
     ]
-    result = await prompt_enhance.enhance_prompt(body.prompt, answers or None, user_id=ctx.user_id)
+    result = await prompt_enhance.enhance_prompt(
+        body.prompt,
+        answers or None,
+        user_id=ctx.user_id,
+        workspace_id=ctx.workspace_id,
+        model=body.model,
+        agent_id=body.agent_id,
+    )
     return EnhancePromptResponse(
         prompt=result.prompt,
         questions=result.questions,

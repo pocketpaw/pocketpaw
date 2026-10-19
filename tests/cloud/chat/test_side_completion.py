@@ -31,7 +31,9 @@ SYSTEM = "You sharpen website ideas."
 
 
 class _ToolsBackend:
-    async def run(self, message, *, system_prompt=None, tools_enabled=True, **_kw):  # pragma: no cover
+    async def run(
+        self, message, *, system_prompt=None, tools_enabled=True, **_kw
+    ):  # pragma: no cover
         yield None
 
 

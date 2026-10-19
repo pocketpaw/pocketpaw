@@ -2,9 +2,13 @@
 #
 # Turns a rough site idea into a short brief that is still the user's idea, or,
 # when the idea is too thin to enhance honestly, into up to three fact questions.
-# One non-streaming chat call through OUR LiteLLM gateway, reusing the studio
-# soften helpers (model resolution, ``_chat_completion``, ``_clean_rewrite``);
-# never a direct provider SDK, because agent mode has no Anthropic key.
+# The model call runs on the Sites agent's OWN backend and model through
+# ``chat.side_completion.agent_complete``: the workspace agent (or the composer's
+# ``agent_id``), the composer's per-send ``model`` (else the agent's own), the
+# workspace's own key when it has one, and the chat turn's credit/BYOK gates,
+# with tools off. Never the gateway's first catalog model. The model budget is
+# sized per backend (``model_budget``: a Claude SDK CLI needs seconds to start)
+# and the guard's one retry runs only if enough of it is left.
 #
 # The system prompt states the enhancer's own rules and embeds two excerpts the
 # build agent already follows: the intake list (§1) of ``sites-conversion-
@@ -21,10 +25,11 @@
 # reference (structure and feel only). ``sources`` lists the pages it was given.
 #
 # Invariants:
-#   * Never raises and never blocks the composer. Every failure (no model,
-#     gateway error, timeout, unparsable output, guard failure, rate limit)
-#     returns the original prompt with ``changed=False``, and ``reason`` says
-#     which: enhanced | questions | unchanged | failed | rate_limited. A link
+#   * Never raises and never blocks the composer. Every failure (no agent,
+#     backend error, timeout, unparsable output, guard failure, rate limit,
+#     credit refusal) returns the original prompt with ``changed=False``, and
+#     ``reason`` says which: enhanced | questions | unchanged | failed |
+#     rate_limited | billing (credits, quota or early-access refusal). A link
 #     that cannot be read (refused, unreachable, non-2xx, not HTML, over budget)
 #     is skipped and never fails the enhance. Logs never carry the user's text or
 #     links, except the dropped terms on a guard failure.
@@ -42,8 +47,8 @@ import asyncio
 import functools
 import json
 import logging
-import os
 import re
+import time
 from dataclasses import dataclass, field
 from html import escape
 from typing import Any, Literal
@@ -53,6 +58,7 @@ import httpx
 
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.cloud.chat import side_completion
 from pocketpaw_ee.cloud.studio import prompt_soften
 from pocketpaw_ee.sites import safe_fetch
 from pocketpaw_ee.sites.import_service import _MetaScan
@@ -60,13 +66,15 @@ from pocketpaw_ee.sites.kb_ingest import _TextHarvester
 
 logger = logging.getLogger(__name__)
 
-# Pins the enhance model; unset falls back to the studio soften model resolution
-# (its env override, then the first chat model the gateway serves).
-ENHANCE_MODEL_ENV = "POCKETPAW_SITES_ENHANCE_MODEL"
-
-# Per-call budget. The composer shows a shimmer while this runs, so a slow
-# gateway must give up rather than hold the input hostage.
-CALL_TIMEOUT_S = 15.0
+# Model budget for one enhance, both attempts together, counted from the first
+# model call. The composer shows a shimmer while this runs, so a slow backend
+# must give up rather than hold the input hostage. A Claude SDK backend leases
+# or spawns a CLI subprocess first, so it gets longer.
+MODEL_BUDGET_S = 25.0
+CLAUDE_SDK_BUDGET_S = 45.0
+_CLAUDE_BACKENDS = frozenset({"claude_agent_sdk", "claude_sdk", "claude_code"})
+# The guard's retry is skipped when less than this is left of the budget.
+MIN_RETRY_S = 5.0
 MAX_PROMPT_CHARS = 4000
 MAX_QUESTIONS = 3
 MAX_QUESTION_CHARS = 200
@@ -475,8 +483,9 @@ async def read_pages(urls: list[str]) -> list[PageRead]:
 
 
 # Why a call ended the way it did. ``unchanged`` is the only "nothing to
-# improve" answer; every error path is ``failed`` (or ``rate_limited``).
-EnhanceReason = Literal["enhanced", "questions", "unchanged", "failed", "rate_limited"]
+# improve" answer; every error path is ``failed``, ``rate_limited`` or, for a
+# credit / quota / early-access refusal, ``billing``.
+EnhanceReason = Literal["enhanced", "questions", "unchanged", "failed", "rate_limited", "billing"]
 
 
 @dataclass
@@ -497,11 +506,9 @@ def _normalised(text: str) -> str:
     return " ".join(text.split())
 
 
-async def _resolve_model() -> str | None:
-    override = (os.environ.get(ENHANCE_MODEL_ENV) or "").strip()
-    if override:
-        return override
-    return await prompt_soften.resolve_soften_model()
+def model_budget(backend: str | None) -> float:
+    """The model budget for one enhance served by ``backend``."""
+    return CLAUDE_SDK_BUDGET_S if backend in _CLAUDE_BACKENDS else MODEL_BUDGET_S
 
 
 def _parse(content: str) -> tuple[str, list[str]] | None:
@@ -529,28 +536,63 @@ def _parse(content: str) -> tuple[str, list[str]] | None:
     return (cleaned, []) if cleaned else None
 
 
-async def _ask(model: str, user: str) -> tuple[str, list[str]] | None:
-    try:
-        content = await asyncio.wait_for(
-            prompt_soften._chat_completion(model=model, system=system_prompt(), user=user),
-            timeout=CALL_TIMEOUT_S,
+@dataclass
+class _Call:
+    """One enhance's model calls: who serves them and the shared budget."""
+
+    workspace_id: str
+    user_id: str
+    model: str | None
+    agent_id: str | None
+    started: float | None = None
+    backend: str | None = None
+
+    def remaining(self, backend: str | None) -> float:
+        elapsed = time.monotonic() - self.started if self.started is not None else 0.0
+        return model_budget(backend) - elapsed
+
+    async def ask(self, user: str) -> tuple[str, list[str]] | EnhanceReason:
+        if self.started is None:
+            self.started = time.monotonic()
+        done = await side_completion.agent_complete(
+            workspace_id=self.workspace_id,
+            user_id=self.user_id,
+            system=system_prompt(),
+            prompt=user,
+            agent_id=self.agent_id,
+            model=self.model,
+            timeout_s=self.remaining,
         )
-    except TimeoutError:
-        logger.warning("sites.enhance: gateway call timed out after %ss", CALL_TIMEOUT_S)
-        return None
-    if content is None:
-        return None
-    parsed = _parse(content)
-    if parsed is None:
-        logger.warning("sites.enhance: model reply was empty or unparsable")
-    return parsed
+        self.backend = done.backend
+        if done.failure is not None:
+            logger.warning(
+                "sites.enhance: model call failed (%s, %s) on %s/%s",
+                done.failure,
+                done.code,
+                done.backend,
+                done.model,
+            )
+            return "billing" if done.failure == "billing" else "failed"
+        parsed = _parse(done.text)
+        if parsed is None:
+            logger.warning("sites.enhance: model reply was empty or unparsable")
+            return "failed"
+        return parsed
 
 
 async def enhance_prompt(
-    prompt: str, answers: list[EnhanceAnswer] | None = None, *, user_id: str = ""
+    prompt: str,
+    answers: list[EnhanceAnswer] | None = None,
+    *,
+    user_id: str = "",
+    workspace_id: str = "",
+    model: str | None = None,
+    agent_id: str | None = None,
 ) -> EnhanceResult:
-    """Enhance one composer prompt. Never raises: any failure returns the
-    original with ``changed=False`` and ``reason`` saying why."""
+    """Enhance one composer prompt on the workspace agent's backend, with the
+    composer's ``model`` when given (else the agent's own). Never raises: any
+    failure returns the original with ``changed=False`` and ``reason`` saying
+    why."""
     original = prompt
     try:
         if not original.strip():
@@ -558,19 +600,22 @@ async def enhance_prompt(
         if user_id and not _limiter.check(f"sites-enhance:{user_id}").allowed:
             logger.info("sites.enhance: rate limited user %s", user_id)
             return _original(original, "rate_limited")
-        model = await _resolve_model()
-        if not model:
-            logger.warning("sites.enhance: no chat model available (set %s)", ENHANCE_MODEL_ENV)
+        if not workspace_id:
+            logger.warning("sites.enhance: no workspace to resolve an agent in")
             return _original(original, "failed")
 
+        call = _Call(workspace_id=workspace_id, user_id=user_id, model=model, agent_id=agent_id)
         text = original[:MAX_PROMPT_CHARS]
         answers = [a for a in (answers or []) if a.answer.strip()] or None
         pages = await read_pages(prompt_urls(text, *(a.answer for a in answers or [])))
         missing: list[str] | None = None
         for attempt in range(2):
-            parsed = await _ask(model, build_user_message(text, answers, missing, pages))
-            if parsed is None:
-                return _original(original, "failed")
+            if attempt and call.remaining(call.backend) < MIN_RETRY_S:
+                logger.info("sites.enhance: no time left for the guard retry")
+                break
+            parsed = await call.ask(build_user_message(text, answers, missing, pages))
+            if isinstance(parsed, str):
+                return _original(original, parsed)
             rewrite, questions = parsed
             if questions and not answers:
                 return EnhanceResult(
@@ -597,7 +642,7 @@ async def enhance_prompt(
             )
         # The dropped terms are the user's own words; logging them makes the
         # next guard bug visible in deploy logs.
-        logger.warning("sites.enhance: guard failed after retry; brief dropped %s", missing)
+        logger.warning("sites.enhance: guard failed; brief dropped %s", missing)
         return _original(original, "failed")
     except Exception:  # noqa: BLE001 — enhance must never break the composer
         logger.warning("sites.enhance: unexpected failure", exc_info=True)
@@ -605,8 +650,9 @@ async def enhance_prompt(
 
 
 __all__ = [
-    "CALL_TIMEOUT_S",
-    "ENHANCE_MODEL_ENV",
+    "CLAUDE_SDK_BUDGET_S",
+    "MIN_RETRY_S",
+    "MODEL_BUDGET_S",
     "EnhanceAnswer",
     "EnhanceReason",
     "EnhanceResult",
@@ -617,6 +663,7 @@ __all__ = [
     "build_user_message",
     "enhance_prompt",
     "missing_terms",
+    "model_budget",
     "page_digest",
     "prompt_urls",
     "read_pages",

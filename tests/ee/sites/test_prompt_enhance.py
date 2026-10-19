@@ -1,7 +1,8 @@
 # tests/ee/sites/test_prompt_enhance.py — the Sites composer's Enhance button.
 #
 # Covers ``sites.prompt_enhance`` and POST /api/v1/sites/enhance-prompt with the
-# gateway call mocked at ``prompt_soften._chat_completion``: the enhanced path,
+# model call mocked at ``side_completion.agent_complete`` (that service has its
+# own tests in tests/cloud/chat/test_side_completion.py): the enhanced path,
 # the questions path for a thin prompt, the always-200 fallback on failure, the
 # keep-the-user's-words guard (retry, then original), the <original_prompt>
 # injection boundary, the auth gate, and reading the links in a prompt: every
@@ -19,7 +20,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from pocketpaw_ee.cloud.studio import prompt_soften
+from pocketpaw_ee.cloud.chat import side_completion
+from pocketpaw_ee.cloud.chat.side_completion import SideCompletion
 from pocketpaw_ee.sites import prompt_enhance
 
 from pocketpaw.security.rate_limiter import RateLimiter
@@ -30,22 +32,35 @@ USER = "user-enhance"
 
 @pytest.fixture(autouse=True)
 def _gateway(monkeypatch):
-    """A fresh limiter, a pinned model, and a scripted gateway per test."""
+    """A fresh limiter and a scripted agent completion per test. A reply is the
+    model's text, a ``SideCompletion``, a coroutine function, or None (a failed
+    call)."""
     monkeypatch.setattr(prompt_enhance, "_limiter", RateLimiter(rate=1.0, capacity=100))
-    monkeypatch.setenv(prompt_enhance.ENHANCE_MODEL_ENV, "test-chat")
     calls: list[dict] = []
     replies: list = []
 
-    async def _fake(*, model: str, system: str, user: str):
-        calls.append({"model": model, "system": system, "user": user})
+    async def _fake(*, workspace_id, user_id, system, prompt, agent_id, model, timeout_s):
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "model": model,
+                "system": system,
+                "user": prompt,
+                "budget": timeout_s("claude_agent_sdk"),
+            }
+        )
         reply = replies.pop(0) if replies else None
-        if isinstance(reply, BaseException):
-            raise reply
         if callable(reply):
-            return await reply()
-        return reply
+            reply = await reply()
+        if isinstance(reply, SideCompletion):
+            return reply
+        if reply is None:
+            return SideCompletion(failure="error", code="side.empty")
+        return SideCompletion(text=reply, model=model, backend="claude_agent_sdk")
 
-    monkeypatch.setattr(prompt_soften, "_chat_completion", _fake)
+    monkeypatch.setattr(side_completion, "agent_complete", _fake)
     # No test reaches the network: every link answers 404 unless a test routes it.
     monkeypatch.setattr(prompt_enhance, "_transport", httpx.MockTransport(_not_found))
     monkeypatch.setattr(prompt_enhance, "_resolver", _public_dns)
@@ -79,20 +94,21 @@ async def test_enhanced_path_returns_the_brief(_gateway):
     calls, replies = _gateway
     replies.append(_json(ENHANCED))
 
-    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert result.changed is True
     assert result.prompt == ENHANCED
     assert result.questions == []
     assert len(calls) == 1
-    assert calls[0]["model"] == "test-chat"
+    assert (calls[0]["workspace_id"], calls[0]["user_id"]) == (WS, USER)
+    assert calls[0]["model"] is None and calls[0]["agent_id"] is None
 
 
 async def test_fenced_json_reply_is_parsed(_gateway):
     _, replies = _gateway
     replies.append(f"```json\n{_json(ENHANCED)}\n```")
 
-    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert result.changed is True
     assert result.prompt == ENHANCED
@@ -111,7 +127,7 @@ async def test_thin_prompt_returns_questions_and_the_original(_gateway):
         )
     )
 
-    result = await prompt_enhance.enhance_prompt("a site", user_id=USER)
+    result = await prompt_enhance.enhance_prompt("a site", user_id=USER, workspace_id=WS)
 
     assert result.changed is False
     assert result.prompt == "a site"
@@ -132,6 +148,7 @@ async def test_answers_force_a_brief_and_ride_in_their_own_tag(_gateway):
         "a site",
         [prompt_enhance.EnhanceAnswer("What's the business called?", "Crumb & Co")],
         user_id=USER,
+        workspace_id=WS,
     )
 
     assert result.changed is True
@@ -156,39 +173,92 @@ async def test_any_failure_returns_the_original_unchanged(_gateway, reply):
     _, replies = _gateway
     replies.append(reply)
 
-    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert (result.prompt, result.questions, result.changed) == (ORIGINAL, [], False)
     assert result.reason == "failed"
 
 
-async def test_timeout_returns_the_original(_gateway, monkeypatch):
+async def test_timeout_returns_the_original(_gateway):
     _, replies = _gateway
-    monkeypatch.setattr(prompt_enhance, "CALL_TIMEOUT_S", 0.01)
+    replies.append(SideCompletion(failure="timeout", code="side.timeout"))
 
-    async def _slow():
-        await asyncio.sleep(1)
-        return _json(ENHANCED)
-
-    replies.append(_slow)
-
-    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert (result.prompt, result.changed, result.reason) == (ORIGINAL, False, "failed")
 
 
-async def test_no_model_returns_the_original(_gateway, monkeypatch):
+async def test_billing_refusal_returns_the_original_with_reason_billing(_gateway):
+    _, replies = _gateway
+    replies.append(SideCompletion(failure="billing", code="credits.insufficient"))
+
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
+
+    assert (result.prompt, result.changed, result.reason) == (ORIGINAL, False, "billing")
+
+
+async def test_no_workspace_returns_the_original(_gateway):
     calls, _ = _gateway
-    monkeypatch.delenv(prompt_enhance.ENHANCE_MODEL_ENV)
 
-    async def _none():
-        return None
-
-    monkeypatch.setattr(prompt_soften, "resolve_soften_model", _none)
-
-    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id="")
 
     assert (result.prompt, result.changed, result.reason) == (ORIGINAL, False, "failed")
+    assert calls == []
+
+
+async def test_model_and_agent_ride_to_the_side_completion(_gateway):
+    calls, replies = _gateway
+    replies.append(_json(ENHANCED))
+
+    await prompt_enhance.enhance_prompt(
+        ORIGINAL, user_id=USER, workspace_id=WS, model="claude-haiku-4-5", agent_id="agent-1"
+    )
+
+    assert (calls[0]["model"], calls[0]["agent_id"]) == ("claude-haiku-4-5", "agent-1")
+
+
+def test_model_budget_is_longer_for_the_claude_sdk():
+    assert prompt_enhance.model_budget("claude_agent_sdk") == prompt_enhance.CLAUDE_SDK_BUDGET_S
+    assert prompt_enhance.model_budget("pydantic_ai") == prompt_enhance.MODEL_BUDGET_S
+    assert prompt_enhance.CLAUDE_SDK_BUDGET_S > prompt_enhance.MODEL_BUDGET_S
+
+
+async def test_guard_retry_is_skipped_when_the_budget_is_spent(_gateway, monkeypatch):
+    calls, replies = _gateway
+    monkeypatch.setattr(prompt_enhance, "CLAUDE_SDK_BUDGET_S", 1.0)  # under MIN_RETRY_S
+    replies.extend(["A site for a bakery.", _json(ENHANCED)])
+
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
+
+    assert (result.prompt, result.reason) == (ORIGINAL, "failed")
+    assert len(calls) == 1
+
+
+async def test_http_passes_model_and_agent(_gateway, monkeypatch):
+    calls, replies = _gateway
+    replies.append(_json(ENHANCED))
+
+    async with _client(_app(monkeypatch)) as c:
+        res = await c.post(
+            "/api/v1/sites/enhance-prompt",
+            json={"prompt": ORIGINAL, "model": "claude-haiku-4-5", "agent_id": "a1b2"},
+        )
+
+    assert res.status_code == 200
+    assert (calls[0]["workspace_id"], calls[0]["user_id"]) == (WS, USER)
+    assert (calls[0]["model"], calls[0]["agent_id"]) == ("claude-haiku-4-5", "a1b2")
+
+
+@pytest.mark.parametrize("field", ["model", "agent_id"])
+async def test_http_rejects_a_hostile_model_or_agent(_gateway, monkeypatch, field):
+    calls, _ = _gateway
+
+    async with _client(_app(monkeypatch)) as c:
+        res = await c.post(
+            "/api/v1/sites/enhance-prompt", json={"prompt": ORIGINAL, field: "x; rm -rf /"}
+        )
+
+    assert res.status_code == 422
     assert calls == []
 
 
@@ -197,8 +267,8 @@ async def test_rate_limit_returns_the_original(_gateway, monkeypatch):
     monkeypatch.setattr(prompt_enhance, "_limiter", RateLimiter(rate=1e-9, capacity=1))
     replies.extend([_json(ENHANCED), _json(ENHANCED)])
 
-    first = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
-    second = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    first = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
+    second = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert (first.changed, first.reason) == (True, "enhanced")
     assert (second.prompt, second.changed, second.reason) == (ORIGINAL, False, "rate_limited")
@@ -222,7 +292,7 @@ async def test_guard_retries_once_then_accepts(_gateway):
     dropped = "A cosy site for a local bakery. Primary action: visit. [your opening hours]"
     replies.extend([_json(dropped), _json(ENHANCED)])
 
-    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert result.changed is True
     assert result.prompt == ENHANCED
@@ -238,7 +308,7 @@ async def test_guard_failing_twice_returns_the_original(_gateway):
     dropped = "A cosy site for a local bakery. Primary action: visit."
     replies.extend([_json(dropped), _json(dropped)])
 
-    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert (result.prompt, result.questions, result.changed) == (ORIGINAL, [], False)
     assert result.reason == "failed"
@@ -256,7 +326,7 @@ async def test_injection_text_stays_inside_the_data_tag(_gateway):
     )
     replies.append(_json("x"))  # content irrelevant; we inspect the request
 
-    await prompt_enhance.enhance_prompt(attack, user_id=USER)
+    await prompt_enhance.enhance_prompt(attack, user_id=USER, workspace_id=WS)
 
     user = calls[0]["user"]
     # Exactly one real opening and closing tag: the spoofed ones were defanged.
@@ -471,8 +541,8 @@ async def test_reason_enhanced_and_questions(_gateway):
     _, replies = _gateway
     replies.extend([_json(ENHANCED), _json(questions=["What's the business called?"])])
 
-    enhanced = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
-    asked = await prompt_enhance.enhance_prompt("a site", user_id=USER)
+    enhanced = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
+    asked = await prompt_enhance.enhance_prompt("a site", user_id=USER, workspace_id=WS)
 
     assert (enhanced.changed, enhanced.reason) == (True, "enhanced")
     assert (asked.changed, asked.reason) == (False, "questions")
@@ -482,7 +552,7 @@ async def test_reason_unchanged_when_the_model_returns_the_same_brief(_gateway):
     _, replies = _gateway
     replies.append(_json("  " + ORIGINAL.replace(" in Leeds", "\nin  Leeds") + "\n"))
 
-    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert (result.prompt, result.changed, result.reason) == (ORIGINAL, False, "unchanged")
 
@@ -493,7 +563,7 @@ async def test_guard_failure_logs_the_dropped_terms(_gateway, caplog):
     replies.extend([_json(dropped), _json(dropped)])
 
     with caplog.at_level("WARNING", logger=prompt_enhance.__name__):
-        result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+        result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER, workspace_id=WS)
 
     assert result.reason == "failed"
     warning = next(r for r in caplog.records if "guard failed" in r.getMessage())
@@ -510,7 +580,7 @@ async def test_portfolio_prompt_with_a_url_is_enhanced(_gateway):
     )
     replies.append(_json(brief))
 
-    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER, workspace_id=WS)
 
     assert (result.prompt, result.changed, result.reason) == (brief, True, "enhanced")
 
@@ -589,7 +659,7 @@ async def test_own_site_link_is_read_into_a_page_block(_gateway, monkeypatch):
     _route(monkeypatch, {"rohitk06.in": _html_response(ROHIT_HTML)}, seen)
     replies.append(_json(OWN_SITE_BRIEF))
 
-    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER, workspace_id=WS)
 
     assert (result.prompt, result.changed, result.reason) == (OWN_SITE_BRIEF, True, "enhanced")
     assert result.sources == ["https://rohitk06.in"]
@@ -635,7 +705,9 @@ async def test_reference_link_is_read_and_the_reference_rule_is_in_the_system_pr
     replies.append(_json(brief))
 
     result = await prompt_enhance.enhance_prompt(
-        "make my invoicing app landing page look like https://stripe.com", user_id=USER
+        "make my invoicing app landing page look like https://stripe.com",
+        user_id=USER,
+        workspace_id=WS,
     )
 
     assert result.reason == "enhanced"
@@ -696,7 +768,7 @@ async def test_an_unreadable_link_is_skipped_and_the_enhance_still_succeeds(
         monkeypatch.setattr(prompt_enhance, "READ_BUDGET_S", 0.05)
     replies.append(_json(OWN_SITE_BRIEF))
 
-    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER, workspace_id=WS)
 
     assert (result.prompt, result.changed, result.reason) == (OWN_SITE_BRIEF, True, "enhanced")
     assert result.sources == []
@@ -714,7 +786,7 @@ async def test_instructions_inside_a_page_stay_inside_the_page_block(_gateway, m
     _route(monkeypatch, {"rohitk06.in": _html_response(hostile)}, [])
     replies.append(_json(OWN_SITE_BRIEF))
 
-    await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER)
+    await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER, workspace_id=WS)
 
     user = calls[0]["user"]
     assert user.count("<page ") == 1
@@ -742,7 +814,7 @@ async def test_at_most_two_distinct_links_are_read(_gateway, monkeypatch):
     )
     replies.append(_json(f"{prompt}. Primary action: [book a call]."))
 
-    result = await prompt_enhance.enhance_prompt(prompt, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(prompt, user_id=USER, workspace_id=WS)
 
     assert sorted(r.headers["host"] for r in seen) == ["a.example", "www.b.example"]
     assert result.sources == ["https://a.example", "https://www.b.example"]
@@ -767,6 +839,7 @@ async def test_a_link_in_the_answers_is_read(_gateway, monkeypatch):
         "a site",
         [prompt_enhance.EnhanceAnswer("Do you have a current site?", "yes https://rohitk06.in")],
         user_id=USER,
+        workspace_id=WS,
     )
 
     assert result.sources == ["https://rohitk06.in"]
@@ -789,7 +862,7 @@ async def test_sources_are_empty_when_the_enhance_fails(_gateway, monkeypatch):
     _route(monkeypatch, {"rohitk06.in": _html_response(ROHIT_HTML)}, [])
     replies.append(None)
 
-    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER)
+    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER, workspace_id=WS)
 
     assert (result.reason, result.sources) == ("failed", [])
 
