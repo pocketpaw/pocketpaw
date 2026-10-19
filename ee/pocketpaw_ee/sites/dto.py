@@ -66,11 +66,14 @@ class EnhancePromptRequest(BaseModel):
 class EnhancePromptResponse(BaseModel):
     """``prompt`` is the brief to put back in the composer (the original when
     ``changed`` is false); ``questions`` is non-empty only when the prompt was too
-    thin to enhance without asking."""
+    thin to enhance without asking. ``reason`` says why: ``enhanced`` (changed),
+    ``questions``, ``unchanged`` (the model had nothing to add), ``failed`` (no
+    model, gateway error, timeout, bad reply, guard failure) or ``rate_limited``."""
 
     prompt: str
     questions: list[str] = Field(default_factory=list)
     changed: bool = False
+    reason: Literal["enhanced", "questions", "unchanged", "failed", "rate_limited"] = "unchanged"
 
 
 class SitePlanRequestResponse(BaseModel):

@@ -144,6 +144,7 @@ async def test_any_failure_returns_the_original_unchanged(_gateway, reply):
     result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
 
     assert (result.prompt, result.questions, result.changed) == (ORIGINAL, [], False)
+    assert result.reason == "failed"
 
 
 async def test_timeout_returns_the_original(_gateway, monkeypatch):
@@ -158,7 +159,7 @@ async def test_timeout_returns_the_original(_gateway, monkeypatch):
 
     result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
 
-    assert (result.prompt, result.changed) == (ORIGINAL, False)
+    assert (result.prompt, result.changed, result.reason) == (ORIGINAL, False, "failed")
 
 
 async def test_no_model_returns_the_original(_gateway, monkeypatch):
@@ -172,7 +173,7 @@ async def test_no_model_returns_the_original(_gateway, monkeypatch):
 
     result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
 
-    assert (result.prompt, result.changed) == (ORIGINAL, False)
+    assert (result.prompt, result.changed, result.reason) == (ORIGINAL, False, "failed")
     assert calls == []
 
 
@@ -184,8 +185,8 @@ async def test_rate_limit_returns_the_original(_gateway, monkeypatch):
     first = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
     second = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
 
-    assert first.changed is True
-    assert (second.prompt, second.changed) == (ORIGINAL, False)
+    assert (first.changed, first.reason) == (True, "enhanced")
+    assert (second.prompt, second.changed, second.reason) == (ORIGINAL, False, "rate_limited")
     assert len(calls) == 1
 
 
@@ -225,6 +226,7 @@ async def test_guard_failing_twice_returns_the_original(_gateway):
     result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
 
     assert (result.prompt, result.questions, result.changed) == (ORIGINAL, [], False)
+    assert result.reason == "failed"
     assert len(calls) == 2
 
 
@@ -329,7 +331,12 @@ async def test_http_enhanced(_gateway, monkeypatch):
         res = await c.post("/api/v1/sites/enhance-prompt", json={"prompt": ORIGINAL})
 
     assert res.status_code == 200
-    assert res.json() == {"prompt": ENHANCED, "questions": [], "changed": True}
+    assert res.json() == {
+        "prompt": ENHANCED,
+        "questions": [],
+        "changed": True,
+        "reason": "enhanced",
+    }
 
 
 async def test_http_questions_and_answers(_gateway, monkeypatch):
@@ -350,8 +357,14 @@ async def test_http_questions_and_answers(_gateway, monkeypatch):
         "prompt": "a site",
         "questions": ["What's the business called?"],
         "changed": False,
+        "reason": "questions",
     }
-    assert answered.json() == {"prompt": "Crumb & Co site.", "questions": [], "changed": True}
+    assert answered.json() == {
+        "prompt": "Crumb & Co site.",
+        "questions": [],
+        "changed": True,
+        "reason": "enhanced",
+    }
 
 
 async def test_http_failure_is_still_a_200(_gateway, monkeypatch):
@@ -362,7 +375,12 @@ async def test_http_failure_is_still_a_200(_gateway, monkeypatch):
         res = await c.post("/api/v1/sites/enhance-prompt", json={"prompt": ORIGINAL})
 
     assert res.status_code == 200
-    assert res.json() == {"prompt": ORIGINAL, "questions": [], "changed": False}
+    assert res.json() == {
+        "prompt": ORIGINAL,
+        "questions": [],
+        "changed": False,
+        "reason": "failed",
+    }
 
 
 @pytest.mark.parametrize("prompt", ["", "x" * 4001])
@@ -423,3 +441,71 @@ def test_guard_keeps_handles_emails_and_domains_whole(original, rewrite, token):
 
 def test_guard_still_checks_standalone_numbers():
     assert prompt_enhance.missing_terms("Bakery open since 1998", "A bakery.") == ["1998"]
+
+
+# ── Why nothing changed ──────────────────────────────────────────────────────
+# ``reason`` separates "the model had nothing to add" from every failure, so the
+# composer never says "no changes to suggest" when the call actually broke.
+
+
+async def test_reason_enhanced_and_questions(_gateway):
+    _, replies = _gateway
+    replies.extend([_json(ENHANCED), _json(questions=["What's the business called?"])])
+
+    enhanced = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+    asked = await prompt_enhance.enhance_prompt("a site", user_id=USER)
+
+    assert (enhanced.changed, enhanced.reason) == (True, "enhanced")
+    assert (asked.changed, asked.reason) == (False, "questions")
+
+
+async def test_reason_unchanged_when_the_model_returns_the_same_brief(_gateway):
+    _, replies = _gateway
+    replies.append(_json("  " + ORIGINAL.replace(" in Leeds", "\nin  Leeds") + "\n"))
+
+    result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+
+    assert (result.prompt, result.changed, result.reason) == (ORIGINAL, False, "unchanged")
+
+
+async def test_guard_failure_logs_the_dropped_terms(_gateway, caplog):
+    _, replies = _gateway
+    dropped = "A cosy site for a local bakery. Primary action: visit."
+    replies.extend([_json(dropped), _json(dropped)])
+
+    with caplog.at_level("WARNING", logger=prompt_enhance.__name__):
+        result = await prompt_enhance.enhance_prompt(ORIGINAL, user_id=USER)
+
+    assert result.reason == "failed"
+    warning = next(r for r in caplog.records if "guard failed" in r.getMessage())
+    assert warning.levelname == "WARNING"
+    for term in ("Crumb & Co", "Leeds", "2009"):
+        assert term in warning.getMessage()
+
+
+async def test_portfolio_prompt_with_a_url_is_enhanced(_gateway):
+    _, replies = _gateway
+    brief = (
+        "Recreate my personal portfolio, based on my current site https://rohitk06.in/, "
+        "with motion and scroll animations. Primary action: [how visitors should reach you]."
+    )
+    replies.append(_json(brief))
+
+    result = await prompt_enhance.enhance_prompt(PORTFOLIO, user_id=USER)
+
+    assert (result.prompt, result.changed, result.reason) == (brief, True, "enhanced")
+
+
+async def test_http_rate_limited_reason(_gateway, monkeypatch):
+    monkeypatch.setattr(prompt_enhance, "_limiter", RateLimiter(rate=1e-9, capacity=0))
+
+    async with _client(_app(monkeypatch)) as c:
+        res = await c.post("/api/v1/sites/enhance-prompt", json={"prompt": ORIGINAL})
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "prompt": ORIGINAL,
+        "questions": [],
+        "changed": False,
+        "reason": "rate_limited",
+    }

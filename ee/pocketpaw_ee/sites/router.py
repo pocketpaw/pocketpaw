@@ -277,14 +277,18 @@ async def enhance_site_prompt(
     """The composer's Enhance button: a sharper brief that is still the user's
     idea, or up to three fact questions when the idea is too thin. Always a 200;
     any failure (no model, gateway error, timeout, guard, rate limit) returns the
-    original prompt with ``changed=false`` so the composer never breaks."""
+    original prompt with ``changed=false`` so the composer never breaks, and
+    ``reason`` tells the client which case it was."""
     answers = [
         prompt_enhance.EnhanceAnswer(question=a.question, answer=a.answer)
         for a in body.answers or []
     ]
     result = await prompt_enhance.enhance_prompt(body.prompt, answers or None, user_id=ctx.user_id)
     return EnhancePromptResponse(
-        prompt=result.prompt, questions=result.questions, changed=result.changed
+        prompt=result.prompt,
+        questions=result.questions,
+        changed=result.changed,
+        reason=result.reason,
     )
 
 

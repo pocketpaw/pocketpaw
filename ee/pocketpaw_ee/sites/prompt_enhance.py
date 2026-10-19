@@ -15,12 +15,16 @@
 # Invariants:
 #   * Never raises and never blocks the composer. Every failure (no model,
 #     gateway error, timeout, unparsable output, guard failure, rate limit)
-#     returns the original prompt with ``changed=False`` and is logged without
-#     the user's text.
+#     returns the original prompt with ``changed=False``, and ``reason`` says
+#     which: enhanced | questions | unchanged | failed | rate_limited, so the
+#     client never shows "nothing to improve" for a failure. Logs never carry
+#     the user's text, except the dropped terms on a guard failure.
 #   * User text is data: it is wrapped in <original_prompt> / <answers> tags with
 #     any spoofed closing tag neutralised.
-#   * Guard: quoted strings, capitalised names and numbers from the user's text
-#     must all survive into the brief; one retry, then the original comes back.
+#   * Guard: quoted strings, URLs, emails, @handles, domains, capitalised names
+#     and standalone numbers from the user's text must all survive into the
+#     brief; one retry, then the original comes back. URLs, emails, handles and
+#     domains are whole tokens: nothing is extracted from inside them.
 #   * Design doc: docs/design/drafts/2026-10-19-sites-prompt-enhance.md (workspace).
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud.studio import prompt_soften
@@ -155,25 +160,45 @@ def build_user_message(
 # ── Guard ────────────────────────────────────────────────────────────────────
 
 _QUOTED = re.compile(r"\"([^\"\n]{1,120})\"|“([^”\n]{1,120})”|‘([^’\n]{1,120})’")
-_NUMBER = re.compile(r"\d+(?:[.,:/-]\d+)*")
+# Whole tokens, extracted in this order and masked before the later passes so
+# a number or a capitalised word is never pulled from inside one ("06" from
+# "rohitk06.in").
+_URL = re.compile(r"(?:https?://|www\.)[^\s<>\"'`]+", re.IGNORECASE)
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_HANDLE = re.compile(r"(?<![\w@])@\w+")
+_DOMAIN = re.compile(r"(?<![\w@./-])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,24}(?![\w-])")
+_TRAILING_PUNCT = ".,;:!?)]}'\""
+# Standalone numbers only: not glued to letters, @, "." or "/".
+_NUMBER = re.compile(r"(?<![\w@./])\d+(?:[.,:/-]\d+)*(?!\w)")
 _WORD = re.compile(r"[^\W\d_][\w'’&-]*", re.UNICODE)
 _SENTENCE_END = re.compile(r"[.!?:\n]\s*$")
 
 
 def significant_terms(text: str) -> list[str]:
     """User tokens the brief must keep: quoted strings, numbers, and capitalised
-    words that are not just the first word of a sentence."""
+    words that are not just the first word of a sentence. URLs, emails, @handles
+    and domains are kept whole."""
     terms: list[str] = []
     for m in _QUOTED.finditer(text):
         quoted = next(g for g in m.groups() if g is not None).strip()
         if quoted:
             terms.append(quoted)
-    terms.extend(m.group(0) for m in _NUMBER.finditer(text))
-    for m in _WORD.finditer(text):
+    masked = text
+    for pattern in (_URL, _EMAIL, _HANDLE, _DOMAIN):
+        for m in list(pattern.finditer(masked)):
+            # Trailing punctuation stays in the text so a sentence end after
+            # the token still reads as one.
+            token = m.group(0).rstrip(_TRAILING_PUNCT)
+            if token:
+                terms.append(token)
+            end = m.start() + len(token)
+            masked = masked[: m.start()] + " " * len(token) + masked[end:]
+    terms.extend(m.group(0) for m in _NUMBER.finditer(masked))
+    for m in _WORD.finditer(masked):
         word = m.group(0)
         if not word[0].isupper() or word == "I" or len(word) < 2:
             continue
-        before = text[: m.start()]
+        before = masked[: m.start()]
         if not before.strip() or _SENTENCE_END.search(before):
             continue  # sentence-initial capital, not a name
         terms.append(word)
@@ -186,17 +211,30 @@ def significant_terms(text: str) -> list[str]:
     return unique
 
 
+def _term_pattern(term: str) -> str:
+    """Whole-word match for ``term``; a URL also matches with or without a
+    trailing slash, but not as the prefix of a longer path."""
+    if _URL.match(term):
+        return rf"(?<![\w/]){re.escape(term.rstrip('/'))}/?(?![\w/])"
+    return rf"(?<!\w){re.escape(term)}(?!\w)"
+
+
 def missing_terms(original: str, rewrite: str) -> list[str]:
     """Significant terms of ``original`` that do not appear in ``rewrite`` as a
     whole word (case-insensitive, so "Co" is not satisfied by "cosy")."""
     return [
         t
         for t in significant_terms(original)
-        if not re.search(rf"(?<!\w){re.escape(t)}(?!\w)", rewrite, re.IGNORECASE)
+        if not re.search(_term_pattern(t), rewrite, re.IGNORECASE)
     ]
 
 
 # ── Model call ───────────────────────────────────────────────────────────────
+
+
+# Why a call ended the way it did. ``unchanged`` is the only "nothing to
+# improve" answer; every error path is ``failed`` (or ``rate_limited``).
+EnhanceReason = Literal["enhanced", "questions", "unchanged", "failed", "rate_limited"]
 
 
 @dataclass
@@ -204,10 +242,15 @@ class EnhanceResult:
     prompt: str
     questions: list[str] = field(default_factory=list)
     changed: bool = False
+    reason: EnhanceReason = "unchanged"
 
 
-def _unchanged(prompt: str) -> EnhanceResult:
-    return EnhanceResult(prompt=prompt, questions=[], changed=False)
+def _original(prompt: str, reason: EnhanceReason) -> EnhanceResult:
+    return EnhanceResult(prompt=prompt, questions=[], changed=False, reason=reason)
+
+
+def _normalised(text: str) -> str:
+    return " ".join(text.split())
 
 
 async def _resolve_model() -> str | None:
@@ -263,18 +306,18 @@ async def enhance_prompt(
     prompt: str, answers: list[EnhanceAnswer] | None = None, *, user_id: str = ""
 ) -> EnhanceResult:
     """Enhance one composer prompt. Never raises: any failure returns the
-    original with ``changed=False``."""
+    original with ``changed=False`` and ``reason`` saying why."""
     original = prompt
     try:
         if not original.strip():
-            return _unchanged(original)
+            return _original(original, "unchanged")
         if user_id and not _limiter.check(f"sites-enhance:{user_id}").allowed:
             logger.info("sites.enhance: rate limited user %s", user_id)
-            return _unchanged(original)
+            return _original(original, "rate_limited")
         model = await _resolve_model()
         if not model:
             logger.warning("sites.enhance: no chat model available (set %s)", ENHANCE_MODEL_ENV)
-            return _unchanged(original)
+            return _original(original, "failed")
 
         text = original[:MAX_PROMPT_CHARS]
         answers = [a for a in (answers or []) if a.answer.strip()] or None
@@ -282,34 +325,39 @@ async def enhance_prompt(
         for attempt in range(2):
             parsed = await _ask(model, build_user_message(text, answers, missing))
             if parsed is None:
-                return _unchanged(original)
+                return _original(original, "failed")
             rewrite, questions = parsed
             if questions and not answers:
-                return EnhanceResult(prompt=original, questions=questions, changed=False)
+                return EnhanceResult(
+                    prompt=original, questions=questions, changed=False, reason="questions"
+                )
             if not rewrite or len(rewrite) > MAX_PROMPT_CHARS:
                 logger.warning("sites.enhance: brief empty or over %d chars", MAX_PROMPT_CHARS)
-                return _unchanged(original)
+                return _original(original, "failed")
             missing = missing_terms(text, rewrite)
             if not missing:
-                if rewrite.strip() == original.strip():
-                    return _unchanged(original)
-                return EnhanceResult(prompt=rewrite, questions=[], changed=True)
+                if _normalised(rewrite) == _normalised(original):
+                    return _original(original, "unchanged")
+                return EnhanceResult(prompt=rewrite, questions=[], changed=True, reason="enhanced")
             logger.info(
                 "sites.enhance: brief dropped %d user term(s) on attempt %d",
                 len(missing),
                 attempt + 1,
             )
-        logger.warning("sites.enhance: guard failed after retry; returning the original")
-        return _unchanged(original)
+        # The dropped terms are the user's own words; logging them makes the
+        # next guard bug visible in deploy logs.
+        logger.warning("sites.enhance: guard failed after retry; brief dropped %s", missing)
+        return _original(original, "failed")
     except Exception:  # noqa: BLE001 — enhance must never break the composer
         logger.warning("sites.enhance: unexpected failure", exc_info=True)
-        return _unchanged(original)
+        return _original(original, "failed")
 
 
 __all__ = [
     "CALL_TIMEOUT_S",
     "ENHANCE_MODEL_ENV",
     "EnhanceAnswer",
+    "EnhanceReason",
     "EnhanceResult",
     "build_user_message",
     "enhance_prompt",
