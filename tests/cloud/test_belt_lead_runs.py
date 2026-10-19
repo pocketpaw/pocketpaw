@@ -360,6 +360,18 @@ def _done_runner(run_ref: str, cls: type[LeadRunner] = LeadRunner, **kw) -> Lead
 
 # -- brief ------------------------------------------------------------------
 
+# The slice-PR rule every lead brief carries, spelled out here so a change to
+# ``cloud_station.SLICE_PR_RULE`` has to change this test too.
+SLICE_PR_RULE = (
+    "Ship one PR per slice. Its first commit adds the failing test; later commits make it "
+    "pass. Aim for 150-400 changed lines; fold any same-feature change under 50 lines into "
+    "your next slice PR instead of its own PR. Open a test-only PR only for a contract test "
+    "another lead will implement. After you open a slice PR, start the next slice at once on "
+    "a branch stacked on it (rebase.updateRefs is on; the lane integrates). Never wait on CI. "
+    "If the lane ejects one of your PRs with needs-fix, fix it first and restack the slices "
+    "above it."
+)
+
 
 async def test_lead_brief_is_the_playbook_plus_the_run_and_the_rules(store, dirs, playbook):
     repo, launch = dirs
@@ -386,6 +398,7 @@ async def test_lead_brief_is_the_playbook_plus_the_run_and_the_rules(store, dirs
     assert "except one that starts `Belt released this run.`" in brief
     assert cloud_station._STOP_TEXT.startswith("Belt released this run.")
     assert "No attribution line anywhere" in brief
+    assert SLICE_PR_RULE in brief  # one PR per slice, never idle on CI
     assert "Belt-Run:" not in brief  # a lead's PRs carry Belt-Lead, never Belt-Run
     # Launched like every cloud run: under the pty, from the clone at origin/dev.
     launch_argv = next(a for a, _ in runner.calls if "--cloud" in a)
@@ -2596,6 +2609,7 @@ async def test_a_line_lead_brief_lists_every_feature(store, dirs, playbook):
     for feature in (FEATURE, FEATURE_B):
         assert f"lead/{feature}" in brief and f"docs/leads/{feature}/RECORD.md" in brief
     assert "`Feature: <feature>`" in brief and "comment on #94" in brief
+    assert SLICE_PR_RULE in brief  # a line lead gets the slice-PR rule too
     assert [a[-1] for a in _rev_lists(runner)] == [
         f"refs/remotes/origin/lead/{FEATURE}..origin/dev",
         f"refs/remotes/origin/lead/{FEATURE_B}..origin/dev",

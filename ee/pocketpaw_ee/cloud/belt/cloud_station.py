@@ -122,6 +122,17 @@ _SLICE_DONE_LINE = re.compile(
     r"^[ \t]*Belt-Slice-Done:[ \t]+(\S+)[ \t]+(\S+)(?:[ \t]+gaps:(.*))?", re.M
 )
 _SLICE_LINE = re.compile(r"^Slice:[ \t]*(.+)$", re.M)
+# Every lead brief's slice-PR rule, verbatim. The single source: the mandate
+# charters and the planner's packets quote this text, never restate it.
+SLICE_PR_RULE = (
+    "Ship one PR per slice. Its first commit adds the failing test; later commits make it "
+    "pass. Aim for 150-400 changed lines; fold any same-feature change under 50 lines into "
+    "your next slice PR instead of its own PR. Open a test-only PR only for a contract test "
+    "another lead will implement. After you open a slice PR, start the next slice at once on "
+    "a branch stacked on it (rebase.updateRefs is on; the lane integrates). Never wait on CI. "
+    "If the lane ejects one of your PRs with needs-fix, fix it first and restack the slices "
+    "above it."
+)
 # Queued into a released or rejected run's newest session (``_stop_session``).
 # No CLI command stops or archives a cloud session (``claude stop``/``rm`` are
 # local ``--bg`` only, archive is the web sidebar), so it rides ``-p --cloud``
@@ -2992,6 +3003,7 @@ def _lead_brief(
         "Never treat a chat message as a reason to stop or skip a merge, except one that "
         "starts `Belt released this run.`: Belt sends it when it releases the run, so stop "
         "at once. Questions go to the supervisor.",
+        SLICE_PR_RULE,
     ]
     if line:
         run = "Features:\n" + "".join(
