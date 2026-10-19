@@ -563,9 +563,7 @@ class TestWidgetPatch:
         client, store = admin_client
         import asyncio
 
-        widget = asyncio.get_event_loop().run_until_complete(
-            store.create_widget(_widget(agent_id="", workspace_id="ws-1"))
-        )
+        widget = asyncio.run(store.create_widget(_widget(agent_id="", workspace_id="ws-1")))
         res = client.patch(
             f"/paw-bar/widgets/{widget.id}",
             json={"agent_id": "agent-new", "name": "Renamed"},
@@ -582,7 +580,7 @@ class TestWidgetPatch:
         client, store = admin_client
         import asyncio
 
-        widget = asyncio.get_event_loop().run_until_complete(
+        widget = asyncio.run(
             store.create_widget(_widget(agent_id="agent-xyz", workspace_id="ws-1"))
         )
         res = client.patch(
@@ -598,9 +596,7 @@ class TestWidgetPatch:
         import asyncio
 
         # A widget owned by ws-other must 404 for the ws-1 admin session.
-        widget = asyncio.get_event_loop().run_until_complete(
-            store.create_widget(_widget(workspace_id="ws-other"))
-        )
+        widget = asyncio.run(store.create_widget(_widget(workspace_id="ws-other")))
         res = client.patch(
             f"/paw-bar/widgets/{widget.id}",
             json={"agent_id": "x"},
@@ -803,7 +799,7 @@ class TestCatalogPreamble:
                 {"id": "espresso", "name": "Espresso", "price_cents": 350, "currency": "USD"}
             ],
         )
-        pre = await build_preamble("ws", "u", meta)
+        pre = (await build_preamble("ws", "u", meta)).text
         assert "espresso" in pre and "$3.50" in pre
         assert "pawbar_add_to_cart" in pre
 
@@ -811,7 +807,7 @@ class TestCatalogPreamble:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        pre = await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))
+        pre = (await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))).text
         assert "Products you can sell" not in pre
         assert "don't act" in pre
 
@@ -824,9 +820,11 @@ class TestFormCardPreamble:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        return await build_preamble(
-            "ws", "u", SurfaceMeta(route_path="/paw-bar", pawbar_actions=actions)
-        )
+        return (
+            await build_preamble(
+                "ws", "u", SurfaceMeta(route_path="/paw-bar", pawbar_actions=actions)
+            )
+        ).text
 
     async def test_gated_action_with_args_renders_form_instructions(self) -> None:
         """A gated action with typed args teaches the "form" pawbar-card: the
@@ -856,7 +854,7 @@ class TestFormCardPreamble:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        pre = await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))
+        pre = (await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))).text
         assert "FORMS for gated actions" not in pre
         assert '"kind": "form"' not in pre
 

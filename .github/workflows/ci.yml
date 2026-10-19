@@ -462,6 +462,9 @@ jobs:
         # The _page_actions and _declared_tools files are the only proof that
         # a pawbar-action fence is validated (known pages, declared tools with
         # schema-checked args) before it becomes the action frame.
+        # The _actions and _escape_hatch files pin the concierge preamble (the
+        # action catalog, form cards, the request-a-person step) and the
+        # visitor-cart and handoff routes.
         # Mutations: tests/mutations/concierge_v2_runtime.json,
         # tests/mutations/concierge_guided_fields.json,
         # tests/mutations/concierge_eval_gate.json and
@@ -476,7 +479,9 @@ jobs:
           tests/cloud/test_paw_bar_concierge_evals.py
           tests/cloud/test_paw_bar_concierge_eval_gate.py
           tests/cloud/test_paw_bar_page_actions.py
-          tests/cloud/test_paw_bar_declared_tools.py -o addopts="" -q --tb=short
+          tests/cloud/test_paw_bar_declared_tools.py
+          tests/cloud/test_paw_bar_actions.py
+          tests/cloud/test_paw_bar_escape_hatch.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
