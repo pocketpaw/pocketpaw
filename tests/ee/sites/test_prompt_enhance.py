@@ -289,7 +289,6 @@ def _app(monkeypatch, *, authed: bool = True) -> FastAPI:
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud.auth import current_active_user
     from pocketpaw_ee.cloud.license import require_license
-    from pocketpaw_ee.cloud.workspace import service as workspace_service
     from pocketpaw_ee.sites.router import router as sites_router
 
     app = FastAPI()
@@ -308,13 +307,9 @@ def _app(monkeypatch, *, authed: bool = True) -> FastAPI:
             started_at=datetime.now(UTC),
         )
 
-    async def _plan(_workspace_id: str) -> str:
-        return "enterprise"
-
     async def _allow(_user, _workspace_id, _action) -> None:
         return None
 
-    monkeypatch.setattr(workspace_service, "get_workspace_plan", _plan)
     monkeypatch.setattr(core_deps, "check_workspace_action", _allow)
     app.dependency_overrides[request_context] = _ctx
     app.dependency_overrides[current_active_user] = lambda: _FakeUser()
