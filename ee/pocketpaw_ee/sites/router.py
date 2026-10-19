@@ -289,6 +289,7 @@ async def enhance_site_prompt(
         questions=result.questions,
         changed=result.changed,
         reason=result.reason,
+        sources=result.sources,
     )
 
 

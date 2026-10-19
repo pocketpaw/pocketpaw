@@ -772,8 +772,8 @@ async def import_from_url(*, workspace_id: str, user_id: str, url: str) -> dict[
 
 
 class _MetaScan(HTMLParser):
-    """Pull the page's own account of itself: title, meta description, favicon
-    and og:image.
+    """Pull the page's own account of itself: title, meta description,
+    og:site_name, favicon and og:image.
 
     A real parser, never a regex: minified markup carries UNQUOTED attributes
     (``<link href=/a.css rel=stylesheet>``), and a quote-assuming pattern returns
@@ -788,6 +788,7 @@ class _MetaScan(HTMLParser):
         self.title = ""
         self.description = ""
         self.og_title = ""
+        self.site_name = ""
         self.favicon = ""
         self.og_image = ""
         self._in_title = False
@@ -806,6 +807,8 @@ class _MetaScan(HTMLParser):
                 self.description = content
             elif key == "og:title" and not self.og_title:
                 self.og_title = content
+            elif key == "og:site_name" and not self.site_name:
+                self.site_name = content
             elif key == "og:image" and not self.og_image:
                 self.og_image = content
         elif tag == "link":

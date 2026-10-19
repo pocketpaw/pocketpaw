@@ -68,12 +68,15 @@ class EnhancePromptResponse(BaseModel):
     ``changed`` is false); ``questions`` is non-empty only when the prompt was too
     thin to enhance without asking. ``reason`` says why: ``enhanced`` (changed),
     ``questions``, ``unchanged`` (the model had nothing to add), ``failed`` (no
-    model, gateway error, timeout, bad reply, guard failure) or ``rate_limited``."""
+    model, gateway error, timeout, bad reply, guard failure) or ``rate_limited``.
+    ``sources`` lists the links in the prompt whose page was read and used for an
+    enhanced brief (empty otherwise)."""
 
     prompt: str
     questions: list[str] = Field(default_factory=list)
     changed: bool = False
     reason: Literal["enhanced", "questions", "unchanged", "failed", "rate_limited"] = "unchanged"
+    sources: list[str] = Field(default_factory=list)
 
 
 class SitePlanRequestResponse(BaseModel):
