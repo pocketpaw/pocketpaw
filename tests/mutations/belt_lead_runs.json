@@ -1126,5 +1126,14 @@
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
+  },
+  {
+    "label": "a lead brief drops the slice-PR rule",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        SLICE_PR_RULE,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py"
+    ]
   }
 ]
