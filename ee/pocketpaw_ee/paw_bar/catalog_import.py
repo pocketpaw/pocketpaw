@@ -44,8 +44,9 @@
 #     ``deadline_reached``; a hard ``asyncio.timeout`` sits
 #     ``IMPORT_BACKSTOP_GRACE_SEC`` past it. ``IMPORT_MAX_PAGES`` product pages for
 #     the generic reader, ``IMPORT_BYTE_CAP`` bytes for the whole run.
-#   * sitemaps are parsed only as UTF-8, by an expat parser that refuses any
-#     DOCTYPE or entity declaration (``_sitemap_locs``).
+#   * sitemaps are found and parsed by ``sites.sitemap`` (shared with the
+#     knowledge crawl): UTF-8 only, any DOCTYPE or entity declaration refused,
+#     one index level deep, product child sitemaps first.
 # Never raises: every failure is ``status="failed"`` with a ``reason``.
 
 """Preview a store's products from its own site (Shopify, Woo, JSON-LD, OG)."""
@@ -53,7 +54,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 import hashlib
 import ipaddress
 import json
@@ -68,7 +68,6 @@ from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit
-from xml.parsers import expat
 
 import httpx
 from pydantic import BaseModel, Field
@@ -85,6 +84,7 @@ from pocketpaw_ee.sites.safe_fetch import (
     FetchResult,
     SafeFetcher,
 )
+from pocketpaw_ee.sites.sitemap import sitemap_urls
 from pocketpaw_ee.sites.url_crawler import POLITENESS_DELAY_SEC, allowed_by_robots, load_robots
 
 logger = logging.getLogger(__name__)
@@ -107,8 +107,7 @@ _DESCRIPTION_CHARS = 300
 _URL_CHARS = 2048
 _JSONLD_BLOCK_BYTES = 256 * 1024
 _JSONLD_MAX_DEPTH = 12
-_MAX_SITEMAPS = 4  # the index or urlset, plus up to three child sitemaps
-_MAX_LINKS = 2000  # anchors / sitemap locs tracked per document
+_MAX_LINKS = 2000  # anchors tracked per document
 _SHOPIFY_PAGE_SIZE = 250
 _SHOPIFY_MAX_PAGES = 20
 _WOO_PAGE_SIZE = 100
@@ -126,7 +125,6 @@ _CURRENCY_CODE_RE = re.compile(r'"currencyCode"\s*:\s*"([A-Za-z]{3})"')
 _WOO_BODY_CLASS_RE = re.compile(r"<body[^>]*class=[\"'][^\"']*\bwoocommerce\b", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
 _DECIMAL_COMMA_RE = re.compile(r"\d*,\d{1,2}")
-_XML_ENCODING_RE = re.compile(r"""\s*<\?xml\b[^>]*?\bencoding\s*=\s*["']([^"']*)["']""")
 
 Platform = Literal["shopify", "woocommerce", ""]
 Source = Literal["shopify", "woocommerce", "jsonld", "opengraph", "csv", ""]
@@ -662,85 +660,6 @@ def parse_og_product(html: str | bytes, page_url: str, host: str) -> ParsedProdu
     return _og_product(_scan(html).meta, page_url, host)
 
 
-class _RefusedXML(Exception):
-    """A sitemap declared a DTD or an entity: refused, nothing expanded."""
-
-
-class _EnoughLocs(Exception):
-    """``_MAX_LINKS`` locs read: stop parsing."""
-
-
-def _refuse_dtd(*_args: Any) -> None:
-    raise _RefusedXML
-
-
-def _local(tag: str) -> str:
-    return tag.rsplit(" ", 1)[-1].lower()
-
-
-def _sitemap_locs(body: bytes) -> tuple[bool, list[str]]:
-    """(is_index, <loc> values) of a sitemap; (False, []) when refused.
-
-    Two locks against entity expansion. The body must be UTF-8 (sitemaps.org
-    requires it; a UTF-8 BOM is allowed), carry no NUL (a BOM-less UTF-16 body
-    is valid UTF-8 byte-wise, its NULs give it away) and declare no other
-    encoding; the decoded text is then fed to expat as a str, so expat cannot
-    re-detect an encoding. And the expat parser raises on any DOCTYPE, entity
-    declaration or external entity reference, so nothing is ever expanded."""
-    if body.startswith(codecs.BOM_UTF8):
-        body = body[len(codecs.BOM_UTF8) :]
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
-        return False, []
-    declared = _XML_ENCODING_RE.match(text)
-    if "\x00" in text or (declared and declared.group(1).strip().lower() not in ("utf-8", "utf8")):
-        return False, []
-
-    parser = expat.ParserCreate(namespace_separator=" ")
-    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
-    parser.StartDoctypeDeclHandler = _refuse_dtd
-    parser.EntityDeclHandler = _refuse_dtd
-    parser.UnparsedEntityDeclHandler = _refuse_dtd
-    parser.ExternalEntityRefHandler = _refuse_dtd
-    parser.buffer_text = True
-    root: list[str] = []
-    locs: list[str] = []
-    current: list[str] | None = None
-
-    def start(tag: str, _attrs: Any) -> None:
-        nonlocal current
-        if not root:
-            root.append(_local(tag))
-        if _local(tag) == "loc":
-            current = []
-
-    def data(chunk: str) -> None:
-        if current is not None:
-            current.append(chunk)
-
-    def end(tag: str) -> None:
-        nonlocal current
-        if current is not None and _local(tag) == "loc":
-            loc = "".join(current).strip()
-            current = None
-            if loc:
-                locs.append(loc)
-                if len(locs) >= _MAX_LINKS:
-                    raise _EnoughLocs
-
-    parser.StartElementHandler = start
-    parser.CharacterDataHandler = data
-    parser.EndElementHandler = end
-    try:
-        parser.Parse(text, True)
-    except _EnoughLocs:
-        pass
-    except (_RefusedXML, expat.ExpatError):
-        return False, []
-    return bool(root) and root[0] == "sitemapindex", locs
-
-
 def _prefer_products(urls: list[str]) -> list[str]:
     """URLs whose path looks like a product's or an event's, or all of them when
     none does."""
@@ -891,23 +810,13 @@ class _Run:
         """Candidate product or event pages: from the sitemap(s) robots.txt names
         (else /sitemap.xml, one index level deep), else the homepage's links."""
         declared = list(self.robots.site_maps() or []) if self.robots is not None else []
-        queue = [u for u in declared if (urlsplit(u).hostname or "") == self.host]
-        queue = queue or [self.url("/sitemap.xml")]
-        pages: list[str] = []
-        fetched = 0
-        while queue and fetched < _MAX_SITEMAPS and len(pages) < _MAX_LINKS:
-            sitemap = queue.pop(0)
-            fetched += 1
-            result = await self.get(sitemap)
-            if result is None or result.status != 200:
-                continue
-            is_index, locs = _sitemap_locs(result.body)
-            on_host = [u for u in locs if (urlsplit(u).hostname or "") == self.host]
-            if is_index:
-                if fetched == 1:  # one level of index only
-                    queue = _prefer_products(on_host)[: _MAX_SITEMAPS - 1]
-                continue
-            pages.extend(on_host)
+        pages = await sitemap_urls(
+            self.get,
+            declared,
+            self.host,
+            self.url("/sitemap.xml"),
+            pick_children=_prefer_products,
+        )
         if not pages:
             pages = [
                 u

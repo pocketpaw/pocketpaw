@@ -235,7 +235,7 @@ async def test_ranked_crawl_reads_menu_links_before_shallower_body_links():
 
     result = await _crawl(routes, seen, max_pages=5, rank_pages=True)
 
-    fetched = _paths(seen)
+    fetched = [p for p in _paths(seen) if p != "/sitemap.xml"]
     assert fetched[:3] == ["/", "/join/become-a-member/", "/membres/inscription/"]
     assert any("page cap reached (5)" in w for w in result.warnings)
 

@@ -4601,6 +4601,15 @@ stamp, the sync error, and an owner-triggered re-crawl — use
 response. That surface already covers every Site in the workspace, a foreign row
 included, and is not duplicated here.
 
+The crawl reads at most 25 pages of the verified origin, HTML only, in one
+60-second window. It picks them without a word list, so it works in any language:
+links inside the site's own menu (`<nav>`, `<header>`, `<footer>` or
+`role="navigation"`, on any page) come first, then the pages its sitemap lists
+(the `Sitemap:` lines in robots.txt, else `/sitemap.xml`, one index level deep,
+same host only, at most 2 MB of sitemap), then every other link, each group
+shallowest path first. A missing or unreadable sitemap just means the crawl
+follows links.
+
 ### `POST .../foreign-concierge/rotate-key`
 
 Retires the embed key and issues a new one; the old key stops resolving

@@ -848,7 +848,9 @@ async def test_an_off_host_or_doctype_sitemap_is_ignored(beanie_test_db):
     routes["/ok/"] = _html(f"<html><body><h1>OK</h1>{_COPY}</body></html>")
     seen: list[httpx.Request] = []
 
-    harvest = await _harvest(routes=routes, seen=seen)
+    # evil.example resolves, so a fetch of it would reach the transport and show.
+    table = {**_PUBLIC, "evil.example": ["93.184.216.36"]}
+    harvest = await _harvest(routes=routes, seen=seen, table=table)
 
     assert harvest.error == ""
     assert "ok/index.html" in harvest.source

@@ -5,7 +5,8 @@
 # Shopify and WooCommerce paged up to the catalog cap.
 #
 # Two halves. The PURE parsers get payloads straight (Shopify /products.json, the
-# WooCommerce Store API, JSON-LD, OpenGraph, platform detection, sitemaps). The
+# WooCommerce Store API, JSON-LD, OpenGraph, platform detection, and the shared
+# ``sites.sitemap`` parser). The
 # ORCHESTRATOR runs against a mocked origin (httpx.MockTransport + a dict-backed
 # resolver, the test_foreign_grounding harness): nothing opens a socket.
 #
@@ -26,6 +27,7 @@ import httpx
 import pytest
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.paw_bar import catalog_import as ci
+from pocketpaw_ee.sites.sitemap import sitemap_locs
 
 _WS = "ws-alpha"
 _HOST = "shop.example"
@@ -469,9 +471,9 @@ def test_a_sitemap_with_a_dtd_is_refused_before_parsing():
         b'<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol">]>'
         b"<urlset><url><loc>&lol;</loc></url></urlset>"
     )
-    assert ci._sitemap_locs(bomb) == (False, [])
+    assert sitemap_locs(bomb) == (False, [])
     ok = b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://a/p/1?x=1&amp;y=2</loc></url></urlset>'
-    assert ci._sitemap_locs(ok) == (False, ["https://a/p/1?x=1&y=2"])
+    assert sitemap_locs(ok) == (False, ["https://a/p/1?x=1&y=2"])
 
 
 _LAUGHS = (
@@ -497,7 +499,7 @@ _LAUGHS = (
 )
 def test_an_entity_bomb_is_refused_in_any_encoding_without_expanding(body):
     started = time.monotonic()
-    assert ci._sitemap_locs(body) == (False, [])
+    assert sitemap_locs(body) == (False, [])
     assert time.monotonic() - started < 0.5
 
 
@@ -506,12 +508,12 @@ def test_a_sitemap_declaring_a_non_utf8_encoding_is_refused():
         b'<?xml version="1.0" encoding="UTF-16"?>'
         b"<urlset><url><loc>https://a/p/1</loc></url></urlset>"
     )
-    assert ci._sitemap_locs(body) == (False, [])
+    assert sitemap_locs(body) == (False, [])
 
 
 def test_the_parser_itself_refuses_a_doctype_with_no_entities():
     body = b'<!DOCTYPE urlset SYSTEM "https://evil.example/x.dtd"><urlset><url><loc>https://a/p/1</loc></url></urlset>'
-    assert ci._sitemap_locs(body) == (False, [])
+    assert sitemap_locs(body) == (False, [])
 
 
 def test_a_utf8_bom_and_a_utf8_declaration_are_accepted():
@@ -521,7 +523,7 @@ def test_a_utf8_bom_and_a_utf8_declaration_are_accepted():
         b'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
         b"<sitemap><loc>https://a/s1.xml</loc></sitemap></sitemapindex>"
     )
-    assert ci._sitemap_locs(body) == (True, ["https://a/s1.xml"])
+    assert sitemap_locs(body) == (True, ["https://a/s1.xml"])
 
 
 # --------------------------------------------------------------------------- #

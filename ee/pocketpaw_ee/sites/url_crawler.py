@@ -34,8 +34,10 @@
 # fetching one is a request against a customer's origin that can only be thrown
 # away. Both knobs NARROW ONLY — ``max_pages`` is clamped to MAX_CRAWL_PAGES, so a
 # caller can spend less of the budget but never more. Grounding also passes
-# ``priority`` so /apply or /contact linked after 30 event pages still makes the
-# budget; without it the walk is plain FIFO BFS, which is what the import uses.
+# ``rank_pages`` so the site's own menu pages (any <nav>/<header>/<footer>) and
+# its sitemap pages make a small budget ahead of 30 event pages, in any language;
+# without it the walk is plain FIFO BFS with no sitemap fetch, which is what the
+# import uses. Sitemaps are parsed and walked by ``sites.sitemap``, fetched here.
 #
 # Harvested paths run through import_service._safe_entry_path, the SAME sanitizer
 # zip entries pass. Absolute same-origin URLs in HTML/CSS are rewritten
@@ -72,6 +74,7 @@ from pocketpaw_ee.sites.safe_fetch import (
     SafeFetcher,
     validate_fetch_url,
 )
+from pocketpaw_ee.sites.sitemap import sitemap_urls
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +107,16 @@ MAX_CRAWL_ASSETS = 200
 MAX_TRACKED_URLS = 2000
 # Politeness delay between consecutive fetches (tests pass 0).
 POLITENESS_DELAY_SEC = 0.15
+# ``rank_pages`` only: the share of the byte budget sitemaps may spend (an
+# oversized sitemap is skipped, never fatal), and how many sitemap URLs join the
+# frontier, shallowest first. The page budget is tens of pages, so a few hundred
+# candidates is plenty and a 50k-URL sitemap cannot crowd out link discovery.
+SITEMAP_BYTE_CAP = 2 * 1024 * 1024
+MAX_SITEMAP_PAGES = 200
+
+# Frontier ranks under ``rank_pages``: the site's menu, then its sitemap, then
+# every other link.
+_RANK_MENU, _RANK_SITEMAP, _RANK_LINK = 0, 1, 2
 
 
 _CSS_URL_RE = re.compile(r"url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)", re.IGNORECASE)
@@ -136,21 +149,61 @@ _NON_ASSET_LINK_RELS = frozenset(
 )
 
 
+# Elements whose links are the site's own menu, and elements that never get an
+# end tag (so never go on the open-element stack).
+_MENU_TAGS = frozenset({"nav", "header", "footer"})
+_VOID_TAGS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param"}
+    | {"source", "track", "wbr"}
+)
+# Bound on the open-element stack: a hostile page of a million unclosed <div>s
+# must not make every end tag a million-entry search.
+_MAX_OPEN_TAGS = 256
+
+
 class _LinkScan(HTMLParser):
     """One-pass scan of a fetched page: same-site page links (<a href>) and asset
     refs (<link href> minus the navigational rels, <script src>, <img src/srcset>,
     <source src/srcset>, <video/audio src>) — classification against the seed host
-    happens later."""
+    happens later.
+
+    ``menu_links`` holds the hrefs that sat inside <nav>, <header>, <footer> or a
+    role="navigation" element. HTML is messy, so the open elements are tracked
+    the way a browser recovers: an end tag closes up to its nearest open match
+    (so an unclosed <nav> ends when an element around it closes), an end tag with
+    no match is ignored, and <main>, which can never sit inside a menu, closes any
+    menu still open."""
 
     def __init__(self) -> None:
         super().__init__()
         self.page_links: list[str] = []
         self.asset_refs: list[str] = []
+        self.menu_links: set[str] = set()
+        self._open: list[tuple[str, bool]] = []  # (tag, opens a menu)
+        self._menus_open = 0
+
+    def _close_to(self, index: int) -> None:
+        self._menus_open -= sum(menu for _, menu in self._open[index:])
+        del self._open[index:]
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self._open) - 1, -1, -1):
+            if self._open[index][0] == tag:
+                self._close_to(index)
+                return
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = {k: (v or "") for k, v in attrs}
+        if tag == "main" and self._menus_open:
+            self._close_to(next(i for i, (_, menu) in enumerate(self._open) if menu))
+        if tag not in _VOID_TAGS and len(self._open) < _MAX_OPEN_TAGS:
+            menu = tag in _MENU_TAGS or attr_map.get("role", "").lower() == "navigation"
+            self._open.append((tag, menu))
+            self._menus_open += menu
         if tag == "a" and attr_map.get("href"):
             self.page_links.append(attr_map["href"])
+            if self._menus_open:
+                self.menu_links.add(attr_map["href"])
         elif tag == "link" and attr_map.get("href"):
             # Navigational only when EVERY token is: rel="alternate stylesheet"
             # is a stylesheet, and a <link> with no rel at all stays an asset.
@@ -309,7 +362,7 @@ async def crawl_site(
     max_pages: int | None = None,
     fetch_assets: bool = True,
     user_agent: str = USER_AGENT,
-    priority: Callable[[str], int] | None = None,
+    rank_pages: bool = False,
 ) -> CrawlResult:
     """BFS-crawl ``url``'s site (same exact host only) into a FileMap.
 
@@ -330,10 +383,17 @@ async def crawl_site(
     identity robots.txt is evaluated for — the two must be the same string or an
     operator's rule about the name in our header is not the rule we obeyed.
 
-    ``priority`` reorders the frontier: pages are fetched by (priority(url),
-    depth, discovery order), lowest first, and discovery is bounded by
-    MAX_TRACKED_URLS instead of the page budget so a key page linked late can
-    still be queued. None (the default) is plain FIFO BFS, as before."""
+    ``rank_pages`` reorders the frontier so a small budget buys the site's main
+    pages, in any language: links found inside a menu (<nav>, <header>, <footer>,
+    role="navigation", on any page) first, then the URLs the site's sitemap
+    lists, then every other link; within a rank, fewer path segments first, then
+    discovery order. A page found again at a better rank is moved up. The
+    sitemaps (robots.txt's, else /sitemap.xml; see ``sites.sitemap``) are read
+    once the seed has landed, so an apex->www redirect has already re-homed the
+    scope; they share the byte budget, capped at SITEMAP_BYTE_CAP, and a missing,
+    oversized or refused sitemap is simply no sitemap. Discovery is bounded by
+    MAX_TRACKED_URLS instead of the page budget so a menu page linked late still
+    gets in. False (the default) is plain FIFO BFS with no sitemap fetch."""
     # Lazy import — import_service imports this module; the safe-path rule is
     # shared with the zip path deliberately (ONE sanitizer for both imports).
     from pocketpaw_ee.sites.import_service import _safe_entry_path
@@ -417,16 +477,21 @@ async def crawl_site(
             result.warnings.append(robots_warning)
 
         seed_url = _normalize(url)
-        # A heap keyed (rank, depth, discovery seq). With no ``priority`` every
-        # rank is 0, and BFS discovers in nondecreasing depth, so this pops in
-        # exactly the FIFO order a deque would.
+        # A heap of (rank, path segments, discovery seq, depth, url). Without
+        # ``rank_pages`` rank and segments are always 0, so it pops in discovery
+        # order: exactly the FIFO a deque would give.
         order = itertools.count()
-        queue: list[tuple[int, int, int, str]] = [(0, 0, next(order), seed_url)]
+        queue: list[tuple[int, int, int, int, str]] = [(0, 0, next(order), 0, seed_url)]
         seen_pages = {seed_url}
-        # Without a priority the frontier never holds more than the budget, so
-        # discovery stops there; with one, a late-linked key page must still get
-        # in, so only the memory bound applies.
-        discovery_cap = page_budget if priority is None else MAX_TRACKED_URLS
+        # The best rank each URL was queued at, and the URLs already popped: a
+        # URL found again at a better rank is pushed again and the stale entry
+        # skipped. Only ``rank_pages`` ever re-queues.
+        best_rank: dict[str, int] = {seed_url: 0}
+        popped: set[str] = set()
+        # Unranked, the frontier never needs more than the budget, so discovery
+        # stops there; ranked, a late-linked menu page must still get in, so
+        # only the memory bound applies.
+        discovery_cap = MAX_TRACKED_URLS if rank_pages else page_budget
         asset_queue: deque[str] = deque()
         seen_assets: set[str] = set()
         cross_origin: set[str] = set()
@@ -442,8 +507,74 @@ async def crawl_site(
                 seen_assets.add(normalized)
                 asset_queue.append(normalized)
 
+        def _segments(page: str) -> int:
+            return sum(1 for seg in urlparse(page).path.split("/") if seg)
+
+        def _enqueue(normalized: str, rank: int, depth: int) -> None:
+            """Queue a same-site page; ranked, re-queue it when ``rank`` beats
+            the rank it was queued at and it has not been fetched yet."""
+            nonlocal pages_truncated
+            if normalized in seen_pages:
+                if rank < best_rank.get(normalized, rank) and normalized not in popped:
+                    best_rank[normalized] = rank
+                    heapq.heappush(
+                        queue, (rank, _segments(normalized), next(order), depth, normalized)
+                    )
+                return
+            if len(seen_pages) >= discovery_cap:
+                pages_truncated = True
+                return
+            seen_pages.add(normalized)
+            best_rank[normalized] = rank
+            segments = _segments(normalized) if rank_pages else 0
+            heapq.heappush(queue, (rank, segments, next(order), depth, normalized))
+
+        async def _read_sitemaps() -> None:
+            """Queue the sitemap's pages at _RANK_SITEMAP, shallowest first. Its
+            own SafeFetcher bounds what sitemaps may spend (SITEMAP_BYTE_CAP, and
+            never past what the crawl's budget has left); the bytes it read are
+            then charged to the crawl's fetcher, so the total cap still holds."""
+            remaining = total_byte_cap - fetcher.bytes_fetched
+            cap = min(SITEMAP_BYTE_CAP, remaining)
+            if cap <= 0:
+                return
+            sitemap_fetcher = SafeFetcher(
+                total_byte_cap=cap,
+                per_fetch_cap=cap,
+                user_agent=user_agent,
+                transport=transport,
+                resolver=resolver,
+            )
+
+            async def _get(target: str) -> FetchResult | None:
+                if not allowed_by_robots(robots, target, user_agent):
+                    return None
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                try:
+                    return await sitemap_fetcher.fetch(target, allowed_host=scope["netloc"])
+                except (CrawlError, ValidationError, httpx.HTTPError):
+                    return None  # includes the sitemap share running out
+
+            try:
+                host = urlparse(f"//{scope['netloc']}").hostname or ""
+                declared = list(robots.site_maps() or []) if robots is not None else []
+                locs = await sitemap_urls(
+                    _get, declared, host, f"https://{scope['netloc']}/sitemap.xml"
+                )
+            finally:
+                fetcher.bytes_fetched += sitemap_fetcher.bytes_fetched
+                await sitemap_fetcher.aclose()
+            # Deduped in sitemap order; the stable sort keeps that order per depth.
+            pages = dict.fromkeys(_normalize(loc) for loc in locs if _same_site(urlparse(loc)))
+            for page in sorted(pages, key=_segments)[:MAX_SITEMAP_PAGES]:
+                _enqueue(page, _RANK_SITEMAP, 1)
+
         while queue and result.stats.pages_fetched < page_budget:
-            _, depth, _, page_url = heapq.heappop(queue)
+            *_, depth, page_url = heapq.heappop(queue)
+            if page_url in popped:
+                continue  # a stale entry for a page re-queued at a better rank
+            popped.add(page_url)
             is_seed = page_url == seed_url
             if not allowed_by_robots(robots, page_url, user_agent):
                 result.stats.skipped_by_robots += 1
@@ -514,15 +645,15 @@ async def crawl_site(
                 if not _same_site(candidate):
                     _note_cross_origin(absolute)
                     continue
-                normalized = _normalize(absolute)
-                if normalized in seen_pages or depth >= MAX_CRAWL_DEPTH:
+                if depth >= MAX_CRAWL_DEPTH:
                     continue
-                if len(seen_pages) >= discovery_cap:
-                    pages_truncated = True
-                    continue
-                seen_pages.add(normalized)
-                rank = 0 if priority is None else priority(normalized)
-                heapq.heappush(queue, (rank, depth + 1, next(order), normalized))
+                if not rank_pages:
+                    rank = 0
+                elif href in scan.menu_links:
+                    rank = _RANK_MENU
+                else:
+                    rank = _RANK_LINK
+                _enqueue(_normalize(absolute), rank, depth + 1)
 
             for ref in scan.asset_refs:
                 absolute = urljoin(fetched.url, ref)
@@ -539,6 +670,8 @@ async def crawl_site(
                 result.files[rel] = _rewrite_same_origin(html_text, scope["origins"]).encode(
                     "utf-8"
                 )
+            if is_seed and rank_pages:
+                await _read_sitemaps()
 
         # ------------------------------------------------------------------- #
         # Assets (CSS refs chase same-origin, so the queue can grow here).
@@ -628,7 +761,7 @@ async def crawl_site(
             result.warnings.append(
                 f"asset cap reached ({MAX_CRAWL_ASSETS}) — {len(asset_queue)} assets not fetched"
             )
-        if queue or pages_truncated:
+        if pages_truncated or any(entry[-1] not in popped for entry in queue):
             result.warnings.append(
                 f"page cap reached ({page_budget}) — some linked pages were not crawled"
             )
