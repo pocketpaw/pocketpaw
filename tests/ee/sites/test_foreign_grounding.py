@@ -709,3 +709,40 @@ async def test_creating_a_foreign_concierge_hands_the_foreign_row_to_the_sync(mo
     assert bound == "agent-1"
     assert seen == [site]
     assert seen[0].foreign_origin is True
+
+
+# --------------------------------------------------------------------------- #
+# Key pages survive the page budget
+# --------------------------------------------------------------------------- #
+
+
+def _events_site() -> dict[str, httpx.Response]:
+    """An events site: the homepage links 30 event pages BEFORE its key pages.
+    A plain BFS spends the 25-page budget on events and never sees /apply, so
+    the concierge cannot point a visitor at the page they asked for."""
+    events = "".join(f'<a href="/events/{n}/">Event {n}</a>' for n in range(1, 31))
+    key = "".join(
+        f'<a href="/{slug}/">{slug}</a>' for slug in ("apply", "membership", "contact", "faq")
+    )
+    routes = {"/": _html(f"<html><body><h1>Events Co</h1>{_COPY}{events}{key}</body></html>")}
+    for n in range(1, 31):
+        routes[f"/events/{n}/"] = _html(f"<html><body><h1>Event {n}</h1>{_COPY}</body></html>")
+    for slug in ("apply", "membership", "contact", "faq"):
+        routes[f"/{slug}/"] = _html(f"<html><body><h1>{slug}</h1>{_COPY}</body></html>")
+    return routes
+
+
+async def test_key_pages_are_crawled_before_the_budget_runs_out(beanie_test_db):
+    await _claim()
+
+    harvest = await _harvest(routes=_events_site())
+
+    assert harvest.error == ""
+    for page in (
+        "apply/index.html",
+        "membership/index.html",
+        "contact/index.html",
+        "faq/index.html",
+    ):
+        assert page in harvest.source, f"{page} missing from {sorted(harvest.source)}"
+    assert len(harvest.source) == foreign_grounding.GROUNDING_MAX_PAGES
