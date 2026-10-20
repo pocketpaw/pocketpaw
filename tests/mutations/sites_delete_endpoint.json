@@ -137,8 +137,8 @@
   {
     "label": "the rate-counter purge is unanchored, so deleting site-a also purges site-abc's counters",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        {\"scope_id\": {\"$regex\": f\"^{re.escape(site_id)}(:|$)\"}}",
-    "replace": "        {\"scope_id\": {\"$regex\": re.escape(site_id)}}",
+    "find": "{\"scope_id\": {\"$regex\": f\"^{prefix}(:|$)\"}}",
+    "replace": "{\"scope_id\": {\"$regex\": prefix}}",
     "tests": [
       "tests/ee/sites/test_delete_job.py"
     ]
