@@ -376,6 +376,35 @@ def test_a_depends_on_note_names_no_dependency(body, refs):
     assert patrols.depends_on_refs(body, SLUG) == refs
 
 
+# Live 2026-10-20 (qbtrix/creative-apps): blueprint issues end with lines like
+# "Depends on: foundation (#777), render-out (#1505), core-loop (planned)" and
+# "Depends on: #3401 (gradient model), #3402 (fill UI)". Cutting the line at its
+# first " (" read the first as no dependency at all and the second as #3401 only.
+# Each comma item counts: its refs outside parentheses, else the ones inside.
+APPS = "qbtrix/creative-apps"
+
+
+@pytest.mark.parametrize(
+    ("body", "refs"),
+    [
+        ("Depends on: #3401 (gradient model), #3402 (fill UI)", [f"{APPS}#3401", f"{APPS}#3402"]),
+        (
+            "Depends on: foundation (#777), render-out (#1505), core-loop (planned)",
+            [f"{APPS}#777", f"{APPS}#1505"],
+        ),
+        (
+            "**Depends on:** qbtrix/creative-core#225 (LC-12), #323 (LM-0c2)",
+            ["qbtrix/creative-core#225", f"{APPS}#323"],
+        ),
+        ("Depends on: core#232, #26", ["qbtrix/creative-core#232", f"{APPS}#26"]),
+        ("Depends on: import (built), thumbnails (planned)", []),
+    ],
+    ids=["ref-then-note", "name-then-ref", "cross-repo-notes", "core-alias", "names-only"],
+)
+def test_every_ref_on_a_depends_on_line_counts(body, refs):
+    assert patrols.depends_on_refs(body, APPS) == refs
+
+
 async def test_depends_on_none_with_a_note_is_not_blocked(tmp_path):
     issue = _issue(873, "feature-lead")
     issue["body"] = "Feature\n\nDepends on: none (#763 is lane-wide, not a dependency)"

@@ -712,9 +712,10 @@ async def test_lead_without_a_playbook_never_launches(store, dirs):
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
-    assert "docs/factory/lead.md" in cc["headless_error"]
-    assert cc["station_pending"] is True
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert "docs/factory/lead.md" in action.rejected_reason
+    assert "headless_error" not in action.parameters["_code_change"]
     assert not _launch_briefs(runner)
 
 
@@ -733,9 +734,50 @@ async def test_lead_without_an_issue_or_a_packet_never_launches(store, dirs, pla
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
-    assert cc["headless_error"].startswith("LAUNCH:")
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith("LAUNCH:")
+    assert "headless_error" not in action.parameters["_code_change"]
     assert not _launch_briefs(runner)
+
+
+# Live 2026-10-20 (creative-apps): a LAUNCH error left the lead queued with a
+# headless_error. A pending lead owns its issues, so the issue sat blocked and
+# nobody was told. Now each issue gets a note naming the error and needs-human,
+# and the run is rejected the way a human reject is, never a develop failure.
+
+
+async def test_a_lead_launch_error_rejects_the_run_and_flags_its_issue(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task="Text shapes\n\nFeature issue #93.")
+    runner = _done_runner(run_ref)  # the issue body links no packet
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.status.value not in lead_planner.FAILED
+    error = "LAUNCH: feature issue #93 links no packet"
+    assert action.rejected_reason.startswith(error)
+    notes = [a for a in _writes(runner) if a[2] == "comment"]
+    assert [a[3] for a in notes] == ["93"] and error in notes[0][-1]
+    labels = [a for a in _writes(runner) if a[2] == "edit"]
+    assert [a[3] for a in labels] == ["93"] and "needs-human" in labels[0]
+    assert not _launch_briefs(runner)
+
+
+async def test_a_task_run_launch_error_still_stays_queued(store, dirs):
+    """Only a lead is released on a LAUNCH error; a task run keeps the
+    queued-with-headless_error contract a human or the dispatcher retries."""
+    repo, launch = dirs
+    run_ref = await _queue(store, repo, base="dev")
+    runner = LeadRunner()
+
+    await _lead_dispatcher(runner, launch / "missing").run(run_ref, workspace_id=WS)
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.PENDING
+    assert action.parameters["_code_change"]["headless_error"].startswith("LAUNCH:")
 
 
 # -- track + done -----------------------------------------------------------
@@ -2499,8 +2541,9 @@ async def test_a_wave_json_over_the_cap_or_outside_the_clone_never_launches(
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
-    assert cc["headless_error"].startswith(f"LAUNCH: {WAVE}")
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith(f"LAUNCH: {WAVE}")
     assert not _launch_briefs(runner)
 
 
@@ -2512,8 +2555,9 @@ async def test_a_wave_json_with_an_unsafe_slice_id_never_launches(store, dirs, p
 
     await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
 
-    cc = (await store.get_action(run_ref)).parameters["_code_change"]
-    assert cc["headless_error"].startswith("LAUNCH:") and "slice" in cc["headless_error"]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert action.rejected_reason.startswith("LAUNCH:") and "slice" in action.rejected_reason
     assert not _launch_briefs(runner)
 
 
@@ -2642,6 +2686,44 @@ async def test_a_line_lead_drops_a_feature_whose_slices_are_all_done(store, dirs
     assert action.status == ActionStatus.EXECUTED, action.rejected_reason
     lead = action.parameters["_code_change"]["lead"]
     assert lead["issues"] == [94] and lead["feature"] == FEATURE_B and "features" not in lead
+
+
+async def test_a_line_lead_skips_an_issue_with_no_packet(store, dirs, playbook):
+    """Live 2026-10-20: one packetless issue failed its whole line's launch.
+    Now #93 (no packet) is skipped on its own: it gets a note naming the
+    missing packet and needs-human, and the run launches on #94 alone."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref, done=("94",))
+    runner.issues["93"]["body"] = "No packet linked yet."
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    (brief,) = _launch_briefs(runner)
+    assert "#94" in brief and FEATURE not in brief
+    notes = [a for a in _writes(runner) if a[2] == "comment"]
+    assert [a[3] for a in notes] == ["93"] and "#93 links no packet" in notes[0][-1]
+    assert [a[3] for a in _writes(runner) if a[2] == "edit"] == ["93"]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.EXECUTED, action.rejected_reason
+    assert action.parameters["_code_change"]["lead"]["issues"] == [94]
+
+
+async def test_a_line_lead_with_no_packet_on_any_issue_is_released(store, dirs, playbook):
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo, task=LINE_TASK)
+    runner = _line_runner(run_ref)
+    for row in runner.issues.values():
+        row["body"] = "No packet linked yet."
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    assert not _launch_briefs(runner)
+    assert sorted(a[3] for a in _writes(runner) if a[2] == "edit") == ["93", "94"]
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert "#93 links no packet" in action.rejected_reason
+    assert "#94 links no packet" in action.rejected_reason
 
 
 async def test_a_line_lead_lands_only_when_every_feature_is_done(store, dirs, playbook):
