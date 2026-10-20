@@ -843,6 +843,44 @@ async def test_a_failed_line_lead_counts_against_each_of_its_issues(
         assert len((await SightingDoc.get(ids[n])).evidence["lead_failed"]) == 1
 
 
+@pytest.mark.usefixtures("graph", "journal", "cloud_station_wired")
+async def test_a_landed_line_lead_leaves_the_issue_it_skipped_open(
+    tmp_path,
+    mongo_db,
+    monkeypatch,
+    store,  # noqa: F811
+):
+    """The station skipped #11 (no packet) and the lead landed on #16 and #10:
+    only their sightings resolve, so #11 is planned again, not closed by a run
+    that never worked it. Mutation: resolving every cited sighting closes #11's."""
+    monkeypatch.delenv("POCKETPAW_BELT_LINE_LEAD_MAX", raising=False)
+    mid, ids = await _lead_mandate(
+        tmp_path,
+        monkeypatch,
+        _line_gh(),
+        run_kind="feature-lead",
+        budget={"max_tasks_per_shift": 1, "max_in_flight": 10},
+    )
+    first = await mandate_service.trigger_shift(WS, USER, mid)
+    assert await _plan_refs(store, first) == [[ids[16], ids[11], ids[10]]]
+    skip = {"issue": 11, "error": "LAUNCH: feature issue #11 links no packet"}
+    run = await _run_for(
+        store,
+        mid,
+        first["shift"]["plan_action_id"],
+        1,
+        lead={"issues": [16, 10], "issue": 16, "skipped": [skip]},
+    )
+    await store.approve(run.id)
+    await store.mark_executed(run.id, "landed")
+
+    second = await mandate_service.trigger_shift(WS, USER, mid)
+
+    assert await _plan_refs(store, second) == [[ids[11]]]
+    assert (await SightingDoc.get(ids[16])).resolved_by_run == run.id
+    assert (await SightingDoc.get(ids[11])).resolved_by_run is None
+
+
 @pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
 async def test_an_issue_labelled_needs_human_after_its_sighting_is_skipped(
     tmp_path, mongo_db, monkeypatch
