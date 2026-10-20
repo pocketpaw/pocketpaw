@@ -119,8 +119,8 @@
   {
     "label": "a cross-repo ref reads as the issue's own repo",
     "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
-    "find": "(m[1] or m[2] or slug)",
-    "replace": "(m[1] or slug)",
+    "find": "else m[1] or m[2] or slug",
+    "replace": "else m[1] or slug",
     "tests": [
       "tests/cloud/test_belt_stale_sightings.py::test_each_depends_on_form_blocks_while_its_issue_is_open"
     ]
@@ -193,8 +193,8 @@
   {
     "label": "the note starts at any parenthesis, cutting a link's URL",
     "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
-    "find": "_NOTE = re.compile(r\"\\s\\(|\\s-\\s\")",
-    "replace": "_NOTE = re.compile(r\"\\(|\\s-\\s\")",
+    "find": "_PAREN = re.compile(r\"\\s\\(([^)]*)\\)?\")",
+    "replace": "_PAREN = re.compile(r\"\\(([^)]*)\\)?\")",
     "tests": [
       "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
     ]
@@ -202,10 +202,46 @@
   {
     "label": "a dash note still counts its refs",
     "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
-    "find": "_NOTE = re.compile(r\"\\s\\(|\\s-\\s\")",
-    "replace": "_NOTE = re.compile(r\"\\s\\(\")",
+    "find": "_NOTE = re.compile(r\"\\s-\\s\")",
+    "replace": "_NOTE = re.compile(r\"\\s-\\s-\")",
     "tests": [
       "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
+  },
+  {
+    "label": "a parenthetical note's ref counts beside a ref outside it",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "found = list(_DEPENDS_REF.finditer(_PAREN.sub(\" \", item)))",
+    "replace": "found = list(_DEPENDS_REF.finditer(item))",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
+  },
+  {
+    "label": "a ref only inside parentheses is dropped",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "for m in found or _DEPENDS_REF.finditer(\" \".join(_PAREN.findall(item))):",
+    "replace": "for m in found:",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_every_ref_on_a_depends_on_line_counts"
+    ]
+  },
+  {
+    "label": "the line stops at its first item",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "for item in _ITEM.split(\"\\n\".join(section)):",
+    "replace": "for item in _ITEM.split(\"\\n\".join(section))[:1]:",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_every_ref_on_a_depends_on_line_counts"
+    ]
+  },
+  {
+    "label": "core#N reads as the issue's own repo",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "_core_repo(slug) if m[2] == \"core\" else ",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_every_ref_on_a_depends_on_line_counts"
     ]
   }
 ]

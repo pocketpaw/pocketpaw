@@ -38,6 +38,8 @@
 #           refused (note, ``needs-human``, released). Slices done before the run (a
 #           ``Belt-Slice-Done`` line, or another run's merged ``Slice:`` PR) are skipped
 #           (``done_before``); none left: a note and ``needs-human``, released unlaunched.
+#           A line lead skips an issue it cannot launch on (no packet: ``lead.skipped``);
+#           any other LAUNCH error notes and flags each issue, then releases the run.
 #           ``Belt-Lead`` PRs go on ``lead.prs`` (never reviewed or fixed), done comments on
 #           ``lead.records``. DONE v3: every slice has a ``Belt-Slice-Done: <slice> <run
 #           url>`` since the launch on a green ci.yml base run holding its last PR, then
@@ -596,6 +598,15 @@ class CloudTaskDispatcher:
             except SlicesDoneError as exc:
                 await self._hold_done(store, run_ref, blob, exc)
                 return
+            except (CloudStationError, DevelopStationError) as exc:
+                if not _is_lead(blob):
+                    raise  # a task run stays queued with its error (``_guard``)
+                await self._launch_failed(store, run_ref, blob, exc)
+                return
+            for skip in (blob.get("lead") or {}).get("skipped") or []:
+                await self._flag_unlaunched(
+                    store, run_ref, blob, slug, [skip["issue"]], skip["error"]
+                )
             cloud = {"session_url": session, "launched_at": self.wall()}
             issue = _ISSUE.search(str(blob.get("task") or ""))
             url = f"https://github.com/{slug}/issues/{issue.group(1)}" if issue else None
@@ -756,7 +767,7 @@ class CloudTaskDispatcher:
     # -- feature lead -----------------------------------------------------------
 
     async def _lead_features(
-        self, request: DevelopRequest, slug: str, launch: Path
+        self, request: DevelopRequest, slug: str, launch: Path, skipped: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """The lead's features from its task: each issue it names
         (``_lead_numbers``) and its packet ``docs/blueprints/<app>/features/<feature>.md``,
@@ -765,43 +776,53 @@ class CloudTaskDispatcher:
         beside it as the launch clone (at ``origin/<base>``) has it
         (``_wave_slices``). A line lead's features also keep the issue's title.
         A missing issue or packet, a feature name unsafe in a branch, or two
-        issues on one packet fails the launch."""
+        issues on one packet fails the launch; in a line lead it only skips that
+        issue (appended to ``skipped`` as ``{issue, error}``) until none is left."""
         numbers = _lead_numbers(request.task)
         if not numbers:
             raise CloudStationError("LAUNCH: a feature lead's task names no feature issue")
         line = len(numbers) > 1
         feats: list[dict[str, Any]] = []
         for number in numbers:
-            packet = None if line else _PACKET.search(request.task)
-            data: dict[str, Any] = {}
-            if not packet:
-                fields = "title,body" if line else "body"
-                argv = ["gh", "issue", "view", str(number), "-R", slug, "--json", fields]
-                try:
-                    data = json.loads(await self._gh(argv, launch, "LAUNCH: gh issue view") or "{}")
-                except Exception:  # noqa: BLE001 — an unreadable issue is a missing packet
-                    data = {}
-                packet = _PACKET.search(str(data.get("body") or ""))
-            if not packet:
-                raise CloudStationError(
-                    f"LAUNCH: feature issue #{number} links no packet "
-                    "docs/blueprints/<app>/features/<feature>.md"
+            try:
+                packet = None if line else _PACKET.search(request.task)
+                data: dict[str, Any] = {}
+                if not packet:
+                    fields = "title,body" if line else "body"
+                    argv = ["gh", "issue", "view", str(number), "-R", slug, "--json", fields]
+                    try:
+                        data = json.loads(
+                            await self._gh(argv, launch, "LAUNCH: gh issue view") or "{}"
+                        )
+                    except Exception:  # noqa: BLE001 — an unreadable issue is a missing packet
+                        data = {}
+                    packet = _PACKET.search(str(data.get("body") or ""))
+                if not packet:
+                    raise CloudStationError(
+                        f"LAUNCH: feature issue #{number} links no packet "
+                        "docs/blueprints/<app>/features/<feature>.md"
+                    )
+                feature = packet.group(2)
+                if not _SAFE_FEATURE.match(feature):
+                    raise CloudStationError(f"LAUNCH: unsafe feature name {feature!r}")
+                if any(f["feature"] == feature for f in feats):
+                    raise CloudStationError(f"LAUNCH: #{number} links a packet another issue has")
+                feats.append(
+                    {
+                        "feature": feature,
+                        "packet": packet.group(0),
+                        "issue": number,
+                        "branch": f"lead/{feature}",
+                        "slice_ids": _wave_slices(launch, packet.group(0)),
+                        **({"title": str(data.get("title") or "")[:200]} if line else {}),
+                    }
                 )
-            feature = packet.group(2)
-            if not _SAFE_FEATURE.match(feature):
-                raise CloudStationError(f"LAUNCH: unsafe feature name {feature!r}")
-            if any(f["feature"] == feature for f in feats):
-                raise CloudStationError(f"LAUNCH: #{number} links a packet another issue has")
-            feats.append(
-                {
-                    "feature": feature,
-                    "packet": packet.group(0),
-                    "issue": number,
-                    "branch": f"lead/{feature}",
-                    "slice_ids": _wave_slices(launch, packet.group(0)),
-                    **({"title": str(data.get("title") or "")[:200]} if line else {}),
-                }
-            )
+            except CloudStationError as exc:
+                if not line:
+                    raise
+                skipped.append({"issue": number, "error": str(exc)})
+        if not feats:
+            raise CloudStationError("; ".join(s["error"] for s in skipped))
         return feats
 
     async def _track_lead(
@@ -1306,6 +1327,45 @@ class CloudTaskDispatcher:
         await self._flag_issue(store, run_ref, blob, exc.slug, issue, cwd)
         await self._release(store, run_ref, blob, str(exc))
 
+    async def _launch_failed(
+        self, store: Any, run_ref: str, blob: dict[str, Any], exc: Exception
+    ) -> None:
+        """A lead that could not launch: a note naming the (redacted) error and
+        ``needs-human`` on each issue its task names, then the run released,
+        so it never sits queued owning its issues and never counts as a failure."""
+        from pocketpaw.security.redact import redact_output
+
+        why = redact_output(str(exc))[:600]
+        try:
+            slug = await self._slug(ClaudeCodeDevelop._resolve_repo(str(blob.get("repo") or "")))
+        except Exception:  # noqa: BLE001 — no repo to note on; the release still frees the issues
+            logger.info("belt cloud: launch failure of %s not noted", run_ref, exc_info=True)
+            slug = ""
+        if slug:
+            await self._flag_unlaunched(store, run_ref, blob, slug, lead_issue_numbers(blob), why)
+        await self._release(store, run_ref, blob, why)
+
+    async def _flag_unlaunched(
+        self, store: Any, run_ref: str, blob: dict[str, Any], slug: str, issues: list[int], why: str
+    ) -> None:
+        """A note naming ``why`` (redacted) and ``needs-human`` on each issue a
+        lead did not launch on."""
+        from pocketpaw.security.redact import redact_output
+
+        cwd = Path(self.launch_dir).expanduser()
+        why = redact_output(why)[:600].rstrip(". ")
+        text = (
+            f"Belt: no feature lead launched on this issue. {why}. Fix it, then remove needs-human."
+        )
+        for number in issues:
+            try:
+                await self._note(
+                    store, run_ref, blob, slug, str(number), f"#{number} launch", text, cwd
+                )
+            except Exception:  # noqa: BLE001 — the label still tells a human
+                logger.info("belt cloud: launch note on #%s failed", number, exc_info=True)
+            await self._flag_issue(store, run_ref, blob, slug, str(number), cwd)
+
     async def _hold_done(
         self, store: Any, run_ref: str, blob: dict[str, Any], exc: SlicesDoneError
     ) -> None:
@@ -1602,12 +1662,16 @@ class CloudTaskDispatcher:
         checks = list(charter.get("checks") or [])
         if _is_lead(blob) and not (fix or test or review):
             lead = blob.setdefault("lead", {})
-            feats = await self._open_slices(
-                run_ref, blob, slug, await self._lead_features(request, slug, launch), launch
-            )
+            skipped: list[dict[str, Any]] = []
+            feats = await self._lead_features(request, slug, launch, skipped)
+            feats = await self._open_slices(run_ref, blob, slug, feats, launch)
             # The first feature stays flat on ``lead`` (``lead.issue`` & co.), so
             # one-feature readers and older blobs keep working.
             lead.update(feats[0], issues=[f["issue"] for f in feats])
+            if skipped:
+                lead["skipped"] = skipped
+            else:
+                lead.pop("skipped", None)
             if len(feats) > 1:
                 lead["features"] = feats
             else:  # a relaunch may have dropped a feature since

@@ -1135,5 +1135,51 @@
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
     ]
+  },
+  {
+    "label": "one packetless issue fails its whole line lead",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                if not line:\n                    raise\n                skipped.append(",
+    "replace": "                raise\n                skipped.append(",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_line_lead_skips_an_issue_with_no_packet"
+    ]
+  },
+  {
+    "label": "a skipped line issue is never surfaced",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            for skip in (blob.get(\"lead\") or {}).get(\"skipped\") or []:",
+    "replace": "            for skip in []:",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_line_lead_skips_an_issue_with_no_packet"
+    ]
+  },
+  {
+    "label": "a lead LAUNCH error leaves the run queued owning its issues",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                if not _is_lead(blob):\n                    raise  # a task run",
+    "replace": "                if True:\n                    raise  # a task run",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_launch_error_rejects_the_run_and_flags_its_issue",
+      "tests/cloud/test_belt_lead_runs.py::test_a_line_lead_with_no_packet_on_any_issue_is_released"
+    ]
+  },
+  {
+    "label": "a task run LAUNCH error is released like a lead's",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                if not _is_lead(blob):\n                    raise  # a task run",
+    "replace": "                if False:\n                    raise  # a task run",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_task_run_launch_error_still_stays_queued"
+    ]
+  },
+  {
+    "label": "a launch failure is released without a note or label",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        if slug:\n            await self._flag_unlaunched(",
+    "replace": "        if False:\n            await self._flag_unlaunched(",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_lead_launch_error_rejects_the_run_and_flags_its_issue"
+    ]
   }
 ]

@@ -26,7 +26,8 @@
 #                    ``open_issues`` (also Clef's duplicate check), and
 #                    ``open_dependencies``: an issue whose live body names a
 #                    ``Depends on`` issue still open is blocked (fail safe);
-#                    a ref in the line's trailing note, or after ``none``, is not.
+#                    every comma item of the line counts, a ref in a note or
+#                    after ``none`` does not.
 #                    ``flag_needs_spec`` comments on a ``github:`` source issue
 #                    and labels it ``needs-spec`` (once) for the auto plan gate;
 #                    ``flag_needs_human`` does the same with ``needs-human``.
@@ -591,18 +592,33 @@ async def closed_issues(repo_id: str, gh: GhFn | None = None) -> set[str]:
 # An issue's ``Depends on`` section: the line (``**Depends on:** #4``, ``Depends
 # on #412``, a ``## Depends on`` heading) and the lines under it, up to a blank
 # line or a heading; a heading with no reference may sit a blank line above its
-# list. A reference is ``#N`` (the issue's own repo), ``owner/repo#N`` or an
-# issue / PR URL; the first ``_DEPENDS_REFS_CAP`` count. Only refs before a
-# line's note count (`` (`` or `` - `` after its list bullet), and a line that
-# says ``none`` names no dependency, its note and the lines under it included.
+# list. A reference is ``#N`` (the issue's own repo), ``owner/repo#N``,
+# ``core#N`` (``_core_repo``) or an issue / PR URL; the first
+# ``_DEPENDS_REFS_CAP`` count. A line's `` - `` note (after its list bullet) is
+# dropped, then each comma item counts its refs outside a parenthetical note
+# (``#12 (see #763)``: #12), else the ones inside it (``foundation (#777)``:
+# #777). A line that says ``none`` names no dependency, its note and the lines
+# under it included.
 _DEPENDS_HEAD = re.compile(r"^[\s>*_#-]*depends\s+on\b[\s*_:]*(.*)$", re.IGNORECASE)
 _DEPENDS_REF = re.compile(
-    r"(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/|([\w.-]+/[\w.-]+)?#)(\d+)"
+    r"(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/|([\w.-]+/[\w.-]+|\bcore)?#)(\d+)"
 )
 _SECTION_END = re.compile(r"^(?:#{1,6}\s|\*\*[^*]+\*\*:?$)")
 _DEPENDS_REFS_CAP = 10
 _BULLET = re.compile(r"^[\s>*_+-]+")
-_NOTE = re.compile(r"\s\(|\s-\s")
+_NOTE = re.compile(r"\s-\s")
+# A parenthetical note (after a space, so a markdown link's URL is no note) and
+# an item separator outside parentheses.
+_PAREN = re.compile(r"\s\(([^)]*)\)?")
+_ITEM = re.compile(r"[,;\n](?![^(]*\))")
+
+
+def _core_repo(slug: str) -> str:
+    """``core#N``'s repo: the bound repo's ``-core`` sibling
+    (``qbtrix/creative-apps`` -> ``qbtrix/creative-core``).
+    ponytail: one alias, the factory's apps/core pair; a map when a second appears."""
+    owner, _, name = slug.partition("/")
+    return f"{owner}/{name.rsplit('-', 1)[0]}-core"
 
 
 def depends_on_refs(body: str, slug: str) -> list[str]:
@@ -625,8 +641,11 @@ def depends_on_refs(body: str, slug: str) -> list[str]:
                 break
             section.append(nxt)
         section = [_NOTE.split(_BULLET.sub("", s), 1)[0] for s in section]
-        for m in _DEPENDS_REF.finditer("\n".join(section)):
-            refs.append(f"{(m[1] or m[2] or slug).lower()}#{m[3]}")
+        for item in _ITEM.split("\n".join(section)):
+            found = list(_DEPENDS_REF.finditer(_PAREN.sub(" ", item)))
+            for m in found or _DEPENDS_REF.finditer(" ".join(_PAREN.findall(item))):
+                repo = _core_repo(slug) if m[2] == "core" else m[1] or m[2] or slug
+                refs.append(f"{repo.lower()}#{m[3]}")
     return list(dict.fromkeys(refs))[:_DEPENDS_REFS_CAP]
 
 
