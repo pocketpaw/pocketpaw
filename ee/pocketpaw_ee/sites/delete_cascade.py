@@ -42,6 +42,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pocketpaw_ee.cloud.leads.domain import lead_site_id
+
 logger = logging.getLogger(__name__)
 
 # Ledger keys, in execution order. Named rather than positional so a step inserted
@@ -451,7 +453,9 @@ async def _purge_records(*, site: Any, deps: Any) -> str:
     NOT the Site document — that is deleted by the caller after this returns, so the
     ledger survives every step it records.
     """
-    await deps.purge_records(workspace_id=site.workspace, site_id=str(site.id))
+    # The id the lead writer filed under, NOT the object id: a built site's leads
+    # carry its script_name, and keying on ``str(site.id)`` left every one of them.
+    await deps.purge_records(workspace_id=site.workspace, site_id=lead_site_id(site))
     await _purge_secrets(site)
     await _purge_integrations(site)
     return OUTCOME_DONE

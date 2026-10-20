@@ -571,9 +571,9 @@ async def test_site_delete_cascade_removes_the_secrets(beanie_test_db):
         async def purge_records(self, *, workspace_id, site_id):
             purged.append(site_id)
 
-    site = SimpleNamespace(id="site_1", workspace=WS, pocket_id=pid)
+    site = SimpleNamespace(id="site_1", script_name="paw-site-1", workspace=WS, pocket_id=pid)
     assert await delete_cascade._purge_records(site=site, deps=_Deps()) == "done"
-    assert purged == ["site_1"]
+    assert purged == ["paw-site-1"]
     assert await SiteSecret.find(SiteSecret.pocket_id == pid).count() == 0
     assert await SiteSecret.find(SiteSecret.pocket_id == keep).count() == 1
 

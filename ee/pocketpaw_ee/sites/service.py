@@ -66,6 +66,7 @@ from pocketpaw_ee.cloud._core.errors import (
     ValidationError,
     with_cause,
 )
+from pocketpaw_ee.cloud.leads.domain import lead_site_id
 from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
@@ -13202,7 +13203,9 @@ async def create_site_export(
         raise _export_error(exc) from exc
 
     try:
-        leads = await collect_leads(workspace_id=workspace_id, site_id=site_id, lead_model=_LeadDoc)
+        leads = await collect_leads(
+            workspace_id=workspace_id, site_id=lead_site_id(doc), lead_model=_LeadDoc
+        )
         payload = render_bundle(
             site={
                 "id": site_id,
@@ -13931,18 +13934,21 @@ async def purge_site_records(*, workspace_id: str, site_id: str) -> int:
         import, not to the site an import eventually became — so there is no query
         that could select this site's.
     """
+    # "" names no one site (a draft, or a lead filed before connected sites had an
+    # id), so a purge on it would take every such row in the workspace.
+    if not site_id:
+        return 0
     removed = 0
     leads = await _LeadDoc.find({"workspace": workspace_id, "site_id": site_id}).delete()
     removed += getattr(leads, "deleted_count", 0) or 0
     # The per-minute capture counters. They carry a 120s TTL and would expire on their
     # own, but a site being destroyed should not leave rows behind that name it.
-    # ``scope_id`` is the site id for the overall scope and ``"{site_id}:{rate_key}"``
-    # for the per-IP one, so one anchored prefix selects both and nothing else — an
-    # unanchored match would also select a different site whose id merely contains
-    # this one.
-    counters = await _SiteRateCounterDoc.find(
-        {"scope_id": {"$regex": f"^{re.escape(site_id)}(:|$)"}}
-    ).delete()
+    # ``scope_id`` is ``"{workspace}:{site_id}"`` for the overall scope and
+    # ``"{workspace}:{site_id}:{rate_key}"`` for the per-IP one (``leads.service``), so
+    # one anchored prefix selects both and nothing else — an unanchored match would
+    # also select a different site whose id merely contains this one.
+    prefix = f"{re.escape(workspace_id)}:{re.escape(site_id)}"
+    counters = await _SiteRateCounterDoc.find({"scope_id": {"$regex": f"^{prefix}(:|$)"}}).delete()
     removed += getattr(counters, "deleted_count", 0) or 0
     return removed
 

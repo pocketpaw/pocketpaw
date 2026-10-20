@@ -52,6 +52,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pocketpaw_ee.cloud.leads.domain import lead_site_id
+
 logger = logging.getLogger(__name__)
 
 # Ledger keys, in execution order. Named rather than positional for the reason
@@ -420,7 +422,7 @@ async def _move_records(*, site: Any, destination: str, deps: Any) -> str:
     them.
     """
     moved = await deps.move_records(
-        site_id=str(getattr(site, "id", "")),
+        site_id=lead_site_id(site),
         source_workspace_id=getattr(site, "identity_workspace", "") or "",
         destination_workspace_id=destination,
     )

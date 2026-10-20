@@ -168,8 +168,11 @@ async def collect_leads(
     """Every captured form submission for this site, oldest first.
 
     Scoped on ``(workspace, site_id)`` — the compound index the Lead model already
-    declares — so this cannot pick up another site's submissions.
+    declares — so this cannot pick up another site's submissions. "" names no one
+    site, so it collects nothing.
     """
+    if not site_id:
+        return []
     docs = (
         await lead_model.find({"workspace": workspace_id, "site_id": site_id})
         .sort("+createdAt")
