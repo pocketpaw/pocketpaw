@@ -33,7 +33,9 @@
 # ``fetch_assets=False`` to say so: a stylesheet cannot be quoted to a visitor, so
 # fetching one is a request against a customer's origin that can only be thrown
 # away. Both knobs NARROW ONLY — ``max_pages`` is clamped to MAX_CRAWL_PAGES, so a
-# caller can spend less of the budget but never more.
+# caller can spend less of the budget but never more. Grounding also passes
+# ``priority`` so /apply or /contact linked after 30 event pages still makes the
+# budget; without it the walk is plain FIFO BFS, which is what the import uses.
 #
 # Harvested paths run through import_service._safe_entry_path, the SAME sanitizer
 # zip entries pass. Absolute same-origin URLs in HTML/CSS are rewritten
@@ -47,6 +49,8 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
+import itertools
 import logging
 import re
 from collections import deque
@@ -305,6 +309,7 @@ async def crawl_site(
     max_pages: int | None = None,
     fetch_assets: bool = True,
     user_agent: str = USER_AGENT,
+    priority: Callable[[str], int] | None = None,
 ) -> CrawlResult:
     """BFS-crawl ``url``'s site (same exact host only) into a FileMap.
 
@@ -323,7 +328,12 @@ async def crawl_site(
 
     ``user_agent`` is the identity announced to the customer's server AND the
     identity robots.txt is evaluated for — the two must be the same string or an
-    operator's rule about the name in our header is not the rule we obeyed."""
+    operator's rule about the name in our header is not the rule we obeyed.
+
+    ``priority`` reorders the frontier: pages are fetched by (priority(url),
+    depth, discovery order), lowest first, and discovery is bounded by
+    MAX_TRACKED_URLS instead of the page budget so a key page linked late can
+    still be queued. None (the default) is plain FIFO BFS, as before."""
     # Lazy import — import_service imports this module; the safe-path rule is
     # shared with the zip path deliberately (ONE sanitizer for both imports).
     from pocketpaw_ee.sites.import_service import _safe_entry_path
@@ -407,8 +417,16 @@ async def crawl_site(
             result.warnings.append(robots_warning)
 
         seed_url = _normalize(url)
-        queue: deque[tuple[str, int]] = deque([(seed_url, 0)])
+        # A heap keyed (rank, depth, discovery seq). With no ``priority`` every
+        # rank is 0, and BFS discovers in nondecreasing depth, so this pops in
+        # exactly the FIFO order a deque would.
+        order = itertools.count()
+        queue: list[tuple[int, int, int, str]] = [(0, 0, next(order), seed_url)]
         seen_pages = {seed_url}
+        # Without a priority the frontier never holds more than the budget, so
+        # discovery stops there; with one, a late-linked key page must still get
+        # in, so only the memory bound applies.
+        discovery_cap = page_budget if priority is None else MAX_TRACKED_URLS
         asset_queue: deque[str] = deque()
         seen_assets: set[str] = set()
         cross_origin: set[str] = set()
@@ -425,7 +443,7 @@ async def crawl_site(
                 asset_queue.append(normalized)
 
         while queue and result.stats.pages_fetched < page_budget:
-            page_url, depth = queue.popleft()
+            _, depth, _, page_url = heapq.heappop(queue)
             is_seed = page_url == seed_url
             if not allowed_by_robots(robots, page_url, user_agent):
                 result.stats.skipped_by_robots += 1
@@ -499,11 +517,12 @@ async def crawl_site(
                 normalized = _normalize(absolute)
                 if normalized in seen_pages or depth >= MAX_CRAWL_DEPTH:
                     continue
-                if len(seen_pages) >= page_budget:
+                if len(seen_pages) >= discovery_cap:
                     pages_truncated = True
                     continue
                 seen_pages.add(normalized)
-                queue.append((normalized, depth + 1))
+                rank = 0 if priority is None else priority(normalized)
+                heapq.heappush(queue, (rank, depth + 1, next(order), normalized))
 
             for ref in scan.asset_refs:
                 absolute = urljoin(fetched.url, ref)

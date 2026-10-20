@@ -14,7 +14,9 @@
 # NO EXTRACTOR LIVES HERE. The crawler already emits exactly the shape the html
 # lane consumes (a path → HTML map), so this module hands that map to
 # ``kb_ingest.extract_site_documents(engine="html", ...)`` and stops. A reader who
-# finds themselves parsing markup in this file has duplicated the lane.
+# finds themselves parsing markup in this file has duplicated the lane. What it
+# does own is policy: which origin, how many pages, and which pages come first
+# (``_key_page_rank``, so /apply beats the thirtieth event page to the budget).
 #
 # WHEN IT RUNS, AND THE PROPERTY THAT DEPENDS ON IT. At bind (the concierge
 # provisioning trigger) and on the owner's explicit re-sync. NEVER during a
@@ -54,6 +56,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -106,7 +109,10 @@ VERIFICATION_MAX_AGE = timedelta(days=30)
 #
 # 25 pages: about double the measured site's entire navigation. Past that a site
 # is a catalogue or a blog whose long tail dilutes BM25 more than it answers
-# anything. Truncation is reported on the crawl warnings, not silent.
+# anything. Truncation is reported on the crawl warnings, not silent. The budget
+# is spent KEY PAGES FIRST (``_KEY_PAGE_WORDS``): a homepage that links thirty
+# event pages before /apply would otherwise use it all on events, and the
+# concierge could only send a visitor asking "how do I apply?" somewhere else.
 # 0 assets: ``fetch_assets=False`` — the 90% above, not fetched at all.
 # 8 MB: 25 pages at ~320 KB of markup each, an order of magnitude past the
 # measured 3.5 KB/page. Crossing it aborts and reports rather than half-filling a
@@ -153,6 +159,49 @@ GROUNDING_USER_AGENT = (
     "PawSitesConcierge/1.0 (+https://pocketpaw.dev; site-knowledge crawler for the "
     "site's own concierge)"
 )
+
+# Path segments that mark a page a visitor asks about by name. Matched whole and
+# case-insensitively, with a ``-``/``_`` suffix or a .html stem allowed, so
+# /apply/, /Apply-Now and /apply.html count and /applesauce does not. "events" is
+# not here: only the /events index ranks first (``_key_page_rank``), never each
+# event under it.
+_KEY_PAGE_WORDS = (
+    "apply",
+    "application",
+    "join",
+    "register",
+    "registration",
+    "signup",
+    "sign-up",
+    "membership",
+    "member",
+    "members",
+    "pricing",
+    "plans",
+    "tickets",
+    "book",
+    "booking",
+    "admissions",
+    "contact",
+    "about",
+    "faq",
+    "faqs",
+    "help",
+    "how-it-works",
+)
+
+
+def _key_page_rank(url: str) -> int:
+    """0 for a key page, 1 for everything else: ``crawl_site``'s ``priority``."""
+    stems = [seg.split(".", 1)[0] for seg in urlparse(url).path.lower().split("/") if seg]
+    if stems and stems[-1] == "events":
+        return 0
+    for stem in stems:
+        for word in _KEY_PAGE_WORDS:
+            if stem == word or stem.startswith((word + "-", word + "_")):
+                return 0
+    return 1
+
 
 # The html lane's page test (``kb_ingest._is_page``). Applied here too so a
 # non-HTML body that landed in the FileMap can never reach the ingest as a page.
@@ -300,6 +349,7 @@ async def harvest_foreign_site(
                 max_pages=GROUNDING_MAX_PAGES,
                 fetch_assets=False,
                 user_agent=GROUNDING_USER_AGENT,
+                priority=_key_page_rank,
             )
     except TimeoutError:
         # ITS OWN CODE, ahead of the catch-all below. "The crawl failed" and "your

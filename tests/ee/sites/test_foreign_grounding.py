@@ -746,3 +746,22 @@ async def test_key_pages_are_crawled_before_the_budget_runs_out(beanie_test_db):
     ):
         assert page in harvest.source, f"{page} missing from {sorted(harvest.source)}"
     assert len(harvest.source) == foreign_grounding.GROUNDING_MAX_PAGES
+
+
+@pytest.mark.parametrize(
+    ("path", "rank"),
+    [
+        ("/apply/", 0),
+        ("/Apply-Now", 0),
+        ("/apply.html", 0),
+        ("/about-us/", 0),
+        ("/how-it-works", 0),
+        ("/events/", 0),
+        ("/events/12/", 1),
+        ("/applesauce/", 1),
+        ("/blog/post-1/", 1),
+        ("/", 1),
+    ],
+)
+async def test_key_page_rank_matches_whole_segments(path, rank):
+    assert foreign_grounding._key_page_rank(f"https://{_HOST}{path}") == rank

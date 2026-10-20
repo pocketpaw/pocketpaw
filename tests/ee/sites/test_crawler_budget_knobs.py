@@ -1,5 +1,6 @@
-# tests/ee/sites/test_crawler_budget_knobs.py — the three narrowing knobs on
-# ``url_crawler.crawl_site``: ``max_pages``, ``fetch_assets`` and ``user_agent``.
+# tests/ee/sites/test_crawler_budget_knobs.py — the knobs on
+# ``url_crawler.crawl_site``: ``max_pages``, ``fetch_assets`` and ``user_agent``
+# narrow the crawl; ``priority`` only reorders which pages the budget buys.
 #
 # They exist because the crawler now has TWO consumers with different needs. The
 # import endpoint wants a deployable copy of a site and takes every default;
@@ -14,6 +15,8 @@
 #   * ``user_agent`` is the identity announced AND the identity robots.txt is
 #     evaluated for. Those two drifting apart would mean obeying a rule about a
 #     name we do not send, which is worse than not reading robots at all.
+#   * with no ``priority`` the walk is plain FIFO BFS, pinned by exact fetch
+#     order, so the import path does not move when grounding ranks key pages.
 #
 # All network is mocked (httpx.MockTransport + a fake resolver).
 from __future__ import annotations
@@ -183,3 +186,39 @@ async def test_a_page_whose_fetch_RAISES_is_counted_too():
     assert result.stats.pages_failed == 1
     assert result.stats.pages_fetched == 3  # the seed, /p0/ and /p2/
     assert any("fetch failed" in w for w in result.warnings)
+
+
+def _paths(seen: list[httpx.Request]) -> list[str]:
+    return [r.url.path for r in seen if r.url.path != "/robots.txt"]
+
+
+async def test_without_priority_the_walk_is_plain_bfs():
+    """Exact fetch order, not a count: the import path takes this default."""
+    routes = {
+        "/": _html('<a href="/a/">a</a><a href="/b/">b</a>'),
+        "/a/": _html('<a href="/a1/">a1</a>'),
+        "/b/": _html('<a href="/b1/">b1</a>'),
+        "/a1/": _html("<p>a1</p>"),
+        "/b1/": _html("<p>b1</p>"),
+    }
+    seen: list[httpx.Request] = []
+    await _crawl(routes, seen)
+    assert _paths(seen) == ["/", "/a/", "/b/", "/a1/", "/b1/"]
+
+    seen = []
+    await _crawl(_wide_site(20, []), seen, max_pages=5)
+    assert _paths(seen) == ["/", "/p0/", "/p1/", "/p2/", "/p3/"]
+
+
+async def test_priority_spends_the_budget_on_ranked_pages_first():
+    """A page linked last still makes a small budget when it ranks first, which
+    means discovery must not stop at the page budget either."""
+    seen: list[httpx.Request] = []
+    result = await _crawl(
+        _wide_site(20, []),
+        seen,
+        max_pages=3,
+        priority=lambda url: 0 if url.endswith("/p19/") else 1,
+    )
+    assert _paths(seen) == ["/", "/p19/", "/p0/"]
+    assert any("page cap reached (3)" in w for w in result.warnings)
