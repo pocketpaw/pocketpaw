@@ -1,6 +1,7 @@
 # tests/ee/sites/test_crawler_budget_knobs.py — the knobs on
 # ``url_crawler.crawl_site``: ``max_pages``, ``fetch_assets`` and ``user_agent``
-# narrow the crawl; ``priority`` only reorders which pages the budget buys.
+# narrow the crawl; ``rank_pages`` only reorders which pages the budget buys
+# (menu links, then sitemap pages, then other links, shallow paths first).
 #
 # They exist because the crawler now has TWO consumers with different needs. The
 # import endpoint wants a deployable copy of a site and takes every default;
@@ -15,8 +16,10 @@
 #   * ``user_agent`` is the identity announced AND the identity robots.txt is
 #     evaluated for. Those two drifting apart would mean obeying a rule about a
 #     name we do not send, which is worse than not reading robots at all.
-#   * with no ``priority`` the walk is plain FIFO BFS, pinned by exact fetch
-#     order, so the import path does not move when grounding ranks key pages.
+#   * without ``rank_pages`` the walk is plain FIFO BFS with no sitemap fetch,
+#     pinned by exact fetch order, so the import path does not move when
+#     grounding ranks pages. ``_LinkScan``'s menu tracking is pinned at scan
+#     level, including the unclosed-tag cases messy HTML produces.
 #
 # All network is mocked (httpx.MockTransport + a fake resolver).
 from __future__ import annotations
@@ -210,15 +213,71 @@ async def test_without_priority_the_walk_is_plain_bfs():
     assert _paths(seen) == ["/", "/p0/", "/p1/", "/p2/", "/p3/"]
 
 
-async def test_priority_spends_the_budget_on_ranked_pages_first():
-    """A page linked last still makes a small budget when it ranks first, which
-    means discovery must not stop at the page budget either."""
-    seen: list[httpx.Request] = []
-    result = await _crawl(
-        _wide_site(20, []),
-        seen,
-        max_pages=3,
-        priority=lambda url: 0 if url.endswith("/p19/") else 1,
+async def test_ranked_crawl_reads_menu_links_before_shallower_body_links():
+    """Only the menu signal can rescue these: the body links are discovered
+    first AND sit fewer path segments deep, so neither discovery order nor path
+    depth puts the footer menu inside a 5-page budget."""
+    body = "".join(f'<a href="/p{i}/">p{i}</a>' for i in range(20))
+    menu = (
+        '<a href="/join/become-a-member/">Join</a><a href="/membres/inscription/">Inscription</a>'
     )
-    assert _paths(seen) == ["/", "/p19/", "/p0/"]
-    assert any("page cap reached (3)" in w for w in result.warnings)
+    routes: dict[str, httpx.Response] = {
+        "/robots.txt": httpx.Response(404, content=b""),
+        "/": _html(
+            f"<html><body><main>{body}</main><footer><nav>{menu}</nav></footer></body></html>"
+        ),
+    }
+    for i in range(20):
+        routes[f"/p{i}/"] = _html(f"<p>p{i}</p>")
+    routes["/join/become-a-member/"] = _html("<p>join</p>")
+    routes["/membres/inscription/"] = _html("<p>inscription</p>")
+    seen: list[httpx.Request] = []
+
+    result = await _crawl(routes, seen, max_pages=5, rank_pages=True)
+
+    fetched = _paths(seen)
+    assert fetched[:3] == ["/", "/join/become-a-member/", "/membres/inscription/"]
+    assert any("page cap reached (5)" in w for w in result.warnings)
+
+
+async def test_ranked_crawl_orders_body_links_by_path_depth():
+    """No menu at all: /apply (one segment) beats /events/<n> linked before it."""
+    events = "".join(f'<a href="/events/{n}/">e{n}</a>' for n in range(10))
+    routes: dict[str, httpx.Response] = {
+        "/robots.txt": httpx.Response(404, content=b""),
+        "/": _html(f'<html><body>{events}<a href="/apply/">Apply</a></body></html>'),
+        "/apply/": _html("<p>apply</p>"),
+    }
+    for n in range(10):
+        routes[f"/events/{n}/"] = _html(f"<p>e{n}</p>")
+    seen: list[httpx.Request] = []
+
+    await _crawl(routes, seen, max_pages=3, rank_pages=True)
+
+    assert [p for p in _paths(seen) if p != "/sitemap.xml"] == ["/", "/apply/", "/events/0/"]
+
+
+@pytest.mark.parametrize(
+    ("html", "menu"),
+    [
+        # The happy path, plus role="navigation" on a plain element.
+        ('<header><nav><a href="/a/">a</a></nav></header><a href="/b/">b</a>', {"/a/"}),
+        ('<div role="navigation"><a href="/a/">a</a></div><a href="/b/">b</a>', {"/a/"}),
+        # An unclosed <nav> ends when an element that was open around it closes...
+        ('<div class="top"><nav><a href="/a/">a</a></div><div><a href="/b/">b</a></div>', {"/a/"}),
+        # ...and at <main>, which can never sit inside a nav, header or footer.
+        ('<nav><a href="/a/">a</a><main><a href="/b/">b</a></main>', {"/a/"}),
+        # A stray </nav> with nothing open does not flip state either way.
+        ('</nav><a href="/b/">b</a><footer><a href="/c/">c</a></footer>', {"/c/"}),
+        # Void and unclosed inline tags inside the menu do not leak it.
+        (
+            '<nav><ul><li><a href="/a/">a<br><img src="x.png"></a>'
+            '<li><a href="/c/">c</a></ul></nav><p><a href="/b/">b</a>',
+            {"/a/", "/c/"},
+        ),
+    ],
+)
+async def test_link_scan_marks_only_links_inside_a_menu(html, menu):
+    scan = url_crawler._LinkScan()
+    scan.feed(f"<html><body>{html}</body></html>")
+    assert scan.menu_links == menu
