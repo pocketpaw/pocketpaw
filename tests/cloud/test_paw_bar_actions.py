@@ -803,6 +803,17 @@ class TestCatalogPreamble:
         assert "espresso" in pre and "$3.50" in pre
         assert "pawbar_add_to_cart" in pre
 
+    async def test_an_item_with_no_price_lists_no_price(self) -> None:
+        """price_cents 0 is "no listed price" (an application-only event, an owner
+        item never priced): the line names the item and claims no $0.00."""
+        from pocketpaw_ee.cloud.surface.handlers.concierge import _catalog_block
+
+        block = _catalog_block(
+            [{"id": "jazz", "name": "Jazz Night", "price_cents": 0, "currency": "USD"}]
+        )
+        assert 'id "jazz": Jazz Night\n' in block
+        assert "$0.00" not in block
+
     async def test_no_actions_preamble_has_no_catalog(self) -> None:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble

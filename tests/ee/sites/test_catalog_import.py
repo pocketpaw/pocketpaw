@@ -892,3 +892,97 @@ async def test_unreadable_product_pages_make_the_preview_partial(beanie_test_db)
     assert preview.status == "partial"
     assert "pages_failed:1" in preview.warnings
     assert [i.name for i in preview.items] == ["Kettle"]
+
+
+# --------------------------------------------------------------------------- #
+# Events: schema.org Event and its subtypes read like products
+# --------------------------------------------------------------------------- #
+
+_EVENT_PAGE = f"https://{_HOST}/events/jazz-night"
+
+
+def _event(kind: str = "Event", *, offers: Any = None, **ov: Any) -> dict:
+    node = {
+        "@context": "https://schema.org",
+        "@type": kind,
+        "name": "Jazz Night",
+        "url": _EVENT_PAGE,
+        "image": f"https://{_HOST}/img/jazz.jpg",
+        "description": "Live quartet in the garden.",
+        "startDate": "2026-11-12T19:30:00+05:30",
+        "location": {"@type": "Place", "name": "Grand Hall"},
+    }
+    if offers is not None:
+        node["offers"] = offers
+    node.update(ov)
+    return node
+
+
+def test_a_jsonld_event_with_offers_is_imported_with_its_price_and_facts():
+    offers = {"@type": "Offer", "price": "25.00", "priceCurrency": "USD"}
+    [jazz] = ci.parse_jsonld_products(
+        _ld(json.dumps(_event(offers=offers))), _EVENT_PAGE, _HOST
+    ).items
+    assert (jazz.name, jazz.price_cents, jazz.currency) == ("Jazz Night", 2500, "USD")
+    assert jazz.url == "/events/jazz-night"
+    assert jazz.image_url == f"https://{_HOST}/img/jazz.jpg"
+    assert "Live quartet in the garden." in jazz.description
+    assert "12 Nov 2026" in jazz.description and "Grand Hall" in jazz.description
+    assert "Free" not in jazz.description
+
+
+@pytest.mark.parametrize("kind", ["MusicEvent", "EducationEvent", "Festival", "Hackathon"])
+def test_a_jsonld_event_subtype_is_imported(kind: str):
+    offers = {"@type": "Offer", "price": "10", "priceCurrency": "USD"}
+    parsed = ci.parse_jsonld_products(
+        _ld(json.dumps(_event(kind, offers=offers))), _EVENT_PAGE, _HOST
+    )
+    assert [i.name for i in parsed.items] == ["Jazz Night"]
+
+
+def test_a_jsonld_event_with_no_offers_is_imported_without_a_price():
+    # Application-only: no offers at all. Kept, never counted as skipped.
+    parsed = ci.parse_jsonld_products(_ld(json.dumps(_event())), _EVENT_PAGE, _HOST)
+    [jazz] = parsed.items
+    assert parsed.skipped_no_price == 0
+    assert jazz.price_cents == 0  # 0 = no listed price; renderers show none
+    assert "Free" not in jazz.description  # never implied
+
+
+def test_an_explicitly_free_event_says_free():
+    for node in (
+        _event(isAccessibleForFree=True),
+        _event(offers={"@type": "Offer", "price": "0", "priceCurrency": "USD"}),
+    ):
+        [item] = ci.parse_jsonld_products(_ld(json.dumps(node)), _EVENT_PAGE, _HOST).items
+        assert item.price_cents == 0
+        assert item.description.startswith("Free")
+
+
+def test_a_product_with_no_price_is_still_skipped():
+    # Regression guard: only events may go without a price.
+    node = {"@type": "Product", "name": "Kettle", "url": "/products/kettle"}
+    parsed = ci.parse_jsonld_products(_ld(json.dumps(node)), _PAGE, _HOST)
+    assert parsed.items == [] and parsed.skipped_no_price == 1
+
+
+async def test_an_events_site_with_no_sitemap_is_read_from_its_homepage_links(beanie_test_db):
+    await _claim()
+    seen: list[httpx.Request] = []
+    home = (
+        '<html><body><a href="/events/jazz-night">Jazz</a>'
+        '<a href="/events/pottery-workshop">Pottery</a><a href="/about">About</a></body></html>'
+    )
+    pottery = _event("EducationEvent", name="Pottery Workshop", url="/events/pottery-workshop")
+    preview = await _preview(
+        {
+            "/": _html(home),
+            "/events/jazz-night": _html(_ld(json.dumps(_event("MusicEvent")))),
+            "/events/pottery-workshop": _html(_ld(json.dumps(pottery))),
+        },
+        seen,
+    )
+    assert (preview.status, preview.source) == ("ok", "jsonld")
+    assert sorted(i.name for i in preview.items) == ["Jazz Night", "Pottery Workshop"]
+    assert not any(w.startswith("skipped_no_price") for w in preview.warnings)
+    assert "/about" not in _paths(seen)
