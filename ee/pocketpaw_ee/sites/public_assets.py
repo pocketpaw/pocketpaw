@@ -1,54 +1,28 @@
 # ee/pocketpaw_ee/sites/public_assets.py — the PUBLIC asset rail for Paw Sites.
 #
-# Updated 2026-09-08 (sites lifecycle, wave 1 chunk 1): added ``purge`` — delete every
-# asset under one site's prefix, for the delete cascade — and ``can_list``. A site's
-# assets outlive the record that lists them: once the Site document is gone nothing can
-# enumerate what it left on a world-readable bucket, and these objects are served from
-# bucket origin with an immutable year-long cache, so an orphan is public forever.
-# ``can_list`` exists because ``StorageAdapter.browse`` DEFAULTS to returning ``[]``
-# rather than raising, which makes an adapter that cannot list look identical to a site
-# with no assets — harmless in ``list``, and in ``purge`` the difference between a
-# completed teardown and a merely reported one.
-# Created 2026-08-31 (feat/sites-public-asset-uploads).
+# A published site is read by anonymous visitors, so the media it shows needs an
+# address with no credential and no expiry. A presign expires (S3 caps it at 7
+# days) and ``/api/v1/uploads/{id}`` is auth-gated, and the bytes cannot ride the
+# build (``generator_client`` sends a text-only source map). This rail stores
+# stills and video on a world-readable bucket and hands back durable URLs, which
+# also keeps visitor-supplied bytes out of the build tree.
 #
-# WHY THIS EXISTS. A site we publish is read by anonymous visitors, so an image it
-# displays needs an address with no credential and no expiry. Neither URL this
-# codebase already mints qualifies:
+# ONLY PUBLISHABLE MEDIA lands here: PNG/JPEG/GIF/WebP and MP4/WebM, decided by
+# magic bytes. SVG (executes script), QuickTime and documents are refused; a PRD
+# is agent input and stays on the private rail. Images cap at 10 MiB, video at
+# 50 MiB (the S3 adapter buffers a whole body before it PUTs; raising the cap
+# means multipart upload first, not a config bump).
 #
-#   * ``StorageAdapter.presigned_get`` expires (S3 caps a presign at 7 days) —
-#     the site outlives the link and the image turns into a broken box.
-#   * ``/api/v1/uploads/{id}`` (what screenshot.py and the deliver MCP tool hand
-#     back) is auth-gated, so it 401s for exactly the visitor it is meant to serve.
-#
-# And the bytes cannot ride the build instead: ``generator_client`` sends a
-# TEXT-ONLY ``source`` map, and its base64 ``assets`` sideband is rejected outright
-# by the generator for every engine except html (paw-sites ``src/index.ts``, the
-# ``assets is only supported with engine="html"`` throw). A URL is the only carrier
-# that works on all four engines, and it keeps visitor-supplied bytes OUT of the
-# build tree — which preserves the write-allowlist property that stops an edit
-# reaching ``package.json`` and routing around the release-age floor.
-#
-# WHAT IT DELIBERATELY DOES NOT DO. It does not store documents. A PRD is agent
-# INPUT, not site content; publishing a customer's requirements doc to an
-# unauthenticated bucket is a data leak, so documents stay on the private rail
-# (``EEUploadService``), where ``chat/agent_service._build_attachments_block``
-# already extracts their text into the model's context. Only PUBLISHABLE MEDIA —
-# the stills and video a page actually renders — lands here.
-#
-# Updated 2026-08-31 (video): the rail carries VIDEO as well as stills. A
-# scroll-driven background video is a mainstream landing-page form now, and it has
-# the same address problem a hero image does — worse, since a video element refetches
-# by range and a signed URL dying mid-scroll is a visibly broken page. Video gets its
-# own 50 MiB cap: the S3 adapter buffers a whole body in memory before it PUTs
-# (``_MEM_BUFFER_WARN_BYTES`` is 64 MiB), so a larger ceiling here would trip that
-# warning and eventually OOM a web worker. Raising it past 50 MiB means teaching the
-# adapter multipart upload first — that is the honest prerequisite, not a config bump.
-#
-# KEY LAYOUT: ``sites-assets/{workspace_id}/{pocket_id}/{sha256[:16]}-{stem}{ext}``
+# KEY LAYOUT: ``sites-assets/{workspace_id}/{pocket_id}/{sha256[:16]}-{stem}{ext}``.
 # Tenant-scoped so one workspace can never enumerate or overwrite another's, and
-# content-addressed so a key's bytes can never change — which is what makes the
-# year-long immutable Cache-Control on the object safe, and makes re-uploading the
-# same file free instead of duplicating it.
+# content-addressed so a key's bytes never change (safe for the year-long
+# immutable Cache-Control, and a repeat put is free).
+#
+# ``key_for_url`` + ``read`` let a caller turn one of this workspace's public URLs
+# back into bytes from storage, so nothing here ever fetches a URL. ``purge`` and
+# ``can_list`` serve the delete cascade: an orphan on this bucket is public
+# forever, and ``StorageAdapter.browse`` defaults to ``[]`` rather than raising,
+# which would make an unlistable adapter look like a site with no assets.
 
 from __future__ import annotations
 
@@ -276,6 +250,48 @@ class PublicAssetStore:
             sha256=digest,
             kind=kind_for_mime(mime),
         )
+
+    def key_for_url(
+        self, url: str, *, workspace_id: str, pocket_id: str | None = None
+    ) -> str | None:
+        """Map a public URL back to its storage key, or ``None``.
+
+        Only a URL this adapter minted for an asset under ``workspace_id`` (and
+        ``pocket_id``, when given) maps; anything else — another tenant, another
+        host, a nested or dotted path, a query string — is ``None``. This is what
+        lets a caller read an asset back from storage instead of fetching a URL.
+        """
+        base = self._adapter.public_url("")
+        if not base or not url.startswith(base):
+            return None
+        key = url[len(base) :]
+        if ".." in key or any(c in key for c in "?#\\%"):
+            return None
+        parts = key.split("/")
+        if len(parts) != 4 or parts[0] != _KEY_PREFIX or parts[1] != workspace_id:
+            return None
+        if not parts[2] or not parts[3]:
+            return None
+        if pocket_id is not None and parts[2] != pocket_id:
+            return None
+        return key
+
+    async def read(self, key: str, *, max_bytes: int = MAX_ASSET_BYTES) -> bytes:
+        """Read one stored asset's bytes. Raises :class:`PublicAssetError` when it
+        is missing or larger than ``max_bytes``."""
+        from pocketpaw.uploads.errors import NotFound
+
+        buf = bytearray()
+        try:
+            async for chunk in self._adapter.open(key):
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    raise PublicAssetError(
+                        f"That file is over the {max_bytes // (1024 * 1024)} MB limit."
+                    )
+        except NotFound as exc:
+            raise PublicAssetError("That file is no longer in storage.") from exc
+        return bytes(buf)
 
     async def list(self, *, workspace_id: str, pocket_id: str) -> list[PublicAsset]:
         """Return every asset stored for one site. Empty on an unlistable adapter."""

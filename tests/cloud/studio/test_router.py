@@ -4,7 +4,8 @@
 # waived; the SERVICE is the seam (the router is a thin adapter). Asserts:
 #   * GET /studio/models         → StudioModelsResponse envelope.
 #   * GET /studio/styles         → StudioStylesResponse envelope.
-#   * GET /studio/generations    → GenerationsResponse, scoped to the workspace.
+#   * GET /studio/generations    → GenerationsResponse, scoped to the workspace;
+#                                  ?source= / ?pocket_id= reach the service.
 #   * POST /studio/generate      → a Generation; bad input → 400; video → 501;
 #                                  proxy failure → 502.
 #   * GET /studio/generations/{id} → one generation, 404 on a miss.
@@ -12,8 +13,6 @@
 #                                 400; fal upstream failure → 502.
 #   * POST /studio/suggest-prompt → PromptSuggestion from the {sentence} body.
 #   * license gate               → no override, require_license denies.
-#
-# Created 2026-08-17 (studio-real-backend): new router tests.
 
 from __future__ import annotations
 
@@ -107,16 +106,35 @@ def test_list_styles_returns_envelope(client):
 def test_list_generations_is_workspace_scoped(client, monkeypatch):
     seen: dict = {}
 
-    async def _list(workspace_id):
-        seen["workspace"] = workspace_id
+    async def _list(workspace_id, *, source=None, pocket_id=None):
+        seen.update(workspace=workspace_id, source=source, pocket_id=pocket_id)
         return [_generation()]
 
     monkeypatch.setattr(studio_service, "list_generations", _list)
     resp = client.get("/api/v1/studio/generations")
     assert resp.status_code == 200
     assert resp.json()["generations"][0]["id"] == "gen_abc"
-    # The service got the caller's active workspace, not a global list.
-    assert seen["workspace"] == "ws-1"
+    # The service got the caller's active workspace, not a global list, and no
+    # filter the caller did not ask for.
+    assert seen == {"workspace": "ws-1", "source": None, "pocket_id": None}
+
+
+def test_list_generations_passes_source_and_pocket_filters(client, monkeypatch):
+    """The Sites builder asks for what a site agent made for one site; the filter
+    has to reach the service, or it gets the whole workspace's history.
+
+    MUTATION: call ``service.list_generations(workspace_id)`` without the filters.
+    """
+    seen: dict = {}
+
+    async def _list(workspace_id, *, source=None, pocket_id=None):
+        seen.update(workspace=workspace_id, source=source, pocket_id=pocket_id)
+        return []
+
+    monkeypatch.setattr(studio_service, "list_generations", _list)
+    resp = client.get("/api/v1/studio/generations?source=sites&pocket_id=pk-1")
+    assert resp.status_code == 200
+    assert seen == {"workspace": "ws-1", "source": "sites", "pocket_id": "pk-1"}
 
 
 def test_post_generate_returns_generation(client, monkeypatch):

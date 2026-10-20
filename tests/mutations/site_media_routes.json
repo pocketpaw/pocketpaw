@@ -1,0 +1,38 @@
+[
+  {
+    "label": "image_url accepts another pocket's public asset",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        if pocket_id is not None and parts[2] != pocket_id:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_media_routes.py::test_video_image_url_outside_the_site_is_refused_and_never_fetched"
+    ]
+  },
+  {
+    "label": "another workspace's browser capture is readable as an image_url",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "    if capture is not None and capture != media_storage.capture_owner_token(workspace_id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_media_routes.py::test_video_image_url_may_be_a_workspace_media_file"
+    ]
+  },
+  {
+    "label": "from-studio ignores a missing or foreign generation",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "    if gen is None:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_media_routes.py::test_another_workspaces_generation_is_404"
+    ]
+  },
+  {
+    "label": "the studio generations filter never reaches the service",
+    "file": "ee/pocketpaw_ee/cloud/studio/router.py",
+    "find": "service.list_generations(workspace_id, source=source, pocket_id=pocket_id)",
+    "replace": "service.list_generations(workspace_id)",
+    "tests": [
+      "tests/cloud/studio/test_router.py::test_list_generations_passes_source_and_pocket_filters"
+    ]
+  }
+]

@@ -4042,6 +4042,66 @@ separate bucket origin.
 so a generated page uses the owner's real logo instead of a stock photo. Workspace
 comes from the per-stream identity, never from the tool arguments.
 
+#### Studio media for a site — `/assets/generate` and `/assets/from-studio`
+
+Two more endpoints let the builder UI put Studio media on the rail. Both share the
+agent's `generate_site_image` / `generate_site_video` implementation
+(`sites.media_generation`), are gated on `fabric.write`, refuse a pocket outside the
+caller's workspace with **404**, and answer **503** with no public bucket.
+
+| Method | Path | Gate |
+|---|---|---|
+| `POST` | `/sites/by-pocket/{pocket_id}/assets/generate` | `fabric.write` + early access |
+| `POST` | `/sites/by-pocket/{pocket_id}/assets/from-studio` | `fabric.write` |
+
+Both return the same body. `assets` items have the list/upload shape; for a video,
+`assets` is the clip and `poster` its poster frame (also on the rail), otherwise
+`poster` is `null`. `errors` lists image attempts that failed while others worked.
+
+```json
+{
+  "assets": [{"key": "sites-assets/ws/pk/3fa9…-harbour-1.png", "url": "https://…", "mime": "image/png", "size": 48213, "filename": "harbour-1.png"}],
+  "poster": null,
+  "generation_id": "site-1a2b3c4d5e6f7a8b",
+  "errors": []
+}
+```
+
+**`POST …/assets/generate`** body:
+
+```json
+{"kind": "image", "prompt": "Golden hour over a quiet harbour", "count": 2, "aspect_ratio": "16:9"}
+{"kind": "video", "prompt": "slow dolly in", "image_url": "https://…/sites-assets/ws/pk/…png", "duration": 5, "aspect_ratio": "16:9"}
+```
+
+- `kind` `"image"|"video"`; `prompt` 1–2000 chars, not blank (else **422**).
+- `count` 1–4, images only (`count` > 1 on a video is **400**).
+- `aspect_ratio` defaults to `16:9`. Images: `1:1 16:9 9:16 4:3 3:4 3:2 2:3`;
+  video: `16:9 9:16 1:1`. Anything else is **400**.
+- `image_url` and `duration` (`5|10`, default 5) are video only (**400** on an image).
+  `image_url` switches to image-to-video and must be one of **this pocket's** public
+  asset URLs or an `/api/v1/media/<name>` this workspace can see. Anything else,
+  including any other URL, is **400**; the server never fetches it.
+- A provider or storage failure is **502** with the reason and what to do next.
+  An unpaid early-access workspace gets **403** `early_access.not_available`.
+- The generation is recorded in the Studio history with `source: "sites"` and the
+  pocket id; `generation_id` is that row's id. A video renders synchronously and can
+  take minutes. Generation is not metered yet (SM-2).
+
+**`POST …/assets/from-studio`** body: `{"generation_id": "gen_…"}`. Copies an
+existing, succeeded Studio generation of this workspace onto the site: every image
+of an image generation, or the clip of a video plus its poster (`posterUrl`) as
+`poster`. Bytes are read from the generation's own stored media (the private media
+adapter, or this workspace's prefix on the public rail), never from a URL. Keys are
+content-addressed, so copying the same generation twice returns the same keys. A
+missing or another workspace's generation is **404**; one still running is **409**;
+a non-image/video generation (audio) is **400**.
+
+**Finding generations for a site.** `GET /studio/generations` takes optional
+`?source=` (`studio` | `sites`) and `?pocket_id=` filters, so the builder can list
+what was generated for one site (`?source=sites&pocket_id=<id>`). Omitting both
+returns the workspace's whole history, as before.
+
 **A cold miss builds in an ephemeral Daytona sandbox, not in this process (SP-2).**
 It used to shell out to `bun` here, which works on a laptop and cannot work in the
 deployed API container — there is no toolchain, so every cold preview raised and

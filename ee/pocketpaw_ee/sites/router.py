@@ -1,7 +1,9 @@
 # ee/pocketpaw_ee/sites/router.py — REST surface for the Sites control plane.
 #
 # Thin FastAPI handlers over ``sites.service``: publish and preview, the composer's
-# Enhance button (``sites.prompt_enhance``), the native editing and asset routes,
+# Enhance button (``sites.prompt_enhance``), the native editing and asset routes
+# (upload, list, delete, Studio generate and copy-from-Studio via
+# ``sites.media_generation``),
 # the html-to-project upgrade and its undo
 # (``sites.site_upgrade``), custom domains, slugs and renames, owner settings
 # (metadata, branding, AI visibility, client record and invoices), site-plan
@@ -66,6 +68,8 @@ from pocketpaw_ee.sites.dto import (
     SiteAiVisibilityUpdate,
     SiteAnalyticsResponse,
     SiteAssetDeleteRequest,
+    SiteAssetFromStudioRequest,
+    SiteAssetGenerateRequest,
     SiteAssetListResponse,
     SiteAssetResponse,
     SiteBrandingUpdate,
@@ -80,6 +84,7 @@ from pocketpaw_ee.sites.dto import (
     SiteEntitlementsResponse,
     SiteExportResponse,
     SiteInvoiceCreate,
+    SiteMediaAssetsResponse,
     SiteMetadataUpdate,
     SitePlanRequestBody,
     SitePlanRequestResponse,
@@ -1459,6 +1464,153 @@ async def delete_site_asset(
         await store.delete(workspace_id=ctx.workspace_id, pocket_id=pocket_id, key=body.key)
     except PublicAssetError as exc:
         raise HTTPException(403, str(exc)) from exc
+
+
+# ``SiteMediaError.reason`` → HTTP status. ``failed`` is the provider or the store
+# breaking, not the caller's input, hence 502.
+_SITE_MEDIA_STATUS = {
+    "not_found": 404,
+    "generation_not_found": 404,
+    "missing": 404,
+    "no_store": 503,
+    "invalid": 400,
+    "bad_source": 400,
+    "unsupported": 400,
+    "rejected": 400,
+    "not_ready": 409,
+    "failed": 502,
+}
+
+_IMAGE_ASPECTS = ("1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3")
+_VIDEO_ASPECTS = ("16:9", "9:16", "1:1")
+
+
+def _asset_dto(asset: Any) -> SiteAssetResponse:
+    return SiteAssetResponse(
+        key=asset.key, url=asset.url, mime=asset.mime, size=asset.size, filename=asset.filename
+    )
+
+
+def _media_response(result: Any) -> SiteMediaAssetsResponse:
+    return SiteMediaAssetsResponse(
+        assets=[_asset_dto(a) for a in result.assets],
+        poster=_asset_dto(result.poster) if result.poster is not None else None,
+        generation_id=result.generation_id,
+        errors=list(result.errors),
+    )
+
+
+def _site_media_http_error(exc: Any, *, what: str, hint: str) -> HTTPException:
+    status = _SITE_MEDIA_STATUS.get(exc.reason, 502)
+    if exc.reason == "no_store":
+        return HTTPException(
+            503,
+            "Public asset storage is not configured for this deployment "
+            "(set POCKETPAW_UPLOAD_ADAPTER=s3 and S3_PUBLIC_BUCKET).",
+        )
+    if exc.reason == "not_found":
+        return HTTPException(404, "No site with that id in this workspace.")
+    if exc.reason == "failed":
+        return HTTPException(
+            502,
+            f"{what} failed: {exc.message}. Nothing was added to the site. {hint}",
+        )
+    return HTTPException(status, exc.message)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/assets/generate", response_model=SiteMediaAssetsResponse)
+async def generate_site_asset(
+    pocket_id: str,
+    body: SiteAssetGenerateRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteMediaAssetsResponse:
+    """Generate an image (1-4) or a short video with Studio and publish it.
+
+    Same gate as upload, plus pocket ownership and the early-access refusal
+    (Studio spend never reaches the credit ledger). Lands in the /studio history
+    with ``source="sites"``. A video renders synchronously and can take minutes.
+    """
+    # TODO(SM-2): meter this. Studio generation is unmetered today
+    # (StudioModel.credits is decorative); this route spends with no debit.
+    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed
+    from pocketpaw_ee.sites import media_generation
+
+    aspect_ratio = body.aspect_ratio or "16:9"
+    if body.kind == "image":
+        if body.image_url or body.duration is not None:
+            raise HTTPException(400, "image_url and duration apply to video only.")
+        if aspect_ratio not in _IMAGE_ASPECTS:
+            raise HTTPException(400, f"aspect_ratio must be one of {', '.join(_IMAGE_ASPECTS)}.")
+    else:
+        if body.count != 1:
+            raise HTTPException(400, "count applies to images only; a video is one clip.")
+        if aspect_ratio not in _VIDEO_ASPECTS:
+            raise HTTPException(400, f"aspect_ratio must be one of {', '.join(_VIDEO_ASPECTS)}.")
+
+    _asset_store_or_503()
+    await assert_early_access_allowed(ctx.workspace_id)
+
+    what = "Image generation" if body.kind == "image" else "Video generation"
+    try:
+        if body.kind == "image":
+            result = await media_generation.generate_site_image_assets(
+                workspace_id=ctx.workspace_id,
+                pocket_id=pocket_id,
+                prompt=body.prompt,
+                count=body.count,
+                aspect_ratio=aspect_ratio,
+            )
+        else:
+            source = None
+            if body.image_url:
+                source = await media_generation.resolve_site_video_source(
+                    body.image_url, workspace_id=ctx.workspace_id, pocket_id=pocket_id
+                )
+            result = await media_generation.generate_site_video_asset(
+                workspace_id=ctx.workspace_id,
+                pocket_id=pocket_id,
+                prompt=body.prompt,
+                image_url=source,
+                aspect_ratio=aspect_ratio,
+                duration_sec=body.duration or 5,
+            )
+    except media_generation.SiteMediaError as exc:
+        raise _site_media_http_error(
+            exc, what=what, hint="Try again in a moment, or change the prompt."
+        ) from exc
+    return _media_response(result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/assets/from-studio", response_model=SiteMediaAssetsResponse
+)
+async def add_studio_generation_to_site(
+    pocket_id: str,
+    body: SiteAssetFromStudioRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteMediaAssetsResponse:
+    """Publish an existing Studio generation of this workspace onto the site.
+
+    Reads only the generation's own stored media (never a URL), so a repeat copy
+    is idempotent (content-addressed keys). A video's poster comes back as
+    ``poster``. Another workspace's generation is a 404, like a missing one.
+    """
+    from pocketpaw_ee.sites import media_generation
+
+    _asset_store_or_503()
+    try:
+        result = await media_generation.copy_studio_generation(
+            workspace_id=ctx.workspace_id,
+            pocket_id=pocket_id,
+            generation_id=body.generation_id,
+        )
+    except media_generation.SiteMediaError as exc:
+        raise _site_media_http_error(
+            exc, what="Copying from Studio", hint="Try again in a moment."
+        ) from exc
+    return _media_response(result)
 
 
 @router.get("/sites/import/brief/{brief_id}", response_model=ImportBriefStatusResponse)

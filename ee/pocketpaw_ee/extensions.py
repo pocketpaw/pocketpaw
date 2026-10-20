@@ -1026,19 +1026,22 @@ class CloudMediaMcpProvider:
 
 class CloudSiteMediaMcpProvider:
     """`pocketpaw.mcp_servers` — the SITE-authoring media server
-    (``pocketpaw_site_media``). Hosts ``generate_site_image`` only.
+    (``pocketpaw_site_media``). Hosts ``generate_site_image`` and
+    ``generate_site_video``, thin wrappers over ``sites.media_generation`` (which
+    the builder UI's ``/sites/by-pocket/{id}/assets/generate`` route shares).
 
     Separate from ``CloudMediaMcpProvider`` because a site asset needs a
     different SINK: media.py writes the private adapter and hands back a
     backend-relative ``/api/v1/media/<name>``, which resolves against the
     published site's own domain and 404s. This one writes ``sites.public_assets``
-    and returns an absolute public URL, skips the chat-canvas gallery pocket, and
-    records the generation in the /studio history tagged ``source="sites"``.
+    and returns absolute public URLs (a video also gets its poster frame), skips the
+    chat-canvas gallery pocket, and records the generation in the /studio history
+    tagged ``source="sites"``.
 
     Ambient like the media server. NOTE that the /sites allow-list entry does not
     confine it: ``allow_mcp_tool_ids`` is None (= unrestricted) on every surface
-    spec that sets no profile, so this is reachable from /chat as well. The tool
-    guards itself instead, by refusing a pocket the caller's workspace does not
+    spec that sets no profile, so this is reachable from /chat as well. The tools
+    guard themselves instead, by refusing a pocket the caller's workspace does not
     own. Do not read the allow-list entry as a boundary.
     """
 

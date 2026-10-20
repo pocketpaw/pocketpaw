@@ -7,7 +7,8 @@
 #
 #   GET  /studio/models          → StudioModelsResponse   (gateway-backed)
 #   GET  /studio/styles          → StudioStylesResponse   (static)
-#   GET  /studio/generations     → GenerationsResponse    (per-workspace history)
+#   GET  /studio/generations     → GenerationsResponse    (per-workspace history;
+#                                  optional ?source= and ?pocket_id= filters)
 #   POST /studio/generate        → Generation             (LiteLLM + fal.ai)
 #   GET  /studio/generations/{id}→ Generation
 #   POST /studio/edit            → Generation             (fal.ai edit endpoints)
@@ -26,12 +27,10 @@
 # music, transcribe) carries ``require_paid_or_early_access_allowed``: refused
 # with 403 ``early_access.not_available`` for an unpaid early-access workspace,
 # since that spend never reaches the credit ledger. Reads stay open.
-#
-# Created 2026-08-17 (studio-real-backend): new entity router.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.cloud._core.deps import (
@@ -75,10 +74,15 @@ async def list_camera_catalog() -> schemas.CameraCatalogResponse:
 @router.get("/generations", response_model=schemas.GenerationsResponse)
 async def list_generations(
     workspace_id: str = Depends(current_workspace_id),
+    source: str | None = Query(default=None, max_length=32),
+    pocket_id: str | None = Query(default=None, max_length=64),
 ) -> schemas.GenerationsResponse:
     """Return the workspace's generation history, newest first (persisted, so it
-    survives reloads)."""
-    return schemas.GenerationsResponse(generations=await service.list_generations(workspace_id))
+    survives reloads). ``source`` ("studio" | "sites") and ``pocket_id`` narrow it,
+    e.g. to what a site agent generated for one site. Both omitted = everything."""
+    return schemas.GenerationsResponse(
+        generations=await service.list_generations(workspace_id, source=source, pocket_id=pocket_id)
+    )
 
 
 @router.post(

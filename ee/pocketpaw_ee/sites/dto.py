@@ -1202,6 +1202,58 @@ class SiteAssetDeleteRequest(BaseModel):
     key: str
 
 
+class SiteAssetGenerateRequest(BaseModel):
+    """Generate media with Studio and publish it for the site.
+
+    ``count`` applies to images only. ``image_url`` and ``duration`` apply to
+    video only: ``image_url`` turns it into image-to-video and must be one of this
+    site's public asset URLs or a ``/api/v1/media/<name>`` this workspace owns —
+    never an arbitrary URL. ``aspect_ratio`` defaults to 16:9; images take 1:1,
+    16:9, 9:16, 4:3, 3:4, 3:2, 2:3 and video takes 16:9, 9:16, 1:1.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["image", "video"]
+    prompt: str = Field(min_length=1, max_length=2000)
+    count: int = Field(default=1, ge=1, le=4)
+    aspect_ratio: str | None = None
+    image_url: str | None = Field(default=None, max_length=2048)
+    duration: Literal[5, 10] | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def _prompt_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Describe what to generate.")
+        return value
+
+
+class SiteAssetFromStudioRequest(BaseModel):
+    """Copy one existing Studio generation of this workspace onto the site."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    generation_id: str = Field(min_length=1, max_length=200)
+
+
+class SiteMediaAssetsResponse(BaseModel):
+    """Media just published to the site's rail, from a generation or a copy.
+
+    ``assets`` uses the same shape as list/upload. For a video, ``assets`` holds
+    the clip and ``poster`` its poster frame (also on the rail, so it appears in
+    the asset list too); ``poster`` is null for images or when there is no frame.
+    ``errors`` names image attempts that failed while others succeeded.
+    ``generation_id`` is the Studio history id (a new one for ``/generate``, the
+    source one for ``/from-studio``).
+    """
+
+    assets: list[SiteAssetResponse]
+    poster: SiteAssetResponse | None = None
+    generation_id: str
+    errors: list[str] = Field(default_factory=list)
+
+
 # ── SA-4: the visitor-analytics read ────────────────────────────────────────
 #
 # ``status`` is a CLOSED vocabulary and the most important field on the response.
