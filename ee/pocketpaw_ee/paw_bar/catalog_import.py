@@ -1,5 +1,5 @@
-# ee/pocketpaw_ee/paw_bar/catalog_import.py — read a store's products off its own
-# website, for the owner to review before they reach the catalog.
+# ee/pocketpaw_ee/paw_bar/catalog_import.py — read a store's products and events
+# off its own website, for the owner to review before they reach the catalog.
 #
 # PREVIEW ONLY. ``preview_catalog_import`` returns a ``CatalogImportPreview`` and
 # writes nothing: the owner picks products in the dashboard and saves them through
@@ -14,12 +14,17 @@
 # its currency (``pocketpaw.money.to_minor``; an unknown currency is "" and
 # converts as 2 decimals), strips HTML, caps lengths, keeps only https images and
 # on-host links (stored as site paths, the form ``concierge_runtime`` matches the
-# visitor's page against), and drops a product with no parseable price. The
+# visitor's page against), and drops a product with no parseable price. JSON-LD
+# also reads schema.org Events (any type ending "Event", Festival, Hackathon,
+# EventSeries): an event may have no price (application-only) and is kept at
+# ``price_cents`` 0, which the prompt and the card render as no price at all;
+# its date, venue and an explicit "Free" lead its description. The
 # ORCHESTRATOR fetches: Shopify's ``/products.json`` or WooCommerce's Store API
 # when the homepage says so, and otherwise (or when that endpoint is refused) the
-# generic reader: sitemap → product pages → JSON-LD, then OpenGraph product tags.
-# Shopify pages ``/products.json`` up to 20 × 250, WooCommerce up to 50 × 100, both
-# stopping at a short page, the catalog cap or the soft deadline (below).
+# generic reader: sitemap (else homepage links) → product or event pages →
+# JSON-LD, then OpenGraph product tags. Shopify pages ``/products.json`` up to
+# 20 × 250, WooCommerce up to 50 × 100, both stopping at a short page, the
+# catalog cap or the soft deadline (below).
 #
 # THE FETCH RULES, same as the knowledge crawl (``sites.foreign_grounding``):
 #   * a connected (foreign) site is read on its ONE verified, fresh origin
@@ -58,6 +63,7 @@ import time
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from typing import Any, Literal
@@ -108,7 +114,10 @@ _SHOPIFY_MAX_PAGES = 20
 _WOO_PAGE_SIZE = 100
 _WOO_MAX_PAGES = 50
 
-_PRODUCT_PATH_RE = re.compile(r"/(products?|shop|item|p)/", re.IGNORECASE)
+_PRODUCT_PATH_RE = re.compile(
+    r"/(products?|shop|item|p|events?|tickets?|workshops?|courses?|classes?)/", re.IGNORECASE
+)
+_EVENT_TYPES = frozenset({"Festival", "Hackathon", "EventSeries"})  # besides "...Event"
 _SHOPIFY_SHOP_RE = re.compile(r"Shopify\.shop\s*=")
 _SHOPIFY_ACTIVE_CURRENCY_RE = re.compile(
     r'Shopify\.currency\s*=\s*\{[^}]*?"active"\s*:\s*"([A-Za-z]{3})"'
@@ -179,6 +188,7 @@ class _Raw:
     url: Any = ""
     description: Any = ""
     in_stock: bool | None = None
+    price_optional: bool = False  # an event: no price is kept, at 0 (no listed price)
 
 
 # --------------------------------------------------------------------------- #
@@ -296,7 +306,8 @@ def _normalise(
     raws: Iterable[_Raw], *, base: str = "", host: str = "", keep_absolute_urls: bool = False
 ) -> ParsedProducts:
     """Raw reader output → catalog-shaped products. A product with no usable
-    price or name is dropped (a card with no price is worse than no card), and so
+    price or name is dropped (a card with no price is worse than no card; an
+    event, ``price_optional``, is kept at 0, which renders as no price), and so
     is one whose price overflows or passes ``_MAX_PRICE_MINOR``: one absurd
     value costs that product, never the import. ``keep_absolute_urls`` (CSV,
     which has no host to check against) keeps an http(s) product url as given
@@ -304,7 +315,7 @@ def _normalise(
     out = ParsedProducts()
     for raw in raws:
         name = _clean_text(raw.name, _NAME_CHARS)
-        if raw.price is None or not name:
+        if not name or (raw.price is None and not raw.price_optional):
             out.skipped_no_price += 1
             continue
         try:
@@ -312,7 +323,7 @@ def _normalise(
         except ValueError:
             currency = ""
         try:
-            cents = to_minor(raw.price, currency)
+            cents = to_minor(raw.price or Decimal(0), currency)
         except (ArithmeticError, ValueError):
             cents = -1
         if not 0 <= cents <= _MAX_PRICE_MINOR:
@@ -488,22 +499,26 @@ def _scan(html: str | bytes) -> _PageScan:
     return scan
 
 
-def _is_product(node: dict[str, Any]) -> bool:
+def _types(node: dict[str, Any]) -> list[str]:
     kind = node.get("@type")
     kinds = kind if isinstance(kind, list) else [kind]
-    return any(isinstance(k, str) and k.rsplit("/", 1)[-1] == "Product" for k in kinds)
+    return [k.rsplit("/", 1)[-1] for k in kinds if isinstance(k, str)]
+
+
+def _is_event(node: dict[str, Any]) -> bool:
+    return any(t.endswith("Event") or t in _EVENT_TYPES for t in _types(node))
 
 
 def _product_nodes(node: Any, depth: int = 0) -> Iterable[dict[str, Any]]:
-    """Every schema.org Product in a JSON-LD value: through lists, ``@graph`` and
-    any nesting (ItemList, WebPage.mainEntity, ProductGroup.hasVariant)."""
+    """Every schema.org Product or Event in a JSON-LD value: through lists,
+    ``@graph`` and any nesting (ItemList, WebPage.mainEntity, ProductGroup.hasVariant)."""
     if depth > _JSONLD_MAX_DEPTH:
         return
     if isinstance(node, list):
         for child in node:
             yield from _product_nodes(child, depth + 1)
     elif isinstance(node, dict):
-        if _is_product(node):
+        if "Product" in _types(node) or _is_event(node):
             yield node
             return
         for value in node.values():
@@ -525,7 +540,7 @@ def _first_str(value: Any, *keys: str) -> str:
 
 def _availability(value: Any) -> bool | None:
     text = _first_str(value, "@id").strip().lower()
-    if text.endswith("outofstock") or text in ("oos", "out of stock", "soldout", "sold out"):
+    if text.endswith(("outofstock", "soldout")) or text in ("oos", "out of stock", "sold out"):
         return False
     if text.endswith("instock") or text == "in stock":
         return True
@@ -561,6 +576,28 @@ def _offer_summary(offers: Any) -> tuple[Decimal | None, str, bool | None]:
     return (best[0], best[1], in_stock) if best else (None, "", in_stock)
 
 
+def _event_description(node: dict[str, Any], price: Decimal | None) -> str:
+    """An event's facts ahead of its own text, so the description cap cuts the
+    text first: "Free" only when the site says so (a 0 offer or
+    ``isAccessibleForFree``), the start date, the venue's name."""
+    free = price == 0 or str(node.get("isAccessibleForFree")).strip().lower() == "true"
+    start = _first_str(node.get("startDate")).strip()
+    when = ""
+    try:
+        moment = datetime.fromisoformat(start)
+        when = f"{moment.day} {moment:%b %Y}" + (f", {moment:%H:%M}" if "T" in start else "")
+    except ValueError:
+        pass
+    description = node.get("description")
+    parts = (
+        "Free" if free else "",
+        when,
+        _first_str(node.get("location"), "name"),
+        description if isinstance(description, str) else "",
+    )
+    return " · ".join(p.strip() for p in parts if p.strip())
+
+
 def _jsonld_products(blocks: Iterable[str], page_url: str, host: str) -> ParsedProducts:
     raws: list[_Raw] = []
     currency = ""
@@ -571,6 +608,7 @@ def _jsonld_products(blocks: Iterable[str], page_url: str, host: str) -> ParsedP
             continue  # one malformed block never costs the others
         for node in _product_nodes(data):
             price, node_currency, in_stock = _offer_summary(node.get("offers"))
+            event = _is_event(node)
             currency = currency or node_currency
             path = _site_path(_first_str(node.get("url")) or page_url, page_url, host)
             raws.append(
@@ -581,8 +619,11 @@ def _jsonld_products(blocks: Iterable[str], page_url: str, host: str) -> ParsedP
                     currency=node_currency,
                     image=_first_str(node.get("image"), "url", "contentUrl"),
                     url=path,
-                    description=node.get("description"),
+                    description=_event_description(node, price)
+                    if event
+                    else node.get("description"),
                     in_stock=in_stock,
+                    price_optional=event,
                 )
             )
     parsed = _normalise(raws, base=page_url, host=host)
@@ -701,7 +742,8 @@ def _sitemap_locs(body: bytes) -> tuple[bool, list[str]]:
 
 
 def _prefer_products(urls: list[str]) -> list[str]:
-    """URLs whose path looks like a product's, or all of them when none does."""
+    """URLs whose path looks like a product's or an event's, or all of them when
+    none does."""
     preferred = [u for u in urls if _PRODUCT_PATH_RE.search(urlsplit(u).path + "/")]
     return preferred or urls
 
@@ -846,8 +888,8 @@ class _Run:
         return None if products is None else parse_woo_products(products, self.host)
 
     async def product_pages(self, home: _PageScan) -> list[str]:
-        """Candidate product pages: from the sitemap(s) robots.txt names (else
-        /sitemap.xml, one index level deep), else the homepage's links."""
+        """Candidate product or event pages: from the sitemap(s) robots.txt names
+        (else /sitemap.xml, one index level deep), else the homepage's links."""
         declared = list(self.robots.site_maps() or []) if self.robots is not None else []
         queue = [u for u in declared if (urlsplit(u).hostname or "") == self.host]
         queue = queue or [self.url("/sitemap.xml")]
@@ -870,7 +912,8 @@ class _Run:
             pages = [
                 u
                 for u in (self.url(h) for h in home.links)
-                if (urlsplit(u).hostname or "") == self.host and _PRODUCT_PATH_RE.search(u)
+                if (urlsplit(u).hostname or "") == self.host
+                and _PRODUCT_PATH_RE.search(urlsplit(u).path + "/")
             ]
         seen: set[str] = {self.base}
         unique: list[str] = []

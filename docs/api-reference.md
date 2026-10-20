@@ -7327,9 +7327,15 @@ separator (`"1,500"`, `"1,299.00"`). A product whose price does not fit (over
 
 It reads Shopify's `/products.json` or the WooCommerce Store API when the homepage looks
 like one of them, and otherwise (or when that endpoint is refused, missing or
-robots-disallowed) the store's sitemap and product pages: schema.org `Product` JSON-LD
-first, then `og:type=product` tags. One item per product: a Shopify product's price is
-its cheapest available variant. Prices are converted to ISO 4217 minor units of the
+robots-disallowed) the store's sitemap (or, with no sitemap, the homepage's links to
+product, shop, event, ticket, workshop, course or class pages) and those pages:
+schema.org `Product` or `Event` JSON-LD first (any `…Event` subtype, `Festival`,
+`Hackathon`, `EventSeries`), then `og:type=product` tags. One item per product: a
+Shopify product's price is its cheapest available variant. An event with no price
+(application-only, no `offers`) is kept with `price_cents: 0`, which means "no listed
+price": the concierge prompt and the product card show no price for it, never $0.00.
+An event's description starts with "Free" (only for a 0 offer or
+`isAccessibleForFree`), its start date and its venue's name. Prices are converted to ISO 4217 minor units of the
 product's currency (WooCommerce's own `currency_minor_unit` is undone first); a product
 whose currency is unknown is converted as two decimals. Products are sorted in stock first, then in the store's
 order, and capped at the catalog cap (5,000 by default); `total_found` is the count
@@ -7339,7 +7345,7 @@ before the cap.
 |---|---|
 | `ok` | Products found and every page read. |
 | `partial` | Products found, but some pages could not be read, or the byte budget or the 60-second deadline ran out. |
-| `empty` | Nothing with a name and a price was found. |
+| `empty` | Nothing with a name and a price (or an event with a name) was found. |
 | `failed` | Nothing was read; `reason` says why. |
 
 `reason` is `""` or one of `site_not_deployed` (a hosted site with no public host;

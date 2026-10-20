@@ -595,7 +595,8 @@ def _card_verbs(verbs: Iterable[str] | None) -> list[str]:
 
 def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, Any]]:
     """Catalog items for the model's ids, in the model's order, unknown and
-    repeated ids dropped. Every field comes from the catalog."""
+    repeated ids dropped. Every field comes from the catalog. A price of 0 means
+    no listed price and is left out, so paw-bar shows none rather than $0.00."""
     if not isinstance(ids, list):
         return []
     items: list[dict[str, Any]] = []
@@ -606,11 +607,12 @@ def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, 
         if product is None or pid in seen:
             continue
         seen.add(pid)
+        price = int(_field(product, "price_cents", 0) or 0)
         items.append(
             {
                 "id": pid,
                 "name": str(_field(product, "name") or pid),
-                "price_cents": int(_field(product, "price_cents", 0) or 0),
+                **({"price_cents": price} if price else {}),
                 "currency": str(_field(product, "currency") or "USD"),
                 "image_url": str(_field(product, "image_url") or ""),
                 "url": str(_field(product, "url") or ""),
