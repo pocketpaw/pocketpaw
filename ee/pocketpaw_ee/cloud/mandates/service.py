@@ -22,7 +22,8 @@
 # or, with ``role``, another live seat (the tester); ``crew_worker`` reads that agent's
 # CURRENT model + instructions through ``agents.service.get_for_viewer`` as ``seated_by``.
 #
-# The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands;
+# The BACKLOG (``_backlog``): a sighting stays open until a task citing it lands
+# (a lead run's ``skipped`` issues are not cited by it);
 # the trigger persists that (``resolved_by_run``), since the runs list only
 # reaches the newest actions. A sighting is in flight while a task citing it is,
 # or while an OPEN PR on the bound repo closes its ``github:`` source issue
@@ -1107,7 +1108,7 @@ async def _planned_tasks(
 ) -> list[dict[str, Any]]:
     """Every task of the given ``belt_plan`` Actions with its outcome, oldest
     shift first: ``{shift_no, title, evidence_refs, status, in_flight, error,
-    run_id}``.
+    run_id, skipped}`` (``skipped``: the issue numbers its lead run skipped).
 
     A task's run is the newest run row carrying its ``(plan_action_id,
     task_index)``; ``task_index`` is 1-based into the plan's CURRENT tasks (the
@@ -1151,6 +1152,7 @@ async def _planned_tasks(
                     "in_flight": status in _IN_FLIGHT,
                     "error": (run or {}).get("error"),
                     "run_id": (run or {}).get("action_id"),
+                    "skipped": ((run or {}).get("lead") or {}).get("skipped") or [],
                     "line": await _line_state(run, line_merged) if status == "landed" else None,
                 }
             )
@@ -1212,10 +1214,14 @@ async def _backlog(
     plan_ids.update(p for p in (*history_plan_ids, *(g.plan_action_id for g in gated)) if p)
     tasks = await _planned_tasks(workspace_id, sorted(plan_ids), runs)
 
+    # A lead run that skipped an issue (no packet) neither works nor resolves it.
+    numbers = {str(s.id): str(s.evidence.get("source") or "").rpartition("#")[2] for s in sightings}
     landed_by: dict[str, str] = {}
     citing: dict[str, list[dict[str, Any]]] = {}
     for t in tasks:
         for ref in t["evidence_refs"]:
+            if numbers.get(ref) in {str(n) for n in t.get("skipped") or []}:
+                continue
             citing.setdefault(ref, []).append(t)
             if t["status"] == "landed" and t["run_id"]:
                 landed_by.setdefault(ref, str(t["run_id"]))

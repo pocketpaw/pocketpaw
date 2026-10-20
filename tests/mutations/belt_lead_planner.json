@@ -547,5 +547,23 @@
     "tests": [
       "tests/cloud/test_belt_lead_planner.py::test_an_issue_past_the_open_list_limit_is_not_blocked"
     ]
+  },
+  {
+    "label": "a landed line lead resolves the issue it skipped",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            if numbers.get(ref) in {str(n) for n in t.get(\"skipped\") or []}:\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py::test_a_landed_line_lead_leaves_the_issue_it_skipped_open"
+    ]
+  },
+  {
+    "label": "the run row drops the lead's skipped issues",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "\"skipped\": [s[\"issue\"] for s in lead.get(\"skipped\") or [] if isinstance(s, dict)],",
+    "replace": "\"skipped\": [],",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py::test_a_landed_line_lead_leaves_the_issue_it_skipped_open"
+    ]
   }
 ]

@@ -792,7 +792,8 @@ def _lead_row(blob: dict[str, Any]) -> dict[str, Any] | None:
     """A feature lead's progress, read off the ``lead`` dict the cloud station's
     tracker writes (``feature`` / ``packet`` / ``issue`` / ``branch`` / ``prs`` /
     ``sessions`` / ``stalls`` / ``contact_sheet`` / ``slices``, a v3 lead's
-    ``{id, done, run, gaps, pr}`` per slice); ``None`` on a task run. A lead
+    ``{id, done, run, gaps, pr}`` per slice, and the ``skipped`` issue numbers);
+    ``None`` on a task run. A lead
     still queued (no launch, so no ``lead`` dict yet) reads with empty fields."""
     if blob.get("recipe") != _LEAD_RECIPE:
         return None
@@ -810,6 +811,8 @@ def _lead_row(blob: dict[str, Any]) -> dict[str, Any] | None:
         "stalls": len(lead.get("stalls") or []),
         "contact_sheet": lead.get("contact_sheet") or None,
         "slices": [s for s in slices if isinstance(s, dict)] if isinstance(slices, list) else [],
+        # Line issues the launch skipped (no packet): cited, never worked.
+        "skipped": [s["issue"] for s in lead.get("skipped") or [] if isinstance(s, dict)],
     }
 
 
