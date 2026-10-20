@@ -4105,6 +4105,7 @@ Both return the same body. `assets` items have the list/upload shape; for a vide
 ```json
 {"kind": "image", "prompt": "Golden hour over a quiet harbour", "count": 2, "aspect_ratio": "16:9"}
 {"kind": "video", "prompt": "slow dolly in", "image_url": "https://…/sites-assets/ws/pk/…png", "duration": 5, "aspect_ratio": "16:9"}
+{"kind": "video", "prompt": "slow aurora of brand colours with drifting rings", "engine": "motion"}
 ```
 
 - `kind` `"image"|"video"`; `prompt` 1–2000 chars, not blank (else **422**).
@@ -4119,6 +4120,24 @@ Both return the same body. `assets` items have the list/upload shape; for a vide
   untagged Studio image (saved before every write stamped an owner) can't be
   animated by URL: copy it onto the site with `from-studio` first, then pass the
   resulting asset URL.
+- `engine` (video only, **400** on an image) picks how the clip is made:
+  - `"generative"`: photoreal footage from fal (Kling). Needs `FAL_AI_API_KEY` on
+    the server; without it the call is **503** and nothing is spent.
+  - `"motion"`: animated typography, shapes and brand graphics. An LLM writes a
+    HyperFrames composition animated with anime.js v3, the HyperFrames CLI lints
+    and renders it to MP4 in headless Chrome, and ffmpeg takes the poster at 0.5s.
+    No generative model; the clip is a seamless loop sized for a hero background.
+    With `image_url`, the image becomes the base layer with a slow Ken Burns move.
+    A server without the renderer (Node 22+, the pinned `hyperframes` CLI, Chrome,
+    ffmpeg) answers **503** with the missing piece named. Configure with
+    `POCKETPAW_HYPERFRAMES_CMD` (default `npx --yes hyperframes@0.8.181`; the
+    enterprise image sets `hyperframes`), `POCKETPAW_HYPERFRAMES_CONCURRENCY`
+    (renders per process, 1–2, default 1) and `POCKETPAW_SITES_MOTION_MODEL`
+    (the composer model; default the deployment's default chat model).
+  - `"auto"` (the default when omitted): `generative` when a fal key is
+    configured, otherwise `motion`.
+  Anything else is **422**. The Studio history row's `model` is the fal endpoint
+  for generative and `hyperframes-animejs` for motion.
 - A provider or storage failure is **502** with the reason and what to do next.
   An unpaid early-access workspace gets **403** `early_access.not_available`.
 - The generation is recorded in the Studio history with `source: "sites"` and the

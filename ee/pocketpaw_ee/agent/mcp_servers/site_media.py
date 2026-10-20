@@ -21,6 +21,10 @@
 # no profile, so an ambient server is reachable from /chat too. The pocket
 # ownership check in ``media_generation`` is the only real boundary.
 #
+# VIDEO ENGINES: ``generate_site_video`` takes ``engine`` — ``motion`` (animated
+# type/shapes/brand graphics rendered from HTML by HyperFrames, no fal needed),
+# ``generative`` (fal footage) or ``auto`` (fal when the server has a key).
+#
 # COST: unmetered (real metering is SM-2). ``_MAX_IMAGES_PER_CALL`` bounds one
 # call; it is not a meter. An unpaid early-access workspace is refused before
 # any generation (``media._early_access_refusal``).
@@ -169,6 +173,13 @@ async def _generate_site_video_handler(args: dict) -> dict:
     except (TypeError, ValueError):
         duration_sec = 5
 
+    raw_palette = args.get("palette")
+    palette = (
+        [str(c).strip() for c in raw_palette if str(c).strip()][:6]
+        if isinstance(raw_palette, list)
+        else None
+    )
+
     try:
         result = await generate_site_video_asset(
             workspace_id=workspace_id,
@@ -177,12 +188,19 @@ async def _generate_site_video_handler(args: dict) -> dict:
             image_url=str(args.get("image_url") or "").strip() or None,
             aspect_ratio=str(args.get("aspect_ratio") or "16:9"),
             duration_sec=duration_sec,
+            engine=str(args.get("engine") or "auto"),
+            palette=palette,
         )
     except SiteMediaError as exc:
         if exc.reason == "no_store":
             return _error_response(
                 "Public asset storage is not configured on this deployment, so a generated "
                 "video would have no address a visitor could load."
+            )
+        if exc.reason == "unavailable":
+            return _error_response(
+                f"{exc.message} Do NOT retry this engine in this build. Use the other "
+                "engine, or fall back to a still hero via generate_site_image."
             )
         if exc.reason == "failed":
             return _error_response(
@@ -192,6 +210,21 @@ async def _generate_site_video_handler(args: dict) -> dict:
         return _error_response(exc.message)
 
     video = result.assets[0]
+    if result.engine == "motion":
+        usage = (
+            "This is a seamless loop made for a background: render it as a muted, "
+            "autoplay, loop, playsinline video element WITH the poster set, layered "
+            "under the hero's own headline and buttons (object-fit: cover). Respect "
+            "prefers-reduced-motion by showing the poster instead."
+        )
+    else:
+        usage = (
+            "For a scroll-scrubbed hero, render a muted playsinline video element "
+            "WITH the poster set, and drive its currentTime from scroll position. "
+            "Seeks land on KEYFRAMES, so scrubbing is chunky by nature: map a long "
+            "scroll distance onto the clip rather than a short one, and never rely "
+            "on frame-exact stops."
+        )
     return _success_response(
         {
             "ok": True,
@@ -200,13 +233,10 @@ async def _generate_site_video_handler(args: dict) -> dict:
             "mime": video.mime,
             "size": video.size,
             "duration_sec": result.duration_sec,
+            "engine": result.engine,
             "message": (
                 "Video published for this site. Both URLs are absolute, public and "
-                "permanent — use them VERBATIM. For a scroll-scrubbed hero, render a "
-                "muted playsinline video element WITH the poster set, and drive its "
-                "currentTime from scroll position. Seeks land on KEYFRAMES, so "
-                "scrubbing is chunky by nature: map a long scroll distance onto the "
-                "clip rather than a short one, and never rely on frame-exact stops."
+                "permanent — use them VERBATIM. " + usage
             ),
         }
     )
@@ -281,20 +311,25 @@ def build_site_media_server() -> tuple[str, Any] | None:
         (
             "Generate a SHORT VIDEO for the site you are building and publish it, "
             "returning permanent public URLs for the clip and its poster frame. "
-            "Pass `image_url` to ANIMATE AN EXISTING IMAGE — the owner's uploaded "
-            "photo, or one you just generated, by its site asset URL — which is "
-            "what you want for a hero "
-            "that moves their actual subject rather than inventing a lookalike. "
-            "Omit it for a purely generated clip. Describe the CAMERA MOVE in the "
-            "prompt ('slow dolly in', 'orbit left around the subject', 'gentle "
-            "handheld push'), because the move comes from the words, not from a "
-            "parameter. This is the most expensive call available to you and it "
-            "takes MINUTES — use it for one hero moment, never decoratively, and "
-            "tell the user it is rendering before you wait on it. Args: `pocket_id` "
-            "and `prompt` (required), optional `image_url`, `duration_sec` (5 or "
-            "10) and `aspect_ratio`. Returns {ok, url, poster_url, mime, size, "
-            "duration_sec, message}. On failure, relay the reason and fall back to "
-            "a still hero — NEVER invent a video URL."
+            "Two engines (`engine`): `motion` renders animated typography, shapes "
+            "and brand graphics from HTML as a seamless loop, which is great for a "
+            "hero BACKGROUND and works on every server (pass the site's brand "
+            "colours as `palette`); `generative` makes photoreal footage with a "
+            "video model and needs fal on the server. `auto` (default) uses "
+            "generative when it is available, else motion. Pass `image_url` to "
+            "ANIMATE AN EXISTING IMAGE (the owner's uploaded photo, or one you just "
+            "generated, by its site asset URL): generative moves their actual subject; motion places it "
+            "with a slow Ken Burns / parallax move under graphic layers. For "
+            "generative, describe the CAMERA MOVE in the prompt ('slow dolly in', "
+            "'orbit left'); for motion, describe the ONE visual idea, mood and "
+            "pace ('slow aurora of brand colours with drifting rings'). This is the "
+            "most expensive call available to you and it takes a minute or more — "
+            "use it for one hero moment, never decoratively, and tell the user it "
+            "is rendering before you wait on it. Args: `pocket_id` and `prompt` "
+            "(required), optional `engine`, `palette`, `image_url`, `duration_sec` "
+            "(5 or 10) and `aspect_ratio`. Returns {ok, url, poster_url, mime, "
+            "size, duration_sec, engine, message}. On failure, relay the reason "
+            "and fall back to a still hero — NEVER invent a video URL."
         ),
         {
             "type": "object",
@@ -323,6 +358,26 @@ def build_site_media_server() -> tuple[str, Any] | None:
                     "type": "integer",
                     "enum": [5, 10],
                     "description": "Clip length. Default 5.",
+                },
+                "engine": {
+                    "type": "string",
+                    "enum": ["auto", "motion", "generative"],
+                    "description": (
+                        "motion = animated typography/shapes/brand graphics rendered "
+                        "from HTML, a seamless loop, great for hero backgrounds, no "
+                        "fal needed. generative = photoreal footage from a video "
+                        "model, needs fal. auto (default) = generative when the "
+                        "server has fal, else motion."
+                    ),
+                },
+                "palette": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 6,
+                    "description": (
+                        "Brand colours as CSS colours ('#0f172a'), dominant first. "
+                        "Steers the motion engine; ignored by generative."
+                    ),
                 },
                 "aspect_ratio": {
                     "type": "string",

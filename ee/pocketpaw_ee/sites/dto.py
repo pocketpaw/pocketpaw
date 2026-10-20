@@ -1205,11 +1205,13 @@ class SiteAssetDeleteRequest(BaseModel):
 class SiteAssetGenerateRequest(BaseModel):
     """Generate media with Studio and publish it for the site.
 
-    ``count`` applies to images only. ``image_url`` and ``duration`` apply to
-    video only: ``image_url`` turns it into image-to-video and must be one of this
-    site's public asset URLs or a ``/api/v1/media/<name>`` this workspace owns —
-    never an arbitrary URL. ``aspect_ratio`` defaults to 16:9; images take 1:1,
-    16:9, 9:16, 4:3, 3:4, 3:2, 2:3 and video takes 16:9, 9:16, 1:1.
+    ``count`` applies to images only. ``image_url``, ``duration`` and ``engine``
+    apply to video only: ``image_url`` turns it into image-to-video and must be
+    one of this site's public asset URLs or a ``/api/v1/media/<name>`` this
+    workspace owns — never an arbitrary URL. ``engine`` is ``auto`` (fal when the
+    server has a key, else motion), ``generative`` (fal footage) or ``motion``
+    (animated graphics rendered from HTML). ``aspect_ratio`` defaults to 16:9;
+    images take 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3 and video takes 16:9, 9:16, 1:1.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1220,6 +1222,7 @@ class SiteAssetGenerateRequest(BaseModel):
     aspect_ratio: str | None = None
     image_url: str | None = Field(default=None, max_length=2048)
     duration: Literal[5, 10] | None = None
+    engine: Literal["auto", "generative", "motion"] | None = None
 
     @field_validator("prompt")
     @classmethod

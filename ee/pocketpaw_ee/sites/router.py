@@ -1478,6 +1478,7 @@ _SITE_MEDIA_STATUS = {
     "unsupported": 400,
     "rejected": 400,
     "not_ready": 409,
+    "unavailable": 503,
     "failed": 502,
 }
 
@@ -1538,8 +1539,8 @@ async def generate_site_asset(
 
     aspect_ratio = body.aspect_ratio or "16:9"
     if body.kind == "image":
-        if body.image_url or body.duration is not None:
-            raise HTTPException(400, "image_url and duration apply to video only.")
+        if body.image_url or body.duration is not None or body.engine is not None:
+            raise HTTPException(400, "image_url, duration and engine apply to video only.")
         if aspect_ratio not in _IMAGE_ASPECTS:
             raise HTTPException(400, f"aspect_ratio must be one of {', '.join(_IMAGE_ASPECTS)}.")
     else:
@@ -1569,6 +1570,7 @@ async def generate_site_asset(
                 image_url=body.image_url,
                 aspect_ratio=aspect_ratio,
                 duration_sec=body.duration or 5,
+                engine=body.engine or "auto",
             )
     except media_generation.SiteMediaError as exc:
         raise _site_media_http_error(

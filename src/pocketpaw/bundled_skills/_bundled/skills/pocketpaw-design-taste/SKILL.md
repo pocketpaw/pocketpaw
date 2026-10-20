@@ -184,8 +184,12 @@ Ambient drift, self-drawing decorative vectors and light sweeps across static el
 
 ### 3.F-video Scroll-scrubbed video
 
-- **Asset:** `generate_site_video` - owner's photo as `image_url`, camera move in
-  the prompt ("slow dolly in"). Returns `url` + `poster_url`; use both.
+- **Asset:** `generate_site_video` with `engine: "generative"` - owner's photo as
+  `image_url`, camera move in the prompt ("slow dolly in"). Returns `url` +
+  `poster_url`; use both. Generative needs fal on the server. Where it is
+  missing, `engine: "motion"` (pass `palette`) renders a seamless graphic loop.
+  That loop is a hero BACKGROUND (`autoplay muted loop playsinline`, poster
+  set), not a scrub source.
 - **Poster is mandatory** (3.F): render the `<video>` with its `poster` visible.
 - **Drive `currentTime` from rAF, not a `scroll` handler**, and never `play()`.
   Seeks land on keyframes: map a tall pinned section onto the clip, not an
@@ -236,7 +240,7 @@ Shapes models reach for because other models reached for them, not because a pag
 
 **Copy.** NO "Not a feature. A platform." contrast constructions turning every point into a slogan; NO dismissing a thing as "theater" in place of explaining it; NO the same label repeated across two slots of one card; NO locale/time/weather strips (`Lisbon 14:23 | 18C`) unless the brand is genuinely place-focused; NO scroll cues (`Scroll`, a bare down arrow).
 
-**Assets.** NO fabricated asset URLs, since a made-up `src` is broken media on a live site. Check `list_site_assets` FIRST: the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them. Then `search_stock_images`, rendering its `credit`. Then `generate_site_image` for what stock cannot supply (a bespoke hero, a product or concept shot, a brand texture), which costs money per image, so use it deliberately rather than for ordinary photography; and `generate_site_video` for a hero that MOVES, dearer again, one moment only. Fall back to a tasteful gradient. Any asset the brief's manifest hands you is fair game at its native medium, video included: there is no images-only rule and no approved-media list.
+**Assets.** NO fabricated asset URLs, since a made-up `src` is broken media on a live site. Check `list_site_assets` FIRST: the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them. Then `search_stock_images`, rendering its `credit`. Then `generate_site_image` for what stock cannot supply (a bespoke hero, a product or concept shot, a brand texture), which costs money per image, so use it deliberately rather than for ordinary photography; and `generate_site_video` for a hero that MOVES, dearer again, one moment only (`engine: "motion"` gives an animated brand-graphics background loop on any server, `"generative"` gives photoreal footage where fal is set up). Fall back to a tasteful gradient. Any asset the brief's manifest hands you is fair game at its native medium, video included: there is no images-only rule and no approved-media list.
 
 ---
 

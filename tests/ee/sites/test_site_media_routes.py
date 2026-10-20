@@ -178,6 +178,8 @@ def fal(monkeypatch: pytest.MonkeyPatch) -> dict:
         return (_MP4, "video/mp4", _JPG, "image/jpeg")
 
     monkeypatch.setattr("pocketpaw_ee.cloud.studio.fal_video.run_fal_video", _run)
+    # A fal key on the server, so ``engine="auto"`` resolves to the fal path.
+    monkeypatch.setattr("pocketpaw_ee.cloud.studio.fal_edit.fal_api_key", lambda: "fal-test")
     return seen
 
 
@@ -278,6 +280,8 @@ async def test_no_public_store_is_503(beanie_test_db, monkeypatch, proxy) -> Non
         ({"kind": "video", "prompt": "x", "duration": 30}, 422),
         ({"kind": "image", "prompt": "x", "aspect_ratio": "21:9"}, 400),
         ({"kind": "image", "prompt": "x", "duration": 5}, 400),
+        ({"kind": "image", "prompt": "x", "engine": "motion"}, 400),
+        ({"kind": "video", "prompt": "x", "engine": "sora"}, 422),
         ({"kind": "video", "prompt": "x", "count": 2}, 400),
         ({"kind": "video", "prompt": "x", "aspect_ratio": "4:3"}, 400),
     ],
@@ -419,6 +423,47 @@ async def test_video_image_url_may_be_a_workspace_media_file(
                 json={"kind": "video", "prompt": "x", "image_url": f"/api/v1/media/{name}"},
             )
             assert bad.status_code == 400, name
+    assert fal == {}
+
+
+async def test_engine_motion_renders_with_hyperframes_and_skips_fal(
+    beanie_test_db, rail, fal, monkeypatch
+) -> None:
+    """``engine`` reaches the generator, and motion never touches fal even when
+    a fal key is configured."""
+    from pocketpaw_ee.sites import motion_video
+
+    seen: dict = {}
+
+    async def _render(**kwargs: Any):
+        seen.update(kwargs)
+        return motion_video.MotionRender(video=_MP4, poster=_JPG, html="<html></html>")
+
+    monkeypatch.setattr(motion_video, "render_motion_video", _render)
+    async with _client() as c:
+        resp = await c.post(
+            f"/api/v1/sites/by-pocket/{POCKET}/assets/generate",
+            json={"kind": "video", "prompt": "aurora", "engine": "motion", "duration": 10},
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [a["mime"] for a in body["assets"]] == ["video/mp4"]
+    assert body["poster"]["mime"] == "image/jpeg"
+    assert seen["duration_sec"] == 10 and seen["workspace_id"] == WORKSPACE
+    assert fal == {}, "the motion engine must not call fal"
+
+
+async def test_an_unavailable_engine_is_503(beanie_test_db, rail, fal, monkeypatch) -> None:
+    """generative with no fal key on the server: a deployment fact, not a 502."""
+    monkeypatch.setattr("pocketpaw_ee.cloud.studio.fal_edit.fal_api_key", lambda: None)
+    async with _client() as c:
+        resp = await c.post(
+            f"/api/v1/sites/by-pocket/{POCKET}/assets/generate",
+            json={"kind": "video", "prompt": "x", "engine": "generative"},
+        )
+    assert resp.status_code == 503
+    assert "FAL_AI_API_KEY" in resp.json()["detail"]
     assert fal == {}
 
 

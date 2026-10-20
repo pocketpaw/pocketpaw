@@ -104,6 +104,8 @@ def _patch_fal(monkeypatch, *, video=_MP4, poster=_JPG, raises: Exception | None
         return (video, "video/mp4", poster, "image/jpeg")
 
     monkeypatch.setattr("pocketpaw_ee.cloud.studio.fal_video.run_fal_video", _run, raising=False)
+    # A fal key on the server, so ``engine="auto"`` resolves to the fal path.
+    monkeypatch.setattr("pocketpaw_ee.cloud.studio.fal_edit.fal_api_key", lambda: "fal-test")
 
     async def _resolve(url, **_kw):
         seen.setdefault("resolved", []).append(url)

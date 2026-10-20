@@ -16,6 +16,10 @@
 #   * EVERY GENERATION LANDS IN THE STUDIO HISTORY with ``source="sites"`` and
 #     the pocket id, so /studio shows it beside the user's own work. Video writes
 #     its row ``running`` before the render and moves that same row afterwards.
+#   * VIDEO HAS TWO ENGINES. ``generative`` is fal (photoreal footage, needs
+#     FAL_AI_API_KEY); ``motion`` is HyperFrames + anime.js rendered from HTML
+#     (``sites/motion_video.py``, no fal). ``auto`` takes fal when a key is set,
+#     else motion. The history row records the engine's model id.
 #   * COPYING FROM STUDIO READS ONLY THE GENERATION'S OWN STORED MEDIA — the
 #     private media adapter, or this workspace's prefix on the public rail. It
 #     never fetches a URL, so a crafted record cannot turn it into an SSRF.
@@ -44,6 +48,9 @@ _MAX_IMAGES_PER_CALL = 4
 #: Kling's standard tiers. A scroll-scrubbed clip gains nothing from length.
 _VIDEO_DURATIONS = (5, 10)
 
+#: ``auto`` resolves to one of the other two (see ``resolve_video_engine``).
+VIDEO_ENGINES = ("auto", "generative", "motion")
+
 _MEDIA_URL_PREFIX = "/api/v1/media/"
 
 
@@ -54,8 +61,9 @@ class SiteMediaError(Exception):
     ``invalid`` (bad input), ``bad_source`` (an unreadable or foreign source image),
     ``generation_not_found``, ``unsupported`` (not an image/video generation),
     ``not_ready`` (no finished media), ``missing`` (media gone from storage),
-    ``rejected`` (the rail refused the bytes), ``failed`` (the provider or the
-    store failed). ``message`` is safe to show a user.
+    ``rejected`` (the rail refused the bytes), ``unavailable`` (the chosen video
+    engine is not set up on this server), ``failed`` (the provider or the store
+    failed). ``message`` is safe to show a user.
     """
 
     def __init__(self, reason: str, message: str) -> None:
@@ -74,6 +82,7 @@ class SiteMediaResult:
     poster: PublicAsset | None = None
     errors: list[str] = field(default_factory=list)
     duration_sec: int | None = None
+    engine: str | None = None
 
 
 def filename_for(prompt: str, index: int) -> str:
@@ -211,6 +220,26 @@ async def generate_site_image_assets(
     return SiteMediaResult(generation_id=generation_id, assets=assets, errors=errors)
 
 
+def resolve_video_engine(engine: str | None) -> str:
+    """``auto``/None → ``generative`` when a fal key is configured, else
+    ``motion``. An explicit ``generative`` without a key is ``unavailable``."""
+    from pocketpaw_ee.cloud.studio import fal_edit
+
+    choice = (engine or "auto").strip().lower()
+    if choice not in VIDEO_ENGINES:
+        raise SiteMediaError("invalid", f"engine must be one of {', '.join(VIDEO_ENGINES)}.")
+    if choice == "motion":
+        return "motion"
+    has_fal = bool(fal_edit.fal_api_key())
+    if choice == "generative" and not has_fal:
+        raise SiteMediaError(
+            "unavailable",
+            "Generative video needs a fal.ai key on the server (FAL_AI_API_KEY). "
+            "Use engine 'motion' for an animated graphic clip instead.",
+        )
+    return "generative" if has_fal else "motion"
+
+
 async def generate_site_video_asset(
     *,
     workspace_id: str,
@@ -219,22 +248,29 @@ async def generate_site_video_asset(
     image_url: str | None = None,
     aspect_ratio: str = "16:9",
     duration_sec: int = 5,
+    engine: str | None = "auto",
+    palette: list[str] | None = None,
 ) -> SiteMediaResult:
     """Generate a short video (image-to-video when ``image_url`` is given) and
     publish it with its poster frame.
 
-    The history row is written ``running`` BEFORE the render (minutes on fal) so
-    /studio shows the job in flight, and the same row moves to succeeded or
-    failed afterwards. ``image_url`` is narrowed by ``resolve_site_video_source``
+    ``engine`` picks fal (``generative``) or the HyperFrames renderer
+    (``motion``); ``palette`` (brand colours) only steers ``motion``. The history
+    row is written ``running`` BEFORE the render (minutes on fal) so /studio
+    shows the job in flight, and the same row moves to succeeded or failed
+    afterwards. ``image_url`` is narrowed by ``resolve_site_video_source``
     for EVERY caller (agent and HTTP alike) before anything reads it, so neither
     can make the server fetch a URL or read another workspace's media.
     """
     from pocketpaw_ee.cloud.studio import fal_video, schemas, service
+    from pocketpaw_ee.sites import motion_video
     from pocketpaw_ee.sites.public_assets import PublicAssetError
 
     prompt = prompt.strip()
     if not prompt:
         raise SiteMediaError("invalid", "Describe the shot and the camera move.")
+
+    resolved_engine = resolve_video_engine(engine)
 
     await _require_site(workspace_id, pocket_id)
     store = _store_or_raise()
@@ -245,7 +281,12 @@ async def generate_site_video_asset(
 
     # An image makes this image-to-video: the clip MOVES THEIR IMAGE rather than
     # inventing a new scene that merely resembles it.
-    model = fal_video.DEFAULT_IMAGE_TO_VIDEO_MODEL if image_url else fal_video.DEFAULT_VIDEO_MODEL
+    if resolved_engine == "motion":
+        model = motion_video.ENGINE_ID
+    elif image_url:
+        model = fal_video.DEFAULT_IMAGE_TO_VIDEO_MODEL
+    else:
+        model = fal_video.DEFAULT_VIDEO_MODEL
 
     input_urls: list[str] | None = None
     if image_url:
@@ -287,27 +328,46 @@ async def generate_site_video_asset(
             error=error,
         )
 
-    async def _fail(reason: str) -> SiteMediaError:
+    async def _fail(reason: str, kind: str = "failed") -> SiteMediaError:
         await service.record_generation_best_effort(
             workspace_id, _record("failed", [], reason), source="sites", pocket_id=pocket_id
         )
-        return SiteMediaError("failed", reason)
+        return SiteMediaError(kind, reason)
 
     # Running BEFORE the await, so the job is visible while it renders.
     await service.record_generation_best_effort(
         workspace_id, _record("running", []), source="sites", pocket_id=pocket_id
     )
 
-    try:
-        video_bytes, video_mime, poster_bytes, poster_mime = await fal_video.run_fal_video(
-            prompt=prompt,
-            duration_sec=duration_sec,
-            aspect_ratio=aspect_ratio,
-            model=model,
-            image_urls=input_urls,
-        )
-    except Exception as exc:  # noqa: BLE001 — fal raises its own hierarchy
-        raise await _fail(str(exc)) from exc
+    if resolved_engine == "motion":
+        image = motion_video.decode_data_url(input_urls[0]) if input_urls else None
+        try:
+            clip = await motion_video.render_motion_video(
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                duration_sec=duration_sec,
+                palette=palette,
+                image=image,
+                workspace_id=workspace_id,
+            )
+        except motion_video.MotionVideoError as exc:
+            raise await _fail(exc.message, exc.reason) from exc
+        except Exception as exc:  # noqa: BLE001 — a renderer bug must still move the row
+            logger.warning("site_media: motion render crashed", exc_info=True)
+            raise await _fail(str(exc)) from exc
+        video_bytes, video_mime = clip.video, "video/mp4"
+        poster_bytes, poster_mime = clip.poster, "image/jpeg"
+    else:
+        try:
+            video_bytes, video_mime, poster_bytes, poster_mime = await fal_video.run_fal_video(
+                prompt=prompt,
+                duration_sec=duration_sec,
+                aspect_ratio=aspect_ratio,
+                model=model,
+                image_urls=input_urls,
+            )
+        except Exception as exc:  # noqa: BLE001 — fal raises its own hierarchy
+            raise await _fail(str(exc)) from exc
 
     if not video_bytes:
         raise await _fail("the model returned no video")
@@ -350,7 +410,11 @@ async def generate_site_video_asset(
     )
 
     return SiteMediaResult(
-        generation_id=generation_id, assets=[video], poster=poster, duration_sec=duration_sec
+        generation_id=generation_id,
+        assets=[video],
+        poster=poster,
+        duration_sec=duration_sec,
+        engine=resolved_engine,
     )
 
 
