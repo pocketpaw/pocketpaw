@@ -168,3 +168,34 @@ async def test_patch_ui_state_spec_path_unchanged(mongo_db, recording_bus):
     assert after.content == patch_content_with_state(content, "spec_0", {"_auto_checkbox_0": True})
     ev = [e for e in recording_bus.events if isinstance(e, MessageUiStateUpdated)][0]
     assert ev.data["content"] == after.content
+
+
+@pytest.mark.asyncio
+async def test_live_spec_id_falls_back_to_ripple_attachment(mongo_db, recording_bus):
+    """During a live run the client still holds the fence, so it sends spec_0.
+
+    The server already stripped that fence into the ripple attachment, so the
+    content has nothing to splice; the patch must land on att_0 instead.
+    """
+    msg = await _group_message(attachments=_atts(), content="No fence here")
+
+    await message_service.patch_ui_state(str(msg.id), "u1", "spec_0", {"__paw_done": True})
+
+    after = await _MessageDoc.get(msg.id)
+    assert after.content == "No fence here"
+    assert after.attachments[1].meta["state"] == {"__paw_done": True}
+    assert after.attachments[2].meta["state"] == {"keep": 1, "x": "old"}
+
+    ev = [e for e in recording_bus.events if isinstance(e, MessageUiStateUpdated)][0]
+    assert ev.data["spec_id"] == "spec_0"
+    assert ev.data["content"] == "No fence here"
+    assert ev.data["attachments"] == [a.model_dump(mode="json") for a in after.attachments]
+
+
+@pytest.mark.asyncio
+async def test_spec_id_with_no_fence_and_no_attachment_is_not_found(mongo_db, recording_bus):
+    msg = await _group_message(attachments=[], content="No fence here")
+
+    with pytest.raises(NotFound):
+        await message_service.patch_ui_state(str(msg.id), "u1", "spec_0", {"a": 1})
+    assert not [e for e in recording_bus.events if isinstance(e, MessageUiStateUpdated)]

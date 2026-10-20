@@ -805,7 +805,11 @@ async def patch_ui_state(
     ``spec_id`` picks the target: ``spec_<n>`` splices into the n-th content
     fence, ``att_<n>`` merges into ``meta["state"]`` of the n-th ripple
     attachment (agent replies store their spec there, fence stripped).
-    Patch keys are shallow-merged over the stored state.
+    A ``spec_<n>`` with no matching fence falls back to ``att_<n>``: a live
+    stream still shows the fence client-side after the server stripped it.
+    Patch keys are shallow-merged over the stored state. Known limit: a reply
+    with 2+ fences keeps the later ones in content, so ``spec_0`` there still
+    hits a content fence rather than the attachment.
 
     Emits ``message.ui_state.updated`` with routing keys (``group_id`` for
     group messages, ``user_id`` for pocket/session messages) so other tabs /
@@ -854,14 +858,24 @@ async def patch_ui_state(
     # Where the spec lives decides where the state is written: ``att_<n>`` is
     # a ripple attachment (the run pipeline strips agent fences into one),
     # ``spec_<n>`` is a fence still inside the content.
-    is_attachment = spec_id.startswith("att_")
     new_attachments = None
-    if is_attachment:
+    new_content: str | None
+    if spec_id.startswith("att_"):
         new_attachments = patch_attachments_with_state(msg.attachments, spec_id, state)
-        new_content: str | None = msg.content or ""
+        new_content = msg.content or ""
     else:
         new_content = patch_content_with_state(msg.content or "", spec_id, state)
-    if (new_attachments if is_attachment else new_content) is None:
+        if new_content is None and spec_id.startswith("spec_"):
+            # During a live run the client still renders the extracted spec as
+            # a fence in the streaming bubble, so a click before any reload
+            # sends ``spec_<n>``. The server already moved that fence into the
+            # ripple attachment, so retry there with the same index.
+            new_attachments = patch_attachments_with_state(
+                msg.attachments, "att_" + spec_id[len("spec_") :], state
+            )
+            if new_attachments is not None:
+                new_content = msg.content or ""
+    if new_content is None or (spec_id.startswith("att_") and new_attachments is None):
         # Spec not found / malformed — surface a 404 so the FE can fall back
         # to in-memory state rather than silently dropping the patch. (A 500
         # would be wrong: nothing crashed, the target just doesn't exist in
