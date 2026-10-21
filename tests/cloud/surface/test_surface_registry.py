@@ -462,6 +462,26 @@ def test_sites_check_defects_are_carved_out_of_the_precedence_line():
     for mode in ("create", "refine"):
         note = sites_handler._design_skills_note(mode)
         assert "defects in `sites-check`" in note, mode
+        # Both notes point at the one order design-taste states instead of
+        # restating a different one.
+        assert "Precedence is the one order stated" in note, mode
+        assert "pocketpaw-design-taste" in note, mode
+        assert "never waivable" in note, mode
+        assert "outranks" not in note, mode
+
+
+async def test_sites_ready_reply_sample_has_no_em_dash() -> None:
+    """The agent copies the ready-reply sample it is handed, punctuation and all,
+    and the skills ban em dashes in generated copy.
+
+    Mutation that must fail this: put the em dash back in the sample.
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    text = (await sites_handler.build_preamble("w", "u", SurfaceMeta(engine="html"))).text
+    start = text.index("'Your site is ready as a")
+    sample = text[start : text.index("happy with it.'", start)]
+    assert "\u2014" not in sample
 
 
 async def test_sites_craft_is_named_on_create_and_the_floor_is_inline():

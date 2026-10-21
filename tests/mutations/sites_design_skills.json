@@ -92,8 +92,8 @@
   {
     "label": "the create precedence line loses the sites-check carve-out: 'your art direction wins' now covers contrast failures and dead links",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"supplied win over them, except the defects in `sites-check` (the floor, \"",
-    "replace": "            \"supplied win over them, except the floor, \"",
+    "find": "            \"The defects in `sites-check` (the floor, honesty, working controls) \"\r\n            \"are never waivable by anything above them.\\n\"\r\n        )\r\n    else:",
+    "replace": "            \"Your art direction wins over everything else.\\n\"\r\n        )\r\n    else:",
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_check_defects_are_carved_out_of_the_precedence_line"
     ]
@@ -186,6 +186,24 @@
     "replace": "A page reveals every section as it scrolls in.",
     "tests": [
       "tests/test_bundled_skills_installer.py::test_install_includes_design_taste"
+    ]
+  },
+  {
+    "label": "the refine note restates its own precedence (design-taste outranks the CRAFT SYSTEM) instead of pointing at the one order design-taste states",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"Precedence is the one order stated there: what the user supplied, then \"",
+    "replace": "            \"It outranks the CRAFT SYSTEM: what the user supplied, then \"",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_check_defects_are_carved_out_of_the_precedence_line"
+    ]
+  },
+  {
+    "label": "the ready-reply sample gets its em dash back, and the agent copies it into the reply",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        'draft. Preview it under /sites, and say publish (or \"make it live\") '",
+    "replace": "        'draft — preview it under /sites, and say publish (or \"make it live\") '",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_ready_reply_sample_has_no_em_dash"
     ]
   }
 ]

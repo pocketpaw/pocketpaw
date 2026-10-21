@@ -81,7 +81,7 @@ catalog.
 
 ## Not verified
 
-The test viewports (1920x860, 1440x820, 1366x768), the ~40vh spacer, the ~60px
+The upstream test viewports (1920x860, 1440x820, 1366x768; the skill now names the 1280x800 and 390x844 frames `preview_site` renders), the ~40vh spacer, the ~60px
 nav threshold and the three-weak-tells threshold are carried from upstream and
 have not been re-derived against a live Paw Site build.
 

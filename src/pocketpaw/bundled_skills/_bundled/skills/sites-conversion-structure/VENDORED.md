@@ -34,13 +34,11 @@ both already in section 5; "Proof beats hype", already covered by section 4's
 "Be specific" and design-taste MODULE 4's organic-metrics rule; and empty-state
 copy, which is product-UI guidance with little to do with a marketing page.
 
-**Deliberately NOT deduplicated:** design-taste MODULE 4 keeps its seven-word
-filler list even though section 6 now carries a ~60-term catalogue that contains
-it. MODULE 4 is EMBEDDED in the create preamble unconditionally; section 6 is an
-on-demand skill the agent has to choose to invoke. Deleting the short list would
-trade a guarantee for a probability, which is the exact failure
-`_design_taste_system()` exists to prevent. Section 6 names the relationship so a
-reader does not treat them as competing lists.
+**Word lists now live in one place.** The banned-word catalogue section 6
+carried, and design-taste MODULE 4's short filler list, both moved to
+`sites-check` (SC-COPY), which the create procedure runs in FIX mode before a
+draft is shown. Section 6 keeps only the positive method. Nothing embeds
+design-taste in the preamble any more; it is loaded on demand like this skill.
 
 ## What was ported
 
@@ -52,9 +50,9 @@ order, the index/noindex + FAQ-schema call, and the pitfalls list.
 ## What was deliberately NOT ported, and why
 
 **All of Part B (its visual system).** `pocketpaw-design-taste` already governs the
-visual layer on every /sites engine, and it is embedded into the create preamble by
-`ee/pocketpaw_ee/cloud/surface/handlers/sites.py::_design_taste_system`. Porting
-Part B would have shipped a second, conflicting design system in the same turn.
+visual layer on every /sites engine, and the /sites preamble names it in
+`<design-skills>` for the agent to load on demand. Porting Part B would have
+shipped a second, conflicting design system in the same turn.
 The two genuinely disagree:
 
 | Part B says | design-taste says |

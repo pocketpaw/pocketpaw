@@ -559,9 +559,11 @@ def _design_skills_note(mode: str) -> str:
     if mode == "create":
         frame = "Reach one with the `Skill` tool when its trigger fires."
         precedence = (
-            "They are reference material. Your art direction and anything the user "
-            "supplied win over them, except the defects in `sites-check` (the floor, "
-            "honesty, working controls), which hold whatever the direction says.\n"
+            "They are reference material. Precedence is the one order stated in "
+            "`pocketpaw-design-taste`: what the user supplied, then these platform "
+            "rules, then the locked reference, then design-taste, then `sites-craft`. "
+            "The defects in `sites-check` (the floor, honesty, working controls) "
+            "are never waivable by anything above them.\n"
         )
     else:
         frame = (
@@ -572,10 +574,12 @@ def _design_skills_note(mode: str) -> str:
             "it: a refine changes what the user asked for and leaves the rest of "
             "the page alone. The CRAFT SYSTEM at the end of this message IS already "
             "loaded and governs how anything you write here is built. If you need "
-            "the full design system on top of it, invoke `pocketpaw-design-taste`, "
-            "which outranks both these skills and the CRAFT SYSTEM on any visual "
-            "value. Nothing outranks the defects in `sites-check` (the floor, "
-            "honesty, working controls).\n"
+            "the full design system on top of it, invoke `pocketpaw-design-taste`. "
+            "Precedence is the one order stated there: what the user supplied, then "
+            "these platform rules, then the locked reference (on a refine, the site's "
+            "existing design), then design-taste, then the CRAFT SYSTEM. "
+            "The defects in `sites-check` (the floor, honesty, working controls) "
+            "are never waivable by anything above them.\n"
         )
     return (
         "<design-skills>\n"
@@ -1116,7 +1120,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         + _VERIFY_RULE
         + "Once it passed, tell the user the draft is ready, point them at "
         "the Preview, and OFFER to take it live — e.g. 'Your site is ready as a "
-        'draft — preview it under /sites, and say publish (or "make it live") '
+        'draft. Preview it under /sites, and say publish (or "make it live") '
         "when you're happy with it.' "
         + _CLOSING_RULE
         + "Then STOP. Publish IN THIS SAME TURN only if "

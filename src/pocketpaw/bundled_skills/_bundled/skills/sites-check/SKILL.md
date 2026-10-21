@@ -71,8 +71,9 @@ are not tells.
   hydrates after the visitor has seen the HTML. The prerender rule itself is
   `pocketpaw-design-taste` 3.F.
 - **SC-BUILD-02 Hero fits the fold** (HIGH). Headline, subhead and primary CTA
-  sit in the first viewport at 1366x768, 1440x820 and 1920x860. If the CTA
-  falls below: lower the display `clamp()` maximum, tighten top padding and
+  sit in the first viewport `preview_site` renders: 1280x800 on desktop and
+  390x844 with `device: mobile`. Leave margin for shorter laptop screens. If
+  the CTA falls below: lower the display `clamp()` maximum, tighten top padding and
   gaps, cut a line of copy.
 - **SC-BUILD-03 Hero height** (MEDIUM). The hero is as tall as its content. If
   it is viewport-tall, size it in `dvh`, never `vh` (mobile `100vh` hides the
