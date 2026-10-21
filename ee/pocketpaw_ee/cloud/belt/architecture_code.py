@@ -3,11 +3,12 @@
 # for the architecture viewer's Code tab.
 #
 # It starts from ``architecture_read.read_architecture`` (its public call only,
-# never its cache), so the files are listed at the same ``sha`` the viewer
-# shows. A file belongs to the component when it matches one of the
-# component's OWN ``paths`` globs (``orient.path_index`` builds the regexes), so
-# a parent with ``src/`` also lists a child's ``src/ui/`` files; the live
-# block's single-owner join is ``orient.component_for``, a different question.
+# never its cache), or ``architecture_history.read_at`` given ``at``, so the
+# files are listed at the same ``sha`` the viewer shows. A file belongs to the
+# component when it matches one of the component's OWN ``paths`` globs
+# (``orient.path_index`` builds the regexes), so a parent with ``src/`` also
+# lists a child's ``src/ui/`` files; the live block's single-owner join is
+# ``orient.component_for``, a different question.
 #
 # Body: ``{sha, files: [{path, lang, loc, url, prs}], expired, no_paths}``.
 # ``loc`` is the line count (0 when empty, ``None`` for a binary), one ``git
@@ -30,6 +31,7 @@ from typing import Any
 from urllib.parse import quote
 
 from . import app_blueprint_read as abr
+from . import architecture_history
 from . import architecture_read as ar
 from .architecture_live import _LIMIT
 from .orient import _dicts, _owned_system, path_index
@@ -61,10 +63,13 @@ def _open_prs(live: dict[str, Any] | None) -> tuple[int, ...]:
 
 
 async def read_code(
-    workspace_id: str, repo: str, component: str, *, gh: abr.Run | None = None
+    workspace_id: str, repo: str, component: str, *, at: str = "", gh: abr.Run | None = None
 ) -> dict[str, Any]:
     """The component's files at the architecture read's sha (see the header)."""
-    body = await ar.read_architecture(workspace_id, repo)
+    if at:
+        body = await architecture_history.read_at(workspace_id, repo, at)
+    else:
+        body = await ar.read_architecture(workspace_id, repo)
     system = _owned_system(body["model"]) or {}
     comps = [c for k in _dicts(system.get("containers")) for c in _dicts(k.get("components"))]
     comp = next((c for c in comps if str(c.get("id")) == component), None)

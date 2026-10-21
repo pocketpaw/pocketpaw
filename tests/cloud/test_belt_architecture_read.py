@@ -57,13 +57,13 @@ class Origin:
         git(tmp, "init", "-q", "-b", branch, str(self.work))
         git(self.work, "remote", "add", "origin", str(self.bare))
 
-    def push(self, model: dict | None = MODEL, filler: str = "") -> str:
+    def push(self, model: dict | None = MODEL, filler: str = "", msg: str = "c") -> str:
         c4 = self.work / "docs" / "c4"
         c4.mkdir(parents=True, exist_ok=True)
         if model is not None:
             (c4 / "model.json").write_text(json.dumps(model) + filler)
         git(self.work, "add", "-A")
-        git(self.work, "commit", "-q", "--allow-empty", "-m", "c")
+        git(self.work, "commit", "-q", "--allow-empty", "-m", msg)
         git(self.work, "push", "-q", "origin", self.branch)
         return git(self.work, "rev-parse", "HEAD").strip()
 

@@ -3524,9 +3524,33 @@ One repo's committed C4 model, for the architecture viewer. RBAC `belt.read`
   should read again a few seconds later to get it. When a refresh fails (the
   fetch, git itself), the next read returns the last body with `stale: true`.
   When the first read fails it is 503 `belt.architecture_unavailable`.
+- `at=<sha>` reads the model as of that trunk commit instead (source:
+  `architecture_history.py`). `at` must be 7 to 40 hex characters naming a
+  commit reachable from the trunk the read last fetched (no new fetch);
+  anything else is 404 `belt.commit_not_found`. The body has the same keys,
+  with that commit's full `sha`, `stale: false` and `live: null`; it never reads
+  live signals or starts a background read. A commit with no readable model is
+  404 `belt.architecture_not_found`. Cached per repo and commit, with no
+  expiry. An empty `at` is the normal read.
 - Error bodies carry `detail`, the sentence the UI shows.
 
-### `GET /api/v1/belt/architecture/code?repo=<path>&component=<id>`
+### `GET /api/v1/belt/architecture/history?repo=<path>`
+
+The trunk's model commits, for the viewer's History control. RBAC `belt.read`.
+Source: `ee/pocketpaw_ee/cloud/belt/architecture_history.py`.
+
+```json
+[ { "sha": "<full commit sha>", "date": "2026-10-21T09:00:00+00:00",
+    "subject": "docs(c4): add the flows file" } ]
+```
+
+- The last 50 commits on the trunk (`origin/dev`, else `origin/main`, as the
+  architecture read last fetched it) that touch `docs/c4/`, newest first.
+  `date` is the committer date.
+- 404 `belt.repo_not_found` outside the allowlist, `belt.architecture_not_found`
+  when the clone has no trunk. Not cached.
+
+### `GET /api/v1/belt/architecture/code?repo=<path>&component=<id>[&at=<sha>]`
 
 One component's files, for the viewer's Code tab. RBAC `belt.read`. Source:
 `ee/pocketpaw_ee/cloud/belt/architecture_code.py`.
@@ -3552,6 +3576,8 @@ One component's files, for the viewer's Code tab. RBAC `belt.read`. Source:
   `no_paths: true`: the component has no `paths` (`files: []`).
 - An id that is not a component of the repo's own system is 404
   `belt.component_not_found`.
+- `at=<sha>` lists the files at that trunk commit, through the `at` read above
+  (its 404s apply; `prs` stay `[]` there, as that read has no live block).
 - Cached per repo, sha, component and the set of open PR numbers.
 
 ## Sites — Native Editing

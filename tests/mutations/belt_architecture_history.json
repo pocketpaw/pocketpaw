@@ -1,0 +1,65 @@
+[
+  {
+    "label": "architecture history: any rev-parse name passes the sha guard",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "    if not _SHA_RE.fullmatch(at):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_a_malformed_or_unknown_sha_is_404"
+    ]
+  },
+  {
+    "label": "architecture history: a commit off the trunk is served",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "    code, _, err = await _git(path, \"merge-base\", \"--is-ancestor\", sha, ref)\n",
+    "replace": "    code, err = 0, \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_a_commit_off_the_trunk_is_404"
+    ]
+  },
+  {
+    "label": "architecture history: the at read is never cached",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "    if hit := _CACHE.get((str(path), sha := sha.strip())):\n        return hit\n",
+    "replace": "    sha = sha.strip()\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_at_serves_the_old_model_with_no_live_and_no_background_task"
+    ]
+  },
+  {
+    "label": "architecture history: the limit is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "\"-n\", str(HISTORY_LIMIT)",
+    "replace": "\"-n\", \"1000\"",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_history_stops_at_its_limit"
+    ]
+  },
+  {
+    "label": "architecture history: every trunk commit is listed",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "fmt, ref, \"--\", \"docs/c4/\")",
+    "replace": "fmt, ref)",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_history_lists_the_trunk_model_commits_newest_first"
+    ]
+  },
+  {
+    "label": "architecture code: at is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_code.py",
+    "find": "    if at:\n        body = await architecture_history.read_at(",
+    "replace": "    if False:\n        body = await architecture_history.read_at(",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_the_code_read_at_a_commit_uses_that_sha"
+    ]
+  },
+  {
+    "label": "architecture route: at is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "        if at:\n            return await architecture_history.read_at(",
+    "replace": "        if False:\n            return await architecture_history.read_at(",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_routes_serve_history_and_at_and_404_a_bad_sha"
+    ]
+  }
+]
