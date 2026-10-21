@@ -187,3 +187,13 @@ def test_route_diff_adds_the_diff_and_a_bad_one_is_404(origin, monkeypatch):
     assert ok.json()["model"]["scope"] == "v3"
     assert bad.status_code == 404 and bad.json()["error"]["code"] == "belt.diff_commit_not_found"
     assert "diff" not in plain.json()
+
+
+def test_route_diff_without_at_compares_the_current_read(origin, monkeypatch):
+    monkeypatch.setattr(ar, "_behind", lambda key, now, read: read.close())
+    params = {"repo": "repo", "diff": origin.shas[0]}
+    with TestClient(_build_app(role="member")) as client:
+        now = client.get("/api/v1/belt/architecture", params=params)
+    assert now.status_code == 200 and now.json()["model"]["scope"] == "v3"
+    assert now.json()["diff"]["added"] == [] and "live" in now.json()
+    assert "diff" not in ar._CACHE[next(iter(ar._CACHE))]["body"]  # the cached read is untouched
