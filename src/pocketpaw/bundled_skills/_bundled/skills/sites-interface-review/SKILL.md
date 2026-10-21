@@ -12,15 +12,6 @@ description: |
   decides whether what got built holds up. Do NOT use it to author sections.
 ---
 
-<!-- New file 2026-09-08: adapted from jakubkrehel/skills (the better-typography,
-     better-colors, better-layout, better-ui, better-accessibility, better-writing and
-     better-interface skills) into ONE self-contained Paw Sites review skill. Upstream
-     ships seven skills across 40+ files; /sites denies Read/Glob/Bash, so reference
-     subfiles are unreachable there and the six domains are consolidated into this
-     single file with the highest-value rules kept verbatim in their exact values.
-     The dead-control rule and the generated-copy tells come from
-     miqdadbadjuber/anti-slop. See VENDORED.md. -->
-
 # Sites: interface review
 
 ## Evidence, not taste
@@ -28,14 +19,16 @@ description: |
 A review is a set of claims about a page. Every claim carries the evidence that
 produced it, or it carries the words **not verified**.
 
-**The honesty rule that matters most here.** On the /sites surface you usually
-cannot open the rendered page - `Read`, `Bash` and `Glob` are denied, and a preview
-may not exist. Bad wrapping, widows, truncation, contrast on a real background and
-sticky-release timing **only show up at real content lengths in a real render**. A
-claim about any of those, made from the source alone, is a guess.
+**The honesty rule that matters most here.** On the /sites surface `Read`, `Bash`
+and `Glob` are denied, so you read the page through the site file tools and see it
+through `preview_site` (desktop, then `device: mobile`). Bad wrapping, widows,
+truncation and sticky-release timing **only show up at real content lengths in a
+real render**, so look at the preview before claiming any of them. A screenshot
+still cannot measure a contrast ratio or a scroll timing exactly. A claim made from
+the source alone about something only a render shows is a guess.
 
-So: inspect what you actually can, and for the rest write `not verified: no render
-available`. A short honest review beats a long confident one. Never report a domain
+So: inspect what you actually can, and for the rest write `not verified` with the
+reason (`no preview taken`, `not measurable from a screenshot`). A short honest review beats a long confident one. Never report a domain
 as `Clear` when you did not look at it - mark it `Not reviewed` and say why.
 
 ## How to run it
@@ -58,8 +51,9 @@ as `Clear` when you did not look at it - mark it `Not reviewed` and say why.
 ## Domain 1: Typography
 
 - **Fewer fonts, sizes and weights.** Rarely more than three families. Pair for
-  contrast, not similarity: a serif headline over a sans body reads as deliberate;
-  two near-identical sans-serifs read as a mistake.
+  contrast, not similarity: two near-identical sans-serifs read as a mistake. A
+  serif display face belongs to an editorial brief or one that names it, not to
+  every page that wants to look considered.
 - **Below 18px, stay at weight 400 or heavier.** Weights under 300 are display-only
   at 28px and above; they disappear at text sizes.
 - **Heading sizes descend with level.** A visually subordinate heading never
@@ -244,7 +238,7 @@ several together read as machine-written. Quote the exact string as the evidence
 | Typography   | Reviewed |
 | Colour       | Reviewed |
 | Layout       | Reviewed |
-| UI polish    | Not reviewed: no render available |
+| UI polish    | Not reviewed: no preview taken |
 | Accessibility| Reviewed (source only; focus order not verified) |
 | Writing      | Reviewed |
 

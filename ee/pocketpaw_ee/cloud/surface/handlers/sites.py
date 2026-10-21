@@ -326,12 +326,9 @@ def _publish_runs_async(engine: str) -> bool:
         return True
 
 
-# Both embedded blocks close their framing with the same sentence, and PHASE 1
-# opens with a third statement of it. Three copies of one instruction in one
-# message is what the 2026-09-08 sites prompt diet calls SD-1: the only cut on
-# that list that needs no behavioral eval, because the surviving copies are
-# equally prominent and the wording is verbatim. PHASE 1 keeps its own (it is read
-# first, and a routing test pins it); the two wrappers share this one.
+# The craft block (both scopes) closes its framing with this sentence; PHASE 1
+# keeps its own statement of it (it is read first, and a routing test pins it).
+# One shared constant keeps the wording verbatim wherever it is repeated.
 _EMBEDDED_BLOCK_FRAMING = (
     "It is ALREADY LOADED here — apply it in full; you do NOT need to invoke any skill to use it."
 )
@@ -340,11 +337,10 @@ _EMBEDDED_BLOCK_FRAMING = (
 def _read_bundled_skill_body(name: str) -> str | None:
     """Return a bundled skill's ``SKILL.md`` with its YAML frontmatter stripped.
 
-    Shared by the two blocks this surface EMBEDS rather than names
-    (``_design_taste_system``, ``_craft_system``). Returns ``None`` — it never
-    raises — when the bundle is missing or the file is unreadable, so each caller
-    degrades to its own short inline directive instead of taking the whole preamble
-    down with it.
+    Used by ``_craft_system``, the one skill block this surface still EMBEDS
+    rather than names. Returns ``None`` — it never raises — when the bundle is
+    missing or the file is unreadable, so the caller degrades to its own short
+    inline directive instead of taking the whole preamble down with it.
     """
     try:
         from pocketpaw.bundled_skills import bundled_skills_plugin_dir
@@ -361,36 +357,6 @@ def _read_bundled_skill_body(name: str) -> str | None:
         if len(parts) == 3:
             return parts[2].strip()
     return md
-
-
-@functools.lru_cache(maxsize=1)
-def _design_taste_system() -> str:
-    """Return the ``pocketpaw-design-taste`` SKILL.md body (frontmatter stripped)
-    wrapped as a governing ``<design-system>`` block.
-
-    PERMANENT FIX (2026-07-14): the sites build agent was not reliably INVOKING
-    the design-taste skill (skill invocation is model-driven and probabilistic,
-    and the SDK backend can auto-select a weaker model that skips it), so sites
-    came out generic. On this surface, design quality IS the job — so instead of
-    hoping the model calls the skill, we EMBED the full 2026 Creative Director
-    system straight into the create preamble. It is read once from the bundled
-    skill file (the SKILL.md stays the single source of truth) and cached. A
-    missing file degrades to a short inline directive, never a crash.
-    """
-    body = _read_bundled_skill_body("pocketpaw-design-taste")
-    if body is not None:
-        return (
-            '<design-system name="pocketpaw-design-taste">\n'
-            "This 2026 Creative Director system GOVERNS every site you build "
-            f"on this surface. {_EMBEDDED_BLOCK_FRAMING}\n\n"
-            f"{body}\n"
-            "</design-system>"
-        )
-    return (
-        '<design-system name="pocketpaw-design-taste">\n'
-        "Invoke the `pocketpaw-design-taste` skill and follow it in full.\n"
-        "</design-system>"
-    )
 
 
 # Where the refine slice starts inside ``sites-craft``'s SKILL.md. Everything from
@@ -417,8 +383,8 @@ def _craft_system(scope: str = "full") -> str:
     is no turn on which loading this would have been wasted.
 
     "Always" is also not something skill invocation can deliver: it is model-driven
-    and probabilistic, which is the finding already recorded in
-    ``_design_taste_system``. A skill invoked on four turns in five leaves one site
+    and probabilistic, and the SDK backend can pick a weaker model that skips the
+    call. A skill invoked on four turns in five leaves one site
     in five built from ad-hoc values, and that site looks assembled in exactly the
     way this material exists to prevent.
 
@@ -468,20 +434,15 @@ def _craft_system(scope: str = "full") -> str:
     )
 
 
-# The five on-demand design skills, added 2026-09-08. Unlike the two blocks this
-# surface EMBEDS verbatim (`_design_taste_system` and `_craft_system`), these are
-# NAMED with a one-line trigger and left for the agent to load through the `Skill`
-# tool. The asymmetry is a budget decision, not an inconsistency: what is embedded
-# applies to EVERY build (design-taste governs the choices, craft governs how they
-# are constructed), so those bytes are earned on every turn, while these five each
-# apply to a subset of briefs. Embedding all seven would add several times the
-# design-taste payload to every create turn to deliver material most turns never
-# use.
+# The on-demand design skills. These are NAMED with a one-line trigger and left for
+# the agent to load through the `Skill` tool. Nothing here is embedded except the
+# craft FLOOR slice on refine (`_craft_system('floor')`) and the short
+# `_CRAFT_FLOOR` on create: each skill applies to a subset of turns, so embedding
+# them would make every turn pay for material most turns never use.
 #
 # Naming them is load-bearing rather than decorative. On ripple/html create and on
 # refine the wholesale bundled plugin is available, so the agent COULD reach them —
-# but a skill it has never been told the trigger for is a skill it does not invoke,
-# which is the exact failure `_design_taste_system` exists to fix. On svelte/react
+# but a skill it has never been told the trigger for is a skill it does not invoke. On svelte/react
 # create it is stronger: `_sites_profile` pins `skill_names` to the one authoring
 # skill, and a NON-EMPTY `skill_names` suppresses the wholesale plugin, so these
 # are invisible there until the registry names them too. Both halves have to move
@@ -545,7 +506,7 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "build well rather than by reflex, or when picking type. Real "
         "techniques filtered to what this surface can build: no "
         "file downloads, so everything there is CSS, inline SVG or GLSL you "
-        "retype (npm packages go through set_site_dependencies).",
+        "retype (npm packages go in a framework template's package.json).",
     ),
     (
         "sites-interface-review",
@@ -581,10 +542,11 @@ def _design_skills_note(mode: str) -> str:
     blind without an ``if``.
 
     The framing sentence differs by mode because the two preambles do not carry
-    the same thing: create appends `_design_taste_system()` (the full system,
-    inline), refine does NOT. Telling a refine agent the design system is
-    "already in your context" would be false, and a preamble that misdescribes
-    what the agent is holding is how it learns to ignore the preamble.
+    the same thing: create carries the short `_CRAFT_FLOOR`, refine embeds the
+    craft floor slice (`_craft_system('floor')`). Neither embeds the design
+    system, so neither may tell the agent it is "already in your context"; a
+    preamble that misdescribes what the agent is holding is how it learns to
+    ignore the preamble.
     """
     # `unaddressed_line`, not a hand-rolled f-string row: a skill is invoked BY
     # NAME (the loader keys them in a dict, so the name is unique by construction
@@ -1127,8 +1089,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "camera move) and needs fal; the default `auto` picks it when available, else "
         "motion. It takes a minute or more and costs more than an image, so one hero "
         "moment only, and say it is rendering before you wait. (d) If none of "
-        "those land, fall back to a tasteful gradient or solid — never a broken "
-        "`<img>`. Use `mcp__pocketpaw_icons__search_icons` for feature icons "
+        "those land, use a flat tone from the palette or drop the image slot, "
+        "never a broken `<img>`. Use `mcp__pocketpaw_icons__search_icons` for feature icons "
         "throughout. Wire the REAL returned URLs into the page — never leave "
         "placeholders or invent asset paths. There is NO approved-media list and no "
         "images-only rule: if the brief hands you a video, an animation, or any other "

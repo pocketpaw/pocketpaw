@@ -511,8 +511,8 @@ async def test_create_carries_a_short_design_step_not_the_embedded_systems() -> 
     art direction the model commits to, with its defaults framed as things to
     question; the two skills stay reachable by name.
 
-    THE MUTATION THAT BREAKS THIS: re-add ``_design_taste_system()`` or
-    ``_craft_system()`` to ``_create_preamble``.
+    THE MUTATION THAT BREAKS THIS: embed the design-taste body (a
+    ``<design-system>`` block) or ``_craft_system()`` in ``_create_preamble``.
     """
     for engine in (None, "svelte", "react", "ripple"):
         out = (

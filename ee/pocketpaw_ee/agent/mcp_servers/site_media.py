@@ -124,7 +124,8 @@ async def _generate_site_image_handler(args: dict) -> dict:
                 "Image generation failed: "
                 + exc.message
                 + ". Do NOT invent an image URL — fall back to "
-                "`mcp__pocketpaw_stock__search_stock_images`, or to a tasteful gradient."
+                "`mcp__pocketpaw_stock__search_stock_images`, or to a flat tone from the "
+                "palette, or drop the image slot."
             )
         return _error_response(exc.message)
 

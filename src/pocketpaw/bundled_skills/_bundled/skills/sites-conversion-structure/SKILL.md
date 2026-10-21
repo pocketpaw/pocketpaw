@@ -1,24 +1,17 @@
 ---
-# Updated 2026-09-27 (feat/sites-visual-research): dropped the pointer to
-# design-taste's removed layout rules; composition comes from the references.
 name: sites-conversion-structure
 description: |
-  The STRATEGY layer for a Paw Site — what the page argues, in what order, and
+  The STRATEGY layer for a Paw Site: what the page argues, in what order, and
   what single action it drives. Invoke it BEFORE writing any section markup on a
   marketing / landing site: "build a dentist landing page", "a page for my SaaS",
   "why is this page not converting", "what sections should this have". It decides
   the one offer / one audience / one action, runs the intake, SELECTS the
   sections this particular page needs, orders the argument, writes headline +
   CTA + benefit copy, handles objections, sets index / noindex + schema.
-  It does NOT choose colors, type, or layout composition — `pocketpaw-design-taste`
+  It does NOT choose colors, type, or layout composition; `pocketpaw-design-taste`
   owns all of that and governs every visual decision. This skill owns the ARGUMENT;
   design-taste owns the LOOK. Use them together: structure first, then taste.
 ---
-
-<!-- New file 2026-09-08: adapted from elayadesign/ai-design-skills (landing-page-design,
-     Part A) into a Paw Sites strategy skill. Part B (its visual system) is deliberately
-     NOT ported - pocketpaw-design-taste already governs the visual layer and the two
-     disagree on several concrete values. See VENDORED.md for the divergence list. -->
 
 # Sites: conversion structure
 
@@ -85,7 +78,7 @@ price, a named testimonial).
 
 ## 2. Page shape
 
-The shape follows the offer. Settle it before the section list — this choice,
+The shape follows the offer. Settle it before the section list: this choice,
 not the section count, is what makes two sites argue differently. It is a
 working decision you hold in your head, never a label you read out to the user.
 
@@ -187,12 +180,12 @@ Section 5 gives the shapes. This is how the words inside them get written. All o
 it applies to every visible string, including alt text, form labels, error text
 and the footer.
 
-**The order is Clarity, then Respect, then Character — always that way round.**
+**The order is Clarity, then Respect, then Character, always that way round.**
 Without clarity copy fails; without respect it irritates; without character it is
 merely forgotten. Most bad brand voice starts at character and never gets back to
 clarity, which is why so many pages sound confident and say nothing.
 
-**Dead words vs living words.** Dead copy is abstract, safe and interchangeable —
+**Dead words vs living words.** Dead copy is abstract, safe and interchangeable;
 the signal is that it could sit on a thousand other sites unchanged.
 
 | Dead | Living |
@@ -204,34 +197,27 @@ the signal is that it could sit on a thousand other sites unchanged.
 
 The test: **if a word can be removed without changing the meaning, it was dead.**
 
-**When a block feels empty, one of these six is missing** — context (where the
+**When a block feels empty, one of these six is missing:** context (where the
 reader is), the job they are trying to do, what you offer, what changes for them,
 the conditions or limits, and the next step. Check them in order before rewriting
 by feel.
 
 **Info-style.** Facts beat adjectives: "fast" becomes "in 10 seconds". Verbs beat
 nouns: "configuration" becomes "set up". One sentence carries one idea. And
-**the higher the stakes, the calmer the tone** — payments, deletion, security and
+**the higher the stakes, the calmer the tone.** Payments, deletion, security and
 anything irreversible get plainer language, not more reassurance.
 
 **Write scenes, not claims.** People remember images, not abstractions. "A better
 workflow for teams" is a claim. "At 10:03 the PM drops a task. At 10:07 the
 designer has real references and a draft" is a scene. The shape is *who + where +
-what happens + what changes*. Use it where a benefit is hard to make concrete —
+what happens + what changes*. Use it where a benefit is hard to make concrete,
 but never invent a customer, a name or a number to build one.
 
-**Rhythm.** Flat rhythm loses attention: vary sentence length every line or two,
-and let one paragraph land one punch.
-
-> Fewer clicks.
-> Clearer decisions.
-> Less arguing in Slack.
-
-**Give the page one quotable line.** Every page worth building has at least one
-line that survives being screenshotted out of context. If nothing on the page is
-quotable, nothing about it is memorable. Shapes that work: "Not another X.
-Finally Y.", "Less noise. More decisions." One per page — a page where every line
-strains to be the sticky one is exhausting.
+**Rhythm.** Flat rhythm loses attention: vary sentence length every line or two.
+Vary it inside full sentences, not with runs of fragments. A stack of two- or
+three-word lines, a "Not another X. Finally Y." contrast or a slogan built to be
+quoted are formulas every reader has seen on generated pages; say the concrete
+thing once, in a whole sentence.
 
 **Headings describe, they do not aspire.** This is the most common failure in
 section headings and in any dashboard or status UI a dynamic site renders.
@@ -244,8 +230,8 @@ section headings and in any dashboard or status UI a dynamic site renders.
 
 The test: **if someone scans only the headings, labels and numbers, do they
 understand the page?** If not, the headings are decoration. Marketing warmth has
-four legitimate homes — an empty state, onboarding, an upgrade prompt and a
-success moment — and even there it is one line, then back to function.
+four legitimate homes (an empty state, onboarding, an upgrade prompt and a
+success moment), and even there it is one line, then back to function.
 
 **Errors say what happened, why if it helps, and what to do next.** Three rungs,
 and most pages ship the first:
@@ -258,27 +244,27 @@ and most pages ship the first:
 
 **Words that are banned outright**, because each one is a claim with no content
 behind it. `pocketpaw-design-taste` MODULE 4 carries a short version of this list
-and is in your context unconditionally; that one is the floor and this is the
-full catalogue, so they extend each other rather than compete:
+when you load it; that one is the floor and this is the full catalogue, so they
+extend each other rather than compete:
 
--   **Hype** — revolutionary, seamless, cutting-edge, best-in-class,
+-   **Hype:** revolutionary, seamless, cutting-edge, best-in-class,
     next-generation, world-class, game-changing, disruptive, state-of-the-art,
     groundbreaking, and *innovative* / *powerful* / *robust* whenever no specific
     follows.
--   **Filler** — very, really, just, actually, basically, literally, simply,
+-   **Filler:** very, really, just, actually, basically, literally, simply,
     easily, highly, incredibly, extremely, absolutely, truly, totally.
--   **Corporate zombie** — leverage, synergy, ecosystem, paradigm, holistic,
+-   **Corporate zombie:** leverage, synergy, ecosystem, paradigm, holistic,
     end-to-end, mission-critical, value proposition, stakeholder, thought leader,
     empower, unlock (metaphorical), drive (as in "drive growth"), and
     optimize / streamline without a number attached.
--   **AI openers**, which are the loudest tell of all — "In today's fast-paced
+-   **AI openers**, which are the loudest tell of all: "In today's fast-paced
     world...", "In an era of...", "Look no further", "Say goodbye to...",
     "Introducing the future of...", "Reimagine...", "Supercharge your...",
     "Elevate your...", "Take your X to the next level", "Harness the power
     of...".
 
 **Then cut.** Read the finished page and ask whether 30% could come out without
-losing meaning. If it could, it should — and if cutting 30% *improves* the page,
+losing meaning. If it could, it should, and if cutting 30% *improves* the page,
 keep cutting. A stranger should get the offer in about three seconds, find one
 concrete detail, see the limits stated honestly, and know the next step without
 looking for it.

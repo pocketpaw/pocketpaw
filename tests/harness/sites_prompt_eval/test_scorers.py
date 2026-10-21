@@ -1,9 +1,5 @@
 """Prove every SD-6 scorer separates a clean page from the defect it names.
 
-New file 2026-09-08 (feat/sites-design-skills).
-Updated 2026-09-27 (feat/sites-visual-research): the centred-hero and three-card
-scorer tests went with their scorers.
-
 WHY THIS FILE EXISTS. A scorer that returns pass on a defective page is worse than
 having no eval: it certifies a regression and it does so with a number beside it.
 This repo's rule is that a gate is not a gate until a mutation has been observed to
@@ -27,9 +23,7 @@ from tests.harness.sites_prompt_eval import behaviors as b
 # --------------------------------------------------------------------------
 
 CLEAN = """
-<!-- Creative Direction Declaration
-     Design Read: a small roastery that wants to be taken seriously about coffee.
-     Family: warm-minimalist. Identity: Frosted Editorial. -->
+<!-- page shell: tokens first, then the hero -->
 <style>
   :root { --ink: #17140f; --ground: #f7f4ee; --accent: #1f5d4c; }
   body { background: var(--ground); color: var(--ink); }
@@ -62,10 +56,15 @@ def _mutate(original: str, find: str, replace: str) -> str:
 
 
 def test_vision_ledger_separates():
+    """The direction notes stay out of the shipped page, in any wrapper."""
     assert b.vision_ledger(CLEAN).ok is True
-    broken = _mutate(CLEAN, "Creative Direction Declaration", "Notes")
-    broken = broken.replace("Design Read:", "Idea:")
-    assert b.vision_ledger(broken).ok is False
+    for note in (
+        "<!-- Creative Direction Declaration: warm-minimalist -->",
+        "<!-- Design Read: a small roastery that wants to be taken seriously -->",
+        "/* Vision Ledger: Calm, Premium */",
+    ):
+        broken = _mutate(CLEAN, "<!-- page shell: tokens first, then the hero -->", note)
+        assert b.vision_ledger(broken).ok is False, note
 
 
 def test_background_separates():
@@ -92,6 +91,11 @@ def test_no_em_dash_separates():
     assert b.no_em_dash(CLEAN).ok is True
     broken = _mutate(CLEAN, "in your cup on Thursday", "in your cup — on Thursday")
     assert b.no_em_dash(broken).ok is False
+    # An en dash is allowed inside a numeric range and nowhere else.
+    ranged = _mutate(CLEAN, "since 2019", "from 2019–2026")
+    assert b.no_em_dash(ranged).ok is True
+    spliced = _mutate(CLEAN, "in your cup on Thursday", "in your cup – on Thursday")
+    assert b.no_em_dash(spliced).ok is False
 
 
 def test_no_em_dash_ignores_dashes_that_are_not_visible():
@@ -100,7 +104,7 @@ def test_no_em_dash_ignores_dashes_that_are_not_visible():
     This is the control that stops the scorer failing a clean page for its own
     stylesheet, which is how a naive source-level regex would behave.
     """
-    hidden = _mutate(CLEAN, "Family: warm-minimalist.", "Family: warm-minimalist — chosen.")
+    hidden = _mutate(CLEAN, "tokens first, then the hero", "tokens first — then the hero")
     assert b.no_em_dash(hidden).ok is True
     styled = _mutate(CLEAN, "--ink: #17140f;", "--ink: #17140f; /* deep — not black */")
     assert b.no_em_dash(styled).ok is True

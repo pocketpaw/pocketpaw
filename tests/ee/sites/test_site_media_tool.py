@@ -367,10 +367,16 @@ async def test_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── The ladder must not drift across the four places that teach it ──────
 
 
+# How a ladder paragraph names its last rung: design-taste and the preamble say
+# "a flat tone from the palette", the legacy engine skills still say "gradient".
+_LADDER_LAST_RUNGS = ("flat tone", "gradient")
+
+
 def test_every_place_that_teaches_the_stock_rung_also_teaches_generation() -> None:
-    """The sourcing ladder is written out in several places, and
-    ``_design_system_block`` reads design-taste's SKILL.md at REQUEST TIME — so a
-    file that stops at stock silently overrides the preamble for that turn.
+    """The sourcing ladder is written out in several places: the /sites preamble,
+    design-taste (loaded on demand through the Skill tool) and the engine skills.
+    Whichever one the agent reads on a turn is the ladder it follows, so a file
+    that stops at stock silently overrides the preamble for that turn.
 
     DISCOVERED, not enumerated, and that is the point. The first version of this
     test carried a hand-written list of four files and therefore could not see
@@ -381,8 +387,9 @@ def test_every_place_that_teaches_the_stock_rung_also_teaches_generation() -> No
 
     Checked PER PARAGRAPH, because design-taste names the tool twice (ladder and
     pre-flight checklist) and a whole-file check stays green while the LADDER
-    loses its last rung. A ladder paragraph is one naming stock AND the gradient
-    fallback — matching on stock alone also flags changelog comments and bare
+    loses its last rung. A ladder paragraph is one naming stock AND a last-rung
+    fallback (the flat palette tone, or the gradient the engine skills still
+    name); matching on stock alone also flags changelog comments and bare
     tool-reference lists, which owe nothing.
 
     MUTATION: delete the generate_site_image clause from any ladder paragraph.
@@ -398,7 +405,10 @@ def test_every_place_that_teaches_the_stock_rung_also_teaches_generation() -> No
     for path in candidates:
         text = path.read_text(encoding="utf-8", errors="replace")
         for block in text.split("\n\n"):
-            if "search_stock_images" not in block or "gradient" not in block.lower():
+            lowered = block.lower()
+            if "search_stock_images" not in block or not any(
+                rung in lowered for rung in _LADDER_LAST_RUNGS
+            ):
                 continue
             checked += 1
             if "generate_site_image" not in block:

@@ -1,14 +1,6 @@
 ---
-# Fonts: every named face is on Google Fonts, the one font source a site loads;
-# Fontshare and commercial faces were named here once and silently fell back to
-# system fonts. On-demand skill, not inlined.
-# Updated 2026-09-27 (feat/sites-visual-research): layout rules removed (old 3.A/3.B,
-# the M5 layout tells, the M6 layout check); composition now comes from the
-# references opened in research. Realistic product mockups allowed; family G
-# (light, product-led) added; Clean-Tech no longer defaults dark.
-# Updated 2026-09-24 (docs/sites-packages-and-verify-guidance): 2.C, 3.F-video
-# and 3.F teach declared npm packages + the verify verdict. Note kept out of the
-# body: sites.py inlines the body into the /sites preamble, so bytes cost tokens.
+# On-demand skill, loaded through the Skill tool. Every named face is on Google
+# Fonts, the one font source a site loads. Byte ceiling: test_bundled_skill_budget.py.
 name: pocketpaw-design-taste
 description: |
   The SINGLE engine-agnostic Creative Director system for authoring marketing
@@ -17,7 +9,7 @@ description: |
   whenever you design or build a site's sections. It governs SCOPE first: sections come from
   the brief and the page stops there, no real-world fact is invented, and
   anything the user supplied ships verbatim. Then the craft: reading brand
-  intent (Vision Ledger), the three dials, the six aesthetic-direction
+  intent (Vision Ledger), the three dials, the seven aesthetic-direction
   families, typography pairings and colour calibration, motion that is motivated rather than ornamental, and the
   full anti-slop copy + AI-tells + pre-flight discipline - all on a page that
   looks finished before any client-side JavaScript runs. Includes the
@@ -53,7 +45,7 @@ Where a rule below would add something the brief did not ask for, this module wi
 Before writing a single line of layout code, execute this core evaluation internally to define the brand’s soul.
 
 ### 1.A The Vision Ledger (Internal Monologue)
-Declare these in one compact `<!-- Creative Direction Declaration -->` block at the top of the markup or template:
+Write these privately, in your reasoning, before any markup. Never ship them: no HTML comment, no CSS stamp, nothing in the page source. Agent notes left in public source are a generated-site tell.
 1. **Emotional palette archetype:** Luxury, Innovation, Playfulness, Security, Calm, Energy, Creativity, Trust, Nature, Architecture, Technology, Finance, Healthcare, Fashion.
 2. **Visual richness target:** Minimalist, Elegant, Premium, Luxury, Experimental, Artistic, Magazine, Immersive.
 3. **The art director's critique:** name the most obvious layout trap for this brief, and how you avoided it.
@@ -101,7 +93,7 @@ Choosing the visual direction is YOUR expertise; infer it and go. Never ask "wha
 Pick ONE aesthetic family from 2.E and express it top to bottom, in tokens. Do not blend two, and do not layer a signature effect on top of a family that is already complete. The family IS the identity: a page does not need a bespoke visual gimmick to be well designed, and reaching for one is how a clean brief turns into a showreel.
 
 ### 2.B Grounding
-Ground the page in a tuned neutral matched to the palette's temperature: an off-black (`#0b0f14`, `#14110e`) or an off-white. Never flat `#fff` or `#000`, which carry no hue and read as unfinished.
+Ground the page in a tuned neutral matched to the palette's temperature: an off-black (`#0b0f14`, `#14110e`) or an off-white. Never flat `#fff` or `#000`, which carry no hue and read as unfinished; pure white or black belongs only to an explicit monochrome direction (`sites-restraint`).
 
 That is the whole requirement. A treatment on top of the ground is optional and has to earn its place. A quiet section-tint rhythm, or one soft field behind a single section, is usually enough, and a page grounded in one well-chosen neutral is finished rather than bare. Decorative grids, blueprint rules, radial spotlights, mesh blobs and grain overlays are the reflex reach here, so use one only where the family genuinely calls for it (the Brutalist family's visible structure, Dark-Tech's fixed scanline), and never more than one per page.
 
@@ -110,7 +102,7 @@ A published Paw Site KEEPS its client bundle by default, so a hand-written WebGL
 
 **Search paw-fx first.** `mcp__pocketpaw_fx__search_effects("<what you want>")` then `get_effect(name)` returns `files` to write verbatim under `_fx/` plus a `snippet` to place: shader backgrounds, 3D heroes, particle fields, scroll, kinetic-text and cursor effects are already built. Hand-written GLSL is the fallback for when nothing fits, not the opening move. Per engine: on **html** every effect ships vendored, dependency and all. On **svelte** pass `engine`: you get a component with its vendored files under `src/lib/_fx/` (declare nothing), or `engine_unsupported` for an effect with no svelte target. On **react** pass `engine`; an effect's `needs` come back as `dependencies` to declare with `set_site_dependencies`. A dynamic svelte site takes no packages: `needs_js=false`.
 
-The hand-written fallback: raw `canvas.getContext('webgl')`, a pass-through vertex shader and one fragment shader over a full-screen quad (`gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)`), driven by `u_time` / `u_resolution`, buffer capped at 2x DPR, loop stopped off-screen. That buys fluid colour mixing, noise fields, gradient flow and aurora warping; scene graphs and particle swarms are what the library buys you — take those from paw-fx, or declare `three` / `ogl`. The `webgl-components` skill carries the mechanics (DPR, aliasing, context loss, many-instances-per-page).
+The hand-written fallback: raw `canvas.getContext('webgl')`, a pass-through vertex shader and one fragment shader over a full-screen quad (`gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)`), driven by `u_time` / `u_resolution`, buffer capped at 2x DPR, loop stopped off-screen. That buys fluid colour mixing, noise fields, gradient flow and aurora warping; scene graphs and particle swarms are what the library buys you, so take those from paw-fx, or declare `three` / `ogl`. The `webgl-components` skill carries the mechanics (DPR, aliasing, context loss, many-instances-per-page).
 
 *THE CANVAS GUARDRAIL:* the page is PRERENDERED, so the `<canvas>` MUST sit over a polished CSS fallback and look premium before the context ever initializes. paw-fx effects satisfy this by construction (each ships a CSS-only resting state); a hand-written canvas still owes the fallback. Two cases prune the bundle and run no JS at all: a site that declared `keepsClientBundle: false`, and every ripple site. There, ship the CSS background alone.
 
@@ -126,13 +118,13 @@ The family below sets the whole token system so each site looks *designed for th
 
 **C. Editorial-Luxury** - lifestyle, food, real estate, heritage craft, publications. Warm bone/cream ground, deep espresso or brick-red text/accent, optional 3% film-grain overlay for a paper feel (beware the beige+brass default - see 2.G's premium-consumer ban and rotate). A justified display **serif** (one of the few places serif is right - Bodoni Moda, Newsreader, Literata, Playfair Display) paired with a clean sans body. Flat, editorial, asymmetric grid, generous margins, hairline rules not boxes. Minimal, slow, tasteful motion - a quiet fade, no bounce.
 
-**D. Warm-Minimalist (Notion / editorial-doc)** - productivity, content, calm consumer. Warm off-white `#faf9f6` / pure white ground, charcoal `#2f3437` text, muted pastel spot accents used only semantically (pale blue/green/yellow chips). Clean humanist/geometric sans (Hanken Grotesk, Onest), optional editorial serif for the hero only; mono for meta. Crisp 1px `#eaeaea` borders, small radius (8-12px), shadows near-zero (opacity < 0.05). No pills on big containers. No gradients. Subtle, functional motion, `transform: scale(0.98)` on press.
+**D. Warm-Minimalist (Notion / editorial-doc)** - productivity, content, calm consumer. Warm off-white `#faf9f6` ground, charcoal `#2f3437` text, muted pastel spot accents used only semantically (pale blue/green/yellow chips). Clean humanist/geometric sans (Hanken Grotesk, Onest), optional editorial serif for the hero only; mono for meta. Crisp 1px `#eaeaea` borders, small radius (8-12px), shadows near-zero (opacity < 0.05). No pills on big containers. No gradients. Subtle, functional motion, the `sites-craft` press scale.
 
 **E. Brutalist / Structural** - bold statements, dev-culture, events, drops. Raw black-on-white (or one loud flat color), high contrast, no gradients, no soft shadows. Mono or condensed grotesk, oversized, tight, often uppercase. Hard borders (2-3px solid), sharp corners (radius 0), visible grid, offset/overlap. Instant or snappy motion - glitch/marquee at most once.
 
 **F. Dark-Tech / Terminal** - security, infra, crypto, hacker-adjacent. Deep near-black, one neon-ish accent used *sparingly* (no page-wide glow), mono everywhere. Hairline grid, subtle scanline/noise on a FIXED overlay only, flat cards. Type-scramble/typewriter once, otherwise still.
 
-**G. Light Product-Led (Lovable / Cohere / Krea)** - AI tools, creator tools, modern SaaS, waitlists: anything whose product can be SHOWN. Light off-white ground (dark variant via `prefers-color-scheme`), near-black ink, black pill CTA (white in dark mode). The only colour is one multi-stop gradient (e.g. orange, pink, violet, blue) spent on a large rounded panel behind the product visual, with fine grain; never on text or buttons. One grotesk, weight 500 display with tight tracking, the second half of a headline greyed. The hero is a calm headline, the action, then a big realistic product screen inside the gradient panel. Motion: the gradient drifting slowly, one element in the product visual moving.
+**G. Light Product-Led (Lovable / Cohere / Krea)** - AI tools, creator tools, modern SaaS, waitlists: anything whose product can be SHOWN. Light off-white ground (dark variant via `prefers-color-scheme`), near-black ink, black pill CTA (white in dark mode). The only colour is one multi-stop gradient (e.g. orange, pink, violet, blue) spent on a large rounded panel behind the product visual, with fine grain; never on text or buttons. One grotesk, weight 500 display with tight tracking, the second half of a headline greyed. The hero is a calm headline, the action, then a big realistic product screen inside the gradient panel. Motion: one element in the product visual moving; the gradient panel holds still.
 
 **Variance mandate + palette rotation.** Never ship the same family twice in a row for similar briefs. Rotate the accent and neutral temperature within a family so two sites don't look identical. State the family in the Design Read so the choice is deliberate.
 
@@ -157,7 +149,7 @@ The family below sets the whole token system so each site looks *designed for th
 ## MODULE 3: LAYOUT & MOTION ENGINE
 
 ### 3.A Composition comes from the references
-The layout of each section comes from the real references you opened in research (PHASE 1b), not from a house pattern. Take the structure the good ones share: what carries the fold, where the product visual sits, how sections hand off to each other. When research came back empty, compose from the brief and what the product needs to show. The only layout floor: multi-column layouts collapse to one clean column below ~768px with no horizontal scroll.
+The layout of each section comes from the real references you opened in research (PHASE 1b), not from a house pattern. Take the structure the good ones share: what carries the fold, where the product visual sits, how sections hand off to each other. When research came back empty, compose from the brief and what the product needs to show. The only layout floor: no horizontal scroll from 320px to 1920px, and one clean column at phone widths. The content decides where a layout breaks, not a fixed number.
 
 ### 3.C Materiality & depth (anti-card-overuse)
 - **Cards only when elevation means something.** If nothing floats, group with whitespace, a `border-top` hairline, or a divided list instead of boxing everything. At high density, drop card boxes and separate with 1px lines.
@@ -211,7 +203,7 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 
 ## MODULE 4: COPY & CONTENT ANTI-SLOP RULES
 
-*   **The Em-Dash Prohibition:** The em dash (`—`, U+2014) and the en dash (`–`, U+2013) are banned as separators in visible copy, the single loudest text tell, with no "sparingly" allowance. Use clean punctuation (colons, commas, periods); split the sentence in two, or use parentheses; use a spaced hyphen ` - ` in attribution. Ranges take a plain hyphen (`2018-2026`, `$40-80`). One visible `—` or `–` fails pre-flight.
+*   **Em dashes: zero.** No em dash (`—`, U+2014) in any visible copy you write: headlines, body, buttons, captions, alt text, footer. It is the loudest text tell and there is no "sparingly". Fix one by restructuring: split the sentence, or rewrite it around its point. Swapping in a colon or a spaced hyphen keeps the same rhythm and the same tell. The en dash (`–`) appears only inside a numeric range (`2018–2026`, `$40–80`; a plain hyphen works too). Copy the user supplied ships verbatim, dashes included. One generated em dash fails pre-flight.
 *   **Copy self-audit before ship.** Re-read every visible string (headlines, subheads, eyebrows, buttons, body, captions, alt, footer). Rewrite anything grammatically broken, with unclear referents, or that reads like an LLM trying to sound thoughtful (forced wordplay, mock-poetic micro-meta, fake-craftsman labels like "From the field").
 *   **Organic Metrics Only:** BANNED: `99.99%`, `50%`, `1,000+ users`. A number the brief supplied ships exactly as given; one it did not is a marked placeholder or left out, never a realistic-looking invention.
 *   **Zero Empty Filler Words:** Completely omit verbs like *Elevate, Revolutionize, Next-Gen, Empower, Supercharge, Seamless, Unleash*. Write explicit, cold technical or practical outcomes. Specificity is the conversion lever: "Cut invoice time from 3 days to 20 minutes" beats "Streamline your workflow."
@@ -226,7 +218,7 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 
 ## MODULE 5: AI TELLS - off by default, built well on request
 
-Shapes models reach for because other models reached for them, not because a page needed them. Read every NO below as **never unprompted**, not as never: when the brief ASKS for a marquee, a gradient headline, a glow, a halo or an eyebrow chip, build it, and build it better than the default version - a named request is the spec (MODULE 0), and only a reflex is a tell. Two things no brief can ask you to break, because they are defects rather than defaults: the legibility floor (contrast, text that fits its container and is not occluded, headings in order) and asset honesty (never a fabricated `src`, never an invented fact). Bans already stated where they are acted on (Inter and serif in 2.F, purple/neon/pure-black in 2.G, card overuse in 3.C, decorative grounds in 2.B) are tells too and are not repeated here.
+Shapes models reach for because other models reached for them, not because a page needed them. Read every NO below as **never unprompted**, not as never: when the brief ASKS for a marquee, a gradient headline, a glow, a halo or an eyebrow chip, build it, and build it better than the default version - a named request is the spec (MODULE 0), and only a reflex is a tell. Two things no brief can ask you to break, because they are defects rather than defaults: the legibility floor (contrast, text that fits its container and is not occluded, headings in order) and asset honesty (never a fabricated `src`, never an invented fact). Bans already stated where they are acted on (Inter and serif in 2.F, purple/neon in 2.G, pure black in 2.B, card overuse in 3.C, decorative grounds in 2.B) are tells too and are not repeated here.
 
 **Borders and edges.** NO accent stripe down one edge of a card (`border-left: 4px solid`): a coloured bar on one side is how an alert is drawn, so a plain card wearing one reads as a warning that never resolves. NO heavy coloured border on a rounded element, which fights the radius it sits on. NO hairline border AND a wide shadow defining the same edge; one treatment per edge. NO `border-top` + `border-bottom` on every row of a long list. NO radius past ~32px on a card, which squeezes the content into a blob. NO card nested inside a card (3.C.A is the one sanctioned nesting).
 
@@ -242,7 +234,7 @@ Shapes models reach for because other models reached for them, not because a pag
 
 **Structure.** NO control without a destination: every nav item, button and footer link goes somewhere that exists, or it goes. NO fake terminal or code window standing in for a product; NO "Most Popular" badge on a pricing tier the brief did not single out; NO three-step "How it works" because the template has three.
 
-**Assets.** NO fabricated asset URLs, since a made-up `src` is broken media on a live site. Check `list_site_assets` FIRST: the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them. Then `search_stock_images`, rendering its `credit`. Then `generate_site_image` for what stock cannot supply (a bespoke hero, a product or concept shot, a brand texture), which costs money per image, so use it deliberately rather than for ordinary photography; and `generate_site_video` for a hero that MOVES, dearer again, one moment only (`engine: "motion"` gives an animated brand-graphics background loop on any server, `"generative"` gives photoreal footage where fal is set up). Fall back to a tasteful gradient. Any asset the brief's manifest hands you is fair game at its native medium, video included: there is no images-only rule and no approved-media list.
+**Assets.** NO fabricated asset URLs, since a made-up `src` is broken media on a live site. Check `list_site_assets` FIRST: the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them. Then `search_stock_images`, rendering its `credit`. Then `generate_site_image` for what stock cannot supply (a bespoke hero, a product or concept shot, a brand texture), which costs money per image, so use it deliberately rather than for ordinary photography; and `generate_site_video` for a hero that MOVES, dearer again, one moment only (`engine: "motion"` gives an animated brand-graphics background loop on any server, `"generative"` gives photoreal footage where fal is set up). The last rung is a flat tone from the palette, or drop the image slot. Any asset the brief's manifest hands you is fair game at its native medium, video included: there is no images-only rule and no approved-media list.
 
 ---
 
@@ -253,10 +245,10 @@ confirmation pass, not a second statement of the rules: where one fails, the
 module named beside it is where the rule lives.
 
 - [ ] **M0** - every section traces to the brief, nothing invented, placeholders flagged, supplied content verbatim.
-- [ ] **M1** - the Creative Direction Declaration is at the top, the Design Read names a 2.E family, dials set from the read.
+- [ ] **M1** - the Vision Ledger and Design Read were written in your reasoning (none of it in the page source), the read names a 2.E family, dials set from the read.
 - [ ] **2.B / 2.F / 2.G** - tuned ground, one accent held page-wide, a distinctive display face, one radius system.
 - [ ] **3.A** - the composition traces to the references you opened, and the fold shows the offer (and the product, when it can be shown).
 - [ ] **3.E / 3.F** - with client JS disabled the page looks finished; media carries width/height or aspect-ratio.
 - [ ] **M4 / M5** - zero em dashes in visible text, the copy self-audit done, and one deliberate pass against the tells list.
 - [ ] **M5** - every `href="#x"` matches an `id` on the page, every page link exists, every form has a submit target. Checked in the code, not assumed.
-- [ ] Multi-column layouts collapse to one clean column below 768px with no horizontal scroll.
+- [ ] **3.A** - no horizontal scroll from 320px to 1920px, one clean column at phone widths.

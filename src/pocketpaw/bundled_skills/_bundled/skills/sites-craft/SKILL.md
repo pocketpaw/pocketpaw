@@ -1,7 +1,7 @@
 ---
 name: sites-craft
 description: |
-  The CRAFT MECHANICS for a Paw Site — how to actually build the type scale, the
+  The CRAFT MECHANICS for a Paw Site: how to actually build the type scale, the
   colour ramp, the spacing rhythm and the surface treatment, with exact values.
   Invoke it WHILE AUTHORING sections, at the moment you lock tokens and again
   whenever you set a font size, pick a colour step, space a group, round a
@@ -10,15 +10,9 @@ description: |
   constructed so they read as one system instead of a pile of one-off values.
   It answers "what line-height does a heading take", "how do I build a ramp",
   "what radius does a nested element get", "how much space separates two
-  groups". Generative, not corrective — `sites-interface-review` checks a built
+  groups". Generative, not corrective: `sites-interface-review` checks a built
   page against these same rules; this one is for while you are writing it.
 ---
-
-<!-- New file 2026-09-08: the AUTHORING half of the jakubkrehel/skills (MIT) craft
-     rules. sites-interface-review already carries them as review criteria, but a
-     review skill only fires after the page exists, and design-taste carries taste
-     (which font, which palette) rather than mechanics (how a ramp is built, what a
-     nested radius is). This is the teaching layer, phrased as do-this. See VENDORED.md. -->
 
 # Sites: craft mechanics
 
@@ -31,18 +25,18 @@ that looks assembled is almost entirely in this file: a real scale instead of
 four arbitrary sizes, a ramp whose steps each have a job, groups separated by
 space that means something, radii that agree.
 
-**Precedence.** design-taste governs every CHOICE — if it bans a font or a
+**Precedence.** design-taste governs every CHOICE: if it bans a font or a
 palette, that is final. This file governs the CONSTRUCTION of whatever it chose.
 They do not conflict: one names the ingredient, the other sets the method.
 
 ---
 
-## 1. Type — build a scale, then stay on it
+## 1. Type: build a scale, then stay on it
 
 **Use a modular scale with semantic names.** Pick a ratio (about 1.2 for dense
 UI, 1.25-1.333 for marketing, up to 1.6 for editorial display) and generate the
 steps. Name them by role (`--text-body`, `--text-lead`, `--text-display`), not by
-appearance. Then deviate from it as little as possible — hard-coded sizes with no
+appearance. Then deviate from it as little as possible; hard-coded sizes with no
 system behind them are what make a page feel assembled.
 
 **Heading sizes descend with level.** A visually subordinate heading never
@@ -66,7 +60,7 @@ line-height does not.
 **Letter-spacing by size.** Large display type usually wants slightly negative
 tracking (`-0.02em` to `-0.04em`). Small uppercase labels need slightly positive
 (`0.04em` to `0.08em`) or the letters crowd. Body copy at reading size needs
-neither — leave it at `0`.
+neither, so leave it at `0`.
 
 **Cap the measure.** 60-75 characters per line for anything anyone reads.
 `max-width: 62ch` on body copy. Full-width paragraphs are the fastest way to make
@@ -96,7 +90,7 @@ non-variable fallback renders.
 ---
 
 **Derive the vertical rhythm from the leading.** `line-height x 0.5` gives the
-smallest vertical step the page should use — body text at `16px/1.5` gives `24px`
+smallest vertical step the page should use: body text at `16px/1.5` gives `24px`
 leading and therefore a `12 / 24 / 48 / 72` ladder. Spacing chosen off a
 different grid from the type is why a page can have a correct scale and still
 feel unsettled.
@@ -109,18 +103,18 @@ noise.
 **Fluid type belongs in `clamp()`, not in breakpoints.**
 `clamp(2.5rem, 5vw, 4.5rem)` for a display line removes a whole class of
 in-between-width defects. Going from phone to desktop, body moves barely at all
-(`16px` to `16-18px`) while a display line moves a lot (`32-36px` to `48-64px`) —
-heading leading gets *tighter* as size grows, and letter-spacing does not change.
+(`16px` to `16-18px`) while a display line moves a lot (`32-36px` to `48-64px`).
+Heading leading gets *tighter* as size grows, and letter-spacing does not change.
 
 **Tighten tracking only when all four are true**: the text is `32px` or larger,
 it is a headline rather than body, its weight is not light, and you have looked
-at the awkward pairs — `AV`, `WA`, `To`. Negative tracking on body text at any
+at the awkward pairs (`AV`, `WA`, `To`). Negative tracking on body text at any
 size is the fastest way to make a page tiring to read.
 
 **Text that can overflow needs to be told how.** A long word in a narrow column
 takes `overflow-wrap: break-word`; a summary line capped at two takes
 `-webkit-line-clamp`. **And a flex child will not truncate at all until it has
-`min-width: 0`** — the default `min-width: auto` refuses to shrink below the
+`min-width: 0`**: the default `min-width: auto` refuses to shrink below the
 content, so the text escapes the container instead of ellipsing. That one is
 worth knowing by heart; it looks like a broken layout, never like a text rule.
 
@@ -132,7 +126,7 @@ the differences between a page that was typeset and one that was typed.
 
 ---
 
-## 2. Colour — build a ramp, not a set of colours
+## 2. Colour: build a ramp, not a set of colours
 
 **A system is ramps, not colours.** One neutral ramp, one accent ramp, and only
 the status ramps the page actually renders. A `warning` ramp nothing uses is
@@ -146,7 +140,7 @@ solid fill, secondary text, body text. Do not generate a step nothing consumes.
 
 1. Steps move evenly in **perceived** lightness, not in whatever the colour
    format calls lightness. (This is why `oklch()` is the best default for new
-   work — its numbers behave the way this rule describes.)
+   work: its numbers behave the way this rule describes.)
 2. **Hue stays constant** end to end. A ramp that drifts hue reads as two
    different colours at its ends.
 3. **Vividness peaks mid-ramp** and falls off at both ends.
@@ -174,11 +168,11 @@ label: a filled button reads as primary across the room, while accent-coloured
 text on a neutral button reads as a link.
 
 **Measure the rendered pair.** Contrast is foreground against the background it
-*actually sits on* — the tinted callout, the raised card — not against the page.
+*actually sits on* (the tinted callout, the raised card), not against the page.
 And **fix a failure with lightness, not hue**: lightness is the channel contrast
 responds to. Changing the hue changes the brand and usually does not fix it.
 
-**Gradients: pick the interpolation space.** `in oklab` is the best default —
+**Gradients: pick the interpolation space.** `in oklab` is the best default:
 even brightness, no hue surprises. Use `in oklch` when a two-hue gradient goes
 grey in the middle. The plain sRGB default mutes the midpoint, which is what you
 get by not asking.
@@ -186,12 +180,12 @@ get by not asking.
 ---
 
 **Tell the browser which scheme the page is in.** This is the most-skipped line
-in dark design and the failure is never in your CSS — it is in the parts of the
+in dark design and the failure is never in your CSS. It is in the parts of the
 page the browser paints for you.
 
 ```html
 <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
 ```
 
 ```css
@@ -207,7 +201,7 @@ Windows a native `<select>` additionally needs its own background and colour set
 in dark, because it does not fully inherit.
 
 **Roughly 60-30-10 by area.** Neutrals carry most of the page, text hierarchy
-takes the next slice, and accent is the smallest — 5-10%, not a third. When a
+takes the next slice, and accent is the smallest: 5-10%, not a third. When a
 page looks loud and no single element is wrong, this ratio is what broke.
 
 **At most two colours in any one component.** A card with a brand border, a tinted
@@ -216,7 +210,7 @@ spend.
 
 **A semantic colour is a set, not a value.** Success, warning and error each need
 a foreground, a background, a border and an on-colour for text that sits on the
-fill — `--success`, `--success-bg`, `--success-border`, `--on-success`. Shipping
+fill: `--success`, `--success-bg`, `--success-border`, `--on-success`. Shipping
 only the first is why status messages end up as unreadable text on a tinted
 block.
 
@@ -226,17 +220,17 @@ yellow-green stops reading as a warning. Decide it once, in the ramp, rather tha
 per component.
 
 **A gradient is never the only thing making something visible.** Remove it: if
-the element disappears, the element was never designed — it was decorated.
+the element disappears, the element was never designed; it was decorated.
 
 ---
 
-## 3. Space — grouping is the layout
+## 3. Space: grouping is the layout
 
 **Group with space, not lines.** Space first, a background shape second,
 a separator line last and only where space alone cannot carry it.
 
 **The 2x rule.** The gap *between* groups must be at least **twice** the gap
-*within* one — 8px inside, 16px+ outside. Anything less and the grouping reads as
+*within* one: 8px inside, 16px+ outside. Anything less and the grouping reads as
 noise rather than structure. This one rule fixes more "it feels cluttered" than
 any other change on this page.
 
@@ -250,12 +244,12 @@ filled controls, about `24px` around borderless text- and icon-only ones.
 edge; text and controls stay inside the layout margins.
 
 **Leave room to grow.** No fixed width or height on a text container. A one-word
-button label is the riskiest string on the page — short strings grow
+button label is the riskiest string on the page, because short strings grow
 proportionally most when the copy changes.
 
 ---
 
-## 4. Surface — the details that read as finish
+## 4. Surface: the details that read as finish
 
 **Concentric radius.** `outer radius = inner radius + padding`. A 16px card with
 8px of padding gives its inner element an 8px radius. Mismatched nested radii is
@@ -263,7 +257,7 @@ the most common thing that makes an interface feel subtly wrong without anyone
 being able to name it.
 
 **Optical over geometric alignment.** A play triangle, an asymmetric glyph, an
-icon beside a label — centre them by eye, not by box. Geometric centring looks
+icon beside a label: centre them by eye, not by box. Geometric centring looks
 off for anything whose visual mass is not centred. A play triangle wants
 `0.5-1px` to the right; a chevron or arrow wants a nudge toward its point. **The
 test:** drop the icon into a circle. If it does not look centred, it is not.
@@ -274,11 +268,11 @@ weighs, not what the box measures.
 
 **Shadows for elevation, borders for structure.** Where a border exists only to
 fake depth, use a layered transparent `box-shadow` instead. Keep borders that
-communicate structure or state — dividers, selection, focus.
+communicate structure or state: dividers, selection, focus.
 
 **Image outlines.** A `1px` outline at low opacity gives images consistent depth:
 `oklch(0 0 0 / 0.1)` in light, `oklch(1 0 0 / 0.1)` in dark. **Never a tinted
-neutral** like slate or zinc — a tinted outline picks up the surface beneath and
+neutral** like slate or zinc: a tinted outline picks up the surface beneath and
 reads as dirt on the image edge.
 
 **Scale on press: `scale(0.96)`.** Always `0.96`. Below `0.95` feels exaggerated,
@@ -295,7 +289,7 @@ nudge. An icon sized off nothing in particular is the most common reason a row
 of links looks subtly uneven.
 
 **Transition only what changes.** Name the properties (`transition-property:
-opacity, transform`). Never `transition: all` — it animates things you did not
+opacity, transform`). Never `transition: all`; it animates things you did not
 mean, including layout, and costs frames.
 
 **Icons recolour, they do not swap.** One SVG using `currentColor`, taking its
@@ -303,7 +297,7 @@ states from CSS colour and opacity. Outline is the default variant; fill marks
 active.
 
 **Load the hero eagerly, everything else lazily.** The largest image above the
-fold carries `fetchpriority="high"` and NO `loading="lazy"` — lazy-loading the
+fold carries `fetchpriority="high"` and NO `loading="lazy"`. Lazy-loading the
 LCP image is the most common self-inflicted performance defect on a landing
 page. Everything below the fold takes `loading="lazy"` and `decoding="async"`.
 Every `<img>` carries explicit `width` and `height` (or an `aspect-ratio`) so
@@ -311,7 +305,7 @@ the page does not reflow as images arrive.
 
 ---
 
-## Motion — timing, easing and origin
+## Motion: timing, easing and origin
 
 `pocketpaw-design-taste` 3.D decides WHICH motion a page earns and holds the
 Tier-0 rule that it stays CSS-only and static-safe. This decides how whatever it
@@ -333,7 +327,7 @@ component are why a page feels like several pages.
 }
 ```
 
-`--ease-out` is the default for this surface, in **both** directions — an exit on
+`--ease-out` is the default for this surface, in **both** directions: an exit on
 `ease-in` accelerates away from the cursor and reads as the element being yanked.
 Reach for `--ease-emphasized` only on the one deliberate hero moment a page is
 allowed.
@@ -365,7 +359,7 @@ svg .spin { transform-box: fill-box; transform-origin: center; }
 ```
 
 **Honour `prefers-reduced-motion` by redefining the tokens, not by hunting
-rules.** Reducing motion means removing travel, not removing feedback — a fade
+rules.** Reducing motion means removing travel, not removing feedback. A fade
 stays, a slide, a scale and any parallax go.
 
 ```css
@@ -377,13 +371,13 @@ stays, a slide, a scale and any parallax go.
 
 ---
 
-## The page shell — set once, at the top
+## The page shell: set once, at the top
 
 These are written once when the page is created and never touched again, which
 is exactly why they get forgotten. None of them is visible until it is missing.
 
 **The viewport meta allows zoom.** `width=device-width, initial-scale=1` and
-nothing else. Never `user-scalable=no` and never `maximum-scale=1` — that tag is
+nothing else. Never `user-scalable=no` and never `maximum-scale=1`: that tag is
 what makes the 200% zoom floor impossible to meet, and it is usually pasted in
 from a template nobody read.
 
@@ -395,19 +389,19 @@ pointing at hidden behind the bar.
 delay a phone otherwise waits out before firing a tap, which is the difference
 between a page that feels native and one that feels like a website.
 
-**`<link rel="preconnect">` every origin you pull from** — the font CDN, the
-stock-photo host. The connection gets set up while the HTML is still parsing
+**`<link rel="preconnect">` every origin you pull from** (the font CDN, the
+stock-photo host). The connection gets set up while the HTML is still parsing
 rather than when the first byte is wanted.
 
 ---
 
-## Forms and input — when the page collects something
+## Forms and input: when the page collects something
 
 A lead form is the conversion point of most pages here, and it is where craft
 failures cost a real submission rather than a compliment.
 
 **Name the field so the browser can fill it.** Every input carries a real
-`autocomplete` value — this is the single highest-leverage thing on a form,
+`autocomplete` value. This is the single highest-leverage thing on a form,
 because a filled form gets finished and an empty one gets abandoned.
 
 | Field | `autocomplete` |
@@ -421,8 +415,8 @@ because a filled form gets finished and an empty one gets abandoned.
 | New password | `new-password` |
 | Existing password | `current-password` |
 
-Set `autocomplete="off"` on anything that is NOT an account field — a search box
-or a quantity — so a password manager stops offering to fill it.
+Set `autocomplete="off"` on anything that is NOT an account field (a search box
+or a quantity), so a password manager stops offering to fill it.
 
 **`type` and `inputmode` pick the mobile keyboard.** `type="email"`,
 `type="tel"`, `inputmode="numeric"` for codes. A numeric field that opens a QWERTY
@@ -435,13 +429,13 @@ squiggles under a correctly typed email address look like an error.
 accessibility failure and it defeats every password manager.
 
 **The label and its control are ONE hit target.** Wrap the checkbox and its text
-in a single `<label>` with `display: flex; gap: 8px; cursor: pointer` — a
+in a single `<label>` with `display: flex; gap: 8px; cursor: pointer`. A
 checkbox whose text is not clickable is a 16px target where a 200px one was
 available.
 
 **Wire errors so they are announced, not just drawn.** The failing input takes
 `aria-invalid="true"` and `aria-describedby` pointing at the message; the message
-carries `role="alert"`. On submit, move focus to the first failing field —
+carries `role="alert"`. On submit, move focus to the first failing field;
 otherwise a keyboard or screen-reader user is told something failed and left with
 no way to find it.
 
@@ -451,21 +445,21 @@ every message a form can produce.
 
 ---
 
-## 5. The floor — non-negotiable on a public page
+## 5. The floor: non-negotiable on a public page
 
 - **Hit areas at least 44x44px**, even where the visual control is smaller.
 - **A visible focus ring** on everything focusable, via **`:focus-visible`, not
-  `:focus`** — `:focus` also fires on a mouse click, which is why rings get
+  `:focus`**, because `:focus` also fires on a mouse click, which is why rings get
   removed in the first place. Never removed without a replacement; at least 2px
   on a dark ground. Where an outline collides with a rounded control, the
   two-ring `box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent)` reads
   cleanly on any ground.
-- **Never rely on colour alone** to carry meaning — pair it with a label, an
+- **Never rely on colour alone** to carry meaning; pair it with a label, an
   icon, or a shape.
 - **Honour `prefers-reduced-motion`** with a complete fallback, not a broken one.
 - **Real elements**: `<button>` for actions, `<a>` for navigation, one `<h1>`,
   headings in order, real landmarks.
-- **Alt text by purpose** — describe the job the image does, `alt=""` if it is
+- **Alt text by purpose:** describe the job the image does, `alt=""` if it is
   decorative.
 - **Survive 200% zoom** without clipping or horizontal scroll.
 - **Contrast floors**: `4.5:1` for body text, `3:1` for large text and for the

@@ -1,10 +1,6 @@
 """The scorers — one per behaviour the /sites prompt spends tokens producing.
 
-New file 2026-09-08 (feat/sites-design-skills), part of SD-6.
-Updated 2026-09-27 (feat/sites-visual-research): dropped the not-centered-hero and
-no-three-equal-cards scorers with the layout rules they measured.
-
-Each scorer takes the SOURCE of a generated site (HTML, or a Svelte/React
+Part of SD-6. Each scorer takes the SOURCE of a generated site (HTML, or a Svelte/React
 component file — they are all markup plus CSS for these purposes) and returns a
 ``Verdict``. A scorer answers one question, names the prompt rule it is measuring,
 and explains what it saw, because a bare False on a 40 KB page is not actionable.
@@ -129,19 +125,26 @@ def rules(css: str) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------
 
 
-def vision_ledger(source: str) -> Verdict:
-    """MODULE 1 / PHASE 1: the Creative Direction Declaration is stated up front.
+_DIRECTION_NOTES = re.compile(
+    r"creative\s+direction\s+declaration|vision\s+ledger|design\s+read\s*:|"
+    r"art\s+direction\s*:",
+    re.I,
+)
 
-    The one behaviour that proves the agent ran the direction engine at all rather
-    than reaching for a default. It is an HTML comment, so it is checked against
-    the raw source, not the visible text.
+
+def vision_ledger(source: str) -> Verdict:
+    """MODULE 1 / ART DIRECTION: the direction notes stay private.
+
+    The Vision Ledger, the Design Read and the art direction are written in the
+    agent's reasoning and never shipped. Notes like these in public source (an
+    HTML or CSS comment, a hidden block) are chatbot residue a visitor can read,
+    so this checks the RAW source, comments included, not the visible text.
     """
     n = "vision-ledger"
-    if re.search(r"creative\s+direction\s+declaration", source, re.I):
-        return _pass(n, "declaration comment present")
-    if re.search(r"design\s+read\s*:", source, re.I):
-        return _pass(n, "design read stated without the comment wrapper")
-    return _fail(n, "no Creative Direction Declaration and no Design Read")
+    hit = _DIRECTION_NOTES.search(source)
+    if hit:
+        return _fail(n, f"direction notes shipped in the page: {hit.group(0)!r}")
+    return _pass(n, "no direction notes in the page source")
 
 
 _PLAIN_GROUND = re.compile(
@@ -184,11 +187,13 @@ def background(source: str) -> Verdict:
     return _pass(n, f"{len(grounds)} page-ground rule(s), none plain")
 
 
-_DASHES = re.compile(r"[—–]")
+# Every em dash, and an en dash anywhere except inside a numeric range
+# (`2018–2026`, `$40–80`), which MODULE 4 allows.
+_DASHES = re.compile(r"—|(?<!\d)–|–(?!\s*[$£€]?\d)")
 
 
 def no_em_dash(source: str) -> Verdict:
-    """MODULE 4: zero em/en dashes in VISIBLE text. The loudest text tell."""
+    """MODULE 4: zero em dashes in VISIBLE text, and en dashes only in ranges."""
     n = "no-em-dash"
     text = visible_text(source)
     if _too_little_copy(text):
@@ -196,7 +201,8 @@ def no_em_dash(source: str) -> Verdict:
     hits = _DASHES.findall(text)
     if not hits:
         return _pass(n, "none in visible text")
-    sample = next((m.group(0) for m in re.finditer(r".{0,32}[—–].{0,32}", text)), "")
+    first = _DASHES.search(text)
+    sample = text[max(0, first.start() - 32) : first.end() + 32] if first else ""
     return _fail(n, f"{len(hits)} in visible text, e.g. …{sample.strip()}…")
 
 
