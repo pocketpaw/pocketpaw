@@ -8,16 +8,21 @@
 #
 #   1. NETWORK: ``vendor/hf-network-guard.cjs`` is preloaded into the CLI and
 #      points Chrome at a dead proxy with only the CLI's own project file server
-#      bypassed, and no DNS. This is the boundary; it holds even if 2 is fooled.
-#   2. CONTENT (this module): ``unsafe_constructs`` is an ALLOW-list check over a
+#      bypassed, and no DNS. THIS IS THE BOUNDARY; it holds even if 2 is fooled.
+#   2. CONTENT (this module): BEST-EFFORT, not a sandbox. Static checks over JS
+#      text cannot be complete, and html.parser and Chrome disagree at the edges
+#      (raw-text elements inside <svg>, script escape states), so the scanner
+#      rejects those edges outright instead of modelling them. Its job is to keep
+#      honest compositions simple and catch obvious abuse early, with a clear
+#      repair message. ``unsafe_constructs`` is an ALLOW-list check over a
 #      real HTML parse. Only known tags; the only external script is the vendored
 #      anime.js; the only URLs are bare filenames present in the temp project or
 #      ``#fragment`` references; CSS cannot load anything; inline JS may not touch
 #      network, navigation, storage, eval-likes, URL-bearing properties, or build
 #      names by string concatenation.
 #   3. ENVIRONMENT: ``renderer_env`` passes the CLI an allow-list of variables
-#      (PATH, home/temp dirs, locale, HYPERFRAMES_*/PRODUCER_*), never the
-#      server's secrets.
+#      (PATH, home/temp dirs, locale, HYPERFRAMES_*/PRODUCER_* minus the browser
+#      path overrides), never the server's secrets.
 #
 # Anything this module rejects goes back to the LLM once as a repair problem.
 
@@ -41,6 +46,9 @@ _SVG_TAGS = {
     "text", "tspan", "pattern", "desc",
 }  # fmt: skip
 ALLOWED_TAGS = frozenset(_HTML_TAGS | _SVG_TAGS)
+_VOID_TAGS = frozenset({"meta", "img", "br"})
+_SCRIPT_TEXT_RE = re.compile(r"(?i)<\s*/?\s*script")
+
 #: What inline JS may create: never a script, style, meta or img.
 _CREATABLE = ALLOWED_TAGS - {"script", "style", "meta", "html", "head", "body", "title", "img"}
 
@@ -84,7 +92,10 @@ _JS_BANNED: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"\blocation\b|\bopen\s*\(|\bopener\b|\bpostMessage\b", "navigates or messages"),
         (r"\bcookie\b|localStorage|sessionStorage|indexedDB|\bcaches\b", "touches storage"),
         (r"\bnavigator\b", "reads navigator"),
-        (r"\beval\b|\bFunction\s*\(|\bnew\s+Function\b|\.constructor\b", "evaluates code"),
+        (r"\beval\b|\bFunction\s*\(|\bnew\s+Function\b|constructor", "evaluates code"),
+        (r"Object\s*\.\s*assign|defineProperty|__proto__|prototype", "rewires objects"),
+        (r"\.\s*(?:join|concat|repeat)\s*\(", "assembles strings at runtime (join/concat/repeat)"),
+        (r"<!--|-->|<\s*/?\s*script", "contains markup or script-escape sequences"),
         (
             r"\bReflect\b|\bProxy\b|\bglobalThis\b|\bself\b|\bwindow\s*\[|\bdocument\s*\[",
             "reaches globals dynamically",
@@ -135,15 +146,28 @@ class _Scanner(HTMLParser):
         self.inline_js: list[str] = []
         self.css: list[str] = []
         self._raw: str | None = None
+        self._stack: list[str] = []
 
     def _bad(self, message: str) -> None:
         if message not in self.problems:
             self.problems.append(message)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._open(tag, attrs, push=tag not in _VOID_TAGS)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._open(tag, attrs, push=False)
+
+    def _open(self, tag: str, attrs: list[tuple[str, str | None]], *, push: bool) -> None:
         if tag not in ALLOWED_TAGS:
             self._bad(f"uses a <{tag}> element, which is not allowed")
             return
+        # Chrome parses <svg><style>/<script> children as MARKUP, html.parser as
+        # raw text, so the scanner would never see what Chrome builds.
+        if tag in ("style", "script") and "svg" in self._stack:
+            self._bad(f"puts a <{tag}> inside <svg>; keep styles and scripts outside it")
+        if push:
+            self._stack.append(tag)
         names = {name for name, _ in attrs}
         if tag == "meta" and not names <= {"charset", "name", "content"}:
             self._bad("uses a <meta> other than charset/viewport (no http-equiv)")
@@ -160,17 +184,22 @@ class _Scanner(HTMLParser):
         for name, value in attrs:
             self._check_attr(tag, name, value or "")
 
-    handle_startendtag = handle_starttag
-
     def handle_endtag(self, tag: str) -> None:
         if tag in ("script", "style"):
             self._raw = None
+        if tag in self._stack:
+            while self._stack and self._stack.pop() != tag:
+                pass
 
     def handle_data(self, data: str) -> None:
         if self._raw == "script":
             self.inline_js.append(data)
         elif self._raw == "style":
             self.css.append(data)
+        elif _SCRIPT_TEXT_RE.search(data):
+            # Text that mentions a script tag means the parse and Chrome's
+            # disagree about where a script ended.
+            self._bad("has script markup in text content")
 
     def _check_attr(self, tag: str, name: str, value: str) -> None:
         if name.startswith("on"):
@@ -207,6 +236,8 @@ class _Scanner(HTMLParser):
 
 def _css_problems(css: str, allowed_files: frozenset[str]) -> list[str]:
     problems = [f"the CSS {why}" for pattern, why in _CSS_BANNED if pattern.search(css)]
+    if "<" in css:
+        problems.append("the CSS contains '<' (markup inside a style)")
     if _SCHEME_RE.search(css):
         problems.append("the CSS contains a URL scheme")
     for _q, target in _CSS_URL_RE.findall(css):
@@ -270,6 +301,9 @@ _ENV_ALLOW = frozenset(
     }
 )  # fmt: skip
 _ENV_PREFIXES = ("HYPERFRAMES_", "PRODUCER_")
+#: Overrides that would let the environment pick which browser binary runs.
+#: The CLI finds its pinned Chrome itself (the image bakes it into the cache).
+_ENV_DENY = frozenset({"HYPERFRAMES_BROWSER_PATH", "PRODUCER_HEADLESS_SHELL_PATH"})
 
 
 def renderer_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -279,7 +313,8 @@ def renderer_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
     return {
         k: v
         for k, v in env.items()
-        if k.upper() in _ENV_ALLOW or k.upper().startswith(_ENV_PREFIXES)
+        if (k.upper() in _ENV_ALLOW or k.upper().startswith(_ENV_PREFIXES))
+        and k.upper() not in _ENV_DENY
     }
 
 

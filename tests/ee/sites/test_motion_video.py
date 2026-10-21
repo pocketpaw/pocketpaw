@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 from pathlib import Path
@@ -279,7 +280,11 @@ async def test_a_hung_render_is_killed_on_timeout(monkeypatch, tmp_path) -> None
     guard = tmp_path / "guard.pids"
     guard.write_text("31337\n")
     browsers: list = []
-    monkeypatch.setattr(motion_video, "_kill_guarded_browsers", lambda g: browsers.append(g))
+
+    async def _kill_browsers(g):
+        browsers.append(g)
+
+    monkeypatch.setattr(motion_video, "_kill_guarded_browsers", _kill_browsers)
     with pytest.raises(MotionVideoError) as exc:
         await motion_video.render_project(tmp_path, tmp_path / "out.mp4", guard)
 
@@ -374,6 +379,23 @@ PROBES = {
     "literal concat": _with_js("const u = 'ht' + 'tp';"),
     "worker": _with_js("new Worker('w.js');"),
     "globalthis": _with_js("globalThis.x = 1;"),
+    # second review: parser-differential and JS-shallowness probes
+    "svg style img onerror": _with_body("<svg><style><img src=x onerror=fetch(1)></style></svg>"),
+    "svg style script": _with_body("<svg><style><script>fetch(1)</script></style></svg>"),
+    "svg script": _with_body("<svg><script>1</script></svg>"),
+    "markup in css": _with_css(".x{color:red}</style><img src=x>"),
+    "script double escape": _good_html().replace(
+        _SCRIPT_TAIL, "</script><script><!--<script></script>\nfetch(1)\n" + _SCRIPT_TAIL
+    ),
+    "comment close in js": _with_js("let a = 1; -->"),
+    "script text in body": _with_body("<div>&lt;script&gt;</div>"),
+    "constructor bare": _with_js("const C = [].filter['constru' + 'ctor'];"),
+    "constructor literal": _with_js("const F = (()=>1)['constructor'];"),
+    "object assign": _with_js("Object.assign(document.body.style, {background: x});"),
+    "define property": _with_js("Object.defineProperty(window, 'x', {});"),
+    "join": _with_js("const n = ['fe', 'tch'].join('');"),
+    "concat": _with_js("const n = 'fe'.concat('tch');"),
+    "repeat": _with_js("const n = 'a'.repeat(3);"),
 }
 
 
@@ -410,21 +432,25 @@ def test_the_renderer_env_is_an_allow_list(monkeypatch) -> None:
             "Path": "/usr/bin",
             "HOME": "/home/p",
             "LANG": "C.UTF-8",
-            "HYPERFRAMES_BROWSER_PATH": "/chrome",
+            "HYPERFRAMES_FFMPEG_PATH": "/ffmpeg",
+            "HYPERFRAMES_BROWSER_PATH": "/attacker/chrome",
             "AWS_SECRET_ACCESS_KEY": "s1",
             "FAL_AI_API_KEY": "s2",
             "AUTH_SECRET": "s3",
             "LITELLM_MASTER_KEY": "s4",
             "MONGODB_URI": "mongodb://u:p@h",
             "NODE_OPTIONS": "--require /evil.js",
+            "HYPERFRAMES_BROWSER_PATH_X": "kept, not an override",
+            "PRODUCER_HEADLESS_SHELL_PATH": "/attacker/chrome",
         }
     )
+    env.pop("HYPERFRAMES_BROWSER_PATH_X")
     assert env == {
         "Path": "/usr/bin",
         "HOME": "/home/p",
         "LANG": "C.UTF-8",
-        "HYPERFRAMES_BROWSER_PATH": "/chrome",
-    }
+        "HYPERFRAMES_FFMPEG_PATH": "/ffmpeg",
+    }, "secrets and browser-path overrides must not reach the CLI"
 
     monkeypatch.setenv("FAL_AI_API_KEY", "planted-secret")
     monkeypatch.setenv("NODE_OPTIONS", "--require /evil.js")
@@ -450,7 +476,12 @@ async def test_an_unguarded_render_is_discarded(monkeypatch, tmp_path) -> None:
     assert "network guard" in exc.value.message
     assert not out.exists()
 
-    (tmp_path / "guard.pids").write_text("1234\n")
+    (tmp_path / "guard.pids").write_text("1234\nUNGUARDED chromium-browser\n")
+    with pytest.raises(MotionVideoError) as exc:
+        await motion_video.render_project(tmp_path, out, tmp_path / "guard.pids")
+    assert "network guard" in exc.value.message, "ANY unguarded launch discards the output"
+
+    (tmp_path / "guard.pids").write_text("1234\nSYNC chrome\n")
     await motion_video.render_project(tmp_path, out, tmp_path / "guard.pids")
     assert out.read_bytes() == _MP4
 
@@ -494,6 +525,112 @@ async def test_the_overall_deadline_stops_the_job(monkeypatch) -> None:
         await motion_video.render_motion_video(prompt="x", workspace_id="ws-slow")
     assert exc.value.reason == "failed" and "longer than" in exc.value.message
     assert motion_video._SLOTS._value == 1, "the slot is released"
+
+
+def _fake_chrome(tmp_path: Path) -> Path | None:
+    """A copy of node named like a browser. Callers end its argv with ``--`` so
+    the guard's appended Chrome flags land in ``process.argv``."""
+    node = shutil.which("node")
+    if node is None:
+        return None
+    fake = tmp_path / ("chromium-browser.exe" if os.name == "nt" else "chromium-browser")
+    shutil.copyfile(node, fake)
+    fake.chmod(0o755)
+    return fake
+
+
+async def _node_with_guard(script: str, guard_file: Path) -> str:
+    env = {
+        **motion_video._cli_env(guard_file),
+        "FAKE_CHROME": "",
+    }
+    proc = await asyncio.create_subprocess_exec(
+        shutil.which("node"),
+        "-e",
+        script,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await asyncio.wait_for(proc.communicate(), 60)
+    assert proc.returncode == 0, err.decode()
+    return out.decode()
+
+
+@pytest.mark.asyncio
+async def test_the_guard_rewrites_browser_launches_and_tracks_live_ports(tmp_path) -> None:
+    """Every browser launch gets the dead proxy; only ports still listening
+    when Chrome starts are bypassed; the PID is logged."""
+    fake = _fake_chrome(tmp_path)
+    if fake is None:
+        pytest.skip("node is not installed")
+    guard = tmp_path / "guard.pids"
+    script = f"""
+const net = require('net'); const cp = require('child_process');
+const closed = net.createServer(); const open = net.createServer();
+closed.listen(0, '127.0.0.1', () => {{
+  const closedPort = closed.address().port;
+  closed.close(() => open.listen(0, '127.0.0.1', () => {{
+    const child = cp.spawn({json.dumps(str(fake))},
+      ['-e', 'process.stdout.write(JSON.stringify(process.argv))', '--', '--proxy-server=http://evil:1']);
+    let out = ''; child.stdout.on('data', d => out += d);
+    child.on('close', () => {{
+      process.stdout.write(JSON.stringify({{argv: JSON.parse(out), closedPort,
+        openPort: open.address().port}}));
+      open.close();
+    }});
+  }}));
+}});
+"""
+    report = json.loads(await _node_with_guard(script, guard))
+    argv = report["argv"]
+    assert "--proxy-server=http://127.0.0.1:9" in argv
+    assert "--proxy-server=http://evil:1" not in argv, "a caller's proxy flag is stripped"
+    bypass = next(a for a in argv if a.startswith("--proxy-bypass-list="))
+    assert "<-loopback>" in bypass
+    assert f"localhost:{report['openPort']}" in bypass
+    assert f"localhost:{report['closedPort']}" not in bypass, "a closed port is not bypassed"
+    assert any(a.startswith("--host-resolver-rules=MAP * ~NOTFOUND") for a in argv)
+    pids, unguarded = motion_video.guard_report(guard)
+    assert len(pids) == 1 and unguarded == []
+
+
+@pytest.mark.asyncio
+async def test_the_guard_refuses_a_launch_it_cannot_rewrite(tmp_path) -> None:
+    """A browser launched without an argv array (or through a shell string) is
+    refused and logged UNGUARDED, which discards the render."""
+    fake = _fake_chrome(tmp_path)
+    if fake is None:
+        pytest.skip("node is not installed")
+    guard = tmp_path / "guard.pids"
+    script = f"""
+const cp = require('child_process'); const results = [];
+for (const launch of [
+  () => cp.spawn({json.dumps(str(fake))}, {{stdio: 'ignore'}}),
+  () => cp.execSync('"' + {json.dumps(str(fake))} + '" --version'),
+  () => cp.execFileSync({json.dumps(str(fake))}, ['-e', '1', '--']),
+]) {{
+  try {{ launch(); results.push('ran'); }}
+  catch (e) {{ results.push(String(e.message).slice(0, 40)); }}
+}}
+process.stdout.write(JSON.stringify(results));
+"""
+    results = json.loads(await _node_with_guard(script, guard))
+    assert results[0].startswith("hf-network-guard") and results[1].startswith("hf-network-guard")
+    assert results[2] == "ran", "a rewritable sync launch still runs"
+    lines = guard.read_text().splitlines()
+    assert sum(line.startswith("UNGUARDED") for line in lines) == 2
+    assert "SYNC chromium-browser" in "\n".join(lines)
+
+
+@pytest.mark.asyncio
+async def test_a_reused_pid_is_not_killed(tmp_path) -> None:
+    """The guard file may name a PID that has since been reused. Only a process
+    that is still a browser is killed: this test's own PID must survive."""
+    guard = tmp_path / "guard.pids"
+    guard.write_text(f"{os.getpid()}\n")
+    assert await motion_video._is_browser(os.getpid()) is False
+    await motion_video._kill_guarded_browsers(guard)  # we are still alive to assert
 
 
 # ── Engine selection in media_generation ─────────────────────────────────

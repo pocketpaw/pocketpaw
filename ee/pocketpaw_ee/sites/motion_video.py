@@ -17,10 +17,11 @@
 #
 # INVARIANTS (the HTML is untrusted: LLM-written from a user brief):
 #   * The render browser is OFF THE NETWORK. ``vendor/hf-network-guard.cjs`` is
-#     preloaded into the CLI (NODE_OPTIONS) and gives every Chrome it spawns a dead
-#     proxy that bypasses only the CLI's own project file server, and no DNS. It
-#     logs each Chrome PID to a guard file outside the project; a render whose
-#     guard file is empty was unguarded and its output is discarded.
+#     preloaded into the CLI (NODE_OPTIONS), wraps every child_process launcher,
+#     and gives every Chrome a dead proxy that bypasses only the CLI's own project
+#     file server, and no DNS. It logs each Chrome launch to a guard file outside
+#     the project; output is discarded unless there is a PID and no UNGUARDED
+#     line. (Upstream: that file server binds all interfaces during a render.)
 #   * The CLI sees an allow-listed environment (``motion_safety.renderer_env``),
 #     never the server's secrets.
 #   * anime.js is VENDORED (vendor/anime-3.2.2.min.js, MIT) and copied next to
@@ -47,7 +48,6 @@ import re
 import shlex
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -166,7 +166,7 @@ HARD CONTRACT (the renderer rejects violations):
 7. Fonts: use only these families by name, with no @font-face: {fonts}; or system-ui / serif / sans-serif / monospace.
 8. Never give an element a CSS transform AND animate its transform in anime; set the start state with anime from/to arrays (translateX:[-40,0]). Elements you transform are display:block or inline-block with a real width and height.
 9. No <video>, <audio>, <canvas>, <iframe>, <object>, <embed>, <link>, <use>, <image>, <foreignObject>, <a>, <form>. No <br> inside text. No event-handler attributes.
-10. The only URLs allowed anywhere are url(#id) / href="#id" fragments and the provided local image filename. In JS: create elements only with literal tag names (document.createElementNS('http://www.w3.org/2000/svg', ...) is NOT allowed; create SVG shapes in the markup instead, or use divs), setAttribute only with literal, non-URL, non-style attribute names, no innerHTML, no string concatenation of two literals, no window[...] / globalThis / eval / Function, no assigning .src or .href, no style.cssText or setProperty. Build repeated elements with document.createElement('div') and el.style.<property> = value.
+10. The only URLs allowed anywhere are url(#id) / href="#id" fragments and the provided local image filename. In JS: create elements only with literal tag names (document.createElementNS('http://www.w3.org/2000/svg', ...) is NOT allowed; create SVG shapes in the markup instead, or use divs), setAttribute only with literal, non-URL, non-style attribute names, no innerHTML, no string concatenation of two literals, no .join()/.concat()/.repeat(), no Object.assign/defineProperty, no window[...] / globalThis / eval / Function / constructor, no assigning .src or .href, no style.cssText or setProperty. Build repeated elements with document.createElement('div') and el.style.<property> = value.
 
 DESIGN (this is what makes it good):
 - ONE idea, executed well: e.g. slow aurora gradients, drifting geometric shapes, a field of seeded dots breathing, giant outlined letterforms sliding past, light sweeping across a surface. Not a slideshow, not a sequence of scenes.
@@ -406,29 +406,69 @@ def _cli_env(guard_file: Path | None = None) -> dict[str, str]:
     return env
 
 
-def guarded_pids(guard_file: Path | None) -> list[int]:
-    """The Chrome PIDs the network guard launched (and so guarded)."""
+def guard_report(guard_file: Path | None) -> tuple[list[int], list[str]]:
+    """What the network guard logged: the PIDs of browsers it rewrote, and any
+    ``UNGUARDED`` launches it refused."""
     if guard_file is None or not guard_file.is_file():
-        return []
-    pids = []
-    for line in guard_file.read_text(encoding="utf-8", errors="replace").split():
+        return [], []
+    pids: list[int] = []
+    unguarded: list[str] = []
+    for line in guard_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
         if line.isdigit():
             pids.append(int(line))
-    return pids
+        elif line.startswith("UNGUARDED"):
+            unguarded.append(line)
+    return pids, unguarded
 
 
-def _kill_guarded_browsers(guard_file: Path | None) -> None:
-    """Kill every Chrome the guard logged. Puppeteer spawns Chrome ``detached``
-    on POSIX (its own process group), so killing the CLI's group misses it."""
+def guarded_pids(guard_file: Path | None) -> list[int]:
+    """The Chrome PIDs the network guard launched (and so guarded)."""
+    return guard_report(guard_file)[0]
+
+
+_BROWSER_NAME_RE = re.compile(r"chrom|headless", re.IGNORECASE)
+
+
+async def _capture(argv: list[str], timeout_s: float = 10) -> str:
+    """Run a small helper (tasklist / ps / taskkill) without blocking the loop."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout_s)
+    except Exception:  # noqa: BLE001 — a helper failing just means "don't know"
+        return ""
+    return out.decode("utf-8", errors="replace")
+
+
+async def _is_browser(pid: int) -> bool:
+    """Whether ``pid`` is still a Chrome process (guards against PID reuse)."""
+    if sys.platform == "win32":
+        out = await _capture(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"])
+        first = out.strip().split(",", 1)[0].strip('"') if out.strip().startswith('"') else ""
+        return bool(_BROWSER_NAME_RE.search(first))
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    if cmdline.parent.is_dir():
+        with contextlib.suppress(OSError):
+            exe = cmdline.read_bytes().split(b"\0", 1)[0].decode("utf-8", errors="replace")
+            return bool(_BROWSER_NAME_RE.search(Path(exe).name))
+        return False
+    return bool(_BROWSER_NAME_RE.search(await _capture(["ps", "-p", str(pid), "-o", "comm="])))
+
+
+async def _kill_guarded_browsers(guard_file: Path | None) -> None:
+    """Kill every Chrome the guard logged that is still a Chrome. Puppeteer spawns
+    it ``detached`` on POSIX (its own process group), so killing the CLI's group
+    misses it."""
     for pid in guarded_pids(guard_file):
+        if not await _is_browser(pid):
+            continue
         if sys.platform == "win32":
-            with contextlib.suppress(Exception):
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True,
-                    timeout=10,
-                    check=False,
-                )
+            await _capture(["taskkill", "/F", "/T", "/PID", str(pid)])
         else:
             with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                 os.killpg(pid, signal.SIGKILL)
@@ -465,7 +505,7 @@ async def _run(
         out, err = await asyncio.wait_for(proc.communicate(), timeout_s)
     except (TimeoutError, asyncio.CancelledError) as exc:
         generator_client._kill_process_group(proc)
-        _kill_guarded_browsers(guard_file)
+        await _kill_guarded_browsers(guard_file)
         with contextlib.suppress(BaseException):
             await asyncio.wait_for(proc.wait(), 5)
         if isinstance(exc, asyncio.CancelledError):
@@ -549,7 +589,8 @@ async def render_project(project_dir: Path, out_path: Path, guard_file: Path) ->
         guard_file=guard_file,
     )
     if rc == 0 and out_path.is_file() and out_path.stat().st_size > 0:
-        if not guarded_pids(guard_file):
+        pids, unguarded = guard_report(guard_file)
+        if not pids or unguarded:
             out_path.unlink(missing_ok=True)
             raise MotionVideoError(
                 "failed",
