@@ -3,7 +3,8 @@
 #
 # Covers naming, the draft secret mapping, deploy-on-build through
 # ``project_build.run_project_preview_build`` (Daytona and Cloudflare faked), the
-# script-cap and failure fallbacks, cleanup on publish / delete, and the sweeper.
+# script-cap and failure fallbacks, cleanup on publish / delete, the sweeper, and
+# opening a draft of the published content (``reopen_for_editing``).
 # Everything is behind ``PAW_SITES_DRAFT_WORKERS=1``; with it off nothing changes.
 from __future__ import annotations
 
@@ -743,3 +744,97 @@ async def test_the_orphan_sweep_leaves_other_deployments_scripts_alone(monkeypat
     )
     assert out["orphans"] == 1
     assert cf.named("delete_account_script") == [mine]
+
+
+# ---------------------------------------------------------------- open a draft
+
+
+async def _published(registry: Any, content_hash: str = "h1") -> None:
+    await registry.put(
+        draft_worker.DraftRecord(
+            pocket_id=POCKET,
+            state="purged",
+            published_hash=content_hash,
+            published_url="https://acme.acct.workers.dev",
+        )
+    )
+
+
+async def test_reopen_turns_the_published_view_into_a_draft_until_the_next_publish():
+    registry, store, cf = draft_worker.MemoryRegistry(), Store(), FakeCF()
+    await _published(registry)
+    assert await draft_worker.published_view(POCKET, "h1", registry=registry) == (
+        True,
+        "https://acme.acct.workers.dev",
+    )
+
+    assert await draft_worker.reopen_for_editing(POCKET, "h1", registry=registry) is True
+    assert await draft_worker.published_view(POCKET, "h1", registry=registry) == (False, None)
+    # Idempotent: the second call finds a draft already wanted.
+    assert await draft_worker.reopen_for_editing(POCKET, "h1", registry=registry) is False
+    rec = await registry.get(POCKET)
+    # The published facts stay for every other reader.
+    assert rec.published_hash == "h1"
+    assert rec.published_url == "https://acme.acct.workers.dev"
+    assert rec.reopened_hash == "h1"
+
+    await draft_worker.purge_pocket_drafts(
+        POCKET,
+        reason="published",
+        published_hash="h1",
+        published_url="https://acme.acct.workers.dev",
+        cf=cf,
+        registry=registry,
+        store=store,
+    )
+    assert (await registry.get(POCKET)).reopened_hash == ""
+    assert (await draft_worker.published_view(POCKET, "h1", registry=registry))[0] is True
+
+
+async def test_reopen_is_a_noop_outside_the_published_view():
+    registry = draft_worker.MemoryRegistry()
+    # No row at all: never published through a draft Worker.
+    assert await draft_worker.reopen_for_editing(POCKET, "h1", registry=registry) is False
+    assert await registry.get(POCKET) is None
+    # Published, but the current content is an edit (another hash).
+    await _published(registry, "h0")
+    assert await draft_worker.reopen_for_editing(POCKET, "h1", registry=registry) is False
+    assert (await registry.get(POCKET)).reopened_hash == ""
+
+
+async def test_a_reopened_draft_survives_its_deploy_and_an_idle_purge():
+    store, records, cf, registry = Store(), _Records(), FakeCF(), draft_worker.MemoryRegistry()
+    await _published(registry)
+    assert await draft_worker.reopen_for_editing(POCKET, "h1", registry=registry) is True
+    # The draft build deploys a fresh Worker for the reopened content.
+    out = await _build(store, records, cf, registry)
+    assert out["preview_mode"] == "full"
+    rec = await registry.get(POCKET)
+    assert rec.state == "live" and rec.reopened_hash == "h1" and rec.published_hash == "h1"
+    # The sweeper reaps the idle draft: the pocket must still want a draft, not flip
+    # back to the live site on its own.
+    assert await draft_worker.purge_pocket_drafts(
+        POCKET, reason="idle", cf=cf, registry=registry, store=store
+    )
+    rec = await registry.get(POCKET)
+    assert rec.state == "purged" and rec.reopened_hash == "h1"
+    assert await draft_worker.published_view(POCKET, "h1", registry=registry) == (False, None)
+
+
+async def test_a_reopen_during_a_purge_is_not_overwritten():
+    registry, store, cf = draft_worker.MemoryRegistry(), Store(), FakeCF()
+    await _published(registry)
+    real_purge = store.purge_previews
+
+    def _purge_then_reopen(pocket_id):
+        # The owner opens a draft while the idle purge is still running.
+        rec = registry.rows[pocket_id]
+        rec.reopened_hash = "h1"
+        rec.version += 1
+        return real_purge(pocket_id)
+
+    store.purge_previews = _purge_then_reopen
+    assert await draft_worker.purge_pocket_drafts(
+        POCKET, reason="idle", cf=cf, registry=registry, store=store
+    )
+    assert (await registry.get(POCKET)).reopened_hash == "h1"

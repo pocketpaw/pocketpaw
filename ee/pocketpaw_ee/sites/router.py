@@ -1,7 +1,8 @@
 # ee/pocketpaw_ee/sites/router.py — REST surface for the Sites control plane.
 #
-# Thin FastAPI handlers over ``sites.service``: publish and preview, the composer's
-# Enhance button (``sites.prompt_enhance``), the native editing and asset routes
+# Thin FastAPI handlers over ``sites.service``: publish and preview, opening a draft
+# of a published project site, the composer's Enhance button
+# (``sites.prompt_enhance``), the native editing and asset routes
 # (upload, list, delete, Studio generate and copy-from-Studio via
 # ``sites.media_generation``),
 # the html-to-project upgrade and its undo
@@ -60,6 +61,7 @@ from pocketpaw_ee.sites.dto import (
     LeafEditVerdict,
     MakeEditableRequest,
     NativeArtifactResponse,
+    OpenDraftResponse,
     OriginClaimRequest,
     OriginClaimResponse,
     OriginVerificationResponse,
@@ -905,6 +907,23 @@ async def revert_site_upgrade_by_pocket(
         workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
     )
     return SiteUpgradeRevertResponse(**result)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/open-draft", response_model=OpenDraftResponse)
+async def open_draft_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> OpenDraftResponse:
+    """Open a draft of a published project site: the builder stops showing the live
+    site for the published content and builds a draft of it, so the editing tools
+    work. ``opened`` is False when the pocket already shows a draft. Idempotent; the
+    next publish returns it to the published view. A missing or another workspace's
+    pocket is a 404, no edit access a 403."""
+    out = await sites_service.open_pocket_draft(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return OpenDraftResponse(**out)
 
 
 @router.post(

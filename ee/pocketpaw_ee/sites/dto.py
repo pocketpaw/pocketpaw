@@ -660,6 +660,14 @@ class SiteStatusResponse(BaseModel):
     verification: SiteVerificationSummary = Field(default_factory=lambda: SiteVerificationSummary())
 
 
+class OpenDraftResponse(BaseModel):
+    """``POST /sites/by-pocket/{pocket_id}/open-draft``. ``opened`` is False when the
+    pocket already showed a draft (a no-op success)."""
+
+    pocket_id: str
+    opened: bool
+
+
 class SiteVersionResponse(BaseModel):
     """One row of a pocket's version timeline (BP-4). Mirrors the durable
     ArtifactVersion row's reading-relevant fields: ``version_no`` (the monotonic

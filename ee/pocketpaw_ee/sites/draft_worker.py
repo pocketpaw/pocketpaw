@@ -23,6 +23,11 @@
 #     to the preview origin, wraps the entry in a guard that requires the per-draft
 #     ``X-Paw-Draft-Key`` (static assets bypass it), and deploys. Any failure returns
 #     a rung and the build falls back; it never fails.
+#   * the published view (``published_view``): a purged row remembers the published
+#     content hash and url, so the builder shows the live site for that content
+#     instead of rebuilding a draft. ``reopen_for_editing`` sets ``reopened_hash`` to
+#     that hash so it builds a draft again; the next publish clears it, and a purge
+#     that is not a publish keeps it.
 #   * ``proxy_target``: which token the preview origin proxies (only the deployed
 #     hash of a ``live`` row; an older hash of a proxied draft is ``SUPERSEDED``).
 #   * Durable Objects (``durable_objects``): the row keeps the draft script's tag
@@ -243,6 +248,9 @@ class DraftRecord:
     retry_after: datetime | None = None
     published_hash: str = ""
     published_url: str = ""
+    # The owner opened a draft of the published content (``reopen_for_editing``):
+    # equal to ``published_hash`` means "build a draft", not "show the live site".
+    reopened_hash: str = ""
     version: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -430,13 +438,40 @@ async def published_view(
     pocket_id: str, content_hash: str, *, registry: Any = None
 ) -> tuple[bool, str | None]:
     """``(True, url or None)`` when ``content_hash`` is what this pocket last
-    published and its drafts were purged: the builder shows the live site."""
+    published and its drafts were purged: the builder shows the live site. A
+    content the owner reopened for editing (``reopened_hash``) builds a draft."""
     rec = await (registry or default_registry()).get(pocket_id)
-    if rec is None or not rec.published_hash or rec.published_hash != content_hash:
+    if not _in_published_view(rec, content_hash):
         return False, None
-    if rec.state == "live" and rec.deployed_hash == content_hash:
-        return False, None
+    assert rec is not None
     return True, rec.published_url or None
+
+
+def _in_published_view(rec: DraftRecord | None, content_hash: str) -> bool:
+    if rec is None or not rec.published_hash or rec.published_hash != content_hash:
+        return False
+    if rec.reopened_hash == content_hash:
+        return False
+    return not (rec.state == "live" and rec.deployed_hash == content_hash)
+
+
+async def reopen_for_editing(pocket_id: str, content_hash: str, *, registry: Any = None) -> bool:
+    """Make the builder build a draft of ``content_hash`` instead of showing the live
+    site. True when the pocket was in the published view and now is not; False (a
+    no-op) when it already shows a draft. Durable: the row remembers it until the next
+    publish (``purge_pocket_drafts`` with a published hash or url) clears it."""
+    registry = registry or default_registry()
+    for _ in range(3):
+        rec = await registry.get(pocket_id)
+        if not _in_published_view(rec, content_hash):
+            return False
+        assert rec is not None
+        rec.reopened_hash = content_hash
+        # Compare-and-set so a purge or deploy writing the row meanwhile is not undone.
+        if await registry.cas(rec, rec.version):
+            _invalidate(pocket_id)
+            return True
+    raise RuntimeError(f"draft registry row of {pocket_id} kept changing")
 
 
 # ---------------------------------------------------------------- deploy
@@ -705,6 +740,7 @@ async def deploy_for_build(
             script=new_script_name(pocket_id),
             published_hash=prior.published_hash if prior else "",
             published_url=prior.published_url if prior else "",
+            reopened_hash=prior.reopened_hash if prior else "",
             version=prior.version if prior else 0,
         )
     assert rec is not None
@@ -975,6 +1011,15 @@ def _purge_previews(store: Any, pocket_id: str) -> bool:
     return ok
 
 
+async def _put_keeping_reopen(registry: Any, rec: DraftRecord) -> None:
+    """A purge's later write of the row it read at the start. An open-draft that
+    landed since then is newer than the purge, so its ``reopened_hash`` stays."""
+    current = await registry.get(rec.pocket_id)
+    if current is not None:
+        rec.reopened_hash = current.reopened_hash
+    await registry.put(rec)
+
+
 async def purge_pocket_drafts(
     pocket_id: str,
     *,
@@ -999,7 +1044,9 @@ async def purge_pocket_drafts(
     rec = await registry.get(pocket_id)
     if rec is not None:
         if published_hash or published_url:
+            # A publish ends any "opened for editing": back to the published view.
             rec.published_hash, rec.published_url = published_hash, published_url
+            rec.reopened_hash = ""
         rec.state, rec.deployed_hash = "deleting", ""
         await registry.put(rec)
     _invalidate(pocket_id)
@@ -1092,13 +1139,13 @@ async def purge_pocket_drafts(
                 done()
             except Exception as exc:  # noqa: BLE001 - best effort, retried by the sweeper
                 errors.append(f"{label}: {exc}")
-        await registry.put(rec)
+        await _put_keeping_reopen(registry, rec)
 
     if errors:
         rec.attempts += 1
         rec.last_error = "; ".join(errors)[:500]
         rec.retry_after = datetime.now(UTC) + _backoff(rec.attempts)
-        await registry.put(rec)
+        await _put_keeping_reopen(registry, rec)
         logger.warning(
             "sites.draft: pocket %s draft cleanup (%s) incomplete, will retry: %s",
             pocket_id,
@@ -1112,7 +1159,7 @@ async def purge_pocket_drafts(
         rec.state, rec.script, rec.host, rec.seeded = "purged", "", "", False
         rec.auth_secret_enc, rec.attempts, rec.last_error, rec.retry_after = "", 0, "", None
         rec.draft_key_enc = ""
-        await registry.put(rec)
+        await _put_keeping_reopen(registry, rec)
     logger.info("sites.draft: pocket %s drafts purged (%s)", pocket_id, reason)
     return True
 
@@ -1203,6 +1250,7 @@ __all__ = [
     "proxy_target",
     "published_view",
     "purge_pocket_drafts",
+    "reopen_for_editing",
     "schedule_purge",
     "sweep_draft_workers",
 ]

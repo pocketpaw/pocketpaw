@@ -1,7 +1,9 @@
 # tests/ee/sites/test_draft_worker_service.py: where the draft Worker meets the sites
 # service: a successful publish purges every draft of the pocket (and a failed purge
 # never fails the publish), the builder shows the published site for the published
-# content instead of rebuilding a draft, and site / pocket delete remove drafts too.
+# content instead of rebuilding a draft (until the owner opens a draft of it through
+# ``open_pocket_draft`` / ``POST .../open-draft``), and site / pocket delete remove
+# drafts too.
 from __future__ import annotations
 
 import json
@@ -243,3 +245,170 @@ async def test_the_mongo_registry_compare_and_set(beanie_test_db):
     rec.state = "live"
     assert await registry.cas(rec, 2) is False
     assert (await registry.get("pk-cas")).state == "deleting"
+
+
+# ---------------------------------------------------------------- open a draft
+
+
+def _published_registry(monkeypatch, pocket_id: str) -> draft_worker.MemoryRegistry:
+    registry = draft_worker.MemoryRegistry()
+    registry.rows[pocket_id] = draft_worker.DraftRecord(
+        pocket_id=pocket_id,
+        state="purged",
+        published_hash=project_build.project_content_hash(SOURCE),
+        published_url="https://acme.acct.workers.dev",
+    )
+    monkeypatch.setattr(draft_worker, "default_registry", lambda: registry)
+    return registry
+
+
+async def _artifact(pocket_id: str, pool: _Pool) -> dict:
+    return await sites_service._project_draft_artifact(
+        pocket_id=pocket_id, source=dict(SOURCE), store=_Store(), _pool=pool, _records=_Records()
+    )
+
+
+async def test_open_draft_sends_the_published_content_down_the_draft_path(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.versions import service as versions_service
+
+    pocket_id = await _make_project_pocket()
+    _published_registry(monkeypatch, pocket_id)
+    pool = _Pool()
+    assert (await _artifact(pocket_id, pool))["preview_mode"] == "published"
+
+    out = await sites_service.open_pocket_draft(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+    )
+    assert out == {"pocket_id": pocket_id, "opened": True}
+    draft = await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id)
+    assert draft is not None and draft.label == "Opened for editing"
+
+    # The same content now queues a draft build instead of showing the live site.
+    art = await _artifact(pocket_id, pool)
+    assert art["preview_mode"] != "published"
+    assert art["build_status"] == "queued" and len(pool.calls) == 1
+
+    # Idempotent: a second call is a no-op and the draft path holds.
+    again = await sites_service.open_pocket_draft(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+    )
+    assert again == {"pocket_id": pocket_id, "opened": False}
+    assert (await _artifact(pocket_id, pool))["preview_mode"] != "published"
+
+
+async def test_a_publish_after_open_draft_brings_back_the_published_view(
+    beanie_test_db, monkeypatch
+):
+    pocket_id = await _make_project_pocket()
+    registry = _published_registry(monkeypatch, pocket_id)
+    await sites_service.open_pocket_draft(workspace_id="ws1", user_id="u1", pocket_id=pocket_id)
+    await draft_worker.purge_pocket_drafts(
+        pocket_id,
+        reason="published",
+        published_hash=project_build.project_content_hash(SOURCE),
+        published_url="https://acme.acct.workers.dev",
+        registry=registry,
+        store=_Store(),
+    )
+    art = await _artifact(pocket_id, _Pool())
+    assert art["preview_mode"] == "published"
+    assert art["preview_url"] == "https://acme.acct.workers.dev"
+
+
+async def test_open_draft_is_a_noop_outside_the_published_view(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.versions import service as versions_service
+
+    pocket_id = await _make_project_pocket()
+    registry = draft_worker.MemoryRegistry()
+    monkeypatch.setattr(draft_worker, "default_registry", lambda: registry)
+    out = await sites_service.open_pocket_draft(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+    )
+    assert out == {"pocket_id": pocket_id, "opened": False}
+    assert registry.rows == {}
+    # A draft version still exists, so Submit for review and History work.
+    assert await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id) is not None
+
+
+async def test_open_draft_with_draft_workers_off_only_ensures_the_draft_version(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.versions import service as versions_service
+
+    monkeypatch.delenv("PAW_SITES_DRAFT_WORKERS")
+    pocket_id = await _make_project_pocket()
+    registry = _published_registry(monkeypatch, pocket_id)
+    out = await sites_service.open_pocket_draft(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+    )
+    assert out == {"pocket_id": pocket_id, "opened": False}
+    assert registry.rows[pocket_id].reopened_hash == ""
+    assert await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id) is not None
+
+
+async def test_the_mongo_registry_round_trips_the_reopened_hash(beanie_test_db):
+    registry = draft_worker.MongoRegistry()
+    rec = draft_worker.DraftRecord(pocket_id="pk-reopen", state="purged", published_hash="h1")
+    await registry.put(rec)
+    assert await draft_worker.reopen_for_editing("pk-reopen", "h1", registry=registry) is True
+    got = await registry.get("pk-reopen")
+    assert got is not None
+    assert (got.reopened_hash, got.published_hash) == ("h1", "h1")
+    assert await draft_worker.published_view("pk-reopen", "h1", registry=registry) == (False, None)
+
+
+# ---------------------------------------------------------------- open-draft route
+
+
+async def _post_open_draft(pocket_id: str, workspace_id: str = "ws1"):
+    from httpx import ASGITransport, AsyncClient
+
+    from tests.ee.sites.test_router import _build_app
+
+    app = _build_app(workspace_id)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        return await c.post(f"/api/v1/sites/by-pocket/{pocket_id}/open-draft")
+
+
+async def test_the_open_draft_route_opens_a_published_pocket(beanie_test_db, monkeypatch):
+    pocket_id = await _make_project_pocket(user_id="user-test-1")
+    _published_registry(monkeypatch, pocket_id)
+    resp = await _post_open_draft(pocket_id)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"pocket_id": pocket_id, "opened": True}
+    resp = await _post_open_draft(pocket_id)
+    assert resp.status_code == 200 and resp.json() == {"pocket_id": pocket_id, "opened": False}
+
+
+async def test_the_open_draft_route_is_404_for_an_unknown_or_foreign_pocket(
+    beanie_test_db, monkeypatch
+):
+    registry = draft_worker.MemoryRegistry()
+    monkeypatch.setattr(draft_worker, "default_registry", lambda: registry)
+    assert (await _post_open_draft("64b7f0c2a1b2c3d4e5f60799")).status_code == 404
+    assert (await _post_open_draft("not-an-id")).status_code == 404
+    foreign = await _make_project_pocket(user_id="user-test-1", workspace_id="ws2")
+    _published_registry(monkeypatch, foreign)
+    assert (await _post_open_draft(foreign, workspace_id="ws1")).status_code == 404
+    assert draft_worker.default_registry().rows[foreign].reopened_hash == ""
+
+
+async def test_the_open_draft_route_needs_edit_access(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    # Readable (public) but not editable by the caller: someone else's pocket.
+    pocket_id = await _make_project_pocket(user_id="someone-else")
+    doc = await Pocket.get(pocket_id)
+    doc.visibility = "public"
+    await doc.save()
+    registry = _published_registry(monkeypatch, pocket_id)
+    resp = await _post_open_draft(pocket_id)
+    assert resp.status_code == 403, resp.text
+    assert registry.rows[pocket_id].reopened_hash == ""
+
+    # Private: not even readable.
+    doc.visibility = "private"
+    await doc.save()
+    assert (await _post_open_draft(pocket_id)).status_code in (403, 404)

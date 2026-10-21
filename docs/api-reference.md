@@ -3744,7 +3744,7 @@ framework config, wrangler config) is also served here, with two extra fields:
   - `"server_only"`: nothing can be previewed and `preview_url` is `null`.
   - `"published"`: the files are exactly what is live and the pocket's drafts were
     deleted on publish. `preview_url` is the live site's URL (`null` when unknown).
-    No draft is rebuilt; the next edit builds one.
+    No draft is rebuilt; the next edit, or `POST .../open-draft` (below), builds one.
   - `null` until a build finished.
 - `capabilities` are the engine's edit/build flags. A project's `select`, `text` and
   `structure` are `true` only when the server's site generator has `visual-edit`: its
@@ -3768,6 +3768,28 @@ framework config, wrangler config) is also served here, with two extra fields:
 - `build_reason` on a failed project build is `build_failed:<code>` with the CLI's
   code (`install_failed`, `build_failed`, `output_missing`, `wrangler_failed`,
   `size_limit`, `unknown_framework`, ...), or one of the rungs above.
+
+### `POST /sites/by-pocket/{pocket_id}/open-draft`
+
+Opens a draft of a published project site, so the builder's Select / Text / Edit tools
+work without an AI edit first. No body. Gated on `fabric.write` and the `sites` plan
+feature like the other by-pocket writes; the caller needs edit access to the pocket.
+
+```json
+{ "pocket_id": "6650f0...", "opened": true }
+```
+
+- `opened: true`: the pocket was showing the live site (`preview_mode: "published"`).
+  The next `GET .../native-artifact` for the same content builds a draft (`queued` /
+  `building`, then `full` / `static` / `server_only`) and never answers `published`
+  for it again. The state lives on the pocket's draft registry row, so it survives a
+  reload and every API process. The next publish returns it to the published view.
+- `opened: false`: a no-op success. The pocket already shows a draft (never published,
+  edited since, not a project, or draft Workers off).
+- Either way the pocket gets a draft version ("Opened for editing") when it has none,
+  so Submit for review and History behave as after an edit.
+- Idempotent. `404` for an unknown or another workspace's pocket, `403` without edit
+  access, `503` (`sites.open_draft_unavailable`) when the registry cannot be written.
 
 ### Site data — `/sites/by-pocket/{pocket_id}/data`
 
