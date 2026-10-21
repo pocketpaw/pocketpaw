@@ -16,8 +16,9 @@ pocket, Paw Bar run, timeline, craft projections, SSE queue, artifacts) before
 override, preamble and attachments, calls ``AgentPool.run`` and maps backend
 events to SSE frames: chunks, thinking, tool chips, plan updates, ripple /
 artifact / studio frames, editor envelopes (``_EDITOR_ENVELOPE_MARKERS``:
-timeline and ``craft_edit``), ``open_surface``, usage. A rate-limited provider
-gets ``agent.provider_busy``; other backend errors ``agent.backend_error``.
+timeline and ``craft_edit``), ``open_surface``, usage. Provider failures a user
+can act on (busy, out of credit, token limit, malformed output, raw model error)
+become plain sentences (``_backend_error_frame``); raw text stays in the logs.
 
 Behind ``POCKETPAW_SESSION_SUPERVISOR`` it resumes the agent's native CLI
 session and can lease a warm client.
@@ -33,8 +34,10 @@ then ``guards.reserve_free_run`` must fit the run under the daily early-access
 ceiling or it ends with ``early_access.paused``.
 
 Every terminal path persists the streamed text as an assistant ``Message`` with
-its steps, records token usage (latest-wins), and sets the stream TTL; a
-concierge run never trains the agent's soul. Invariants: the cancel check keeps
+its steps, records token usage (latest-wins), and sets the stream TTL. A reply
+that loops (``RepetitionGuard``) is stopped and kept to one copy. A concierge run
+never trains the agent's soul; a Sites run neither trains it nor reads its
+cross-session recall, since each Sites chat is about one site. Invariants: the cancel check keeps
 its held chunk in ``full_text`` without appending it; ``mark_cloud_chat_run`` and
 the artifact collector are bound before the prewarm task exists; the host-cancel
 cleanup is shielded and drained (``drain_pending_cleanups``) before DB close; a
@@ -71,6 +74,11 @@ from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
 from pocketpaw.agents.errors import AgentDisabled  # type: ignore[import-untyped]
 from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
     get_agent_pool,
+)
+from pocketpaw.agents.repetition_guard import (  # type: ignore[import-untyped]
+    REPETITION_STOPPED_CODE,
+    REPETITION_STOPPED_MESSAGE,
+    RepetitionGuard,
 )
 from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped]
     get_session_supervisor,
@@ -196,15 +204,82 @@ PROVIDER_BUSY_CODE = "agent.provider_busy"
 PROVIDER_BUSY_MESSAGE = "The AI provider is busy right now, try again in a moment."
 
 
+# The other provider and model failures a user can act on. Each maps to a plain
+# sentence that says what happened and what to do; the raw provider text stays in
+# the logs (and, for a crash, on the run doc), never in the chat. Out of credit is
+# checked BEFORE busy: OpenAI reports an empty balance as a 429 insufficient_quota.
+_OUT_OF_CREDIT_RE = re.compile(
+    r"402|insufficient[ _-]?(?:balance|credit|funds|quota)|payment required"
+    r"|credit balance is too low|exceeded your current quota",
+    re.IGNORECASE,
+)
+_TOKEN_LIMIT_RE = re.compile(
+    r"token limit|context[ _-]length|maximum context|context window|prompt is too long"
+    r"|max_tokens",
+    re.IGNORECASE,
+)
+_MALFORMED_OUTPUT_RE = re.compile(
+    r"validation errors? for|pydantic_core|ValidationError|Field required"
+    r"|UnexpectedModelBehavior|Exceeded maximum retries",
+)
+# The pydantic_ai backend's catch-all prefix: whatever follows is raw provider text.
+_RAW_MODEL_ERROR_PREFIX = "Pydantic AI error:"
+
+OUT_OF_CREDIT_CODE = "agent.provider_out_of_credit"
+OUT_OF_CREDIT_MESSAGE = (
+    "This model has run out of credit. Pick a different model from the model menu "
+    "and send your message again."
+)
+TOKEN_LIMIT_CODE = "agent.token_limit"
+TOKEN_LIMIT_MESSAGE = (
+    "This reply ran past the model's length limit before it finished. Try a shorter "
+    "message or ask for a smaller change, or switch to a model with a larger limit."
+)
+MALFORMED_OUTPUT_CODE = "agent.malformed_output"
+MALFORMED_OUTPUT_MESSAGE = (
+    "The model sent back something this app could not read, so the reply stopped. "
+    "Try again, and switch model if it keeps happening."
+)
+MODEL_ERROR_CODE = "agent.model_error"
+MODEL_ERROR_MESSAGE = (
+    "The model returned an error and the reply stopped. Try again, and switch model "
+    "if it keeps happening."
+)
+
+
+def _known_error_frame(message: str) -> dict[str, str] | None:
+    """The plain-sentence frame for a failure a user can act on, else ``None``."""
+    if _OUT_OF_CREDIT_RE.search(message):
+        return {"code": OUT_OF_CREDIT_CODE, "message": OUT_OF_CREDIT_MESSAGE}
+    if _PROVIDER_BUSY_RE.search(message):
+        return {"code": PROVIDER_BUSY_CODE, "message": PROVIDER_BUSY_MESSAGE}
+    if _TOKEN_LIMIT_RE.search(message):
+        return {"code": TOKEN_LIMIT_CODE, "message": TOKEN_LIMIT_MESSAGE}
+    if _MALFORMED_OUTPUT_RE.search(message):
+        return {"code": MALFORMED_OUTPUT_CODE, "message": MALFORMED_OUTPUT_MESSAGE}
+    return None
+
+
 def _backend_error_frame(message: str) -> dict[str, str]:
     """The ``error`` frame for a backend-yielded error.
 
-    A busy provider gets a stable code and a plain message; the raw provider text
-    (already logged by the caller) never reaches the client or the run doc.
+    Known failures (out of credit, busy, token limit, malformed output) get a
+    stable code and a plain message, and so does any other raw pydantic_ai
+    provider error; the raw text (already logged by the caller) never reaches the
+    client or the run doc. Anything else (a backend's own diagnostic, such as the
+    LiteLLM 401 rewrite or a missing SDK) passes through unchanged.
     """
-    if _PROVIDER_BUSY_RE.search(message):
-        return {"code": PROVIDER_BUSY_CODE, "message": PROVIDER_BUSY_MESSAGE}
+    known = _known_error_frame(message)
+    if known is not None:
+        return known
+    if message.startswith(_RAW_MODEL_ERROR_PREFIX):
+        return {"code": MODEL_ERROR_CODE, "message": MODEL_ERROR_MESSAGE}
     return {"code": "agent.backend_error", "message": message}
+
+
+def _crash_error_frame(exc: Exception) -> dict[str, str]:
+    """The ``error`` frame for a run that crashed: plain words for a known class."""
+    return _known_error_frame(str(exc)) or {"code": "agent.run_failed", "message": str(exc)}
 
 
 def _stream_ttl() -> int:
@@ -1103,6 +1178,19 @@ def _normalize_and_strip(
 _CONCIERGE_SESSION_PREFIX = "cloud:concierge:"
 
 
+def _is_sites_run(ctx: ScopeContext) -> bool:
+    """True when this run is a /sites chat (create or refine).
+
+    Each Sites chat is about ONE site. The per-agent soul is shared by every
+    chat the agent has, and its recall is keyed on the user's message, so two
+    site briefs ("a site for my pottery studio" / "...tattoo studio") recall each
+    other's replies: that was the cross-session bleed. Sites runs therefore
+    neither feed ``pool.observe`` nor read the soul recall.
+    """
+    sc = ctx.surface_context
+    return sc is not None and sc.kind is SurfaceKind.SITES
+
+
 def _is_concierge_run(spec: RunSpec) -> bool:
     """True when this run is a Paw Bar concierge (anonymous-visitor) chat.
 
@@ -1160,6 +1248,12 @@ async def _persist_and_complete(
         logger.debug(
             "skipping pool.observe for concierge run %s — anonymous visitor input "
             "must not train the per-agent soul",
+            spec.run_id,
+        )
+    elif _is_sites_run(ctx):
+        logger.debug(
+            "skipping pool.observe for sites run %s: a site's brief must not "
+            "reach the agent's other chats",
             spec.run_id,
         )
     else:
@@ -1919,6 +2013,10 @@ async def _drive_agent_loop(
             surface_preamble=surface_preamble,
             surface_cache_key=surface_cache_key,
         )
+        if _is_sites_run(ctx):
+            # UX-8: no cross-session soul recall in a Sites chat (see
+            # ``_is_sites_run``). Withheld otherwise, so other runs are unchanged.
+            run_kwargs["soul_recall"] = False
         if surface_allow_mcp is not None:
             run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp
         # CX-2 — per-agent EXCLUSIVE tool policy. When the RESOLVED agent declares
@@ -3184,6 +3282,7 @@ async def execute_run(spec: RunSpec) -> None:
         # ``stream_end`` frame and the persisted run doc carry actual counts instead
         # of the old hardcoded ``{}``.
         usage: dict[str, Any] = {}
+        repetition = RepetitionGuard()
         agent_events = _iter_agent_events(spec, ctx)
         try:
             async for event_name, event_data in agent_events:
@@ -3203,7 +3302,26 @@ async def execute_run(spec: RunSpec) -> None:
                     cancelled = True
                     break
                 if event_name == "chunk":
-                    full_text += _chunk_text(event_data)
+                    chunk_text = _chunk_text(event_data)
+                    full_text += chunk_text
+                    if repetition.feed(chunk_text):
+                        # UX-4: the model is looping on one sentence or paragraph.
+                        # Stop reading (the ``finally`` closes the backend), keep
+                        # one copy of the loop, and end the turn on the failed path
+                        # with a message the user can act on. The tripping chunk is
+                        # never forwarded, so the client sees at most a few copies.
+                        logger.warning(
+                            "execute_run %s: reply repeated itself, stopping it", spec.run_id
+                        )
+                        full_text = repetition.kept_text(full_text)
+                        stop_frame = {
+                            "code": REPETITION_STOPPED_CODE,
+                            "message": REPETITION_STOPPED_MESSAGE,
+                        }
+                        recorder.observe("error", stop_frame)
+                        await transport.append_event(spec.run_id, "error", stop_frame)
+                        backend_error_message = REPETITION_STOPPED_MESSAGE
+                        break
                 elif event_name == "token_usage":
                     if isinstance(event_data, dict) and event_data:
                         # LATEST-WINS, FLOORED. Every backend reports a
@@ -3264,11 +3382,7 @@ async def execute_run(spec: RunSpec) -> None:
         except Exception as exc:
             error = exc
             logger.exception("execute_run %s crashed", spec.run_id)
-            await transport.append_event(
-                spec.run_id,
-                "error",
-                {"code": "agent.run_failed", "message": str(exc)},
-            )
+            await transport.append_event(spec.run_id, "error", _crash_error_frame(exc))
         finally:
             # A ``break`` (user stop, backend error frame) leaves the generator
             # suspended; close it here so the backend and its bookkeeping in

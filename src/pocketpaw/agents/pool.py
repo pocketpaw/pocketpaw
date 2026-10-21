@@ -430,6 +430,7 @@ class AgentPool:
         user_info: str = "",
         user_id: str | None = None,
         budget_chars: int | None = None,
+        soul_recall: bool = True,
     ) -> AssembledPrompt:
         """Assemble the agent's system prompt from its layers.
 
@@ -508,6 +509,7 @@ class AgentPool:
             tenant_scope=tenant_scope,
             user_info=user_info,
             user_id=user_id,
+            soul_recall=soul_recall,
         )
         layers = [prompt_layer_registry.get(name) for name in _SYSTEM_PROMPT_LAYERS]
         return await assemble(layers, ctx, budget_chars=budget_chars)
@@ -665,6 +667,7 @@ class AgentPool:
         force_pydantic_ai: bool = False,
         max_requests: int | None = None,
         total_tokens_limit: int | None = None,
+        soul_recall: bool = True,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -775,6 +778,9 @@ class AgentPool:
         other backend. ``max_requests`` / ``total_tokens_limit`` cap the run; a
         backend that cannot take them refuses the turn. The cloud sets all three
         for a platform-funded free run. Defaults leave every run unchanged.
+
+        ``soul_recall=False`` leaves the per-message soul recall out of the
+        prompt (the cloud sets it on /sites, where each chat is about one site).
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -806,6 +812,7 @@ class AgentPool:
             system_message_override=system_message_override,
             surface_preamble=surface_preamble,
             surface_cache_key=surface_cache_key,
+            soul_recall=soul_recall,
         )
 
         # Mark this instance as actively running for the duration of the
