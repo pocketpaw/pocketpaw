@@ -3502,6 +3502,34 @@ One repo's committed C4 model, for the architecture viewer. RBAC `belt.read`
   `stale: true`. With no earlier body it is 503 `belt.architecture_unavailable`.
 - Error bodies carry `detail`, the sentence the UI shows.
 
+### `GET /api/v1/belt/architecture/code?repo=<path>&component=<id>`
+
+One component's files, for the viewer's Code tab. RBAC `belt.read`. Source:
+`ee/pocketpaw_ee/cloud/belt/architecture_code.py`.
+
+```json
+{
+  "sha": "<the architecture read's sha>",
+  "files": [ { "path": "src/ui/a.py", "lang": "python", "loc": 42,
+               "url": "https://github.com/<slug>/blob/<sha>/src/ui/a.py", "prs": [1153] } ],
+  "expired": false, "no_paths": false
+}
+```
+
+- Files are listed at the same `sha` as `GET /belt/architecture`, through that
+  read (so the same 404s and 503 apply). A file belongs when it matches one of
+  the component's own `paths` globs, so a parent with `src/` also lists the
+  files of a child with `src/ui/`.
+- `lang` comes from the extension. `loc` is the line count: `0` for an empty
+  file, `null` for a binary one. `url` is `null` when origin is not on GitHub.
+- `prs` are the open PRs changing that file. They are read only when the live
+  block shows an open PR; if that gh read fails, every `prs` is `[]`.
+- `expired: true`: the component has `paths` but they match no file at `sha`.
+  `no_paths: true`: the component has no `paths` (`files: []`).
+- An id that is not a component of the repo's own system is 404
+  `belt.component_not_found`.
+- Cached per repo, sha, component and the set of open PR numbers.
+
 ## Sites — Native Editing
 
 NE-4b / NE-5b. The **native site editor** renders a svelte Paw Site directly in
