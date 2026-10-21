@@ -22,7 +22,10 @@
 # lead is released too. BREAKER: a failed lead is tried again until 3 failures
 # across all the issue's sightings (a re-filed issue keeps its count); then the
 # issue is labelled needs-human with a one-line reason, and a human removing the
-# label re-arms it for 3 more. A title naming another issue (``#12``)
+# label re-arms it for 3 more. ``waiting-on-prereq`` (set and cleared by
+# automation while the first slice waits on another feature's) keeps an issue
+# out the same way, live labels first, but never trips the breaker.
+# A title naming another issue (``#12``)
 # is prefixed with its own number, so the lead is briefed on the right issue.
 # CLOUD ONLY: a lead mandate is refused (422) at create and at trigger unless
 # the cloud develop station is the wired dispatcher; the local station has no
@@ -261,6 +264,30 @@ def test_a_re_armed_lead_released_again_is_held_again():
     assert lead_planner.plan(3, [again], 5).no_action
     cleared = _released(2, "rejected", "rejected", "rejected", live=())
     assert _numbers(lead_planner.plan(3, [cleared], 5)) == ["s2"]
+
+
+def test_an_issue_waiting_on_a_prerequisite_is_not_planned():
+    """Automation labels ``waiting-on-prereq`` while the issue's first slice waits
+    on another feature's slice, and takes it off when it can start. The live
+    labels win, like ``needs-human``."""
+    waiting = _s(1, "p0", age_h=5)
+    waiting["labels"] = ["feature-lead", "p0", "Waiting-On-Prereq"]
+    cleared = _s(2, "p1", "waiting-on-prereq", age_h=4)
+    cleared["labels"] = ["feature-lead", "p1"]  # the wait cleared since filing
+    stale = _s(3, "p2", "waiting-on-prereq", age_h=3)  # no live row: the filed labels
+    assert _numbers(lead_planner.plan(1, [waiting, cleared, stale], 5)) == ["s2"]
+
+
+def test_waiting_on_a_prerequisite_never_trips_the_breaker_nor_hides_one():
+    """The wait is not a failure and needs no human: a waiting issue with no
+    failed leads trips nothing, one at the breaker still trips, and the wait
+    clearing frees an issue with failures under the breaker."""
+    idle = _failed(1, 0, live=("waiting-on-prereq",))
+    assert lead_planner.trips([idle]) == []
+    assert lead_planner.plan(2, [idle], 5).no_action
+    (trip,) = lead_planner.trips([_failed(2, 3, live=("waiting-on-prereq",))])
+    assert trip[0]["id"] == "s2"
+    assert _numbers(lead_planner.plan(2, [_failed(3, 2)], 5)) == ["s3"]
 
 
 def test_a_title_naming_another_issue_leads_with_its_own_number():

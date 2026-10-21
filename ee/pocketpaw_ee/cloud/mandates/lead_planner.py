@@ -2,40 +2,34 @@
 #
 # A mandate whose charter says ``run_kind: "feature-lead"`` plans without the
 # foreman: ONE ``feature-lead`` run per LINE of free feature issues, every
-# shift. The foreman may split, merge or skip issues; a lead line's plan is
-# deterministic. Pure: no I/O, no clock (``line_max`` reads one env var).
+# shift. Pure: no I/O, no clock (``line_max`` reads one env var).
 #
-# ``plan`` takes the free sightings (the caller has already dropped the ones in
+# ``plan`` takes the free sightings (the caller already dropped the ones in
 # flight, blocked by an open dependency or closed: ``service._backlog``), keeps
-# those naming a GitHub issue, orders them p0 before p1 before p2 before p3
-# (issue labels, unlabelled last; a ``p0`` jumps every queue and leads its line's
-# group), then oldest first, and groups them by their ``line:<app>``
-# label in that order, up to ``line_max`` issues a lead (env
-# ``POCKETPAW_BELT_LINE_LEAD_MAX``, default 3; 1 is one issue a lead). An issue
-# with no line label leads alone. One task per group up to the shift's
-# ``budget``, which counts runs, not issues: title = the first issue's title,
-# why = a one-line pointer naming every issue (``Feature issue(s) #a, #b``,
-# which the cloud station reads the lead's issues from; the first is
-# ``lead.issue``), recipe = ``feature-lead``, evidence = EVERY sighting of the
-# group, so each issue counts in flight and each failure counts per issue. A
-# title naming another issue (``Follow-up to #12``) is prefixed with its own
-# ``#<n>``, since the station takes the FIRST ``#N`` in title + why.
-# ``beta_only`` (the charter flag) leaves ``p3`` issues out: p3 is out of the beta.
+# those naming a GitHub issue, orders them p0, p1, p2, p3, unlabelled, then
+# oldest first, and groups them by their ``line:<app>`` label, up to
+# ``line_max`` issues a lead (env ``POCKETPAW_BELT_LINE_LEAD_MAX``, default 3).
+# An issue with no line label leads alone. One task per group up to ``budget``
+# (runs, not issues): title = the first issue's title (prefixed ``#<n>`` when it
+# names another issue, since the station takes the FIRST ``#N``), why = ``Feature
+# issue(s) #a, #b`` (what the cloud station reads), recipe = ``feature-lead``,
+# evidence = EVERY sighting of the group, so each issue counts in flight and each
+# failure counts per issue. ``beta_only`` (charter flag) leaves ``p3`` out.
 #
-# NEVER TWICE, UNTIL RE-ARMED: an issue labelled ``needs-human`` is skipped,
-# read off the LIVE labels (``labels``) the caller passes (a fresh ``--label``
-# list per charter label, so a busy repo's open list limit never hides one), else
-# the ones filed with the sighting. The station's ways to end a lead short of done (a release,
-# a stale-base refusal) label the issue ``needs-human``, then reject the run; a
-# human removes the label to retry. A rejected run never counts as a failure.
+# SKIP LABELS, read off the LIVE labels (``labels``: a fresh ``--label`` list per
+# charter label, every label on the issue), else the ones filed with the sighting:
+# ``needs-human``: the station's ways to end a lead short of done (a release, a
+#   stale-base refusal) label it, then reject the run; a human removes it to
+#   retry. A rejected run never counts as a failure.
+# ``waiting-on-prereq``: automation (the factory's prereq-priority pass) sets it
+#   while the issue's first slice waits on another feature's slice, and clears it
+#   when the slice can start. Not a failure, never trips the breaker, needs no human.
 #
 # CIRCUIT BREAKER, per issue: a lead that failed (``failed`` or ``develop
-# failed``) is tried again until ``BREAKER`` failures. ``failed`` is the issue's
-# failed lead run ids across ALL its sightings (the caller unions them and keeps
-# them on the sighting), so re-filing the issue can't reset the count. ``trips``
-# names each issue at the limit with a one-line reason; the caller labels it
-# ``needs-human`` and records the count as ``breaker_at``. A human taking the
-# label off re-arms it for ``BREAKER`` more failures.
+# failed``) is tried again until ``BREAKER`` failures, counted across ALL the
+# issue's sightings (so re-filing can't reset it). ``trips`` names each issue at
+# the limit with a one-line reason; the caller labels it ``needs-human`` and
+# records the count as ``breaker_at``, so removing the label re-arms it.
 #
 # The plan needs no human: each feature issue comes from an approved blueprint
 # and packet, so the shift trigger approves it as ``APPROVER``.
@@ -57,6 +51,7 @@ _SOURCE = re.compile(r"^github:([\w.-]+/[\w.-]+)#(\d+)$")
 # The station's issue reference (``cloud_station._ISSUE``).
 _ISSUE_REF = re.compile(r"(?<![\w/&])#(\d+)\b")
 _NEEDS_HUMAN = "needs-human"
+_WAITING_ON_PREREQ = "waiting-on-prereq"
 # A lead task in one of these failed outside the station's release path. A
 # ``rejected`` one (released, or rejected by hand) defers to the label.
 # ponytail: if the release's label write fails, a rejected task with no label
@@ -97,6 +92,12 @@ def _labels(sighting: dict[str, Any]) -> list[str]:
 
 def _flagged(sighting: dict[str, Any]) -> bool:
     return _NEEDS_HUMAN in {str(lb).strip().lower() for lb in _labels(sighting)}
+
+
+def _waiting(sighting: dict[str, Any]) -> bool:
+    """Labelled ``waiting-on-prereq``: its first slice waits on another feature's.
+    Kept out of ``_held`` so it never feeds the breaker."""
+    return _WAITING_ON_PREREQ in {str(lb).strip().lower() for lb in _labels(sighting)}
 
 
 def _tripped(sighting: dict[str, Any]) -> bool:
@@ -179,12 +180,13 @@ def plan(
     issues of one line in ``sightings`` (each ``{id, evidence, ts}``, optionally
     the live ``labels``, the issue's ``failed`` lead run ids and
     ``breaker_at``), p0 then p1 first, then oldest, at most ``budget`` tasks;
-    ``beta_only`` drops the p3 ones."""
+    ``beta_only`` drops the p3 ones. ``needs-human``, a tripped breaker and
+    ``waiting-on-prereq`` each keep an issue out."""
     issues = []
     for s in sightings:
         found = _SOURCE.match(str((s.get("evidence") or {}).get("source") or ""))
         out_of_beta = beta_only and priority(_labels(s)) == _OUT_OF_BETA
-        if found and not _held(s) and not out_of_beta:
+        if found and not _held(s) and not _waiting(s) and not out_of_beta:
             issues.append((s, found[2]))
     issues.sort(
         key=lambda pair: (

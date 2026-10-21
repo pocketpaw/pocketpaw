@@ -137,8 +137,8 @@
   {
     "label": "a sighting without an issue is planned",
     "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
-    "find": "        if found and not _held(s) and not out_of_beta:\n            issues.append((s, found[2]))",
-    "replace": "        if not _held(s) and not out_of_beta:\n            issues.append((s, found[2] if found else \"0\"))",
+    "find": "        if found and not _held(s) and not _waiting(s) and not out_of_beta:\n            issues.append((s, found[2]))",
+    "replace": "        if not _held(s) and not _waiting(s) and not out_of_beta:\n            issues.append((s, found[2] if found else \"0\"))",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py"
     ]
@@ -564,6 +564,33 @@
     "replace": "\"skipped\": [],",
     "tests": [
       "tests/cloud/test_belt_lead_planner.py::test_a_landed_line_lead_leaves_the_issue_it_skipped_open"
+    ]
+  },
+  {
+    "label": "a waiting-on-prereq issue is planned",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "    return _WAITING_ON_PREREQ in {str(lb).strip().lower() for lb in _labels(sighting)}",
+    "replace": "    return False",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "waiting-on-prereq matches case-sensitively",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "    return _WAITING_ON_PREREQ in {str(lb).strip().lower() for lb in _labels(sighting)}",
+    "replace": "    return _WAITING_ON_PREREQ in {str(lb).strip() for lb in _labels(sighting)}",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
+    ]
+  },
+  {
+    "label": "waiting-on-prereq holds like needs-human and blocks the breaker",
+    "file": "ee/pocketpaw_ee/cloud/mandates/lead_planner.py",
+    "find": "    return _NEEDS_HUMAN in {str(lb).strip().lower() for lb in _labels(sighting)}",
+    "replace": "    return bool({_NEEDS_HUMAN, _WAITING_ON_PREREQ} & {str(lb).strip().lower() for lb in _labels(sighting)})",
+    "tests": [
+      "tests/cloud/test_belt_lead_planner.py"
     ]
   }
 ]
