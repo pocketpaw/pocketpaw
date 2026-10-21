@@ -29,7 +29,7 @@ from .orient import _loom_dir, world_model_for
 logger = logging.getLogger(__name__)
 MAX_WORLD_MODEL_BYTES = 25_000_000
 _CACHE_MAX = 8
-_SCOPE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+_SCOPE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 # ponytail: drop-all when full, like architecture_code's cache
 _CACHE: dict[tuple[str, int, int], dict[str, list[dict[str, Any]]]] = {}
 
@@ -85,10 +85,10 @@ async def symbols_for(
 ) -> tuple[list[dict[str, Any]], str | None]:
     """``(symbols, skipped)`` for one repo file; ``skipped`` is ``"no model"``,
     ``"too large"`` or ``"unreadable"`` when no symbols could be read."""
-    model = _model_path(repo, scope)
-    if model is None:
-        return [], "no model"
+    model = None
     try:
+        if (model := _model_path(repo, scope)) is None:
+            return [], "no model"
         st = model.stat()
         if st.st_size > MAX_WORLD_MODEL_BYTES:
             return [], "too large"

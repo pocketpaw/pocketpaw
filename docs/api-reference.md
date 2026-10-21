@@ -3586,7 +3586,7 @@ One file of that listing: its symbols and a code excerpt.
   "sha": "<the read's sha>", "path": "src/ui/a.py", "lang": "python",
   "symbols": [ { "name": "build", "kind": "function", "line": 42, "callers": 3,
                  "url": "https://github.com/<slug>/blob/<sha>/src/ui/a.py#L42" } ],
-  "symbols_skipped": null,
+  "symbols_source": "loom", "symbols_skipped": null,
   "excerpt": { "startLine": 1, "before": ["..."], "language": "python" }
 }
 ```
@@ -3598,9 +3598,12 @@ One file of that listing: its symbols and a code excerpt.
   the nearest `.loom/` above the repo. They are sorted by `callers` (distinct
   calling symbols), then by line. The model reflects the workspace checkout,
   not `sha`, so lines can drift on an old `at`. Loom reads Python and Go only.
-- `symbols_skipped` says why `symbols` is empty when no model could be used:
-  `"no model"`, `"too large"` (over 25 MB, never parsed) or `"unreadable"`.
-  `null` means the model was read.
+- `symbols_skipped` says why no model could be used: `"no model"`, `"too large"`
+  (over 25 MB, never parsed) or `"unreadable"`. `null` means the model was read.
+- When the model gives the file no symbols, they are read from the file itself
+  at `sha` (Swift, TS/JS/Svelte, Python and Go declaration patterns, comments
+  and strings skipped, at most 200, in file order) with `callers: null`.
+  `symbols_source` is `"loom"`, `"file"`, or `null` when neither found any.
 - `excerpt` is 40 lines starting at `line` (clamped to the file; the top when
   omitted), in Ripple's `C4Code` shape. It is `null` for an empty or binary
   file, one over 1 MB, or a failed git read.

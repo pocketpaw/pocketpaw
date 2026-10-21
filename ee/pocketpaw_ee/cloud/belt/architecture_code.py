@@ -24,9 +24,11 @@
 #
 # ``read_file`` (``&file=``) opens one file of that listing (an exact path match,
 # else 404 ``belt.file_not_found``, so nothing outside the listing is read):
-# ``{sha, path, lang, symbols, symbols_skipped, excerpt}``. ``symbols`` come from
-# ``architecture_symbols`` (the world-model is the workspace's, not ``sha``'s, so
-# a line can drift on an old ``at``), each with the file url plus ``#L<line>``.
+# ``{sha, path, lang, symbols, symbols_source, symbols_skipped, excerpt}``.
+# ``symbols`` come from ``architecture_symbols`` (``symbols_source: "loom"``; the
+# world-model is the workspace's, not ``sha``'s, so a line can drift on an old
+# ``at``), else from ``file_symbols`` over the file at ``sha`` (``"file"``,
+# ``callers: None``); ``None`` with neither. Each has the file url plus ``#L<line>``.
 # ``excerpt`` is Ripple's ``C4Code`` shape ``{startLine, before, language}``:
 # ``EXCERPT_LINES`` lines from ``line`` (the top by default), ``None`` for an
 # empty, binary or over-``MAX_MODEL_BYTES`` file, or a failed git read.
@@ -43,6 +45,7 @@ from . import app_blueprint_read as abr
 from . import architecture_history, architecture_symbols
 from . import architecture_read as ar
 from .architecture_live import _LIMIT
+from .file_symbols import file_symbols
 from .orient import _dicts, _owned_system, path_index
 from .service import MAX_MODEL_BYTES, BeltConsoleError
 
@@ -97,31 +100,38 @@ async def read_file(
         raise BeltConsoleError(404, "No such file in this component.", "belt.file_not_found")
     scope = (body.get("model") or {}).get("scope")
     symbols, skipped = await architecture_symbols.symbols_for(Path(body["repo"]), file, scope)
+    text = None
+    if row["loc"]:  # None: binary; 0: empty
+        try:
+            text = await _blob(abr._git(Path(body["repo"])), listing["sha"], file)
+        except abr.ReadFailed:
+            logger.warning("Read of %s at %s failed", file, listing["sha"], exc_info=True)
+    source = "loom" if symbols else None
+    if not symbols and text is not None and (symbols := file_symbols(text, row["lang"])):
+        source = "file"
     for s in symbols:
         s["url"] = f"{row['url']}#L{s['line']}" if row["url"] and s["line"] else row["url"]
     excerpt = None
-    if row["loc"]:  # None: binary; 0: empty
-        try:
-            excerpt = await _excerpt(abr._git(Path(body["repo"])), listing["sha"], file, line)
-        except abr.ReadFailed:
-            logger.warning("Excerpt of %s at %s failed", file, listing["sha"], exc_info=True)
+    if text is not None:
+        # split, not splitlines: \f or U+2028 would shift the line numbers
+        lines = text.removesuffix("\n").split("\n")
+        start = max(1, min(line, len(lines)))
+        before = lines[start - 1 : start - 1 + EXCERPT_LINES]
+        excerpt = {"startLine": start, "before": before, "language": lang(file)}
     return {
         "sha": listing["sha"], "path": file, "lang": row["lang"], "symbols": symbols,
-        "symbols_skipped": skipped, "excerpt": excerpt,
+        "symbols_source": source, "symbols_skipped": skipped, "excerpt": excerpt,
     }  # fmt: skip
 
 
-async def _excerpt(git: abr.Run, sha: str, path: str, line: int) -> dict[str, Any] | None:
-    """``EXCERPT_LINES`` lines from ``line`` (clamped; the top when 0), sized by
-    ``ls-tree`` first so an oversized blob is never read."""
+async def _blob(git: abr.Run, sha: str, path: str) -> str | None:
+    """The file's text at ``sha``, sized by ``ls-tree`` first so an oversized blob
+    is never read (``None``)."""
     entry = await abr._ok(git, ["--literal-pathspecs", "ls-tree", "-l", sha, "--", path])
     _mode, kind, obj, size = (entry.split("\t", 1)[0].split() + ["", "", "", ""])[:4]
     if kind != "blob" or not size.isdigit() or int(size) > MAX_MODEL_BYTES:
         return None
-    lines = (await abr._ok(git, ["cat-file", "blob", obj])).splitlines()
-    start = max(1, min(line, len(lines)))
-    before = lines[start - 1 : start - 1 + EXCERPT_LINES]
-    return {"startLine": start, "before": before, "language": lang(path)}
+    return await abr._ok(git, ["cat-file", "blob", obj])
 
 
 async def _read(workspace_id: str, repo: str, at: str) -> dict[str, Any]:

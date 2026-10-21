@@ -1,0 +1,66 @@
+[
+  {
+    "label": "file symbols: block comments are not skipped",
+    "file": "ee/pocketpaw_ee/cloud/belt/file_symbols.py",
+    "find": "    text = _BLOCK.sub(_blank, text) if lang != \"python\" else text\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_without_loom_symbols_a_swift_file_is_read_directly",
+      "tests/cloud/test_belt_architecture_code.py::test_without_loom_symbols_a_ts_file_is_read_directly"
+    ]
+  },
+  {
+    "label": "file symbols: a brace inside a string counts",
+    "file": "ee/pocketpaw_ee/cloud/belt/file_symbols.py",
+    "find": "_STRING.sub('\"\"', line)",
+    "replace": "line",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_without_loom_symbols_a_swift_file_is_read_directly"
+    ]
+  },
+  {
+    "label": "file symbols: a local var/let in a function body is listed",
+    "file": "ee/pocketpaw_ee/cloud/belt/file_symbols.py",
+    "find": "                braces.append(opens_type)\n",
+    "replace": "                braces.append(True)\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_without_loom_symbols_a_swift_file_is_read_directly"
+    ]
+  },
+  {
+    "label": "file symbols: the count is uncapped",
+    "file": "ee/pocketpaw_ee/cloud/belt/file_symbols.py",
+    "find": "        if hit and len(out) < MAX_SYMBOLS:\n",
+    "replace": "        if hit:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_the_fallback_is_capped"
+    ]
+  },
+  {
+    "label": "architecture code: no fallback when loom has no symbols",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_code.py",
+    "find": "(symbols := file_symbols(text, row[\"lang\"]))",
+    "replace": "(symbols := [])",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_without_loom_symbols_a_swift_file_is_read_directly"
+    ]
+  },
+  {
+    "label": "architecture code: the excerpt splits on form feeds too",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_code.py",
+    "find": "        lines = text.removesuffix(\"\\n\").split(\"\\n\")\n",
+    "replace": "        lines = text.removesuffix(\"\\n\").splitlines()\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_the_excerpt_splits_on_newlines_only"
+    ]
+  },
+  {
+    "label": "architecture symbols: a scope of any length reaches the filesystem",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_symbols.py",
+    "find": "[a-z0-9_-]{0,63}",
+    "replace": "[a-z0-9_-]*",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_an_overlong_scope_is_unreadable_not_a_crash"
+    ]
+  }
+]

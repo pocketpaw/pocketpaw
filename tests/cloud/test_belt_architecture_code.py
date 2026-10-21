@@ -7,12 +7,15 @@
 # open-PR join through a fake gh (a failed gh keeps the files, uncached) and the
 # route's RBAC. File mode (``&file=``): symbols from a fixture world-model in a
 # tmp loom dir (order, callers, url), the excerpt window, 404 off the listing,
-# and empty symbols for a missing or oversized model.
+# and empty symbols for a missing or oversized model. Without loom symbols, a
+# Swift or TS file's declarations are read from the file itself (comments and
+# strings skipped, capped).
 
 from __future__ import annotations
 
 import json
 import os
+import re
 
 import pytest
 
@@ -22,6 +25,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from pocketpaw_ee.cloud.belt import architecture_code as ac  # noqa: E402
 from pocketpaw_ee.cloud.belt import architecture_read as ar  # noqa: E402
 from pocketpaw_ee.cloud.belt import architecture_symbols as asy  # noqa: E402
+from pocketpaw_ee.cloud.belt import file_symbols as fs  # noqa: E402
 from pocketpaw_ee.cloud.belt.service import BeltConsoleError  # noqa: E402
 
 from tests.cloud.test_belt_architecture_read import _no_run_store, origin  # noqa: E402, F401
@@ -32,6 +36,7 @@ COMPS = [
     {"id": "ui", "paths": ["src/ui/"]},
     {"id": "gone", "paths": ["old/**"]},
     {"id": "bare"},
+    {"id": "mac", "paths": ["mac/"]},
 ]
 MODEL = {
     "scope": "app",
@@ -41,6 +46,34 @@ MODEL = {
     },
 }
 SLUG = "acme/app"
+SWIFT = """import SwiftUI
+/*
+struct Hidden {}
+*/
+// func commented() {}
+@MainActor public final class Store {
+    let label = "{ func notAFunc()"
+    @Published private(set) var items: [String] = []
+    init(items: [String]) { self.items = items }
+    class func make() -> Store { Store(items: []) }
+    func add(_ item: String) {
+        let local = 1
+    }
+}
+enum Mode { case a }
+extension Store.Mode {}
+"""
+TS = """/*
+class Doc {}
+*/
+// export function gone() {}
+export function build(a: number) { return a }
+export default class Panel {}
+export interface Props { a: string }
+type Id = string;
+export const LIMIT = 3;
+const hidden = "function fake() {}";
+"""
 
 
 @pytest.fixture
@@ -53,6 +86,9 @@ def repo(origin, monkeypatch):  # noqa: F811
         "src/ui/my file.md": "# hi\n",
         "src/api/b.go": "package b\n",
         "README.md": "top\n",
+        "mac/Store.swift": SWIFT,
+        "mac/panel.ts": TS,
+        "mac/feed.txt": "a\x0cb\nc\n",
     }
     for name, text in files.items():
         (origin.work / name).parent.mkdir(parents=True, exist_ok=True)
@@ -273,3 +309,47 @@ def test_route_serves_a_file_and_404s_one_outside_the_component(loom, repo):
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "belt.file_not_found"
     assert bad.status_code == 422
+
+
+async def test_without_loom_symbols_a_swift_file_is_read_directly(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("POCKETPAW_FACTORY_LOOM_DIR", str(tmp_path / "none"))
+    with_read(monkeypatch)
+    body = await ac.read_file("ws1", "repo", "mac", "mac/Store.swift")
+    got = [(s["kind"], s["name"], s["line"]) for s in body["symbols"]]
+    assert got == [("class", "Store", 6), ("property", "label", 7), ("property", "items", 8),
+                   ("init", "init", 9), ("function", "make", 10), ("function", "add", 11),
+                   ("enum", "Mode", 15), ("extension", "Store.Mode", 16)]  # fmt: skip
+    assert (body["symbols_source"], body["symbols_skipped"]) == ("file", "no model")
+    assert all(s["callers"] is None for s in body["symbols"])
+    assert body["symbols"][0]["url"] == f"https://github.com/{SLUG}/blob/{repo}/mac/Store.swift#L6"
+
+
+async def test_without_loom_symbols_a_ts_file_is_read_directly(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("POCKETPAW_FACTORY_LOOM_DIR", str(tmp_path / "none"))
+    body = await ac.read_file("ws1", "repo", "mac", "mac/panel.ts")
+    got = [(s["kind"], s["name"], s["line"]) for s in body["symbols"]]
+    assert got == [("function", "build", 5), ("class", "Panel", 6), ("interface", "Props", 7),
+                   ("type", "Id", 8), ("const", "LIMIT", 9)]  # fmt: skip
+    assert body["symbols_source"] == "file"
+
+
+async def test_loom_symbols_win_and_say_so(loom, repo):
+    body = await ac.read_file("ws1", "repo", "ui", "src/ui/long.py")
+    assert body["symbols_source"] == "loom"
+
+
+async def test_the_fallback_is_capped(repo, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_SYMBOLS", 2)
+    assert len(fs.file_symbols("def a(): pass\ndef b(): pass\ndef c(): pass\n", "python")) == 2
+
+
+async def test_the_excerpt_splits_on_newlines_only(repo):
+    excerpt = (await ac.read_file("ws1", "repo", "mac", "mac/feed.txt"))["excerpt"]
+    assert excerpt["before"] == ["a\x0cb", "c"]
+
+
+async def test_an_overlong_scope_is_unreadable_not_a_crash(tmp_path, monkeypatch):
+    monkeypatch.setenv("POCKETPAW_FACTORY_LOOM_DIR", str(tmp_path))
+    assert await asy.symbols_for(tmp_path, "a.py", "a" * 300) == ([], "no model")
+    monkeypatch.setattr(asy, "_SCOPE", re.compile(r"a+"))  # past the cap: the stat fails
+    assert await asy.symbols_for(tmp_path, "a.py", "a" * 300) == ([], "unreadable")
