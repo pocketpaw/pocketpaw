@@ -21,8 +21,8 @@
 # Invariants:
 #   * every handler resolves identity from the chat ContextVars, records the call,
 #     and runs ``_require_sites_plan_or_error`` (the same ``sites`` plan gate the
-#     publish path and the REST router use) before it writes; its refusal tells the
-#     agent to stop in one sentence, never to hand the site over some other way;
+#     publish path and the REST router use) before it writes; the refusal says what
+#     the call did not do (create / edit / read) in plain words a user can read;
 #   * creates persist a DRAFT and mint a draft Site doc (``_mint_draft_site``); they
 #     never publish. Edits stage a draft too, and report ``verification`` per the
 #     verify contract (static check now, build and browser verdict on the next call);
@@ -680,15 +680,27 @@ def _identity() -> tuple[str | None, str | None]:
         return None, None
 
 
-#: Appended to every Sites plan refusal the agent sees.
-_PLAN_REFUSAL_TAIL = (
-    "Nothing was created. Tell the user that in one sentence with this next step, "
-    "then stop: do not write the site into the chat as code or a file, and do not "
-    "suggest another host or builder."
-)
+#: What a refused call did NOT do, by kind of tool. Tool results can show in the
+#: chat's activity feed, so this is a plain sentence for the user; how the agent
+#: must react (one sentence, then stop) lives in the /sites preamble's blocked rule.
+_PLAN_REFUSAL_OUTCOME = {
+    "create": "Nothing was created.",
+    "edit": "Nothing was changed.",
+    "read": "",
+}
 
 
-async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
+def _plan_refusal_op(tool: str) -> str:
+    """``create`` / ``edit`` / ``read`` for a tool name, so the refusal never claims
+    a create on a read or an edit."""
+    if tool.startswith("create_") or tool == "start_site_from_template":
+        return "create"
+    if tool.startswith(("list_", "read_", "get_", "verify_", "preview_")):
+        return "read"
+    return "edit"
+
+
+async def _require_sites_plan_or_error(workspace_id: str, tool: str = "") -> dict | None:
     """Gate the create on the workspace's plan. Returns an MCP ``_error_response``
     when the plan lacks the Sites ("sites") feature (so the agent surfaces the
     upgrade message instead of a phantom-created site), or ``None`` when the plan
@@ -698,7 +710,10 @@ async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
     the in-process create path is gated by the SAME plan check + feature table as
     the publish path and the HTTP ``require_plan_feature("sites")`` dependency. A
     free-plan workspace was the bug: create + publish ran in-process and bypassed
-    the router gate, deploying a live site that GET /sites then 403'd."""
+    the router gate, deploying a live site that GET /sites then 403'd.
+
+    ``tool`` is the calling tool's name; it picks the outcome sentence (nothing
+    created / nothing changed / none for a read). Unnamed reads as an edit."""
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites.service import require_sites_plan
 
@@ -706,11 +721,10 @@ async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
         await require_sites_plan(workspace_id)
     except CloudError as exc:
         # Forbidden('plan.feature_denied') / NotFound('workspace'). Relay the
-        # code + message so the agent tells the user to upgrade / switch
-        # workspace, not "site created". The tail is for the agent: given only
-        # the refusal, it used to paste the whole site into the chat as HTML and
-        # point the user at other hosts.
-        return _error_response(f"{exc.code}: {exc.message} {_PLAN_REFUSAL_TAIL}")
+        # code + message (it names the upgrade path) so the agent tells the user
+        # to upgrade / switch workspace, not "site created".
+        outcome = _PLAN_REFUSAL_OUTCOME[_plan_refusal_op(tool)]
+        return _error_response(f"{exc.code}: {exc.message} {outcome}".rstrip())
     return None
 
 
@@ -810,7 +824,9 @@ async def _create_landing_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_landing_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -1019,7 +1035,9 @@ async def _create_dynamic_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_dynamic_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -1241,7 +1259,9 @@ async def _create_svelte_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_svelte_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -1491,7 +1511,9 @@ async def _create_html_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_html_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -1743,7 +1765,9 @@ async def _create_react_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_react_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -2401,7 +2425,9 @@ async def _edit_react_component_handler(args: dict) -> dict:
     # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
     # the same feature the create tools are. Without this a workspace that lost the
     # plan could keep editing a site its own /sites list 403s.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="edit_react_component")
+    ) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -2685,7 +2711,9 @@ async def _read_site_source_handler(args: dict) -> dict:
             "strings (relative file paths). Omit it to list the site's files instead."
         )
 
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="read_site_source")
+    ) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -2844,7 +2872,9 @@ async def _edit_html_file_handler(args: dict) -> dict:
     # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
     # the same feature the create tools are. Without this a workspace that lost the
     # plan could keep editing a site its own /sites list 403s.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="edit_html_file")
+    ) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -2959,7 +2989,9 @@ async def _set_site_dependencies_handler(args: dict) -> dict:
             "(package names to drop)."
         )
 
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="set_site_dependencies")
+    ) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -3075,7 +3107,7 @@ async def _verify_site_handler(args: dict) -> dict:
             "verify_site requires a `pocket_id` — the id of the site pocket to check."
         )
 
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (gate := await _require_sites_plan_or_error(workspace_id, tool="verify_site")) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -3224,7 +3256,7 @@ async def _preview_site_handler(args: dict) -> dict:
         )
     device = args.get("device") if args.get("device") in _PREVIEW_VIEWPORTS else "desktop"
 
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (gate := await _require_sites_plan_or_error(workspace_id, tool="preview_site")) is not None:
         return gate
 
     from pocketpaw.tools.builtin import reference_images
@@ -3594,7 +3626,9 @@ async def _request_site_secret_handler(args: dict) -> dict:
     workspace_id, user_id, err = _secret_tool_identity("request_site_secret", pocket_id)
     if err is not None:
         return err
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="request_site_secret")
+    ) is not None:
         return gate
     pocket_id = pocket_id.strip()
     try:
@@ -3655,7 +3689,9 @@ async def _list_site_secrets_handler(args: dict) -> dict:
     workspace_id, user_id, err = _secret_tool_identity("list_site_secrets", pocket_id)
     if err is not None:
         return err
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="list_site_secrets")
+    ) is not None:
         return gate
     try:
         listing = await site_secrets.list_secrets(
@@ -3868,7 +3904,9 @@ async def _list_site_integrations_handler(args: dict) -> dict:
     workspace_id, user_id, err = _secret_tool_identity("list_site_integrations", pocket_id)
     if err is not None:
         return err
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="list_site_integrations")
+    ) is not None:
         return gate
     try:
         linked = await bindings.list_for_pocket(
@@ -3905,7 +3943,9 @@ async def _connect_site_integration_handler(args: dict) -> dict:
     workspace_id, user_id, err = _secret_tool_identity("connect_site_integration", pocket_id)
     if err is not None:
         return err
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="connect_site_integration")
+    ) is not None:
         return gate
     pocket_id = pocket_id.strip()
     provider_id = str(args.get("provider") or "").strip().lower()

@@ -1085,8 +1085,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "\n"
         "DECIDE THE DESIGN YOURSELF; ASK ONLY FOR FACTS. Style, palette, layout and "
         "type are YOUR call: infer them from the business and never ask the user "
-        "'what style / theme / colors do you want?'. Ask only for a fact the page "
-        "cannot work without (a missing business name can be 'Your Studio'); then "
+        "'what style / theme / colors do you want?'. Never block on a missing fact: "
+        "a missing business name is 'Your Studio', listed with the other "
+        "placeholders. Ask only when the page cannot work without the fact; then "
         f"{ask_mechanism}.\n" + _FACTS_RULE + "\n"
         "THE ARGUMENT. Settle the one offer, the one action, and the sections the "
         "brief asks for, in the order that sells. Nothing the brief did not ask for.\n"
@@ -1159,6 +1160,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "- If an ASSET tool errors (stock, palette, icons, image or video), do NOT "
         "retry blindly or stall: proceed with the identity you committed to and "
         "tasteful defaults, and note the fallback in a few words.\n"
+        "- Any other tool failing for a transient reason (a server error starting "
+        "the template, a build log that will not load): retry once, then tell the "
+        "user plainly what failed.\n"
         f"- {_BLOCKED_RULE}"
         "- ONE round of questions maximum. If the user already gave detail or "
         "says 'just build it', go straight to building with sensible "
@@ -1224,7 +1228,8 @@ _ART_DIRECTION = (
     "Google Fonts serves. Satoshi, General Sans, Clash Display, Cabinet Grotesk, "
     "Switzer and other Fontshare or commercial faces are not on it and silently "
     "fall back to the system font. The family your CSS names is the one the link "
-    "loads.\n"
+    "loads. Request only weights the family has (a single-weight face such as Young "
+    "Serif takes `wght@400` only): one missing weight fails the whole link.\n"
 )
 
 # Added 2026-09-27 (feat/sites-lean-prompt). What must hold on any public page,
@@ -1267,17 +1272,22 @@ _LOOK_RULE = (
 _FACTS_RULE = (
     "NEVER FABRICATE FACTS. A business name, address, phone, email, hours, staff or "
     "client names, prices, ratings, review counts, awards, stats, testimonials and "
-    "real venues or brands come from the user or not at all. A missing one is an "
-    "obvious placeholder the owner will replace ('Your Studio', '[Phone]', "
-    "'[Price]') or its section is left out, never a plausible invention or a real "
-    "venue's, brand's or person's name. Your reply lists the placeholders left to "
-    "fill; never say nothing was invented unless that is true.\n"
+    "real venues or brands come from the user or not at all. Research counts only "
+    "when the user named the business and gave a URL or location that pins it "
+    "down: cite the source and ask the owner to confirm; never borrow a same-named "
+    "business's details. A missing fact is an obvious placeholder the owner will "
+    "replace ('Your Studio', '[Phone]', '[Price]'), never a plausible invention or "
+    "a real venue's, brand's or person's name. A new page may leave out a section "
+    "it knows nothing for; an edit keeps existing sections, with placeholders. "
+    "Your reply lists the placeholders left to fill (its own list, not one of your "
+    "next ideas); never say nothing was invented unless that is true.\n"
 )
 
 _BLOCKED_RULE = (
     "WHEN A SITE TOOL REFUSES (a plan or early-access refusal, or the site tools are "
-    "missing), the site cannot be built here: say so in one plain sentence with the "
-    "next step the refusal names, then stop. Never build it another way: no site "
+    "missing), the site cannot be built here: say so yourself in one plain sentence "
+    "with the next step the refusal names (Settings → Billing, or another "
+    "workspace), then stop. Never build it another way: no site "
     "code or file pasted into the chat, no download link, no internal placeholder "
     "such as `__CAPTURE_API_BASE__`, no other host or builder (GitHub Pages, "
     "Netlify, Vercel).\n"
@@ -1294,9 +1304,9 @@ _STORED_DATA_RULE = (
 )
 
 _CLOSING_RULE = (
-    "CLOSE FROM THIS BRIEF: offer at most two next ideas, taken from this user's "
-    "brief and conversation (a placeholder to fill, a section they mentioned), never "
-    "a generic upgrade menu or something they asked to remove.\n"
+    "CLOSE FROM THIS BRIEF: offer at most two next ideas (the placeholder list does "
+    "not count), taken from this user's brief and conversation, never a generic "
+    "upgrade menu or something they asked to remove.\n"
 )
 
 # Added 2026-10-02 (feat/sites-card-photo-source, PH-10). One rule, three
@@ -1320,9 +1330,10 @@ _WHATSAPP_ORDERS_RULE = (
 )
 
 _REFINE_SHARED_RULES = (
-    "PRESERVE the landing funnel (nav → hero → services → proof → pricing → "
-    "call-to-action → lead form → footer): a refine changes a section, it does not "
-    "reorder or drop the funnel, and it does not turn the page into a dashboard.\n"
+    "PRESERVE the page's sections and their order (whatever it has of nav, hero, "
+    "services, proof, pricing, call-to-action, lead form, footer): a refine changes "
+    "what was asked, it does not drop, reorder or add sections, and it does not "
+    "turn the page into a dashboard.\n"
     + _STORED_DATA_RULE
     + "Every CTA stays an anchor `href` (or `tel:` / `mailto:` / `https://wa.me/…`), "
     "never a click handler that needs JavaScript to navigate.\n"

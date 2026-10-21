@@ -254,7 +254,7 @@ async def _begin(tool: str) -> tuple[str | None, str | None, dict | None]:
         status="ok",
         ok=True,
     )
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (gate := await _require_sites_plan_or_error(workspace_id, tool=tool)) is not None:
         return None, None, gate
     return workspace_id, user_id, None
 

@@ -287,7 +287,7 @@ def _extract_css(html: str, cloudflare_dir: Path) -> str:
     component's link is refused) before it is read.
 
     A stylesheet link with an absolute ``https://`` or protocol-relative ``//`` href
-    (a web font from Google Fonts / Fontshare in ``<head>``) is not on disk: it is
+    (a web-font stylesheet such as Google Fonts in ``<head>``) is not on disk: it is
     emitted as ``@import url("...");`` in its document position instead, since the
     native preview drops the page ``<head>``. Plain ``http://`` and other schemes
     are ignored. Finally every top-level ``@import`` is hoisted to the start of the
@@ -1714,8 +1714,8 @@ async def require_sites_plan(workspace_id: str) -> None:
         )
         raise Forbidden(
             "plan.feature_denied",
-            f"Sites requires the {needed.capitalize()} plan — upgrade, or switch "
-            "to a workspace that has it.",
+            f"Sites requires the {needed.capitalize()} plan. Upgrade under "
+            "Settings → Billing, or switch to a workspace that has it.",
         )
 
 

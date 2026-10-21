@@ -75,11 +75,13 @@ If the user cannot answer, **make a reasonable assumption, state it in one line,
 and continue.** Do not stall the build on intake. On the /sites surface prefer the
 `ask_user` chips for this rather than a wall of prose questions.
 
-**Research the real business first.** Before assuming, use WebSearch / WebFetch on
-the actual business. Real services, real neighbourhood, real hours and real
-differentiators beat any invented intake answer, and they are what stops the page
-reading as generic. Never fabricate a specific verifiable fact (an address, a
-price, a named testimonial) - use an obvious placeholder and flag it.
+**Research the real business only when it is identified.** If the user named
+the business AND gave a URL or location that pins it down, WebSearch / WebFetch it:
+real services, hours and differentiators beat any invented intake answer. Cite the
+source of each fact in your reply and ask the owner to confirm it. Otherwise, or if
+the match is uncertain, use an obvious placeholder; never borrow the details of a
+same-named business. Never fabricate a specific verifiable fact (an address, a
+price, a named testimonial).
 
 ## 2. Page shape
 

@@ -151,7 +151,7 @@
   {
     "label": "the MCP handler skips the Sites plan gate, so a workspace without the plan keeps editing a site its own /sites list 403s",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:\n        return gate\n\n    from pocketpaw_ee.cloud._core.errors import CloudError\n    from pocketpaw_ee.sites import service as sites_service\n\n    try:\n        result = await sites_service.edit_react_component(",
+    "find": "    if (\n        gate := await _require_sites_plan_or_error(workspace_id, tool=\"edit_react_component\")\n    ) is not None:\n        return gate\n\n    from pocketpaw_ee.cloud._core.errors import CloudError\n    from pocketpaw_ee.sites import service as sites_service\n\n    try:\n        result = await sites_service.edit_react_component(",
     "replace": "    from pocketpaw_ee.cloud._core.errors import CloudError\n    from pocketpaw_ee.sites import service as sites_service\n\n    try:\n        result = await sites_service.edit_react_component(",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestEditHandler::test_plan_gate_denies_a_workspace_without_sites"

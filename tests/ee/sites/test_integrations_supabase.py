@@ -497,7 +497,7 @@ async def test_a_401_refreshes_once_and_a_403_is_setup_required(beanie_test_db, 
 async def test_the_agent_tool_points_at_the_recipe(beanie_test_db, supa, monkeypatch):
     from pocketpaw_ee.agent.mcp_servers import sites_create
 
-    async def _plan_ok(_ws):
+    async def _plan_ok(_ws, **_kw):
         return None
 
     monkeypatch.setattr(sites_create, "_identity", lambda: (WS, OWNER))

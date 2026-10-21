@@ -2360,6 +2360,32 @@ async def test_facts_rule_forbids_invention_and_names_placeholders() -> None:
     assert "'Your Studio'" in rule
     assert "lists the placeholders" in rule
     assert "never say nothing was invented unless that is true" in rule
+    # Research only on an identified business, cited and confirmed by the owner.
+    assert "URL or location that pins it" in rule
+    assert "never borrow a same-named" in rule
+    # Create may omit an unknown section; an edit keeps it with placeholders.
+    assert "an edit keeps existing sections" in rule
+
+
+async def test_refine_preserves_sections_instead_of_a_fixed_funnel() -> None:
+    """A refine keeps whatever sections the page has; it must not imply every site
+    has proof and pricing, which would make the agent invent them."""
+    rules = sites_handler._REFINE_SHARED_RULES
+    assert "PRESERVE the page's sections and their order" in rules
+    assert "does not drop, reorder or add sections" in rules
+    assert "drop the funnel" not in rules
+
+
+async def test_create_does_not_block_on_a_missing_name() -> None:
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+    assert "Never block on a missing fact" in out
+    assert "listed with the other placeholders" in out
+    # Transient non-asset failures: one retry, then an honest report.
+    assert "retry once, then tell the user plainly what failed" in out
+    # A single-weight family requested at a weight it lacks fails the whole link.
+    assert "Request only weights the family has" in out
 
 
 async def test_blocked_rule_stops_instead_of_handing_the_site_over() -> None:
@@ -2369,6 +2395,7 @@ async def test_blocked_rule_stops_instead_of_handing_the_site_over() -> None:
     rule = sites_handler._BLOCKED_RULE
     assert "one plain sentence" in rule
     assert "then stop" in rule
+    assert "Settings → Billing" in rule
     assert "pasted into the chat" in rule
     assert "__CAPTURE_API_BASE__" in rule
     for host in ("GitHub Pages", "Netlify", "Vercel"):
@@ -2392,3 +2419,4 @@ async def test_closing_rule_comes_from_the_brief() -> None:
     assert "brief" in rule
     assert "two" in rule
     assert "asked to remove" in rule
+    assert "the placeholder list does not count" in rule
