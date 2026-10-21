@@ -18,10 +18,10 @@
     ]
   },
   {
-    "label": "the 5b self-check stops invoking the defect list — the draft still gets shown, just without the pass that catches the first-revision defects",
+    "label": "the 5b self-check stops invoking sites-check in FIX mode: the draft still gets shown, just without the pass that catches the first-revision defects",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "        \"5b. \" + _LOOK_RULE + \"`sites-ship-fixes` lists the defects that most \"",
-    "replace": "        \"5b. \" + _LOOK_RULE + \"A defect list covers the defects that most \"",
+    "find": "        \"5b. \" + _LOOK_RULE + \"Then run `sites-check` in FIX mode over the draft \"",
+    "replace": "        \"5b. \" + _LOOK_RULE + \"Then run a defect list over the draft \"",
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_procedure_steps_invoke_the_design_skills"
     ]
@@ -69,6 +69,42 @@
     "replace": "        \"sites-craft\",\r\n        \"create\",",
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_craft_refine_carries_the_floor_and_names_the_rest"
+    ]
+  },
+  {
+    "label": "the sites-check trigger drops 'read-only': review mode is now advertised on create, so a create turn reads it as a licence to critique instead of build",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"the page, or asks why it feels off. It is read-only: ranked findings with \"",
+    "replace": "        \"the page, or asks why it feels off. It returns ranked findings with \"",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_create_skill_names_cover_the_advertised_skills"
+    ]
+  },
+  {
+    "label": "refine routes a review request back to editing: the procedure stops naming sites-check REVIEW mode, so 'review this page' gets answered with a mutation",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"`sites-check` in REVIEW mode and report its ranked findings INSTEAD of \"",
+    "replace": "        \"`sites-check` and report its ranked findings INSTEAD of \"",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_refine_routes_a_review_request_away_from_editing"
+    ]
+  },
+  {
+    "label": "the create precedence line loses the sites-check carve-out: 'your art direction wins' now covers contrast failures and dead links",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"supplied win over them, except the defects in `sites-check` (the floor, \"",
+    "replace": "            \"supplied win over them, except the floor, \"",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_check_defects_are_carved_out_of_the_precedence_line"
+    ]
+  },
+  {
+    "label": "the merged check skill is renamed back to sites-ship-fixes in the tuple: the note advertises a skill dir that no longer exists",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"sites-check\",\r\n        \"both\",",
+    "replace": "        \"sites-ship-fixes\",\r\n        \"both\",",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_create_skill_names_cover_the_advertised_skills"
     ]
   }
 ]

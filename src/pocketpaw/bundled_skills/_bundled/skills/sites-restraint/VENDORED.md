@@ -58,8 +58,8 @@ ericzakariasson stays in this file either way.
 - **Its Invocation Modes (Apply / Review / Prototype / Deep) and its Recon step.**
   These assume the agent can inspect an existing codebase. `_SITES_BUILTIN_DENY`
   strips `Read`, `Glob` and `Bash` on every /sites mode, so a source-inspection
-  workflow cannot run there. The review axis lives in `sites-interface-review`
-  instead.
+  workflow cannot run there. The review axis lives in `sites-check` (REVIEW
+  mode) instead.
 - **Its browser-verification harness** (`scripts/lines.js`, `scripts/tints.js`,
   `scripts/run-eval.js`, and the Browser verification section). Those are Node
   scripts run against a live page; /sites has no shell and bundled-skill scripts are

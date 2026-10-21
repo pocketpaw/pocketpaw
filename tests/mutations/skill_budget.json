@@ -25,5 +25,32 @@
     "tests": [
       "tests/test_bundled_skill_budget.py"
     ]
+  },
+  {
+    "label": "sites-check budget: the skill grows past its ceiling and nothing notices",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/sites-check/SKILL.md",
+    "find": "# Sites: check\n",
+    "replace": "# Sites: check\n\n## Extra rules (added without measuring the budget)\n- **SC-EXTRA-01 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-02 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-03 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-04 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-05 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-06 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-07 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-08 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-09 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-10 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-11 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-12 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-13 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-14 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n- **SC-EXTRA-15 Padding rule** (LOW). A plausible rule written to look like guidance, long enough to cost real bytes, and repeated so the file crosses its ceiling.\n",
+    "tests": [
+      "tests/test_sites_check_skill_budget.py"
+    ]
+  },
+  {
+    "label": "sites-check budget: the ceiling is measured in decoded chars, not wc -c bytes",
+    "file": "tests/test_sites_check_skill_budget.py",
+    "find": "    return path.stat().st_size",
+    "replace": "    return len(path.read_text(encoding=\"utf-8\"))",
+    "tests": [
+      "tests/test_sites_check_skill_budget.py"
+    ]
+  },
+  {
+    "label": "sites-check budget: the fixture reads a path that does not exist",
+    "file": "tests/test_sites_check_skill_budget.py",
+    "find": "    return plugin_dir / \"skills\" / \"sites-check\" / \"SKILL.md\"",
+    "replace": "    return plugin_dir / \"skills\" / \"sites-check\" / \"SKILL.markdown\"",
+    "tests": [
+      "tests/test_sites_check_skill_budget.py"
+    ]
   }
 ]

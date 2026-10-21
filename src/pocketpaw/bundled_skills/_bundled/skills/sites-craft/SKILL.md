@@ -10,8 +10,8 @@ description: |
   constructed so they read as one system instead of a pile of one-off values.
   It answers "what line-height does a heading take", "how do I build a ramp",
   "what radius does a nested element get", "how much space separates two
-  groups". Generative, not corrective: `sites-interface-review` checks a built
-  page against these same rules; this one is for while you are writing it.
+  groups". Generative, not corrective: `sites-check` (REVIEW mode) checks a
+  built page against these same rules; this one is for while you are writing it.
 ---
 
 # Sites: craft mechanics

@@ -193,9 +193,15 @@ def test_sites_create_skill_names_cover_the_advertised_skills():
     note = sites_handler._design_skills_note("create")
     for name in advertised:
         assert f"`{name}`" in note, name
-    # A refine-only skill must not be advertised on create — there is nothing to
-    # review before the page exists.
-    assert "sites-interface-review" not in note
+    # The check skill is advertised on create with BOTH modes, and its REVIEW mode
+    # must say it is read-only and on request, or a create turn reads it as a
+    # licence to critique instead of build.
+    assert "`sites-check`" in note
+    for phrase in ("FIX mode", "REVIEW mode", "read-only", "only when the user asks"):
+        assert phrase in note, phrase
+    # The merged skills are gone, from the note and from the bundle.
+    for gone in ("sites-ship-fixes", "sites-interface-review"):
+        assert gone not in note, gone
 
 
 def test_sites_refine_wins_over_react_engine():
@@ -408,15 +414,15 @@ async def test_sites_procedure_steps_invoke_the_design_skills():
     """The numbered procedure must point at the checks, not just list skills.
 
     Since the lean preamble the argument and the look are written inline, so the
-    only skill a step still names is ``sites-ship-fixes`` beside the LOOK rule;
-    every other design skill lives in ``<design-skills>`` with its trigger.
+    only skill a step still names is ``sites-check`` (FIX mode) beside the LOOK
+    rule; every other design skill lives in ``<design-skills>`` with its trigger.
     """
     from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
 
     text = (await sites_handler.build_preamble("w", "u", SurfaceMeta(engine="svelte"))).text
     procedure = text[text.index("<sites-procedure>") : text.index("</sites-procedure>")]
 
-    assert "sites-ship-fixes" in procedure
+    assert "`sites-check` in FIX mode" in procedure
     assert "preview_site" in procedure
     note = text[text.index("<design-skills>") : text.index("</design-skills>")]
     for name in ("sites-conversion-structure", "pocketpaw-design-taste", "sites-craft"):
@@ -437,8 +443,25 @@ async def test_sites_refine_routes_a_review_request_away_from_editing():
         )
     ).text
     procedure = text[text.index("<sites-procedure>") : text.index("</sites-procedure>")]
-    assert "sites-interface-review" in procedure
-    assert "INSTEAD of editing" in procedure or "INSTEAD of" in procedure
+    assert "`sites-check` in REVIEW mode" in procedure
+    assert "INSTEAD of editing" in procedure
+    # And a layout-moving edit still gets the author's fix pass.
+    assert "in FIX mode over what you changed" in procedure
+
+
+def test_sites_check_defects_are_carved_out_of_the_precedence_line():
+    """The "your art direction wins" line must not cover sites-check.
+
+    The design doc's precedence puts the floor, honesty and working controls
+    above every direction and brief. The note's generic line ranks the art
+    direction over "them", so without the carve-out a contrast failure or a dead
+    link reads as something the direction may override.
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    for mode in ("create", "refine"):
+        note = sites_handler._design_skills_note(mode)
+        assert "defects in `sites-check`" in note, mode
 
 
 async def test_sites_craft_is_named_on_create_and_the_floor_is_inline():

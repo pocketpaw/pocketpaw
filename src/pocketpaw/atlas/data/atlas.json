@@ -2256,7 +2256,7 @@
       ],
       "kind": "skill",
       "name": "pocketpaw-design-taste",
-      "narrative": "The SINGLE engine-agnostic Creative Director system for authoring marketing landing pages on ANY Paw Sites engine - hand-written static HTML/CSS (the default), ripple specs, React, or Svelte/SvelteKit components. Invoke it whenever you design or build a site's sections. It governs SCOPE first: sections come from the brief and the page stops there, no real-world fact is invented, and anything the user supplied ships verbatim. Then the craft: reading brand intent (Vision Ledger), the three dials, the six aesthetic-direction families, typography pairings and colour calibration, motion that is motivated rather than ornamental, and the full anti-slop copy + AI-tells + pre-flight discipline - all on a page that looks finished before any client-side JavaScript runs. Includes the Svelte-track specifics (runes, prerender, onMount) so it is the only design skill any engine needs.",
+      "narrative": "The SINGLE engine-agnostic Creative Director system for authoring marketing landing pages on ANY Paw Sites engine - hand-written static HTML/CSS (the default), ripple specs, React, or Svelte/SvelteKit components. Invoke it whenever you design or build a site's sections. It governs SCOPE first: sections come from the brief and the page stops there, no real-world fact is invented, and anything the user supplied ships verbatim. Then the craft: reading brand intent (Vision Ledger), the three dials, the seven aesthetic-direction families, typography pairings and colour calibration, motion that is motivated rather than ornamental, and the full anti-slop copy + AI-tells + pre-flight discipline - all on a page that looks finished before any client-side JavaScript runs. Includes the Svelte-track specifics (runes, prerender, onMount) so it is the only design skill any engine needs.",
       "requires": [],
       "summary": "The SINGLE engine-agnostic Creative Director system for authoring marketing landing pages on ANY Paw Sites engine - hand-written static HTML/CSS (the default), ripple specs, React, or…",
       "surface": ""
@@ -2361,6 +2361,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /sites-check in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-check",
+      "keywords": [
+        "sites-check"
+      ],
+      "kind": "skill",
+      "name": "sites-check",
+      "narrative": "Every measurable defect on a Paw Site, each with a stable id (SC-BUILD-02, SC-LINK-01, SC-COPY-04): build defects, honesty and fabrication, dead controls, generated-copy tells, layout tells, accessibility and mobile. Two modes. FIX mode: the author runs it after writing the sections and before showing a draft, or after a refine edit that moved layout, and fixes what it finds. REVIEW mode: read-only, only when the user asks to review, critique or audit the page or asks why it feels off; it returns one ranked findings table with evidence and edits nothing until the user asks for the fixes. `pocketpaw-design-taste` decides how the page should look and `sites-craft` how values are built; this decides whether what got built is broken, false or generated-looking. Its defects are not waived by a direction or a brief.",
+      "requires": [],
+      "summary": "Every measurable defect on a Paw Site, each with a stable id (SC-BUILD-02, SC-LINK-01, SC-COPY-04): build defects, honesty and fabrication, dead controls, generated-copy tells, layout tells,…",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /sites-conversion-structure in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:sites-conversion-structure",
       "keywords": [
@@ -2368,9 +2382,9 @@
       ],
       "kind": "skill",
       "name": "sites-conversion-structure",
-      "narrative": "The STRATEGY layer for a Paw Site — what the page argues, in what order, and what single action it drives. Invoke it BEFORE writing any section markup on a marketing / landing site: \"build a dentist landing page\", \"a page for my SaaS\", \"why is this page not converting\", \"what sections should this have\". It decides the one offer / one audience / one action, runs the intake, SELECTS the sections this particular page needs, orders the argument, writes headline + CTA + benefit copy, handles objections, sets index / noindex + schema. It does NOT choose colors, type, or layout composition — `pocketpaw-design-taste` owns all of that and governs every visual decision. This skill owns the ARGUMENT; design-taste owns the LOOK. Use them together: structure first, then taste.",
+      "narrative": "The STRATEGY layer for a Paw Site: what the page argues, in what order, and what single action it drives. Invoke it BEFORE writing any section markup on a marketing / landing site: \"build a dentist landing page\", \"a page for my SaaS\", \"why is this page not converting\", \"what sections should this have\". It decides the one offer / one audience / one action, runs the intake, SELECTS the sections this particular page needs, orders the argument, writes headline + CTA + benefit copy, handles objections, sets index / noindex + schema. It does NOT choose colors, type, or layout composition; `pocketpaw-design-taste` owns all of that and governs every visual decision. This skill owns the ARGUMENT; design-taste owns the LOOK. Use them together: structure first, then taste.",
       "requires": [],
-      "summary": "The STRATEGY layer for a Paw Site — what the page argues, in what order, and what single action it drives.",
+      "summary": "The STRATEGY layer for a Paw Site: what the page argues, in what order, and what single action it drives.",
       "surface": ""
     },
     {
@@ -2382,9 +2396,9 @@
       ],
       "kind": "skill",
       "name": "sites-craft",
-      "narrative": "The CRAFT MECHANICS for a Paw Site — how to actually build the type scale, the colour ramp, the spacing rhythm and the surface treatment, with exact values. Invoke it WHILE AUTHORING sections, at the moment you lock tokens and again whenever you set a font size, pick a colour step, space a group, round a corner, or style a state. `pocketpaw-design-taste` chooses WHICH font, WHICH palette family and WHICH layout composition; this decides HOW those are constructed so they read as one system instead of a pile of one-off values. It answers \"what line-height does a heading take\", \"how do I build a ramp\", \"what radius does a nested element get\", \"how much space separates two groups\". Generative, not corrective — `sites-interface-review` checks a built page against these same rules; this one is for while you are writing it.",
+      "narrative": "The CRAFT MECHANICS for a Paw Site: how to actually build the type scale, the colour ramp, the spacing rhythm and the surface treatment, with exact values. Invoke it WHILE AUTHORING sections, at the moment you lock tokens and again whenever you set a font size, pick a colour step, space a group, round a corner, or style a state. `pocketpaw-design-taste` chooses WHICH font, WHICH palette family and WHICH layout composition; this decides HOW those are constructed so they read as one system instead of a pile of one-off values. It answers \"what line-height does a heading take\", \"how do I build a ramp\", \"what radius does a nested element get\", \"how much space separates two groups\". Generative, not corrective: `sites-check` (REVIEW mode) checks a built page against these same rules; this one is for while you are writing it.",
       "requires": [],
-      "summary": "The CRAFT MECHANICS for a Paw Site — how to actually build the type scale, the colour ramp, the spacing rhythm and the surface treatment, with exact values.",
+      "summary": "The CRAFT MECHANICS for a Paw Site: how to actually build the type scale, the colour ramp, the spacing rhythm and the surface treatment, with exact values.",
       "surface": ""
     },
     {
@@ -2396,7 +2410,7 @@
       ],
       "kind": "skill",
       "name": "sites-design-research",
-      "narrative": "Ground a page in REAL shipped design systems before designing it, using the Refero research tools. Invoke when you are about to choose a visual direction and the brief gives you room to choose — a new landing page, a redesign, a \"make it look premium / editorial / technical\" ask, or a second site that must not resemble the first. It is the RESEARCH step that feeds `pocketpaw-design-taste`: this skill finds and locks a direction with evidence, that one builds the page from it. Also the honest answer to \"what should this look like?\" when the brief does not say. Do NOT invoke it for a copy edit, a single value change, or when the user supplied a design to match — there is nothing to research. Returns nothing when Refero is unconfigured, which is a normal outcome, not a failure.",
+      "narrative": "Ground a page in REAL shipped design systems before designing it, using the Refero research tools. Invoke when you are about to choose a visual direction and the brief gives you room to choose: a new landing page, a redesign, a \"make it look premium / editorial / technical\" ask, or a second site that must not resemble the first. It is the RESEARCH step that feeds `pocketpaw-design-taste`: this skill finds and locks a direction with evidence, that one builds the page from it. Also the honest answer to \"what should this look like?\" when the brief does not say. Do NOT invoke it for a copy edit, a single value change, or when the user supplied a design to match, since there is nothing to research. Returns nothing when Refero is unconfigured, which is a normal outcome, not a failure.",
       "requires": [],
       "summary": "Ground a page in REAL shipped design systems before designing it, using the Refero research tools.",
       "surface": ""
@@ -2410,23 +2424,9 @@
       ],
       "kind": "skill",
       "name": "sites-design-sources",
-      "narrative": "Named reference sources for GROUNDS, EFFECTS, SHADERS, MOTION and TYPE on a Paw Site, filtered to what this surface can physically build. Invoke when you are about to hand-write a background, a texture, a canvas shader, a CSS animation or a text effect and want a real technique behind it instead of a default gradient, or when the brief NAMES an effect (marquee, halo, gradient headline, dither, grain) and you want to build it WELL rather than reach for the first shape that comes to mind. Also the way out of the overused-font trap in `pocketpaw-design-taste` 2.F. Everything listed here is TEXT you author into the source map: CSS, inline SVG, or a GLSL string. Nothing here is downloaded, because this surface has no filesystem; npm packages are a separate, declared path (set_site_dependencies).",
+      "narrative": "Named reference sources for GROUNDS, EFFECTS, SHADERS, MOTION and TYPE on a Paw Site, filtered to what this surface can physically build. Invoke when you are about to hand-write a background, a texture, a canvas shader, a CSS animation or a text effect and want a real technique behind it instead of a default gradient, or when the brief NAMES an effect (marquee, halo, gradient headline, dither, grain) and you want to build it WELL rather than reach for the first shape that comes to mind. Also the way out of the overused-font trap in `pocketpaw-design-taste` 2.F. Everything listed here is TEXT you author into the site's files: CSS, inline SVG, or a GLSL string. Nothing here is downloaded, because this surface has no shell and no download tool; npm packages belong to a framework template's package.json (see `pocketpaw-site`).",
       "requires": [],
       "summary": "Named reference sources for GROUNDS, EFFECTS, SHADERS, MOTION and TYPE on a Paw Site, filtered to what this surface can physically build.",
-      "surface": ""
-    },
-    {
-      "gist": "",
-      "how": "a user invokes it as /sites-interface-review in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
-      "id": "skill:sites-interface-review",
-      "keywords": [
-        "sites-interface-review"
-      ],
-      "kind": "skill",
-      "name": "sites-interface-review",
-      "narrative": "Review a built Paw Site and report ranked, evidence-backed findings across six domains - typography, colour, layout, UI polish, accessibility and interface writing. Invoke when the user asks to review, critique, audit, or \"look over\" a page, when they ask why a page \"feels off\", or before handing a site back. It is READ-ONLY by default: it produces one ranked findings table with a measured value and a fix for each, and it marks anything it could not actually observe as NOT VERIFIED rather than asserting it. This is the corrective counterpart to `pocketpaw-design-taste`, which is generative - taste decides what to build, this decides whether what got built holds up. Do NOT use it to author sections.",
-      "requires": [],
-      "summary": "Review a built Paw Site and report ranked, evidence-backed findings across six domains - typography, colour, layout, UI polish, accessibility and interface writing.",
       "surface": ""
     },
     {
@@ -2445,20 +2445,6 @@
     },
     {
       "gist": "",
-      "how": "a user invokes it as /sites-ship-fixes in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
-      "id": "skill:sites-ship-fixes",
-      "keywords": [
-        "sites-ship-fixes"
-      ],
-      "kind": "skill",
-      "name": "sites-ship-fixes",
-      "narrative": "The catalogue of defects that come back as the FIRST revision on a Paw Site. Invoke it after authoring sections and before showing a draft, or when the user says a page is \"off\", \"cramped\", \"the button is cut off\", \"the sticky thing overlaps\", \"there is a huge gap\", \"the nav is unreadable over the hero\". Each entry is a concrete, measurable failure with the fix: the hero not fitting the fold, a sticky element bleeding into the next section, a transparent fixed nav with headings behind it, screenshots dropped as flat rows, dead gutters in two-column blocks, and motion that only exists when JavaScript runs. This is a BUILD-DEFECT skill, not a taste skill - `pocketpaw-design-taste` decides how the page should look, this decides whether what you built actually holds up.",
-      "requires": [],
-      "summary": "The catalogue of defects that come back as the FIRST revision on a Paw Site.",
-      "surface": ""
-    },
-    {
-      "gist": "",
       "how": "a user invokes it as /sites-theme-system in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:sites-theme-system",
       "keywords": [
@@ -2466,7 +2452,7 @@
       ],
       "kind": "skill",
       "name": "sites-theme-system",
-      "narrative": "Makes two Paw Sites built by the same agent look like DIFFERENT SITES, not colour-swaps of one template. Invoke when building a second (or fifth) site, when a page \"looks like the last one\", or whenever you are about to pick a theme, a nav, or a footer. It supplies the three things `pocketpaw-design-taste` asserts but cannot check: a THEME-DIFFERENCE TEST on three measurable axes (paper band / display style / accent hue), a NAV + FOOTER archetype catalogue to rotate through, and a LOCKED-TOKEN rule that forbids mid-render colour and font improvisation. It also carries the honest-copy and pre-emit self-critique gates. It does NOT replace design-taste's palettes, families or layout rules — it is the diversification and token-discipline layer on top of them.",
+      "narrative": "Makes two Paw Sites built by the same agent look like DIFFERENT SITES, not colour-swaps of one template. Invoke when building a second (or fifth) site, when a page \"looks like the last one\", or whenever you are about to pick a theme, a nav, or a footer. It supplies the three things `pocketpaw-design-taste` asserts but cannot check: a THEME-DIFFERENCE TEST on three measurable axes (paper band / display style / accent hue), a NAV + FOOTER archetype catalogue to rotate through, and a LOCKED-TOKEN rule that forbids mid-render colour and font improvisation. It also carries the honest-copy and pre-emit self-critique gates. It does NOT replace design-taste's palettes, families or layout rules; it is the diversification and token-discipline layer on top of them.",
       "requires": [],
       "summary": "Makes two Paw Sites built by the same agent look like DIFFERENT SITES, not colour-swaps of one template.",
       "surface": ""

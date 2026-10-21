@@ -1,5 +1,5 @@
-<!-- New file 2026-09-08: provenance for sites-craft, the authoring half of the
-     jakubkrehel craft rules. Sibling of sites-interface-review (the review half). -->
+<!-- Provenance for sites-craft, the authoring half of the jakubkrehel craft
+     rules. sites-check is the checking half. -->
 # Vendored: sites-craft
 
 - **Source:** https://github.com/jakubkrehel/skills (MIT, Jakub Krehel) — the
@@ -65,8 +65,7 @@ of them ABOVE `## 5. The floor`, so the refine slice is untouched (measured +0%)
   classes and this surface guarantees no such thing. NOT ported: springs, Framer
   Motion, GSAP, Rive and Lottie (npm, and the last two additionally need a file
   ingested); and upstream's enter=ease-out / exit=ease-in split, which
-  contradicts `sites-interface-review`'s "exits are softer than enters, ease-out
-  both ways".
+  contradicts this file's own `--ease-out` in both directions.
 - **Into `## 4. Surface`:** the optical-correction numbers (play triangle
   `0.5-1px` right, chevrons toward the point, the circle test), visual mass vs
   stroke width, and the icon-to-text size pairing. These sharpen two bullets that
@@ -98,16 +97,16 @@ could move to a named skill if the number matters more than the guarantee.
 this surface: upstream's `scale(0.98)` on press (we specify `0.96` and say above
 `0.98` is invisible); upstream's 32x32px desktop icon hit area (ours is 44x44
 everywhere); and upstream's "Title Case for buttons", which contradicts
-`sites-interface-review`'s verb-first `Save changes` and our one-capitalization-
-policy rule. None of the three was carried.
+`sites-check`'s verb-first button rule and our one-capitalization-policy
+rule. None of the three was carried.
 
-## Why this exists as well as `sites-interface-review`
+## Why this exists as well as `sites-check`
 
 They are the same knowledge pointed at two different moments, and shipping only
 one of them left a real gap.
 
-`sites-interface-review` is **corrective**: read-only, ranked findings, invoked
-when someone asks for a review. That framing means the rules only reach the agent
+`sites-check` is **corrective**: a fix pass before a draft, or read-only ranked
+findings when someone asks for a review. That framing means the rules only reach the agent
 *after* the page exists. On a create turn — the common case on /sites — nothing
 was teaching the agent how to build a type scale or a colour ramp in the first
 place.
@@ -121,7 +120,7 @@ rotate. Those are choices; this file is the method for building whatever was
 chosen.
 
 So: design-taste picks the ingredient, `sites-craft` sets the method,
-`sites-interface-review` checks the result.
+`sites-check` checks the result.
 
 ## What was ported
 
@@ -147,30 +146,19 @@ they are values and not ranges:
 - **The floor** — 44x44px hit areas, visible focus, no colour-only meaning,
   reduced motion, real elements, alt by purpose, 200% zoom.
 
-## Deliberate overlap with `sites-interface-review`
+## No overlap with `sites-check`
 
-Some rules appear in both files. That is a considered duplication rather than an
-oversight: the alternative — making the review skill reference this one for its
-criteria — adds an invocation hop on a path where a miss silently degrades the
-review into an opinion.
-
-**The original wording here said "both are loaded ON DEMAND and rarely in the same
-turn, so the cost is paid only when one is actually used". That stopped being true
-the same day it was written**, when this file was embedded in the /sites preamble.
-It is now unconditional on create, so the overlap with `sites-interface-review` is
-paid on every create turn where a review is also requested. Measured: the two files
-share the 62ch measure cap, `prefers-reduced-motion`, and tabular figures. Three
-rules, small, and worth knowing before someone adds a fourth.
-
-If the two ever disagree on a value, **this file is the one to correct**: the
-review skill was written first and compressed harder.
+`sites-check` is the corrective half. It does not restate the type, colour,
+space or surface rules: its REVIEW mode checks a page against sections 1 to 4
+of this file, and its A11Y ids are the checks for section 5. If a value needs
+correcting, this file is the only place to correct it.
 
 ## What was NOT ported
 
 - Everything already covered by `pocketpaw-design-taste` — font *choice*, palette
   *choice*, layout composition, the anti-slop copy rules.
 - The upstream review protocol (scope resolution, coverage table, findings
-  format), which lives in `sites-interface-review`.
+  format), which lives in `sites-check`.
 - `break`, `variant` and `explain-interface`, which need a filesystem and a
   browser and cannot run on /sites.
 - The 35 reference subfiles. `_SITES_BUILTIN_DENY` strips `Read`, `Glob` and

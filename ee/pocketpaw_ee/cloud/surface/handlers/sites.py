@@ -449,8 +449,12 @@ def _craft_system(scope: str = "full") -> str:
 # together or this block advertises skills that surface cannot load.
 #
 # Scope values: "create", "refine", or "both" — which preamble the trigger can fire
-# in. `sites-interface-review` is refine-only on purpose: there is nothing to review
-# before the page exists.
+# in. `sites-check` is "both" and carries two modes in one entry: FIX mode is the
+# author's pass before a draft is shown (create step 5b, and refine after an edit
+# that moved layout); REVIEW mode is read-only and runs only when the user asks for
+# a review. Review is advertised on create too, so its trigger text must keep
+# saying "read-only" and "only when the user asks" or a create turn reads it as a
+# licence to critique instead of build.
 _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
     (
         "sites-conversion-structure",
@@ -485,11 +489,15 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "dark-canvas inversion, and what must NOT be neutralized.",
     ),
     (
-        "sites-ship-fixes",
+        "sites-check",
         "both",
-        "AFTER authoring the sections and BEFORE showing the draft. The "
-        "first-revision defect list: hero fits the fold, sticky bleed, nav "
-        "bleed-through, dead gutters, the mobile floor.",
+        "Every defect with a stable id, in two modes. FIX mode: AFTER authoring "
+        "the sections (or after an edit that moved layout) and BEFORE showing the "
+        "draft, run it and fix what it finds: hero fits the fold, sticky and nav "
+        "bleed, dead links and controls, invented facts, copy tells, the mobile "
+        "floor. REVIEW mode: only when the user asks to review, critique or audit "
+        "the page, or asks why it feels off. It is read-only: ranked findings with "
+        "evidence, no edits until they ask for the fixes.",
     ),
     (
         "sites-design-research",
@@ -507,12 +515,6 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "techniques filtered to what this surface can build: no "
         "file downloads, so everything there is CSS, inline SVG or GLSL you "
         "retype (npm packages go in a framework template's package.json).",
-    ),
-    (
-        "sites-interface-review",
-        "refine",
-        "When the user asks to review, critique or audit the page, or asks why it "
-        "feels off. Read-only ranked findings with evidence.",
     ),
 )
 
@@ -547,6 +549,10 @@ def _design_skills_note(mode: str) -> str:
     system, so neither may tell the agent it is "already in your context"; a
     preamble that misdescribes what the agent is holding is how it learns to
     ignore the preamble.
+
+    Both framings carve `sites-check` out of the precedence line. Its defects
+    (the floor, honesty, working controls) are what no direction or brief may
+    waive, so "your art direction wins over them" must not reach it.
     """
     # `unaddressed_line`, not a hand-rolled f-string row: a skill is invoked BY
     # NAME (the loader keys them in a dict, so the name is unique by construction
@@ -565,7 +571,8 @@ def _design_skills_note(mode: str) -> str:
         frame = "Reach one with the `Skill` tool when its trigger fires."
         precedence = (
             "They are reference material. Your art direction and anything the user "
-            "supplied win over them.\n"
+            "supplied win over them, except the defects in `sites-check` (the floor, "
+            "honesty, working controls), which hold whatever the direction says.\n"
         )
     else:
         frame = (
@@ -578,7 +585,8 @@ def _design_skills_note(mode: str) -> str:
             "loaded and governs how anything you write here is built. If you need "
             "the full design system on top of it, invoke `pocketpaw-design-taste`, "
             "which outranks both these skills and the CRAFT SYSTEM on any visual "
-            "value.\n"
+            "value. Nothing outranks the defects in `sites-check` (the floor, "
+            "honesty, working controls).\n"
         )
     return (
         "<design-skills>\n"
@@ -1102,8 +1110,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "pushes to the enquiry form.' Then build.\n"
         f"5. {build_step}\n"
         f"5a. {_WHATSAPP_ORDERS_RULE}"
-        "5b. " + _LOOK_RULE + "`sites-ship-fixes` lists the defects that most "
-        "often come back as a first revision if you want a checklist.\n"
+        "5b. " + _LOOK_RULE + "Then run `sites-check` in FIX mode over the draft "
+        "and fix what it finds: it lists, by id, the defects that most often come "
+        "back as a first revision.\n"
         "6. DRAFT-FIRST — STOP at the draft; do NOT publish by default. The create "
         "tool persists a reviewable DRAFT the user previews IN-APP (open /sites → "
         "the site's Preview tab). Publishing deploys the site to the public edge "
@@ -1805,11 +1814,11 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         + _BLOCKED_RULE
         + "WHEN THE ASK IS A JUDGEMENT, NOT AN EDIT: if the user asks you to review "
         "or critique the page, or says it feels off without naming what, invoke "
-        "`sites-interface-review` and report its ranked findings INSTEAD of "
-        "editing — a review request is read-only until they ask for the fixes. If "
+        "`sites-check` in REVIEW mode and report its ranked findings INSTEAD of "
+        "editing: a review request is read-only until they ask for the fixes. If "
         "they ask you to make the page calmer, quieter or more minimal, invoke "
-        "`sites-restraint`. After any edit that moves layout, run "
-        "`sites-ship-fixes` over what you changed and look at it with "
+        "`sites-restraint`. After any edit that moves layout, run `sites-check` "
+        "in FIX mode over what you changed and look at it with "
         "`mcp__pocketpaw_sites_manager__preview_site`.\n"
         f"{_refine_research_step()}"
         f"{edit_step}"
