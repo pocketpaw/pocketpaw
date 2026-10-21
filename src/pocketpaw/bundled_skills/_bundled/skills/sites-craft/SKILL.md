@@ -25,9 +25,9 @@ that looks assembled is almost entirely in this file: a real scale instead of
 four arbitrary sizes, a ramp whose steps each have a job, groups separated by
 space that means something, radii that agree.
 
-**Precedence.** design-taste governs every CHOICE: if it bans a font or a
-palette, that is final. This file governs the CONSTRUCTION of whatever it chose.
-They do not conflict: one names the ingredient, the other sets the method.
+**Precedence** is stated once, in `pocketpaw-design-taste`: it governs every
+CHOICE, this file governs the CONSTRUCTION of whatever it chose. Where a value
+appears in both, the number here is the canonical one.
 
 ---
 
@@ -43,8 +43,8 @@ system behind them are what make a page feel assembled.
 outweighs its parent. Adjacent levels may share a size at the small end as long
 as weight or spacing keeps them distinct.
 
-**Line-height by role.** This is the single highest-leverage typographic value on
-a marketing page and the one most often left at the browser default.
+**Line-height by role.** The highest-leverage typographic value on a marketing
+page, and the one most often left at the browser default.
 
 | Role | Value |
 | --- | --- |
@@ -113,16 +113,14 @@ size is the fastest way to make a page tiring to read.
 
 **Text that can overflow needs to be told how.** A long word in a narrow column
 takes `overflow-wrap: break-word`; a summary line capped at two takes
-`-webkit-line-clamp`. **And a flex child will not truncate at all until it has
+`-webkit-line-clamp`. **A flex child will not truncate until it has
 `min-width: 0`**: the default `min-width: auto` refuses to shrink below the
-content, so the text escapes the container instead of ellipsing. That one is
-worth knowing by heart; it looks like a broken layout, never like a text rule.
+content, so the text escapes the container. It looks like a broken layout.
 
 **Use the real punctuation.** A true ellipsis `…` rather than three periods,
 curly quotes and apostrophes in prose, and a non-breaking space between a number
 and its unit (`10 MB`, `20 min`) so the pair never splits across a line break.
-Every loading or in-progress string ends in `…`. This is small, and it is one of
-the differences between a page that was typeset and one that was typed.
+Every loading or in-progress string ends in `…`.
 
 ---
 
@@ -200,6 +198,18 @@ so the browser chrome stops ending the design two pixels above the header. On
 Windows a native `<select>` additionally needs its own background and colour set
 in dark, because it does not fully inherit.
 
+**Theme the rest of the browser surface from the palette.** The defaults are
+browser blue and system grey, and they show on every finished page:
+
+```css
+::selection { background: var(--accent-soft); color: var(--ink); }
+:root { caret-color: var(--accent); accent-color: var(--accent); }
+a { text-underline-offset: 0.2em; text-decoration-thickness: 1px; }
+```
+
+`accent-color` themes native checkboxes, radios, ranges and progress bars in
+one line.
+
 **Roughly 60-30-10 by area.** Neutrals carry most of the page, text hierarchy
 takes the next slice, and accent is the smallest: 5-10%, not a third. When a
 page looks loud and no single element is wrong, this ratio is what broke.
@@ -212,7 +222,8 @@ spend.
 a foreground, a background, a border and an on-colour for text that sits on the
 fill: `--success`, `--success-bg`, `--success-border`, `--on-success`. Shipping
 only the first is why status messages end up as unreadable text on a tinted
-block.
+block. The accent follows the same rule: `--accent` always ships with
+`--accent-ink`, the text colour measured to pass on the accent fill.
 
 **Keep semantic colours clear of the brand.** A blue primary means blue cannot
 also mean success; a green primary means success needs to move to teal, and
@@ -231,11 +242,14 @@ a separator line last and only where space alone cannot carry it.
 
 **The 2x rule.** The gap *between* groups must be at least **twice** the gap
 *within* one: 8px inside, 16px+ outside. Anything less and the grouping reads as
-noise rather than structure. This one rule fixes more "it feels cluttered" than
-any other change on this page.
+noise. It fixes more "it feels cluttered" than any other change.
 
 **Align to shared edges.** Pick the alignment edges and hold them. Every stray
 edge reads as noise. One spacing step per level of subordination.
+
+**More space above a heading than below it.** A heading belongs to the content
+it introduces, so the gap before it is larger (about 2x) than the gap after.
+Equal gaps leave it floating between two sections.
 
 **Breathing room between controls:** about `12px` between adjacent bordered or
 filled controls, about `24px` around borderless text- and icon-only ones.
@@ -252,9 +266,8 @@ proportionally most when the copy changes.
 ## 4. Surface: the details that read as finish
 
 **Concentric radius.** `outer radius = inner radius + padding`. A 16px card with
-8px of padding gives its inner element an 8px radius. Mismatched nested radii is
-the most common thing that makes an interface feel subtly wrong without anyone
-being able to name it.
+8px of padding gives its inner element an 8px radius. Mismatched nested radii
+make an interface feel subtly wrong without anyone being able to name it.
 
 **Optical over geometric alignment.** A play triangle, an asymmetric glyph, an
 icon beside a label: centre them by eye, not by box. Geometric centring looks
@@ -266,17 +279,19 @@ test:** drop the icon into a circle. If it does not look centred, it is not.
 than a square and a diagonal reads thinner than a horizontal. Match what the eye
 weighs, not what the box measures.
 
-**Shadows for elevation, borders for structure.** Where a border exists only to
-fake depth, use a layered transparent `box-shadow` instead. Keep borders that
-communicate structure or state: dividers, selection, focus.
+**Nothing at rest casts a shadow.** Separate resting surfaces by a step of tone
+or a hairline. A layered transparent `box-shadow` is for what floats: a menu, a
+dialog, a sticky bar. On a dark ground, elevation is a lighter surface. Keep
+borders that communicate structure or state: dividers, selection, focus.
 
 **Image outlines.** A `1px` outline at low opacity gives images consistent depth:
 `oklch(0 0 0 / 0.1)` in light, `oklch(1 0 0 / 0.1)` in dark. **Never a tinted
 neutral** like slate or zinc: a tinted outline picks up the surface beneath and
 reads as dirt on the image edge.
 
-**Scale on press: `scale(0.96)`.** Always `0.96`. Below `0.95` feels exaggerated,
-above `0.98` is invisible.
+**Scale on press: `scale(0.96)`.** Always `0.96`, and this is the one press
+value every other skill defers to. Below `0.95` feels exaggerated, above
+`0.98` is invisible.
 
 **Match icon stroke to text weight.** `1.5px` stroke beside regular (400) text,
 `2px` beside semibold (600). One stroke weight per icon set, one icon library per
@@ -285,8 +300,7 @@ page. A hairline icon next to bold text is a visible mismatch.
 **Size the icon off the text it sits beside**, then check it by eye: `14-16px`
 text takes a `16px` icon, `16-18px` text takes `18-20px`, a heading takes
 `20-24px`. Icons need `align-items: center` plus, often, a final `0.5-1px`
-nudge. An icon sized off nothing in particular is the most common reason a row
-of links looks subtly uneven.
+nudge.
 
 **Transition only what changes.** Name the properties (`transition-property:
 opacity, transform`). Never `transition: all`; it animates things you did not
@@ -297,9 +311,9 @@ states from CSS colour and opacity. Outline is the default variant; fill marks
 active.
 
 **Load the hero eagerly, everything else lazily.** The largest image above the
-fold carries `fetchpriority="high"` and NO `loading="lazy"`. Lazy-loading the
-LCP image is the most common self-inflicted performance defect on a landing
-page. Everything below the fold takes `loading="lazy"` and `decoding="async"`.
+fold carries `fetchpriority="high"` and NO `loading="lazy"` (lazy-loading the
+LCP image is the most common self-inflicted slowdown). Everything below the fold
+takes `loading="lazy"` and `decoding="async"`.
 Every `<img>` carries explicit `width` and `height` (or an `aspect-ratio`) so
 the page does not reflow as images arrive.
 
@@ -307,12 +321,8 @@ the page does not reflow as images arrive.
 
 ## Motion: timing, easing and origin
 
-`pocketpaw-design-taste` 3.D decides WHICH motion a page earns and holds the
-Tier-0 rule that it stays CSS-only and static-safe. This decides how whatever it
-chose is timed. Everything here is plain CSS: the page is prerendered and has to
-look finished before any JavaScript runs, so motion is a transition or a
-keyframe on markup that already renders in its resting state, never a class a
-script toggles on arrival.
+`pocketpaw-design-taste` 3.D decides WHICH motion a page earns, and 3.F holds
+the rule that the resting state lives in markup. This decides how it is timed.
 
 **Name the curves once and reuse them.** Hand-rolled `cubic-bezier` values per
 component are why a page feels like several pages.
@@ -329,8 +339,8 @@ component are why a page feels like several pages.
 
 `--ease-out` is the default for this surface, in **both** directions: an exit on
 `ease-in` accelerates away from the cursor and reads as the element being yanked.
-Reach for `--ease-emphasized` only on the one deliberate hero moment a page is
-allowed.
+Reach for `--ease-emphasized` (or the family's spring curve) only on the one
+orchestrated moment a page is allowed.
 
 **Duration follows distance and frequency**, not taste. A token triple covers
 almost everything: `120ms` fast, `200ms` default, `320ms` slow.
@@ -373,8 +383,8 @@ stays, a slide, a scale and any parallax go.
 
 ## The page shell: set once, at the top
 
-These are written once when the page is created and never touched again, which
-is exactly why they get forgotten. None of them is visible until it is missing.
+Written once when the page is created, which is why they get forgotten. None is
+visible until it is missing.
 
 **The viewport meta allows zoom.** `width=device-width, initial-scale=1` and
 nothing else. Never `user-scalable=no` and never `maximum-scale=1`: that tag is
@@ -386,8 +396,7 @@ sized to the nav. Without it every in-page link lands with the heading it was
 pointing at hidden behind the bar.
 
 **`touch-action: manipulation`** on buttons and links. It removes the ~300ms
-delay a phone otherwise waits out before firing a tap, which is the difference
-between a page that feels native and one that feels like a website.
+delay a phone otherwise waits out before firing a tap.
 
 **`<link rel="preconnect">` every origin you pull from** (the font CDN, the
 stock-photo host). The connection gets set up while the HTML is still parsing
@@ -401,8 +410,7 @@ A lead form is the conversion point of most pages here, and it is where craft
 failures cost a real submission rather than a compliment.
 
 **Name the field so the browser can fill it.** Every input carries a real
-`autocomplete` value. This is the single highest-leverage thing on a form,
-because a filled form gets finished and an empty one gets abandoned.
+`autocomplete` value: a filled form gets finished, an empty one abandoned.
 
 | Field | `autocomplete` |
 | --- | --- |
@@ -438,6 +446,11 @@ available.
 carries `role="alert"`. On submit, move focus to the first failing field;
 otherwise a keyboard or screen-reader user is told something failed and left with
 no way to find it.
+
+**One control height, and room for the error.** Inputs, selects and the submit
+button in one form share a height (about `44-48px`). Each field reserves its
+error line (`min-height` on the message slot), so an error appearing never
+pushes the form down.
 
 **Say what happened and what to do**, next to the field that broke. Error copy is
 governed by `sites-conversion-structure` section 6; the three rungs there apply to

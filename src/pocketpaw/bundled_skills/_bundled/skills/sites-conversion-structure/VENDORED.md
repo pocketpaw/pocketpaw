@@ -81,6 +81,9 @@ already carries organic metrics, no "John Doe", no "Acme", and no filler verbs.
   upstream does not have and which is what keeps generated copy specific.
 - Added the archetype-C note (a waitlist page does not need twelve sections).
 - Tightened the SEO section to forbid inventing values into structured data.
+- Dropped the upstream headline formulas and bold-label bullets (both read as
+  generated) and the banned-word lists, which now live once in `sites-check`.
+  Section 5 teaches the plainest true headline and sentence-case bullets.
 
 ## Why it ships bundled
 

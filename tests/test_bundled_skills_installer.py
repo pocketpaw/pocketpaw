@@ -272,6 +272,16 @@ def test_install_includes_design_taste(tmp_path: Path) -> None:
     assert "$state" in body
     assert '"use client"' not in body
 
+    # The taste rewrite: one precedence order, the idea sentence, one motion
+    # moment and the calibration clusters, and none of the legacy engine flags
+    # the project templates do not use.
+    assert "Precedence, stated once" in body
+    assert "The idea sentence" in body
+    assert "then content is just there" in body
+    assert "How to use the clusters" in body
+    for legacy in ("set_site_dependencies", "keepsClientBundle", "sites_keep_client_bundle"):
+        assert legacy not in body, legacy
+
 
 # ---------------------------------------------------------------------------
 # Local-plugin entry (the claude_agent_sdk path)

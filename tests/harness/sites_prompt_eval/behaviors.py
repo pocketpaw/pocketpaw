@@ -214,7 +214,7 @@ _FILLER = re.compile(
 
 
 def no_filler(source: str) -> Verdict:
-    """MODULE 4: the banned filler verbs, in visible copy only."""
+    """sites-check SC-COPY-13/17: the filler verbs, in visible copy only."""
     n = "no-filler"
     text = visible_text(source)
     if _too_little_copy(text):
@@ -233,7 +233,7 @@ _PLACEHOLDER = re.compile(
 
 
 def no_placeholder(source: str) -> Verdict:
-    """MODULE 4: no John Doe, no Acme, no lorem ipsum in visible copy."""
+    """sites-check SC-HONEST-03/07: no John Doe, no Acme, no lorem ipsum in visible copy."""
     n = "no-placeholder"
     text = visible_text(source)
     if _too_little_copy(text):

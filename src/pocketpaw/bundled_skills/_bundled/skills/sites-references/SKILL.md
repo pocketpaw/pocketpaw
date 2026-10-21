@@ -182,8 +182,9 @@ one you cannot cap.
 | Theme Toggle Effect (`theme-toggle.rdsx.dev`) | free | View-Transitions light/dark switching. |
 
 Named techniques kept here for when a brief asks: the double-bezel enclosure
-(design-taste 3.C.A, soft-premium only), marquees, grain over a flat ground.
-None is a default.
+(an outer shell with a faint fill, a hairline and about `0.375rem` padding
+around an inner core whose radius is the shell's minus that padding, one
+nesting only), marquees, grain over a flat ground. None is a default.
 
 ### Type
 

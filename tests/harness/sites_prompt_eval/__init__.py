@@ -37,8 +37,8 @@ cut that silently removes one is visible:
   background           the page ground is not plain #fff / #000 (MODULE 2.B)
   no-em-dash           zero em dashes in VISIBLE text, en dashes only in
                        numeric ranges (MODULE 4)
-  no-filler            no Elevate / Seamless / Unleash / Supercharge (MODULE 4)
-  no-placeholder       no John Doe / Acme / Lorem ipsum (MODULE 4)
+  no-filler            no Elevate / Seamless / Unleash / Supercharge (SC-COPY)
+  no-placeholder       no John Doe / Acme / Lorem ipsum (SC-HONEST)
   measure-capped       body copy carries a max-width (design-taste 2.F, craft 1)
   floor-hit-area       interactive targets reach 44px (craft 5)
   floor-focus          a visible focus style survives (craft 5)
