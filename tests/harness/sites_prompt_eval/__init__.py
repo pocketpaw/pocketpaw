@@ -43,12 +43,12 @@ cut that silently removes one is visible:
   floor-hit-area       interactive targets reach 44px (craft 5)
   floor-focus          a visible focus style survives (craft 5)
   floor-reduced-motion motion is gated on prefers-reduced-motion (craft 5)
-  rotation             two briefs in one run do not resolve to the same accent
-                       and the same nav (MODULE 2.G colour-consistency + the
-                       repetition ban that `sites-theme-system` exists to check)
+  rotation             two briefs in one industry do not resolve to the same
+                       palette (design-taste 2.E: variety is structural and
+                       comes from the subject, never one template recoloured)
 
 The last one is the only cross-fixture scorer, and it is the one a cut to
-`sites-theme-system` or to the rotation language in PHASE 2 would break first.
+design-taste 2.E or to the variety language in PHASE 2 would break first.
 
 HOW TO RUN IT. There is no baseline in this repo yet, deliberately: this branch
 had no model credentials, and a fabricated baseline is worse than an absent one.

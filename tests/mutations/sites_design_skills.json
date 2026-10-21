@@ -106,5 +106,32 @@
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_create_skill_names_cover_the_advertised_skills"
     ]
+  },
+  {
+    "label": "sites-references is scoped to create only: refine loses the research method behind its own RESEARCH step and the technique sources for a restyle",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"sites-references\",\r\n        \"both\",",
+    "replace": "        \"sites-references\",\r\n        \"create\",",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_references_is_one_entry_advertised_in_both_modes"
+    ]
+  },
+  {
+    "label": "the merged references skill is renamed back to sites-design-research in the tuple: the note advertises a skill dir that no longer ships",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"sites-references\",\r\n        \"both\",",
+    "replace": "        \"sites-design-research\",\r\n        \"both\",",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_references_is_one_entry_advertised_in_both_modes"
+    ]
+  },
+  {
+    "label": "design-taste 2.E loses the structural-variety rule that replaced sites-theme-system: nav and footer go back to the genre default",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/pocketpaw-design-taste/SKILL.md",
+    "find": "Pick the nav by genre, never by default:",
+    "replace": "Use the usual nav:",
+    "tests": [
+      "tests/test_bundled_skills_installer.py::test_install_includes_design_taste"
+    ]
   }
 ]

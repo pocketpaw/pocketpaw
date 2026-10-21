@@ -258,6 +258,11 @@ def test_install_includes_design_taste(tmp_path: Path) -> None:
     assert "Aesthetic direction families" in body
     assert "MODULE 0: SCOPE" in body
 
+    # Structural variety (2.E) replaced the deleted sites-theme-system skill: the
+    # nav and footer are picked by genre, not rotated through a numbered list.
+    assert "Variety is structural" in body
+    assert "Pick the nav by genre" in body
+
     # The static-prerender resting-state rule survives (folded-in Svelte track).
     assert "onMount" in body
     assert "resting" in body.lower()

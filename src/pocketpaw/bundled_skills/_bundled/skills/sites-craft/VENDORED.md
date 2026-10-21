@@ -50,7 +50,7 @@ break this?*
 `next/image` `priority`, uncontrolled-input patterns); `content-visibility` list
 virtualization and `Intl.*` formatting, both marginal on a static marketing page;
 and `<link rel="preload">` for a local WOFF2, which cannot exist here —
-`sites-design-sources` states flatly that a font file cannot be brought into the
+`sites-references` states flatly that a font file cannot be brought into the
 project.
 
 **Third pass, same day - motion, icons, colour and typography.** The remaining

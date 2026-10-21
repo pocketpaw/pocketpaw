@@ -562,6 +562,42 @@ async def test_sites_craft_refine_carries_the_floor_and_names_the_rest():
     assert len(floor) < len(full) / 3, (len(floor), len(full))
 
 
+def test_sites_references_is_one_entry_advertised_in_both_modes() -> None:
+    """The research loop and the technique sources are one skill, named once, on
+    create and on refine, and the three skills it and design-taste 2.E replaced
+    are advertised nowhere.
+
+    Mutation that must fail this: scope the ``sites-references`` entry to
+    ``"create"`` (refine loses the research method behind its own RESEARCH step),
+    or re-add a ``sites-design-research`` / ``sites-theme-system`` entry (the note
+    advertises a skill dir that no longer ships).
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    from pocketpaw.bundled_skills.installer import bundled_skills_plugin_dir
+
+    names = [n for n, _, _ in sites_handler._SITES_DESIGN_SKILLS]
+    assert names.count("sites-references") == 1
+    scopes = {n: scope for n, scope, _ in sites_handler._SITES_DESIGN_SKILLS}
+    assert scopes["sites-references"] == "both"
+    assert "sites-references" in sites_handler.create_design_skill_names()
+
+    gone = ("sites-design-research", "sites-design-sources", "sites-theme-system")
+    for mode in ("create", "refine"):
+        note = sites_handler._design_skills_note(mode)
+        assert "`sites-references`" in note, mode
+        for name in gone:
+            assert name not in note, (mode, name)
+    for name in gone:
+        assert name not in names, name
+
+    # Every advertised design skill is a dir the bundle actually ships.
+    plugin_dir = bundled_skills_plugin_dir()
+    assert plugin_dir is not None
+    for name in names:
+        assert (plugin_dir / "skills" / name / "SKILL.md").is_file(), name
+
+
 # ── external MCP servers on /sites (POCKETPAW_SITES_MCP_SERVERS) ────────────
 #
 # Added 2026-09-15 (fix/surface-external-mcp-grant). An EXTERNAL MCP server's

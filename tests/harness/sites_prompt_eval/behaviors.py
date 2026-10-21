@@ -388,11 +388,13 @@ def _accents(source: str) -> set[str]:
 
 
 def rotation(first: str, second: str) -> Verdict:
-    """MODULE 2.G + the repetition ban: two briefs do not resolve to one look.
+    """Design-taste 2.E structural variety: two briefs do not resolve to one look.
 
-    This is the behaviour `sites-theme-system` exists to enforce and the one a cut
-    to the rotation language in PHASE 2 would remove first. It is also the only
-    scorer that needs two pages, which is why the fixture set is built in pairs.
+    2.E says variety comes from the subject and from structure, and that two
+    briefs in one industry must not be one template recoloured. This is the
+    scorer a cut to that paragraph, or to the variety language in PHASE 2, would
+    break first. It is also the only scorer that needs two pages, which is why
+    the fixture set is built in pairs.
 
     Judged on the palette, because that is the axis with a machine-checkable
     answer. Identical palettes across two unrelated briefs is the failure; a couple

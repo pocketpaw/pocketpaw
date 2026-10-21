@@ -477,11 +477,6 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "calibration and motion vocabulary. Not needed for a copy tweak or a bug fix.",
     ),
     (
-        "sites-theme-system",
-        "create",
-        "When the user says a new site looks too much like the last one.",
-    ),
-    (
         "sites-restraint",
         "both",
         "When the brief reads calm, minimal, monochrome, Nordic or "
@@ -500,21 +495,14 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "evidence, no edits until they ask for the fixes.",
     ),
     (
-        "sites-design-research",
+        "sites-references",
         "both",
-        "When you want the longer research method behind the RESEARCH step: how "
-        "to search, open and lock references. Skip it for a copy edit or when the "
-        "user supplied a design to match.",
-    ),
-    (
-        "sites-design-sources",
-        "both",
-        "When you are about to hand-write a BACKGROUND, texture, canvas shader, "
-        "CSS animation or text effect, when the brief NAMES an effect you want to "
-        "build well rather than by reflex, or when picking type. Real "
-        "techniques filtered to what this surface can build: no "
-        "file downloads, so everything there is CSS, inline SVG or GLSL you "
-        "retype (npm packages go in a framework template's package.json).",
+        "When the look is open and you want the full research method behind the "
+        "RESEARCH step (how to search, open and lock references), or when you are "
+        "about to hand-write a background, texture, canvas shader, CSS animation, "
+        "text effect or type pairing and want a real technique, not a reflex. "
+        "Everything there is CSS, inline SVG or GLSL you retype; nothing is "
+        "downloaded. Skip it for a copy edit or when the user supplied a design.",
     ),
 )
 
