@@ -4,14 +4,18 @@
 # (``motion_video._run`` / ``lint_project`` / ``render_project``) doubled, so
 # they need no node, Chrome or proxy. They pin:
 #   * the composition contract the renderer depends on (static checks),
+#   * the ``motion_safety`` allow-list rejects every SSRF / exfiltration probe a
+#     reviewer found, and the renderer env carries no server secrets,
+#   * an unguarded render is discarded; busy slots and the deadline fail fast,
 #   * exactly ONE repair round-trip on lint/static problems, then a failure,
 #   * a hung subprocess is killed as a tree and surfaces as a failure,
 #   * a missing CLI is ``unavailable`` (→ 503) BEFORE any LLM spend,
 #   * engine auto-selection (fal key present/absent) and the history model id,
 #   * the MCP tool schema advertises ``engine`` and ``palette``.
 #
-# One opt-in integration test (POCKETPAW_HYPERFRAMES_IT=1) really renders a 2s
-# composition through the CLI and checks a playable MP4 and a JPEG poster.
+# Opt-in integration tests (POCKETPAW_HYPERFRAMES_IT=1) really render through
+# the CLI: a 2s MP4 + JPEG poster, and a render whose (unvalidated) composition
+# tries to load a local HTTP server, which must receive NO request.
 
 from __future__ import annotations
 
@@ -86,7 +90,7 @@ def test_extract_html_strips_fences_and_chatter() -> None:
             lambda h: h.replace(
                 "<style>", '<link rel="stylesheet" href="https://fonts.x/a.css"><style>'
             ),
-            "stylesheet",
+            "<link>",
         ),
         (
             lambda h: h.replace('src="anime.min.js"', 'src="https://cdn.jsdelivr.net/npm/animejs"'),
@@ -166,7 +170,7 @@ def _wire_pipeline(monkeypatch, *, replies: list[str], lint_rounds: list[list[st
         assert (project_dir / "anime.min.js").is_file(), "anime.js must be vendored in"
         return lint_rounds[len(calls["lint"]) - 1]
 
-    async def _render(project_dir: Path, out: Path):
+    async def _render(project_dir: Path, out: Path, guard_file: Path):
         calls["render"].append(project_dir)
         out.write_bytes(_MP4)
 
@@ -236,12 +240,12 @@ async def test_a_missing_cli_is_unavailable_before_any_llm_spend(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_a_render_failure_naming_chrome_is_unavailable(monkeypatch, tmp_path) -> None:
-    async def _run(argv, *, cwd, timeout_s, label):
+    async def _run(argv, *, cwd, timeout_s, label, **_kw):
         return 1, "", "Error: Could not find Chrome (ver. 131). Run hyperframes browser ensure"
 
     monkeypatch.setattr(motion_video, "_run", _run)
     with pytest.raises(MotionVideoError) as exc:
-        await motion_video.render_project(tmp_path, tmp_path / "out.mp4")
+        await motion_video.render_project(tmp_path, tmp_path / "out.mp4", tmp_path / "g")
     assert exc.value.reason == "unavailable" and "Chrome" in exc.value.message
 
 
@@ -272,11 +276,16 @@ async def test_a_hung_render_is_killed_on_timeout(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(generator_client, "_kill_process_group", lambda p: killed.append(p.pid))
     monkeypatch.setattr(motion_video, "RENDER_TIMEOUT_S", 0.05)
 
+    guard = tmp_path / "guard.pids"
+    guard.write_text("31337\n")
+    browsers: list = []
+    monkeypatch.setattr(motion_video, "_kill_guarded_browsers", lambda g: browsers.append(g))
     with pytest.raises(MotionVideoError) as exc:
-        await motion_video.render_project(tmp_path, tmp_path / "out.mp4")
+        await motion_video.render_project(tmp_path, tmp_path / "out.mp4", guard)
 
     assert exc.value.reason == "failed" and "timed out" in exc.value.message
-    assert killed and killed[0] == 4242
+    assert killed and killed[0] == 4242, "the CLI's process group is killed"
+    assert browsers == [guard], "and so is every guarded (detached) Chrome"
 
 
 @pytest.mark.asyncio
@@ -288,12 +297,203 @@ async def test_lint_reads_error_findings_from_json(monkeypatch, tmp_path) -> Non
         '{"code": "studio_missing_editable_id", "severity": "warning", "message": "w"}]}'
     )
 
-    async def _run(argv, *, cwd, timeout_s, label):
+    async def _run(argv, *, cwd, timeout_s, label, **_kw):
         assert "lint" in argv and "--json" in argv
         return 1, report, ""
 
     monkeypatch.setattr(motion_video, "_run", _run)
     assert await motion_video.lint_project(tmp_path) == ["missing_timeline_registry: m Fix: f"]
+
+
+# ── Safety: the allow-list, the env, the guard, the limits ───────────────
+
+_SCRIPT_TAIL = "</script>\n</body>"
+
+
+def _with_body(markup: str) -> str:
+    return _good_html().replace('<div class="blob"', markup + '<div class="blob"')
+
+
+def _with_js(js: str) -> str:
+    return _good_html().replace(_SCRIPT_TAIL, js + "\n" + _SCRIPT_TAIL)
+
+
+def _with_css(css: str) -> str:
+    return _good_html().replace("</style>", css + "\n</style>")
+
+
+PROBES = {
+    # the reviewer's probes
+    "metadata ip": _with_body('<img src="http://169.254.169.254/latest/meta-data/">'),
+    "object to api": _with_body('<object data="http://127.0.0.1:8888/api/v1/health"></object>'),
+    "embed localhost": _with_body('<embed src="http://localhost:8888/">'),
+    "file url": _with_body('<img src="file:///etc/passwd">'),
+    "bracket fetch": _with_js('window["fe"+"tch"]("http://x/");'),
+    "image src concat": _with_js('new Image().src="https://"+"evil.example/x";'),
+    # more of the same family
+    "protocol relative img": _with_body('<img src="//evil.example/x.png">'),
+    "data img": _with_body('<img src="data:image/png;base64,AAAA">'),
+    "img not provided": _with_body('<img src="secret.png">'),
+    "link": _with_body('<link rel="stylesheet" href="x.css">'),
+    "base": _with_body('<base href="http://evil.example/">'),
+    "meta refresh": _with_body('<meta http-equiv="refresh" content="0;url=http://x">'),
+    "iframe srcdoc": _with_body('<iframe srcdoc="<img src=x>"></iframe>'),
+    "svg use": _with_body('<svg><use href="http://evil.example/s.svg#a"></use></svg>'),
+    "svg image": _with_body('<svg><image href="http://evil.example/a.png"></image></svg>'),
+    "foreignobject": _with_body("<svg><foreignObject><div></div></foreignObject></svg>"),
+    "event handler": _with_body('<div onclick="x()"></div>'),
+    "anchor": _with_body('<a href="http://x">x</a>'),
+    "svg fill url": _with_body('<svg><rect fill="url(http://evil.example/p)"></rect></svg>'),
+    "style attr url": _with_body('<div style="background:url(http://evil.example/a)"></div>'),
+    "css url": _with_css(".x{background:url('https://evil.example/a.png')}"),
+    "css protocol relative": _with_css(".x{background:url(//evil.example/a.png)}"),
+    "css import": _with_css("@import 'x.css';"),
+    "css font face": _with_css("@font-face{font-family:A;src:url(a.woff)}"),
+    "css escape": _with_css(".x{background:\\75 rl(x)}"),
+    "module script": _good_html().replace("<script>\n", '<script type="module">\n'),
+    "second script": _good_html().replace(
+        '<script src="anime.min.js"></script>',
+        '<script src="anime.min.js"></script><script src="x.js"></script>',
+    ),
+    "self bracket": _with_js('self["fet"+"ch"]("x");'),
+    "template access": _with_js("window[`fetch`]('x');"),
+    "location": _with_js("location = 'x';"),
+    "eval atob": _with_js("eval(atob('Zm9v'));"),
+    "function ctor": _with_js("(0).constructor.constructor('return 1')();"),
+    "cookie": _with_js("const c = document.cookie;"),
+    "dynamic import": _with_js("import('x');"),
+    "beacon": _with_js("navigator.sendBeacon('x', 'y');"),
+    "websocket": _with_js("new WebSocket('ws://x');"),
+    "xhr": _with_js("new XMLHttpRequest();"),
+    "set src attr": _with_js("document.body.setAttribute('src', 'x');"),
+    "dynamic set attr": _with_js("const k = 'sr'; document.body.setAttribute(k, 'x');"),
+    "create script": _with_js("document.createElement('script');"),
+    "dynamic create": _with_js("const t = 'img'; document.createElement(t);"),
+    "inner html": _with_js("document.body.innerHTML = '<img>';"),
+    "css text": _with_js("document.body.style.cssText = 'x';"),
+    "literal concat": _with_js("const u = 'ht' + 'tp';"),
+    "worker": _with_js("new Worker('w.js');"),
+    "globalthis": _with_js("globalThis.x = 1;"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PROBES))
+def test_every_probe_is_rejected(name: str) -> None:
+    problems = motion_video.composition_problems(PROBES[name], MotionBrief(prompt="x"))
+    assert problems, f"{name}: passed the validator"
+
+
+def test_what_a_good_composition_needs_still_passes() -> None:
+    """The allow-list must not reject the normal toolbox: a provided image, SVG
+    gradients by fragment, and building divs with literal tags and attributes."""
+    html = _good_html(image="source-image.png").replace(
+        '<div class="blob"',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><defs>'
+        '<linearGradient id="g"><stop offset="0" stop-color="#fff"/></linearGradient>'
+        '</defs><rect width="10" height="10" fill="url(#g)"/></svg><div class="blob"',
+    )
+    html = html.replace(
+        _SCRIPT_TAIL,
+        "for (let i = 0; i < 20; i++) { const d = document.createElement('div');"
+        " d.setAttribute('class', 'dot'); d.style.left = (rand() * 100) + '%';"
+        " document.getElementById('root').appendChild(d); }\n" + _SCRIPT_TAIL,
+    )
+    brief = MotionBrief(prompt="x", image_filename="source-image.png")
+    assert motion_video.composition_problems(html, brief) == []
+
+
+def test_the_renderer_env_is_an_allow_list(monkeypatch) -> None:
+    from pocketpaw_ee.sites.motion_safety import renderer_env
+
+    env = renderer_env(
+        {
+            "Path": "/usr/bin",
+            "HOME": "/home/p",
+            "LANG": "C.UTF-8",
+            "HYPERFRAMES_BROWSER_PATH": "/chrome",
+            "AWS_SECRET_ACCESS_KEY": "s1",
+            "FAL_AI_API_KEY": "s2",
+            "AUTH_SECRET": "s3",
+            "LITELLM_MASTER_KEY": "s4",
+            "MONGODB_URI": "mongodb://u:p@h",
+            "NODE_OPTIONS": "--require /evil.js",
+        }
+    )
+    assert env == {
+        "Path": "/usr/bin",
+        "HOME": "/home/p",
+        "LANG": "C.UTF-8",
+        "HYPERFRAMES_BROWSER_PATH": "/chrome",
+    }
+
+    monkeypatch.setenv("FAL_AI_API_KEY", "planted-secret")
+    monkeypatch.setenv("NODE_OPTIONS", "--require /evil.js")
+    cli = motion_video._cli_env(Path("/tmp/guard.pids"))
+    assert "planted-secret" not in cli.values()
+    assert "hf-network-guard.cjs" in cli["NODE_OPTIONS"] and "evil" not in cli["NODE_OPTIONS"]
+    assert cli[motion_video.GUARD_FILE_ENV] == str(Path("/tmp/guard.pids"))
+
+
+@pytest.mark.asyncio
+async def test_an_unguarded_render_is_discarded(monkeypatch, tmp_path) -> None:
+    """If the guard did not log a Chrome, the browser ran with network access:
+    the output must not be published."""
+
+    async def _run(argv, *, cwd, timeout_s, label, guard_file=None):
+        Path(argv[argv.index("--output") + 1]).write_bytes(_MP4)
+        return 0, "", ""
+
+    monkeypatch.setattr(motion_video, "_run", _run)
+    out = tmp_path / "out.mp4"
+    with pytest.raises(MotionVideoError) as exc:
+        await motion_video.render_project(tmp_path, out, tmp_path / "guard.pids")
+    assert "network guard" in exc.value.message
+    assert not out.exists()
+
+    (tmp_path / "guard.pids").write_text("1234\n")
+    await motion_video.render_project(tmp_path, out, tmp_path / "guard.pids")
+    assert out.read_bytes() == _MP4
+
+
+@pytest.mark.asyncio
+async def test_no_free_slot_is_busy_fast(monkeypatch) -> None:
+    calls = _wire_pipeline(monkeypatch, replies=[_good_html()], lint_rounds=[[]])
+    slots = asyncio.Semaphore(1)
+    await slots.acquire()  # someone else is rendering
+    monkeypatch.setattr(motion_video, "_SLOTS", slots)
+    monkeypatch.setattr(motion_video, "SLOT_WAIT_S", 0.05)
+
+    with pytest.raises(MotionVideoError) as exc:
+        await motion_video.render_motion_video(prompt="x", workspace_id="ws-busy")
+
+    assert exc.value.reason == "busy" and "try again" in exc.value.message
+    assert calls["chat"] == [], "no LLM spend while waiting for a slot"
+    assert "ws-busy" not in motion_video._IN_FLIGHT
+
+
+@pytest.mark.asyncio
+async def test_one_motion_job_per_workspace(monkeypatch) -> None:
+    _wire_pipeline(monkeypatch, replies=[_good_html()], lint_rounds=[[]])
+    monkeypatch.setattr(motion_video, "_IN_FLIGHT", {"ws1"})
+    with pytest.raises(MotionVideoError) as exc:
+        await motion_video.render_motion_video(prompt="x", workspace_id="ws1")
+    assert exc.value.reason == "busy"
+
+
+@pytest.mark.asyncio
+async def test_the_overall_deadline_stops_the_job(monkeypatch) -> None:
+    _wire_pipeline(monkeypatch, replies=[_good_html()], lint_rounds=[[]])
+    monkeypatch.setattr(motion_video, "_SLOTS", asyncio.Semaphore(1))
+
+    async def _slow_chat(**_kw):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(motion_video, "_chat", _slow_chat)
+    monkeypatch.setattr(motion_video, "OVERALL_DEADLINE_S", 0.05)
+    with pytest.raises(MotionVideoError) as exc:
+        await motion_video.render_motion_video(prompt="x", workspace_id="ws-slow")
+    assert exc.value.reason == "failed" and "longer than" in exc.value.message
+    assert motion_video._SLOTS._value == 1, "the slot is released"
 
 
 # ── Engine selection in media_generation ─────────────────────────────────
@@ -453,3 +653,60 @@ async def test_integration_renders_a_real_two_second_mp4(monkeypatch) -> None:
         )
         stdout, _ = await proc.communicate(clip.video)
         assert abs(float(stdout.decode().strip()) - 2.0) < 0.2
+
+
+@pytest.mark.skipif(
+    os.environ.get("POCKETPAW_HYPERFRAMES_IT") != "1",
+    reason="real HyperFrames render; set POCKETPAW_HYPERFRAMES_IT=1 (needs node, Chrome, ffmpeg)",
+)
+@pytest.mark.asyncio
+async def test_integration_the_render_browser_cannot_reach_the_network(
+    monkeypatch, tmp_path
+) -> None:
+    """Defence in depth, layer 1 alone: the composition skips the validator and
+    tries to load a local HTTP server by IP literal, by localhost, and from JS.
+    The render must succeed (the CLI's own file server still works) and the
+    server must see NO request."""
+    import http.server
+    import threading
+
+    hits: list[str] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *_a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        html = _good_html(d=2).replace(
+            '<div class="blob"',
+            f'<img src="http://127.0.0.1:{port}/ip.png">'
+            f'<img src="http://localhost:{port}/localhost.png">'
+            f'<div style="background:url(http://127.0.0.1:{port}/css.png)"></div>'
+            '<div class="blob"',
+        )
+        html = html.replace(
+            _SCRIPT_TAIL,
+            f"fetch('http://127.0.0.1:{port}/fetch').catch(function(){{}});\n" + _SCRIPT_TAIL,
+        )
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "index.html").write_text(html, encoding="utf-8")
+        shutil.copyfile(motion_video._ANIME_VENDOR, project / motion_video.ANIME_FILENAME)
+        guard = tmp_path / "guard.pids"
+        out = tmp_path / "out.mp4"
+
+        await motion_video.render_project(project, out, guard)
+
+        assert out.stat().st_size > 0
+        assert motion_video.guarded_pids(guard), "the guard must have wrapped Chrome"
+        assert hits == [], f"the render browser reached the network: {hits}"
+    finally:
+        server.shutdown()

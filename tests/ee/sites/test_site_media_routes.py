@@ -467,6 +467,26 @@ async def test_an_unavailable_engine_is_503(beanie_test_db, rail, fal, monkeypat
     assert fal == {}
 
 
+async def test_a_busy_motion_renderer_is_503(beanie_test_db, rail, fal, monkeypatch) -> None:
+    """No render slot free: tell the client to retry shortly, not a 502."""
+    from pocketpaw_ee.sites import motion_video
+
+    async def _busy(**_kw: Any):
+        raise motion_video.MotionVideoError(
+            "busy", "Motion video rendering is busy right now; try again shortly."
+        )
+
+    monkeypatch.setattr(motion_video, "render_motion_video", _busy)
+    async with _client() as c:
+        resp = await c.post(
+            f"/api/v1/sites/by-pocket/{POCKET}/assets/generate",
+            json={"kind": "video", "prompt": "x", "engine": "motion"},
+        )
+    assert resp.status_code == 503
+    assert "try again" in resp.json()["detail"]
+    assert rail.objects == {}
+
+
 async def test_a_failed_render_is_502(beanie_test_db, rail, fal) -> None:
     fal["_raise"] = True
     async with _client() as c:

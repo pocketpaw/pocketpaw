@@ -432,7 +432,12 @@ ENV PAW_SITES_MOTION_DEP=^12.40.0
 # — no `bunx wrangler@...` network fetch at publish time (DP0-5).
 ENV PAW_CF_WRANGLER_CMD=wrangler
 # Sites motion video runs the baked CLI, never `npx` at render time. Telemetry and
-# the update check stay off: a render must not phone home.
+# the update check stay off: a render must not phone home. The render browser's
+# network isolation is NOT done here: motion_video preloads
+# vendor/hf-network-guard.cjs into the CLI (dead proxy + no DNS for Chrome, only
+# the CLI's own project server reachable) and hands it an allow-listed env. An
+# OS-level `unshare -n` was rejected: it needs user namespaces, which Docker's
+# default seccomp profile denies to this non-root user.
 ENV POCKETPAW_HYPERFRAMES_CMD=hyperframes
 ENV HYPERFRAMES_NO_TELEMETRY=1
 ENV HYPERFRAMES_NO_UPDATE_CHECK=1

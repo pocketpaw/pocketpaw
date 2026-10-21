@@ -11,33 +11,43 @@
 #   compose  ``_chat`` — one completion through the LiteLLM proxy with the
 #            workspace's own key (studio ``_resolve_auth_key``). Model:
 #            POCKETPAW_SITES_MOTION_MODEL, else the deployment default.
-#   validate static checks (``composition_problems``) + ``hyperframes lint``.
-#            Problems get exactly ONE repair round-trip to the LLM, then fail.
+#   validate ``composition_problems`` (contract + the ``motion_safety`` allow-list)
+#            and ``hyperframes lint``. ONE repair round-trip to the LLM, then fail.
 #   render   ``hyperframes render`` → MP4, remuxed with +faststart, poster at 0.5s.
 #
-# INVARIANTS:
+# INVARIANTS (the HTML is untrusted: LLM-written from a user brief):
+#   * The render browser is OFF THE NETWORK. ``vendor/hf-network-guard.cjs`` is
+#     preloaded into the CLI (NODE_OPTIONS) and gives every Chrome it spawns a dead
+#     proxy that bypasses only the CLI's own project file server, and no DNS. It
+#     logs each Chrome PID to a guard file outside the project; a render whose
+#     guard file is empty was unguarded and its output is discarded.
+#   * The CLI sees an allow-listed environment (``motion_safety.renderer_env``),
+#     never the server's secrets.
 #   * anime.js is VENDORED (vendor/anime-3.2.2.min.js, MIT) and copied next to
-#     index.html; the composition loads it as ``anime.min.js``. A render never
-#     touches the network, and the composition may not either (no external URL).
-#     v3, not v4: the HyperFrames adapter seeks every instance in
-#     ``window.__hfAnime`` (and auto-discovers the v3 ``anime.running`` global).
+#     index.html as ``anime.min.js``. v3, not v4: the HyperFrames adapter seeks
+#     every instance in ``window.__hfAnime``.
 #   * The CLI comes from POCKETPAW_HYPERFRAMES_CMD, default a PINNED npx spec.
-#     Never a floating version. The image bakes it (``hyperframes`` on PATH).
-#   * Every subprocess is bounded and killed as a process tree on timeout, and
-#     renders are capped per process (POCKETPAW_HYPERFRAMES_CONCURRENCY, 1-2).
-#   * The temp project dir is always removed.
-#   * A missing node/npx/Chrome/ffmpeg is ``reason="unavailable"`` with a message
-#     that names the renderer, so callers can map it to 503 and fall back.
+#   * Bounded: one motion job per workspace, 1-2 per process
+#     (POCKETPAW_HYPERFRAMES_CONCURRENCY) with a short wait for a slot ("busy"),
+#     and the whole compose+lint+render under OVERALL_DEADLINE_S. Every subprocess
+#     is killed on timeout or cancellation, and so is every guarded Chrome (puppeteer
+#     launches it detached, outside the CLI's process group). The temp dir is
+#     always removed.
+#   * ``reason`` is ``unavailable`` (renderer missing), ``busy`` (no slot) or
+#     ``failed``; callers map the first two to 503.
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import os
 import re
 import shlex
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -55,12 +65,19 @@ CONCURRENCY_ENV = "POCKETPAW_HYPERFRAMES_CONCURRENCY"
 ANIME_VERSION = "3.2.2"
 ANIME_FILENAME = "anime.min.js"
 _ANIME_VENDOR = Path(__file__).parent / "vendor" / f"anime-{ANIME_VERSION}.min.js"
+_NETWORK_GUARD = Path(__file__).parent / "vendor" / "hf-network-guard.cjs"
+GUARD_FILE_ENV = "POCKETPAW_HF_GUARD_FILE"
 
 COMPOSITION_ID = "hero"
 RENDER_TIMEOUT_S = 180
-LINT_TIMEOUT_S = 90  # the first npx run resolves the package
+LINT_TIMEOUT_S = 60
 FFMPEG_TIMEOUT_S = 30
-_CHAT_TIMEOUT_S = 150.0
+_CHAT_TIMEOUT_S = 90.0
+#: The whole job (compose, lint, repair, render, poster). Keeps one HTTP request
+#: under ~5 minutes; a background job + polling is the real fix (follow-up).
+OVERALL_DEADLINE_S = 280
+#: How long a job waits for a render slot before answering "busy".
+SLOT_WAIT_S = 15
 _MAX_HTML_BYTES = 200_000
 
 DIMENSIONS: dict[str, tuple[int, int]] = {
@@ -94,12 +111,17 @@ _IMAGE_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "im
 
 
 class MotionVideoError(Exception):
-    """``reason`` is ``unavailable`` (renderer missing on this host) or ``failed``."""
+    """``reason`` is ``unavailable`` (renderer missing on this host), ``busy``
+    (no render slot free) or ``failed``."""
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
         self.message = message
+
+
+def _busy() -> MotionVideoError:
+    return MotionVideoError("busy", "Motion video rendering is busy right now; try again shortly.")
 
 
 def _unavailable(detail: str) -> MotionVideoError:
@@ -143,7 +165,8 @@ HARD CONTRACT (the renderer rejects violations):
 6. No network: no http(s) URLs anywhere (no <link>, no @import, no web fonts, no remote images). Inline SVG is fine (its xmlns attribute is fine).
 7. Fonts: use only these families by name, with no @font-face: {fonts}; or system-ui / serif / sans-serif / monospace.
 8. Never give an element a CSS transform AND animate its transform in anime; set the start state with anime from/to arrays (translateX:[-40,0]). Elements you transform are display:block or inline-block with a real width and height.
-9. No <video>, <audio>, <canvas>, <iframe>. No <br> inside text.
+9. No <video>, <audio>, <canvas>, <iframe>, <object>, <embed>, <link>, <use>, <image>, <foreignObject>, <a>, <form>. No <br> inside text. No event-handler attributes.
+10. The only URLs allowed anywhere are url(#id) / href="#id" fragments and the provided local image filename. In JS: create elements only with literal tag names (document.createElementNS('http://www.w3.org/2000/svg', ...) is NOT allowed; create SVG shapes in the markup instead, or use divs), setAttribute only with literal, non-URL, non-style attribute names, no innerHTML, no string concatenation of two literals, no window[...] / globalThis / eval / Function, no assigning .src or .href, no style.cssText or setProperty. Build repeated elements with document.createElement('div') and el.style.<property> = value.
 
 DESIGN (this is what makes it good):
 - ONE idea, executed well: e.g. slow aurora gradients, drifting geometric shapes, a field of seeded dots breathing, giant outlined letterforms sliding past, light sweeping across a surface. Not a slideshow, not a sequence of scenes.
@@ -311,23 +334,19 @@ _BANNED: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"performance\.now\s*\(", "reads the clock (performance.now)"),
         (r"\bset(?:Timeout|Interval)\s*\(", "uses setTimeout/setInterval"),
         (r"requestAnimationFrame\s*\(", "uses requestAnimationFrame"),
-        (r"\bfetch\s*\(|XMLHttpRequest", "makes a network request"),
         (r"\bloop\s*:\s*true", "uses loop:true (infinite); use a finite loop count"),
         (r"autoplay\s*:\s*true", "sets autoplay:true; every animation must be autoplay:false"),
-        (r"@import\b|<link\b", "loads an external stylesheet"),
         (r"@keyframes\b", "uses CSS @keyframes; animate with anime.js only"),
-        (r"<(?:video|audio|canvas|iframe)\b", "uses a <video>/<audio>/<canvas>/<iframe>"),
         (r"\bgsap\b", "uses GSAP; use anime.js only"),
     )
 )
 
-_URL_RE = re.compile(r"(?:https?:)?//[\w.-]+\.[a-z]{2,}[^\s\"')]*", re.IGNORECASE)
-_SCRIPT_SRC_RE = re.compile(r"<script\b[^>]*\bsrc\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
-
 
 def composition_problems(html: str, brief: MotionBrief) -> list[str]:
-    """Static checks the HyperFrames linter does not make for anime.js
-    compositions. Empty means it may go to ``lint``."""
+    """The renderer contract plus the ``motion_safety`` allow-list. Empty means
+    it may go to ``lint``."""
+    from pocketpaw_ee.sites.motion_safety import unsafe_constructs
+
     problems: list[str] = []
     if len(html.encode()) > _MAX_HTML_BYTES:
         problems.append(f"the document is over {_MAX_HTML_BYTES // 1000} KB; simplify it")
@@ -343,27 +362,16 @@ def composition_problems(html: str, brief: MotionBrief) -> list[str]:
         if _attr(tag, "data-duration") != str(brief.duration_sec):
             problems.append(f'the root must carry data-duration="{brief.duration_sec}"')
 
-    scripts = _SCRIPT_SRC_RE.findall(html)
-    if scripts != [ANIME_FILENAME]:
-        problems.append(
-            f'load exactly one external script, <script src="{ANIME_FILENAME}"></script> '
-            f"(found: {scripts or 'none'})"
-        )
     if "__hfAnime" not in html or ".push(" not in html:
         problems.append("no animation is pushed to window.__hfAnime")
     if not re.search(r"autoplay\s*:\s*false", html):
         problems.append("animations must be created with autoplay:false")
-
     for pattern, why in _BANNED:
         if pattern.search(html):
             problems.append(f"the composition {why}")
 
-    for url in _URL_RE.findall(html):
-        if "w3.org/" in url:  # SVG / XLink namespaces, never fetched
-            continue
-        problems.append(f"references a network URL ({url[:80]}); no network is allowed")
-        break
-
+    allowed = [brief.image_filename] if brief.image_filename else []
+    problems.extend(unsafe_constructs(html, allowed_files=allowed, script_src=ANIME_FILENAME))
     if brief.image_filename and brief.image_filename not in html:
         problems.append(f'the owner\'s image "{brief.image_filename}" is not used')
     return problems
@@ -383,23 +391,66 @@ def hyperframes_argv() -> list[str]:
     return argv
 
 
-def _cli_env() -> dict[str, str]:
-    env = dict(os.environ)
+def _cli_env(guard_file: Path | None = None) -> dict[str, str]:
+    """An allow-listed environment (no server secrets) with the network guard
+    preloaded into every Node process the CLI starts."""
+    from pocketpaw_ee.sites.motion_safety import renderer_env
+
+    env = renderer_env()
     env.setdefault("HYPERFRAMES_NO_TELEMETRY", "1")
     env.setdefault("HYPERFRAMES_NO_UPDATE_CHECK", "1")
-    env.setdefault("NO_COLOR", "1")
+    env["NO_COLOR"] = "1"
+    env["NODE_OPTIONS"] = f'--require "{_NETWORK_GUARD.as_posix()}"'
+    if guard_file is not None:
+        env[GUARD_FILE_ENV] = str(guard_file)
     return env
 
 
-async def _run(argv: list[str], *, cwd: str, timeout_s: int, label: str) -> tuple[int, str, str]:
-    """Run one bounded subprocess; kill its process tree on timeout. Seam for tests."""
-    from pocketpaw_ee.sites.generator_client import _BuildTimeout, _communicate_bounded
+def guarded_pids(guard_file: Path | None) -> list[int]:
+    """The Chrome PIDs the network guard launched (and so guarded)."""
+    if guard_file is None or not guard_file.is_file():
+        return []
+    pids = []
+    for line in guard_file.read_text(encoding="utf-8", errors="replace").split():
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
+def _kill_guarded_browsers(guard_file: Path | None) -> None:
+    """Kill every Chrome the guard logged. Puppeteer spawns Chrome ``detached``
+    on POSIX (its own process group), so killing the CLI's group misses it."""
+    for pid in guarded_pids(guard_file):
+        if sys.platform == "win32":
+            with contextlib.suppress(Exception):
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(pid, signal.SIGKILL)
+
+
+async def _run(
+    argv: list[str],
+    *,
+    cwd: str,
+    timeout_s: float,
+    label: str,
+    guard_file: Path | None = None,
+) -> tuple[int, str, str]:
+    """Run one bounded subprocess. On timeout OR cancellation (the overall
+    deadline) kill its process group and any guarded Chrome. Seam for tests."""
+    from pocketpaw_ee.sites import generator_client
 
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=cwd,
-            env=_cli_env(),
+            env=_cli_env(guard_file),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -411,8 +462,14 @@ async def _run(argv: list[str], *, cwd: str, timeout_s: int, label: str) -> tupl
             f"set {HYPERFRAMES_CMD_ENV}."
         ) from exc
     try:
-        out, err = await _communicate_bounded(proc, timeout_s, label)
-    except _BuildTimeout as exc:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout_s)
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        generator_client._kill_process_group(proc)
+        _kill_guarded_browsers(guard_file)
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(proc.wait(), 5)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         raise MotionVideoError(
             "failed", f"the {label} step timed out after {timeout_s}s and was stopped"
         ) from exc
@@ -468,8 +525,9 @@ async def lint_project(project_dir: Path) -> list[str]:
     return problems
 
 
-async def render_project(project_dir: Path, out_path: Path) -> None:
-    """``hyperframes render`` to ``out_path`` (bounded, single worker)."""
+async def render_project(project_dir: Path, out_path: Path, guard_file: Path) -> None:
+    """``hyperframes render`` to ``out_path`` (bounded, single worker, guarded).
+    Refuses the output when the guard file shows no guarded Chrome."""
     rc, out, err = await _run(
         [
             *hyperframes_argv(),
@@ -488,8 +546,15 @@ async def render_project(project_dir: Path, out_path: Path) -> None:
         cwd=str(project_dir),
         timeout_s=RENDER_TIMEOUT_S,
         label="render",
+        guard_file=guard_file,
     )
     if rc == 0 and out_path.is_file() and out_path.stat().st_size > 0:
+        if not guarded_pids(guard_file):
+            out_path.unlink(missing_ok=True)
+            raise MotionVideoError(
+                "failed",
+                "the render ran without the network guard, so its output was discarded",
+            )
         return
     detail = _tail(err or out) or f"exit {rc}"
     if any(hint in detail.lower() for hint in _MISSING_TOOL_HINTS):
@@ -533,10 +598,11 @@ async def finish_video(project_dir: Path, rendered: Path) -> tuple[bytes, bytes 
 # ── Orchestration ────────────────────────────────────────────────────────
 
 _SLOTS: asyncio.Semaphore | None = None
+_IN_FLIGHT: set[str] = set()
 
 
 def _render_slots() -> asyncio.Semaphore:
-    """1-2 concurrent renders per process: each one is a Chrome plus an encoder."""
+    """1-2 concurrent motion jobs per process: each one is a Chrome plus an encoder."""
     global _SLOTS
     if _SLOTS is None:
         try:
@@ -560,10 +626,11 @@ async def render_motion_video(
     image: tuple[bytes, str] | None = None,
     workspace_id: str | None = None,
 ) -> MotionRender:
-    """Compose, validate (one repair), and render a motion clip. Raises
-    ``MotionVideoError``."""
-    if not _ANIME_VENDOR.is_file():
-        raise _unavailable(f"the vendored anime.js ({_ANIME_VENDOR.name}) is missing")
+    """Compose, validate (one repair), and render a motion clip, within the
+    per-workspace, per-process and overall limits. Raises ``MotionVideoError``."""
+    for vendored in (_ANIME_VENDOR, _NETWORK_GUARD):
+        if not vendored.is_file():
+            raise _unavailable(f"the vendored {vendored.name} is missing")
     # Fail before the LLM spend when the CLI cannot even be found.
     exe = (hyperframes_argv() or [""])[0]
     if not exe or not (shutil.which(exe) or Path(exe).is_file()):
@@ -572,6 +639,45 @@ async def render_motion_video(
             f"hyperframes@{HYPERFRAMES_VERSION} CLI, or set {HYPERFRAMES_CMD_ENV}."
         )
 
+    key = workspace_id or ""
+    if key in _IN_FLIGHT:
+        raise _busy()
+    _IN_FLIGHT.add(key)
+    try:
+        slots = _render_slots()
+        try:
+            await asyncio.wait_for(slots.acquire(), SLOT_WAIT_S)
+        except TimeoutError as exc:
+            raise _busy() from exc
+        try:
+            async with asyncio.timeout(OVERALL_DEADLINE_S):
+                return await _compose_and_render(
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    duration_sec=duration_sec,
+                    palette=palette,
+                    image=image,
+                    workspace_id=workspace_id,
+                )
+        except TimeoutError as exc:
+            raise MotionVideoError(
+                "failed", f"motion video took longer than {OVERALL_DEADLINE_S}s and was stopped"
+            ) from exc
+        finally:
+            slots.release()
+    finally:
+        _IN_FLIGHT.discard(key)
+
+
+async def _compose_and_render(
+    *,
+    prompt: str,
+    aspect_ratio: str,
+    duration_sec: int,
+    palette: list[str] | None,
+    image: tuple[bytes, str] | None,
+    workspace_id: str | None,
+) -> MotionRender:
     image_filename = None
     if image is not None:
         image_filename = f"source-image.{_IMAGE_EXT.get(image[1], 'jpg')}"
@@ -583,7 +689,11 @@ async def render_motion_video(
         image_filename=image_filename,
     )
 
-    project_dir = Path(tempfile.mkdtemp(prefix="paw-motion-"))
+    # The CLI serves ``project/`` to Chrome; the guard file sits OUTSIDE it.
+    work_dir = Path(tempfile.mkdtemp(prefix="paw-motion-"))
+    project_dir = work_dir / "project"
+    project_dir.mkdir()
+    guard_file = work_dir / "guard.pids"
     try:
         shutil.copyfile(_ANIME_VENDOR, project_dir / ANIME_FILENAME)
         if image is not None and image_filename:
@@ -606,13 +716,12 @@ async def render_motion_video(
                     "failed", "the composition did not validate: " + "; ".join(problems[:5])
                 )
 
-        rendered = project_dir / "render.mp4"
-        async with _render_slots():
-            await render_project(project_dir, rendered)
-            video, poster = await finish_video(project_dir, rendered)
+        rendered = work_dir / "render.mp4"
+        await render_project(project_dir, rendered, guard_file)
+        video, poster = await finish_video(work_dir, rendered)
         return MotionRender(video=video, poster=poster, html=html)
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def decode_data_url(data_url: str) -> tuple[bytes, str]:

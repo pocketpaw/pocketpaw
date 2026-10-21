@@ -62,7 +62,8 @@ class SiteMediaError(Exception):
     ``generation_not_found``, ``unsupported`` (not an image/video generation),
     ``not_ready`` (no finished media), ``missing`` (media gone from storage),
     ``rejected`` (the rail refused the bytes), ``unavailable`` (the chosen video
-    engine is not set up on this server), ``failed`` (the provider or the store
+    engine is not set up on this server), ``busy`` (no motion render slot free),
+    ``failed`` (the provider or the store
     failed). ``message`` is safe to show a user.
     """
 

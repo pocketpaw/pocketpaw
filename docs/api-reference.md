@@ -4129,7 +4129,17 @@ Both return the same body. `assets` items have the list/upload shape; for a vide
     No generative model; the clip is a seamless loop sized for a hero background.
     With `image_url`, the image becomes the base layer with a slow Ken Burns move.
     A server without the renderer (Node 22+, the pinned `hyperframes` CLI, Chrome,
-    ffmpeg) answers **503** with the missing piece named. Configure with
+    ffmpeg) answers **503** with the missing piece named. The composition is
+    untrusted (an LLM wrote it from the prompt), so the render browser is cut off
+    the network (a preloaded guard gives Chrome a dead proxy and no DNS; only the
+    CLI's own project file server is reachable), the CLI gets an allow-listed
+    environment with no server secrets, and the HTML must pass an allow-list:
+    known tags only, the vendored anime.js as the only script, no URLs except
+    `#fragments` and the provided image, no network/eval/navigation APIs in JS.
+    One motion job runs per workspace and 1–2 per process; with no slot free
+    within 15s the call is **503** "busy, try again shortly". The whole job is
+    capped at 280s. (A background job with polling is the planned replacement
+    for this synchronous request.) Configure with
     `POCKETPAW_HYPERFRAMES_CMD` (default `npx --yes hyperframes@0.8.181`; the
     enterprise image sets `hyperframes`), `POCKETPAW_HYPERFRAMES_CONCURRENCY`
     (renders per process, 1–2, default 1) and `POCKETPAW_SITES_MOTION_MODEL`

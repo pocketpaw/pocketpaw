@@ -197,6 +197,11 @@ async def _generate_site_video_handler(args: dict) -> dict:
                 "Public asset storage is not configured on this deployment, so a generated "
                 "video would have no address a visitor could load."
             )
+        if exc.reason == "busy":
+            return _error_response(
+                f"{exc.message} Build the page with a still hero now; offer the user to "
+                "add the video later rather than retrying in a loop."
+            )
         if exc.reason == "unavailable":
             return _error_response(
                 f"{exc.message} Do NOT retry this engine in this build. Use the other "

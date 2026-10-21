@@ -1479,6 +1479,7 @@ _SITE_MEDIA_STATUS = {
     "rejected": 400,
     "not_ready": 409,
     "unavailable": 503,
+    "busy": 503,
     "failed": 502,
 }
 
