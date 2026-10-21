@@ -1,0 +1,74 @@
+[
+  {
+    "label": "a red PR check does not fail the component",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "(\"failed\", any(p.get(\"checks\") == \"red\" for p in row[\"prs\"])),",
+    "replace": "(\"failed\", False),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "an in-flight run does not read changing",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "(\"changing\", bool(row[\"runs\"])),",
+    "replace": "(\"changing\", False),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a trunk commit in the window does not read changed",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "(\"changed\", row[\"merges\"][\"count_7d\"] > 0),",
+    "replace": "(\"changed\", False),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "changed outranks changing",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "        (\"changing\", bool(row[\"runs\"])),\n        (\"changed\", row[\"merges\"][\"count_7d\"] > 0),",
+    "replace": "        (\"changed\", row[\"merges\"][\"count_7d\"] > 0),\n        (\"changing\", bool(row[\"runs\"])),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "an unfinished check rolls up green",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "for s in (\"red\", \"pending\", \"green\")",
+    "replace": "for s in (\"red\", \"green\", \"pending\")",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "an empty rollup reads green",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "if s in seen), None), gate",
+    "replace": "if s in seen), \"green\"), gate",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a signal that joins no component is dropped, not put on the repo row",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "return [rows[i] for i in ids] or [repo]",
+    "replace": "return [rows[i] for i in ids]",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a signal with an unjoined file also lands on the repo row",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "return [rows[i] for i in ids] or [repo]",
+    "replace": "return [rows[i] for i in ids] + ([repo] if None in {component_for(f, index) for f in files} else [])",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  }
+]
