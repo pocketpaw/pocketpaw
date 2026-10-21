@@ -36,6 +36,8 @@ PATHS_MODEL = {
 }
 NOW = datetime(2026, 10, 21, 12, tzinfo=UTC)
 EMPTY = {"runs": [], "prs": [], "merges": {"count_7d": 0, "last": None}, "findings": []}
+HOURS_AGO_10 = {"count_7d": 1, "last": {"at": "2026-10-21T02:00:00+00:00"}}
+HOURS_AGO_25 = {"count_7d": 3, "last": {"at": "2026-10-20T11:00:00+00:00"}}
 
 
 def run_row(status="running", repo="/r", **kw):
@@ -65,14 +67,15 @@ def finding(n, body, created="2026-10-21T07:00:00Z"):
     ("row", "planned", "want"),
     [
         ({"prs": [{"checks": "red"}], "runs": [{}]}, False, "failed"),
-        ({"runs": [{}], "merges": {"count_7d": 2}}, False, "changing"),
-        ({"merges": {"count_7d": 1}}, True, "changed"),
+        ({"runs": [{}], "merges": HOURS_AGO_10}, False, "changing"),
+        ({"merges": HOURS_AGO_10}, True, "changed"),
+        ({"merges": HOURS_AGO_25}, False, "landed"),  # counted in 7 d, not changed in 24 h
         ({"prs": [{"checks": "green"}]}, True, "planned"),
         ({"prs": [{"checks": "pending"}], "findings": [{}]}, False, "landed"),
     ],
 )
 def test_status_takes_the_first_rule_that_holds(row, planned, want):
-    assert al.component_status({**EMPTY, **row}, planned) == want
+    assert al.component_status({**EMPTY, **row}, planned, NOW) == want
 
 
 @pytest.mark.parametrize(

@@ -13,9 +13,10 @@
 # signal that joins none lands on ``repo``, the row for the repo as a whole.
 # A row's ``status`` is the first rule that holds: ``failed`` (an open PR's
 # checks are red), ``changing`` (an in-flight run), ``changed`` (a trunk commit
-# within ``WINDOW``), ``planned`` (the model tags it ``planned``), else
-# ``landed``. Only in-flight runs are passed in, so one failed run cannot paint
-# a component red for good; ``drift`` waits on loom.
+# in the last ``CHANGED_H`` hours; ``merges`` still counts ``WINDOW``),
+# ``planned`` (the model tags it ``planned``), else ``landed``. Only in-flight
+# runs are passed in, so one failed run cannot paint a component red for good;
+# ``drift`` waits on loom.
 #
 # Rows carry ids, titles and states only, never a finding's body, a PR's file
 # list or raw check rows, so creative-apps' block stays under 100 KB.
@@ -30,6 +31,7 @@ from .orient import _dicts, _owned_system, component_for, path_index, repo_path
 
 FINDING_LABEL = "finding"
 WINDOW = "7.days"
+CHANGED_H = 24  # a ring reads changed this long after a trunk commit
 _TEXT = 160  # a run task or a title, cut
 _GATE = "local-ci/quality"
 _RED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
@@ -60,12 +62,13 @@ def finding_files(body: str) -> list[str]:
     return list(dict.fromkeys(p for t in raw if t and (p := repo_path(t))))
 
 
-def component_status(row: dict[str, Any], planned: bool) -> str:
+def component_status(row: dict[str, Any], planned: bool, now: datetime) -> str:
     """A row's status, first rule that holds (``feature_status``'s shape)."""
+    age = _age_h((row["merges"]["last"] or {}).get("at"), now)
     rules = (
         ("failed", any(p.get("checks") == "red" for p in row["prs"])),
         ("changing", bool(row["runs"])),
-        ("changed", row["merges"]["count_7d"] > 0),
+        ("changed", age is not None and age < CHANGED_H),
         ("planned", planned),
     )
     return next((name for name, holds in rules if holds), "landed")
@@ -151,6 +154,6 @@ def derive(
             row["findings"].append(item)
     for c in comps:
         planned = "planned" in (c.get("tags") or [])
-        rows[str(c["id"])]["status"] = component_status(rows[str(c["id"])], planned)
-    repo["status"] = component_status(repo, False)
+        rows[str(c["id"])]["status"] = component_status(rows[str(c["id"])], planned, now)
+    repo["status"] = component_status(repo, False, now)
     return {"stale": False, "dev_ci": dev_ci, "components": rows, "repo": repo}

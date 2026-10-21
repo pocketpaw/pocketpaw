@@ -18,10 +18,19 @@
     ]
   },
   {
-    "label": "a trunk commit in the window does not read changed",
+    "label": "a trunk commit in the last 24 h does not read changed",
     "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
-    "find": "(\"changed\", row[\"merges\"][\"count_7d\"] > 0),",
+    "find": "(\"changed\", age is not None and age < CHANGED_H),",
     "replace": "(\"changed\", False),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "any commit in the 7-day window reads changed",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "(\"changed\", age is not None and age < CHANGED_H),",
+    "replace": "(\"changed\", row[\"merges\"][\"count_7d\"] > 0),",
     "tests": [
       "tests/cloud/test_belt_architecture_live.py"
     ]
@@ -29,8 +38,8 @@
   {
     "label": "changed outranks changing",
     "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
-    "find": "        (\"changing\", bool(row[\"runs\"])),\n        (\"changed\", row[\"merges\"][\"count_7d\"] > 0),",
-    "replace": "        (\"changed\", row[\"merges\"][\"count_7d\"] > 0),\n        (\"changing\", bool(row[\"runs\"])),",
+    "find": "        (\"changing\", bool(row[\"runs\"])),\n        (\"changed\", age is not None and age < CHANGED_H),",
+    "replace": "        (\"changed\", age is not None and age < CHANGED_H),\n        (\"changing\", bool(row[\"runs\"])),",
     "tests": [
       "tests/cloud/test_belt_architecture_live.py"
     ]
