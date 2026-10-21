@@ -5,8 +5,9 @@
 # ``containers`` / ``components``). Pins added / removed / changed by id across
 # every level, that nested lists are not "fields", a move reported as
 # ``parent``, a relationship matched by its ends (and ``from`` / ``to``
-# accepted), the topmost removed element carried with its parent and pruned
-# subtree, and the counts.
+# accepted, a second one between the same ends counted on its own), the
+# topmost removed element carried with its parent and pruned subtree, and the
+# counts.
 
 from __future__ import annotations
 
@@ -116,6 +117,19 @@ def test_relationships_match_by_their_ends_and_accept_from_to():
         "added": [{"source": "api", "target": "routes", "description": "mounts"}],
         "removed": [{"source": "web", "target": "api", "description": "calls"}],
     }
+
+
+def test_a_second_relationship_between_the_same_ends_is_its_own():
+    twice = [
+        {"source": "web", "target": "api", "description": "calls"},
+        {"source": "web", "target": "api", "description": "streams"},
+    ]
+    added = diff_models(model(), model(relationships=model()["relationships"] + twice[1:]))
+    assert added["relationships"] == {"added": [twice[1]], "removed": []}
+    gone = diff_models(model(relationships=model()["relationships"] + twice[1:]), model())
+    assert gone["relationships"] == {"added": [], "removed": [twice[1]]}
+    relabel = model(relationships=[model()["relationships"][0], {**twice[0], "description": "x"}])
+    assert diff_models(model(), relabel)["relationships"] == {"added": [], "removed": []}
 
 
 def test_counts_add_relationships_to_elements():

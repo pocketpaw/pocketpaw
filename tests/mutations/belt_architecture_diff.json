@@ -45,6 +45,25 @@
     ]
   },
   {
+    "label": "architecture diff: a second relationship between the same ends is invisible",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "            out.setdefault(ends, []).append(r)\n",
+    "replace": "            out.setdefault(ends, [r])\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_a_second_relationship_between_the_same_ends_is_its_own"
+    ]
+  },
+  {
+    "label": "architecture diff: a relabel reads as removed plus added",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "        out += alone[len(theirs) :]\n",
+    "replace": "        out += alone\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_relationships_match_by_their_ends_and_accept_from_to",
+      "tests/cloud/test_belt_architecture_diff.py::test_a_second_relationship_between_the_same_ends_is_its_own"
+    ]
+  },
+  {
     "label": "architecture diff: counts leave relationships out",
     "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
     "find": "        \"added\": len(diff[\"added\"]) + len(rels[\"added\"]),\n",
@@ -105,6 +124,15 @@
     "replace": "    body[\"diff\"] = diff_models(old[\"model\"][\"model\"], body[\"model\"][\"model\"])\n    return body\n",
     "tests": [
       "tests/cloud/test_belt_architecture_history.py::test_diff_returns_the_read_plus_what_changed_since_the_commit"
+    ]
+  },
+  {
+    "label": "architecture diff: a bad diff sha shares at's 404 code",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "        code = \"belt.diff_commit_not_found\" if exc.code == \"belt.commit_not_found\" else exc.code\n",
+    "replace": "        code = exc.code\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_diff_guards_its_sha_like_at_with_its_own_code"
     ]
   }
 ]
