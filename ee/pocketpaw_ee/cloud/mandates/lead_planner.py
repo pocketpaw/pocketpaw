@@ -27,7 +27,8 @@
 # list per charter label, so a busy repo's open list limit never hides one), else
 # the ones filed with the sighting. The station's ways to end a lead short of done (a release,
 # a stale-base refusal) label the issue ``needs-human``, then reject the run; a
-# human removes the label to retry. A rejected run never counts as a failure.
+# human removes the label to retry. A timeout a Belt restart caused releases with no
+# label, so the next shift relaunches the issue. A rejected run never counts as a failure.
 #
 # CIRCUIT BREAKER, per issue: a lead that failed (``failed`` or ``develop
 # failed``) is tried again until ``BREAKER`` failures. ``failed`` is the issue's

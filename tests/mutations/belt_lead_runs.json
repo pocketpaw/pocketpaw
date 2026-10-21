@@ -210,7 +210,7 @@
   {
     "label": "an outage past the timeout never ends the lead",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                if now - since >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd)\n                    return\n                await self.sleep(self.poll_seconds)\n                continue",
+    "find": "                if now - since >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd, restart=blind)\n                    return\n                await self.sleep(self.poll_seconds)\n                continue",
     "replace": "                await self.sleep(self.poll_seconds)\n                continue",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"
@@ -359,8 +359,8 @@
   {
     "label": "an outage counts the timeout from the launch",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                if now - since >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd)",
-    "replace": "                if now - launched >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd)",
+    "find": "                if now - since >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd, restart=blind)",
+    "replace": "                if now - launched >= self.lead_timeout_seconds:\n                    await self._lead_expired(store, run_ref, blob, slug, cwd, restart=blind)",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_an_outage_while_a_lead_waits_past_8h_does_not_release_it"
     ]
@@ -1180,6 +1180,24 @@
     "replace": "        if False:\n            await self._flag_unlaunched(",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_lead_launch_error_rejects_the_run_and_flags_its_issue"
+    ]
+  },
+  {
+    "label": "a restart's timeout labels the issue needs-human",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        await self._park(store, run_ref, blob, slug, cwd, why, flag=not restart)",
+    "replace": "        await self._park(store, run_ref, blob, slug, cwd, why)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_restart_past_the_lead_timeout_releases_without_needs_human"
+    ]
+  },
+  {
+    "label": "a resumed tracker stays exempt after a clean poll",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "            blind = False\n            await self.sleep(self.poll_seconds)",
+    "replace": "            await self.sleep(self.poll_seconds)",
+    "tests": [
+      "tests/cloud/test_belt_lead_runs.py::test_a_resumed_lead_that_times_out_after_a_clean_poll_is_labelled"
     ]
   }
 ]

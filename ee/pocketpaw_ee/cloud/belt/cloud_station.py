@@ -30,6 +30,8 @@
 #   RESUME  at startup every launched run with no diff is tracked again (never relaunched),
 #           as is one whose tracker died on a TRACK error (lesson 45); a lead with a newer
 #           pending lead on one of its issues is released (newer: ``(created_at, id)``).
+#           A resumed lead that times out before its first clean poll is a restart's
+#           timeout: released, its issue left free (no ``needs-human``).
 #   LEAD    ``recipe == "feature-lead"``: one session per line of feature issues (the first
 #           flat on ``lead``, all on ``lead.features``), briefed from ``docs/factory/lead.md``,
 #           each issue and packet, the run id and a 3k PACK (loom, kb, soul). A ``lead/<f>``
@@ -751,7 +753,7 @@ class CloudTaskDispatcher:
         worker = await self._blobs._worker(blob)
         slug = await self._slug(ClaudeCodeDevelop._resolve_repo(str(blob.get("repo") or "")))
         if _is_lead(blob):
-            await self._track_lead(store, run_ref, blob, slug, worker)
+            await self._track_lead(store, run_ref, blob, slug, worker, resumed=True)
         else:
             await self._track(store, run_ref, blob, slug, dict(blob["cloud"]), worker)
 
@@ -826,14 +828,22 @@ class CloudTaskDispatcher:
         return feats
 
     async def _track_lead(
-        self, store: Any, run_ref: str, blob: dict[str, Any], slug: str, worker: dict[str, str]
+        self,
+        store: Any,
+        run_ref: str,
+        blob: dict[str, Any],
+        slug: str,
+        worker: dict[str, str],
+        *,
+        resumed: bool = False,
     ) -> None:
         """Poll a feature lead to its end (see the header): its ``Belt-Lead`` PRs
         onto ``lead.prs``, then per feature its issue, done rule and records,
         the stall ladder and the 8 h timeout over all of them, all on the wall
         clock from ``cloud.launched_at`` so a resume keeps them. The run lands
         once every feature meets its done rule; it finishes once every feature
-        is done or its issue closed."""
+        is done or its issue closed. A ``resumed`` tracker that times out before
+        its first clean poll releases without ``needs-human`` (``_lead_expired``)."""
         lead: dict[str, Any] = blob.setdefault("lead", {})
         cloud = blob.get("cloud") or {}
         launched = cloud.get("launched_at")
@@ -843,6 +853,10 @@ class CloudTaskDispatcher:
         # Where the timeout counts from: the launch, or the last progress of a
         # lead that waits. Kept across polls for the ones GitHub fails.
         since = launched
+        # A resumed tracker lost the old one's evidence (``since``, a CI wait),
+        # and the startup gh burst often fails its first read: a timeout before
+        # one clean poll is the restart's, not the lead's.
+        blind = resumed
         while True:
             action = await store.get_action(run_ref)
             status = getattr(action, "status", None)
@@ -861,7 +875,7 @@ class CloudTaskDispatcher:
                 # GitHub is down past the retries: skip this poll, not the lead.
                 logger.warning("belt cloud: lead %s poll skipped: %s", run_ref, exc)
                 if now - since >= self.lead_timeout_seconds:
-                    await self._lead_expired(store, run_ref, blob, slug, cwd)
+                    await self._lead_expired(store, run_ref, blob, slug, cwd, restart=blind)
                     return
                 await self.sleep(self.poll_seconds)
                 continue
@@ -941,7 +955,7 @@ class CloudTaskDispatcher:
             # Anatomy round must not release a live lead (factory lesson 100).
             hard = now - launched >= 2 * self.lead_timeout_seconds
             if hard or (expired and now - active >= self.lead_stall_seconds):
-                await self._lead_expired(store, run_ref, blob, slug, cwd, hard=hard)
+                await self._lead_expired(store, run_ref, blob, slug, cwd, hard=hard, restart=blind)
                 return
             heard = max(
                 [
@@ -978,6 +992,7 @@ class CloudTaskDispatcher:
                     read=read,
                 ):
                     return
+            blind = False
             await self.sleep(self.poll_seconds)
 
     async def _lead_expired(
@@ -989,18 +1004,23 @@ class CloudTaskDispatcher:
         cwd: Path,
         *,
         hard: bool = False,
+        restart: bool = False,
     ) -> None:
         """Out of time: settle like the stall ladder's last rung (``_park``).
         Never as a develop failure: a failed run stops counting in flight while
         its session may still be committing, and the next shift would launch a
-        second lead on the same feature."""
+        second lead on the same feature. A ``restart`` timeout (a resumed tracker
+        with no clean poll yet) parks without ``needs-human``: the issue stays
+        free and the next shift relaunches it from its RECORD."""
         lead = blob["lead"]
         lead["stalls"] = [*(lead.get("stalls") or []), {"kind": "timeout", "at": self.wall()}]
         await _patch(store, run_ref, lead=lead)
         session = (lead.get("sessions") or [{}])[-1].get("session_url")
         hours = self.lead_timeout_seconds * (2 if hard else 1) / 3600
         why = f"feature lead not done after {hours:g}h (session {session})"
-        await self._park(store, run_ref, blob, slug, cwd, why)
+        if restart:
+            why += ", timed out at a restart before a clean poll"
+        await self._park(store, run_ref, blob, slug, cwd, why, flag=not restart)
 
     async def _lead_read(self, slug: str, feats: list[dict[str, Any]], cwd: Path) -> _LeadRead:
         """This poll's GitHub read for a lead's ``feats``, shared by every tracker
@@ -1433,13 +1453,22 @@ class CloudTaskDispatcher:
         await self._once(store, run_ref, blob, "note", target, note, noted)
 
     async def _park(
-        self, store: Any, run_ref: str, blob: dict[str, Any], slug: str, cwd: Path, why: str
+        self,
+        store: Any,
+        run_ref: str,
+        blob: dict[str, Any],
+        slug: str,
+        cwd: Path,
+        why: str,
+        *,
+        flag: bool = True,
     ) -> None:
         """End a lead short of the done rule (the timeout, the ladder's last
         rung), deciding PER FEATURE by what its ``lead.records`` say. A contact
         sheet: its issue is closed as completed. A ``Belt-Slice-Done`` for every
         slice and no sheet: one note on its issue asks for the sheet, the issue
-        left open, unlabelled. Else its issue gets ``needs-human``. Every
+        left open, unlabelled. Else its issue gets ``needs-human`` (unless not
+        ``flag``: a restart's timeout leaves it free for the next shift). Every
         feature closed: the run finishes as done; else it is released, the
         reason naming each feature's outcome. Close, note and label each run
         once under a request id; none is a develop failure, so none counts
@@ -1488,9 +1517,11 @@ class CloudTaskDispatcher:
                 except Exception:  # noqa: BLE001 — the release still frees the slot
                     logger.info("belt cloud: sheet note on #%s failed", issue, exc_info=True)
                 parts.append((issue, "every slice is done, the contact sheet is missing"))
-            else:
+            elif flag:
                 await self._flag_issue(store, run_ref, blob, slug, issue, cwd)
                 parts.append((issue, _NEEDS_HUMAN))
+            else:
+                parts.append((issue, "left free for the next shift"))
         if closed == len(feats):
             issues = ", ".join(f"#{f.get('issue')}" for f in feats)
             done = (
