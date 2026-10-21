@@ -22,16 +22,6 @@ description: |
 
 # Edit a Paw Site — the React-track edit brain
 
-<!--
-  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): "What you
-  cannot change" no longer says a dependency cannot be added; packages go
-  through set_site_dependencies (any package, version or dist-tag), import
-  normally, and package.json / vite.config.* are editable. "Reading
-  the response" gains `verification` and a "Verify loop" section (only
-  `passed` means ready; fix → verify_site, max 3 rounds; unverified said
-  plainly). Quality bar and paw-fx entry follow.
--->
-
 The user has a **react-track Paw Site** and wants it **changed**. This skill is
 the sibling of `pocketpaw-create-react-site`: same engine, same prerender
 contract, same quality bar — but the page already exists, so the unit of work
@@ -326,7 +316,7 @@ Every edit is held to the bar the page was built to. Briefly:
   images-only rule. The only asset rule is that the URL is one you were given.
 - **Every CTA is an anchor** — `href="#pricing"`, `tel:`, `mailto:` — not a
   bare `onClick` button.
-- **The lead form stays a native `<form>`** with flat named fields (`name`,
+- **The lead form stays a native `<form>`** with flat named fields (`full_name`,
   `email`, `phone`, `message`) and a `<button type="submit">`. There is no
   server route on this track, so an `onSubmit` that fetches drops the lead.
 - **`className`, not `class`.** This is JSX.

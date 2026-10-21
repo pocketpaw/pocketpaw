@@ -9,17 +9,9 @@ description: |
   (paper band / display style / accent hue), a NAV + FOOTER archetype catalogue
   to rotate through, and a LOCKED-TOKEN rule that forbids mid-render colour and
   font improvisation. It also carries the honest-copy and pre-emit self-critique
-  gates. It does NOT replace design-taste's palettes, families or layout rules —
+  gates. It does NOT replace design-taste's palettes, families or layout rules;
   it is the diversification and token-discipline layer on top of them.
 ---
-
-<!-- New file 2026-09-08: adapted from Nutlope/hallmark (SKILL.md design flow, steps
-     2-2.6, plus its anti-patterns and slop-test gates) into a Paw Sites diversification
-     and token-discipline skill. Hallmark's 21-theme catalog, 21 macrostructures and
-     53-gate slop test are NOT ported wholesale - design-taste already carries six
-     aesthetic families and a pre-flight checklist. What is ported is the machinery
-     design-taste lacks: the measurable difference test, archetype rotation, and the
-     project-memory stamp. See VENDORED.md. -->
 
 # Sites: theme system and diversification
 
@@ -37,21 +29,20 @@ the fix.
 
 ## 1. Project memory (do this before picking anything)
 
-Every site this skill builds carries a stamp in a comment at the top of its main
-stylesheet or root component:
+Keep one line per site in your reasoning, never in the shipped page. No CSS
+comment, no HTML comment: agent notes left in public source are a generated-site
+tell, and a visitor can read them.
 
-```css
-/* Paw Site · theme: <name> · paper: <dark|mid|light> · display: <style> · accent: <hue>
- * nav: <archetype> · footer: <archetype> · macro: <section rhythm>
- * built: <YYYY-MM-DD>
- */
+```
+theme: <name> | paper: <dark|mid|light> | display: <style> | accent: <hue>
+nav: <archetype> | footer: <archetype> | macro: <section rhythm>
 ```
 
-Before you pick, **read the stamp on the most recent site you built** (on the
-/sites surface: the previous site in this conversation, or the pocket you are
-refining). If you have built any other site in this session, the new pick must
-differ from it. If you cannot see a previous stamp, say so in one line and pick
-freely - an unverifiable claim of variety is worse than an honest "first build".
+Before you pick, **check the record for the most recent site you built** in this
+conversation. If you have built any other site in this session, the new pick must
+differ from it. On a refine, read the choices off the page itself. If you have no
+earlier record, say so in one line and pick freely: an unverifiable claim of
+variety is worse than an honest "first build".
 
 ## 2. The theme-difference test (three axes)
 
@@ -77,7 +68,7 @@ differ on **at least two of these three axes**:
 > warm. Differs on all three.
 
 If a candidate differs on only one axis, it is too close. Pick again. This maps
-directly onto design-taste's six aesthetic families (MODULE 2.E) - use the family
+directly onto design-taste's aesthetic families (MODULE 2.E) - use the family
 for the full token system, and use these axes to check the family choice was
 actually a change.
 
@@ -109,7 +100,7 @@ the site really has two destinations.
 | Ft1 | Statement (one large line + one CTA) | Marketing pages with a single action |
 | Ft2 | Two-column (contact left, links right) | Local business, service business |
 | Ft3 | Four-column link farm + social row | A genuine docs root or hub, and almost nowhere else |
-| Ft4 | Hairline minimal (wordmark + copyright on one line) | Minimal / archetype-C conversion pages |
+| Ft4 | Hairline minimal (wordmark + copyright on one line) | Minimal conversion pages: a waitlist, one booking, one download |
 | Ft5 | Oversized wordmark (brand set huge, links small above) | Brand-led, soft-premium, portfolio |
 | Ft6 | Contact card (address, hours, map link) | Anything with a physical location |
 
@@ -153,7 +144,7 @@ style rule because an invented metric is a false claim shipped on a real busines
 domain.
 
 - Stat bars, comparison rows and proof strips use **real numbers**, a labelled
-  placeholder (`—` with "metric to confirm"), or **a different section shape**.
+  placeholder (`[metric to confirm]`), or **a different section shape**.
 - `+47% conversion`, `trusted by 50,000+ teams`, `10x faster` are fabrications the
   moment they are invented, however plausible they read.
 - Same rule for testimonials, customer logos and case-study counts. A logo strip
@@ -162,9 +153,8 @@ domain.
   the proof section with invention. A page with no testimonials section is honest;
   a page with three invented ones is not.
 
-This composes with design-taste MODULE 4 (organic metrics, no "John Doe", no
-"Acme"): that rule says make numbers *look* real, this one says do not make them
-up at all.
+This is the same rule as design-taste MODULE 0 and MODULE 4 (no invented
+numbers, no "John Doe", no "Acme"), stated where proof sections get built.
 
 ## 7. Re-drawn chrome is forbidden
 
@@ -184,7 +174,8 @@ inside running paragraphs.
 
 ## 9. Pre-emit self-critique
 
-Before handing back the page, score it 1-5 on six axes and **state the scores**:
+Before handing back the page, score it 1-5 on six axes, privately, in your
+reasoning:
 
 | Axis | Asks |
 | --- | --- |
@@ -193,20 +184,20 @@ Before handing back the page, score it 1-5 on six axes and **state the scores**:
 | Execution | Would this survive a look at 1440 and at 375? |
 | Specificity | Could this copy belong to any other business? |
 | Restraint | What could be removed with no loss? |
-| Variety | Does it pass the section-repetition ban? |
+| Variety | Do neighbouring sections differ in shape, and does it pass the section 2 test against the last site? |
 
 Anything scoring **below 3 triggers a revision pass before emit**, not a note in
-the summary. Stamp the scores into the CSS comment beside the theme stamp.
+the summary. The scores never go into the page: no CSS or HTML comment.
 
 ## Before you finish
 
 | Mistake | Fix |
 | --- | --- |
 | Theme differs from the last on one axis only | Pick again; two of three axes minimum |
-| Nav/footer picked as the family default | Read the stamp, rotate, state the line |
+| Nav/footer picked as the family default | Check the record, rotate, state the line |
 | Inline hex or font-family in a section | Lift it into the token block, reference the token |
 | An invented stat in a proof bar | Real number, labelled placeholder, or a different section |
 | Fake browser chrome around a screenshot | Real screenshot in a `<figure>`, or no frame |
 | Italic display heading | Roman; carry emphasis with weight or accent |
 | Self-critique skipped or scored after emit | Score before emit; below 3 means revise first |
-| No previous stamp, variety claimed anyway | Say "first build, no prior stamp" and pick freely |
+| No previous record, variety claimed anyway | Say "first build, no prior record" and pick freely |

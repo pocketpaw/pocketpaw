@@ -13,16 +13,6 @@ description: |
   page should look, this decides whether what you built actually holds up.
 ---
 
-<!-- New file 2026-09-08: adapted from blackbrainpy/designs-by-kore (its "Ship-it
-     checklist - recurring first-draft fixes" plus the reduced-motion/cleanup items of
-     its quality bar) into a Paw Sites defect catalogue. Its GSAP / Lenis / ScrollTrigger
-     / React-Three-Fiber library patterns are deliberately NOT ported: Paw Sites prerender,
-     and a defect fix that needs JS is one that fails with JS off. Every fix here is
-     expressible in CSS and survives with JS disabled. See VENDORED.md.
-     Updated 2026-09-24 (docs/sites-packages-and-verify-guidance): those libraries CAN
-     now be declared as packages (set_site_dependencies) on svelte/react/html; they
-     enhance a page, they don't fix one, so the catalogue stays CSS-only. -->
-
 # Sites: ship fixes
 
 Craft first, effects second. A page with a real type scale, honest grid tension and
@@ -34,11 +24,13 @@ Everything below is a defect that reliably comes back as revision #1. Run this l
 
 ## 0. The rule that gates every fix here
 
-Paw Sites prerender. Unless this site explicitly keeps its client bundle, `onMount`,
-`use:` actions, IntersectionObserver, scroll listeners and WebGL **never run**. So
-every fix in this file is CSS, and every one of them must hold with JavaScript
-disabled. If a fix you are reaching for needs JS the site does not keep, it is a
-claim, not a page - rebuild it in CSS or drop it.
+Every site starts from a project template. `static` ships no client bundle: only a
+`<script>` you wrote yourself runs. A framework template hydrates, so client code
+does run, but only after the visitor has already seen the prerendered HTML. Either
+way the finished state lives in the markup and motion only enhances it. So every
+fix in this file is CSS, and every one of them must hold with JavaScript disabled.
+A fix that only works once a script runs is a claim, not a page: rebuild it in CSS
+or drop it.
 
 ## 1. The hero must fit the fold
 
@@ -51,9 +43,11 @@ If the CTA falls below the fold:
 - tighten the hero's top padding and the gaps between its elements,
 - cut a line of copy - a two-line headline and a one-line subhead is usually enough.
 
-Use `min-height: 100dvh`, never `100vh` - on mobile `100vh` is taller than the
-visible area and pushes the CTA under the browser chrome. Cap the hero to at most
-four text elements (eyebrow **or** brand strip, headline, subtext, CTA row).
+The hero is as tall as its content, not a full screen by default. If a hero is
+viewport-tall, size it in `dvh`, never `vh`: on mobile `100vh` is taller than the
+visible area and pushes the CTA under the browser chrome. Cap the hero at a
+headline, a subtext and a CTA row, plus at most one proof or brand line. No
+eyebrow label above the headline.
 
 ## 2. Sticky and pinned sections must not bleed
 
@@ -89,11 +83,11 @@ and the two become unreadable.
 Dropping raw app screenshots into alternating image/text rows is the most reliable
 "generated" tell in a product page.
 
-- Present a screen inside a frame that **floats**: a gentle CSS `translateY`
-  keyframe (about 10px over 6s), a soft radial glow behind it, a rim light on the
-  edge. All CSS, all working without JS.
-- **Do not hand-build fake browser or phone chrome** - a URL pill with traffic-light
-  dots is its own tell. A `<figure>` with a hairline border is enough.
+- Present a real screen in a `<figure>` with a hairline border, at rest. No
+  floating keyframe, no glow or halo behind it, no rim light: motion and light
+  behind a screenshot are decoration, and they date the page.
+- **Do not hand-build fake browser or phone chrome**: a URL pill with traffic-light
+  dots is its own tell.
 - **Crop to the real frame bounds.** If the source image already has rounded
   corners, do not re-round with `border-radius` - it clips them flat. Use
   `filter: drop-shadow(...)` for the shadow rather than `border-radius` plus
@@ -134,7 +128,8 @@ move the final state into the markup and let motion enhance it.
 
 ## 7. Mobile floor
 
-Verified at 320, 375, 414 and 768px. These are hard, not aspirational:
+Verified at 320, 375 and 414px, and on up to 1920px. These are hard, not
+aspirational:
 
 - **No horizontal scroll.** Set `overflow-x: clip` on both `html` and `body`, never
   `hidden` - `hidden` silently creates a scroll container and breaks `position:
@@ -146,7 +141,8 @@ Verified at 320, 375, 414 and 768px. These are hard, not aspirational:
   scroll.
 - **Display headings need `overflow-wrap: anywhere` and `min-width: 0`** or a long
   unbroken word overflows the viewport.
-- **Every asymmetric layout collapses to one clean column below 768px.**
+- **Every asymmetric layout collapses to one clean column at phone widths**, at
+  the width where its content stops fitting, not at a fixed 768px.
 - Tap targets are at least 44x44px, and hover-only affordances have a non-hover path.
 
 ## 8. The things that make a page feel unfinished
@@ -165,13 +161,13 @@ Verified at 320, 375, 414 and 768px. These are hard, not aspirational:
 
 ## 8B. Six removals that tell you what the page is worth
 
-Sections 1-8 find defects. These find the opposite problem — a page with no
+Sections 1-8 find defects. These find the opposite problem: a page with no
 defects that is also not about anything. Each one is a removal: take something
 away and see whether the page notices.
 
 - **The card test.** Strip the border, shadow, background and radius off a card.
-  If nothing about the interaction or the meaning got worse, it was never a card
-  — it was a rectangle drawn around text. Remove the box, keep the content.
+  If nothing about the interaction or the meaning got worse, it was never a card,
+  only a rectangle drawn around text. Remove the box, keep the content.
 - **The image test.** Hide the hero image. If the first viewport still works
   fine, the image is doing nothing and is costing the page its largest download.
   Make it carry the section or take it out; a decorative hero is the worst of
@@ -180,15 +176,15 @@ away and see whether the page notices.
   the identity lives entirely in a logo in a corner. It should survive in the
   type, the colour or one distinctive detail.
 - **The copy test.** Delete 30% of the words. If the page got BETTER, keep
-  deleting — the draft was over-written, which is the default failure rather than
+  deleting: the draft was over-written, which is the default failure rather than
   the exception.
 - **The identity test.** Look at the first viewport and ask whether it could
   belong to a different company in the same industry. If yes, nothing on it is
   specific to this one yet.
 - **The editorial test.** Swap the logo for a coffee shop, a boutique hotel and a
   literary magazine. If the hero stays plausible for all three, the page has
-  landed in calm-editorial house style — cream ground, oversized high-contrast
-  serif, one italic word, very airy spacing — which reads as taste and is
+  landed in calm-editorial house style (cream ground, oversized high-contrast
+  serif, one italic word, very airy spacing), which reads as taste and is
   actually the absence of a decision. `sites-theme-system` carries the three-axis
   difference test for getting out of it.
 
@@ -199,12 +195,12 @@ made, so make it before showing the draft.
 
 ## 9. Look at it before calling it done
 
-Most of the defects above are only caught by looking. Where a preview is available,
-view the hero, every major section, and **every section-to-section transition** at a
-desktop and a mobile width. The transitions are where sticky bleed and spacing
+Most of the defects above are only caught by looking. Call `preview_site` (desktop,
+then `device: mobile`) and view the hero, every major section, and **every
+section-to-section transition**. The transitions are where sticky bleed and spacing
 collapse actually show up, and they are the frames nobody screenshots.
 
-If no preview is reachable, say that plainly rather than implying the page was
+If the preview fails, say that plainly rather than implying the page was
 checked. An unverified page reported as verified is the one defect on this list that
 costs trust rather than a revision.
 
@@ -212,11 +208,11 @@ costs trust rather than a revision.
 
 | Defect | Check |
 | --- | --- |
-| CTA below the fold | Hero fits at 1366x768; `100dvh` not `100vh` |
+| CTA below the fold | Hero fits at 1366x768; `dvh` not `vh` when viewport-tall |
 | Sticky element overlapping the next section | Heights aligned + ~40vh exit spacer |
 | Sticky not sticking at all | An ancestor has `overflow` set |
 | Headings unreadable behind a fixed nav | Opaque past ~60px, driven from CSS |
-| Screenshots as flat alternating rows | Floating frame, real crop, no fake chrome |
+| Screenshots as flat alternating rows | Still `<figure>`, hairline, real crop, no fake chrome |
 | Canyon between media and copy | `justify-items: end`; space goes to the outer edge |
 | Section empty with JS disabled | Resting state moved into the markup |
 | Horizontal scroll on mobile | `overflow-x: clip`, `minmax(0, 1fr)`, `overflow-wrap: anywhere` |

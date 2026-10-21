@@ -1,9 +1,5 @@
 """SD-6 — the behavioural eval that gates every remaining /sites prompt cut.
 
-New package 2026-09-08 (feat/sites-design-skills).
-Updated 2026-09-27 (feat/sites-visual-research): layout scorers removed with the
-layout rules.
-
 WHAT THIS IS FOR. ``docs/design/drafts/2026-09-08-sites-system-prompt-diet.md``
 lists four slices that would take ~810 tokens out of a 14,094-token /sites create
 turn, and gates all four on a measurement that did not exist: does the prompt
@@ -36,9 +32,11 @@ and it runs in CI with no model and no key.
 WHAT IT MEASURES. One behaviour per rule the prompt spends tokens producing, so a
 cut that silently removes one is visible:
 
-  vision-ledger        the Creative Direction Declaration is stated (MODULE 1)
+  vision-ledger        the direction notes (Vision Ledger, Design Read) stay out
+                       of the shipped source (MODULE 1, ART DIRECTION)
   background           the page ground is not plain #fff / #000 (MODULE 2.B)
-  no-em-dash           zero em/en dashes in VISIBLE text (MODULE 4)
+  no-em-dash           zero em dashes in VISIBLE text, en dashes only in
+                       numeric ranges (MODULE 4)
   no-filler            no Elevate / Seamless / Unleash / Supercharge (MODULE 4)
   no-placeholder       no John Doe / Acme / Lorem ipsum (MODULE 4)
   measure-capped       body copy carries a max-width (design-taste 2.F, craft 1)

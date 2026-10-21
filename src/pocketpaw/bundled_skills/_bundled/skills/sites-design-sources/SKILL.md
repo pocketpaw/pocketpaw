@@ -9,22 +9,10 @@ description: |
   grain) and you want to build it WELL rather than reach for the first shape that
   comes to mind. Also the way out of the overused-font trap in
   `pocketpaw-design-taste` 2.F. Everything listed here is TEXT you author into the
-  source map: CSS, inline SVG, or a GLSL string. Nothing here is downloaded,
-  because this surface has no filesystem; npm packages are a separate, declared
-  path (set_site_dependencies).
+  site's files: CSS, inline SVG, or a GLSL string. Nothing here is downloaded,
+  because this surface has no shell and no download tool; npm packages belong to
+  a framework template's package.json (see `pocketpaw-site`).
 ---
-
-<!-- Fonts: Google Fonts is the one font source. Fontshare faces were listed
-     once; agents then requested them from Google, where they do not exist. -->
-
-<!-- Updated 2026-09-27 (feat/sites-visual-research): the colour section no
-     longer says there is no browser; preview_site shows the draft, but a
-     screenshot still cannot measure contrast, so the checker stays. -->
-
-<!-- Updated 2026-09-24 (docs/sites-packages-and-verify-guidance): fact 1 no
-     longer says there is no package manager. svelte, react and html sites
-     declare npm packages through set_site_dependencies; what stays out is
-     anything that installs files into the project (shadcn registry, kits). -->
 
 # Design sources for a Paw Site
 
@@ -33,15 +21,16 @@ description: |
 Three facts decide whether a source is usable here, and together they rule out
 most of the web's design catalogue:
 
-1.  **Packages are declared, not installed by you.** svelte, react and html
-    sites take npm packages through `set_site_dependencies` (any npm package
-    or version, pinned to an exact version), so a runtime like `gsap`, `lenis` or `three`
-    is there when it earns its weight. `npm i` is still not a step you have, and
-    anything that installs FILES into the project (shadcn registry entries,
-    copy-in component kits) is out, however good it is.
-2.  **No filesystem and no binary ingest.** Your belt is `create_*`, `edit_*`,
-    `read_site_source`, `list_site_assets`, `publish`, plus image and video
-    generation. There is no download tool and no upload-from-URL, so a WOFF2
+1.  **Packages live in a framework template, never in `static`.** On a
+    framework template you add an npm package by editing `package.json` with the
+    file tools (`pocketpaw-site` has the loop), so a runtime like `gsap` or
+    `three` is there when it earns its weight. `static` takes no packages. There
+    is no shell, so a CLI that generates files into the project (shadcn registry
+    entries, copy-in component kits) cannot run, however good it is.
+2.  **Text files only, no binary ingest.** Your tools are the site file tools
+    (`list_site_files`, `read_site_files`, `write_site_files`, `patch_site_file`),
+    the build and verify loop, `list_site_assets`, stock search, and image and
+    video generation. There is no download tool and no upload-from-URL, so a WOFF2
     file, an SVG pack, a texture PNG or a CC0 illustration set cannot be brought
     into the project no matter how permissive its licence.
 3.  **What remains is technique.** A source is useful here when its value is
@@ -115,9 +104,9 @@ the project. So:
 -   **Fontpair** (`fontpair.co`) and **Free Faces** (`freefaces.gallery`) are for
     CHOOSING. Pick a pairing there, then confirm both faces are on Google Fonts
     before committing to them.
--   **The independent OFL foundries** — Velvetyne (`velvetyne.fr`), Open Foundry
-    (`open-foundry.com`), Uncut (`uncut.wtf`), Collletttivo
-    (`collletttivo.it`), The League of Moveable Type — are where genuinely
+-   **The independent OFL foundries** (Velvetyne at `velvetyne.fr`, Open Foundry
+    at `open-foundry.com`, Uncut at `uncut.wtf`, Collletttivo at
+    `collletttivo.it`, The League of Moveable Type) are where genuinely
     distinctive free type lives. Treat them as a reference for what a display
     face CAN look like, and as a real option only when the site owner supplies
     the file through their own assets. Never write a `@font-face` pointing at a
@@ -126,8 +115,10 @@ the project. So:
 
 ## Colour (feeds 2.G)
 
-`derive_palette` on your own belt comes first, because it is instant and returns
-values rather than a page to read. These cover what it does not:
+The palette tools come first, because they are instant and return values rather
+than a page to read: `mcp__pocketpaw_palette__scale_from_color` builds a full
+scale from one brand hex, and `mcp__pocketpaw_palette__extract_palette` reads one
+off a logo or reference image. These cover what they do not:
 
 -   **OKLCH picker** (`oklch.com`, MIT) when a ramp needs perceptually even
     steps. Lightness in OKLCH behaves the way the eye expects; HSL does not.

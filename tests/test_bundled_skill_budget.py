@@ -1,69 +1,36 @@
-# tests/test_bundled_skill_budget.py
-# Created: 2026-08-07 (MT-3, feat/design-taste-real-webgl) — bounds the byte
-# size of the one bundled skill that is embedded WHOLE into a system prompt.
-# Nothing else in the repo measures it, so every edit to that file silently
-# changed a per-turn runtime cost.
-# Updated: 2026-09-27 (feat/sites-lean-prompt): docstring notes the skill is no longer
-# inlined into the /sites preamble.
-# Updated: 2026-09-06 (feat/fx-skill-amendments): ceiling raised 34,000 ->
-# 34,500 so §2.C could teach the paw-fx effects registry instead of claiming
-# libraries never resolve. The argument is in the module docstring; the
-# mutations in tests/mutations/skill_budget.json still trip the new ceiling.
+# tests/test_bundled_skill_budget.py — bounds the byte size of the
+# pocketpaw-design-taste skill. Nothing else in the repo measures it, so without
+# this every edit to that file would silently change what a /sites turn costs
+# when the agent loads it. The argument for the number is in the docstring; the
+# mutations in tests/mutations/skill_budget.json trip the ceiling.
 """``pocketpaw-design-taste/SKILL.md`` stays under a stated byte ceiling.
 
-UPDATE 2026-09-27 (feat/sites-lean-prompt): the /sites create preamble no longer
-inlines this skill; it is named in <design-skills> and loaded on demand. The
-ceiling stays, because a skill the agent does load still costs its full length.
-
-WHY A SIZE TEST EXISTS FOR ONE MARKDOWN FILE. This skill is not merely
-installed for on-demand invocation. ``sites.py``'s ``_design_system_block``
-reads it off disk and inlines its body into the ``/sites`` surface preamble,
-wrapped in ``<design-system name="pocketpaw-design-taste">`` and labelled
-ALREADY LOADED so the agent applies it without a skill call. Every
-site-authoring turn on that surface therefore pays for this file's length, in
-tokens, forever. A prose edit to a SKILL.md reads like a docs change and is
-priced like a prompt change.
+WHY A SIZE TEST EXISTS FOR ONE MARKDOWN FILE. The /sites preamble names this
+skill in ``<design-skills>`` and the agent loads it through the ``Skill`` tool
+before the first UI file on create and before any new section or restyle on
+refine. Nothing embeds it any more, but on the turns that load it, the agent
+pays for the whole file in tokens. A prose edit to a SKILL.md reads like a docs
+change and is priced like a prompt change.
 
 The failure mode this guards is documented in ``pocketpaw/CLAUDE.md``: a file
 in this exact class answered a lookup miss with 58,765 chars that did not
-contain the answer. Growth here is not free and it is not visible in review —
+contain the answer. Growth here is not free and it is not visible in review:
 a diff showing "+40 lines of guidance" looks like an improvement.
 
-WHY 35,000 AND NOT THE CURRENT SIZE. A ceiling pinned to the current size fails
+WHY 36,500 AND NOT THE CURRENT SIZE. A ceiling pinned to the current size fails
 on the next honest one-line fix, which trains people to bump the constant
-reflexively and turns the gate into a formality. The number leaves roughly 2.8%
-of headroom: enough for ordinary maintenance, far too little to absorb a new
-module. Raising it is allowed and should be argued for in the commit body, not
-done in passing.
-
-It was 34,000 until fix/sites-prompt-scope-and-slop, which added MODULE 0
-(scope: build only what the brief asked for) and widened MODULE 5's tell list.
-That is the "new module" case the paragraph above says 34,000 cannot absorb.
-
-The ceiling did NOT move to make room for growth: the file ends that branch at
-34,019 bytes, 65 more than the 33,954 it started at. It moved because 34,000
-left 46 bytes of headroom, so the gate fired on any edit at all and taught
-exactly the reflexive bump it exists to prevent. 35,000 restores about 2.8%.
-
-The new material was paid for in the same branch. Out: the Trend Engine identity
-menu, the mandatory background architecture, the ornament motion catalogue, and
-MODULE 6's restatement of values MODULE 0-5 already carry (37 of its 38, the
-38th moved to 3.B where eyebrows are acted on). MODULE 5 also stopped repeating
-the bans that 2.F, 2.G, 3.B and 3.C state where they are acted on.
-
-RAISED TO 36,500 ON 2026-09-16 (feat/fx-skill-amendments rebase). The fx
-amendments (the "Sections from paw-fx" loop and the fx-first 2.C) landed on top
-of the fix/sites-prompt-scope-and-slop rewrite: 35,516 bytes merged, so the
-35,000 ceiling left negative headroom. 36,500 restores roughly 2.8%. The fx
-material is the "new module" case the paragraph above names, argued for in the
-PR body, not bumped in passing.
+reflexively and turns the gate into a formality. The number was set to leave
+roughly 2.8% of headroom over the file it was raised for: enough for ordinary
+maintenance, far too little to absorb a new module. Raising it is allowed and
+should be argued for in the commit body, not done in passing. Each past raise
+(34,000, then 35,000, then 36,500) followed a new module that was paid for with
+cuts elsewhere in the file; ``git log -p`` on this file has the arguments.
 
 WHAT IT DOES NOT COVER. Only this one skill. The other bundled skills are
-invoked on demand rather than inlined, so their bytes are paid only when used;
-if another skill is ever embedded whole into a preamble, it belongs here too.
-The ceiling is measured on the WHOLE file, matching ``wc -c``, while the
-preamble embeds the frontmatter-stripped body — so the assertion is slightly
-stricter than the runtime cost, which is the right direction for a budget.
+smaller or rarely loaded; if another one grows into the same class, it belongs
+here too. The ceiling is measured on the WHOLE file, matching ``wc -c``, which
+includes the frontmatter the loader strips, so the assertion is slightly
+stricter than the runtime cost. That is the right direction for a budget.
 
 Mutations: ``tests/mutations/skill_budget.json``. Run them; a size assertion
 nobody watched fail is precisely the class of gate ``pocketpaw/CLAUDE.md``
@@ -91,7 +58,8 @@ _IMPLAUSIBLY_SMALL = 10_000
 def _design_taste_skill() -> Path:
     """Resolve the skill file through the accessor the SHIPPING code uses.
 
-    ``sites.py`` reaches the file via ``bundled_skills_plugin_dir()``. Reading
+    The installer and ``sites.py`` reach bundled skills via
+    ``bundled_skills_plugin_dir()``. Reading
     it any other way here (a hand-built relative path, a copy under tests/)
     would measure a file that is not necessarily the one served.
     """
@@ -101,8 +69,8 @@ def _design_taste_skill() -> Path:
         pytest.fail(
             "bundled_skills_plugin_dir() returned None — the bundled plugin "
             "manifest or skills/ directory is missing from the installed "
-            "package, so the /sites preamble would silently fall back to its "
-            "one-line 'invoke the skill' stub."
+            "package, so the /sites agent could not load the design skills it "
+            "is told to load."
         )
     return plugin_dir / "skills" / "pocketpaw-design-taste" / "SKILL.md"
 
@@ -112,8 +80,8 @@ def _skill_bytes(path: Path) -> int:
 
     The ceiling test goes through this helper rather than measuring inline, so
     the unit is a single named thing a mutation can flip. ``len(read_text())``
-    would be several hundred short — the file is UTF-8 and full of em-dashes,
-    arrows and typographic quotes — and a ceiling reviewed as "wc -c" but
+    would be short: the file is UTF-8 with arrows, typographic quotes and the
+    literal dash characters its copy rules name, and a ceiling reviewed as "wc -c" but
     asserted in decoded characters grants unearned headroom.
     """
 
@@ -140,7 +108,7 @@ def test_the_fixture_reads_the_real_shipped_skill() -> None:
 
 
 def test_design_taste_skill_stays_under_its_ceiling() -> None:
-    """The skill's bytes stay inside the budget the /sites preamble pays.
+    """The skill's bytes stay inside the budget a /sites turn pays to load it.
 
     MUTATION: append ~1,500 chars of plausible guidance to SKILL.md (see
     ``tests/mutations/skill_budget.json``). Before this test, that edit was
@@ -153,9 +121,9 @@ def test_design_taste_skill_stays_under_its_ceiling() -> None:
 
     assert size <= DESIGN_TASTE_MAX_BYTES, (
         f"{path.name} is {size} bytes, over the {DESIGN_TASTE_MAX_BYTES}-byte "
-        f"ceiling by {size - DESIGN_TASTE_MAX_BYTES}. This file is inlined "
-        "whole into the /sites system prompt, so every byte is a cost on every "
-        "site-authoring turn. Cut something before raising the ceiling, and if "
+        f"ceiling by {size - DESIGN_TASTE_MAX_BYTES}. The /sites agent loads "
+        "this file whole before it designs, so every byte is a cost on every "
+        "turn that loads it. Cut something before raising the ceiling, and if "
         "you do raise it, say why in the commit body."
     )
 
@@ -174,7 +142,7 @@ def test_the_ceiling_is_measured_in_bytes_not_decoded_characters() -> None:
 
     assert _skill_bytes(path) == len(path.read_bytes())
     assert _skill_bytes(path) > char_len, (
-        "Expected multi-byte characters in the skill (em-dashes, arrows). If "
+        "Expected multi-byte characters in the skill (arrows, quotes). If "
         "this ever becomes equal the file went plain-ASCII, and the ceiling "
         "unit no longer needs distinguishing — but check before relaxing it."
     )

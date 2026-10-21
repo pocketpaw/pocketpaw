@@ -1,26 +1,22 @@
 ---
-# Updated 2026-09-27 (feat/sites-visual-research): the loop now OPENS the
-# screenshots (view_reference / view_reference_screenshot), researches per
-# section, lets the locked reference set the look with roles kept, and ends
-# with preview_site on the draft. Matches PHASE 1b in the /sites preamble.
 name: sites-design-research
 description: |
   Ground a page in REAL shipped design systems before designing it, using the
   Refero research tools. Invoke when you are about to choose a visual direction
-  and the brief gives you room to choose — a new landing page, a redesign, a
+  and the brief gives you room to choose: a new landing page, a redesign, a
   "make it look premium / editorial / technical" ask, or a second site that
   must not resemble the first. It is the RESEARCH step that feeds
   `pocketpaw-design-taste`: this skill finds and locks a direction with
   evidence, that one builds the page from it. Also the honest answer to "what
   should this look like?" when the brief does not say. Do NOT invoke it for a
-  copy edit, a single value change, or when the user supplied a design to match
-  — there is nothing to research. Returns nothing when Refero is unconfigured,
+  copy edit, a single value change, or when the user supplied a design to match,
+  since there is nothing to research. Returns nothing when Refero is unconfigured,
   which is a normal outcome, not a failure.
 ---
 
 # Design research
 
-Adapted from the Refero Skill (`referodesign/refero_skill`, MIT) — the
+Adapted from the Refero Skill (`referodesign/refero_skill`, MIT): the
 research-first methodology, rewritten for this surface and this toolset. The
 craft half of that skill is deliberately NOT reproduced here: typography,
 colour, motion, icons, copy and the AI-tell index already live in
@@ -47,7 +43,7 @@ justifies adding one.
 
 ## The tools
 
-Two archives. Names differ by backend — use whichever you actually have:
+Two archives. Names differ by backend; use whichever you actually have:
 
 | Job | Refero (when configured) | Inspo (always there) |
 | --- | --- | --- |
@@ -96,7 +92,7 @@ reference. A new page or a redesign earns the whole loop.
 whole is someone else's brand wearing your client's name.
 
 **Do not average.** When two references disagree, blending them produces the
-safe centroid — which is exactly the generic output the research was meant to
+safe centroid, which is exactly the generic output the research was meant to
 escape. Pick ONE dominant direction, keep its sharp traits, and borrow only
 narrow, named details from the others.
 
@@ -105,30 +101,31 @@ CTA-only, a face display-only, or a surface elevated-only, it keeps that role
 or it does not ship. A palette flattened into "five nice hex values" smeared
 across the page is not the reference you researched. Same for media: if the
 direction depends on photography or illustration, honour it with real or
-generated assets or an intentional art-directed placeholder — never fake it
+generated assets or an intentional art-directed placeholder. Never fake it
 with a decorative gradient box.
 
 ## Lock it before you build
 
-Write the lock down before authoring. Two short artefacts, in your reasoning —
+Write the lock down before authoring. Two short artefacts, in your reasoning,
 not on the page:
 
-**Reference lock** — one line naming the primary direction and the signature
+**Reference lock:** one line naming the primary direction and the signature
 traits that must survive contact with the brief.
 
 ```
-Primary: Depot (dark, high-contrast developer tool) — keep the near-black
-canvas, the thin cool borders, and code-set monospace as an accent only.
-Borrowed: framed product-screenshot panels from a second reference. Nothing else.
+Primary: a light product-led scheduling tool. Keep the warm off-white
+canvas, near-black ink, the one accent spent only on the primary action,
+and the large real product screen in the hero.
+Borrowed: the plain two-column pricing table from a second reference. Nothing else.
 ```
 
-**Decision ledger** — every major choice traced to something.
+**Decision ledger:** every major choice traced to something.
 
 | Decision | Source | Role to preserve | Why |
 | --- | --- | --- | --- |
-| Near-black canvas | primary style | surface, not accent | brief asks for "serious, technical" |
+| Off-white canvas, near-black ink | primary style | surface, not accent | brief asks for "calm and credible" |
 | One accent hue, CTA only | primary style `dos` | CTA-only | keeps the single page action loud |
-| Framed screenshot panels | secondary style | media role | the product IS the proof here |
+| Real product screen in the hero | primary style | media role | the product IS the proof here |
 
 **If a major choice has no source, it is not a design decision yet.** Research
 further, tie it to something the user actually said, or drop it. That test is
@@ -141,7 +138,7 @@ the whole point of this skill: it converts taste into something reviewable.
 - Did I keep one direction's sharp traits rather than averaging several?
 - Did every colour, face and surface keep the role its source gave it?
 - Does every major choice trace to a reference, the brief, or a craft rule?
-- Did I stay inside the brief — no section a reference talked me into?
+- Did I stay inside the brief, with no section a reference talked me into?
 - Did I look at my own draft with `preview_site`, and does it hold up next
   to the references?
 
