@@ -4,12 +4,15 @@
 # ``dev`` (or only ``main``, ripple's trunk), and the clone the reader is bound to.
 # A push after the clone proves the read fetches and serves ``origin/dev``, not the
 # checkout. Pins the response contract later slices extend (``flows: []``,
-# ``loom: None``, a ``live`` block), the 404s (no model, an oversized one), the TTL
-# cache, the stale fallback when the fetch breaks after one success (503 with
-# none), and that ``belt.read`` admits a member and refuses an outsider.
+# ``loom: None``, a ``live`` block), the 404s (no model, an oversized one), the
+# stale-while-revalidate cache (a miss serves the model with ``live: None`` and
+# fills it behind; an expired hit is served at once while one background read
+# refreshes it), the stale fallback when the fetch breaks after one success (503
+# with none), and that ``belt.read`` admits a member and refuses an outsider.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -80,22 +83,48 @@ def _no_run_store(monkeypatch):
 
 @pytest.fixture
 def origin(monkeypatch, tmp_path):
-    for name in ("_CACHE", "_LOCKS"):
+    for name in ("_CACHE", "_LOCKS", "_TASKS"):
         monkeypatch.setattr(ar, name, {})
     o = Origin(tmp_path)
     monkeypatch.setattr(ar, "_re_resolve_repo", lambda r: (o.clone.resolve(), None))
     return o
 
 
-async def read(t: float = 0.0) -> dict:
-    return await ar.read_architecture("ws1", "repo", now=lambda: t)
+async def read(t: float = 0.0, **io) -> dict:
+    return await ar.read_architecture("ws1", "repo", now=lambda: t, **io)
+
+
+async def drain() -> None:
+    """Wait out the background reads."""
+    await asyncio.gather(*list(ar._TASKS.values()))
+
+
+async def settled(t: float = 0.0, **io) -> dict:
+    """The body once the read at ``t`` and its background work have finished."""
+    await read(t, **io)
+    await drain()
+    return await read(t, **io)
+
+
+def counting_gh(calls: list, gate: asyncio.Event | None = None):
+    """A gh seam that counts its calls; with ``gate``, each waits for it."""
+
+    async def gh(argv):
+        calls.append(argv[:3])
+        if gate is not None:
+            await gate.wait()
+        if argv[0] == "git":  # the slug read
+            return 0, "https://github.com/o/r.git\n", ""
+        return 0, "[]", ""
+
+    return gh
 
 
 async def test_a_repo_with_a_model_returns_it_at_origin_dev(origin):
     origin.push()
     origin.cloned()
     sha = origin.push({**MODEL, "scope": "moved"})  # lands after the clone: only a fetch sees it
-    body = await read()
+    body = await settled()
     assert set(body) == {
         "repo",
         "slug",
@@ -114,13 +143,13 @@ async def test_a_repo_with_a_model_returns_it_at_origin_dev(origin):
 
 
 async def test_main_is_read_when_origin_has_no_dev(monkeypatch, tmp_path):
-    for name in ("_CACHE", "_LOCKS"):
+    for name in ("_CACHE", "_LOCKS", "_TASKS"):
         monkeypatch.setattr(ar, name, {})
     o = Origin(tmp_path, branch="main")
     monkeypatch.setattr(ar, "_re_resolve_repo", lambda r: (o.clone.resolve(), None))
     sha = o.push()
     o.cloned()
-    assert (await read())["sha"] == sha
+    assert (await settled())["sha"] == sha
 
 
 async def test_no_model_is_404(origin):
@@ -140,13 +169,64 @@ async def test_an_oversized_model_is_unreadable_never_partial(origin, monkeypatc
     assert err.value.status_code == 404
 
 
-async def test_a_read_within_the_ttl_is_the_cached_body(origin):
+async def test_a_read_within_the_ttl_is_the_cached_body_and_reads_nothing(origin):
     origin.push()
     origin.cloned()
-    first = await read()
+    calls: list = []
+    first = await settled(gh=counting_gh(calls))
+    calls.clear()
     sha = origin.push({**MODEL, "scope": "next"})
-    assert await read(t=59.0) is first
+    assert await read(t=59.0, gh=counting_gh(calls)) is first
+    assert not ar._TASKS and calls == []
+    assert await read(t=61.0) is first  # expired: still served, refreshed behind
+    await drain()
     assert (await read(t=61.0))["sha"] == sha
+
+
+async def test_a_miss_serves_the_model_at_once_and_fills_live_behind(origin):
+    origin.push()
+    origin.cloned()
+    gate = asyncio.Event()
+    calls: list = []
+    gh = counting_gh(calls, gate)
+    gate.set()  # the slug read runs inline on a miss
+    first = await read(gh=gh)
+    gate.clear()  # every gh read after it now blocks
+    assert first["model"]["scope"] == "app" and first["live"] is None
+    assert len(ar._TASKS) == 1
+    gate.set()
+    await drain()
+    assert (await read(gh=gh))["live"]["stale"] is False
+
+
+async def test_an_expired_read_is_served_at_once_and_refreshed_once(origin):
+    origin.push()
+    origin.cloned()
+    first = await settled()
+    sha = origin.push({**MODEL, "scope": "next"})
+    gate = asyncio.Event()
+    calls: list = []
+    gh = counting_gh(calls, gate)
+    both = asyncio.gather(read(t=61.0, gh=gh), read(t=62.0, gh=gh))
+    a, b = await asyncio.wait_for(both, 1)  # neither waits on the blocked gh
+    assert a is first and b is first
+    assert len(ar._TASKS) == 1  # one refresh for the two callers
+    gate.set()
+    await drain()
+    assert (await read(t=62.0))["sha"] == sha
+
+
+async def test_a_model_gone_on_refresh_drops_the_entry(origin):
+    origin.push()
+    origin.cloned()
+    await settled()
+    (origin.work / "docs" / "c4" / "model.json").unlink()
+    origin.push(model=None)
+    await read(t=61.0)
+    await drain()
+    with pytest.raises(BeltConsoleError) as err:
+        await read(t=61.0)
+    assert err.value.status_code == 404
 
 
 async def test_a_failed_fetch_after_one_success_serves_stale(origin):
@@ -157,11 +237,18 @@ async def test_a_failed_fetch_after_one_success_serves_stale(origin):
         await read()
     assert err.value.status_code == 503
     git(clone, "remote", "set-url", "origin", str(origin.bare))
-    first = await read(t=100.0)
+    first = await settled(t=100.0)
     git(clone, "remote", "set-url", "origin", str(origin.bare.parent / "gone.git"))
-    body = await read(t=161.0)
+    body = await settled(t=161.0)
     assert body["stale"] is True and body["model"] == first["model"]
     assert body["sha"] == first["sha"]
+
+
+@pytest.fixture
+def no_background(monkeypatch):
+    """The route tests check routing and auth; a background read would outlive
+    TestClient's loop."""
+    monkeypatch.setattr(ar, "_behind", lambda key, now, read: read.close())
 
 
 def test_route_404_carries_detail_and_its_code(origin):
@@ -173,7 +260,7 @@ def test_route_404_carries_detail_and_its_code(origin):
     assert res.json()["detail"] and res.json()["error"]["code"] == "belt.architecture_not_found"
 
 
-def test_route_serves_a_member_and_refuses_an_outsider(origin):
+def test_route_serves_a_member_and_refuses_an_outsider(origin, no_background):
     from pocketpaw_ee.cloud.auth import current_active_user
 
     origin.push()

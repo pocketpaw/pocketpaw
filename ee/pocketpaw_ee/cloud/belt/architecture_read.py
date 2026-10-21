@@ -12,11 +12,18 @@
 # with none yet. ``flows`` (``[]``) and ``loom`` (``None``) are the keys later
 # slices fill; clients may rely on them being present.
 #
-# Cached per (workspace, repo) for ``TTL`` behind a single-flight lock, the same
-# shape as ``app_blueprint_read``. A failed refresh (fetch, git missing, a bug)
-# serves the last body with ``stale: True``, 503 with none yet. A repo outside
-# the allowlist is 404 ``belt.repo_not_found``; no model, or one over
-# ``MAX_MODEL_BYTES``, is 404 ``belt.architecture_not_found`` and never cached.
+# Cached per (workspace, repo), stale-while-revalidate: a read within ``TTL``
+# is the cached body; a later one is still the cached body, served at once,
+# while one background task per key refreshes it (``_TASKS`` holds the task,
+# so it is never collected mid-read and a second caller never starts another).
+# The live block's gh reads take 4-10 s against ~1.5 s for the model, so on a
+# miss only the model is read inline (behind a per-key lock, so concurrent
+# misses fetch once) and the body goes out with ``live: None`` while a
+# background task fills it in. A failed refresh (fetch, git missing, a bug)
+# keeps the last body with ``stale: True``; a miss that fails is 503. A repo
+# outside the allowlist is 404 ``belt.repo_not_found``; no model, or one over
+# ``MAX_MODEL_BYTES``, is 404 ``belt.architecture_not_found`` and never cached
+# (a refresh that finds the model gone drops the entry).
 
 from __future__ import annotations
 
@@ -40,6 +47,7 @@ logger = logging.getLogger(__name__)
 # helper when a third reader needs them
 _LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 _CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_TASKS: dict[tuple[str, str], asyncio.Task[None]] = {}  # the refresh in flight per key
 
 
 class _NoModel(Exception):
@@ -57,40 +65,72 @@ async def read_architecture(
 ) -> dict[str, Any]:
     """The repo's architecture body (design doc 2026-10-21, section 4.1). The
     keyword seams default to the patrols gh runner and the Belt run readers."""
+    from pocketpaw_ee.cloud.mandates.patrols import _default_gh
+
     path, _err = _re_resolve_repo(repo)
     if path is None:
         raise BeltConsoleError(404, "Repo not found.", "belt.repo_not_found")
     key = (workspace_id, str(path))
-    async with _LOCKS.setdefault(key, asyncio.Lock()):
-        hit = _CACHE.get(key)
-        if hit and now() - hit["at"] < TTL:
-            return hit["body"]
+    io = (gh or _default_gh, runs or abr._lead_runs, touched or abr._touched)
+    if (hit := _CACHE.get(key)) is None:
+        async with _LOCKS.setdefault(key, asyncio.Lock()):
+            if (hit := _CACHE.get(key)) is None:  # still a miss: the model now, live behind
+                try:
+                    body, branch, model = await _read_model(path, None, io[0])
+                except _NoModel:
+                    msg = "No C4 model in this repo. Add docs/c4/model.json on its trunk."
+                    raise BeltConsoleError(404, msg, "belt.architecture_not_found") from None
+                except Exception:  # a failed fetch, git missing, or a bug
+                    logger.warning("Architecture read of %s failed", path, exc_info=True)
+                    msg = "Architecture not readable yet."
+                    raise BeltConsoleError(503, msg, "belt.architecture_unavailable") from None
+                hit = _CACHE[key] = {"body": body, "at": now()}
+                _behind(key, now, _with_live(workspace_id, path, body, branch, model, None, io))
+    elif now() - hit["at"] >= TTL and key not in _TASKS:
+        _behind(key, now, _refresh(workspace_id, path, hit["body"], io))
+    return hit["body"]
+
+
+def _behind(key: tuple[str, str], now: Callable[[], float], read: Awaitable[Any]) -> None:
+    """Run ``read`` in the background and cache its body (``None`` drops the entry)."""
+
+    async def run() -> None:
         try:
-            io = (gh, runs or abr._lead_runs, touched or abr._touched)
-            body = await _read(workspace_id, path, hit["body"] if hit else None, *io)
-        except _NoModel:
-            msg = "No C4 model in this repo. Add docs/c4/model.json on its trunk."
-            raise BeltConsoleError(404, msg, "belt.architecture_not_found") from None
-        except Exception:  # a failed fetch, git missing, or a bug: stale or 503
-            logger.warning("Architecture read of %s failed", path, exc_info=True)
-            if hit is None:
-                msg = "Architecture not readable yet."
-                raise BeltConsoleError(503, msg, "belt.architecture_unavailable") from None
-            body = {**hit["body"], "stale": True}
-        _CACHE[key] = {"body": body, "at": now()}
-        return body
+            body = await read
+            if body is None:
+                _CACHE.pop(key, None)
+            else:
+                _CACHE[key] = {"body": body, "at": now()}
+        finally:
+            _TASKS.pop(key, None)
+
+    _TASKS[key] = asyncio.create_task(run())
+
+
+async def _refresh(
+    workspace_id: str, path: Path, prev: dict[str, Any], io: tuple[Any, Any, Any]
+) -> dict[str, Any] | None:
+    """A fresh body; the last one with ``stale: True`` on a failed read, ``None``
+    when the model is gone."""
+    try:
+        body, branch, model = await _read_model(path, prev, io[0])
+    except _NoModel:
+        return None
+    except Exception:  # a failed fetch, git missing, or a bug: stale
+        logger.warning("Architecture read of %s failed", path, exc_info=True)
+        return {**prev, "stale": True}
+    return await _with_live(workspace_id, path, body, branch, model, prev, io)
 
 
 async def _git(path: Path, *argv: str) -> tuple[int, str, str]:
     return await _run([*_READ_GIT, *argv], cwd=path)
 
 
-async def _read(
-    workspace_id: str, path: Path, prev: dict[str, Any] | None, gh: Any, runs: Any, touched: Any
-) -> dict[str, Any]:
-    from pocketpaw_ee.cloud.mandates.patrols import _default_gh, _github_slug
-
-    gh = gh or _default_gh
+async def _read_model(
+    path: Path, prev: dict[str, Any] | None, gh: Any
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """``(body, branch, model)``: the body with ``live: None``, the trunk it read."""
+    from pocketpaw_ee.cloud.mandates.patrols import _github_slug
 
     for branch in _BRANCHES:
         code, _, _ = await _git(path, "rev-parse", "--verify", "--quiet", f"origin/{branch}")
@@ -105,13 +145,7 @@ async def _read(
     if model is None:
         raise _NoModel
     slug = prev["slug"] if prev else await _github_slug(str(path), gh) or ""
-    try:
-        io = {"gh": gh, "runs": runs, "touched": touched}
-        live = await read_live(workspace_id, path, branch, slug, model, **io)
-    except Exception:  # gh, a rate limit, git or a bug: the model stays fresh
-        logger.warning("Live read of %s failed", path, exc_info=True)
-        live = {**prev["live"], "stale": True} if prev and prev.get("live") else None
-    return {
+    body = {
         "repo": str(path),
         "slug": slug,
         "sha": sha,
@@ -120,5 +154,26 @@ async def _read(
         "model": {"scope": model.get("scope"), "model": model["model"]},
         "flows": [],
         "loom": None,
-        "live": live,
+        "live": None,
     }
+    return body, branch, model
+
+
+async def _with_live(
+    workspace_id: str,
+    path: Path,
+    body: dict[str, Any],
+    branch: str,
+    model: dict[str, Any],
+    prev: dict[str, Any] | None,
+    io: tuple[Any, Any, Any],
+) -> dict[str, Any]:
+    """``body`` with its live block; a failed live read keeps the model fresh."""
+    gh, runs, touched = io
+    try:
+        io_kw = {"gh": gh, "runs": runs, "touched": touched}
+        live = await read_live(workspace_id, path, branch, body["slug"], model, **io_kw)
+    except Exception:  # gh, a rate limit, git or a bug: the model stays fresh
+        logger.warning("Live read of %s failed", path, exc_info=True)
+        live = {**prev["live"], "stale": True} if prev and prev.get("live") else None
+    return {**body, "live": live}

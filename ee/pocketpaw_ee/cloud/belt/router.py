@@ -348,8 +348,10 @@ async def get_architecture(
     _user: Any = Depends(require_action_any_workspace("belt.read")),
     workspace_id: str = Depends(current_workspace_id),
 ) -> dict[str, Any]:
-    """The repo's C4 model at ``origin/dev`` (``main`` without one), cached 60 s:
-    ``{repo, slug, sha, stale, read_at, model, flows, loom, live}``. 404
+    """The repo's C4 model at ``origin/dev`` (``main`` without one):
+    ``{repo, slug, sha, stale, read_at, model, flows, loom, live}``. Fresh for
+    60 s, then served from cache while a background read refreshes it; the
+    first read returns ``live: null`` and fills it in behind. 404
     ``belt.architecture_not_found`` without a readable model; a failed refresh
     serves the last body with ``stale: true``, 503 when there is none yet."""
     try:

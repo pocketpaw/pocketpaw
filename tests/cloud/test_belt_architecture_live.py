@@ -187,11 +187,18 @@ def fake_gh(prs=(), findings=(), fail=False, started=None):
 
 @pytest.fixture
 def origin(monkeypatch, tmp_path):
-    for name in ("_CACHE", "_LOCKS"):
+    for name in ("_CACHE", "_LOCKS", "_TASKS"):
         monkeypatch.setattr(ar, name, {})
     o = Origin(tmp_path)
     monkeypatch.setattr(ar, "_re_resolve_repo", lambda r: (o.clone.resolve(), None))
     return o
+
+
+async def settled(t: float = 0.0, **io) -> dict:
+    """The body once the read at ``t`` and its background live read have finished."""
+    await ar.read_architecture("ws1", "repo", now=lambda: t, **io)
+    await asyncio.gather(*list(ar._TASKS.values()))
+    return await ar.read_architecture("ws1", "repo", now=lambda: t, **io)
 
 
 def commit(o: Origin, path: str, *, days_ago: int = 0) -> None:
@@ -221,9 +228,7 @@ async def test_a_pending_run_reads_changing_and_a_3_day_old_merge_counts_but_lan
         assert action_id == "a1"  # settled and foreign runs are never read
         return ["src/ui/a.ts"]
 
-    body = await ar.read_architecture(
-        "ws1", "repo", now=lambda: 0.0, gh=fake_gh(), runs=runs, touched=touched
-    )
+    body = await settled(gh=fake_gh(), runs=runs, touched=touched)
     comps = body["live"]["components"]
     assert (comps["ui"]["status"], comps["api"]["status"]) == ("changing", "landed")
     assert comps["api"]["merges"]["count_7d"] == 1  # 3 days counts; 30 days is out
@@ -242,9 +247,7 @@ async def test_the_pr_read_carries_the_body_that_joins_a_run_to_its_prs(origin):
         return []
 
     lead_pr = {**pr(3, ["src/api/b.py"]), "body": "Belt-Lead: a1"}
-    body = await ar.read_architecture(
-        "ws1", "repo", now=lambda: 0.0, gh=fake_gh(prs=[lead_pr]), runs=runs, touched=touched
-    )
+    body = await settled(gh=fake_gh(prs=[lead_pr]), runs=runs, touched=touched)
     live = body["live"]
     assert [r["action_id"] for r in live["components"]["api"]["runs"]] == ["a1"]
     assert live["repo"]["runs"] == []
@@ -258,7 +261,7 @@ async def test_a_gh_failure_keeps_the_model_fresh_and_serves_the_last_live_block
         return []
 
     async def read(t, gh):
-        return await ar.read_architecture("ws1", "repo", now=lambda: t, gh=gh, runs=runs)
+        return await settled(t, gh=gh, runs=runs)
 
     first = await read(0.0, fake_gh(fail=True))
     assert first["stale"] is False and first["live"] is None and first["model"]["scope"] == "app"
@@ -278,8 +281,7 @@ async def test_the_gh_reads_run_together_and_one_failing_still_serves_stale(orig
         return []
 
     async def read(t, gh):
-        call = ar.read_architecture("ws1", "repo", now=lambda: t, gh=gh, runs=runs)
-        return await asyncio.wait_for(call, 10)
+        return await asyncio.wait_for(settled(t, gh=gh, runs=runs), 10)
 
     ok = await read(0.0, fake_gh(prs=[pr(1, ["src/ui/a.ts"])], started=started))
     assert sorted(started) == ["issue", "pr", "run"] and ok["live"]["stale"] is False
@@ -297,5 +299,5 @@ async def test_the_lead_runs_reader_is_the_default(origin, monkeypatch):
         return []
 
     monkeypatch.setattr(abr, "_lead_runs", runs)
-    body = await ar.read_architecture("ws1", "repo", now=lambda: 0.0)
+    body = await settled()
     assert body["live"]["repo"]["status"] == "changed"  # the model commit landed today
