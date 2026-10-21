@@ -14,10 +14,12 @@
 # (``_early_access_refusal``, backed by ``credits.guards.early_access_denial``)
 # before any proxy call. ``site_media`` reuses the same refusal.
 #
-# Identity comes from the chat runtime's ContextVars (``_identity``). Generated
-# images, audio and video land in a Studio gallery pocket through the
-# trusted-create path and re-emit the refreshed pocket; transcription returns
-# text and does not touch the gallery. Tool ids namespace as
+# Identity comes from the chat runtime's ContextVars (``_identity``). Saved
+# files are stamped with that workspace's owner token (``save_generated``
+# requires it), which is what keeps them out of other workspaces' /media
+# listings. Generated images, audio and video land in a Studio gallery pocket
+# through the trusted-create path and re-emit the refreshed pocket;
+# transcription returns text and does not touch the gallery. Tool ids namespace as
 # ``mcp__pocketpaw_media__<tool>`` for the allowlist machinery.
 #
 # EE to OSS boundary: the surface service loads ``MEDIA_TOOL_IDS`` as a plain
@@ -535,7 +537,9 @@ async def _image_generate_handler(args: dict) -> dict:
         return _error_response(err or "image generation returned no data")
 
     try:
-        media_url = await media_storage.save_generated(image_bytes, mime="image/png")
+        media_url = await media_storage.save_generated(
+            image_bytes, mime="image/png", workspace_id=workspace_id
+        )
         logger.info("media: generated image %s via proxy model %s", media_url, model)
     except Exception as exc:  # noqa: BLE001
         logger.warning("media: saving generated image failed", exc_info=True)
@@ -654,6 +658,7 @@ async def _audio_generate_handler(args: dict) -> dict:
         media_url = await media_storage.save_generated(
             audio_bytes,
             mime=_AUDIO_MIME_MAP.get(response_format, "audio/mpeg"),
+            workspace_id=workspace_id,
             ext=response_format,
         )
         logger.info("media: generated audio %s via proxy model %s", media_url, model)

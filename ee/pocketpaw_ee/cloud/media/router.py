@@ -13,34 +13,25 @@ Endpoints:
                                 previous copy, so a re-saved render stays one tile
   GET  /api/v1/media/{name}   — serve a single media file (capability-based, see below)
 
-Updated: 2026-09-07 — list and upload had NO auth and the key carried no tenant,
-so one gallery was shared by every workspace: the listing returned every
-tenant's filenames and URLs, and anyone on the internet could store bytes on
-this infrastructure and have them served from this origin. Both routes now take
-``current_workspace_id``, and an upload's filename carries an owner token so the
-listing can be scoped.
+The gallery listing is scoped by an owner token baked into each filename
+(``storage.owned_name_prefix``; the key cannot carry a workspace segment
+because ``serve_media`` refuses any name with a slash). Every write path stamps
+it: uploads here, and ``storage.save_generated`` (studio generations, the agent
+media MCP) requires the workspace. A name with no token is legacy and listed to
+NO workspace (``storage.visible_to``). Direct /studio generation outputs are
+also excluded from the list, because the gallery renders them via the
+generation history.
 
 ``serve_media`` is deliberately NOT gated, and that asymmetry is the design
 rather than an omission. Gallery URLs are embedded in ripple specs, and a pocket
-published as a site is served from the edge with no session — enforcing an owner
+published as a site is served from the edge with no session: enforcing an owner
 on the read would blank every published page showing one. The read stays
-capability-based on an unguessable name, like /uploads. A /browser capture is
-different: it is private to its workspace and never embedded, so serve_media
-does enforce ITS owner token.
-
-Updated: 2026-09-06 (BR-4, feat/browser-surface-extract): /browser screenshots
-are saved through this same storage so they have a URL an image widget can
-render. They are NOT gallery items, so both listings skip them — and because
-they belong to one tenant, ``serve_media`` refuses a capture whose owner token
-(baked into the filename by ``storage.capture_name_prefix``) does not match the
-caller's active workspace. The workspace comes from an OPTIONAL user dependency:
-every non-capture name keeps serving exactly as before, with or without a
-session, so the studio gallery is untouched.
-
-Updated: 2026-08-17 (studio-media-s3): list/serve/upload now go through the
-storage adapter (local → on-disk mtime listing; S3 → browse + timestamp-from-key
-listing, streaming reads). Direct /studio generation outputs are still excluded
-from the list (the gallery renders them via the generation history).
+capability-based on an unguessable name, like /uploads, legacy files included.
+A /browser capture is different: it is private to its workspace and never
+embedded, so both listings skip captures and ``serve_media`` refuses one whose
+owner token (``storage.capture_name_prefix``) does not match the caller's active
+workspace. That workspace comes from an OPTIONAL user dependency, so every
+non-capture name serves with or without a session.
 """
 
 from __future__ import annotations
@@ -93,10 +84,8 @@ _MEDIA_TYPE_MAP = {
 # browser's Blob naming (canvas toBlob can hand over a name-less blob).
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 
-# The on-disk generated dir is the SAME path the local adapter writes (and the
-# agent-side media MCP still writes directly), so local-mode listings keep
-# surfacing those files — only S3 mode stops seeing them (that agent path still
-# writes local disk).
+# The on-disk generated dir is the SAME path the local adapter writes, so the
+# local listing reads it directly (mtime-sorted) instead of going through browse.
 
 
 def _local_entries(generated: Path, sort: str, tracked: set[str], workspace_id: str) -> list[dict]:
@@ -170,15 +159,16 @@ async def list_media(
     limit: int = Query(50, description="Max items to return"),
     workspace_id: str = Depends(current_workspace_id),
 ) -> Response:
-    """List all generated media files with metadata.
+    """List the caller's workspace's generated media files with metadata.
 
     Returns a JSON array sorted by modification time (newest first by default).
     Each entry has ``{name, url, mime, size, modified}``.
 
-    Direct /studio generation outputs are excluded — the gallery already renders
-    them via the generation history, so listing them here too would double the
-    tiles. Agent-side generated files (media MCP) are NOT tracked and therefore
-    still surface here (in local mode).
+    Only files stamped with the caller's workspace token are listed; untagged
+    legacy files are listed to nobody. Direct /studio generation outputs are
+    excluded too: the gallery already renders them via the generation history,
+    so listing them here would double the tiles. Agent-side generated files
+    (media MCP) are not tracked, so they surface here for their own workspace.
     """
     tracked = await tracked_generation_filenames()
     generated = storage.local_generated_dir()
