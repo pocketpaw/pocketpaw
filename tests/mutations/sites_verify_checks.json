@@ -1,0 +1,65 @@
+[
+  {
+    "label": "page checks fail the verdict: any warning turns a passed site into failed, so a placeholder or an em dash blocks the draft",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "    return {**verdict, \"checks\": checks}",
+    "replace": "    return {**verdict, \"checks\": checks, **({\"status\": \"failed\"} if checks[\"warnings\"] else {})}",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestVerdict::test_warnings_never_flip_a_passed_verdict"
+    ]
+  },
+  {
+    "label": "SC-LINK-01 off: a nav link to a section id that does not exist is never reported",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "            if fragment and fragment.lower() != \"top\" and fragment not in parsed.ids:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestLinks::test_anchor_without_target_is_link_01"
+    ]
+  },
+  {
+    "label": "SC-LINK-04 judges scripted pages: a framework form whose submit JS binds is reported as lost",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    if not parsed.has_script:",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestLinks::test_forms_with_a_target_or_a_script_are_not_judged"
+    ]
+  },
+  {
+    "label": "visible-text filter gone: an em dash inside script, style, pre or code is reported as copy",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        if self._skip:\n            return\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestCopy::test_em_dash_outside_visible_text_is_clean"
+    ]
+  },
+  {
+    "label": "input placeholder attributes read as text: a form hint like [Your name] is reported as a leftover placeholder",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "_TEXT_ATTRS = (\"alt\", \"title\", \"aria-label\")",
+    "replace": "_TEXT_ATTRS = (\"alt\", \"title\", \"aria-label\", \"placeholder\")",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestHonest::test_input_placeholder_attribute_is_clean"
+    ]
+  },
+  {
+    "label": "warning cap removed: a large site floods the tool result with every warning",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "for w in warnings[:MAX_WARNINGS]]",
+    "replace": "for w in warnings]",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestReport::test_capped_with_an_omitted_count_and_strong_ids_first"
+    ]
+  },
+  {
+    "label": "project builds unread: a project site's verify never sees its built pages",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "        data = read_dist(pocket_id, project_build.bundle_key(content_hash))",
+    "replace": "        data = None",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestProject::test_project_build_bundle_is_checked_and_stays_unverified"
+    ]
+  }
+]
