@@ -284,8 +284,8 @@
   {
     "label": "the lead poll never asks for the issue state",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "    \"i{k}:issue(number:{n}){{state comments(last:100)",
-    "replace": "    \"i{k}:issue(number:{n}){{comments(last:100)",
+    "find": "    \"i{k}:issue(number:{n}){{state labels(first:20)",
+    "replace": "    \"i{k}:issue(number:{n}){{labels(first:20)",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py::test_a_closed_feature_issue_finishes_the_run_and_frees_the_slot"
     ]

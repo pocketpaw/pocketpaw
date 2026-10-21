@@ -102,10 +102,19 @@
   {
     "label": "a missing branch head breaks the read",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "    head = read.heads.get((str(lead.get(\"branch\") or \"\"), str(lead.get(\"feature\") or \"\"))) or {}",
-    "replace": "    head = read.heads.get((str(lead.get(\"branch\") or \"\"), str(lead.get(\"feature\") or \"\")))",
+    "find": "    heads = heads or [read.heads.get(bare) or {}]",
+    "replace": "    heads = heads or [read.heads.get(bare)]",
     "tests": [
       "tests/cloud/test_belt_lead_read.py"
+    ]
+  },
+  {
+    "label": "a line lead is judged by the bare lead/<feature> branch",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "    heads = [h for k in _line_heads(read, lead) if (h := read.heads.get(k))]",
+    "replace": "    heads = []",
+    "tests": [
+      "tests/cloud/test_belt_lead_read.py::test_a_line_lead_is_watched_on_its_line_branch_not_the_bare_feature_branch"
     ]
   }
 ]
