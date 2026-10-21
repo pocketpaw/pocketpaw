@@ -7,6 +7,14 @@
 - **Vendored:** 2026-09-08 from commit `267330e1adfc`
 - **License:** MIT. Attribution retained here; the skill body is a rewrite rather
   than a copy.
+- **Second source:** https://github.com/miqdadbadjuber/anti-slop (MIT, Miqdad
+  Badjuber), vendored 2026-10-21 from commit `439a2ef5b9dd`. Only two pieces, both
+  rewritten: R-24/R-26 (navigation and interactive elements) became the
+  "Every control does something" rule in Domain 5, and the Rhythm & Structure,
+  Tone & Voice and Honesty sections of `skills/antislop-copywriting` became the
+  "Generated-copy tells" list in Domain 6. The same tells, compressed to one line
+  each, sit in `pocketpaw-design-taste` MODULE 5 (Copy, Structure) and MODULE 6 so
+  the authoring agent avoids them, not only the reviewer.
 
 ## What was ported
 
@@ -59,6 +67,21 @@ Seven upstream skills across 40+ files, consolidated into **one** self-contained
   outcome for whole domains rather than an edge case.
 - Added the pointer framing it as the corrective counterpart to
   `pocketpaw-design-taste` so the two are not read as competing.
+
+### What was NOT taken from anti-slop, and why
+
+- **The 38-rule core, the five sub-skills and the PASS/FAIL Delivery Gate.**
+  Roughly 70% overlaps design-taste (scope before sections, no invented proof,
+  three dials, em-dash ban, tells list, pre-flight) and `sites-ship-fixes`
+  (overflow, tap targets, `100vh`, sticky nav). Loading 1,200+ more lines into
+  every /sites turn would cost tokens for repetition.
+- **Rules that contradict design-taste:** Lucide icons, dark mode by default and
+  glassmorphism as tells. design-taste has a dark-tech family and a "real glass"
+  recipe; a named direction is not slop.
+- **R-31 (write down a reason for every decision), R-33 (no patching files by
+  script) and `antislop-code`.** Coding-agent discipline, not page quality.
+- **`contrast-check.py` / the contrast MCP.** /sites denies `Bash`, and contrast is
+  already measured in Domain 2.
 
 ## Why it ships bundled
 

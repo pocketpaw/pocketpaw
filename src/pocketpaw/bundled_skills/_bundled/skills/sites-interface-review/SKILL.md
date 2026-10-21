@@ -18,7 +18,8 @@ description: |
      ships seven skills across 40+ files; /sites denies Read/Glob/Bash, so reference
      subfiles are unreachable there and the six domains are consolidated into this
      single file with the highest-value rules kept verbatim in their exact values.
-     See VENDORED.md. -->
+     The dead-control rule and the generated-copy tells come from
+     miqdadbadjuber/anti-slop. See VENDORED.md. -->
 
 # Sites: interface review
 
@@ -187,6 +188,12 @@ Every value below is specific, not a range to approximate.
   decorative images.
 - **Structure is navigation** - correct heading order, real landmarks.
 - **Survive 200% zoom and text resize** without clipping or horizontal scroll.
+- **Every control does something.** A nav item, button or footer link that goes
+  nowhere is a dead end for every visitor, so it rates `HIGH`. This one is
+  checkable from source without a render: each `href="#x"` needs a matching
+  `id="x"` on the page, each page link a page that exists, each form a submit
+  target, each toggle a state it changes. `href="#"` and an `onclick` that does
+  nothing both fail. List every dead control by its label.
 
 ## Domain 6: Interface writing
 
@@ -203,6 +210,27 @@ Every value below is specific, not a range to approximate.
 - **Empty states point forward** with the action that fills them.
 - **Placeholders are examples, not labels** - a placeholder that disappears on focus
   is not a label.
+
+**Generated-copy tells.** Read the page copy for these. One alone is usually fine;
+several together read as machine-written. Quote the exact string as the evidence.
+
+- **Forced triads.** Every list three items long because three sounds complete:
+  "innovation, inspiration, and insights". Real lists are as long as the content.
+- **Negative parallelism.** "It's not just X, it's Y", "Not only X, but Y", and
+  tacked-on fragments like "no guessing" or "zero friction".
+- **Aphorism formulas.** "X is the language of Y", "X is the currency of Z". They
+  sound profound and say nothing; state the point.
+- **Staccato runs.** "No templates. No defaults. No limits." One short sentence
+  for emphasis is fine; a run of them is theatre.
+- **Inflated significance.** "A pivotal moment", "reshaping the landscape",
+  "game-changing", on things that are ordinary.
+- **Weasel attribution.** "Experts agree", "studies show", "trusted by industry
+  leaders", with no named source.
+- **Chat voice on a page.** Openers like "Let's be honest" or "Here's the thing",
+  closers like "Ready to get started?" after every section, signposting like "In
+  this section we'll explore".
+- **Fabricated specifics.** A precise number, date or customer count the brief did
+  not supply. Flag it as `HIGH`: it is a claim the business has to stand behind.
 
 ## Review output format
 
@@ -246,3 +274,4 @@ meaning. `MEDIUM` is a noticeable system or theme failure. `LOW` is isolated pol
 | Contrast "fixed" by changing the brand colour | Report the measured pair; leave the colours to the user |
 | Every legacy issue in a touched file reported | Three pre-existing findings, in their own section |
 | Findings implemented during a review request | Review is read-only unless implementation was asked for |
+| Links and buttons assumed to work | Trace every `href`, anchor and form target in source and list the dead ones |
