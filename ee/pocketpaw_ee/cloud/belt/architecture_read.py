@@ -101,6 +101,8 @@ def _behind(key: tuple[str, str], now: Callable[[], float], read: Awaitable[Any]
                 _CACHE.pop(key, None)
             else:
                 _CACHE[key] = {"body": body, "at": now()}
+        except Exception:  # a bug past the readers' own handling: log it, keep the last body
+            logger.exception("Background architecture read of %s failed", key[1])
         finally:
             _TASKS.pop(key, None)
 

@@ -3497,9 +3497,13 @@ One repo's committed C4 model, for the architecture viewer. RBAC `belt.read`
 - When the live read fails (gh, a rate limit), the body still carries the
   fresh model, with the last `live` block marked `stale: true`, or `live: null`
   if there was none.
-- Cached per workspace and repo for 60 s behind a single-flight lock. When a
-  refresh fails (the fetch, git itself), the last body comes back with
-  `stale: true`. With no earlier body it is 503 `belt.architecture_unavailable`.
+- Cached per workspace and repo, stale-while-revalidate: a body is fresh for
+  60 s; after that the cached body still comes back at once while one
+  background read refreshes it. The first read for a repo returns the model
+  with `live: null` and fills the live block in the background, so a client
+  should read again a few seconds later to get it. When a refresh fails (the
+  fetch, git itself), the next read returns the last body with `stale: true`.
+  When the first read fails it is 503 `belt.architecture_unavailable`.
 - Error bodies carry `detail`, the sentence the UI shows.
 
 ## Sites — Native Editing
