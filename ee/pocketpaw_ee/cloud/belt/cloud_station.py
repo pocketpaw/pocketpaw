@@ -169,8 +169,8 @@ _LEAD_PRS = (
     "mergedAt headRefName mergeCommit{oid} labels(first:50){nodes{name}}}}"
 )
 _LEAD_ISSUE = (
-    "i{k}:issue(number:{n}){{state comments(last:100){{totalCount "
-    "nodes{{id url body createdAt author{{login}}}}}}}}"
+    "i{k}:issue(number:{n}){{state labels(first:20){{nodes{{name}}}} "
+    "comments(last:100){{totalCount nodes{{id url body createdAt author{{login}}}}}}}}"
 )
 _LEAD_BRANCH = (
     "b{k}:object(expression:{ref}){{...on Commit{{committedDate "
@@ -1011,6 +1011,8 @@ class CloudTaskDispatcher:
             branch, feature = str(f.get("branch") or ""), str(f.get("feature") or "")
             if _SAFE_REF.match(branch) and _SAFE_FEATURE.match(feature):
                 want.add(("branch", branch, feature))
+            # Its line branches, once a poll has read the issue's labels.
+            want.update(("branch", *k) for k in _line_heads(read, f))
         asked = self.clock()
         read.asked.update(dict.fromkeys(want, asked))
         async with read.lock:  # one fetch at a time per repo; the rest reuse it
@@ -1045,12 +1047,15 @@ class CloudTaskDispatcher:
                 nodes = comments.get("nodes") or []
                 if int(comments.get("totalCount") or 0) > len(nodes):
                     argv = ["gh", "issue", "view", str(number), "-R", slug]
-                    argv += ["--json", "comments,state"]
+                    argv += ["--json", "comments,state,labels"]
                     raw = json.loads(await self._gh(argv, cwd, "TRACK: gh issue view") or "{}")
                     read.issues[number] = raw
                 else:
+                    labels = (raw.get("labels") or {}).get("nodes") or []
                     read.issues[number] = (
-                        {"state": raw.get("state"), "comments": nodes} if raw else {}
+                        {"state": raw.get("state"), "comments": nodes, "labels": labels}
+                        if raw
+                        else {}
                     )
             read.heads = {h: repo.get(f"b{k}") for k, h in enumerate(heads)}
             read.at, read.keys = self.clock(), set(keys)
@@ -3222,11 +3227,28 @@ def _live_session(blob: dict[str, Any]) -> str:
     return urls[-1] if urls else ""
 
 
+def _line_heads(read: _LeadRead, lead: dict[str, Any]) -> list[tuple[str, str]]:
+    """The ``(branch, record dir)`` a lead on a line records on, one per
+    ``line:<x>`` label on its issue in ``read``: ``lead/<x>-<feature>`` with
+    ``docs/leads/<x>-<feature>/RECORD.md`` (the sentinel's ``record_branches``
+    rule). [] before a poll has read the issue."""
+    feature = str(lead.get("feature") or "")
+    labels = (read.issues.get(_issue_no(lead)) or {}).get("labels") or []
+    names = [str(lb.get("name") or "") for lb in labels if isinstance(lb, dict)]
+    dirs = [f"{n[5:]}-{feature}" for n in names if n.startswith("line:") and feature]
+    return [(f"lead/{d}", d) for d in dirs if _SAFE_FEATURE.match(d)]
+
+
 def _branch_at(read: _LeadRead, lead: dict[str, Any]) -> tuple[float, str]:
     """When the lead's status branch got its last commit (epoch) and the
     ``Next:`` line of the RECORD.md on it, from ``read``; ``(0.0, "")`` when
-    the branch does not exist yet or was not read."""
-    head = read.heads.get((str(lead.get("branch") or ""), str(lead.get("feature") or ""))) or {}
+    the branch does not exist yet or was not read. A lead on a line reads its
+    newest line branch (``_line_heads``); the bare ``lead/<feature>`` then is
+    another line's, and counts only while no line branch exists."""
+    heads = [h for k in _line_heads(read, lead) if (h := read.heads.get(k))]
+    bare = (str(lead.get("branch") or ""), str(lead.get("feature") or ""))
+    heads = heads or [read.heads.get(bare) or {}]
+    head = max(heads, key=lambda h: _epoch(h.get("committedDate")))
     text = ((head.get("file") or {}).get("object") or {}).get("text")
     return _epoch(head.get("committedDate")), str(parse_record(text)["next"] or "")
 

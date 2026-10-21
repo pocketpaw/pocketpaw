@@ -76,6 +76,7 @@ class GitHub:
             repo[alias] = issue and {
                 "state": issue["state"],
                 "comments": {"totalCount": len(issue["comments"]), "nodes": issue["comments"]},
+                "labels": {"nodes": [{"name": n} for n in issue.get("labels", [])]},
             }
         for alias, ref in re.findall(r'(b\d+):object\(expression:"([^"]+)"\)', query):
             repo[alias] = self.heads.get(ref)
@@ -101,9 +102,9 @@ def _feat(issue: int, feature: str) -> dict:
     return {"issue": issue, "feature": feature, "branch": f"lead/{feature}"}
 
 
-def _head(next_line: str | None) -> dict:
+def _head(next_line: str | None, at: str = "2026-10-18T06:30:00Z") -> dict:
     record = None if next_line is None else {"object": {"text": f"Next: {next_line}\n"}}
-    return {"committedDate": "2026-10-18T06:30:00Z", "file": record}
+    return {"committedDate": at, "file": record}
 
 
 def _batches(gh: GitHub) -> list[str]:
@@ -156,7 +157,7 @@ async def test_one_query_serves_every_lead_on_the_repo_and_maps_back_to_each():
     ]
     assert "docs/leads/canvas/RECORD.md" in query and "pullRequests(first:100" in query
     # Each lead gets its own issue (gh's ``--json comments,state`` shape) and branch.
-    assert a.issues[11] == {"state": "OPEN", "comments": [_comment("canvas-said")]}
+    assert a.issues[11] == {"state": "OPEN", "comments": [_comment("canvas-said")], "labels": []}
     assert b.issues[12]["state"] == "CLOSED"
     assert b.issues[12]["comments"][0]["body"] == "brush-said"
     assert cloud_station._branch_at(a, A[0])[1] == "wait for CI"
@@ -237,3 +238,33 @@ async def test_an_answer_that_empties_the_bucket_holds_every_next_read_to_the_re
     await disp._lead_read(SLUG, A, Path("."))
 
     assert slept == [301.0] and len(_batches(gh)) == 2
+
+
+async def test_a_line_lead_is_watched_on_its_line_branch_not_the_bare_feature_branch():
+    """A lead on a line records on ``lead/<line>-<feature>`` (one per ``line:<x>``
+    label on its issue), like the sentinel's ``record_branches``. Another line's
+    push on the bare ``lead/<feature>`` is not this lead's activity once its own
+    line branch exists (creative-apps #3467, #3517, #3456)."""
+    feat = _feat(21, "pen-paths")
+    gh = GitHub(
+        issues={21: {"state": "OPEN", "comments": [], "labels": ["line:design", "beta"]}},
+        heads={
+            "lead/pen-paths": _head("SuiteUI S3", "2026-10-18T07:00:00Z"),
+            "lead/design-pen-paths": _head("S2 Anatomy", "2026-10-18T06:30:00Z"),
+        },
+    )
+    disp, _ = _dispatcher(gh)
+    await disp._lead_read(SLUG, [feat], Path("."))  # the first poll learns the labels
+    disp.clock = disp.wall = lambda: START + 60.0
+
+    read = await disp._lead_read(SLUG, [feat], Path("."))
+
+    query = _batches(gh)[-1]
+    assert '"lead/design-pen-paths"' in query and "docs/leads/design-pen-paths/RECORD.md" in query
+    at, step = cloud_station._branch_at(read, feat)
+    assert (at, step) == (cloud_station._epoch("2026-10-18T06:30:00Z"), "S2 Anatomy")
+    # No line branch pushed yet: the bare feature branch still counts.
+    del gh.heads["lead/design-pen-paths"]
+    disp.clock = disp.wall = lambda: START + 120.0
+    read = await disp._lead_read(SLUG, [feat], Path("."))
+    assert cloud_station._branch_at(read, feat)[1] == "SuiteUI S3"
