@@ -18,8 +18,8 @@ events to SSE frames: chunks, thinking, tool chips, plan updates, ripple /
 artifact / studio frames, editor envelopes (``_EDITOR_ENVELOPE_MARKERS``:
 timeline and ``craft_edit``), ``open_surface``, usage. Provider failures a user
 can act on (busy, out of credit, token limit, malformed output) become plain
-sentences (``_backend_error_frame``); config diagnostics pass through raw, and
-the raw text stays in the logs and on the run doc.
+sentences (``_backend_error_frame``), as does an unreachable provider; other
+diagnostics reach chat scrubbed of secrets and addresses; raw text stays in logs.
 
 Behind ``POCKETPAW_SESSION_SUPERVISOR`` it resumes the agent's native CLI
 session and can lease a warm client.
@@ -212,14 +212,26 @@ PROVIDER_BUSY_MESSAGE = "The AI provider is busy right now, try again in a momen
 # everything, which also keeps the LiteLLM 401 rewrite (it embeds the original
 # error) intact. Then token limit beats out of credit (a token count can contain
 # "402"), and out of credit beats busy (OpenAI reports an empty balance as a 429).
+# The provider is unreachable or misconfigured on the operator's side: the
+# LiteLLM 401 rewrite, a bad base URL, a refused connection, a DNS failure. On
+# the cloud the provider config is the operator's, so a tenant gets a plain
+# sentence and never the proxy address or the ``POCKETPAW_*`` setting names.
+_PROVIDER_SETUP_RE = re.compile(
+    r"LiteLLM proxy rejected|base[ _-]?url|connection (?:refused|error|reset)"
+    r"|connecterror|failed to establish|name or service not known|getaddrinfo"
+    r"|nodename nor servname|temporary failure in name resolution",
+    re.IGNORECASE,
+)
+# A status code only counts next to a status word, so "128,404 tokens" is not a 404.
+_STATUS_CTX = r"(?:status[ _]?code\W{0,3}|\bhttp\W{0,3}|\berror\W{0,3}|\bcode\W{0,3})"
 _PASSTHROUGH_RE = re.compile(
-    r"LiteLLM proxy rejected|\b(?:401|403|404)\b|authenticat|unauthori[sz]ed"
+    _STATUS_CTX + r"40[134]\b|\b40[134]\W{0,3}(?:unauthori[sz]ed|forbidden|not found)"
+    r"|authenticat|unauthori[sz]ed"
     r"|invalid[ _-]?api[ _-]?key|incorrect api key|api[ _-]?key (?:is )?(?:missing|invalid|not)"
     r"|permission[ _-]denied|model[ _-]?not[ _-]?found|not_found_error|does not exist"
-    r"|unknown model|no such model|base[ _-]?url|connection (?:refused|error|reset)"
-    r"|connecterror|failed to establish|name or service not known|getaddrinfo"
-    r"|nodename nor servname|request_limit|total_tokens_limit|unsupported (?:parameter|value)"
-    r"|unrecognized (?:request )?argument|extra inputs are not permitted",
+    r"|unknown model|no such model|request_limit|total_tokens_limit"
+    r"|unsupported (?:parameter|value)|unrecognized (?:request )?argument"
+    r"|extra inputs are not permitted",
     re.IGNORECASE,
 )
 _TOKEN_LIMIT_RE = re.compile(
@@ -254,6 +266,11 @@ MALFORMED_OUTPUT_MESSAGE = (
     "Try again, and switch model if it keeps happening."
 )
 INTERNAL_ERROR_MESSAGE = "Something went wrong on our side, so the reply stopped. Try again."
+PROVIDER_SETUP_CODE = "agent.provider_unreachable"
+PROVIDER_SETUP_MESSAGE = (
+    "The AI provider isn't reachable or isn't set up right. An admin needs to check "
+    "the model settings."
+)
 
 # Exceptions raised by a provider SDK or an agent backend, by defining module.
 # Only these are read for provider wording on the crash path; an exception from
@@ -263,8 +280,6 @@ _PROVIDER_EXC_MODULES = (
     "litellm",
     "openai",
     "anthropic",
-    "httpx",
-    "httpcore",
     "google",
     "mistralai",
     "groq",
@@ -275,34 +290,61 @@ _PROVIDER_EXC_MODULES = (
 )
 
 
-def _known_error_frame(message: str) -> dict[str, str] | None:
-    """The plain-sentence frame for a provider failure a user can act on, else ``None``.
+_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s'\"<>)\]]+", re.IGNORECASE)
+_HOST_PORT_RE = re.compile(
+    r"\b(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d{2,5}\b",
+    re.IGNORECASE,
+)
+_IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_ENV_NAME_RE = re.compile(r"\bPOCKETPAW_[A-Z0-9_]+\b")
 
-    ``None`` also for the operator diagnostics in ``_PASSTHROUGH_RE``: those keep
-    their raw text because the raw text is the fix.
+
+def _scrub_for_chat(text: str) -> str:
+    """Make raw error text safe to show a tenant.
+
+    Secrets go through ``redact_output`` (API keys, bearer tokens, ``api_key=``).
+    URLs, host:port pairs, IPs and ``POCKETPAW_*`` setting names are operator
+    config on the cloud, so they are replaced too. The run doc keeps the raw text.
     """
-    if _PASSTHROUGH_RE.search(message):
-        return None
-    if _TOKEN_LIMIT_RE.search(message):
-        return {"code": TOKEN_LIMIT_CODE, "message": TOKEN_LIMIT_MESSAGE}
-    if _OUT_OF_CREDIT_RE.search(message):
-        return {"code": OUT_OF_CREDIT_CODE, "message": OUT_OF_CREDIT_MESSAGE}
-    if _PROVIDER_BUSY_RE.search(message):
-        return {"code": PROVIDER_BUSY_CODE, "message": PROVIDER_BUSY_MESSAGE}
-    if _MALFORMED_OUTPUT_RE.search(message):
-        return {"code": MALFORMED_OUTPUT_CODE, "message": MALFORMED_OUTPUT_MESSAGE}
-    return None
+    from pocketpaw.security.redact import redact_output  # type: ignore[import-untyped]
+
+    text = redact_output(text)
+    text = _URL_RE.sub("[url]", text)
+    text = _HOST_PORT_RE.sub("[host]", text)
+    text = _IP_RE.sub("[host]", text)
+    return _ENV_NAME_RE.sub("[setting]", text)
+
+
+def _classify_error(message: str) -> dict[str, str]:
+    """The chat ``error`` frame for raw provider/backend error text.
+
+    Setup failures get a plain admin-facing sentence. Operator diagnostics in
+    ``_PASSTHROUGH_RE`` (auth, unknown model, run-limit settings, unsupported
+    parameters) keep their wording because the wording is the fix, scrubbed of
+    secrets and internal addresses. Known user-facing failures (token limit, out
+    of credit, busy, malformed output) get plain sentences. Anything else passes
+    through scrubbed as ``agent.backend_error``.
+    """
+    if _PROVIDER_SETUP_RE.search(message):
+        return {"code": PROVIDER_SETUP_CODE, "message": PROVIDER_SETUP_MESSAGE}
+    if not _PASSTHROUGH_RE.search(message):
+        if _TOKEN_LIMIT_RE.search(message):
+            return {"code": TOKEN_LIMIT_CODE, "message": TOKEN_LIMIT_MESSAGE}
+        if _OUT_OF_CREDIT_RE.search(message):
+            return {"code": OUT_OF_CREDIT_CODE, "message": OUT_OF_CREDIT_MESSAGE}
+        if _PROVIDER_BUSY_RE.search(message):
+            return {"code": PROVIDER_BUSY_CODE, "message": PROVIDER_BUSY_MESSAGE}
+        if _MALFORMED_OUTPUT_RE.search(message):
+            return {"code": MALFORMED_OUTPUT_CODE, "message": MALFORMED_OUTPUT_MESSAGE}
+    return {"code": "agent.backend_error", "message": _scrub_for_chat(message)}
 
 
 def _backend_error_frame(message: str) -> dict[str, str]:
-    """The ``error`` frame for a backend-yielded error.
+    """The ``error`` frame for a backend-yielded error (see ``_classify_error``).
 
-    Known provider failures (token limit, out of credit, busy, malformed output)
-    get a stable code and a plain message; the caller keeps the raw text in the
-    logs and on the run doc. Anything else, including every auth / config /
-    connection / run-limit diagnostic, passes through unchanged.
+    The caller keeps the raw text in the logs and on the run doc.
     """
-    return _known_error_frame(message) or {"code": "agent.backend_error", "message": message}
+    return _classify_error(message)
 
 
 def _is_provider_exception(exc: BaseException) -> bool:
@@ -320,18 +362,20 @@ def _is_validation_error(exc: BaseException) -> bool:
 def _crash_error_frame(exc: Exception) -> dict[str, str]:
     """The ``error`` frame for a run that crashed.
 
-    Provider/backend exceptions get the same plain sentences as a backend error.
-    Our own validation errors (a store or model rejecting data) are internal: a
-    generic sentence, never their field-by-field text. Everything else keeps the
-    ``agent.run_failed`` text it always had. The raw text goes on the run doc.
+    Provider/backend exceptions are classified like a backend error. Our own
+    validation errors (a store or model rejecting data) are internal: a generic
+    sentence, never their field-by-field text. Everything else keeps the
+    ``agent.run_failed`` text it always had, scrubbed. The raw text goes on the
+    run doc.
     """
+    text = str(exc)
     if _is_provider_exception(exc):
-        known = _known_error_frame(str(exc))
-        if known is not None:
-            return known
+        frame = _classify_error(text)
+        if frame["code"] != "agent.backend_error":
+            return frame
     elif _is_validation_error(exc):
         return {"code": "agent.run_failed", "message": INTERNAL_ERROR_MESSAGE}
-    return {"code": "agent.run_failed", "message": str(exc)}
+    return {"code": "agent.run_failed", "message": _scrub_for_chat(text)}
 
 
 def _stream_ttl() -> int:

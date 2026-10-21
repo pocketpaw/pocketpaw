@@ -269,16 +269,29 @@ async def test_a_busy_provider_gets_the_friendly_code(monkeypatch, raw):
 
 @pytest.mark.parametrize(
     "raw",
-    [_LITELLM_401, "codex sdk missing", "context of 14290 tokens exceeds the limit"],
+    ["codex sdk missing", "context of 14290 tokens exceeds the limit"],
 )
 async def test_other_backend_errors_pass_through_unchanged(monkeypatch, raw):
-    """The LiteLLM 401 rewrite says "401" and "UPSTREAM", which the broad
-    failover classifier would read as lane-down; it must reach the user as-is."""
+    """A token count containing 429 is not a rate limit, and a backend's own
+    diagnostic reaches the user as-is."""
     events = [SimpleNamespace(type="error", content=raw, metadata={})]
     _pool, out = await _drive(monkeypatch, events=events, flag_on=False)
 
     errors = [data for name, data in out if name == "error"]
     assert errors == [{"code": "agent.backend_error", "message": raw}]
+
+
+async def test_the_litellm_401_rewrite_is_not_read_as_busy(monkeypatch):
+    """The rewrite says "401" and "UPSTREAM", which the broad failover classifier
+    would read as lane-down. It is a provider-setup problem, and on the cloud the
+    tenant gets the admin sentence, not the operator's proxy details."""
+    events = [SimpleNamespace(type="error", content=_LITELLM_401, metadata={})]
+    _pool, out = await _drive(monkeypatch, events=events, flag_on=False)
+
+    errors = [data for name, data in out if name == "error"]
+    assert errors == [
+        {"code": run_core.PROVIDER_SETUP_CODE, "message": run_core.PROVIDER_SETUP_MESSAGE}
+    ]
 
 
 # --- 4. the jail quota walk runs off the event loop --------------------------

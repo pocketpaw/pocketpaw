@@ -226,11 +226,8 @@ async def test_known_provider_errors_become_plain_sentences(raw, code):
         "you requested 140200 tokens",
         "context of 14290 tokens exceeds the limit",
         # Operator diagnostics: the raw text names the fix.
-        _LITELLM_401_REWRITE,
         "Pydantic AI error: status_code: 401, body: Invalid API key provided",
         "Pydantic AI error: status_code: 404, model 'gpt-9' not found",
-        "Pydantic AI error: Connection refused: http://localhost:11434 (is Ollama running?)",
-        "Pydantic AI error: Invalid base_url 'htp://proxy'",
         "Pydantic AI error: The next request would exceed the request_limit of 50",
         "Pydantic AI error: Exceeded the total_tokens_limit of 200000 (total_tokens=200100)",
         "Pydantic AI error: Unsupported parameter: 'max_tokens' is not supported with this model",
@@ -239,6 +236,90 @@ async def test_known_provider_errors_become_plain_sentences(raw, code):
 )
 async def test_diagnostics_and_lookalikes_pass_through_raw(raw):
     assert run_core._backend_error_frame(raw) == {"code": "agent.backend_error", "message": raw}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _LITELLM_401_REWRITE,
+        "Pydantic AI error: Connection refused: http://localhost:11434 (is Ollama running?)",
+        "Pydantic AI error: Invalid base_url 'htp://proxy'",
+        "httpx.ConnectError: [Errno -2] Name or service not known",
+    ],
+)
+async def test_an_unreachable_or_misconfigured_provider_gets_the_admin_sentence(raw):
+    assert run_core._backend_error_frame(raw) == {
+        "code": run_core.PROVIDER_SETUP_CODE,
+        "message": run_core.PROVIDER_SETUP_MESSAGE,
+    }
+
+
+async def test_the_litellm_rewrite_never_shows_the_proxy_or_setting_names():
+    rewrite = (
+        "The LiteLLM proxy rejected model 'x' with a 401 from its UPSTREAM provider. "
+        "curl -H 'Authorization: Bearer $POCKETPAW_LITELLM_API_KEY' "
+        "https://llm.internal.example:4000/health and set POCKETPAW_PYDANTIC_AI_MODEL"
+    )
+    frame = run_core._backend_error_frame(rewrite)
+    assert frame["code"] == run_core.PROVIDER_SETUP_CODE
+    for leak in ("llm.internal", "POCKETPAW_", "4000", "curl"):
+        assert leak not in frame["message"]
+
+
+async def test_a_key_echoed_in_an_auth_error_is_redacted():
+    key = "sk-or-v1-0123456789abcdef0123456789abcdef"
+    raw = f"Pydantic AI error: status_code: 401, body: Incorrect API key provided: {key}"
+    frame = run_core._backend_error_frame(raw)
+    assert frame["code"] == "agent.backend_error"
+    assert key not in frame["message"]
+    assert "Incorrect API key provided" in frame["message"]
+
+
+async def test_an_internal_address_in_a_diagnostic_is_not_shown():
+    raw = (
+        "Pydantic AI error: status_code: 404, model 'gpt-9' not found at "
+        "https://proxy.internal.example/v1/chat (10.0.3.7:4000), check POCKETPAW_LITELLM_API_BASE"
+    )
+    msg = run_core._backend_error_frame(raw)["message"]
+    for leak in ("proxy.internal", "10.0.3.7", "4000", "POCKETPAW_"):
+        assert leak not in msg
+    assert "not found" in msg
+
+
+async def test_a_comma_grouped_count_is_not_a_status_code():
+    raw = "maximum context length is 128000 tokens, you requested 128,404 tokens"
+    assert run_core._backend_error_frame(raw)["code"] == "agent.token_limit"
+
+
+async def test_our_own_httpx_crash_stays_generic(monkeypatch, mongo_db):  # noqa: ARG001
+    import httpx
+
+    async def raising_events(spec, ctx):  # noqa: ARG001
+        yield ("chunk", {"content": "Working on it. ", "type": "text"})
+        raise httpx.ReadTimeout("timed out reading http://mongo-proxy.internal:27017/x")
+
+    frames, _ = await _drive(monkeypatch, [], events_fn=raising_events)
+
+    err = next(f.data for f in frames if f.event == "error")
+    assert err["code"] == "agent.run_failed"
+    assert "mongo-proxy.internal" not in err["message"]
+    assert "27017" not in err["message"]
+    # The run doc keeps the raw text for operators.
+    assert "mongo-proxy.internal" in (await run_service.get_run("r1")).error
+
+
+async def test_a_provider_crash_with_a_key_is_redacted(monkeypatch, mongo_db):  # noqa: ARG001
+    key = "sk-abcdefghijklmnopqrstuvwxyz012345"
+
+    async def raising_events(spec, ctx):  # noqa: ARG001
+        yield ("chunk", {"content": "Working on it. ", "type": "text"})
+        raise _ProviderError(f"status_code: 401, Incorrect API key provided: {key}")
+
+    frames, _ = await _drive(monkeypatch, [], events_fn=raising_events)
+
+    err = next(f.data for f in frames if f.event == "error")
+    assert key not in err["message"]
+    assert key in (await run_service.get_run("r1")).error
 
 
 async def test_the_run_doc_keeps_the_raw_provider_text(monkeypatch, mongo_db):  # noqa: ARG001
