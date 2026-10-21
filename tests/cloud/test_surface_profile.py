@@ -3,7 +3,8 @@
 # /sites is meta-aware: a NEW-site create (no pocket, no site id, no brief) is
 # always a project, so it drops ripple, denies the old per-engine authoring tools
 # and loads the ``pocketpaw-site`` skill whatever create-time engine hint it has;
-# a REFINE (pocket set) keeps ripple only for a ripple site or an unknown engine.
+# a REFINE (pocket set) keeps ripple only for a ripple site or an unknown engine
+# and names its own per-engine skill allowlist.
 # Every other kind falls through to the ripple-on default.
 
 from __future__ import annotations
@@ -131,12 +132,14 @@ def test_resolve_profile_sites_refine_keeps_ripple():
 def test_resolve_profile_sites_source_refine_drops_ripple():
     """A refine of an html / svelte / react site edits a source map, not a widget spec,
     so it runs without the inline ripple prompt (asking via ask_user), denies the same
-    built-ins, and is NOT the create branch (no create skills, no create deny)."""
+    built-ins, and is NOT the create branch (no create deny, and its own skill
+    allowlist, which never includes an old create brain)."""
     for engine in ("html", "svelte", "react"):
         profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine=engine))
         assert profile.ripple_mode == "off", engine
         assert _own_deny(profile) == _SITES_BUILTIN_DENY, engine
-        assert not profile.skill_names, engine
+        assert "pocketpaw-create-paw-site" not in profile.skill_names, engine
+        assert "pocketpaw-create-react-site" not in profile.skill_names, engine
 
 
 # ---------------------------------------------------------------------------

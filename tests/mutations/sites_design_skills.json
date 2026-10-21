@@ -205,5 +205,69 @@
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_ready_reply_sample_has_no_em_dash"
     ]
+  },
+  {
+    "label": "refine drops its skill allowlist and goes back to the wholesale bundled plugin, so create-paw-site's popular badges, eyebrows and plausible copy are reachable on every refine again",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "            skill_names=_sites_refine_skill_names(meta.engine),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_refine_never_offers_a_banned_legacy_skill",
+      "tests/cloud/surface/test_surface_registry.py::test_sites_refine_skill_allowlist_per_engine"
+    ]
+  },
+  {
+    "label": "import-create drops its skill allowlist and loads the wholesale plugin, legacy create brains included",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "            skill_names=_SITES_IMPORT_CREATE_SKILLS,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_import_create_keeps_the_old_create_profile"
+    ]
+  },
+  {
+    "label": "the refine allowlist stops naming the design skills: the refine preamble advertises sites-check and design-taste that the run cannot load",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "    return frozenset({_SITES_CREATE_SKILL}) | _SITES_REFINE_DESIGN_SKILLS | extra\n",
+    "replace": "    return frozenset({_SITES_CREATE_SKILL}) | extra\n",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_refine_skill_names_cover_the_advertised_skills"
+    ]
+  },
+  {
+    "label": "a legacy react site loses its edit skill on refine, so the agent edits it without the react edit contract",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "    \"react\": frozenset({\"pocketpaw-edit-react-site\", \"webgl-components\"}),\n",
+    "replace": "    \"react\": frozenset({\"webgl-components\"}),\n",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_refine_offers_what_each_engine_needs"
+    ]
+  },
+  {
+    "label": "a svelte site loses create-svelte-site on refine, so a D1-backed svelte site is edited without its data-layer contract",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "    \"svelte\": frozenset({\"pocketpaw-create-svelte-site\", \"webgl-components\"}),\n",
+    "replace": "    \"svelte\": frozenset({\"webgl-components\"}),\n",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_refine_offers_what_each_engine_needs"
+    ]
+  },
+  {
+    "label": "an unknown-engine refine gets no engine extras, so a site whose pocket read failed loses the skill its real engine needs",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "    extra = _SITES_REFINE_ENGINE_SKILLS.get(engine or \"\", _SITES_REFINE_UNKNOWN_ENGINE_SKILLS)\n",
+    "replace": "    extra = _SITES_REFINE_ENGINE_SKILLS.get(engine or \"\", frozenset())\n",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_refine_skill_allowlist_per_engine"
+    ]
+  },
+  {
+    "label": "a ripple refine is handed the dashboard edit skill, which teaches rebuilding the page as a kanban",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "    \"ripple\": frozenset(),\n",
+    "replace": "    \"ripple\": frozenset({\"pocketpaw-edit-pocket\"}),\n",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_refine_never_offers_a_banned_legacy_skill"
+    ]
   }
 ]

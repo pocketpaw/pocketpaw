@@ -440,13 +440,12 @@ def _craft_system(scope: str = "full") -> str:
 # `_CRAFT_FLOOR` on create: each skill applies to a subset of turns, so embedding
 # them would make every turn pay for material most turns never use.
 #
-# Naming them is load-bearing rather than decorative. On ripple/html create and on
-# refine the wholesale bundled plugin is available, so the agent COULD reach them —
-# but a skill it has never been told the trigger for is a skill it does not invoke. On svelte/react
-# create it is stronger: `_sites_profile` pins `skill_names` to the one authoring
-# skill, and a NON-EMPTY `skill_names` suppresses the wholesale plugin, so these
-# are invisible there until the registry names them too. Both halves have to move
-# together or this block advertises skills that surface cannot load.
+# Naming them is load-bearing rather than decorative: a skill the agent has never
+# been told the trigger for is a skill it does not invoke. It is also a contract
+# with the profile. Create, refine and import-create all pin `skill_names` in
+# `_sites_profile`, and a NON-EMPTY `skill_names` suppresses the wholesale plugin,
+# so a skill named here is invisible until the registry names it too. Both halves
+# have to move together or this block advertises skills that surface cannot load.
 #
 # Scope values: "create", "refine", or "both" — which preamble the trigger can fire
 # in. `sites-check` is "both" and carries two modes in one entry: FIX mode is the
@@ -523,6 +522,18 @@ def create_design_skill_names() -> frozenset[str]:
     stopped embedding it.
     """
     return frozenset(name for name, scope, _ in _SITES_DESIGN_SKILLS if scope in ("create", "both"))
+
+
+def refine_design_skill_names() -> frozenset[str]:
+    """The design skills whose triggers can fire on a REFINE turn.
+
+    The refine twin of :func:`create_design_skill_names`. Refine pins
+    ``skill_names`` too, so every skill `_design_skills_note("refine")` advertises
+    must be named in ``surface_registry._sites_profile`` or the agent is pointed at
+    a skill it cannot load. Pinned by
+    ``test_sites_refine_skill_names_cover_the_advertised_skills``.
+    """
+    return frozenset(name for name, scope, _ in _SITES_DESIGN_SKILLS if scope in ("refine", "both"))
 
 
 def _design_skills_note(mode: str) -> str:

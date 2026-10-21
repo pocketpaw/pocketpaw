@@ -4,8 +4,10 @@
 # /sites meta-fork on the SITES row's ``profile_resolver``: a NEW-site create drops
 # ripple, denies the old per-engine authoring tools and loads exactly
 # ``pocketpaw-site`` plus the create-scoped design skills, whatever create-time
-# engine hint it carries; refine (a pocket or a site id) keeps every sites tool and
-# forks ripple on the site's own engine; import-create keeps the earlier profile.
+# engine hint it carries; refine (a pocket or a site id) keeps every sites tool,
+# forks ripple on the site's own engine and loads an exact per-engine skill
+# allowlist (the design skills, ``pocketpaw-site``, and only the legacy skill an old
+# engine needs); import-create keeps the earlier tools with its own allowlist.
 # Also pins the /sites authoring toolbelt allow-list and that every skill a profile
 # names resolves to a real skill.
 
@@ -46,6 +48,59 @@ _CREATE_METAS = (
     SurfaceMeta(engine="svelte"),
     SurfaceMeta(engine="react"),
     SurfaceMeta(engine="project"),
+)
+
+# The six design skills every /sites mode names (create, refine, import-create).
+_DESIGN_SKILLS = frozenset(
+    {
+        "pocketpaw-design-taste",
+        "sites-craft",
+        "sites-conversion-structure",
+        "sites-check",
+        "sites-references",
+        "sites-restraint",
+    }
+)
+
+# The exact refine allowlist per engine of the source pocket. ``None`` is a refine
+# whose engine could not be read, so it gets every engine's extra.
+_REFINE_SKILLS_BY_ENGINE = {
+    "ripple": _DESIGN_SKILLS | {"pocketpaw-site"},
+    "html": _DESIGN_SKILLS | {"pocketpaw-site", "webgl-components"},
+    "svelte": _DESIGN_SKILLS
+    | {"pocketpaw-site", "pocketpaw-create-svelte-site", "webgl-components"},
+    "react": _DESIGN_SKILLS | {"pocketpaw-site", "pocketpaw-edit-react-site", "webgl-components"},
+    "project": _DESIGN_SKILLS | {"pocketpaw-site", "webgl-components"},
+    None: _DESIGN_SKILLS
+    | {
+        "pocketpaw-site",
+        "pocketpaw-create-svelte-site",
+        "pocketpaw-edit-react-site",
+        "webgl-components",
+    },
+}
+
+_IMPORT_CREATE_SKILLS = _DESIGN_SKILLS | {
+    "pocketpaw-site",
+    "pocketpaw-create-svelte-site",
+    "webgl-components",
+}
+
+# Legacy skills that teach what sites-check bans (popular badges, eyebrows,
+# "plausible copy"), or that build the wrong thing on a site. No refine and no
+# import-create may offer them.
+_BANNED_ON_REFINE = frozenset(
+    {
+        "pocketpaw-create-paw-site",
+        "pocketpaw-create-react-site",
+        "pocketpaw-create-dynamic-site",
+        "pocketpaw-create-site",
+        "pocketpaw-create-project-site",
+        "pocketpaw-create-pocket",
+        "pocketpaw-edit-pocket",
+        "pocketpaw-pocket-specialist",
+        "pocketpaw-pocket-planner",
+    }
 )
 
 # The file/shell built-ins every /sites mode drops (a dedicated sites agent has no
@@ -155,11 +210,16 @@ def test_sites_create_keeps_the_project_tools():
 
 def test_sites_import_create_keeps_the_old_create_profile():
     """Import-create (a captured brief) still routes on the brief's engine through the
-    old create tools, so it must not inherit the new-site deny."""
+    old create tools, so it must not inherit the new-site deny. Its skills are an
+    exact allowlist: the brief routes to ``create_svelte_site`` (every captured brief
+    is svelte), and an unreadable brief falls back to the create preamble."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(brief_id="b1"))
     assert profile.ripple_mode == "off"
     assert _own_deny(profile) == _SITES_BUILTIN_DENY
-    assert profile.skill_names == frozenset()
+    assert profile.skill_names == _IMPORT_CREATE_SKILLS
+    assert not (_BANNED_ON_REFINE & profile.skill_names)
+    # The create fallback's skills, so a missing brief still has what it advertises.
+    assert _SITES_CREATE_DESIGN_SKILLS | {"pocketpaw-site"} <= profile.skill_names
 
 
 def test_sites_create_skill_names_cover_the_advertised_skills():
@@ -211,7 +271,7 @@ def test_sites_refine_wins_over_react_engine():
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine="react"))
     assert profile.ripple_mode == "off"
     assert _own_deny(profile) == _SITES_BUILTIN_DENY
-    assert profile.skill_names == frozenset()
+    assert profile.skill_names == _REFINE_SKILLS_BY_ENGINE["react"]
 
 
 def test_sites_refine_keeps_ripple_and_wins_over_engine():
@@ -231,7 +291,7 @@ def test_sites_refine_keeps_ripple_and_wins_over_engine():
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "off", f"refine {meta!r} must drop ripple"
         assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"refine {meta!r}"
-        assert profile.skill_names == frozenset(), f"refine {meta!r}"
+        assert "pocketpaw-create-react-site" not in profile.skill_names, f"refine {meta!r}"
 
 
 def test_sites_refine_keeps_the_old_engine_edit_tools():
@@ -250,7 +310,70 @@ def test_sites_refine_keeps_the_old_engine_edit_tools():
         assert _SITES_LEGACY_AUTHORING_DENY - {"mcp__pocketpaw_pocket_specialist__create"} <= set(
             profile.allow_mcp_tool_ids or ()
         ), f"{meta!r}"
-        assert profile.skill_names == frozenset(), f"{meta!r}"
+
+
+def test_sites_refine_skill_allowlist_per_engine():
+    """Refine names its skills exactly, per engine of the source pocket, instead of
+    loading the wholesale bundled plugin. A ``site_id``-only refine carries no engine
+    (``run_core._sites_refine_meta`` reads it only for a ``pocket_id``), so it gets
+    the unknown-engine union."""
+    for engine, expected in _REFINE_SKILLS_BY_ENGINE.items():
+        profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine=engine))
+        assert profile.skill_names == expected, f"refine engine={engine!r}"
+    site_only = resolve_profile(SurfaceKind.SITES, SurfaceMeta(site_id="site_1"))
+    assert site_only.skill_names == _REFINE_SKILLS_BY_ENGINE[None]
+
+
+def test_sites_refine_never_offers_a_banned_legacy_skill():
+    """The legacy create brains teach ``"popular": true`` tier badges, an eyebrow on
+    every hero and "the tool fills any gap with plausible copy", all of which
+    sites-check flags. A non-empty allowlist is what keeps them off a refine."""
+    metas = [SurfaceMeta(pocket_id="pkt_1", engine=e) for e in _REFINE_SKILLS_BY_ENGINE]
+    metas.append(SurfaceMeta(site_id="site_1"))
+    for meta in metas:
+        names = resolve_profile(SurfaceKind.SITES, meta).skill_names
+        assert names, f"{meta!r}: an empty allowlist loads the wholesale plugin"
+        leaked = _BANNED_ON_REFINE & names
+        assert not leaked, f"{meta!r} offers {sorted(leaked)}"
+
+
+@pytest.mark.parametrize(
+    ("engine", "needed"),
+    [
+        ("ripple", {"pocketpaw-site"}),
+        ("html", {"pocketpaw-site", "webgl-components"}),
+        ("svelte", {"pocketpaw-create-svelte-site", "webgl-components"}),
+        ("react", {"pocketpaw-edit-react-site", "webgl-components"}),
+        ("project", {"pocketpaw-site", "webgl-components"}),
+    ],
+)
+def test_sites_refine_offers_what_each_engine_needs(engine, needed):
+    """Every engine a site can still be on stays editable: the skill that carries its
+    edit contract is on its refine allowlist. svelte needs the CHANGE section and the
+    dynamic data layer of ``pocketpaw-create-svelte-site``; react needs
+    ``pocketpaw-edit-react-site``; project needs ``pocketpaw-site``."""
+    names = resolve_profile(
+        SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine=engine)
+    ).skill_names
+    assert needed <= names, f"{engine}: missing {sorted(needed - names)}"
+
+
+def test_sites_refine_skill_names_cover_the_advertised_skills():
+    """Every design skill the REFINE preamble advertises is loadable on every refine.
+    Refine pins ``skill_names`` now, so a skill named in ``<design-skills>`` but not
+    allowed is an instruction the agent cannot follow."""
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    advertised = {
+        name for name, scope, _ in sites_handler._SITES_DESIGN_SKILLS if scope in ("refine", "both")
+    }
+    assert advertised == _DESIGN_SKILLS
+    for engine in _REFINE_SKILLS_BY_ENGINE:
+        names = resolve_profile(
+            SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine=engine)
+        ).skill_names
+        missing = advertised - names
+        assert not missing, f"refine engine={engine!r} cannot load {sorted(missing)}"
 
 
 def test_sites_all_modes_drop_file_and_shell_builtins():
@@ -386,6 +509,11 @@ def test_every_surface_skill_name_resolves_to_a_real_skill():
         SurfaceMeta(engine="svelte"),
         SurfaceMeta(engine="react"),
         SurfaceMeta(pocket_id="pkt_1"),
+        SurfaceMeta(pocket_id="pkt_1", engine="html"),
+        SurfaceMeta(pocket_id="pkt_1", engine="svelte"),
+        SurfaceMeta(pocket_id="pkt_1", engine="react"),
+        SurfaceMeta(pocket_id="pkt_1", engine="project"),
+        SurfaceMeta(brief_id="b1"),
         SurfaceMeta(widget_id="w1"),
     )
     referenced: set[str] = set()
@@ -403,7 +531,12 @@ def test_every_surface_skill_name_resolves_to_a_real_skill():
     # refactor that stops surfacing them entirely leaves the loop above scanning a
     # smaller set, finding no unknown names, and passing — the same blindness in a
     # different disguise.
-    for expected in ("pocketpaw-site",):
+    for expected in (
+        "pocketpaw-site",
+        "pocketpaw-create-svelte-site",
+        "pocketpaw-edit-react-site",
+        "webgl-components",
+    ):
         assert expected in referenced, (
             f"{expected} is no longer reachable from any resolved profile — either "
             "the surface stopped surfacing it, or this scan stopped seeing it"

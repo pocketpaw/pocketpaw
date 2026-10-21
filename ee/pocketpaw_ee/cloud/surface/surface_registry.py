@@ -20,9 +20,10 @@
 # built-in or a granted id (/code denies the backend-disk built-ins, ``Agent`` and
 # ``Skill``; /other-hand denies the two pocket-creation ids); ``exclusive_tools``
 # (the public concierge) offers only the allow-listed tools. ``skill_names`` is an
-# exact ALLOWLIST that suppresses the bundled plugin, so /sites create names
-# ``pocketpaw-site`` and its design skills explicitly (sourced from
-# handlers/sites.py so advertised == allowed) and denies the old per-engine
+# exact ALLOWLIST that suppresses the bundled plugin, so every /sites mode names
+# its skills explicitly: the design skills (sourced from handlers/sites.py so
+# advertised == allowed), ``pocketpaw-site``, and on refine only the legacy skill
+# an old engine still needs to be edited. Create also denies the old per-engine
 # authoring tools; refine keeps them. A deny-only profile still needs a
 # ``system_message_override`` that states the surface's own deliverable, or the
 # trained-in default wins.
@@ -852,7 +853,9 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
 #: The one authoring skill a NEW-site create turn loads: the platform contract for a
 #: project started from a template (``static`` for content pages). The old per-engine
 #: authoring skills are not named, and ``skill_names`` is an exact allowlist, so they
-#: cannot load on a create turn; refine keeps the wholesale bundled plugin.
+#: cannot load on a create turn. Refine and import-create name it too: its
+#: integrations and secrets rules (paw.js buy buttons, Connect cards, never a pasted
+#: key) hold on every engine, and it is the whole contract for a project refine.
 _SITES_CREATE_SKILL = "pocketpaw-site"
 
 # The create-scoped design skills the create branch must ALSO name. ``skill_names``
@@ -869,6 +872,61 @@ _SITES_CREATE_DESIGN_SKILLS: frozenset[str] = sites.create_design_skill_names()
 #: Engines whose refine edits a ``source`` map (no widget spec), so refine drops ripple.
 _SITES_SOURCE_REFINE_ENGINES: frozenset[str] = frozenset({"html", "svelte", "react", "project"})
 
+# The design skills the REFINE preamble advertises, sourced the same way as create's.
+_SITES_REFINE_DESIGN_SKILLS: frozenset[str] = sites.refine_design_skill_names()
+
+# Refine names its skills exactly instead of loading the wholesale bundled plugin,
+# which kept every legacy engine skill reachable (create-paw-site, create-react,
+# create-dynamic, create-site, create-project-site, create-pocket ...) and with them
+# teaching the design suite bans: ``"popular": true`` tier badges, an eyebrow on
+# every hero, "the tool fills any gap with plausible copy". Every refine gets the
+# design skills and ``pocketpaw-site``; an OLD engine also gets the legacy skill it
+# still needs to be edited correctly, keyed by the engine
+# ``run_core._sites_refine_meta`` reads off the source pocket:
+#
+#   * ripple (and ripple ``pattern="dynamic"``): nothing extra. The edit goes through
+#     ``pocket_specialist__edit``, whose kit carries the op vocabulary, and the refine
+#     preamble carries the landing-widget rules. ``pocketpaw-edit-pocket`` is not
+#     named: it is dashboard guidance ("rebuild this as a kanban"). A ripple build
+#     drops the client bundle, so a canvas never runs there either.
+#   * html: ``webgl-components``. The refine preamble carries the whole
+#     ``edit_html_file`` contract, the same text create-paw-site's html section holds.
+#   * svelte: ``pocketpaw-create-svelte-site`` + ``webgl-components``. Its CHANGE
+#     section (a new page is three calls, the ``+page.ts`` prerender flag does not
+#     cascade) and its dynamic data layer (``useSource`` / ``useAction`` from the
+#     generated ``$lib/paw/``) are in no preamble, and a D1-backed svelte site cannot
+#     be edited correctly without the latter.
+#   * react: ``pocketpaw-edit-react-site`` + ``webgl-components``.
+#   * project: ``webgl-components``; ``pocketpaw-site`` is the project contract.
+#   * unknown (the pocket read failed, or a ``site_id``-only refine): the union of
+#     the above, because the agent reads the pocket first and may land on any of them.
+_SITES_REFINE_ENGINE_SKILLS: dict[str, frozenset[str]] = {
+    "ripple": frozenset(),
+    "html": frozenset({"webgl-components"}),
+    "svelte": frozenset({"pocketpaw-create-svelte-site", "webgl-components"}),
+    "react": frozenset({"pocketpaw-edit-react-site", "webgl-components"}),
+    "project": frozenset({"webgl-components"}),
+}
+_SITES_REFINE_UNKNOWN_ENGINE_SKILLS: frozenset[str] = frozenset().union(
+    *_SITES_REFINE_ENGINE_SKILLS.values()
+)
+
+# Import-create builds from a captured brief. Every brief captured today is stamped
+# ``engine="svelte"`` (``sites.design_brief``), so it routes to ``create_svelte_site``;
+# an unreadable brief falls back to the create preamble, which needs ``pocketpaw-site``
+# and the create design skills. A ripple brief (only ever written by the first
+# capture build, before the svelte stamp) gets no ripple authoring skill.
+_SITES_IMPORT_CREATE_SKILLS: frozenset[str] = (
+    frozenset({_SITES_CREATE_SKILL, "pocketpaw-create-svelte-site", "webgl-components"})
+    | _SITES_CREATE_DESIGN_SKILLS
+)
+
+
+def _sites_refine_skill_names(engine: str | None) -> frozenset[str]:
+    """The exact skill allowlist for a /sites refine of a site on ``engine``."""
+    extra = _SITES_REFINE_ENGINE_SKILLS.get(engine or "", _SITES_REFINE_UNKNOWN_ENGINE_SKILLS)
+    return frozenset({_SITES_CREATE_SKILL}) | _SITES_REFINE_DESIGN_SKILLS | extra
+
 
 def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
     """/sites is META-AWARE. Three shapes:
@@ -878,13 +936,14 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
         ``run_core._sites_refine_meta``. html / svelte / react / project sites edit a
         ``source`` map, so they DROP ripple and ask through ``ask_user``; a ripple
         site, or one whose engine could not be read, KEEPS ripple. Every sites tool
-        stays allowed, including the old per-engine edit tools, and skills stay
-        wholesale. A ``site_id`` alone counts as refine because ``build_preamble``
-        resolves it to the site's pocket; treating it as a create would deny the edit
-        tools the refine preamble names.
+        stays allowed, including the old per-engine edit tools. Skills are an exact
+        allowlist per engine (``_sites_refine_skill_names``). A ``site_id`` alone
+        counts as refine because ``build_preamble`` resolves it to the site's pocket;
+        treating it as a create would deny the edit tools the refine preamble names.
       * IMPORT-CREATE (``meta.brief_id``): ``_frontend_preamble`` still routes on the
         brief's engine and names the old create tools, so this keeps the earlier
-        create profile: ripple off, no deny, wholesale skills.
+        create profile (ripple off, no deny) with the ``_SITES_IMPORT_CREATE_SKILLS``
+        allowlist.
       * CREATE (none of those): every new site is a project. Ripple off, the old
         authoring tools denied (``_SITES_LEGACY_AUTHORING_DENY``), and exactly the
         ``pocketpaw-site`` skill plus the create-scoped design skills. The create
@@ -900,12 +959,14 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
             ripple_mode="off" if meta.engine in _SITES_SOURCE_REFINE_ENGINES else "on",
             allow_mcp_tool_ids=sites_allow,
             deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
+            skill_names=_sites_refine_skill_names(meta.engine),
         )
     if meta.brief_id is not None:
         return SurfaceProfile(
             ripple_mode="off",
             allow_mcp_tool_ids=sites_allow,
             deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
+            skill_names=_SITES_IMPORT_CREATE_SKILLS,
         )
     return SurfaceProfile(
         ripple_mode="off",
