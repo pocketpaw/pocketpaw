@@ -251,7 +251,9 @@ def repair_request(html: str, problems: list[str]) -> str:
 
 
 async def _chat(*, workspace_id: str | None, system: str, user: str) -> str | None:
-    """One completion through the LiteLLM proxy. Seam for tests."""
+    """One completion through the LiteLLM proxy, billed to the workspace's own
+    virtual key when it has one. Seam for tests."""
+    from pocketpaw_ee.catalog import litellm_client
     from pocketpaw_ee.cloud.studio import service as studio
 
     model = (os.environ.get(MOTION_MODEL_ENV) or "").strip()
@@ -259,29 +261,21 @@ async def _chat(*, workspace_id: str | None, system: str, user: str) -> str | No
         from pocketpaw_ee.cloud.chat.side_completion import deployment_default_model
 
         model = deployment_default_model()
-    auth_key = await studio._resolve_auth_key(workspace_id)
-    payload = {
-        "model": model,
-        "messages": [
+    extra = {"user": workspace_id} if workspace_id else {}
+    return await litellm_client.chat_completion(
+        model=model,
+        messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.7,
-        "max_tokens": 12000,
-    }
-    if workspace_id:
-        payload["user"] = workspace_id
-    base = studio._proxy_base().rstrip("/")
-    async with studio._proxy_client(timeout=_CHAT_TIMEOUT_S) as client:
-        resp = await client.post(
-            f"{base}/v1/chat/completions",
-            headers=studio._proxy_headers(auth_key=auth_key),
-            json=payload,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-    content = body["choices"][0]["message"]["content"]
-    return content if isinstance(content, str) else None
+        api_key=await studio._resolve_auth_key(workspace_id),
+        base_url=studio._proxy_base(),
+        timeout=_CHAT_TIMEOUT_S,
+        transport=studio._PROXY_TRANSPORT,
+        temperature=0.7,
+        max_tokens=12000,
+        **extra,
+    )
 
 
 async def _ask(*, workspace_id: str | None, user: str) -> str:

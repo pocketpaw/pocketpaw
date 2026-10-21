@@ -17,6 +17,11 @@
 # not expose per-model routability/readiness, so catalog ⊇ routable degrades to
 # "all listed entries are available" (noted in the entity README + MCG-1 report).
 #
+# One write-shaped call lives here too: ``chat_completion`` POSTs a single
+# OpenAI-compatible /v1/chat/completions request to the same proxy. It is the
+# canonical completion helper (scripts/dup-ratchet counts hand-rolled copies
+# elsewhere); callers pick the key, so a tenant's virtual key can bill the call.
+#
 # httpx-based with an injectable ``_transport`` so tests stand in an
 # httpx.MockTransport (no live proxy). Fail-closed: a non-2xx raises
 # CatalogUpstreamError so a broken proxy never silently yields a partial catalog.
@@ -266,8 +271,44 @@ class LiteLLMClient:
         return list(entries.values())
 
 
+async def chat_completion(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout: float = 60.0,
+    transport: httpx.BaseTransport | None = None,
+    **params: Any,
+) -> str | None:
+    """One chat completion through the LiteLLM proxy; returns the first
+    choice's message content, or None when the reply carries no text.
+
+    ``api_key`` defaults to the deployment master key (pass a tenant's virtual
+    key to bill it). ``params`` go into the body as-is (``temperature``,
+    ``max_tokens``, ``user``, ...). Transport and HTTP status failures raise
+    ``httpx.HTTPError``, so the caller decides whether to degrade or surface them.
+    """
+    base = (base_url or config.litellm_proxy_url()).rstrip("/")
+    key = api_key if api_key is not None else config.litellm_proxy_api_key()
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    payload: dict[str, Any] = {"model": model, "messages": messages, **params}
+    async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+        resp = await client.post(f"{base}/v1/chat/completions", headers=headers, json=payload)
+        resp.raise_for_status()
+        body = resp.json()
+    try:
+        content = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return content if isinstance(content, str) else None
+
+
 __all__ = [
     "LiteLLMClient",
+    "chat_completion",
     "CatalogUpstreamError",
     "MODE_TO_MODALITY",
     "SUPPORTS_TO_CAPABILITY",

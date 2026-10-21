@@ -19,7 +19,9 @@
 #   * VIDEO HAS TWO ENGINES. ``generative`` is fal (photoreal footage, needs
 #     FAL_AI_API_KEY); ``motion`` is HyperFrames + anime.js rendered from HTML
 #     (``sites/motion_video.py``, no fal). ``auto`` takes fal when a key is set,
-#     else motion. The history row records the engine's model id.
+#     else motion. The history row records the engine's model id. In Python the
+#     choice is always named ``video_engine``, never ``engine``: that name means
+#     the SITE engine (``sites/engines.py``) and test_engines scans for it.
 #   * COPYING FROM STUDIO READS ONLY THE GENERATION'S OWN STORED MEDIA — the
 #     private media adapter, or this workspace's prefix on the public rail. It
 #     never fetches a URL, so a crafted record cannot turn it into an SSRF.
@@ -50,6 +52,7 @@ _VIDEO_DURATIONS = (5, 10)
 
 #: ``auto`` resolves to one of the other two (see ``resolve_video_engine``).
 VIDEO_ENGINES = ("auto", "generative", "motion")
+DEFAULT_VIDEO_ENGINE = "auto"
 
 _MEDIA_URL_PREFIX = "/api/v1/media/"
 
@@ -83,7 +86,7 @@ class SiteMediaResult:
     poster: PublicAsset | None = None
     errors: list[str] = field(default_factory=list)
     duration_sec: int | None = None
-    engine: str | None = None
+    video_engine: str | None = None
 
 
 def filename_for(prompt: str, index: int) -> str:
@@ -221,12 +224,12 @@ async def generate_site_image_assets(
     return SiteMediaResult(generation_id=generation_id, assets=assets, errors=errors)
 
 
-def resolve_video_engine(engine: str | None) -> str:
+def resolve_video_engine(video_engine: str | None) -> str:
     """``auto``/None → ``generative`` when a fal key is configured, else
     ``motion``. An explicit ``generative`` without a key is ``unavailable``."""
     from pocketpaw_ee.cloud.studio import fal_edit
 
-    choice = (engine or "auto").strip().lower()
+    choice = (video_engine or DEFAULT_VIDEO_ENGINE).strip().lower()
     if choice not in VIDEO_ENGINES:
         raise SiteMediaError("invalid", f"engine must be one of {', '.join(VIDEO_ENGINES)}.")
     if choice == "motion":
@@ -249,13 +252,13 @@ async def generate_site_video_asset(
     image_url: str | None = None,
     aspect_ratio: str = "16:9",
     duration_sec: int = 5,
-    engine: str | None = "auto",
+    video_engine: str | None = None,
     palette: list[str] | None = None,
 ) -> SiteMediaResult:
     """Generate a short video (image-to-video when ``image_url`` is given) and
     publish it with its poster frame.
 
-    ``engine`` picks fal (``generative``) or the HyperFrames renderer
+    ``video_engine`` picks fal (``generative``) or the HyperFrames renderer
     (``motion``); ``palette`` (brand colours) only steers ``motion``. The history
     row is written ``running`` BEFORE the render (minutes on fal) so /studio
     shows the job in flight, and the same row moves to succeeded or failed
@@ -271,7 +274,7 @@ async def generate_site_video_asset(
     if not prompt:
         raise SiteMediaError("invalid", "Describe the shot and the camera move.")
 
-    resolved_engine = resolve_video_engine(engine)
+    resolved_engine = resolve_video_engine(video_engine)
 
     await _require_site(workspace_id, pocket_id)
     store = _store_or_raise()
@@ -415,7 +418,7 @@ async def generate_site_video_asset(
         assets=[video],
         poster=poster,
         duration_sec=duration_sec,
-        engine=resolved_engine,
+        video_engine=resolved_engine,
     )
 
 

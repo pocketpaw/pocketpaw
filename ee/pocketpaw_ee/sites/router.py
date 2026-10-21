@@ -1571,7 +1571,7 @@ async def generate_site_asset(
                 image_url=body.image_url,
                 aspect_ratio=aspect_ratio,
                 duration_sec=body.duration or 5,
-                engine=body.engine or "auto",
+                video_engine=body.engine,
             )
     except media_generation.SiteMediaError as exc:
         raise _site_media_http_error(

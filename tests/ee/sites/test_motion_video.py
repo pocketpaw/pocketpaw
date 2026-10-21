@@ -11,6 +11,7 @@
 #   * a hung subprocess is killed as a tree and surfaces as a failure,
 #   * a missing CLI is ``unavailable`` (→ 503) BEFORE any LLM spend,
 #   * engine auto-selection (fal key present/absent) and the history model id,
+#   * the composer call reaches the proxy on the tenant key with its settings,
 #   * the MCP tool schema advertises ``engine`` and ``palette``.
 #
 # Opt-in integration tests (POCKETPAW_HYPERFRAMES_IT=1) really render through
@@ -714,13 +715,48 @@ async def test_a_motion_failure_moves_the_row_and_keeps_its_reason(monkeypatch) 
     monkeypatch.setattr(motion_video, "render_motion_video", _render)
     with pytest.raises(SiteMediaError) as exc:
         await generate_site_video_asset(
-            workspace_id="ws1", pocket_id="pk1", prompt="x", engine="motion"
+            workspace_id="ws1", pocket_id="pk1", prompt="x", video_engine="motion"
         )
     assert exc.value.reason == "unavailable"
     assert [r["status"] for r in recorded] == ["running", "failed"]
 
 
 # ── The MCP schema ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_composer_call_goes_through_the_proxy_on_the_tenant_key(monkeypatch) -> None:
+    """``_chat`` uses the shared completion helper: the workspace's virtual key,
+    the ``user`` spend tag and the composer's own sampling settings all reach the
+    proxy, and the reply's text comes back."""
+    import httpx
+    from pocketpaw_ee.cloud.studio import service as studio
+
+    seen: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "<html></html>"}}]})
+
+    async def _tenant_key(workspace_id):
+        return f"sk-{workspace_id}"
+
+    monkeypatch.setattr(studio, "_PROXY_TRANSPORT", httpx.MockTransport(_handler))
+    monkeypatch.setattr(studio, "_proxy_base", lambda: "http://proxy.test/")
+    monkeypatch.setattr(studio, "_resolve_auth_key", _tenant_key)
+    monkeypatch.setenv(motion_video.MOTION_MODEL_ENV, "composer-model")
+
+    out = await motion_video._chat(workspace_id="ws1", system="sys", user="brief")
+
+    assert out == "<html></html>"
+    assert seen["url"] == "http://proxy.test/v1/chat/completions"
+    assert seen["auth"] == "Bearer sk-ws1"
+    body = seen["body"]
+    assert body["model"] == "composer-model" and body["user"] == "ws1"
+    assert body["temperature"] == 0.7 and body["max_tokens"] == 12000
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
 
 
 def test_the_mcp_tool_schema_offers_engine_and_palette(monkeypatch) -> None:

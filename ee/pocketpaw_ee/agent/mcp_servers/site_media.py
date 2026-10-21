@@ -152,7 +152,11 @@ async def _generate_site_video_handler(args: dict) -> dict:
     """Generate a short video for the site and land it on the public rail, with
     its poster frame (a scroll-scrubbed ``<video>`` paints nothing until it has
     buffered, so without a poster the hero is blank on first load)."""
-    from pocketpaw_ee.sites.media_generation import SiteMediaError, generate_site_video_asset
+    from pocketpaw_ee.sites.media_generation import (
+        DEFAULT_VIDEO_ENGINE,
+        SiteMediaError,
+        generate_site_video_asset,
+    )
 
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
@@ -188,7 +192,7 @@ async def _generate_site_video_handler(args: dict) -> dict:
             image_url=str(args.get("image_url") or "").strip() or None,
             aspect_ratio=str(args.get("aspect_ratio") or "16:9"),
             duration_sec=duration_sec,
-            engine=str(args.get("engine") or "auto"),
+            video_engine=str(args.get("engine") or DEFAULT_VIDEO_ENGINE),
             palette=palette,
         )
     except SiteMediaError as exc:
@@ -215,7 +219,7 @@ async def _generate_site_video_handler(args: dict) -> dict:
         return _error_response(exc.message)
 
     video = result.assets[0]
-    if result.engine == "motion":
+    if result.video_engine == "motion":
         usage = (
             "This is a seamless loop made for a background: render it as a muted, "
             "autoplay, loop, playsinline video element WITH the poster set, layered "
@@ -238,7 +242,7 @@ async def _generate_site_video_handler(args: dict) -> dict:
             "mime": video.mime,
             "size": video.size,
             "duration_sec": result.duration_sec,
-            "engine": result.engine,
+            "engine": result.video_engine,
             "message": (
                 "Video published for this site. Both URLs are absolute, public and "
                 "permanent — use them VERBATIM. " + usage

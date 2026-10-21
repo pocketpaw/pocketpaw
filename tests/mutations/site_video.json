@@ -48,8 +48,8 @@
   {
     "label": "always text-to-video - the owner's own image is ignored",
     "file": "ee/pocketpaw_ee/sites/media_generation.py",
-    "find": "    model = fal_video.DEFAULT_IMAGE_TO_VIDEO_MODEL if image_url else fal_video.DEFAULT_VIDEO_MODEL",
-    "replace": "    model = fal_video.DEFAULT_VIDEO_MODEL",
+    "find": "    elif image_url:\n        model = fal_video.DEFAULT_IMAGE_TO_VIDEO_MODEL\n    else:\n        model = fal_video.DEFAULT_VIDEO_MODEL",
+    "replace": "    else:\n        model = fal_video.DEFAULT_VIDEO_MODEL",
     "tests": [
       "tests/ee/sites/test_site_video_tool.py::test_an_image_selects_the_image_to_video_model"
     ]
