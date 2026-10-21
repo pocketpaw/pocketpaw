@@ -1122,8 +1122,9 @@ class NativeArtifactResponse(BaseModel):
     # (``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/``, which serves index.html),
     # the full draft with its <head> and JS. Every engine including html. ``None``
     # while the build is pending or failed, and for a project draft whose
-    # ``preview_mode`` is ``"server_only"``. Append ``?paw_edit=1`` to arm the edit
-    # bridge.
+    # ``preview_mode`` is ``"server_only"``. Append ``?paw_edit=1`` to load the edit
+    # bridge; it starts in select mode, and an ``arm {mode: "browse"}`` command turns
+    # it inert without a reload (acked with ``paw-edit-armed {mode}``).
     preview_url: str | None = None
     # project engine only (None elsewhere): "full" when the preview is the whole site
     # (static assets, or a draft Worker running its server code), "static" when it has
