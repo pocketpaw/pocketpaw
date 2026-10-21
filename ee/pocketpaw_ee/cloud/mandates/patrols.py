@@ -27,7 +27,9 @@
 #                    ``open_dependencies``: an issue whose live body names a
 #                    ``Depends on`` issue still open is blocked (fail safe);
 #                    every comma item of the line counts, a ref in a note or
-#                    after ``none`` does not.
+#                    after ``none`` does not. A ref's state comes off the
+#                    ``--state all`` list, else one GraphQL batch for all the
+#                    refs that list misses (``_ref_states``), else a view.
 #                    ``flag_needs_spec`` comments on a ``github:`` source issue
 #                    and labels it ``needs-spec`` (once) for the auto plan gate;
 #                    ``flag_needs_human`` does the same with ``needs-human``.
@@ -657,11 +659,14 @@ async def open_dependencies(
 
     The body comes off the bound repo's cached open-issue list or the cached
     ``--label`` list of each of ``labels`` (the charter's, which reach issues past
-    the open list's limit), else one cached ``gh issue view``; a bound-repo
-    ref's state off the cached ``--state all`` list, else a view (a cross-repo
-    ref always). Empty when the bound repo is not on GitHub. Fail safe: an
-    unreadable body blocks as ``["?"]`` and an unknown ref state counts as open.
-    Never raises."""
+    the open list's limit), else one cached ``gh issue view``. A bound-repo
+    ref's state comes off the cached ``--state all`` list, else ONE GraphQL
+    batch over every ref that list misses (``_ref_states``: a repo past
+    ``_GH_STATE_LIMIT`` issues depends on old ones, and a view per ref spent
+    the budget by the twentieth and blocked the rest), else a view (a
+    cross-repo ref always). Empty when the bound repo is not on GitHub. Fail
+    safe: an unreadable body blocks as ``["?"]`` and an unknown ref state
+    counts as open. Never raises."""
     runner = gh or _default_gh
     bound, states = await _slug_states(repo_id, runner)
     bound = bound.lower()
@@ -677,6 +682,7 @@ async def open_dependencies(
     }
     budget = [_MAX_ISSUE_VIEWS]
     blocked: dict[str, list[str]] = {}
+    refs_of: dict[str, list[str]] = {}
     for source in dict.fromkeys(sources):
         found = _SPEC_SOURCE.match(source)
         if not found:
@@ -689,8 +695,19 @@ async def open_dependencies(
         if body is None:
             blocked[source] = ["?"]
             continue
+        refs_of[source] = depends_on_refs(body, slug)
+    unlisted = sorted(
+        {
+            int(ref.rsplit("#", 1)[1])
+            for refs in refs_of.values()
+            for ref in refs
+            if ref.rsplit("#", 1)[0] == bound and int(ref.rsplit("#", 1)[1]) not in states
+        }
+    )
+    states = {**states, **await _ref_states(bound, unlisted, runner)}
+    for source, refs in refs_of.items():
         waiting = []
-        for ref in depends_on_refs(body, slug):
+        for ref in refs:
             ref_slug, ref_n = ref.rsplit("#", 1)
             state = states.get(int(ref_n)) if ref_slug == bound else None
             if state is None:
@@ -701,6 +718,44 @@ async def open_dependencies(
         if waiting:
             blocked[source] = waiting
     return blocked
+
+
+# Issue states GraphQL answers per call: one alias per number.
+_GQL_BATCH = 100
+
+
+async def _ref_states(slug: str, numbers: list[int], gh: GhFn) -> dict[int, str]:
+    """``{number: "open"|"closed"|"merged"}`` for ``numbers`` on ``slug``
+    (issues and PRs alike), one ``gh api graphql`` per ``_GQL_BATCH`` of them,
+    the repo passed as query variables. A failed call, a null node (no such
+    number) or a stateless one is left out: the caller views it. Never
+    raises."""
+    owner, _, name = slug.partition("/")
+    out: dict[int, str] = {}
+    for start in range(0, len(numbers), _GQL_BATCH):
+        fields = " ".join(
+            f"i{n}: issueOrPullRequest(number: {n}) "
+            "{ ... on Issue { state } ... on PullRequest { state } }"
+            for n in numbers[start : start + _GQL_BATCH]
+        )
+        query = (
+            "query($owner: String!, $name: String!) "
+            f"{{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+        )
+        argv = ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}"]
+        try:
+            # gh exits 1 on a partial error (one missing number) and still
+            # prints the data, so the body is read whatever the exit code.
+            _, raw, _ = await gh([*argv, "-F", f"name={name}"])
+            nodes = ((json.loads(raw) if raw else {}).get("data") or {}).get("repository") or {}
+        except Exception:  # noqa: BLE001 — an unread batch leaves the refs to the views
+            logger.warning("mandate: gh api graphql states failed for %s", slug, exc_info=True)
+            nodes = {}
+        for key, node in nodes.items():
+            state = str((node or {}).get("state") or "").lower() if isinstance(node, dict) else ""
+            if key[:1] == "i" and key[1:].isdigit() and state:
+                out[int(key[1:])] = state
+    return out
 
 
 async def open_issues(repo_id: str, gh: GhFn | None = None) -> list[dict[str, Any]]:

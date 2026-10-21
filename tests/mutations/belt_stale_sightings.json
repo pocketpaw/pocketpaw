@@ -243,5 +243,23 @@
     "tests": [
       "tests/cloud/test_belt_stale_sightings.py::test_every_ref_on_a_depends_on_line_counts"
     ]
+  },
+  {
+    "label": "the GraphQL batch is skipped: refs past the state list fall to the view budget",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "states = {**states, **await _ref_states(bound, unlisted, runner)}",
+    "replace": "states = {**states}",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_dependencies_past_the_state_list_are_read_in_one_batch"
+    ]
+  },
+  {
+    "label": "a batch state of open reads as closed",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "out[int(key[1:])] = state",
+    "replace": "out[int(key[1:])] = \"closed\"",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_dependency_the_batch_says_is_open_still_blocks"
+    ]
   }
 ]

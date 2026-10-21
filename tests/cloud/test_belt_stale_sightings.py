@@ -342,6 +342,55 @@ async def test_a_gh_failure_counts_as_blocked(tmp_path, issues, views, blocked_b
     assert found == {_src(31): blocked_by}
 
 
+def _old_deps(count: int) -> tuple[list[dict], dict[int, str], list[str]]:
+    """``count`` open line issues (#101..) each depending on its own CLOSED
+    issue (#1..) that the ``--state all`` list no longer reaches, as on a repo
+    past ``_GH_STATE_LIMIT`` issues: the open list rows, the listed states
+    (the line issues only) and the sources."""
+    numbers = range(1, count + 1)
+    issues = [{**_issue(100 + n, "suite"), "body": f"Depends on: #{n}"} for n in numbers]
+    return issues, {100 + n: "OPEN" for n in numbers}, [_src(100 + n) for n in numbers]
+
+
+async def test_dependencies_past_the_state_list_are_read_in_one_batch(tmp_path):
+    """Belt's live bug: 109 open sightings whose ``Depends on`` issues (all
+    closed) were older than the 500-row ``--state all`` list; the 20-view
+    budget ran out by the 20th and every later one read as blocked. The states
+    the list misses come from ONE GraphQL batch, so more such refs than
+    ``_MAX_ISSUE_VIEWS`` block nothing and spend no view."""
+    count = patrols._MAX_ISSUE_VIEWS + 5
+    issues, states, sources = _old_deps(count)
+    closed = {n: "CLOSED" for n in range(1, count + 1)}
+    gh = FakeGh(issues, states=states, views={n: _closed() for n in closed}, graphql=closed)
+
+    found = await patrols.open_dependencies(str(tmp_path), sources, gh=gh)
+
+    assert found == {}
+    assert _views(gh) == []
+    assert sum(a[:3] == ["gh", "api", "graphql"] for a in gh.calls) == 1
+
+
+async def test_a_dependency_the_batch_says_is_open_still_blocks(tmp_path):
+    issues, states, sources = _old_deps(2)
+    gh = FakeGh(issues, states=states, graphql={1: "CLOSED", 2: "OPEN"})
+
+    found = await patrols.open_dependencies(str(tmp_path), sources, gh=gh)
+
+    assert found == {_src(102): [f"{SLUG}#2"]}
+
+
+async def test_without_the_batch_dependencies_are_still_viewed(tmp_path):
+    """gh without GraphQL (or a failed batch) falls back to the per-ref view
+    and its budget: a closed dependency it can view is no block."""
+    issues, states, sources = _old_deps(2)
+    gh = FakeGh(issues, states=states, views={1: _closed(), 2: _closed()}, graphql=None)
+
+    found = await patrols.open_dependencies(str(tmp_path), sources, gh=gh)
+
+    assert found == {}
+    assert len(_views(gh)) == 2
+
+
 async def test_off_github_nothing_is_checked(tmp_path):
     async def gitlab(argv):
         if "get-url" in argv:

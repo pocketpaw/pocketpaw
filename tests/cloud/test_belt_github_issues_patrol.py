@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,8 +56,10 @@ class FakeGh:
     """Answers ``git remote get-url`` with ``origin``, ``gh issue list --state
     all`` with ``states`` (``{number: "OPEN"|"CLOSED"}``), any other ``gh
     issue list`` with ``issues``, ``gh pr list`` with ``prs`` (exit
-    ``pr_code``) and ``gh issue view <n> -R <slug>`` with ``views[n]`` or
-    ``views["<slug>#<n>"]`` (exit 1 when absent); records every argv."""
+    ``pr_code``), ``gh issue view <n> -R <slug>`` with ``views[n]`` or
+    ``views["<slug>#<n>"]`` (exit 1 when absent) and the ``gh api graphql``
+    state batch with ``graphql`` (``{number: "OPEN"|"CLOSED"}``, a missing
+    number a null node; ``None`` = gh fails); records every argv."""
 
     def __init__(
         self,
@@ -68,6 +71,7 @@ class FakeGh:
         prs: list[dict] | None = None,
         pr_code: int = 0,
         views: dict | None = None,
+        graphql: dict[int, str] | None = None,
     ) -> None:
         self.issues = issues
         self.views = views or {}
@@ -76,6 +80,7 @@ class FakeGh:
         self.origin = origin
         self.code = code
         self.states = states or {}
+        self.graphql = graphql
         self.calls: list[list[str]] = []
 
     async def __call__(self, argv: list[str]) -> tuple[int, str, str]:
@@ -92,6 +97,14 @@ class FakeGh:
             n, slug = argv[3], argv[5]
             view = self.views.get(f"{slug}#{n}", self.views.get(int(n)))
             return (0, json.dumps(view), "") if view is not None else (1, "", "not found")
+        if argv[:3] == ["gh", "api", "graphql"]:
+            if self.graphql is None:
+                return 1, "", "gh: graphql unavailable"
+            numbers = [int(m) for m in re.findall(r"issueOrPullRequest\(number: (\d+)\)", argv[4])]
+            nodes = {
+                f"i{n}": {"state": self.graphql[n]} if n in self.graphql else None for n in numbers
+            }
+            return 0, json.dumps({"data": {"repository": nodes}}), ""
         raise AssertionError(f"unexpected argv {argv}")
 
 
