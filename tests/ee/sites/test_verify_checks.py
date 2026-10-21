@@ -1,31 +1,38 @@
 # tests/ee/sites/test_verify_checks.py — the warn-only page checks verify_site attaches
 # as ``checks`` (pocketpaw_ee.sites.verify_checks, verify._with_checks).
 #
-# Each sites-check id has a fixture page that trips it and one that is clean. The
-# verdict tests pin the contract that matters most: warnings ride the verdict, capped
-# with an omitted count, and NEVER change its status (a passed site stays passed, a
-# failed one stays failed, a crashing check is ``skipped``). The served tree is the html
-# source, the svelte / react draft files (``read_dist`` under the content hash) or a
-# project's last bundle. Mutations: tests/mutations/sites_verify_checks.json.
+# Each sites-check id has a fixture page that trips it and one that is clean, plus the
+# false positives the checks must not raise (hash routes, anchors wired as buttons,
+# bracketed citations, the page title, aria-hidden art, server paths, generator-owned
+# react pages). The verdict tests pin the contract that matters most: warnings ride the
+# verdict, capped with an omitted count and merged across pages, NEVER change its
+# status, and are computed off the event loop. The served tree is the html source, the
+# svelte / react draft files (``read_dist`` under the content hash) or a project's
+# bundle for its current files. Mutations: tests/mutations/sites_verify_checks.json.
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 import pytest
 from pocketpaw_ee.cloud.pockets import service as pockets_service
-from pocketpaw_ee.sites import preview_origin, project_build, verify, verify_checks
+from pocketpaw_ee.sites import preview_origin, project_build, verify, verify_checks, verify_store
 
 from .test_verify_pipeline import Check, MemoryVerifyStore, Pool, Waiter, report
 
 _HEAD = (
     "<head><title>Bright Smile</title>"
     '<meta name="description" content="A dental studio in Leeds.">'
+    '<meta property="og:title" content="Bright Smile">'
+    '<meta property="og:description" content="A dental studio in Leeds.">'
     '<link rel="icon" href="/favicon.svg"></head>'
 )
 
 
 def _doc(body: str, head: str = _HEAD) -> str:
+    if "<h1" not in body:
+        body = "<h1>Bright Smile</h1>" + body
     return f"<!doctype html><html>{head}<body>{body}</body></html>"
 
 
@@ -49,6 +56,10 @@ class TestLinks:
         out = _run('<a href="#pricing">Pricing</a><a href="#top">Top</a><h2 id="pricing">P</h2>')
         assert _ids(out) == []
 
+    @pytest.mark.parametrize("href", ["#/pricing", "#!/about", "/#/team"])
+    def test_hash_routes_are_not_anchors(self, href: str) -> None:
+        assert _ids(_run(f'<a href="{href}">Route</a>')) == []
+
     def test_cross_page_anchor_checks_the_other_page(self) -> None:
         about = _doc('<h2 id="team">Team</h2>')
         bad = _run('<a href="/about.html#history">History</a>', extra={"about.html": about})
@@ -62,6 +73,16 @@ class TestLinks:
         assert _ids(out) == ["SC-LINK-02"]
         assert "Book now" in out["warnings"][0]["detail"]
 
+    @pytest.mark.parametrize(
+        "attrs", ['role="button"', 'data-bs-toggle="collapse"', 'data-toggle="menu"']
+    )
+    def test_anchor_wired_as_a_button_is_not_link_02(self, attrs: str) -> None:
+        assert _ids(_run(f'<a href="#" {attrs}>Menu</a>')) == []
+
+    def test_anchor_with_a_handler_is_not_link_02(self) -> None:
+        out = _run('<a href="#" onclick="openMenu()">Menu</a>')
+        assert "SC-LINK-02" not in _ids(out)
+
     def test_real_links_are_clean(self) -> None:
         out = _run(
             '<a href="https://example.org">x</a><a href="mailto:hi@bright.test">m</a>'
@@ -74,6 +95,17 @@ class TestLinks:
         assert _ids(out) == ["SC-LINK-03"]
         detail = out["warnings"][0]["detail"]
         assert "/services" in detail and "img/hero.webp" in detail
+
+    def test_one_page_html_with_handlers_still_checks_page_links(self) -> None:
+        body = '<button onclick="toggle()">Menu</button><a href="/about">About</a>'
+        assert _ids(_run(body + "<script>function toggle(){}</script>")) == ["SC-LINK-03"]
+        assert _ids(_run(body)) == ["SC-LINK-03"]
+
+    @pytest.mark.parametrize("engine", ["react", "svelte", "project"])
+    def test_one_page_client_app_skips_page_links(self, engine: str) -> None:
+        body = '<a href="/about">About</a><script type="module" src="/app.js"></script>'
+        out = _run(body, extra={"app.js": ""}, engine=engine)
+        assert "SC-LINK-03" not in _ids(out)
 
     def test_paths_that_resolve_are_clean(self) -> None:
         out = _run(
@@ -90,10 +122,18 @@ class TestLinks:
         )
         assert _ids(out) == []
 
-    def test_server_routes_skip_page_links_but_not_assets(self) -> None:
-        out = _run('<a href="/dashboard">D</a><img src="/missing.png" alt="m">', server_routes=True)
+    def test_server_routes_skip_page_links_and_server_paths_but_not_assets(self) -> None:
+        out = _run(
+            '<a href="/dashboard">D</a><img src="/missing.png" alt="m">'
+            '<script src="/_next/static/chunk.js"></script><img src="/_image?url=x" alt="i">'
+            '<link rel="preload" href="/api/data">',
+            server_routes=True,
+        )
         assert _ids(out) == ["SC-LINK-03"]
-        assert "/dashboard" not in out["warnings"][0]["detail"]
+        detail = out["warnings"][0]["detail"]
+        assert "/missing.png" in detail
+        for skipped in ("/dashboard", "_next", "_image", "/api/"):
+            assert skipped not in detail
 
     def test_plain_form_with_no_action_is_link_04(self) -> None:
         out = _run('<form id="contact"><input name="email"><button>Send</button></form>')
@@ -106,6 +146,7 @@ class TestLinks:
             '<form action="/thanks.html"><button>Send</button></form>',
             '<form onsubmit="send(event)"><button>Send</button></form>',
             '<form><button>Send</button></form><script type="module">bind()</script>',
+            '<form><button onclick="send()">Send</button></form>',
             '<form method="dialog"><button>Close</button></form>',
         ],
     )
@@ -133,17 +174,47 @@ class TestCopy:
         )
         assert _ids(out) == []
 
+    def test_title_and_aria_hidden_are_not_copy(self) -> None:
+        head = _HEAD.replace("<title>Bright Smile</title>", "<title>Home — Bright</title>")
+        files = {
+            "index.html": _doc(
+                '<div aria-hidden="true"><span>—</span><div>—</div></div>'
+                '<img aria-hidden="true" alt="—" src="/favicon.svg"><p>calm</p>',
+                head=head,
+            ),
+            "favicon.svg": "",
+        }
+        assert _ids(verify_checks.run_checks(files)) == []
+
+    def test_text_after_an_aria_hidden_block_still_counts(self) -> None:
+        out = _run('<div aria-hidden="true"><div>x</div></div><p>after — it</p>')
+        assert _ids(out) == ["SC-COPY-01"]
+
 
 class TestHonest:
     @pytest.mark.parametrize(
-        "text", ["[Phone]", "[Price]", "[Client name]", "[NEED: proof]", "Lorem ipsum dolor"]
+        "text",
+        [
+            "[Phone]",
+            "[Price]",
+            "[Client name]",
+            "[Role]",
+            "[NEED: proof]",
+            "Your Studio",
+            "Lorem ipsum dolor",
+            "hello@example.com",
+        ],
     )
     def test_placeholder_is_honest_07(self, text: str) -> None:
         out = _run(f"<p>Call {text}</p>")
         assert _ids(out) == ["SC-HONEST-07"]
 
+    @pytest.mark.parametrize("text", ["[sic]", "[Smith 2020]", "[1]", "your studio visit"])
+    def test_bracketed_words_are_not_placeholders(self, text: str) -> None:
+        assert _ids(_run(f"<p>Quote {text}</p>")) == []
+
     def test_input_placeholder_attribute_is_clean(self) -> None:
-        out = _run('<form action="/t.html"><input placeholder="[Your name]"></form>')
+        out = _run('<form action="/t.html"><input placeholder="[Phone]"></form>')
         assert "SC-HONEST-07" not in _ids(out)
 
     @pytest.mark.parametrize(
@@ -151,8 +222,6 @@ class TestHonest:
         [
             "<blockquote>Great care. Sarah Chen</blockquote>",
             "<p>Elena Vasquez, practice manager</p>",
-            "<p>Trusted by Acme</p>",
-            '<a href="mailto:johndoe@example.com">Email</a>',
             "<p>Call 555-0123</p>",
             "<p>Call (555) 234-5678</p>",
         ],
@@ -160,56 +229,86 @@ class TestHonest:
     def test_default_people_are_honest_03(self, body: str) -> None:
         assert _ids(_run(body)) == ["SC-HONEST-03"]
 
-    def test_real_names_are_clean(self) -> None:
-        assert _ids(_run("<p>Dr Priya Raman, 0113 496 0000</p>")) == []
+    def test_johndoe_is_honest_03_only(self) -> None:
+        assert _ids(_run('<a href="mailto:johndoe@example.com">Email</a>')) == ["SC-HONEST-03"]
+
+    @pytest.mark.parametrize("text", ["Dr Priya Raman, 0113 496 0000", "Trusted by Acme Dental"])
+    def test_real_names_are_clean(self, text: str) -> None:
+        assert _ids(_run(f"<p>{text}</p>")) == []
 
 
 class TestBasics:
     def test_a_complete_head_is_clean(self) -> None:
-        assert _ids(_run("<h1>Hi</h1>")) == []
+        assert _ids(_run("<p>Hi</p>")) == []
 
     def test_missing_basics_are_build_12(self) -> None:
         out = verify_checks.run_checks({"index.html": _doc("<h1>Hi</h1>", head="<head></head>")})
         assert _ids(out) == ["SC-BUILD-12"]
         detail = out["warnings"][0]["detail"]
-        for part in ("no <title>", "no meta description", "no favicon"):
+        for part in ("no <title>", "no meta description", "og:title", "og:description"):
             assert part in detail
+        assert "no favicon" in detail
 
     def test_vite_favicon_and_generator_are_build_12(self) -> None:
-        head = (
-            '<head><title>X</title><meta name="description" content="d">'
-            '<meta name="generator" content="Astro v5"><link rel="icon" href="/vite.svg"></head>'
+        head = _HEAD.replace("/favicon.svg", "/vite.svg").replace(
+            "</head>", '<meta name="generator" content="Astro v5"></head>'
         )
-        out = verify_checks.run_checks(
-            {"index.html": _doc("<h1>Hi</h1>", head=head), "vite.svg": "<svg/>"}
-        )
+        out = verify_checks.run_checks({"index.html": _doc("<p>x</p>", head=head), "vite.svg": ""})
         assert _ids(out) == ["SC-BUILD-12"]
         detail = out["warnings"][0]["detail"]
         assert "vite.svg" in detail and "Astro" in detail
 
     def test_root_favicon_file_counts(self) -> None:
-        head = '<head><title>X</title><meta name="description" content="d"></head>'
+        head = _HEAD.replace('<link rel="icon" href="/favicon.svg">', "")
         out = verify_checks.run_checks({"index.html": _doc("hi", head=head), "favicon.ico": b"x"})
         assert _ids(out) == []
+
+    def test_react_index_is_the_generators_so_basics_are_skipped(self) -> None:
+        files = {"index.html": _doc("<p>x</p>", head="<head></head>")}
+        assert "SC-BUILD-12" not in _ids(verify_checks.run_checks(files, engine="react"))
+        assert "SC-BUILD-12" in _ids(verify_checks.run_checks(files, engine="svelte"))
+
+    @pytest.mark.parametrize("body", ["<p>no heading</p><h2>x</h2>", "<h1>a</h1><h1>b</h1>"])
+    def test_not_exactly_one_h1_is_a11y_06(self, body: str) -> None:
+        page = f"<!doctype html><html>{_HEAD}<body>{body}</body></html>"
+        out = verify_checks.run_checks({"index.html": page, "favicon.svg": ""})
+        assert _ids(out) == ["SC-A11Y-06"]
 
 
 class TestReport:
     def test_capped_with_an_omitted_count_and_strong_ids_first(self) -> None:
-        pages = {f"p{i}.html": _doc("<p>a — b</p>", head="<head></head>") for i in range(20)}
-        pages["index.html"] = _doc('<a href="#nope">x</a>')
+        pages = {f"p{i}.html": _doc(f"<p>a{i} — b</p>") for i in range(40)}
+        pages["index.html"] = _doc('<a href="#nope">x</a>', head="<head></head>")
         pages["favicon.svg"] = "<svg/>"
         out = verify_checks.run_checks(pages)
         assert len(out["warnings"]) == verify_checks.MAX_WARNINGS
-        assert out["omitted"] == 41 - verify_checks.MAX_WARNINGS
+        assert out["omitted"] == 42 - verify_checks.MAX_WARNINGS
         assert out["warnings"][0]["id"] == "SC-LINK-01"
         assert set(out["warnings"][0]) == {"id", "page", "detail"}
 
-    def test_a_tree_with_no_pages_is_empty(self) -> None:
-        assert verify_checks.run_checks({"app.js": "x"}) == {
-            "warnings": [],
-            "omitted": 0,
-            "pages": 0,
-        }
+    def test_one_shared_defect_is_one_warning_with_a_page_count(self) -> None:
+        footer = '<footer><a href="#">Privacy</a></footer>'
+        pages = {f"p{i}.html": _doc(footer) for i in range(3)}
+        out = verify_checks.run_checks({**pages, "favicon.svg": ""})
+        assert out["warnings"] == [
+            {
+                "id": "SC-LINK-02",
+                "page": "p0.html",
+                "detail": 'link goes nowhere: "Privacy -> #"',
+                "pages": 3,
+            }
+        ]
+
+    def test_a_tree_with_no_pages_is_skipped(self) -> None:
+        assert verify_checks.run_checks({"app.js": "x"}) == verify_checks.skipped("no_pages")
+
+    def test_pages_past_the_byte_budget_are_counted(self, monkeypatch) -> None:
+        pages = {f"p{i}.html": _doc("<p>" + "x" * 300 + "</p>") for i in range(3)}
+        monkeypatch.setattr(verify_checks, "MAX_TOTAL_BYTES", len(pages["p0.html"]) + 10)
+        out = verify_checks.run_checks({**pages, "favicon.svg": ""})
+        assert out["pages"] == 1
+        assert out["pages_skipped"] == 2
+        assert "2 pages not checked" in out["note"]
 
 
 # ── on the verdict ────────────────────────────────────────────────────────────
@@ -292,6 +391,19 @@ class TestVerdict:
         assert verdict["status"] == "passed"
         assert verdict["checks"]["skipped"] == "check_crashed"
 
+    async def test_checks_run_off_the_event_loop(self, beanie_test_db, monkeypatch) -> None:
+        threads: list[int] = []
+        real = verify._page_checks
+
+        def recording(*args: Any) -> dict[str, Any]:
+            threads.append(threading.get_ident())
+            return real(*args)
+
+        monkeypatch.setattr(verify, "_page_checks", recording)
+        verdict = await _verify(await _pocket("html", {"index.html": _SLOPPY}))
+        assert threads and threads[0] != threading.get_ident()
+        assert verdict["checks"]["pages"] == 1
+
     async def test_svelte_reads_the_draft_files_under_its_hash(self, beanie_test_db) -> None:
         from .test_verify_pipeline import _SVELTE
 
@@ -313,6 +425,18 @@ class TestVerdict:
         assert again["cached"] is True
         assert again["checks"] == first["checks"]
 
+    async def test_an_old_cached_verdict_is_upgraded_once(self, beanie_test_db) -> None:
+        store = MemoryVerifyStore()
+        pocket_id = await _pocket("html", {"index.html": _SLOPPY})
+        first = await _verify(pocket_id, _store=store)
+        key = verify_store.verdict_key(first["content_hash"])
+        record = store.read(pocket_id, key)
+        record["verdict"].pop("checks")
+        store.write(pocket_id, key, record)
+        again = await _verify(pocket_id, _store=store)
+        assert again["cached"] is True and "SC-LINK-02" in _ids(again["checks"])
+        assert "checks" in store.read(pocket_id, key)["verdict"]
+
 
 class TestProject:
     async def test_project_build_bundle_is_checked_and_stays_unverified(self) -> None:
@@ -333,6 +457,19 @@ class TestProject:
         assert verdict["note"] == verify.PROJECT_CHECKS_NOTE
         assert "SC-LINK-02" in _ids(verdict["checks"])
         assert verdict["checks"]["warnings"][0]["page"] == "index.html"
+
+    async def test_a_worker_bundle_with_no_pages_is_skipped(self) -> None:
+        source = {"package.json": "{}", "src/main.ts": "x"}
+        content_hash = project_build.project_content_hash(source)
+        manifest = {"assetsDir": "dist", "workerEntry": "_worker.js"}
+        bundle = preview_origin.pack_files(
+            {"paw-build.json": json.dumps(manifest).encode(), "dist/app.js": b"x"}
+        )
+        artifacts = Artifacts({("p1", project_build.bundle_key(content_hash)): bundle})
+        verdict = await verify.verify_pocket(
+            {"engine": "project", "source": source}, pocket_id="p1", _artifacts=artifacts
+        )
+        assert verdict["checks"]["skipped"] == "no_pages"
 
     async def test_unbuilt_project_says_so(self) -> None:
         source = {"package.json": "{}", "src/main.ts": "x"}
