@@ -4,9 +4,9 @@
 # ``read_live`` makes the reads and ``derive`` joins them (pure). Reads, all
 # through ``app_blueprint_read``'s seams: the workspace's in-flight runs on this
 # repo (``service.list_runs``, files by ``_touched``), one ``git log`` of the
-# trunk over ``WINDOW``, and through the patrols gh runner one ``gh pr list`` of
-# open PRs (files and ``statusCheckRollup``), one ``gh issue list`` of open
-# ``finding`` issues and the trunk's newest CI run. ``finding`` is the label the
+# trunk over ``WINDOW``, and through the patrols gh runner, run together, one
+# ``gh pr list`` of open PRs (files and ``statusCheckRollup``), one ``gh issue
+# list`` of open ``finding`` issues and the trunk's newest CI run. ``finding`` is the label the
 # cloud station's critics file (its lead brief: "Critics file `finding` issues");
 # a finding maps by its ``Files:`` line.
 #
@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -192,9 +193,15 @@ async def read_live(
     prs, findings, dev_ci = [], [], None
     if slug:
         listed = ["--state", "open", "--limit", _LIMIT, "--json"]
-        prs = await abr._rows(gh, ["gh", "pr", "list", "-R", slug, *listed, _PR_JSON])
         argv = ["gh", "issue", "list", "-R", slug, "--label", FINDING_LABEL, *listed]
-        findings = await abr._rows(gh, [*argv, "number,title,body,createdAt,url"])
-        dev_ci = await abr.read_dev_ci(gh, slug, branch)
+        got = await asyncio.gather(  # all three finish before the first failure raises
+            abr._rows(gh, ["gh", "pr", "list", "-R", slug, *listed, _PR_JSON]),
+            abr._rows(gh, [*argv, "number,title,body,createdAt,url"]),
+            abr.read_dev_ci(gh, slug, branch),
+            return_exceptions=True,
+        )
+        if err := next((g for g in got if isinstance(g, BaseException)), None):
+            raise err
+        prs, findings, dev_ci = got
     now = datetime.now(UTC)
     return derive(model, runs=mine, prs=prs, log=log, findings=findings, dev_ci=dev_ci, now=now)

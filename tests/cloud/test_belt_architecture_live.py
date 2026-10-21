@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -150,11 +151,18 @@ def test_the_block_stays_small_at_creative_apps_counts():
 # -- reader: real git for the merge log, fakes for gh and the runs ---------
 
 
-def fake_gh(prs=(), findings=(), fail=False):
+def fake_gh(prs=(), findings=(), fail=False, started=None):
+    """``fail``: True for every read, or the nouns (``pr``, ``issue``, ``run``)
+    that fail. With ``started``, each read waits until all three have begun."""
+
     async def gh(argv):
         if argv[0] == "git":  # the slug read
             return 0, "https://github.com/o/r.git\n", ""
-        if fail:
+        if started is not None:
+            started.append(argv[1])
+            while len(started) < 3:  # never passes when the reads run one by one
+                await asyncio.sleep(0)
+        if fail is True or argv[1] in (fail or ()):
             return 1, "", "API rate limit exceeded"
         rows = {"pr": prs, "issue": findings, "run": [{"headSha": "h", "conclusion": "success"}]}
         return 0, json.dumps(rows[argv[1]]), ""
@@ -183,10 +191,10 @@ def commit(o: Origin, path: str, *, days_ago: int = 0) -> None:
     git(o.work, "push", "-q", "origin", o.branch)
 
 
-async def test_a_pending_run_reads_changing_and_a_recent_merge_changed(origin):
+async def test_a_pending_run_reads_changing_and_a_3_day_old_merge_counts_but_lands(origin):
     origin.push(PATHS_MODEL)
     commit(origin, "src/old/x.py", days_ago=30)
-    commit(origin, "src/api/x.py", days_ago=1)
+    commit(origin, "src/api/x.py", days_ago=3)
     clone = origin.cloned()
 
     async def runs(ws):
@@ -202,8 +210,8 @@ async def test_a_pending_run_reads_changing_and_a_recent_merge_changed(origin):
         "ws1", "repo", now=lambda: 0.0, gh=fake_gh(), runs=runs, touched=touched
     )
     comps = body["live"]["components"]
-    assert (comps["ui"]["status"], comps["api"]["status"]) == ("changing", "changed")
-    assert comps["api"]["merges"]["count_7d"] == 1  # the 30-day-old commit is out
+    assert (comps["ui"]["status"], comps["api"]["status"]) == ("changing", "landed")
+    assert comps["api"]["merges"]["count_7d"] == 1  # 3 days counts; 30 days is out
     assert body["live"]["dev_ci"] == {"sha": "h", "state": "green", "url": None}
     assert body["slug"] == "o/r"
 
@@ -224,6 +232,26 @@ async def test_a_gh_failure_keeps_the_model_fresh_and_serves_the_last_live_block
     sha = origin.push({**PATHS_MODEL, "scope": "moved"})
     body = await read(200.0, fake_gh(fail=True))
     assert (body["stale"], body["sha"]) == (False, sha)
+    assert body["live"] == {**ok["live"], "stale": True}
+
+
+async def test_the_gh_reads_run_together_and_one_failing_still_serves_stale(origin):
+    origin.push(PATHS_MODEL)
+    origin.cloned()
+    started: list[str] = []
+
+    async def runs(ws):
+        return []
+
+    async def read(t, gh):
+        call = ar.read_architecture("ws1", "repo", now=lambda: t, gh=gh, runs=runs)
+        return await asyncio.wait_for(call, 10)
+
+    ok = await read(0.0, fake_gh(prs=[pr(1, ["src/ui/a.ts"])], started=started))
+    assert sorted(started) == ["issue", "pr", "run"] and ok["live"]["stale"] is False
+    started.clear()
+    body = await read(100.0, fake_gh(fail={"pr"}, started=started))
+    assert sorted(started) == ["issue", "pr", "run"]  # the other two still ran
     assert body["live"] == {**ok["live"], "stale": True}
 
 
