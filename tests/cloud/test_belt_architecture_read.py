@@ -3,12 +3,13 @@
 # Real git, no runner fakes: a bare ``origin`` with the C4 model committed on
 # ``dev`` (or only ``main``, ripple's trunk), and the clone the reader is bound to.
 # A push after the clone proves the read fetches and serves ``origin/dev``, not the
-# checkout. Pins the response contract later slices extend (``flows: []``,
-# ``loom: None``, a ``live`` block), the 404s (no model, an oversized one), the
-# stale-while-revalidate cache (a miss serves the model with ``live: None`` and
-# fills it behind; an expired hit is served at once while one background read
-# refreshes it), the stale fallback when the fetch breaks after one success (503
-# with none), and that ``belt.read`` admits a member and refuses an outsider.
+# checkout. Pins the response contract later slices extend (``flows: []`` and
+# ``warnings: []`` with no flows file, ``loom: None``, a ``live`` block), the 404s
+# (no model, an oversized one), the stale-while-revalidate cache (a miss serves the
+# model with ``live: None`` and fills it behind; an expired hit is served at once
+# while one background read refreshes it), the stale fallback when the fetch breaks
+# after one success (503 with none), and that ``belt.read`` admits a member and
+# refuses an outsider.
 
 from __future__ import annotations
 
@@ -133,12 +134,14 @@ async def test_a_repo_with_a_model_returns_it_at_origin_dev(origin):
         "read_at",
         "model",
         "flows",
+        "warnings",
         "loom",
         "live",
     }
     assert (body["sha"], body["stale"], body["slug"]) == (sha, False, "")
     assert body["model"] == {"scope": "moved", "model": MODEL["model"]}
-    assert (body["flows"], body["loom"], body["live"]["stale"]) == ([], None, False)
+    assert (body["flows"], body["warnings"], body["loom"]) == ([], [], None)
+    assert body["live"]["stale"] is False
     assert body["repo"] == str(origin.clone.resolve())
 
 

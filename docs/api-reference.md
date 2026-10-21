@@ -3452,7 +3452,11 @@ One repo's committed C4 model, for the architecture viewer. RBAC `belt.read`
   "sha": "<full commit sha>", "stale": false, "read_at": "2026-10-21T09:00:00+00:00",
   "model": { "scope": "paw-enterprise",
              "model": { "people": [], "systems": [], "relationships": [] } },
-  "flows": [], "loom": null,
+  "flows": [ { "id": "open-a-photo", "name": "Opening a photo", "steps": [
+      { "from": "photo-app", "to": "photo-model", "label": "…", "implied": false },
+      { "at": "photo-model", "label": "…" }, { "note": "…" } ] } ],
+  "warnings": [ { "flow": "ghost", "step": 0, "problem": "at 'nowhere' is not in the model" } ],
+  "loom": null,
   "live": {
     "stale": false,
     "dev_ci": { "sha": "…", "state": "green", "url": "…" },
@@ -3479,8 +3483,24 @@ One repo's committed C4 model, for the architecture viewer. RBAC `belt.read`
   readable model (missing, not JSON, no `model.systems` list, or over 1 MB) is
   404 `belt.architecture_not_found`.
 - `slug` is the GitHub `owner/repo`, or `""` when origin is not on GitHub.
-- `flows` and `loom` are always present. They read `[]` and `null` until the
-  viewer's later slices fill them, so a client can test for them now.
+- `flows` is `docs/c4/flows.json` at the same `sha`, `[]` when the repo has none.
+  The format is `ee/pocketpaw_ee/cloud/belt/flows.schema.json`: each flow is
+  `{id, name, description?, steps}`, and a step is a message
+  `{from, to, label, technology?, reverse?}`, a process `{at, label}` (work inside
+  one element) or a note `{note}`. Ids are model element ids (people, systems,
+  containers, components). `reverse: true` is a reply along the `to → from`
+  relationship, drawn `from → to`. Every message step comes back with `implied`:
+  `true` when the model has no relationship for the hop (`source`/`target`,
+  checked the other way for `reverse`). Alternate and parallel paths are out of
+  scope.
+- `warnings` lists what was dropped, as `{flow, step, problem}`. A flow that
+  breaks the schema, or names an id the model lacks, is dropped whole (`flow` is
+  its id, `step` the index of the bad step or `null`). A file that is not JSON,
+  over 1 MB (sized before it is read), not `{"flows": [...]}`, a folder rather
+  than a file, or unreadable by git gives `flows: []` and one warning with
+  `flow` and `step` `null`. A bad flows file never fails the read. `[]` when
+  clean.
+- `loom` is always present and reads `null` until a later slice fills it.
 - `live` has a row per component of the repo's own system, keyed by model id.
   Signals join a component when one of their files matches its `paths` globs:
   in-flight Belt runs on this repo (by the files they touched), open PRs (by

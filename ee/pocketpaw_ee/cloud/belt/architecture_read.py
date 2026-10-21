@@ -2,15 +2,17 @@
 # ``GET /belt/architecture?repo=``: one repo's committed C4 model for the
 # architecture viewer.
 #
-# The body is ``{repo, slug, sha, stale, read_at, model, flows, loom, live}``.
+# The body is ``{repo, slug, sha, stale, read_at, model, flows, warnings, loom,
+# live}``.
 # ``model`` is ``{scope, model}`` from ``docs/c4/model.json`` at ``origin/dev``
 # (``origin/main`` when the clone has no ``origin/dev``, as ripple), read through
 # ``service.read_repo_model`` after a fetch of that branch, so it follows the
 # remote, not the checkout. ``live`` is ``architecture_live``'s block, read under
 # the same cache entry; a failed live read (gh, a rate limit) keeps the fresh
 # model and serves the last live block with its own ``stale: True``, ``None``
-# with none yet. ``flows`` (``[]``) and ``loom`` (``None``) are the keys later
-# slices fill; clients may rely on them being present.
+# with none yet. ``flows`` and ``warnings`` are ``architecture_flows``'s read of
+# ``docs/c4/flows.json`` at the same sha (``[]`` with no file). ``loom``
+# (``None``) is the key a later slice fills; clients may rely on it.
 #
 # Cached per (workspace, repo), stale-while-revalidate: a read within ``TTL``
 # is the cached body; a later one is still the cached body, served at once,
@@ -36,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import app_blueprint_read as abr
+from .architecture_flows import load_flows
 from .architecture_live import read_live
 from .executor import _re_resolve_repo, _run
 from .service import _READ_GIT, BeltConsoleError, read_repo_model
@@ -146,6 +149,7 @@ async def _read_model(
     sha, model = await read_repo_model(path, f"origin/{branch}")
     if model is None:
         raise _NoModel
+    flows, warnings = await load_flows(path, sha, model)
     slug = prev["slug"] if prev else await _github_slug(str(path), gh) or ""
     body = {
         "repo": str(path),
@@ -154,7 +158,8 @@ async def _read_model(
         "stale": False,
         "read_at": datetime.now(UTC).isoformat(),
         "model": {"scope": model.get("scope"), "model": model["model"]},
-        "flows": [],
+        "flows": flows,
+        "warnings": warnings,
         "loom": None,
         "live": None,
     }
