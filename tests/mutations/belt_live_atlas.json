@@ -93,8 +93,8 @@
   {
     "label": "blueprint route: reads the owner's working tree, not the base",
     "file": "ee/pocketpaw_ee/cloud/belt/service.py",
-    "find": "        argv = [*_READ_GIT, \"cat-file\", \"blob\", f\"{sha.strip()}:{_MODEL_PATH}\"]\n        code, text, _ = await _run(argv, cwd=repo)\n",
-    "replace": "        code, text = 0, (repo / _MODEL_PATH).read_text()\n",
+    "find": "    argv = [*_READ_GIT, \"cat-file\", \"blob\", f\"{sha.strip()}:{_MODEL_PATH}\"]\n    code, text, _ = await _run(argv, cwd=repo)\n",
+    "replace": "    code, text = 0, (repo / _MODEL_PATH).read_text()\n",
     "tests": [
       "tests/cloud/test_belt_live_atlas.py::test_the_blueprint_is_read_at_the_base_not_the_working_tree"
     ]

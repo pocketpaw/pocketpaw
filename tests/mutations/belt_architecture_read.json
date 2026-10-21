@@ -1,0 +1,57 @@
+[
+  {
+    "label": "architecture read: serves the stale clone, never fetches",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "    code, _, err = await _git(path, \"fetch\", \"--no-tags\", \"origin\", branch)\n",
+    "replace": "    code, err = 0, \"\"\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_a_repo_with_a_model_returns_it_at_origin_dev"
+    ]
+  },
+  {
+    "label": "architecture read: a failed refresh is a 503, not stale",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "            if hit is None:\n                msg = \"Architecture not readable yet.\"\n",
+    "replace": "            if True:\n                msg = \"Architecture not readable yet.\"\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_a_failed_fetch_after_one_success_serves_stale"
+    ]
+  },
+  {
+    "label": "architecture read: no model reads as stale or 503",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "        except _NoModel:\n",
+    "replace": "        except ZeroDivisionError:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_no_model_is_404",
+      "tests/cloud/test_belt_architecture_read.py::test_an_oversized_model_is_unreadable_never_partial"
+    ]
+  },
+  {
+    "label": "architecture read: an oversized model is served",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    if code != 0 or len(text.encode(\"utf-8\")) > MAX_MODEL_BYTES:\n        return sha.strip(), None\n",
+    "replace": "    if code != 0:\n        return sha.strip(), None\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_an_oversized_model_is_unreadable_never_partial"
+    ]
+  },
+  {
+    "label": "architecture read: the cache never expires",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "        if hit and now() - hit[\"at\"] < TTL:\n",
+    "replace": "        if hit:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_a_read_within_the_ttl_is_the_cached_body"
+    ]
+  },
+  {
+    "label": "architecture read: a later slice's key goes missing",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "        \"loom\": None,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_a_repo_with_a_model_returns_it_at_origin_dev"
+    ]
+  }
+]

@@ -3439,6 +3439,39 @@ every role-gated entry stays hidden.
   "download") lifts that. Exact ties are deterministic: verbs last, then the
   entry whose name the query covers more, then kind, then id.
 
+## Belt — Architecture Read
+
+### `GET /api/v1/belt/architecture?repo=<path>`
+
+One repo's committed C4 model, for the architecture viewer. RBAC `belt.read`
+(any workspace member). Source: `ee/pocketpaw_ee/cloud/belt/architecture_read.py`.
+
+```json
+{
+  "repo": "/…/paw-enterprise", "slug": "qbtrix/paw-enterprise",
+  "sha": "<full commit sha>", "stale": false, "read_at": "2026-10-21T09:00:00+00:00",
+  "model": { "scope": "paw-enterprise",
+             "model": { "people": [], "systems": [], "relationships": [] } },
+  "flows": [], "loom": null, "live": null
+}
+```
+
+- `repo` is the allowlisted path, resolved. Outside the allowlist: 404
+  `belt.repo_not_found`.
+- `model` is `{scope, model}` from `docs/c4/model.json` at `origin/dev`, or at
+  `origin/main` when the clone has no `origin/dev` (ripple). The branch is fetched
+  first, so the read follows the remote, not the checkout. A repo with no
+  readable model (missing, not JSON, no `model.systems` list, or over 1 MB) is
+  404 `belt.architecture_not_found`.
+- `slug` is the GitHub `owner/repo`, or `""` when origin is not on GitHub.
+- `flows`, `loom` and `live` are always present. They read `[]`, `null` and
+  `null` until the viewer's later slices fill them, so a client can test for
+  them now.
+- Cached per workspace and repo for 60 s behind a single-flight lock. When a
+  refresh fails (the fetch, git itself), the last body comes back with
+  `stale: true`. With no earlier body it is 503 `belt.architecture_unavailable`.
+- Error bodies carry `detail`, the sentence the UI shows.
+
 ## Sites — Native Editing
 
 NE-4b / NE-5b. The **native site editor** renders a svelte Paw Site directly in

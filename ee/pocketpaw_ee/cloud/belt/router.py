@@ -29,6 +29,8 @@
 #                                 status per component
 #   * GET  /belt/blueprints/suite-map?repo= — the suite feature map (layers, apps,
 #                                 features with adopters) with each row's live status
+#   * GET  /belt/architecture?repo= — one repo's committed C4 model at its trunk
+#                                 for the architecture viewer (``architecture_read``)
 #
 # Routes are THIN: they read identity (workspace + user) from the cloud deps,
 # delegate to ``ee.cloud.belt.service``, and return what the service built. RBAC
@@ -55,7 +57,7 @@ from pocketpaw_ee.cloud._core.deps import (
     require_paid_or_early_access_allowed,
 )
 from pocketpaw_ee.cloud._core.errors import CloudError
-from pocketpaw_ee.cloud.belt import app_blueprint_read
+from pocketpaw_ee.cloud.belt import app_blueprint_read, architecture_read
 from pocketpaw_ee.cloud.belt import review as belt_review
 from pocketpaw_ee.cloud.belt import service as belt_service
 from pocketpaw_ee.cloud.license import require_license
@@ -336,6 +338,22 @@ async def get_suite_map(
     readable ``docs/blueprints/suite/feature-map.json``."""
     try:
         return await app_blueprint_read.read_suite_map(workspace_id, repo)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/architecture")
+async def get_architecture(
+    repo: str = Query(min_length=1),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The repo's C4 model at ``origin/dev`` (``main`` without one), cached 60 s:
+    ``{repo, slug, sha, stale, read_at, model, flows, loom, live}``. 404
+    ``belt.architecture_not_found`` without a readable model; a failed refresh
+    serves the last body with ``stale: true``, 503 when there is none yet."""
+    try:
+        return await architecture_read.read_architecture(workspace_id, repo)
     except belt_service.BeltConsoleError as exc:
         raise _to_cloud_error(exc) from exc
 
