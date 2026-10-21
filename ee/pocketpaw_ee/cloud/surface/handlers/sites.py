@@ -1120,9 +1120,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "(subject, composition, lighting, mood) — a vague prompt buys a generic "
         "picture. It returns a permanent public URL; use it VERBATIM. "
         "(c2) `mcp__pocketpaw_site_media__generate_site_video` when the hero should "
-        "MOVE. `engine: \"motion\"` renders animated type, shapes and brand graphics "
+        'MOVE. `engine: "motion"` renders animated type, shapes and brand graphics '
         "as a seamless background loop and works on every server: pass the brand "
-        "colours as `palette` and describe one visual idea. `engine: \"generative\"` "
+        'colours as `palette` and describe one visual idea. `engine: "generative"` '
         "makes photoreal footage (pass the owner's photo as `image_url`, describe the "
         "camera move) and needs fal; the default `auto` picks it when available, else "
         "motion. It takes a minute or more and costs more than an image, so one hero "
