@@ -1464,6 +1464,28 @@ async def test_a_restart_past_the_lead_timeout_releases_without_needs_human(stor
     _never_a_failure(action)
 
 
+async def test_a_restart_past_the_timeout_leaves_every_line_issue_free(store, dirs, playbook):
+    """creative-apps #3479/#3458 shared one line lead: a restart's timeout
+    parks each issue unlabelled and the reason names each one as free."""
+    repo, launch = dirs
+    run_ref = await _resumed_lead(store, repo, 8 * 3600 + 600)
+    feats = [
+        {"feature": FEATURE, "packet": PACKET, "issue": 93, "branch": f"lead/{FEATURE}"},
+        {"feature": FEATURE_B, "packet": PACKET_B, "issue": 94, "branch": f"lead/{FEATURE_B}"},
+    ]
+    blob = (await store.get_action(run_ref)).parameters["_code_change"]
+    lead = {**blob["lead"], "issues": [93, 94], "features": feats}
+    await cloud_station._patch(store, run_ref, lead=lead)
+    runner = LeadRunner(fail={"pr list": 10**6})
+
+    assert await _lead_dispatcher(runner, launch, workspaces_for=_ws).resume_all() == 1
+
+    assert not _flagged(runner)
+    reason = (await store.get_action(run_ref)).rejected_reason or ""
+    assert "#93 left free for the next shift" in reason
+    assert "#94 left free for the next shift" in reason
+
+
 async def test_a_resumed_lead_that_times_out_after_a_clean_poll_is_labelled(store, dirs, playbook):
     """The restart exemption ends at the resumed tracker's first clean poll: a
     quiet lead that reaches 8 h after it is parked ``needs-human`` as usual."""

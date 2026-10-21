@@ -16,22 +16,18 @@
 #           tester. No PR by NO_PR_TIMEOUT: a worker's comment releases it (``needs-human``),
 #           else a relaunch, then release. gh retries transient failures (lesson 42) and
 #           waits out a rate limit to the reset its response headers give.
-#   RELEASE a rejected run (``_release``, or a human's reject the tracker sees) first gets
-#           one stop message queued into its newest session (``_STOP_TEXT``, kept on
-#           ``stopped``); a failed stop is logged, never a failed release (lesson 182).
+#   RELEASE a rejected run (``_release``, or a human's reject) first gets one stop message
+#           in its newest session (``_STOP_TEXT``, on ``stopped``); a failed stop logs (lesson 182).
 #   REVIEW  ``POCKETPAW_FACTORY_CLOUD_REVIEWER=1``: one reviewer per green head (REVIEW_CAP
-#           in flight) posts ``Belt-Review: pass|fail`` + ``Head: <sha>``, turned into the
-#           ``belt/review`` status (a fail's items go through ``clef.judge_review`` to a
-#           ``review`` fixer); no verdict in time passes.
+#           in flight) posts ``Belt-Review: pass|fail`` + ``Head: <sha>`` as the ``belt/review``
+#           status (a fail goes through ``clef.judge_review`` to a ``review`` fixer); none passes.
 #   LESSONS a merged PR a ``ci``/``review`` fixer got through, and each tester bug, is one
 #           deduplicated lesson in the mandate's soul; a brief recalls the top 5.
 #   TESTER  ``POCKETPAW_FACTORY_CLOUD_TESTER=1`` + a ``tester`` seat: one session per landed
 #           run files bugs and one ``Belt-Test`` PR; it never holds the land.
 #   RESUME  at startup every launched run with no diff is tracked again (never relaunched),
 #           as is one whose tracker died on a TRACK error (lesson 45); a lead with a newer
-#           pending lead on one of its issues is released (newer: ``(created_at, id)``).
-#           A resumed lead that times out before its first clean poll is a restart's
-#           timeout: released, its issue left free (no ``needs-human``).
+#           pending lead on an issue is released; one timed out before a clean poll, unlabelled.
 #   LEAD    ``recipe == "feature-lead"``: one session per line of feature issues (the first
 #           flat on ``lead``, all on ``lead.features``), briefed from ``docs/factory/lead.md``,
 #           each issue and packet, the run id and a 3k PACK (loom, kb, soul). A ``lead/<f>``
