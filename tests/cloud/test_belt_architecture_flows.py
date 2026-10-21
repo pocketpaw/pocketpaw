@@ -3,7 +3,10 @@
 # ``check`` keeps a valid flow and marks each hop ``implied`` or not (``reverse``
 # read along ``to -> from``), drops a flow naming an unknown id with warnings, and
 # survives non-dict model elements. ``load_flows`` runs on real git: no file is
-# ``([], [])``; a git failure, a folder or an oversized blob is a warning.
+# ``([], [])``; a git failure, a folder or an oversized blob is a warning. The
+# hand-written schema check drops a flow off the schema, turns a malformed file
+# into one warning, and agrees with flows.schema.json (jsonschema, test-only) on
+# good and bad fixtures.
 
 from __future__ import annotations
 
@@ -150,3 +153,69 @@ async def test_the_read_serves_flows_and_warnings_past_a_non_dict_system(tmp_pat
     assert body["warnings"] == [
         {"flow": "ghost", "step": 0, "problem": "at 'nowhere' is not in the model"}
     ]
+
+
+def test_a_flow_off_the_schema_is_dropped_and_warned():
+    mixed = _flow({"at": "web", "to": "api", "label": "?"}, id="mixed")
+    flows, warnings = af.check({"flows": [mixed, {"name": "no id", "steps": []}, FLOW]}, MODEL)
+    assert [f["id"] for f in flows] == ["save"]
+    assert [(w["flow"], w["step"]) for w in warnings] == [("mixed", None), (None, None)]
+    assert all(w["problem"].startswith("flows/") for w in warnings)
+
+
+@pytest.mark.parametrize("data", [[], {"flows": "x"}, {"other": []}])
+def test_a_malformed_file_is_one_warning_never_a_raise(data):
+    problem = 'flows.json: must be {"flows": [...]}'
+    assert af.check(data, MODEL) == ([], [{"flow": None, "step": None, "problem": problem}])
+
+
+_MSG = {"from": "a", "to": "b", "label": "x"}
+GOOD_FLOWS = [
+    {"id": "f", "name": "n", "steps": [_MSG]},
+    {
+        "id": "f",
+        "name": "n",
+        "description": "",
+        "steps": [{"note": "n"}, {"at": "a", "label": "l"}],
+    },
+    {"id": "f", "name": "n", "steps": [{**_MSG, "technology": "", "reverse": False}]},
+    {"id": "i" * 200, "name": "n" * 2000, "steps": [{**_MSG, "technology": "t" * 200}] * 200},
+]
+BAD_FLOWS = [
+    "flow",
+    {"name": "n", "steps": [_MSG]},
+    {"id": "", "name": "n", "steps": [_MSG]},
+    {"id": "i" * 201, "name": "n", "steps": [_MSG]},
+    {"id": "f", "name": "n" * 2001, "steps": [_MSG]},
+    {"id": "f", "name": "n", "steps": []},
+    {"id": "f", "name": "n", "steps": [_MSG] * 201},
+    {"id": "f", "name": "n", "steps": {"0": _MSG}},
+    {"id": "f", "name": "n", "steps": [_MSG], "extra": 1},
+    {"id": 3, "name": "n", "steps": [_MSG]},
+    {"id": "f", "name": "n", "description": 5, "steps": [_MSG]},
+    {"id": "f", "name": "n", "steps": ["step"]},
+    {"id": "f", "name": "n", "steps": [{"from": "a", "label": "x"}]},
+    {"id": "f", "name": "n", "steps": [{**_MSG, "reverse": "yes"}]},
+    {"id": "f", "name": "n", "steps": [{**_MSG, "technology": "t" * 201}]},
+    {"id": "f", "name": "n", "steps": [{**_MSG, "at": "a"}]},
+    {"id": "f", "name": "n", "steps": [{"at": "a", "label": "l", "note": "n"}]},
+    {"id": "f", "name": "n", "steps": [{"at": "a"}]},
+    {"id": "f", "name": "n", "steps": [{"note": ""}]},
+    {"id": "f", "name": "n", "steps": [{"note": "n", "label": "l"}]},
+    {"id": "f", "name": "n", "steps": [{**_MSG, "from": ""}]},
+    {"id": "f", "name": "n", "steps": [{**_MSG, "label": None}]},
+]
+
+
+def test_the_hand_check_agrees_with_the_published_schema():
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(Path(af.__file__).with_name("flows.schema.json").read_text())
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+    for flow in GOOD_FLOWS + BAD_FLOWS:
+        by_schema = validator.is_valid({"flows": [flow]})
+        by_hand = af._flow_problem(flow, "flows/0") is None
+        assert by_schema == by_hand == (flow in GOOD_FLOWS), flow
+    for doc in [{"flows": []}, {"flows": [], "x": 1}, [], {"flows": "x"}, {"other": []}, None]:
+        assert validator.is_valid(doc) == (af.check(doc, MODEL)[1] == []), doc
