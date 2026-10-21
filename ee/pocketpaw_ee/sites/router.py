@@ -1562,16 +1562,11 @@ async def generate_site_asset(
                 aspect_ratio=aspect_ratio,
             )
         else:
-            source = None
-            if body.image_url:
-                source = await media_generation.resolve_site_video_source(
-                    body.image_url, workspace_id=ctx.workspace_id, pocket_id=pocket_id
-                )
             result = await media_generation.generate_site_video_asset(
                 workspace_id=ctx.workspace_id,
                 pocket_id=pocket_id,
                 prompt=body.prompt,
-                image_url=source,
+                image_url=body.image_url,
                 aspect_ratio=aspect_ratio,
                 duration_sec=body.duration or 5,
             )

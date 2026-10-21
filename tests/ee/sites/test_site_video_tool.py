@@ -30,6 +30,10 @@ from pocketpaw_ee.agent.mcp_servers.site_media import (
 
 _MP4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64
 _JPG = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+#: A public asset URL under ws1/pk1, the only http(s) source the tool accepts.
+_OWN_ASSET = "https://cdn.example.com/sites-assets/ws1/pk1/3fa9c1d0e2b4a6f8-photo.png"
 
 
 def _text(resp: dict) -> str:
@@ -49,10 +53,27 @@ class _FakeAsset:
     key: str = "sites-assets/ws/pk/abc-hero.mp4"
 
 
+class _Minter:
+    """Lets FakeStore use the REAL ``key_for_url`` prefix check."""
+
+    def public_url(self, key: str) -> str:
+        return f"https://cdn.example.com/{key}"
+
+
 class FakeStore:
     def __init__(self, fail_on: str | None = None) -> None:
         self.seen: list[tuple[str, str, str]] = []
+        self.read_keys: list[str] = []
         self._fail_on = fail_on
+
+    def key_for_url(self, url, **kw):  # noqa: ANN001
+        from pocketpaw_ee.sites.public_assets import PublicAssetStore
+
+        return PublicAssetStore(_Minter()).key_for_url(url, **kw)
+
+    async def read(self, key, **_kw):  # noqa: ANN001
+        self.read_keys.append(key)
+        return _PNG
 
     async def put(self, data, *, filename, workspace_id, pocket_id):  # noqa: ANN001
         if self._fail_on and self._fail_on in filename:
@@ -85,6 +106,7 @@ def _patch_fal(monkeypatch, *, video=_MP4, poster=_JPG, raises: Exception | None
     monkeypatch.setattr("pocketpaw_ee.cloud.studio.fal_video.run_fal_video", _run, raising=False)
 
     async def _resolve(url, **_kw):
+        seen.setdefault("resolved", []).append(url)
         return (f"data:image/png;base64,FAKE({url})", "image/png")
 
     monkeypatch.setattr(
@@ -148,7 +170,7 @@ async def test_the_video_and_poster_are_public_and_absolute(monkeypatch) -> None
     _wire(monkeypatch, store)
 
     resp = await _generate_site_video_handler(
-        {"pocket_id": "pk1", "prompt": "slow dolly in", "image_url": "https://x/a.png"}
+        {"pocket_id": "pk1", "prompt": "slow dolly in", "image_url": _OWN_ASSET}
     )
     body = _body(resp)
 
@@ -238,11 +260,13 @@ async def test_an_image_selects_the_image_to_video_model(monkeypatch) -> None:
     seen, _ = _wire(monkeypatch, store)
 
     await _generate_site_video_handler(
-        {"pocket_id": "pk1", "prompt": "orbit left", "image_url": "https://cdn/x.png"}
+        {"pocket_id": "pk1", "prompt": "orbit left", "image_url": _OWN_ASSET}
     )
 
     assert seen["model"] == fal_video.DEFAULT_IMAGE_TO_VIDEO_MODEL
-    assert seen["image_urls"] and "x.png" in seen["image_urls"][0]
+    # Read back from the rail and inlined; never fetched by URL.
+    assert seen["image_urls"][0].startswith("data:image/png;base64,")
+    assert store.read_keys == ["sites-assets/ws1/pk1/3fa9c1d0e2b4a6f8-photo.png"]
 
 
 @pytest.mark.asyncio
@@ -296,3 +320,83 @@ async def test_a_foreign_pocket_is_refused_before_any_spend(monkeypatch) -> None
     assert seen == {}, "fal must not have been called at all"
     assert recorded == [], "and nothing may be recorded against a foreign site"
     assert store.seen == []
+
+
+# ── image_url is narrowed: the agent cannot steer a fetch or a read ─────
+
+
+@pytest.mark.asyncio
+async def test_the_agent_cannot_make_the_server_fetch_a_url(monkeypatch) -> None:
+    """SSRF: studio's resolver httpx-GETs any http(s) URL, and the bytes would end
+    up in a PUBLIC video. A model-chosen URL must be refused before anything runs.
+
+    MUTATION: skip ``resolve_site_video_source`` in the video core.
+    """
+
+    async def _no_fetch(*_a, **_kw):
+        raise AssertionError("the server must never fetch an agent-supplied URL")
+
+    monkeypatch.setattr("httpx.AsyncClient.get", _no_fetch)
+    store = FakeStore()
+    seen, recorded = _wire(monkeypatch, store)
+
+    for url in (
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        "http://localhost:8888/api/v1/admin",
+        "https://cdn.example.com/sites-assets/other-ws/pk1/abc-x.png",
+        "data:image/png;base64,AAAA",
+    ):
+        resp = await _generate_site_video_handler(
+            {"pocket_id": "pk1", "prompt": "x", "image_url": url}
+        )
+        assert resp.get("is_error") is True, url
+
+    assert seen == {}, "neither the resolver nor fal may run"
+    assert recorded == [], "a refused source writes no history row"
+    assert store.seen == [] and store.read_keys == []
+
+
+@pytest.mark.asyncio
+async def test_the_agent_cannot_animate_another_workspaces_capture(monkeypatch) -> None:
+    """A /browser capture is private to its workspace; publishing it inside a
+    public video would leak it. A legacy untagged name cannot be attributed, so
+    it is refused too."""
+    from pocketpaw_ee.cloud.media import storage as media_storage
+
+    store = FakeStore()
+    seen, _ = _wire(monkeypatch, store)
+    foreign = f"/api/v1/media/{media_storage.capture_name_prefix('other-ws')}1-x.png"
+    untagged = "/api/v1/media/1700000000000-legacy.png"
+
+    for url in (foreign, untagged):
+        resp = await _generate_site_video_handler(
+            {"pocket_id": "pk1", "prompt": "x", "image_url": url}
+        )
+        assert resp.get("is_error") is True, url
+    assert seen == {}
+
+
+@pytest.mark.asyncio
+async def test_the_agent_can_animate_its_own_media(monkeypatch) -> None:
+    """The legitimate sources still work: this site's asset, or a Studio file
+    stamped with this workspace's token (read from the private adapter)."""
+    from pocketpaw_ee.cloud.media import storage as media_storage
+
+    store = FakeStore()
+    seen, _ = _wire(monkeypatch, store)
+    own_media = f"/api/v1/media/{media_storage.owned_name_prefix('ws1')}1-x.png"
+
+    ok = _body(
+        await _generate_site_video_handler(
+            {"pocket_id": "pk1", "prompt": "x", "image_url": own_media}
+        )
+    )
+    assert ok["ok"] is True
+    assert seen["resolved"] == [own_media]
+
+    ok = _body(
+        await _generate_site_video_handler(
+            {"pocket_id": "pk1", "prompt": "x", "image_url": _OWN_ASSET}
+        )
+    )
+    assert ok["ok"] is True

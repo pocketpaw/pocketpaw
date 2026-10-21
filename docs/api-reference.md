@@ -4080,8 +4080,12 @@ Both return the same body. `assets` items have the list/upload shape; for a vide
   video: `16:9 9:16 1:1`. Anything else is **400**.
 - `image_url` and `duration` (`5|10`, default 5) are video only (**400** on an image).
   `image_url` switches to image-to-video and must be one of **this pocket's** public
-  asset URLs or an `/api/v1/media/<name>` this workspace can see. Anything else,
-  including any other URL, is **400**; the server never fetches it.
+  asset URLs or an `/api/v1/media/<name>` stamped with this workspace's owner token.
+  Anything else, including any other URL, is **400**; the server never fetches it.
+  The agent's `generate_site_video` tool goes through the same check. A legacy
+  untagged Studio image (saved before every write stamped an owner) can't be
+  animated by URL: copy it onto the site with `from-studio` first, then pass the
+  resulting asset URL.
 - A provider or storage failure is **502** with the reason and what to do next.
   An unpaid early-access workspace gets **403** `early_access.not_available`.
 - The generation is recorded in the Studio history with `source: "sites"` and the
@@ -4092,7 +4096,9 @@ Both return the same body. `assets` items have the list/upload shape; for a vide
 existing, succeeded Studio generation of this workspace onto the site: every image
 of an image generation, or the clip of a video plus its poster (`posterUrl`) as
 `poster`. Bytes are read from the generation's own stored media (the private media
-adapter, or this workspace's prefix on the public rail), never from a URL. Keys are
+adapter, or this workspace's prefix on the public rail), never from a URL. Names
+come from this workspace's own history record, so legacy untagged files copy fine;
+only a name stamped with another workspace's token is refused. Keys are
 content-addressed, so copying the same generation twice returns the same keys. A
 missing or another workspace's generation is **404**; one still running is **409**;
 a non-image/video generation (audio) is **400**.

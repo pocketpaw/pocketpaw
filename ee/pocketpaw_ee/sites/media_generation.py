@@ -225,8 +225,9 @@ async def generate_site_video_asset(
 
     The history row is written ``running`` BEFORE the render (minutes on fal) so
     /studio shows the job in flight, and the same row moves to succeeded or
-    failed afterwards. ``image_url`` is passed to studio's source resolver as-is:
-    the HTTP caller narrows it first (``resolve_site_video_source``).
+    failed afterwards. ``image_url`` is narrowed by ``resolve_site_video_source``
+    for EVERY caller (agent and HTTP alike) before anything reads it, so neither
+    can make the server fetch a URL or read another workspace's media.
     """
     from pocketpaw_ee.cloud.studio import fal_video, schemas, service
     from pocketpaw_ee.sites.public_assets import PublicAssetError
@@ -248,8 +249,17 @@ async def generate_site_video_asset(
 
     input_urls: list[str] | None = None
     if image_url:
+        source = await resolve_site_video_source(
+            image_url, workspace_id=workspace_id, pocket_id=pocket_id, store=store
+        )
         try:
-            data_url, _mime = await service._resolve_source_data_url(image_url)
+            # A site asset is already inlined as data:; a media name is read from
+            # the private adapter by studio's resolver (never fetched).
+            data_url = (
+                source
+                if source.startswith("data:")
+                else (await service._resolve_source_data_url(source))[0]
+            )
         except Exception as exc:  # noqa: BLE001
             raise SiteMediaError(
                 "bad_source", f"Could not read the source image {image_url!r}: {exc}"
@@ -357,15 +367,25 @@ def _media_name(url: str) -> str | None:
     return name
 
 
-def _media_name_visible(name: str, workspace_id: str) -> bool:
-    """Whether this workspace may read ``name`` — the same rule ``serve_media``
-    and the gallery listing apply (captures and owned uploads carry a token)."""
+def _foreign_media_name(name: str, workspace_id: str) -> bool:
+    """True when ``name`` carries ANOTHER workspace's owner token (a /browser
+    capture or a stamped gallery file). An untagged legacy name is not foreign."""
     from pocketpaw_ee.cloud.media import storage as media_storage
 
+    token = media_storage.capture_owner_token(workspace_id)
     capture = media_storage.capture_owner_of(name)
-    if capture is not None and capture != media_storage.capture_owner_token(workspace_id):
-        return False
-    return media_storage.visible_to(name, workspace_id)
+    owner = media_storage.owner_of(name)
+    return (capture is not None and capture != token) or (owner is not None and owner != token)
+
+
+def _owned_media_name(name: str, workspace_id: str) -> bool:
+    """True only when ``name`` is stamped with THIS workspace's token. Checked
+    directly rather than through ``storage.visible_to``, whose legacy-name policy
+    is a listing rule and has changed under us before."""
+    from pocketpaw_ee.cloud.media import storage as media_storage
+
+    token = media_storage.capture_owner_token(workspace_id)
+    return media_storage.owner_of(name) == token or media_storage.capture_owner_of(name) == token
 
 
 async def _read_private_media(name: str, *, max_bytes: int) -> bytes:
@@ -390,14 +410,27 @@ async def _read_private_media(name: str, *, max_bytes: int) -> bytes:
     return bytes(buf)
 
 
-async def resolve_site_video_source(image_url: str, *, workspace_id: str, pocket_id: str) -> str:
-    """Narrow a client-supplied image-to-video source to media this site owns.
+async def resolve_site_video_source(
+    image_url: str,
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    store: PublicAssetStore | None = None,
+) -> str:
+    """Narrow a caller-supplied image-to-video source to media this site owns.
 
     Accepts ONLY a public asset URL under this pocket's own prefix (read back
     through the rail and inlined as a ``data:`` URL) or a private
-    ``/api/v1/media/<name>`` this workspace can see (studio's resolver reads it
-    from the media adapter). Anything else is refused, so the route never fetches
-    a URL a client chose.
+    ``/api/v1/media/<name>`` stamped with this workspace's owner token (studio's
+    resolver reads it from the media adapter). Anything else — any other http(s)
+    URL, a ``data:`` URL, another tenant's capture — is refused, so neither the
+    agent nor a client can make the server fetch a URL.
+
+    A LEGACY UNTAGGED Studio image (written before every save stamped an owner)
+    cannot be animated by URL: nothing proves which workspace it belongs to.
+    Copy it onto the site first (``copy_studio_generation`` trusts it, because
+    there the name comes from this workspace's own history record), then pass
+    the resulting site asset URL.
     """
     from pocketpaw_ee.sites.public_assets import (
         MAX_IMAGE_BYTES,
@@ -414,11 +447,11 @@ async def resolve_site_video_source(image_url: str, *, workspace_id: str, pocket
 
     name = _media_name(url)
     if name is not None:
-        if not _media_name_visible(name, workspace_id):
+        if not _owned_media_name(name, workspace_id):
             raise refusal
         return url
 
-    store = _store_or_raise()
+    store = store or _store_or_raise()
     key = store.key_for_url(url, workspace_id=workspace_id, pocket_id=pocket_id)
     if key is None:
         raise refusal
@@ -436,12 +469,17 @@ async def resolve_site_video_source(image_url: str, *, workspace_id: str, pocket
 
 
 async def _read_generation_asset(url: str, *, workspace_id: str, store: PublicAssetStore) -> bytes:
-    """The bytes of one asset a generation recorded, from storage only."""
+    """The bytes of one asset a generation recorded, from storage only.
+
+    The URL comes from this workspace's own history record (``get_generation``
+    is workspace-scoped), so an untagged legacy name is trusted here; only a name
+    stamped with ANOTHER workspace's token is refused.
+    """
     from pocketpaw_ee.sites.public_assets import MAX_ASSET_BYTES, PublicAssetError
 
     name = _media_name(url)
     if name is not None:
-        if not _media_name_visible(name, workspace_id):
+        if _foreign_media_name(name, workspace_id):
             raise SiteMediaError("missing", "That generation's media is not readable here.")
         return await _read_private_media(name, max_bytes=MAX_ASSET_BYTES)
 

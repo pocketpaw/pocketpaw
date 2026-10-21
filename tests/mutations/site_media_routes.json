@@ -9,15 +9,6 @@
     ]
   },
   {
-    "label": "another workspace's browser capture is readable as an image_url",
-    "file": "ee/pocketpaw_ee/sites/media_generation.py",
-    "find": "    if capture is not None and capture != media_storage.capture_owner_token(workspace_id):",
-    "replace": "    if False:",
-    "tests": [
-      "tests/ee/sites/test_site_media_routes.py::test_video_image_url_may_be_a_workspace_media_file"
-    ]
-  },
-  {
     "label": "from-studio ignores a missing or foreign generation",
     "file": "ee/pocketpaw_ee/sites/media_generation.py",
     "find": "    if gen is None:",
@@ -33,6 +24,34 @@
     "replace": "service.list_generations(workspace_id)",
     "tests": [
       "tests/cloud/studio/test_router.py::test_list_generations_passes_source_and_pocket_filters"
+    ]
+  },
+  {
+    "label": "image_url accepts a media name this workspace does not own",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "    return media_storage.owner_of(name) == token or media_storage.capture_owner_of(name) == token",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_site_media_routes.py::test_video_image_url_may_be_a_workspace_media_file",
+      "tests/ee/sites/test_site_video_tool.py::test_the_agent_cannot_animate_another_workspaces_capture"
+    ]
+  },
+  {
+    "label": "from-studio reads a name stamped with another workspace's token",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "    return (capture is not None and capture != token) or (owner is not None and owner != token)",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_site_media_routes.py::test_a_generation_naming_another_workspaces_file_is_refused"
+    ]
+  },
+  {
+    "label": "the video core skips narrowing image_url (agent SSRF)",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "        source = await resolve_site_video_source(\n            image_url, workspace_id=workspace_id, pocket_id=pocket_id, store=store\n        )",
+    "replace": "        source = image_url",
+    "tests": [
+      "tests/ee/sites/test_site_video_tool.py::test_the_agent_cannot_make_the_server_fetch_a_url"
     ]
   }
 ]

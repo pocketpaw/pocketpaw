@@ -38,6 +38,13 @@ _JPG = b"\xff\xd8\xff\xe0" + b"\x00" * 32
 pytestmark = pytest.mark.asyncio
 
 
+def _owned(name: str, workspace_id: str = WORKSPACE) -> str:
+    """A media name stamped with its workspace's owner token."""
+    from pocketpaw_ee.cloud.media import storage as media_storage
+
+    return f"{media_storage.owned_name_prefix(workspace_id)}{name}"
+
+
 # ── Doubles ──────────────────────────────────────────────────────────────
 
 
@@ -384,9 +391,14 @@ async def test_video_image_url_may_be_a_workspace_media_file(
 ) -> None:
     from pocketpaw_ee.cloud.media import storage as media_storage
 
-    media.objects[media_storage.media_key("1700000000000-abc.png")] = _PNG
+    own = _owned("1700000000000-abc.png")
+    media.objects[media_storage.media_key(own)] = _PNG
     foreign_capture = f"{media_storage.capture_name_prefix(OTHER_WS)}1-x.png"
     media.objects[media_storage.media_key(foreign_capture)] = _PNG
+    # Legacy untagged names cannot be attributed, so they cannot be animated by
+    # URL (copy them onto the site first; from-studio trusts its own history).
+    legacy = "1700000000000-legacy.png"
+    media.objects[media_storage.media_key(legacy)] = _PNG
 
     async with _client() as c:
         ok = await c.post(
@@ -394,18 +406,19 @@ async def test_video_image_url_may_be_a_workspace_media_file(
             json={
                 "kind": "video",
                 "prompt": "x",
-                "image_url": "/api/v1/media/1700000000000-abc.png",
+                "image_url": f"/api/v1/media/{own}",
             },
         )
         assert ok.status_code == 200, ok.text
         assert fal["image_urls"][0].startswith("data:image/png;base64,")
 
         fal.clear()
-        bad = await c.post(
-            f"/api/v1/sites/by-pocket/{POCKET}/assets/generate",
-            json={"kind": "video", "prompt": "x", "image_url": f"/api/v1/media/{foreign_capture}"},
-        )
-    assert bad.status_code == 400
+        for name in (foreign_capture, legacy):
+            bad = await c.post(
+                f"/api/v1/sites/by-pocket/{POCKET}/assets/generate",
+                json={"kind": "video", "prompt": "x", "image_url": f"/api/v1/media/{name}"},
+            )
+            assert bad.status_code == 400, name
     assert fal == {}
 
 
@@ -428,15 +441,15 @@ async def test_copy_an_image_generation_is_public_and_idempotent(
 ) -> None:
     from pocketpaw_ee.cloud.media import storage as media_storage
 
-    media.objects[media_storage.media_key("1700-a.png")] = _PNG
-    media.objects[media_storage.media_key("1700-b.png")] = _PNG_2
+    media.objects[media_storage.media_key(_owned("1700-a.png"))] = _PNG
+    media.objects[media_storage.media_key(_owned("1700-b.png"))] = _PNG_2
     await _seed_generation(
         WORKSPACE,
         "gen_img",
         kind="image",
         assets=[
-            {"id": "a", "url": "/api/v1/media/1700-a.png", "mime": "image/png"},
-            {"id": "b", "url": "/api/v1/media/1700-b.png", "mime": "image/png"},
+            {"id": "a", "url": f"/api/v1/media/{_owned('1700-a.png')}", "mime": "image/png"},
+            {"id": "b", "url": f"/api/v1/media/{_owned('1700-b.png')}", "mime": "image/png"},
         ],
     )
 
@@ -466,8 +479,8 @@ async def test_copy_an_image_generation_is_public_and_idempotent(
 async def test_copy_a_video_generation_brings_its_poster(beanie_test_db, rail, media) -> None:
     from pocketpaw_ee.cloud.media import storage as media_storage
 
-    media.objects[media_storage.media_key("1700-v.mp4")] = _MP4
-    media.objects[media_storage.media_key("1700-v-poster.jpg")] = _JPG
+    media.objects[media_storage.media_key(_owned("1700-v.mp4"))] = _MP4
+    media.objects[media_storage.media_key(_owned("1700-v-poster.jpg"))] = _JPG
     await _seed_generation(
         WORKSPACE,
         "gen_vid",
@@ -475,9 +488,9 @@ async def test_copy_a_video_generation_brings_its_poster(beanie_test_db, rail, m
         assets=[
             {
                 "id": "v",
-                "url": "/api/v1/media/1700-v.mp4",
+                "url": f"/api/v1/media/{_owned('1700-v.mp4')}",
                 "mime": "video/mp4",
-                "posterUrl": "/api/v1/media/1700-v-poster.jpg",
+                "posterUrl": f"/api/v1/media/{_owned('1700-v-poster.jpg')}",
             }
         ],
     )
@@ -493,6 +506,66 @@ async def test_copy_a_video_generation_brings_its_poster(beanie_test_db, rail, m
     assert [a["mime"] for a in body["assets"]] == ["video/mp4"]
     assert body["poster"]["mime"] == "image/jpeg"
     assert body["poster"]["url"].startswith(BASE)
+
+
+async def test_a_legacy_untagged_generation_can_still_be_copied(
+    beanie_test_db, rail, media
+) -> None:
+    """Studio files written before every save stamped an owner carry no token.
+    The listing hides them, but the name here comes from THIS workspace's own
+    history record, so the copy must still work or "Add to site" 404s for all
+    existing history.
+
+    Once untagged names are listed to nobody (#2595), gating the copy on
+    ``storage.visible_to`` would fail this test.
+    """
+    from pocketpaw_ee.cloud.media import storage as media_storage
+
+    media.objects[media_storage.media_key("1700-legacy.png")] = _PNG
+    await _seed_generation(
+        WORKSPACE,
+        "gen_legacy",
+        kind="image",
+        assets=[{"id": "l", "url": "/api/v1/media/1700-legacy.png", "mime": "image/png"}],
+    )
+
+    async with _client() as c:
+        resp = await c.post(
+            f"/api/v1/sites/by-pocket/{POCKET}/assets/from-studio",
+            json={"generation_id": "gen_legacy"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert rail.objects[resp.json()["assets"][0]["key"]] == _PNG
+
+
+async def test_a_generation_naming_another_workspaces_file_is_refused(
+    beanie_test_db, rail, media
+) -> None:
+    """Even inside this workspace's own record, a name stamped with ANOTHER
+    workspace's token (a capture or a gallery file) is not read."""
+    from pocketpaw_ee.cloud.media import storage as media_storage
+
+    names = (
+        f"{media_storage.capture_name_prefix(OTHER_WS)}1-x.png",
+        _owned("1-y.png", OTHER_WS),
+    )
+    for i, name in enumerate(names):
+        media.objects[media_storage.media_key(name)] = _PNG
+        await _seed_generation(
+            WORKSPACE,
+            f"gen_foreign_{i}",
+            kind="image",
+            assets=[{"id": "x", "url": f"/api/v1/media/{name}", "mime": "image/png"}],
+        )
+    async with _client() as c:
+        for i, name in enumerate(names):
+            resp = await c.post(
+                f"/api/v1/sites/by-pocket/{POCKET}/assets/from-studio",
+                json={"generation_id": f"gen_foreign_{i}"},
+            )
+            assert resp.status_code == 404, name
+    assert rail.objects == {}
 
 
 async def test_another_workspaces_generation_is_404(beanie_test_db, rail, media) -> None:

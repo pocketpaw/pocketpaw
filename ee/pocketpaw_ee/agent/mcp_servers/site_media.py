@@ -282,7 +282,8 @@ def build_site_media_server() -> tuple[str, Any] | None:
             "Generate a SHORT VIDEO for the site you are building and publish it, "
             "returning permanent public URLs for the clip and its poster frame. "
             "Pass `image_url` to ANIMATE AN EXISTING IMAGE — the owner's uploaded "
-            "photo, or one you just generated — which is what you want for a hero "
+            "photo, or one you just generated, by its site asset URL — which is "
+            "what you want for a hero "
             "that moves their actual subject rather than inventing a lookalike. "
             "Omit it for a purely generated clip. Describe the CAMERA MOVE in the "
             "prompt ('slow dolly in', 'orbit left around the subject', 'gentle "
@@ -313,8 +314,9 @@ def build_site_media_server() -> tuple[str, Any] | None:
                 "image_url": {
                     "type": "string",
                     "description": (
-                        "Public URL of an image to animate (image-to-video). Use the "
-                        "owner's uploaded photo here when there is one."
+                        "Image to animate (image-to-video): one of THIS site's asset "
+                        "URLs (the owner's upload from `list_site_assets`, or one "
+                        "`generate_site_image` returned). Any other URL is refused."
                     ),
                 },
                 "duration_sec": {
