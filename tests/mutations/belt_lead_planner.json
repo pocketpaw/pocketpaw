@@ -281,7 +281,7 @@
   {
     "label": "a timed-out lead ends as a develop failure",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "                await self._lead_expired(store, run_ref, blob, slug, cwd, hard=hard)\n                return\n            heard =",
+    "find": "                await self._lead_expired(store, run_ref, blob, slug, cwd, hard=hard, restart=blind)\n                return\n            heard =",
     "replace": "                raise CloudStationError(\"TRACK: feature lead not done\")\n            heard =",
     "tests": [
       "tests/cloud/test_belt_lead_runs.py"

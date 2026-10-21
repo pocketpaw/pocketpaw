@@ -40,7 +40,8 @@
 # 150 the launch is refused (note, ``needs-human``, released), unless it only
 # changes ``docs/leads/`` records: then it is rebuilt on the base with a lease.
 # RESUME: a launched lead is tracked again, never relaunched; one with a newer
-# pending lead on an issue is released.
+# pending lead on an issue is released. A resumed lead timed out before its first
+# clean poll is released with no ``needs-human``; after one, the usual timeout.
 # LESSONS 42/45: a transient gh failure is retried with backoff, a permanent one
 # fails at once; a run whose tracker died on a TRACK error is tracked again.
 # STOP (lesson 182): a release or a human reject queues one stop message into the
@@ -1417,6 +1418,89 @@ async def test_resume_releases_an_errored_lead_the_planner_already_replaced(stor
 
 async def _ws() -> list[str]:
     return [WS]
+
+
+async def _resumed_lead(store, repo: Path, age: float) -> str:
+    """A lead launched ``age`` seconds ago whose tracker a restart dropped."""
+    run_ref = await _queue_lead(store, repo)
+    launched = time.time() - age
+    lead = {
+        "feature": FEATURE,
+        "packet": PACKET,
+        "issue": 93,
+        "branch": f"lead/{FEATURE}",
+        "sessions": [{"session_url": CLOUD_URL, "at": launched}],
+    }
+    await cloud_station._patch(
+        store,
+        run_ref,
+        headless_state="cloud",
+        cloud={"session_url": CLOUD_URL, "launched_at": launched},
+        lead=lead,
+    )
+    return run_ref
+
+
+async def test_a_restart_past_the_lead_timeout_releases_without_needs_human(store, dirs, playbook):
+    """creative-apps #3451/#3459: leads past 8 h that their old tracker kept
+    (live, or waiting on CI) were resumed at a restart, the first poll failed
+    in the startup gh burst, and the outage branch timed them out from the
+    launch, labelling each issue ``needs-human`` with no question. A release
+    before the resumed tracker reads GitHub once leaves the issue free, so the
+    next shift relaunches it from its RECORD. Mutation: labelling on that
+    release fails here."""
+    repo, launch = dirs
+    run_ref = await _resumed_lead(store, repo, 8 * 3600 + 600)
+    runner = LeadRunner(fail={"pr list": 10**6})
+    disp = _lead_dispatcher(runner, launch, workspaces_for=_ws)
+
+    assert await disp.resume_all() == 1
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert not _flagged(runner)
+    assert "restart" in (action.rejected_reason or "")
+    assert len(_stops(runner)) == 1
+    _never_a_failure(action)
+
+
+async def test_a_restart_past_the_timeout_leaves_every_line_issue_free(store, dirs, playbook):
+    """creative-apps #3479/#3458 shared one line lead: a restart's timeout
+    parks each issue unlabelled and the reason names each one as free."""
+    repo, launch = dirs
+    run_ref = await _resumed_lead(store, repo, 8 * 3600 + 600)
+    feats = [
+        {"feature": FEATURE, "packet": PACKET, "issue": 93, "branch": f"lead/{FEATURE}"},
+        {"feature": FEATURE_B, "packet": PACKET_B, "issue": 94, "branch": f"lead/{FEATURE_B}"},
+    ]
+    blob = (await store.get_action(run_ref)).parameters["_code_change"]
+    lead = {**blob["lead"], "issues": [93, 94], "features": feats}
+    await cloud_station._patch(store, run_ref, lead=lead)
+    runner = LeadRunner(fail={"pr list": 10**6})
+
+    assert await _lead_dispatcher(runner, launch, workspaces_for=_ws).resume_all() == 1
+
+    assert not _flagged(runner)
+    reason = (await store.get_action(run_ref)).rejected_reason or ""
+    assert "#93 left free for the next shift" in reason
+    assert "#94 left free for the next shift" in reason
+
+
+async def test_a_resumed_lead_that_times_out_after_a_clean_poll_is_labelled(store, dirs, playbook):
+    """The restart exemption ends at the resumed tracker's first clean poll: a
+    quiet lead that reaches 8 h after it is parked ``needs-human`` as usual."""
+    repo, launch = dirs
+    run_ref = await _resumed_lead(store, repo, 8 * 3600 - 600)
+    runner = LeadRunner()
+    disp = _lead_dispatcher(runner, launch, workspaces_for=_ws)
+
+    assert await disp.resume_all() == 1
+
+    action = await store.get_action(run_ref)
+    assert action.status == ActionStatus.REJECTED
+    assert (action.rejected_reason or "").startswith("feature lead not done after 8h")
+    assert _flagged(runner)
+    _never_a_failure(action)
 
 
 # -- lesson 42: transient gh failures ---------------------------------------
