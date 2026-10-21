@@ -967,7 +967,15 @@ class CloudTaskDispatcher:
             sheet = all(sh or e for sh, e in zip(sheets, ends, strict=True))
             if not (sheet or waiting) and now - heard >= self.lead_stall_seconds:
                 if not await self._lead_stall(
-                    store, run_ref, blob, slug, worker, cwd, active, exited=state == "exited"
+                    store,
+                    run_ref,
+                    blob,
+                    slug,
+                    worker,
+                    cwd,
+                    active,
+                    exited=state == "exited",
+                    read=read,
                 ):
                     return
             await self.sleep(self.poll_seconds)
@@ -1193,6 +1201,7 @@ class CloudTaskDispatcher:
         active: float = 0.0,
         *,
         exited: bool = False,
+        read: _LeadRead | None = None,
     ) -> bool:
         """One rung of the stall ladder: the stalls since the lead's last sign of
         work (``active``). Silence alone proves nothing, so an unverifiable lead
@@ -1207,7 +1216,11 @@ class CloudTaskDispatcher:
         stalls: list[dict[str, Any]] = list(lead.get("stalls") or [])
         ladder = [s for s in stalls if float(s.get("at") or 0) > active]
         entry: dict[str, Any] = {"at": self.wall()}
-        features = [str(f.get("feature") or "") for f in _features(lead)]
+        # A line lead is nudged about its own line branches (``_line_heads``).
+        features: list[str] = []
+        for f in _features(lead):
+            lines = [d for _, d in _line_heads(read, f)] if read else []
+            features += lines or [str(f.get("feature") or "")]
         if exited and any(s.get("kind") == "relaunch" for s in ladder):
             entry["kind"] = _NEEDS_HUMAN
             lead["stalls"] = [*stalls, entry]
@@ -3161,7 +3174,9 @@ def _lead_done(f: dict[str, Any], base: str, line: bool) -> str:
 
 
 def _resume_text(features: str | list[str], stall_seconds: float) -> str:
-    """The nudge sent into a silent lead's session, naming each feature's branch."""
+    """The nudge sent into a silent lead's session, naming each record's branch
+    ``lead/<name>`` and ``docs/leads/<name>/RECORD.md``; a line lead's names are
+    ``<line>-<feature>``."""
     names = [features] if isinstance(features, str) else features
     on = ", ".join(f"lead/{f}" for f in names)
     reads = ", ".join(f"docs/leads/{f}/RECORD.md on lead/{f}" for f in names)

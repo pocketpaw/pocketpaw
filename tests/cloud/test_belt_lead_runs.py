@@ -225,6 +225,7 @@ class LeadRunner:
             data = json.loads(out)
             comments = data.get("comments") or []
             repo[alias] = {"comments": {"totalCount": len(comments), "nodes": comments}}
+            repo[alias]["labels"] = {"nodes": data.get("labels") or []}
             if state:
                 repo[alias]["state"] = data.get("state")
         for alias, ref in re.findall(r'(b\d+):object\(expression:"([^"]+)"\)', query):
@@ -1070,6 +1071,23 @@ async def test_a_lead_still_working_is_released_only_at_twice_the_timeout(store,
     assert action.rejected_reason == (
         "feature lead not done after 16h (session https://claude.ai/code/session_L1)"
     )
+
+
+async def test_a_line_lead_is_nudged_about_its_own_line_branch_and_record(store, dirs, playbook):
+    """A lead on a line records on ``lead/<line>-<feature>``: the nudge names
+    that branch and ``docs/leads/<line>-<feature>/RECORD.md``, never the bare
+    ``lead/<feature>`` another line may be using."""
+    repo, launch = dirs
+    run_ref = await _queue_lead(store, repo)
+    runner = LeadRunner()
+    runner.labels = ["line:design"]
+
+    await _lead_dispatcher(runner, launch).run(run_ref, workspace_id=WS)
+
+    text = _nudges(runner)[0][-1]
+    assert f"no commit on lead/design-{FEATURE}," in text
+    assert f"docs/leads/design-{FEATURE}/RECORD.md on lead/design-{FEATURE}" in text
+    assert f"docs/leads/{FEATURE}/" not in text
 
 
 async def test_a_lead_quiet_before_the_timeout_is_nudged_until_the_timeout(store, dirs, playbook):
