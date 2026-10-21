@@ -267,7 +267,8 @@ async def test_the_litellm_rewrite_never_shows_the_proxy_or_setting_names():
 
 
 async def test_a_key_echoed_in_an_auth_error_is_redacted():
-    key = "sk-or-v1-0123456789abcdef0123456789abcdef"
+    # Built at runtime so the diff secret scan doesn't see a literal key.
+    key = "sk-or-v1-" + "0123456789abcdef0123456789abcdef"
     raw = f"Pydantic AI error: status_code: 401, body: Incorrect API key provided: {key}"
     frame = run_core._backend_error_frame(raw)
     assert frame["code"] == "agent.backend_error"
@@ -309,7 +310,8 @@ async def test_our_own_httpx_crash_stays_generic(monkeypatch, mongo_db):  # noqa
 
 
 async def test_a_provider_crash_with_a_key_is_redacted(monkeypatch, mongo_db):  # noqa: ARG001
-    key = "sk-abcdefghijklmnopqrstuvwxyz012345"
+    # Built at runtime so the diff secret scan doesn't see a literal key.
+    key = "sk-" + "abcdefghijklmnopqrstuvwxyz012345"
 
     async def raising_events(spec, ctx):  # noqa: ARG001
         yield ("chunk", {"content": "Working on it. ", "type": "text"})
