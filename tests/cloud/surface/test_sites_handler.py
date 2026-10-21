@@ -348,7 +348,7 @@ async def test_sites_handler_refine_mode_uses_edit_path() -> None:
 
 
 async def test_sites_handler_refine_mode_is_landing_aware() -> None:
-    """The RIPPLE refine preamble carries the same landing structure + 5 SSR rules
+    """The RIPPLE refine preamble preserves the page's existing sections + carries the 5 SSR rules
     as the create brain, so an edit can't introduce a static-site trap.
 
     These five rules are the ripple branch's and only the ripple branch's: each one
@@ -2420,3 +2420,14 @@ async def test_closing_rule_comes_from_the_brief() -> None:
     assert "two" in rule
     assert "asked to remove" in rule
     assert "the placeholder list does not count" in rule
+
+
+async def test_ripple_refine_and_import_preserve_existing_sections() -> None:
+    """The ripple refine and the import build keep the page's own sections, like the
+    shared refine rules: no fixed proof-and-pricing funnel the agent must fill."""
+    ripple = sites_handler._refine_preamble(_refine_meta(), "ripple")
+    assert "PRESERVE the page's existing sections and their order" in ripple
+    assert "landing structure" not in ripple
+    imported = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), _landing_brief())
+    assert "PRESERVE the source page's existing sections and their order" in imported
+    assert "landing structure" not in imported

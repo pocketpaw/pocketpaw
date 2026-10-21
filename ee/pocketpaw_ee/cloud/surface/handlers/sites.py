@@ -1617,9 +1617,9 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         # that shipped before the fork, plus the engine-neutral WhatsApp rule
         # (PH-10), which this branch does not get through _REFINE_SHARED_RULES.
         rules = (
-            "PRESERVE the landing structure (nav → hero → services → proof → "
-            "pricing → flat lead form → footer) and keep the 5 static-site (SSR) "
-            "rules intact while you edit:\n"
+            "PRESERVE the page's existing sections and their order (whatever it "
+            "has of nav, hero, services, proof, pricing, flat lead form, footer) and "
+            "keep the 5 static-site (SSR) rules intact while you edit:\n"
             "1. Lead capture stays FLAT native `input`/`textarea`/"
             '`button{type:"submit"}` with real field names (name, email, phone, '
             "message) — NEVER the `form` or `newsletter` widget, which nests an "
@@ -2038,8 +2038,8 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
         + (design_block + "\n" if design_block else "")
         + "</sites-brief>\n"
         "<sites-procedure>\n" + route_block + "\n"
-        "PRESERVE the landing structure and keep the static-site (SSR) rules "
-        "intact while you build:\n"
+        "PRESERVE the source page's existing sections and their order, and keep "
+        "the static-site (SSR) rules intact while you build:\n"
         "1. Lead capture stays FLAT native `input`/`textarea`/"
         '`button{type:"submit"}` with real field names (name, email, phone, '
         "message) — NEVER the `form` or `newsletter` widget, which nests an "
