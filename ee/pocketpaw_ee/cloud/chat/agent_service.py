@@ -768,6 +768,10 @@ class ScopeContext:
     # agent then behaves exactly as before, no block. Stays a pre-rendered
     # string so the sync ``build_behavior_instructions`` never has to await.
     about_member_block: str | None = None
+    # The raw text of a backend error whose chat frame was rewritten into a plain
+    # sentence. Set by ``run_core._drive_agent_loop`` so the run doc's ``error``
+    # field keeps the provider's own words for operators.
+    backend_error_detail: str | None = None
     # The anchored pocket's orientation data: {name, description, type,
     # template_slug, pattern, ripple} where ``ripple`` is
     # ``spec_ops.summarize_ripple_spec`` over the pocket's rippleSpec

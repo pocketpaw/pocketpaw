@@ -206,3 +206,29 @@ async def test_the_prompt_carries_no_past_memories_when_recall_is_off():
     assert "Relevant Past Memories" not in without.text
     # Recall is a volatile layer, so turning it off must not move the digest.
     assert with_recall.stable_digest == without.stable_digest
+
+
+# --- the tool half: a Sites turn cannot call the soul memory tools ------------
+
+
+async def test_a_sites_run_denies_the_soul_memory_tools(monkeypatch):
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    ctx = _ctx(SurfaceKind.SITES)
+    base = resolve_profile(SurfaceKind.SITES, SurfaceMeta())
+    ctx.resolved_profile = run_core._deny_soul_tools_on_sites(ctx, base)
+
+    assert {"soul_recall", "soul_remember"} <= ctx.resolved_profile.deny_mcp_tool_ids
+    assert base.deny_mcp_tool_ids <= ctx.resolved_profile.deny_mcp_tool_ids
+
+    pool = await _drive(monkeypatch, ctx)
+    assert pool.run_kwargs is not None
+    assert "soul_recall" in pool.run_kwargs["deny_mcp_tool_ids"]
+
+
+async def test_other_surfaces_keep_the_soul_memory_tools():
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    ctx = _ctx(SurfaceKind.POCKET)
+    base = resolve_profile(SurfaceKind.POCKET, SurfaceMeta())
+    assert run_core._deny_soul_tools_on_sites(ctx, base) is base
