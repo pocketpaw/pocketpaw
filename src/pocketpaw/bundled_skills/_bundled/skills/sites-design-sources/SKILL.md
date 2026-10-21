@@ -14,8 +14,8 @@ description: |
   path (set_site_dependencies).
 ---
 
-<!-- Updated 2026-09-27 (feat/sites-lean-prompt): added Fontshare, the other font
-     library that loads from a CSS URL. -->
+<!-- Fonts: Google Fonts is the one font source. Fontshare faces were listed
+     once; agents then requested them from Google, where they do not exist. -->
 
 <!-- Updated 2026-09-27 (feat/sites-visual-research): the colour section no
      longer says there is no browser; preview_site shows the draft, but a
@@ -105,18 +105,16 @@ copied without understanding is a shader you cannot cap.
 WOFF2 cannot be self-hosted here, because there is no way to get the file into
 the project. So:
 
--   **Fontshare** (`fontshare.com`, free for commercial use) serves its whole
-    library from a CSS URL: `<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500&f[]=clash-display@600&display=swap" rel="stylesheet">`.
-    It is where Satoshi, General Sans, Clash Display, Cabinet Grotesk, Switzer and
-    the free serifs Zodiak, Sentient, Erode and Gambetta live.
--   **Google Fonts** (`fonts.google.com`, OFL / Apache-2.0) is the practical
-    library, loaded with a single `@import` or one `<link>` in the document head.
+-   **Google Fonts** (`fonts.google.com`, OFL / Apache-2.0) is the ONE source,
+    loaded with a single `@import` or one `<link>` in the document head. Name only
+    families it serves: Satoshi, General Sans, Clash Display, Cabinet Grotesk,
+    Switzer, Zodiak and other Fontshare or commercial faces are not on it.
     It is far wider than its famous handful: Bricolage Grotesque, Instrument
     Sans, Familjen Grotesk, Schibsted Grotesk, Gabarito, Funnel Display,
     Geologica and Onest all live there, and none of them is Inter.
 -   **Fontpair** (`fontpair.co`) and **Free Faces** (`freefaces.gallery`) are for
-    CHOOSING. Pick a pairing there, then confirm the faces are servable from a
-    CDN you can reference before committing to them.
+    CHOOSING. Pick a pairing there, then confirm both faces are on Google Fonts
+    before committing to them.
 -   **The independent OFL foundries** — Velvetyne (`velvetyne.fr`), Open Foundry
     (`open-foundry.com`), Uncut (`uncut.wtf`), Collletttivo
     (`collletttivo.it`), The League of Moveable Type — are where genuinely

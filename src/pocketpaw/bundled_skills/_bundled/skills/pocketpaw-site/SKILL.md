@@ -21,7 +21,8 @@ Call `list_site_templates` and match `when_to_use`.
 - A framework template when ANY hold: the site is an app, not a page (a game,
   3D/WebGL or canvas, simulation, editor, tool, dashboard, client routing or
   real state); it needs npm packages (three, @react-three/fiber, charts,
-  physics); it needs server logic, accounts or a database; or the user
+  physics); it needs server logic, accounts or a database (data others see
+  later, e.g. bookings; never localStorage); or the user
   named the framework. The named framework wins; for a client-heavy app with
   no server needs, prefer `vite-react-hono`.
 - For something interactive, when unsure between `static` and a framework,
@@ -32,8 +33,8 @@ Call `list_site_templates` and match `when_to_use`.
 ## The loop
 
 1. `start_site_from_template(slug, brief, name?)` ONCE. It returns `pocket_id`
-   and the repo's AGENTS.md. Never call it again for a change: it makes
-   a second site.
+   and the repo's AGENTS.md. Never call it again for a change: that
+   makes a second site.
 2. Follow AGENTS.md over your habits: where pages, data, auth and tokens go,
    which files are generated. Re-read it after a recipe adds a section.
 3. Recipes (framework templates): `list_site_recipes` (pass `template`), then
@@ -52,7 +53,7 @@ Call `list_site_templates` and match `when_to_use`.
    `get_site_build_log`), fix, build again: three rounds at most, then tell the
    user what still fails.
 8. `verify_site` once at the end; call the site ready only on `passed`.
-   `preview_site` to look at it. If `preview_mode` is `static`, say server
+   `preview_site` to look. If `preview_mode` is `static`, say server
    routes run after publish.
 9. Everything saves to the DRAFT. Call `publish` only when the user asks; it
    deploys the last build, so build first.
@@ -88,16 +89,16 @@ source): only names go in `.dev.vars.example`.
 
 ## Plans
 
-A plan refusal (a tool, or a recipe above the site's plan) means the site needs
-a higher plan: tell the user, never work around it.
+A recipe's plan refusal: tell the user and build the rest. A site
+tool's plan refusal: say so in one sentence with its next step and stop; never
+paste the site into chat, name `__CAPTURE_API_BASE__`, or suggest another host.
 
-## Framework and library knowledge
+## Library docs
 
-AGENTS.md first. For a framework or library API, or a provider's embed markup,
-search the web and fetch the current docs; never guess.
+AGENTS.md first; for a framework, library or embed API, search the web and
+fetch the current docs; never guess.
 
 ## Do not
 
 - Edit generated files AGENTS.md names, or write under `_paw/`.
-- Put resource ids or secret values in wrangler.jsonc or any file.
-- Call the site ready before a `built` build and a `passed` `verify_site`.
+- Put resource ids in wrangler.jsonc or any file.

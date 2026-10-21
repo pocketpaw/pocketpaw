@@ -1028,7 +1028,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     build_step = (
         "BUILD via the `pocketpaw-site` skill. Invoke it by intent (no slash "
         "command); it carries the platform contract for every new site: the loop, "
-        f"integrations, secrets and plan rules. {pick} If the skill is unavailable: "
+        f"integrations, secrets and plan rules. {pick}\n"
+        + _STORED_DATA_RULE
+        + "If the skill is unavailable: "
         "`mcp__pocketpaw_sites_manager__list_site_templates`, then "
         "`mcp__pocketpaw_sites_manager__start_site_from_template` ONCE (it returns the "
         "pocket_id and the repo's AGENTS.md), then follow the loop below. Never call a "
@@ -1081,17 +1083,11 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "on this surface, because the user handed you the answer and got a "
         "generic page back.\n"
         "\n"
-        "DECIDE THE DESIGN YOURSELF; ASK ONLY FOR REAL FACTS. Choosing the visual "
-        "style, palette, layout, and typography is YOUR expertise — infer it from "
-        "the business and never ask the user 'what style / theme / colors do you "
-        "want?'. The only things worth asking are real-world FACTS you genuinely "
-        "cannot know and cannot sensibly placeholder (a specific offering list, "
-        "real contact details, real pricing) — and even then PREFER to proceed "
-        f"with a clearly-reasonable placeholder and let the user refine. When you "
-        f"truly must ask, {ask_mechanism}. NEVER fabricate specific real-world "
-        "facts (invented testimonials, precise stats, prices, addresses, phone "
-        "numbers) — use an obviously-generic placeholder and flag it instead.\n"
-        "\n"
+        "DECIDE THE DESIGN YOURSELF; ASK ONLY FOR FACTS. Style, palette, layout and "
+        "type are YOUR call: infer them from the business and never ask the user "
+        "'what style / theme / colors do you want?'. Ask only for a fact the page "
+        "cannot work without (a missing business name can be 'Your Studio'); then "
+        f"{ask_mechanism}.\n" + _FACTS_RULE + "\n"
         "THE ARGUMENT. Settle the one offer, the one action, and the sections the "
         "brief asks for, in the order that sells. Nothing the brief did not ask for.\n"
         # Always present now that the research server is bundled rather than an
@@ -1150,7 +1146,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         + "Once it passed, tell the user the draft is ready, point them at "
         "the Preview, and OFFER to take it live — e.g. 'Your site is ready as a "
         'draft — preview it under /sites, and say publish (or "make it live") '
-        "when you're happy with it.' Then STOP. Publish IN THIS SAME TURN only if "
+        "when you're happy with it.' "
+        + _CLOSING_RULE
+        + "Then STOP. Publish IN THIS SAME TURN only if "
         "the user's request ALREADY asked to go live ('publish', 'make it live', "
         "'ship it', 'put it online'): in that case call "
         "`mcp__pocketpaw_sites_manager__publish` with the pocket_id and SHOW the "
@@ -1158,11 +1156,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "'create'/'build'/'make' request.\n"
         "\n"
         "ROBUSTNESS (this flow must never stall or disappoint in real use):\n"
-        "- If ANY tool errors (stock, palette, or icons), do NOT retry blindly "
-        "or stall. Proceed with sensible defaults — the identity you already "
-        "committed to, generic-but-tasteful section imagery — and briefly "
-        "note what you fell back on. A tool failure must NEVER block "
-        "the build.\n"
+        "- If an ASSET tool errors (stock, palette, icons, image or video), do NOT "
+        "retry blindly or stall: proceed with the identity you committed to and "
+        "tasteful defaults, and note the fallback in a few words.\n"
+        f"- {_BLOCKED_RULE}"
         "- ONE round of questions maximum. If the user already gave detail or "
         "says 'just build it', go straight to building with sensible "
         "defaults.\n"
@@ -1222,12 +1219,12 @@ _ART_DIRECTION = (
     "accent; a centred hero over three icon cards; small uppercase labels above "
     "every heading; stats and testimonials nobody supplied. Each is right for some "
     "brief. Use one only when this brief calls for it.\n"
-    "Fonts must load from a URL: one `<link>` to Google Fonts "
-    "(`fonts.googleapis.com/css2?family=...&display=swap`) or to Fontshare "
-    "(`api.fontshare.com/v2/css?f[]=satoshi@400,500&display=swap`, which hosts "
-    "Satoshi, General Sans, Clash Display, Cabinet Grotesk, Switzer, Zodiak, "
-    "Sentient, Erode and Gambetta). A face on neither silently falls back to the "
-    "system font.\n"
+    "Fonts must load: one `<link>` to Google Fonts "
+    "(`fonts.googleapis.com/css2?family=...&display=swap`), and only families "
+    "Google Fonts serves. Satoshi, General Sans, Clash Display, Cabinet Grotesk, "
+    "Switzer and other Fontshare or commercial faces are not on it and silently "
+    "fall back to the system font. The family your CSS names is the one the link "
+    "loads.\n"
 )
 
 # Added 2026-09-27 (feat/sites-lean-prompt). What must hold on any public page,
@@ -1239,9 +1236,8 @@ _CRAFT_FLOOR = (
     "and controls); tap targets of 44px; a visible focus state; motion that "
     "respects `prefers-reduced-motion`; one column with no horizontal scroll "
     "below 768px; media with width and height or aspect-ratio; every section "
-    "finished in the markup, because visitors get prerendered HTML first; and real "
-    "content only, so a fact nobody supplied (a testimonial, a stat, a price, an "
-    "address) is a clearly marked placeholder.\n"
+    "finished in the markup, because visitors get prerendered HTML first; and no "
+    "fact nobody supplied.\n"
     "</craft-floor>\n"
 )
 
@@ -1257,6 +1253,50 @@ _LOOK_RULE = (
     "blob, crowding, overlap, a section that lost the direction) and look again; "
     "two rounds at most. If it errors, say the page was not visually checked "
     "rather than implying it was. "
+)
+
+# Four rules from the 2026-10-21 Sites user simulation, each with several readers
+# (create, every refine branch, the brief-driven import), so each is stated once.
+# Facts: vague briefs got a real trademarked venue, invented addresses, phones and
+# prices, then "nothing here is invented". Blocked: a plan-gated workspace got the
+# whole site pasted into chat as HTML, the form's publish-time tokens explained,
+# and other hosts recommended; asset fallbacks degrade, site-tool refusals stop.
+# Stored data: bookings, guestbooks, accounts and high scores went to the
+# visitor's localStorage, so the owner never saw them. Closing: every reply ended
+# on one canned three-option upsell, sometimes for a different business.
+_FACTS_RULE = (
+    "NEVER FABRICATE FACTS. A business name, address, phone, email, hours, staff or "
+    "client names, prices, ratings, review counts, awards, stats, testimonials and "
+    "real venues or brands come from the user or not at all. A missing one is an "
+    "obvious placeholder the owner will replace ('Your Studio', '[Phone]', "
+    "'[Price]') or its section is left out, never a plausible invention or a real "
+    "venue's, brand's or person's name. Your reply lists the placeholders left to "
+    "fill; never say nothing was invented unless that is true.\n"
+)
+
+_BLOCKED_RULE = (
+    "WHEN A SITE TOOL REFUSES (a plan or early-access refusal, or the site tools are "
+    "missing), the site cannot be built here: say so in one plain sentence with the "
+    "next step the refusal names, then stop. Never build it another way: no site "
+    "code or file pasted into the chat, no download link, no internal placeholder "
+    "such as `__CAPTURE_API_BASE__`, no other host or builder (GitHub Pages, "
+    "Netlify, Vercel).\n"
+)
+
+_STORED_DATA_RULE = (
+    "STORED DATA. Data the owner or other visitors must see later (a bookings list, "
+    "a guestbook, accounts, shared high scores) lives in the site's database: a "
+    "framework template plus the database recipe from `list_site_recipes`. A "
+    "request the owner only needs to receive (an enquiry, a booking request, a "
+    "signup) is the lead form or `data-paw-subscribe`. Never fake either with "
+    "localStorage, which only that visitor's browser sees; if this site cannot have "
+    "a database, say the feature is not available here.\n"
+)
+
+_CLOSING_RULE = (
+    "CLOSE FROM THIS BRIEF: offer at most two next ideas, taken from this user's "
+    "brief and conversation (a placeholder to fill, a section they mentioned), never "
+    "a generic upgrade menu or something they asked to remove.\n"
 )
 
 # Added 2026-10-02 (feat/sites-card-photo-source, PH-10). One rule, three
@@ -1283,10 +1323,8 @@ _REFINE_SHARED_RULES = (
     "PRESERVE the landing funnel (nav → hero → services → proof → pricing → "
     "call-to-action → lead form → footer): a refine changes a section, it does not "
     "reorder or drop the funnel, and it does not turn the page into a dashboard.\n"
-    "REAL COPY ONLY. Never invent a testimonial, a statistic, a price, an address, "
-    "or a phone number to fill a section you are editing — ask, or keep what is "
-    "there.\n"
-    "Every CTA stays an anchor `href` (or `tel:` / `mailto:` / `https://wa.me/…`), "
+    + _STORED_DATA_RULE
+    + "Every CTA stays an anchor `href` (or `tel:` / `mailto:` / `https://wa.me/…`), "
     "never a click handler that needs JavaScript to navigate.\n"
     "The lead form stays a FLAT native `<form>` — real `name=` on every "
     '`input`/`textarea` and a `button type="submit"`. Never nest a form inside a '
@@ -1785,9 +1823,10 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "needs a real fact or content you don't have (new copy, a price, a "
         "section's content, or which of several interpretations the user means), "
         f"ASK {_refine_ask_mechanism(engine)} (include a 'you decide' "
-        "option) instead of guessing — and NEVER fabricate real-world facts "
-        "(testimonials, stats, prices, addresses, contact details).\n"
-        "WHEN THE ASK IS A JUDGEMENT, NOT AN EDIT: if the user asks you to review "
+        "option) instead of guessing.\n"
+        + _FACTS_RULE
+        + _BLOCKED_RULE
+        + "WHEN THE ASK IS A JUDGEMENT, NOT AN EDIT: if the user asks you to review "
         "or critique the page, or says it feels off without naming what, invoke "
         "`sites-interface-review` and report its ranked findings INSTEAD of "
         "editing — a review request is read-only until they ask for the fixes. If "
@@ -1799,6 +1838,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         f"{edit_step}"
         f"{rules}"
         f"{publish_step}"
+        f"{_CLOSING_RULE}"
         'Keep `type="site"` + `pattern="landing"` on the pocket. Keep talking '
         "'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>\n"
@@ -2008,6 +2048,8 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
         "`parallax`, or `spotlight` (they need client JS and hide content on a "
         "static page).\n"
         + _WHATSAPP_ORDERS_RULE
+        + _FACTS_RULE
+        + _BLOCKED_RULE
         + "After it publishes, relay any publish error — never claim a phantom "
         "publish — and SHOW the live `url` plus a link to /sites. Keep talking "
         "'site' / 'page', never 'pocket'.\n"

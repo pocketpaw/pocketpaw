@@ -11,8 +11,9 @@
 # than falling into create; they seed a real Site row and pocket and go through
 # ``build_preamble``, because that defect only exists on the live path. Also
 # pinned: draft-first publishing, the research and art-direction steps, the craft
-# floor and size budget, the concierge block, the WhatsApp orders rule, and the
-# per-engine refine rules (packages, verify, ask mechanism).
+# floor and size budget, the concierge block, the WhatsApp orders rule, the
+# per-engine refine rules (packages, verify, ask mechanism), and the shared facts /
+# blocked / stored-data / closing rules and Google-Fonts-only type.
 
 from __future__ import annotations
 
@@ -525,8 +526,12 @@ async def test_create_carries_a_short_design_step_not_the_embedded_systems() -> 
         assert len(out) < 25_000, (engine, len(out))
         # Defaults are named as things to question, not banned.
         assert "Use one only when this brief calls for it" in out, engine
-        # Fonts that actually load.
-        assert "api.fontshare.com" in out and "fonts.googleapis.com" in out, engine
+        # Fonts that actually load: Google Fonts is the one source, and the
+        # Fontshare faces agents kept requesting from it are named as not there.
+        assert "fonts.googleapis.com" in out, engine
+        assert "api.fontshare.com" not in out, engine
+        assert "only families Google Fonts serves" in out, engine
+        assert "Clash Display" in out and "not on it" in out, engine
 
     note = sites_handler._design_skills_note("create")
     assert "`pocketpaw-design-taste`" in note
@@ -2309,3 +2314,81 @@ async def test_the_frontend_preamble_carries_the_whatsapp_rule(engine: str) -> N
         SurfaceMeta(route_path="/sites"), _landing_brief(engine=engine)
     )
     assert sites_handler._WHATSAPP_ORDERS_RULE in preamble
+
+
+# --- The 2026-10-21 user-sim rules: facts, blocked, stored data, closing ---------
+#
+# Each rule is one constant with several readers. These pin that every reader
+# carries it, and that the wording the sim's failures hinge on is present: a real
+# venue name, the plan-gate HTML dump, localStorage "bookings", canned closers.
+
+_SIM_RULES = ("_FACTS_RULE", "_BLOCKED_RULE", "_STORED_DATA_RULE", "_CLOSING_RULE")
+
+
+async def test_create_carries_every_sim_rule() -> None:
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+    for name in _SIM_RULES:
+        assert getattr(sites_handler, name) in out, name
+
+
+@pytest.mark.parametrize("engine", ["project", "html", "svelte", "react", "ripple", None])
+async def test_refine_carries_facts_blocked_and_closing(engine: str | None) -> None:
+    preamble = sites_handler._refine_preamble(_refine_meta(), engine)
+    for name in ("_FACTS_RULE", "_BLOCKED_RULE", "_CLOSING_RULE"):
+        assert getattr(sites_handler, name) in preamble, (engine, name)
+
+
+@pytest.mark.parametrize("engine", ["project", "html", "svelte", "react"])
+async def test_source_refines_carry_the_stored_data_rule(engine: str) -> None:
+    preamble = sites_handler._refine_preamble(_refine_meta(), engine)
+    assert sites_handler._STORED_DATA_RULE in preamble, engine
+
+
+async def test_import_preamble_carries_facts_and_blocked() -> None:
+    preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), _landing_brief())
+    assert sites_handler._FACTS_RULE in preamble
+    assert sites_handler._BLOCKED_RULE in preamble
+
+
+async def test_facts_rule_forbids_invention_and_names_placeholders() -> None:
+    rule = sites_handler._FACTS_RULE
+    for fact in ("business name", "address", "phone", "email", "prices", "review counts"):
+        assert fact in rule, fact
+    assert "real venue" in rule
+    assert "'Your Studio'" in rule
+    assert "lists the placeholders" in rule
+    assert "never say nothing was invented unless that is true" in rule
+
+
+async def test_blocked_rule_stops_instead_of_handing_the_site_over() -> None:
+    """A plan-gated create pasted the site into chat as HTML, explained the form
+    tokens and recommended other hosts. The old robustness line, "a tool failure
+    must NEVER block the build", is what invited the workaround."""
+    rule = sites_handler._BLOCKED_RULE
+    assert "one plain sentence" in rule
+    assert "then stop" in rule
+    assert "pasted into the chat" in rule
+    assert "__CAPTURE_API_BASE__" in rule
+    for host in ("GitHub Pages", "Netlify", "Vercel"):
+        assert host in rule, host
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+    assert "must NEVER block" not in out
+
+
+async def test_stored_data_rule_routes_to_the_database_not_localstorage() -> None:
+    rule = sites_handler._STORED_DATA_RULE
+    assert "database recipe" in rule
+    assert "localStorage" in rule
+    assert "not available here" in rule
+    assert "lead form" in rule
+
+
+async def test_closing_rule_comes_from_the_brief() -> None:
+    rule = sites_handler._CLOSING_RULE
+    assert "brief" in rule
+    assert "two" in rule
+    assert "asked to remove" in rule

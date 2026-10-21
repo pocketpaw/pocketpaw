@@ -8,7 +8,8 @@
 #     has a line for EVERY registered provider, naming each public action the
 #     provider really exposes, in client (paw.js) and server (``pawCall``) form;
 #   * the project tools gate on the same Sites plan the old create tools use, so the
-#     ``static`` starter is open to everyone who could create a site before.
+#     ``static`` starter is open to everyone who could create a site before, and the
+#     refusal tells the agent to stop rather than hand the site over another way.
 from __future__ import annotations
 
 import pytest
@@ -169,3 +170,10 @@ async def test_the_project_tools_use_the_same_sites_plan_gate(monkeypatch) -> No
     _ws, _user, err = await sites_project._begin("start_site_from_template")
     assert err == await sites_create._require_sites_plan_or_error("ws1")
     assert "plan.feature_denied" in err["content"][0]["text"]
+    # The refusal itself tells the agent to stop, so a gated create no longer ends
+    # with the whole site pasted into the chat and other hosts recommended.
+    text = err["content"][0]["text"]
+    assert "Sites requires the Go plan" in text
+    assert "in one sentence" in text
+    assert "do not write the site into the chat" in text
+    assert "another host" in text
