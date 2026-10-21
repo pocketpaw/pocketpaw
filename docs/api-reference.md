@@ -3452,7 +3452,22 @@ One repo's committed C4 model, for the architecture viewer. RBAC `belt.read`
   "sha": "<full commit sha>", "stale": false, "read_at": "2026-10-21T09:00:00+00:00",
   "model": { "scope": "paw-enterprise",
              "model": { "people": [], "systems": [], "relationships": [] } },
-  "flows": [], "loom": null, "live": null
+  "flows": [], "loom": null,
+  "live": {
+    "stale": false,
+    "dev_ci": { "sha": "…", "state": "green", "url": "…" },
+    "components": {
+      "<component id>": {
+        "runs": [ { "action_id": "…", "task": "…", "status": "running", "stage": "develop",
+                    "lead": { "feature": "…", "app": null, "issue": 1036 } } ],
+        "prs": [ { "number": 1153, "title": "…", "branch": "…", "checks": "pending",
+                   "gate": "local-ci/quality: success", "url": "…" } ],
+        "merges": { "count_7d": 4, "last": { "sha": "…", "title": "…", "at": "…" } },
+        "findings": [ { "number": 2067, "title": "…", "age_h": 5.2, "url": "…" } ],
+        "status": "changing" } },
+    "repo": { "runs": [], "prs": [], "merges": { "count_7d": 0, "last": null },
+              "findings": [], "status": "landed" }
+  }
 }
 ```
 
@@ -3464,9 +3479,24 @@ One repo's committed C4 model, for the architecture viewer. RBAC `belt.read`
   readable model (missing, not JSON, no `model.systems` list, or over 1 MB) is
   404 `belt.architecture_not_found`.
 - `slug` is the GitHub `owner/repo`, or `""` when origin is not on GitHub.
-- `flows`, `loom` and `live` are always present. They read `[]`, `null` and
-  `null` until the viewer's later slices fill them, so a client can test for
-  them now.
+- `flows` and `loom` are always present. They read `[]` and `null` until the
+  viewer's later slices fill them, so a client can test for them now.
+- `live` has a row per component of the repo's own system, keyed by model id.
+  Signals join a component when one of their files matches its `paths` globs:
+  in-flight Belt runs on this repo (by the files they touched), open PRs (by
+  changed files), trunk commits in the last 7 days, and open issues labelled
+  `finding` (by their `Files:` line). A signal with no file, or a file no glob
+  owns, goes on `repo`, the row for the repo as a whole. A model without
+  `paths` puts everything there.
+- `status` is the first rule that holds: `failed` (an open PR's checks are
+  red), `changing` (an in-flight run), `changed` (a trunk commit in 7 days),
+  `planned` (the component is tagged `planned`), else `landed`. A PR's `checks`
+  is `red`, `pending`, `green`, or `null` with no checks; `gate` is its
+  `local-ci/quality` status or `null`. `dev_ci` is the trunk's newest CI run,
+  or `null`.
+- When the live read fails (gh, a rate limit), the body still carries the
+  fresh model, with the last `live` block marked `stale: true`, or `live: null`
+  if there was none.
 - Cached per workspace and repo for 60 s behind a single-flight lock. When a
   refresh fails (the fetch, git itself), the last body comes back with
   `stale: true`. With no earlier body it is 503 `belt.architecture_unavailable`.

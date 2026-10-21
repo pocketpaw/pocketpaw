@@ -192,6 +192,15 @@ async def _touched(workspace_id: str, action_id: str) -> list[str]:
     return await _touched_files(workspace_id, action_id, blob)
 
 
+async def read_dev_ci(gh: Run, slug: str, branch: str) -> dict[str, Any] | None:
+    """The newest CI run on ``branch`` as ``{sha, state, url}`` (``state``
+    green, red or pending); ``None`` when it has none."""
+    argv = ["gh", "run", "list", "-R", slug, "--branch", branch, "--limit", "5", "--json"]
+    ci = next(iter(await _rows(gh, [*argv, "headSha,conclusion,url"])), {})
+    state = {"success": "green", "failure": "red"}.get(ci.get("conclusion"), "pending")
+    return {"sha": ci.get("headSha"), "state": state, "url": ci.get("url")} if ci else None
+
+
 async def _ok(run: Run, argv: list[str]) -> str:
     code, out, err = await run(argv)
     if code != 0:
@@ -307,7 +316,7 @@ async def _read(
     slug = prev["slug"] if "slug" in prev else await _github_slug(str(path), gh) or ""
     issues: dict[Any, dict[str, Any]] = {}
     done_prs: dict[str, list[dict[str, Any]]] = {}
-    ci, heads = {}, {}
+    dev_ci, heads = None, {}
     if slug:
         leads_argv = ["gh", "issue", "list", "-R", slug, "--label", "feature-lead", *_LIST]
         for row in await _rows(gh, [*leads_argv, "number,state,labels,updatedAt"]):
@@ -317,14 +326,11 @@ async def _read(
             pr = {"number": row.get("number"), "state": "MERGED", "done": True}
             for f in _DONE_BY.findall(str(row.get("body") or "")):
                 done_prs.setdefault(f, []).append(pr)
-        dev = ["gh", "run", "list", "-R", slug, "--branch", "dev", "--limit", "5", "--json"]
-        ci = next(iter(await _rows(gh, [*dev, "headSha,conclusion,url"])), {})
+        dev_ci = await read_dev_ci(gh, slug, "dev")
         for row in await _rows(gh, ["gh", "api", f"repos/{slug}/git/matching-refs/heads/lead/"]):
             f = str(row.get("ref") or "").removeprefix("refs/heads/lead/")
             if _ID.fullmatch(f):
                 heads[f] = (row.get("object") or {}).get("sha")
-    state = {"success": "green", "failure": "red"}.get(ci.get("conclusion"), "pending")
-    dev_ci = {"sha": ci.get("headSha"), "state": state, "url": ci.get("url")} if ci else None
 
     leads: dict[str | None, dict[str, Any]] = {}
     in_flight = []
@@ -437,7 +443,7 @@ async def _read(
                     row | {"present": present, "total": len(paths), "features": owners}
                 )
         for j, owners in named.items():
-            passing = built & set(owners) and state == "green"
+            passing = built & set(owners) and (dev_ci or {}).get("state") == "green"
             js = (
                 "named" if j.split("/")[1] not in existing else "passing" if passing else "existing"
             )

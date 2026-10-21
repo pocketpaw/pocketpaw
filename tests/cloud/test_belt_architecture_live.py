@@ -3,15 +3,23 @@
 #
 # Pure: the status rule by precedence, the PR check roll-up, a finding's
 # ``Files:`` line, every signal joined to its components (none: ``repo``)
-# and the block's size at creative-apps' counts.
+# and the block's size at creative-apps' counts. Reader: real git for the merge
+# log, fakes for gh and the run list; a gh failure keeps the model fresh and
+# serves the last live block with ``stale``.
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from datetime import UTC, datetime
 
 import pytest
+from pocketpaw_ee.cloud.belt import app_blueprint_read as abr
 from pocketpaw_ee.cloud.belt import architecture_live as al
+from pocketpaw_ee.cloud.belt import architecture_read as ar
+
+from tests.cloud.test_belt_architecture_read import Origin, git
 
 PATHS_MODEL = {
     "scope": "app",
@@ -137,3 +145,95 @@ def test_the_block_stays_small_at_creative_apps_counts():
     prs = [pr(n, [f"src/api/{i}.py" for i in range(30)], [check()] * 5) for n in range(100)]
     live = al.derive(PATHS_MODEL, runs=[], prs=prs, log="", findings=findings, dev_ci=None, now=NOW)
     assert len(json.dumps(live)) < 60_000
+
+
+# -- reader: real git for the merge log, fakes for gh and the runs ---------
+
+
+def fake_gh(prs=(), findings=(), fail=False):
+    async def gh(argv):
+        if argv[0] == "git":  # the slug read
+            return 0, "https://github.com/o/r.git\n", ""
+        if fail:
+            return 1, "", "API rate limit exceeded"
+        rows = {"pr": prs, "issue": findings, "run": [{"headSha": "h", "conclusion": "success"}]}
+        return 0, json.dumps(rows[argv[1]]), ""
+
+    return gh
+
+
+@pytest.fixture
+def origin(monkeypatch, tmp_path):
+    for name in ("_CACHE", "_LOCKS"):
+        monkeypatch.setattr(ar, name, {})
+    o = Origin(tmp_path)
+    monkeypatch.setattr(ar, "_re_resolve_repo", lambda r: (o.clone.resolve(), None))
+    return o
+
+
+def commit(o: Origin, path: str, *, days_ago: int = 0) -> None:
+    f = o.work / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(path + str(days_ago))
+    git(o.work, "add", path)
+    when = f"{int(datetime.now(UTC).timestamp()) - days_ago * 86400} +0000"
+    env = {**os.environ, "GIT_COMMITTER_DATE": when, "GIT_AUTHOR_DATE": when}
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", path],
+                   cwd=o.work, env=env, check=True, capture_output=True)  # fmt: skip
+    git(o.work, "push", "-q", "origin", o.branch)
+
+
+async def test_a_pending_run_reads_changing_and_a_recent_merge_changed(origin):
+    origin.push(PATHS_MODEL)
+    commit(origin, "src/old/x.py", days_ago=30)
+    commit(origin, "src/api/x.py", days_ago=1)
+    clone = origin.cloned()
+
+    async def runs(ws):
+        assert ws == "ws1"
+        here = str(clone)
+        return [run_row(repo=here), run_row("landed", here, action_id="a2"), run_row(repo="/x")]
+
+    async def touched(ws, action_id):
+        assert action_id == "a1"  # settled and foreign runs are never read
+        return ["src/ui/a.ts"]
+
+    body = await ar.read_architecture(
+        "ws1", "repo", now=lambda: 0.0, gh=fake_gh(), runs=runs, touched=touched
+    )
+    comps = body["live"]["components"]
+    assert (comps["ui"]["status"], comps["api"]["status"]) == ("changing", "changed")
+    assert comps["api"]["merges"]["count_7d"] == 1  # the 30-day-old commit is out
+    assert body["live"]["dev_ci"] == {"sha": "h", "state": "green", "url": None}
+    assert body["slug"] == "o/r"
+
+
+async def test_a_gh_failure_keeps_the_model_fresh_and_serves_the_last_live_block_stale(origin):
+    origin.push(PATHS_MODEL)
+    origin.cloned()
+
+    async def runs(ws):
+        return []
+
+    async def read(t, gh):
+        return await ar.read_architecture("ws1", "repo", now=lambda: t, gh=gh, runs=runs)
+
+    first = await read(0.0, fake_gh(fail=True))
+    assert first["stale"] is False and first["live"] is None and first["model"]["scope"] == "app"
+    ok = await read(100.0, fake_gh(prs=[pr(1, ["src/ui/a.ts"])]))
+    sha = origin.push({**PATHS_MODEL, "scope": "moved"})
+    body = await read(200.0, fake_gh(fail=True))
+    assert (body["stale"], body["sha"]) == (False, sha)
+    assert body["live"] == {**ok["live"], "stale": True}
+
+
+async def test_the_lead_runs_reader_is_the_default(origin, monkeypatch):
+    origin.push(PATHS_MODEL)
+    origin.cloned()
+
+    async def runs(ws):
+        return []
+
+    monkeypatch.setattr(abr, "_lead_runs", runs)
+    body = await ar.read_architecture("ws1", "repo", now=lambda: 0.0)
+    assert body["live"]["repo"]["status"] == "changed"  # the model commit landed today

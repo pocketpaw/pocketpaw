@@ -63,6 +63,15 @@
     ]
   },
   {
+    "label": "a settled run joins",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "if run.get(\"status\") in ab._SETTLED or not run.get(\"repo\"):",
+    "replace": "if not run.get(\"repo\"):",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
     "label": "a signal that joins no component is dropped, not put on the repo row",
     "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
     "find": "return [rows[i] for i in ids] or [repo]",

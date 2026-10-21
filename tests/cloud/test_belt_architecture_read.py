@@ -4,7 +4,7 @@
 # ``dev`` (or only ``main``, ripple's trunk), and the clone the reader is bound to.
 # A push after the clone proves the read fetches and serves ``origin/dev``, not the
 # checkout. Pins the response contract later slices extend (``flows: []``,
-# ``loom: None``, ``live: None``), the 404s (no model, an oversized one), the TTL
+# ``loom: None``, a ``live`` block), the 404s (no model, an oversized one), the TTL
 # cache, the stale fallback when the fetch breaks after one success (503 with
 # none), and that ``belt.read`` admits a member and refuses an outsider.
 
@@ -20,6 +20,7 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 from fastapi.testclient import TestClient  # noqa: E402
+from pocketpaw_ee.cloud.belt import app_blueprint_read as abr  # noqa: E402
 from pocketpaw_ee.cloud.belt import architecture_read as ar  # noqa: E402
 from pocketpaw_ee.cloud.belt import service as belt_service  # noqa: E402
 from pocketpaw_ee.cloud.belt.service import BeltConsoleError  # noqa: E402
@@ -68,6 +69,15 @@ class Origin:
         return self.clone
 
 
+async def _no_runs(workspace_id: str) -> list:
+    return []
+
+
+@pytest.fixture(autouse=True)
+def _no_run_store(monkeypatch):
+    monkeypatch.setattr(abr, "_lead_runs", _no_runs)  # the live block never reaches the store
+
+
 @pytest.fixture
 def origin(monkeypatch, tmp_path):
     for name in ("_CACHE", "_LOCKS"):
@@ -99,7 +109,7 @@ async def test_a_repo_with_a_model_returns_it_at_origin_dev(origin):
     }
     assert (body["sha"], body["stale"], body["slug"]) == (sha, False, "")
     assert body["model"] == {"scope": "moved", "model": MODEL["model"]}
-    assert (body["flows"], body["loom"], body["live"]) == ([], None, None)
+    assert (body["flows"], body["loom"], body["live"]["stale"]) == ([], None, False)
     assert body["repo"] == str(origin.clone.resolve())
 
 

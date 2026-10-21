@@ -6,8 +6,11 @@
 # ``model`` is ``{scope, model}`` from ``docs/c4/model.json`` at ``origin/dev``
 # (``origin/main`` when the clone has no ``origin/dev``, as ripple), read through
 # ``service.read_repo_model`` after a fetch of that branch, so it follows the
-# remote, not the checkout. ``flows`` (``[]``), ``loom`` and ``live`` (``None``)
-# are the keys later slices fill; clients may rely on them being present.
+# remote, not the checkout. ``live`` is ``architecture_live``'s block, read under
+# the same cache entry; a failed live read (gh, a rate limit) keeps the fresh
+# model and serves the last live block with its own ``stale: True``, ``None``
+# with none yet. ``flows`` (``[]``) and ``loom`` (``None``) are the keys later
+# slices fill; clients may rely on them being present.
 #
 # Cached per (workspace, repo) for ``TTL`` behind a single-flight lock, the same
 # shape as ``app_blueprint_read``. A failed refresh (fetch, git missing, a bug)
@@ -20,11 +23,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import app_blueprint_read as abr
+from .architecture_live import read_live
 from .executor import _re_resolve_repo, _run
 from .service import _READ_GIT, BeltConsoleError, read_repo_model
 
@@ -42,9 +47,16 @@ class _NoModel(Exception):
 
 
 async def read_architecture(
-    workspace_id: str, repo: str, *, now: Callable[[], float] = time.monotonic
+    workspace_id: str,
+    repo: str,
+    *,
+    now: Callable[[], float] = time.monotonic,
+    gh: abr.Run | None = None,
+    runs: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None,
+    touched: Callable[[str, str], Awaitable[list[str]]] | None = None,
 ) -> dict[str, Any]:
-    """The repo's architecture body (design doc 2026-10-21, section 4.1)."""
+    """The repo's architecture body (design doc 2026-10-21, section 4.1). The
+    keyword seams default to the patrols gh runner and the Belt run readers."""
     path, _err = _re_resolve_repo(repo)
     if path is None:
         raise BeltConsoleError(404, "Repo not found.", "belt.repo_not_found")
@@ -54,7 +66,8 @@ async def read_architecture(
         if hit and now() - hit["at"] < TTL:
             return hit["body"]
         try:
-            body = await _read(path, hit["body"]["slug"] if hit else None)
+            io = (gh, runs or abr._lead_runs, touched or abr._touched)
+            body = await _read(workspace_id, path, hit["body"] if hit else None, *io)
         except _NoModel:
             msg = "No C4 model in this repo. Add docs/c4/model.json on its trunk."
             raise BeltConsoleError(404, msg, "belt.architecture_not_found") from None
@@ -72,8 +85,12 @@ async def _git(path: Path, *argv: str) -> tuple[int, str, str]:
     return await _run([*_READ_GIT, *argv], cwd=path)
 
 
-async def _read(path: Path, slug: str | None) -> dict[str, Any]:
+async def _read(
+    workspace_id: str, path: Path, prev: dict[str, Any] | None, gh: Any, runs: Any, touched: Any
+) -> dict[str, Any]:
     from pocketpaw_ee.cloud.mandates.patrols import _default_gh, _github_slug
+
+    gh = gh or _default_gh
 
     for branch in _BRANCHES:
         code, _, _ = await _git(path, "rev-parse", "--verify", "--quiet", f"origin/{branch}")
@@ -87,8 +104,13 @@ async def _read(path: Path, slug: str | None) -> dict[str, Any]:
     sha, model = await read_repo_model(path, f"origin/{branch}")
     if model is None:
         raise _NoModel
-    if slug is None:
-        slug = await _github_slug(str(path), _default_gh) or ""
+    slug = prev["slug"] if prev else await _github_slug(str(path), gh) or ""
+    try:
+        io = {"gh": gh, "runs": runs, "touched": touched}
+        live = await read_live(workspace_id, path, branch, slug, model, **io)
+    except Exception:  # gh, a rate limit, git or a bug: the model stays fresh
+        logger.warning("Live read of %s failed", path, exc_info=True)
+        live = {**prev["live"], "stale": True} if prev and prev.get("live") else None
     return {
         "repo": str(path),
         "slug": slug,
@@ -98,5 +120,5 @@ async def _read(path: Path, slug: str | None) -> dict[str, Any]:
         "model": {"scope": model.get("scope"), "model": model["model"]},
         "flows": [],
         "loom": None,
-        "live": None,
+        "live": live,
     }

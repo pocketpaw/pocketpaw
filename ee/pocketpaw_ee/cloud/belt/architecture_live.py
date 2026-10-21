@@ -1,12 +1,14 @@
 # ee/pocketpaw_ee/cloud/belt/architecture_live.py — the ``live`` block of
 # ``GET /belt/architecture``: what Belt and GitHub are doing to each C4 component.
 #
-# ``derive`` joins the reads into the block (pure). Its inputs: the workspace's
-# in-flight runs on the repo with the files each touched, the open PRs (files and
-# ``statusCheckRollup``, as ``gh pr list`` prints them), the trunk's ``git log
-# --name-only`` over ``WINDOW``, the open ``finding`` issues and the trunk's dev
-# CI. ``finding`` is the label the cloud station's critics file (its lead brief:
-# "Critics file `finding` issues"); a finding maps by its ``Files:`` line.
+# ``read_live`` makes the reads and ``derive`` joins them (pure). Reads, all
+# through ``app_blueprint_read``'s seams: the workspace's in-flight runs on this
+# repo (``service.list_runs``, files by ``_touched``), one ``git log`` of the
+# trunk over ``WINDOW``, and through the patrols gh runner one ``gh pr list`` of
+# open PRs (files and ``statusCheckRollup``), one ``gh issue list`` of open
+# ``finding`` issues and the trunk's newest CI run. ``finding`` is the label the
+# cloud station's critics file (its lead brief: "Critics file `finding` issues");
+# a finding maps by its ``Files:`` line.
 #
 # Each file joins a component by ``orient.component_for`` over the model's
 # ``paths`` globs, and a signal joins every component one of its files does. A
@@ -14,8 +16,8 @@
 # A row's ``status`` is the first rule that holds: ``failed`` (an open PR's
 # checks are red), ``changing`` (an in-flight run), ``changed`` (a trunk commit
 # in the last ``CHANGED_H`` hours; ``merges`` still counts ``WINDOW``),
-# ``planned`` (the model tags it ``planned``), else ``landed``. Only in-flight
-# runs are passed in, so one failed run cannot paint a component red for good;
+# ``planned`` (the model tags it ``planned``), else ``landed``. Settled runs
+# never join, so one failed run cannot paint a component red for good;
 # ``drift`` waits on loom.
 #
 # Rows carry ids, titles and states only, never a finding's body, a PR's file
@@ -24,19 +26,25 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from . import app_blueprint as ab
+from . import app_blueprint_read as abr
 from .orient import _dicts, _owned_system, component_for, path_index, repo_path
 
 FINDING_LABEL = "finding"
 WINDOW = "7.days"
 CHANGED_H = 24  # a ring reads changed this long after a trunk commit
+_LIMIT = "200"  # gh lists default to 30 rows
 _TEXT = 160  # a run task or a title, cut
 _GATE = "local-ci/quality"
 _RED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _FILES = re.compile(r"^Files:(.*)$", re.M)
+_PR_JSON = "number,title,headRefName,files,statusCheckRollup,url"
 
 
 def checks(rollup: Any) -> tuple[str | None, str | None]:
@@ -157,3 +165,36 @@ def derive(
         rows[str(c["id"])]["status"] = component_status(rows[str(c["id"])], planned, now)
     repo["status"] = component_status(repo, False, now)
     return {"stale": False, "dev_ci": dev_ci, "components": rows, "repo": repo}
+
+
+async def read_live(
+    workspace_id: str,
+    path: Path,
+    branch: str,
+    slug: str,
+    model: dict[str, Any],
+    *,
+    gh: abr.Run,
+    runs: Callable[[str], Awaitable[list[dict[str, Any]]]],
+    touched: Callable[[str, str], Awaitable[list[str]]],
+) -> dict[str, Any]:
+    """Read and derive the live block for the repo at ``path`` (its trunk is
+    ``origin/<branch>``). Raises on a failed git or gh read (``abr.ReadFailed``)."""
+    mine = []
+    for run in await runs(workspace_id):
+        if run.get("status") in ab._SETTLED or not run.get("repo"):
+            continue
+        if Path(str(run["repo"])).expanduser().resolve() == path:
+            mine.append((run, await touched(workspace_id, str(run["action_id"]))))
+    fmt = "--format=%H%x09%s%x09%cI"
+    argv = ["log", f"origin/{branch}", f"--since={WINDOW}", "--name-only", fmt]
+    log = await abr._ok(abr._git(path), argv)
+    prs, findings, dev_ci = [], [], None
+    if slug:
+        listed = ["--state", "open", "--limit", _LIMIT, "--json"]
+        prs = await abr._rows(gh, ["gh", "pr", "list", "-R", slug, *listed, _PR_JSON])
+        argv = ["gh", "issue", "list", "-R", slug, "--label", FINDING_LABEL, *listed]
+        findings = await abr._rows(gh, [*argv, "number,title,body,createdAt,url"])
+        dev_ci = await abr.read_dev_ci(gh, slug, branch)
+    now = datetime.now(UTC)
+    return derive(model, runs=mine, prs=prs, log=log, findings=findings, dev_ci=dev_ci, now=now)
