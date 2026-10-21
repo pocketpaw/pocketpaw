@@ -202,7 +202,7 @@ async def test_a_miss_serves_the_model_at_once_and_fills_live_behind(origin):
 async def test_an_expired_read_is_served_at_once_and_refreshed_once(origin):
     origin.push()
     origin.cloned()
-    first = await settled()
+    first = await settled(gh=counting_gh([]))  # slug o/r: a refresh makes 3 gh reads
     sha = origin.push({**MODEL, "scope": "next"})
     gate = asyncio.Event()
     calls: list = []
@@ -210,9 +210,9 @@ async def test_an_expired_read_is_served_at_once_and_refreshed_once(origin):
     both = asyncio.gather(read(t=61.0, gh=gh), read(t=62.0, gh=gh))
     a, b = await asyncio.wait_for(both, 1)  # neither waits on the blocked gh
     assert a is first and b is first
-    assert len(ar._TASKS) == 1  # one refresh for the two callers
     gate.set()
     await drain()
+    assert len(calls) == 3  # one refresh for the two callers
     assert (await read(t=62.0))["sha"] == sha
 
 

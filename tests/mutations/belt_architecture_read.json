@@ -9,22 +9,31 @@
     ]
   },
   {
-    "label": "architecture read: a failed refresh is a 503, not stale",
+    "label": "architecture read: a failed refresh is not marked stale",
     "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
-    "find": "            if hit is None:\n                msg = \"Architecture not readable yet.\"\n",
-    "replace": "            if True:\n                msg = \"Architecture not readable yet.\"\n",
+    "find": "        return {**prev, \"stale\": True}\n",
+    "replace": "        return prev\n",
     "tests": [
       "tests/cloud/test_belt_architecture_read.py::test_a_failed_fetch_after_one_success_serves_stale"
     ]
   },
   {
-    "label": "architecture read: no model reads as stale or 503",
+    "label": "architecture read: no model reads as 503",
     "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
-    "find": "        except _NoModel:\n",
-    "replace": "        except ZeroDivisionError:\n",
+    "find": "                except _NoModel:\n",
+    "replace": "                except ZeroDivisionError:\n",
     "tests": [
       "tests/cloud/test_belt_architecture_read.py::test_no_model_is_404",
       "tests/cloud/test_belt_architecture_read.py::test_an_oversized_model_is_unreadable_never_partial"
+    ]
+  },
+  {
+    "label": "architecture read: a model gone on refresh stays cached",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "    except _NoModel:\n        return None\n",
+    "replace": "    except _NoModel:\n        return {**prev, \"stale\": True}\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_a_model_gone_on_refresh_drops_the_entry"
     ]
   },
   {
@@ -39,10 +48,37 @@
   {
     "label": "architecture read: the cache never expires",
     "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
-    "find": "        if hit and now() - hit[\"at\"] < TTL:\n",
-    "replace": "        if hit:\n",
+    "find": "    elif now() - hit[\"at\"] >= TTL and key not in _TASKS:\n",
+    "replace": "    elif False:\n",
     "tests": [
-      "tests/cloud/test_belt_architecture_read.py::test_a_read_within_the_ttl_is_the_cached_body"
+      "tests/cloud/test_belt_architecture_read.py::test_a_read_within_the_ttl_is_the_cached_body_and_reads_nothing"
+    ]
+  },
+  {
+    "label": "architecture read: every expired read starts its own refresh",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "    elif now() - hit[\"at\"] >= TTL and key not in _TASKS:\n",
+    "replace": "    elif now() - hit[\"at\"] >= TTL:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_an_expired_read_is_served_at_once_and_refreshed_once"
+    ]
+  },
+  {
+    "label": "architecture read: an expired read waits for its refresh",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "        _behind(key, now, _refresh(workspace_id, path, hit[\"body\"], io))\n",
+    "replace": "        hit = {\"body\": await _refresh(workspace_id, path, hit[\"body\"], io)}\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_an_expired_read_is_served_at_once_and_refreshed_once"
+    ]
+  },
+  {
+    "label": "architecture read: a miss waits for the live block",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_read.py",
+    "find": "                _behind(key, now, _with_live(workspace_id, path, body, branch, model, None, io))\n",
+    "replace": "                hit = _CACHE[key] = {\"body\": await _with_live(workspace_id, path, body, branch, model, None, io), \"at\": now()}\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_read.py::test_a_miss_serves_the_model_at_once_and_fills_live_behind"
     ]
   },
   {
