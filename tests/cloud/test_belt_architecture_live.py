@@ -19,6 +19,7 @@ import pytest
 from pocketpaw_ee.cloud.belt import app_blueprint_read as abr
 from pocketpaw_ee.cloud.belt import architecture_live as al
 from pocketpaw_ee.cloud.belt import architecture_read as ar
+from pocketpaw_ee.cloud.belt import cloud_station as cs
 
 from tests.cloud.test_belt_architecture_read import Origin, git
 
@@ -141,6 +142,19 @@ def test_every_signal_joins_its_components_and_one_that_joins_none_lands_on_repo
     assert [f["number"] for f in repo["findings"]] == [8] and repo["status"] == "landed"
 
 
+def test_a_run_with_no_touched_files_joins_the_components_its_belt_lead_prs_touch():
+    mine = {**pr(3, ["src/api/b.py", "README.md"]), "body": "Feature: f\n Belt-Lead: a1 \n"}
+    other = {**pr(4, ["src/ui/a.ts"]), "body": "Belt-Lead: a2\nsee Belt-Lead: a1 later"}
+    runs = [(run_row(), []), (run_row(action_id="a9"), [])]  # a9 has no PR yet
+    live = al.derive(PATHS_MODEL, runs=runs, prs=[mine, other], log="", findings=[],
+                     dev_ci=None, now=NOW)  # fmt: skip
+    ui, api = live["components"]["ui"], live["components"]["api"]
+    assert [r["action_id"] for r in api["runs"]] == ["a1"] and api["status"] == "changing"
+    assert ui["runs"] == []  # a2's PR, and a1 named mid-line, do not join a1
+    assert [r["action_id"] for r in live["repo"]["runs"]] == ["a9"]
+    assert al.LEAD_MARKER == cs.LEAD_MARKER
+
+
 def test_the_block_stays_small_at_creative_apps_counts():
     findings = [finding(n, "x" * 700 + "\nFiles: src/ui/a.ts") for n in range(150)]
     prs = [pr(n, [f"src/api/{i}.py" for i in range(30)], [check()] * 5) for n in range(100)]
@@ -165,7 +179,8 @@ def fake_gh(prs=(), findings=(), fail=False, started=None):
         if fail is True or argv[1] in (fail or ()):
             return 1, "", "API rate limit exceeded"
         rows = {"pr": prs, "issue": findings, "run": [{"headSha": "h", "conclusion": "success"}]}
-        return 0, json.dumps(rows[argv[1]]), ""
+        fields = argv[-1].split(",")  # gh returns only the --json fields asked for
+        return 0, json.dumps([{k: r[k] for k in fields if k in r} for r in rows[argv[1]]]), ""
 
     return gh
 
@@ -214,6 +229,25 @@ async def test_a_pending_run_reads_changing_and_a_3_day_old_merge_counts_but_lan
     assert comps["api"]["merges"]["count_7d"] == 1  # 3 days counts; 30 days is out
     assert body["live"]["dev_ci"] == {"sha": "h", "state": "green", "url": None}
     assert body["slug"] == "o/r"
+
+
+async def test_the_pr_read_carries_the_body_that_joins_a_run_to_its_prs(origin):
+    origin.push(PATHS_MODEL)
+    clone = origin.cloned()
+
+    async def runs(ws):
+        return [run_row(repo=str(clone))]
+
+    async def touched(ws, action_id):
+        return []
+
+    lead_pr = {**pr(3, ["src/api/b.py"]), "body": "Belt-Lead: a1"}
+    body = await ar.read_architecture(
+        "ws1", "repo", now=lambda: 0.0, gh=fake_gh(prs=[lead_pr]), runs=runs, touched=touched
+    )
+    live = body["live"]
+    assert [r["action_id"] for r in live["components"]["api"]["runs"]] == ["a1"]
+    assert live["repo"]["runs"] == []
 
 
 async def test_a_gh_failure_keeps_the_model_fresh_and_serves_the_last_live_block_stale(origin):

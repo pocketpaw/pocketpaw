@@ -88,5 +88,32 @@
     "tests": [
       "tests/cloud/test_belt_architecture_live.py"
     ]
+  },
+  {
+    "label": "a run does not join the components its Belt-Lead PRs touch",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "for row in homes([*files, *led.get(str(run.get(\"action_id\")), [])]):",
+    "replace": "for row in homes(files):",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a Belt-Lead PR joins every run, not only the one it names",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "for row in homes([*files, *led.get(str(run.get(\"action_id\")), [])]):",
+    "replace": "for row in homes([*files, *(x for v in led.values() for x in v)]):",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "the PR read drops the body that names a PR's lead",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "_PR_JSON = \"number,title,body,headRefName,",
+    "replace": "_PR_JSON = \"number,title,headRefName,",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
   }
 ]

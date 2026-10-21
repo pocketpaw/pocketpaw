@@ -5,14 +5,17 @@
 # through ``app_blueprint_read``'s seams: the workspace's in-flight runs on this
 # repo (``service.list_runs``, files by ``_touched``), one ``git log`` of the
 # trunk over ``WINDOW``, and through the patrols gh runner, run together, one
-# ``gh pr list`` of open PRs (files and ``statusCheckRollup``), one ``gh issue
-# list`` of open ``finding`` issues and the trunk's newest CI run. ``finding`` is the label the
-# cloud station's critics file (its lead brief: "Critics file `finding` issues");
-# a finding maps by its ``Files:`` line.
+# ``gh pr list`` of open PRs (files, body and ``statusCheckRollup``), one ``gh
+# issue list`` of open ``finding`` issues and the trunk's newest CI run.
+# ``finding`` is the label the cloud station's critics file (its lead brief:
+# "Critics file `finding` issues"); a finding maps by its ``Files:`` line.
 #
 # Each file joins a component by ``orient.component_for`` over the model's
 # ``paths`` globs, and a signal joins every component one of its files does. A
-# signal that joins none lands on ``repo``, the row for the repo as a whole.
+# run's files are its touched files plus those of every open PR whose body has
+# the line ``Belt-Lead: <action_id>`` (``cloud_station._lead_prs``'s match), since
+# cloud leads report no touched files. A signal that joins none lands on
+# ``repo``, the row for the repo as a whole.
 # A row's ``status`` is the first rule that holds: ``failed`` (an open PR's
 # checks are red), ``changing`` (an in-flight run), ``changed`` (a trunk commit
 # in the last ``CHANGED_H`` hours; ``merges`` still counts ``WINDOW``),
@@ -45,7 +48,8 @@ _GATE = "local-ci/quality"
 _RED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _FILES = re.compile(r"^Files:(.*)$", re.M)
-_PR_JSON = "number,title,headRefName,files,statusCheckRollup,url"
+_PR_JSON = "number,title,body,headRefName,files,statusCheckRollup,url"
+LEAD_MARKER = "Belt-Lead:"  # cloud_station.LEAD_MARKER, not imported (heavy)
 
 
 def checks(rollup: Any) -> tuple[str | None, str | None]:
@@ -118,6 +122,14 @@ def derive(
         ids = sorted({c for f in files if (c := component_for(f, index)) in rows})
         return [rows[i] for i in ids] or [repo]
 
+    def pr_files(pr: dict[str, Any]) -> list[str]:
+        return [p for f in _dicts(pr.get("files")) if (p := repo_path(str(f.get("path") or "")))]
+
+    led: dict[str, list[str]] = {}  # run id -> the files of its Belt-Lead PRs
+    for pr in prs:
+        for line in str(pr.get("body") or "").splitlines():
+            if (mark := line.strip()).startswith(LEAD_MARKER):
+                led.setdefault(mark[len(LEAD_MARKER) :].strip(), []).extend(pr_files(pr))
     for run, files in runs:
         lead = run.get("lead") or {}
         item = {
@@ -127,7 +139,7 @@ def derive(
             "stage": run.get("stage"),
             "lead": {k: lead.get(k) for k in ("feature", "app", "issue")} if lead else None,
         }
-        for row in homes(files):
+        for row in homes([*files, *led.get(str(run.get("action_id")), [])]):
             row["runs"].append(item)
     for pr in prs:
         state, gate = checks(pr.get("statusCheckRollup"))
@@ -139,8 +151,7 @@ def derive(
             "gate": gate,
             "url": pr.get("url"),
         }
-        files = [p for f in _dicts(pr.get("files")) if (p := repo_path(str(f.get("path") or "")))]
-        for row in homes(files):
+        for row in homes(pr_files(pr)):
             row["prs"].append(item)
     commits: list[tuple[dict[str, Any], list[str]]] = []
     for line in log.splitlines():
