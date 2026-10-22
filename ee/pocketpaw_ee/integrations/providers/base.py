@@ -20,10 +20,11 @@
 #     as ``callback_params={key: value}``: untrusted, the provider validates them
 #   * refresh_with_meta: bool   ``refresh`` also gets ``meta=connection.meta`` (a
 #     token endpoint that depends on the account: Zoho's region, Shopify's shop)
-#   * connect_params: tuple[ConnectParam, ...]   typed by the owner before Connect;
-#     checked by ``check_connect_params``, kept in the state (never read from the
-#     callback), passed as ``params=`` to authorize_url / complete; a grant should
-#     keep them in ``meta["connect_params"]`` for resume and refresh
+#   * connect_params: tuple[ConnectParam, ...]   given by the owner before Connect
+#     (typed text, or a ``select`` of declared options; an optional one may be left
+#     out); checked by ``check_connect_params``, kept in the state (never read from
+#     the callback), passed as ``params=`` to authorize_url / complete; a grant
+#     should keep them in ``meta["connect_params"]`` for resume and refresh
 #   * verify_callback(query, params) -> bool   checks the full (signed) callback query
 #   * handle_event(event) -> bool   (async) account-level webhooks (uninstall, privacy
 #     requests) taken before site routing; True acks and records the event id
@@ -115,19 +116,25 @@ class TokenGrant:
 
 
 @dataclass(frozen=True)
+class SettingOption:
+    value: str
+    label: str
+
+
+@dataclass(frozen=True)
 class ConnectParam:
-    """One value the owner gives before Connect (``params`` on the connect body)."""
+    """One value the owner gives before Connect (``params`` on the connect body).
+    A ``select`` takes one of ``options`` (matched case-insensitively, stored as the
+    option's value); an optional param left empty is omitted from the result."""
 
     key: str
     label: str
     placeholder: str = ""
     max_length: int = 200
-
-
-@dataclass(frozen=True)
-class SettingOption:
-    value: str
-    label: str
+    type: Literal["text", "select"] = "text"
+    options: tuple[SettingOption, ...] = ()
+    required: bool = True
+    help: str = ""
 
 
 @dataclass(frozen=True)
@@ -269,9 +276,19 @@ class BaseProvider:
         for key, spec in declared.items():
             value = str(params.get(key) or "").strip()
             if not value:
+                if not spec.required:
+                    continue
                 raise ValueError(f"Enter your {spec.label}.")
             if len(value) > spec.max_length:
                 raise ValueError(f"{spec.label} is too long.")
+            if spec.type == "select":
+                match = next(
+                    (o.value for o in spec.options if o.value.casefold() == value.casefold()),
+                    None,
+                )
+                if match is None:
+                    raise ValueError(f"Pick your {spec.label} from the list.")
+                value = match
             out[key] = value
         return out
 

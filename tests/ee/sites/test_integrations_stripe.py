@@ -6,6 +6,8 @@
 # server-side account binding, pending-account reuse, resume), meta from a v2
 # account, a Stripe failure at connect/resume as a generic 502 (and the "platform
 # has no Connect" warning), attention and site status from connection meta,
+# the owner's account country (a select of Stripe's supported countries, checked
+# before Stripe is called; a pending account in another country isn't reused),
 # ``create_checkout`` (server-side catalog pricing, currency, qty bounds,
 # success/cancel URLs, platform fee off, ``Stripe-Account`` = the v2 account id),
 # and webhooks (signature, orders paid / refunded / failed, dedupe, v1
@@ -45,6 +47,7 @@ def _v2_account(acct: str, body: dict) -> dict:
         "contact_email": "owner@shop.test",
         "dashboard": body.get("dashboard"),
         "metadata": dict(body.get("metadata") or {}),
+        "identity": {"country": (body.get("identity") or {}).get("country")},
         "configuration": {
             "merchant": {
                 "capabilities": {"card_payments": {"status": "restricted", "status_details": []}}
@@ -503,6 +506,102 @@ async def test_account_country_comes_from_the_workspace_else_the_platform_defaul
     monkeypatch.delenv(mod.DEFAULT_COUNTRY_ENV)
     assert await mod._account_country(ws_id) == "US"
     assert [mod._iso2(v) for v in ("in", " fr ", "ü1", None)] == ["IN", "FR", "", ""]
+
+
+async def _start_in(c, country: str | None, pocket_id: str | None = None):
+    body: dict = {"params": {"country": country}} if country is not None else {}
+    if pocket_id:
+        body["pocket_id"] = pocket_id
+    return await c.post("/api/v1/integrations/stripe/connect", json=body)
+
+
+async def _follow(c, started) -> None:
+    assert started.status_code == 200, started.text
+    split = urlsplit(started.json()["authorize_url"])
+    resp = await c.get(split.path, params=parse_qs(split.query))
+    assert resp.status_code == 302, resp.text
+
+
+@pytest.mark.asyncio
+async def test_connect_offers_stripes_supported_countries(beanie_test_db, stripe):
+    from pocketpaw_ee.integrations.providers import stripe as mod
+
+    async with _client() as c:
+        views = {p["id"]: p for p in (await c.get("/api/v1/integrations/providers")).json()}
+    [param] = views["stripe"]["connect_params"]
+    assert param["key"] == "country" and param["type"] == "select"
+    assert param["required"] is False
+    values = [o["value"] for o in param["options"]]
+    assert len(values) == len(set(values)) == len(mod.CONNECT_COUNTRIES) == 44
+    assert {"US", "GB", "DE", "JP", "AE", "MX", "TH"} <= set(values)
+    # Preview-only and non-Stripe countries are not offered.
+    assert not {"IN", "ID", "NG", "ZA", "CN"} & set(values)
+    assert all(len(o["label"]) > 2 for o in param["options"])
+
+
+@pytest.mark.asyncio
+async def test_the_owner_picks_the_account_country(beanie_test_db, stripe):
+    async with _client() as c:
+        await _follow(c, await _start_in(c, "gb"))
+    [acct] = stripe.accounts
+    assert stripe.bodies[acct]["identity"] == {"country": "GB"}
+
+
+@pytest.mark.asyncio
+async def test_an_unsupported_country_is_refused_before_stripe_is_called(beanie_test_db, stripe):
+    async with _client() as c:
+        for bad in ("IN", "XX", "USA", "u", "<b>"):
+            resp = await _start_in(c, bad)
+            assert resp.status_code == 422, (bad, resp.text)
+            assert resp.json()["error"]["code"] == "integrations.invalid_connect_params"
+        extra = await c.post(
+            "/api/v1/integrations/stripe/connect",
+            json={"params": {"country": "US", "currency": "usd"}},
+        )
+        assert extra.status_code == 422
+    assert stripe.accounts == {} and stripe.paths == []
+
+
+@pytest.mark.asyncio
+async def test_no_country_keeps_the_workspace_or_platform_default(beanie_test_db, stripe):
+    async with _client() as c:
+        await _follow(c, await _start_in(c, None))
+        await _follow(c, await _start_in(c, ""))
+    assert [b["identity"] for b in stripe.bodies.values()] == [{"country": "US"}]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_account_in_another_country_is_not_reused(beanie_test_db, stripe):
+    async with _client() as c:
+        await _follow(c, await _start_in(c, "GB"))
+        await _follow(c, await _start_in(c, "FR"))
+        assert len(stripe.accounts) == 2
+        assert stripe.bodies["acct_0002"]["identity"] == {"country": "FR"}
+        # The same country again reuses the newest pending account.
+        await _follow(c, await _start_in(c, "FR"))
+        assert len(stripe.accounts) == 2
+        assert stripe.links[-1]["account"] == "acct_0002"
+        # No country picked: whatever is pending is theirs.
+        await _follow(c, await _start_in(c, None))
+        assert len(stripe.accounts) == 2
+        msg = await _return(c, stripe.links[-1])
+    assert msg["status"] == "active", msg
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_country_stripe_does_not_support_falls_back(
+    beanie_test_db, stripe, monkeypatch
+):
+    from pocketpaw_ee.cloud.models.workspace import PartnerProfile, Workspace
+    from pocketpaw_ee.integrations.providers import stripe as mod
+
+    ws = Workspace(name="Mugs", slug="mugs-in", owner=OWNER)
+    ws.partner = PartnerProfile(status="active", footer_name="Mugs", country="in")
+    await ws.insert()
+    assert await mod._account_country(str(ws.id)) == "US"
+    monkeypatch.setenv(mod.DEFAULT_COUNTRY_ENV, "IN")
+    with pytest.raises(mod.ProviderError):
+        await mod._account_country(str(ws.id))
 
 
 # ------------------------------------------------------------------ checkout

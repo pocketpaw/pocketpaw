@@ -166,7 +166,19 @@ def provider_view(provider: IntegrationProvider) -> ProviderView:
         settings_fields=settings_rules.field_views(provider),
         requires_connection=provider.kind == "connect",
         connect_params=[
-            {"key": p.key, "label": p.label, "placeholder": p.placeholder}
+            {
+                "key": p.key,
+                "label": p.label,
+                "placeholder": p.placeholder,
+                "type": p.type,
+                "required": p.required,
+                "options": (
+                    [{"value": o.value, "label": o.label} for o in p.options]
+                    if p.type == "select"
+                    else None
+                ),
+                "help": p.help or None,
+            }
             for p in getattr(provider, "connect_params", ())
         ],
     )

@@ -345,6 +345,10 @@ async def test_connect_route_checks_params_and_the_catalog_declares_them(beanie_
             "key": "shop",
             "label": "Shopify store address",
             "placeholder": "your-store.myshopify.com",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "help": None,
         }
     ]
     assert [f["key"] for f in view["settings_fields"]] == ["shop_domain"]
