@@ -16,13 +16,14 @@
 #     It carries its start time and goes stale after :data:`PENDING_STALE_SECONDS`, so a
 #     crashed verify cannot pin a site in "pending" forever.
 #
-# Four per-pocket POINTER records sit beside them, one each, overwritten in place and
+# Five per-pocket POINTER records sit beside them, one each, overwritten in place and
 # exempt from eviction: ``latest`` (the last edit's enqueued sandbox job, read back by
 # ``verify.settled_verdict``), ``view-origin`` (the builder origin the editor last
 # viewed the draft with, read by ``service.resolve_armed_builder_origin``),
-# ``latest-build`` (a project pocket's newest build job, ``project_build``) and
-# ``build-history`` (its recent builds without logs, the builds list route). The
-# project lane's per-job build logs are ordinary ``build-<job id>`` records.
+# ``latest-build`` (a project pocket's newest build job, ``project_build``),
+# ``build-history`` (its recent builds without logs, the builds list route) and
+# ``edit-session`` (until when a project draft is being visually edited). The project
+# lane's per-job build logs are ordinary ``build-<job id>`` records.
 #
 # THE BACKEND FOLLOWS THE ARTIFACT STORE'S. The worker writes and the web process reads,
 # which is already true of preview artifacts, so this uses the same selection:
@@ -70,8 +71,13 @@ LATEST_BUILD_KEY = "latest-build"
 #: A project pocket's recent builds, newest first, without logs (``project_build``).
 BUILD_HISTORY_KEY = "build-history"
 
+#: Until when someone is visually editing a project pocket's draft (``project_build``).
+EDIT_SESSION_KEY = "edit-session"
+
 #: Pointer records: one per pocket, never evicted to make room for hash records.
-_POINTER_KEYS = frozenset({LATEST_KEY, VIEW_ORIGIN_KEY, LATEST_BUILD_KEY, BUILD_HISTORY_KEY})
+_POINTER_KEYS = frozenset(
+    {LATEST_KEY, VIEW_ORIGIN_KEY, LATEST_BUILD_KEY, BUILD_HISTORY_KEY, EDIT_SESSION_KEY}
+)
 
 
 def sandbox_key(content_hash: str) -> str:
@@ -200,6 +206,7 @@ def default_verify_store() -> Any:
 
 
 __all__ = [
+    "EDIT_SESSION_KEY",
     "KEEP_PER_POCKET",
     "LATEST_KEY",
     "PENDING_STALE_SECONDS",

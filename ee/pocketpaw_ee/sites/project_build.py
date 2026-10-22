@@ -14,38 +14,41 @@
 #     project tree, the vendored generator beside it (plus ``templates/_paw/paw.js``),
 #     and ``paw-sites-gen project-build`` installs, builds and writes ``paw-build.json``;
 #     ``--site-config`` rides only a generator that knows it (queued builds have the
-#     key scrubbed, so paw.js lands at publish). On a generator with ``--source-tags``
-#     a draft builds twice: untagged, then tagged into :data:`TAGGED_STAGE` for the
-#     preview (:func:`build_script`). A stage step copies each manifest and its files
-#     into ``engines.PROJECT_STAGE_REL``, which the wrapper tars.
+#     key scrubbed, so paw.js lands at publish). A stage step copies each manifest and
+#     its files into ``engines.PROJECT_STAGE_REL``, which the wrapper tars.
 #
-# What a finished build leaves, all keyed by ``(pocket_id, content_hash)``:
-#   * the whole UNTAGGED bundle in the artifact store under ``<hash>.bundle``: what
-#     publish deploys through ``bundle_deploy`` (a no-build publish re-stages from the
-#     source with the live site config instead), so no tag or stamp ever ships;
-#   * the (tagged when there is one) assets as the draft's preview files + token
-#     (``preview_origin``), unless they have no root index.html (``preview_mode``);
+# Source tags cost a second sandbox build, so with :data:`LAZY_TAGS_ENV` on a sandbox
+# draft is tagged only while someone visually edits it (:func:`mark_edit_session`).
+# Outside a session it builds once, untagged, under the source's content hash. In a
+# session the view moves to :func:`tagged_view_hash` and its job's input carries
+# ``sourceTags``: ``"only"`` (the untagged bundle for this source is stored, so only
+# ``--source-tags`` runs, into :data:`TAGGED_STAGE`) or ``"both"``; ``bundleHash``
+# names the base hash the publish bundle is filed under (:func:`build_script`).
+#
+# What a finished build leaves, keyed by ``(pocket_id, hash)``:
+#   * the whole UNTAGGED bundle in the artifact store under ``<base hash>.bundle``:
+#     what publish deploys through ``bundle_deploy`` (a no-build publish re-stages
+#     from the source with the live site config instead), so no tag or stamp ever
+#     ships; a tagged-only build reuses the stored one;
+#   * under the VIEW hash (the base, or its tagged view): the (tagged when there is
+#     one) assets as the draft's preview files + token (``preview_origin``), unless
+#     they have no root index.html (``preview_mode``);
 #   * a build record in ``verify_store`` (``build-<job id>``): status, rung, the
 #     redacted and capped build log, ``preview_mode`` and the framework; plus the
 #     pocket's ``latest-build`` pointer and its ``build-history`` (the newest
 #     :data:`BUILD_HISTORY_LIMIT` builds without logs: status, trigger, start and
 #     finish times; :func:`read_build_history`), both exempt from eviction.
 #
-# Invariants: nothing here runs author code on this host; the content hash is the
-# source plus the draft tag mode, so the site config (id + signed key) never moves it:
-# a draft keeps the paw.js it was built with, and publish re-applies paw.js
-# with the live config (:func:`apply_paw_client_to_bundle`, idempotent) and resolves
-# the lead-form capture placeholders (:func:`apply_capture_tokens_to_bundle`). The build log
-# is scrubbed (``verify_diagnostics.scrub_log_text``) before it is stored;
-# ``preview_mode`` is ``"full"`` when the assets are the whole site or a draft Worker
-# serves the build (``draft_worker``, behind ``PAW_SITES_DRAFT_WORKERS``; its fallback
-# rung is the record's ``draft_worker_reason``), else ``"static"`` for a worker build,
-# and ``"server_only"`` when a worker build's assets have no root index.html (next,
-# sveltekit): no preview files are stored then, because the URL would only 404.
-# ``"published"`` is never a build's mode: ``service._project_draft_artifact`` answers
-# it for the pocket's published content once its drafts were purged. No realtime
-# event exists for site builds, so build progress is polled (latest-build /
-# native-artifact).
+# Invariants: nothing here runs author code on this host. The content hash is the
+# source plus the draft tag mode, never the site config, so a draft keeps the paw.js
+# it was built with and publish re-applies it with the live config
+# (:func:`apply_paw_client_to_bundle`) and resolves the capture placeholders
+# (:func:`apply_capture_tokens_to_bundle`). Build logs are scrubbed before storage.
+# ``preview_mode``: ``"full"`` (the assets are the site, or a draft Worker serves it,
+# ``draft_worker``), ``"static"`` (a worker build previewed as assets),
+# ``"server_only"`` (no root index.html, so no preview files); ``"published"`` is
+# answered by ``service._project_draft_artifact``, never a build. Build progress is
+# polled (latest-build / native-artifact); there is no realtime event.
 from __future__ import annotations
 
 import hashlib
@@ -53,6 +56,7 @@ import json
 import logging
 import os
 import shlex
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -166,8 +170,9 @@ def draft_tag_mode(source: Mapping[str, Any] | None) -> str | None:
 def project_content_hash(source: Mapping[str, Any]) -> str:
     """The draft's content hash: the source map, the engine and this lane's format.
     The generator version rides it too, so a new ``project-build`` rebuilds drafts,
-    and so does :func:`draft_tag_mode` when it is on, so an untagged draft is never
-    served as a tagged one (with it off the hash is what it always was)."""
+    and so does :func:`draft_tag_mode` when it is on (with it off the hash is what it
+    always was). It names the untagged draft and the publish bundle; a tagged draft
+    of the same source lives under :func:`tagged_view_hash`."""
     from pocketpaw_ee.sites.generator_client import generator_version
 
     parts = [
@@ -184,6 +189,13 @@ def project_content_hash(source: Mapping[str, Any]) -> str:
         h.update(part.encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()
+
+
+def tagged_view_hash(content_hash: str) -> str:
+    """The hash a source-tagged draft of ``content_hash`` is built, previewed and
+    recorded under while someone edits it. A hex digest like the base, so job ids,
+    store keys and preview tokens take it as they take the base."""
+    return hashlib.sha256(f"{content_hash}\0source-tags".encode()).hexdigest()
 
 
 def project_files(source: Mapping[str, Any] | None) -> dict[str, bytes]:
@@ -553,16 +565,22 @@ TAGGED_STAGE = "_paw_tagged"
 
 
 def build_script(
-    project_dir: str, *, site_config_path: str | None = None, source_tags: bool = False
+    project_dir: str,
+    *,
+    site_config_path: str | None = None,
+    source_tags: bool = False,
+    untagged: bool = True,
 ) -> str:
     """The bash the wrapper's build step runs (under its timeout, logging to its log):
     ``project-build`` (with ``--site-config`` when given), then the stage step. Exits
     with the first failure's code.
 
-    ``source_tags`` (a draft on a generator that has the flag) adds a SECOND build with
-    ``--source-tags``, staged under :data:`TAGGED_STAGE`: the preview shows the tagged
-    pages while the untagged bundle stays the one publish deploys. A tagged build that
-    fails only costs the tags (the draft previews untagged)."""
+    ``source_tags`` (a draft being edited, on a generator that has the flag) adds a
+    build with ``--source-tags``, staged under :data:`TAGGED_STAGE`: the preview shows
+    the tagged pages while the untagged bundle stays the one publish deploys. With
+    ``untagged=False`` (that bundle is already stored) the tagged build is the only
+    one. A tagged build that fails only costs the tags: the script still exits 0 and
+    the draft previews untagged."""
     project = shlex.quote(project_dir)
     out_dir = f"{project_dir.rstrip('/')}/{PROJECT_STAGE_REL}"
     out = shlex.quote(out_dir)
@@ -582,12 +600,15 @@ def build_script(
             '  echo "paw: the source-tagged build failed; the preview is untagged"\n'
             "fi\n"
         )
-    return f"""#!/usr/bin/env bash
+    head = """#!/usr/bin/env bash
 # Generated by pocketpaw_ee.sites.project_build — do not edit in place.
 set -u
 RUN=node
 command -v node >/dev/null 2>&1 || RUN=bun
-"$RUN" {cli} project-build --dir {project} --out {manifest}{extra} --json
+"""
+    if tagged and not untagged:
+        return f"{head}mkdir -p {out}\n{tagged}"
+    return f"""{head}"$RUN" {cli} project-build --dir {project} --out {manifest}{extra} --json
 CODE=$?
 if [ "$CODE" -ne 0 ]; then
   echo "paw: project-build exited $CODE"
@@ -918,6 +939,59 @@ def read_latest_build(store: Any, pocket_id: str) -> dict[str, Any] | None:
         return None
 
 
+#: Turns the edit-session gate on ("1"). Off, every sandbox draft builds both copies
+#: under its base hash, as before the gate: the rollout switch until every builder
+#: sends ``POST .../edit-session``, without which framework drafts would carry no tags.
+LAZY_TAGS_ENV = "PAW_SITES_LAZY_SOURCE_TAGS"
+
+
+def lazy_source_tags() -> bool:
+    """True when sandbox drafts are source-tagged only during an edit session."""
+    return (os.environ.get(LAZY_TAGS_ENV) or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+#: How long one edit-session signal keeps a pocket's drafts source-tagged. The builder
+#: renews it while a select/design tool is on, and every visual edit renews it.
+EDIT_SESSION_TTL_SECONDS = 20 * 60
+
+
+def mark_edit_session(store: Any, pocket_id: str, *, now: float | None = None) -> float:
+    """Start or renew the pocket's edit session; returns when it lapses (epoch seconds).
+    Best effort: a lost write costs the tags on the next build, never the build."""
+    from pocketpaw_ee.sites import verify_store
+
+    until = (time.time() if now is None else now) + EDIT_SESSION_TTL_SECONDS
+    try:
+        store.write(pocket_id, verify_store.EDIT_SESSION_KEY, {"until": until})
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.project: could not mark an edit session on %s", pocket_id)
+    return until
+
+
+def end_edit_session(store: Any, pocket_id: str) -> None:
+    """End the pocket's edit session now (the builder left its edit tools). Best effort."""
+    from pocketpaw_ee.sites import verify_store
+
+    try:
+        store.write(pocket_id, verify_store.EDIT_SESSION_KEY, {"until": 0})
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.project: could not end the edit session on %s", pocket_id)
+
+
+def edit_session_active(store: Any, pocket_id: str, *, now: float | None = None) -> bool:
+    """True while someone is visually editing the pocket's draft. Never raises."""
+    from pocketpaw_ee.sites import verify_store
+
+    try:
+        record = store.read(pocket_id, verify_store.EDIT_SESSION_KEY)
+    except Exception:  # noqa: BLE001
+        return False
+    until = record.get("until") if isinstance(record, dict) else None
+    if not isinstance(until, (int, float)):
+        return False
+    return (time.time() if now is None else now) < until
+
+
 def new_record(job_id: str, content_hash: str, status: str, **extra: Any) -> dict[str, Any]:
     return {
         "job_id": job_id,
@@ -1013,11 +1087,24 @@ async def run_project_preview_build(
 
     wants_client = client_config(site_config) is not None
     config_path = SANDBOX_SITE_CONFIG if wants_client and supports_site_config(gen) else None
-    # A draft builds twice when the generator can tag sources: untagged for the bundle
-    # publish deploys, tagged for the preview (see build_script).
-    source_tags = draft_tag_mode(files) == "source-tags" and supports_source_tags(gen)
+    # Source tags only for a draft someone is editing (``sourceTags``, set by the
+    # service), on a generator that has them. The publish bundle is filed under the
+    # source's base hash; "only" reuses the stored one, and falls back to building it
+    # when the store no longer has it.
+    tags_wanted = generator_input.get("sourceTags") in ("only", "both")
+    source_tags = (
+        tags_wanted and draft_tag_mode(files) == "source-tags" and supports_source_tags(gen)
+    )
+    raw_bundle_hash = generator_input.get("bundleHash")
+    bundle_hash = raw_bundle_hash if isinstance(raw_bundle_hash, str) else content_hash
+    stored_bundle: bytes | None = None
+    if source_tags and generator_input.get("sourceTags") == "only":
+        stored_bundle = store.read_dist(pocket_id, bundle_key(bundle_hash)) or None
     script = build_script(
-        SANDBOX_PROJECT_DIR, site_config_path=config_path, source_tags=source_tags
+        SANDBOX_PROJECT_DIR,
+        site_config_path=config_path,
+        source_tags=source_tags,
+        untagged=stored_bundle is None,
     )
     uploads = [
         *gen,
@@ -1063,9 +1150,14 @@ async def run_project_preview_build(
     tagged: bytes | None = None
     try:
         artifact, tagged = split_tagged_artifact(result.artifact or b"")
-        manifest, bundle_files = read_bundle(artifact)
-        if not store.write_dist(pocket_id, bundle_key(content_hash), artifact):
-            raise RuntimeError("the artifact store refused the bundle")
+        if stored_bundle is not None:
+            # Tagged-only: the publish bundle is the one already stored for this source.
+            artifact = stored_bundle
+            manifest, bundle_files = read_bundle(artifact)
+        else:
+            manifest, bundle_files = read_bundle(artifact)
+            if not store.write_dist(pocket_id, bundle_key(bundle_hash), artifact):
+                raise RuntimeError("the artifact store refused the bundle")
         view_manifest, view_files = manifest, bundle_files
         if tagged is not None:
             try:
@@ -1244,8 +1336,10 @@ def check_plan_allows(manifest: Mapping[str, Any], *, paid: bool, has_custom_dom
 __all__ = [
     "BUILD_FORMAT",
     "CLI_FAILURE_CODES",
+    "EDIT_SESSION_TTL_SECONDS",
     "ENGINE",
     "FREE_WORKER_BINDINGS",
+    "LAZY_TAGS_ENV",
     "LOG_CAP_BYTES",
     "NO_BUILD",
     "PREVIEW_PUBLISHED",
@@ -1264,11 +1358,15 @@ __all__ = [
     "check_plan_allows",
     "cli_failure_code",
     "draft_tag_mode",
+    "edit_session_active",
+    "end_edit_session",
     "excluded_from_static_output",
     "files_are_no_build",
     "generator_uploads",
     "is_no_build",
     "job_belongs_to",
+    "lazy_source_tags",
+    "mark_edit_session",
     "materialize_bundle",
     "no_build_bundle",
     "preview_files",
@@ -1283,5 +1381,6 @@ __all__ = [
     "split_tagged_artifact",
     "supports_site_config",
     "supports_source_tags",
+    "tagged_view_hash",
     "write_build_record",
 ]

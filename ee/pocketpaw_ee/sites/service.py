@@ -10747,16 +10747,22 @@ async def _project_draft_artifact(
     nothing can open; ``"published"`` with the live URL (or null) for the published
     content once its drafts were purged, without a rebuild; ``None`` until a build
     finished) and the engine's ``capabilities``. No arming: a project has no
-    generator-owned anchors, so there is no builder origin in the hash."""
+    generator-owned anchors, so there is no builder origin in the hash.
+
+    A sandbox draft is source-tagged only during an edit session
+    (:func:`_project_draft_view`), so the job, record and preview may be the tagged
+    view's; publish and the published view always key on the base hash."""
     from pocketpaw_ee.sites import build_job, project_build, verify_store
     from pocketpaw_ee.sites.engines import engine_capabilities
 
     capabilities = engine_capabilities("project")
     files_source = source if isinstance(source, dict) else None
     project_build.project_files(files_source)  # 422 on a tree that cannot build
-    content_hash = project_build.project_content_hash(files_source or {})
+    base_hash = project_build.project_content_hash(files_source or {})
+    published = await _project_published_view(pocket_id, base_hash)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    content_hash, tag_input = _project_draft_view(pocket_id, files_source, base_hash, records)
     job_id = build_job._preview_job_id(pocket_id, content_hash)
-    published = await _project_published_view(pocket_id, content_hash)
     if published is not None:
         # The live site IS this content and its drafts were purged on publish: show
         # the site, never rebuild a draft of it. An edit (a new hash) builds again.
@@ -10771,7 +10777,6 @@ async def _project_draft_artifact(
             "preview_mode": project_build.PREVIEW_PUBLISHED,
             "capabilities": capabilities,
         }
-    records = _records if _records is not None else verify_store.default_verify_store()
     record = project_build.read_build_record(records, pocket_id, job_id)
     if record is not None and record.get("status") == project_build.STATUS_BUILT:
         server_only = record.get("preview_mode") == project_build.PREVIEW_SERVER_ONLY
@@ -10825,7 +10830,7 @@ async def _project_draft_artifact(
             "capabilities": capabilities,
         }
 
-    generator_input: dict[str, Any] = {"source": files_source}
+    generator_input: dict[str, Any] = {"source": files_source, **tag_input}
     if site_config:
         generator_input["siteConfig"] = site_config
     try:
@@ -10862,6 +10867,41 @@ async def _project_draft_artifact(
         "preview_mode": None,
         "capabilities": capabilities,
     }
+
+
+def _project_draft_view(
+    pocket_id: str, source: dict[str, Any] | None, base_hash: str, records: Any
+) -> tuple[str, dict[str, Any]]:
+    """``(view hash, extra build input)`` for a project draft. A tagged copy costs a
+    second sandbox build, so a sandbox draft (``draft_tag_mode`` ``"source-tags"``) is
+    tagged only while someone edits it (``project_build.edit_session_active``): the
+    view is then ``tagged_view_hash(base)``, built tagged-only when the base already
+    built (its bundle is stored) and both otherwise, the bundle filed under the base.
+    Outside a session the base is the view, unless only a tagged build of the same
+    source exists: that one is served rather than rebuilt (tags are preview-only).
+    The no-build lane stamps in-process for free, so it is never gated. With the gate
+    off (``project_build.lazy_source_tags``) every sandbox draft builds both copies
+    under its base hash."""
+    from pocketpaw_ee.sites import build_job, project_build
+
+    if project_build.draft_tag_mode(source) != "source-tags":
+        return base_hash, {}
+    if not project_build.lazy_source_tags():
+        return base_hash, {"sourceTags": "both"}
+
+    def _built(content_hash: str) -> bool:
+        job_id = build_job._preview_job_id(pocket_id, content_hash)
+        record = project_build.read_build_record(records, pocket_id, job_id)
+        return isinstance(record, dict) and record.get("status") == project_build.STATUS_BUILT
+
+    tagged = project_build.tagged_view_hash(base_hash)
+    base_built = _built(base_hash)
+    if project_build.edit_session_active(records, pocket_id):
+        mode = "only" if base_built else "both"
+        return tagged, {"sourceTags": mode, "bundleHash": base_hash}
+    if not base_built and _built(tagged):
+        return tagged, {"sourceTags": "both", "bundleHash": base_hash}
+    return base_hash, {}
 
 
 def _no_build_source(source: Any) -> bool:
@@ -10955,6 +10995,8 @@ async def project_latest_build(
     if not latest or not latest.get("job_id"):
         raise NotFound("site_build", pocket_id)
     source = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
+    base_hash = project_build.project_content_hash(source)
+    current = {base_hash, project_build.tagged_view_hash(base_hash)}
     return {
         "pocket_id": pocket_id,
         "job_id": latest.get("job_id"),
@@ -10963,7 +11005,7 @@ async def project_latest_build(
         "preview_mode": latest.get("preview_mode"),
         "framework": latest.get("framework"),
         "updated_at": latest.get("updated_at"),
-        "current": latest.get("content_hash") == project_build.project_content_hash(source),
+        "current": latest.get("content_hash") in current,
     }
 
 
@@ -12112,6 +12154,70 @@ async def open_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: str) 
                 "The draft could not be opened. Try again in a moment.",
             ) from exc
     return {"pocket_id": pocket_id, "opened": opened}
+
+
+async def _project_pocket_for_editing(
+    workspace_id: str, user_id: str, pocket_id: str
+) -> dict[str, Any]:
+    """:func:`_project_pocket` plus edit access (403 without it)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await _project_pocket(workspace_id, user_id, pocket_id)
+    if not await pockets_service.has_edit_access(pocket_id, user_id):
+        raise Forbidden("pocket.access_denied", "You cannot edit this site.")
+    return pocket
+
+
+async def start_project_edit_session(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    _store: Any | None = None,
+    _pool: Any | None = None,
+    _records: Any | None = None,
+) -> dict[str, Any]:
+    """Start (or renew) a visual-edit session on a project site's draft and answer the
+    draft for it. While the session lasts (``project_build.EDIT_SESSION_TTL_SECONDS``)
+    every draft build of the pocket is source-tagged, so the first call queues the
+    tagged copy of the current source when only the untagged one was built. The
+    builder calls this when a select / design tool turns on, and again before the
+    session lapses while it stays on.
+
+    The native-artifact shape plus ``editing`` and ``expires_at`` (ISO 8601). 404 for
+    an unknown or another workspace's pocket, 403 without edit access, 422 for a site
+    that is not a project."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    pocket = await _project_pocket_for_editing(workspace_id, user_id, pocket_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    until = project_build.mark_edit_session(records, pocket_id)
+    source = pocket.get("source")
+    artifact = await _project_draft_artifact(
+        pocket_id=pocket_id,
+        source=source,
+        store=_store or _default_artifact_store(),
+        site_config=await _project_site_config(
+            workspace_id, pocket_id, mint_key=_no_build_source(source)
+        ),
+        _pool=_pool,
+        _records=records,
+    )
+    expires_at = datetime.fromtimestamp(until, UTC).isoformat()
+    return {**artifact, "editing": True, "expires_at": expires_at}
+
+
+async def end_project_edit_session(
+    *, workspace_id: str, user_id: str, pocket_id: str, _records: Any | None = None
+) -> dict[str, Any]:
+    """End the pocket's edit session: later draft builds go back to untagged only.
+    Idempotent. Same 404 / 403 / 422 as :func:`start_project_edit_session`."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    await _project_pocket_for_editing(workspace_id, user_id, pocket_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    project_build.end_edit_session(records, pocket_id)
+    return {"pocket_id": pocket_id, "editing": False}
 
 
 async def preview_pocket(

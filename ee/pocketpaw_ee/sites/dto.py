@@ -1802,6 +1802,23 @@ class VisualEditRequest(BaseModel):
     base_hash: str | None = Field(default=None, max_length=128)
 
 
+class EditSessionResponse(NativeArtifactResponse):
+    """``POST /sites/by-pocket/{pocket_id}/edit-session``: the project draft for an
+    editing builder (the native-artifact shape, source-tagged once its build lands)
+    plus until when the session lasts. Renew it before ``expires_at`` while a select /
+    design tool stays on."""
+
+    editing: bool = True
+    expires_at: str
+
+
+class EditSessionEndResponse(BaseModel):
+    """``DELETE /sites/by-pocket/{pocket_id}/edit-session``: the session is over."""
+
+    pocket_id: str
+    editing: bool = False
+
+
 class VisualEditResponse(BaseModel):
     """One applied visual edit: the file it changed, that file's new ``file_hash``,
     whether the text changed at all, and the queued draft build (``build_status``:
