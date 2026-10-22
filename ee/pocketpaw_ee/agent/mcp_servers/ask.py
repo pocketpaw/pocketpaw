@@ -1,24 +1,24 @@
 # ask.py — in-process MCP server exposing an ``ask_user`` tool to the
 # claude_agent_sdk cloud chat backend.
 #
-# Created: 2026-07-07 (feat/sites-ask-user-ui). WHY this exists: the cloud chat
-# agent runs on the claude_agent_sdk backend, whose built-in tool set is only
-# Bash/Read/Write/Edit/Glob/Grep/WebSearch/WebFetch (+Skill) — the harness
-# ``AskUserQuestion`` tool is NOT exposed to it. So on surfaces where inline
-# Ripple is OFF (notably /sites svelte-create, ``ripple_mode="off"``) the agent
-# has NO way to render an interactive question; clarifying questions come back
-# as plain text. This tool restores the dynamic "ask the user a choice" UI on
-# those surfaces WITHOUT re-enabling full inline-Ripple ui-spec authoring (which
-# is deliberately off there so the agent hand-authors Svelte, not a ripple spec).
+# WHY this exists: the cloud chat agent runs on the claude_agent_sdk backend,
+# whose built-in tool set is only Bash/Read/Write/Edit/Glob/Grep/WebSearch/
+# WebFetch (+Skill); the harness ``AskUserQuestion`` tool is NOT exposed to it.
+# So on surfaces where inline Ripple is OFF (notably /sites svelte-create,
+# ``ripple_mode="off"``) the agent has no other way to render an interactive
+# question. This tool restores the "ask the user a choice" UI there WITHOUT
+# re-enabling inline-Ripple ui-spec authoring.
 #
 # HOW it renders: the tool itself is a near no-op that returns an ack. The real
-# effect is downstream — ``ee/pocketpaw_ee/cloud/chat/runs/run_core.py`` detects
+# effect is downstream: ``ee/pocketpaw_ee/cloud/chat/runs/run_core.py`` detects
 # a ``tool_use`` for ``ASK_USER_TOOL_ID`` and emits an ``ask_user_question``
-# stream frame ({question, options}) instead of a generic ``tool_start``. The
-# client is ALREADY fully wired for that frame (service.ts -> onAskUserQuestion
-# -> chatStore.setAskUser -> AssistantMessage.svelte option chips -> click ->
-# answerAskUser sends the chosen label as the next user message). So the agent
-# calls ask_user, ends its turn, and the user's click drives the next turn.
+# stream frame ({question, options}) instead of a generic ``tool_start``. Both
+# sides validate through ``ask_user_payload``, so run_core sends a frame only
+# for a call this handler accepts, with the same trimmed, capped options. The
+# client renders the frame as option chips and sends the clicked label as the
+# next user message. Rendering depends on the client handling the frame on its
+# active chat path: the legacy chatStore path handles it; the ChatSession path
+# is wired by a separate paw-enterprise change.
 #
 # Clones the icons.py / palette.py shape: a single ``create_sdk_mcp_server`` with
 # an SDK import-guard, ``SERVER_NAME`` / ``*_TOOL_ID`` allowlist constants, and
@@ -83,6 +83,24 @@ def _normalize_options(raw: Any) -> list[str] | None:
     return out
 
 
+def ask_user_payload(args: Any) -> dict[str, Any] | None:
+    """Return the ``{question, options}`` a call renders, or ``None`` if the
+    call is invalid. The single validation rule for ask_user: the handler acks
+    exactly this, and run_core emits it as the ``ask_user_question`` frame.
+    Valid means a non-empty question and at least ``_MIN_OPTIONS`` non-empty
+    labels; the question is trimmed and options are capped at ``_MAX_OPTIONS``.
+    """
+    if not isinstance(args, dict):
+        return None
+    question = args.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return None
+    options = _normalize_options(args.get("options"))
+    if options is None or len(options) < _MIN_OPTIONS:
+        return None
+    return {"question": question.strip(), "options": options[:_MAX_OPTIONS]}
+
+
 async def _ask_user_handler(args: dict) -> dict:
     """MCP handler for ``ask__ask_user``.
 
@@ -92,18 +110,15 @@ async def _ask_user_handler(args: dict) -> dict:
     Fail-soft: a bad question/options returns an ``_error_response`` and never
     raises into the agent.
     """
-    question = args.get("question")
-    if not isinstance(question, str) or not question.strip():
-        return _error_response("ask_user requires a non-empty `question` string.")
-
-    options = _normalize_options(args.get("options"))
-    if options is None or len(options) < _MIN_OPTIONS:
+    payload = ask_user_payload(args)
+    if payload is None:
+        question = args.get("question") if isinstance(args, dict) else None
+        if not isinstance(question, str) or not question.strip():
+            return _error_response("ask_user requires a non-empty `question` string.")
         return _error_response(
             f"ask_user requires an `options` array of at least {_MIN_OPTIONS} short "
             "answer labels the user can click."
         )
-    if len(options) > _MAX_OPTIONS:
-        options = options[:_MAX_OPTIONS]
 
     # The ack is the agent-facing contract: the question is now on screen as
     # clickable chips; the agent must stop and let the user answer.
@@ -111,8 +126,7 @@ async def _ask_user_handler(args: dict) -> dict:
         {
             "ok": True,
             "shown": True,
-            "question": question.strip(),
-            "options": options,
+            **payload,
             "note": (
                 "The question is shown to the user as clickable options. END your turn "
                 "now and wait for their reply — do NOT continue, ask another question, "

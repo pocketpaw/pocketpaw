@@ -82,6 +82,7 @@ from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped
     get_session_supervisor,
 )
 from pocketpaw.observability import baggage  # type: ignore[import-untyped]
+from pocketpaw_ee.agent.mcp_servers.ask import ASK_USER_TOOL_ID, ask_user_payload
 from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.agent_sessions import runtime_service
 from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
@@ -551,15 +552,15 @@ def _usage_total(usage: dict[str, Any] | None) -> int:
 # prompt. OFF (the default) leaves ``pool.run`` byte-for-byte the legacy path.
 _SUPERVISOR_TRUTHY = {"1", "true", "yes", "on"}
 
-# The interactive ask_user tool id (source of truth:
-# ``ee/pocketpaw_ee/agent/mcp_servers/ask.py`` ``ASK_USER_TOOL_ID``). Spelled as
-# a literal so this hot streaming path stays decoupled from the agent-tool
-# module — the same reason surface_registry spells its deny-list ids literally.
-# A ``tool_use`` for this id becomes an ``ask_user_question`` stream frame
-# (question + options) the client renders as clickable option chips, instead of
-# a generic ``tool_start``. It restores the interactive question UI on surfaces
-# where inline Ripple is off (notably /sites svelte-create).
-_ASK_USER_TOOL_ID = "mcp__pocketpaw_ask__ask_user"
+# The interactive ask_user tool id, from ``ee/pocketpaw_ee/agent/mcp_servers/ask.py``
+# (a dependency-free module: json + logging only, so importing it here costs the
+# hot streaming path nothing). A ``tool_use`` for this id becomes an
+# ``ask_user_question`` stream frame (question + options) the client renders as
+# clickable option chips, instead of a generic ``tool_start``. It restores the
+# interactive question UI on surfaces where inline Ripple is off (notably /sites
+# svelte-create). ``ask_user_payload`` is the frame's gate: the claude_sdk
+# ``input_pending`` placeholder and any call the tool would reject emit nothing.
+_ASK_USER_TOOL_ID = ASK_USER_TOOL_ID
 
 
 def _session_supervisor_enabled() -> bool:
@@ -2579,18 +2580,17 @@ async def _drive_agent_loop(
                         name = econtent
                 if name == _ASK_USER_TOOL_ID:
                     # Interactive question: emit an ``ask_user_question`` frame the
-                    # client renders as clickable option chips (service.ts ->
-                    # chatStore.setAskUser -> AssistantMessage chips), NOT a generic
+                    # client renders as clickable option chips, NOT a generic
                     # tool_start. The agent ends its turn after asking; the user's
-                    # click returns as the next message.
-                    ask_input = tool_input if isinstance(tool_input, dict) else {}
-                    yield (
-                        "ask_user_question",
-                        {
-                            "question": ask_input.get("question", ""),
-                            "options": ask_input.get("options", []),
-                        },
-                    )
+                    # click returns as the next message. claude_sdk announces each
+                    # call twice, first as an ``input_pending`` placeholder with
+                    # ``input={}``; only the real call carries the question. A
+                    # call the tool rejects gets no frame, so the UI never shows
+                    # a question the agent was told failed.
+                    pending = isinstance(meta, dict) and meta.get("input_pending") is True
+                    ask_frame = None if pending else ask_user_payload(tool_input)
+                    if ask_frame is not None:
+                        yield ("ask_user_question", ask_frame)
                 else:
                     # HTN-5: a plan tool is not a tool chip. Same normalizer and
                     # same per-run tracker as the group/DM bridge — only the
