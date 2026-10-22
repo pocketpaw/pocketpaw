@@ -63,6 +63,7 @@ def cli(monkeypatch) -> FakeCli:
 class BuildQueue:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.triggers: list[str] = []
         self.answer: dict[str, Any] = {
             "build_status": "queued",
             "build_job_id": "site-preview-p-abc",
@@ -70,8 +71,11 @@ class BuildQueue:
             "preview_mode": None,
         }
 
-    async def __call__(self, *, workspace_id: str, user_id: str, pocket_id: str) -> dict:
+    async def __call__(
+        self, *, workspace_id: str, user_id: str, pocket_id: str, trigger: str = "draft"
+    ) -> dict:
         self.calls.append(pocket_id)
+        self.triggers.append(trigger)
         return dict(self.answer)
 
 
@@ -402,8 +406,9 @@ class TestFileTools:
         doc = await _doc(pocket_id)
         assert doc.source["src/pages/about.astro"] == "<h1>About us</h1>\n"
         assert "src/pages/index.astro" not in doc.source
-        # Every write queued the draft build of the new source.
+        # Every write queued the draft build of the new source, as the agent's.
         assert len(builds.calls) == 4
+        assert builds.triggers == ["agent"] * 4
 
     async def test_a_write_over_a_file_the_owner_changed_is_refused(
         self, cli, identity, builds, beanie_test_db, recording_bus

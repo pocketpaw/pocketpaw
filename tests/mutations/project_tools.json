@@ -77,7 +77,7 @@
   {
     "label": "a write no longer queues the draft build, so the preview never rebuilds",
     "file": "ee/pocketpaw_ee/sites/project_tools.py",
-    "find": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"hashes\": {p: file_hash(writes[p]) for p in sorted(writes)},\n        \"verification\": await build_verification(\n            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id\n        ),",
+    "find": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"hashes\": {p: file_hash(writes[p]) for p in sorted(writes)},\n        \"verification\": await build_verification(\n            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger\n        ),",
     "replace": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"hashes\": {p: file_hash(writes[p]) for p in sorted(writes)},\n        \"verification\": {\"status\": \"pending\", \"job_id\": \"site-preview-p-abc\"},",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestFileTools::test_write_patch_delete_round_trip",
@@ -154,6 +154,15 @@
     "replace": "        guard=None,\n",
     "tests": [
       "tests/ee/sites/test_project_files_routes.py::test_a_write_racing_between_read_and_save_is_409"
+    ]
+  },
+  {
+    "label": "the builds list drops the agent trigger the agent's writes record",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_project.py",
+    "find": "            files=args.get(\"files\"),\n            base_hashes=args.get(\"base_hashes\"),\n            trigger=\"agent\",\n",
+    "replace": "            files=args.get(\"files\"),\n            base_hashes=args.get(\"base_hashes\"),\n",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestFileTools::test_write_patch_delete_round_trip"
     ]
   }
 ]

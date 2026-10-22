@@ -3991,7 +3991,7 @@ plurals) a non-null value in a column named like `password`, `token`, `secret`,
 
 ### Project builds — `/sites/by-pocket/{pocket_id}/builds`
 
-Two reads for a `project` pocket's sandbox builds. Both take `fabric.write` (owner /
+Three reads for a `project` pocket's sandbox builds. All take `fabric.write` (owner /
 editor) and the pockets service's read check, and are scoped to the caller's
 workspace: another workspace's pocket is a `404`. A non-project pocket is a `422`
 (`sites.not_a_project`). **No realtime event exists for site builds, so poll.**
@@ -4015,6 +4015,42 @@ The newest build, without its log. `404` when the pocket never built.
 
 `status` is `queued` / `building` / `built` / `failed`. `current` is true when this
 build is of the pocket's current files (an edit since makes it false).
+
+#### `GET /sites/by-pocket/{pocket_id}/builds`
+
+The pocket's recent builds, newest first, without logs. `?limit=` (1 to 50, default
+20) and `?offset=` (default 0) page through them; `total` counts every build kept. A
+pocket that never built answers an empty page, not a `404`.
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "builds": [
+    {
+      "job_id": "site-preview-p_abc123-9f2c…",
+      "status": "built",
+      "reason": null,
+      "trigger": "agent",
+      "content_hash": "9f2c…",
+      "started_at": "2026-10-07T12:00:05+00:00",
+      "finished_at": "2026-10-07T12:01:10+00:00",
+      "updated_at": "2026-10-07T12:01:10+00:00"
+    }
+  ],
+  "total": 1,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+`trigger` is `draft` when an owner or editor started the build (opening the preview, a
+Code view save, a visual edit) and `agent` when the agent's tools did; it is `null` for
+a build recorded before triggers were. Publish never appears as a trigger because it
+does not build: it deploys the stored draft build of the current files. `started_at`
+is `null` while the build is queued and `finished_at` until it is `built` or `failed`.
+A build of the same files queued again after it finished starts a fresh entry at the
+top (the job id is per content hash). The newest 50 builds are kept; read one's log
+with the route below.
 
 #### `GET /sites/by-pocket/{pocket_id}/builds/{job_id}/log`
 

@@ -612,6 +612,173 @@ async def test_build_log_and_latest_are_scoped_to_the_pocket(beanie_test_db):
 
 
 @pytest.mark.asyncio
+async def test_builds_list_newest_first_with_trigger_times_and_hash(beanie_test_db):
+    """Every build of the pocket, not just the latest: an agent-queued build that
+    finished, then an owner edit's build still queued. Paged, newest first."""
+    pocket_id = await _make_project_pocket()
+    store, records, pool = _Store(), _Records(), _Pool()
+    first_hash = project_build.project_content_hash(SOURCE)
+
+    await sites_service._project_draft_artifact(
+        pocket_id=pocket_id,
+        source=dict(SOURCE),
+        store=store,
+        _pool=pool,
+        _records=records,
+        trigger="agent",
+    )
+    _pk, _h, payload, _engine, _timeout = pool.calls[0]["args"]
+    await project_build.run_project_preview_build(
+        {}, pocket_id, first_hash, payload, 600,
+        _runner=_Runner(_result(artifact=_bundle(WORKER_MANIFEST))),
+        _store=store, _verify_store=records, _gen_uploads=GEN,
+    )  # fmt: skip
+
+    edited = {**SOURCE, "src/pages/about.astro": "<h1>About</h1>\n"}
+    second_hash = project_build.project_content_hash(edited)
+    await sites_service._project_draft_artifact(
+        pocket_id=pocket_id, source=edited, store=store, _pool=pool, _records=records
+    )
+
+    page = await sites_service.project_builds(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _records=records
+    )
+    assert page["total"] == 2 and page["offset"] == 0
+    newest, older = page["builds"]
+    assert newest["job_id"] == build_job._preview_job_id(pocket_id, second_hash)
+    assert newest["status"] == "queued" and newest["trigger"] == "draft"
+    assert newest["content_hash"] == second_hash
+    assert newest["started_at"] is None and newest["finished_at"] is None
+    assert older["job_id"] == build_job._preview_job_id(pocket_id, first_hash)
+    assert older["status"] == "built" and older["trigger"] == "agent"
+    assert older["content_hash"] == first_hash
+    assert older["started_at"] and older["finished_at"]
+    assert older["started_at"] <= older["finished_at"]
+    assert "log" not in older
+
+    second_page = await sites_service.project_builds(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, limit=1, offset=1, _records=records
+    )
+    assert [b["job_id"] for b in second_page["builds"]] == [older["job_id"]]
+    assert second_page["total"] == 2 and second_page["limit"] == 1
+
+
+@pytest.mark.asyncio
+async def test_builds_list_is_capped_and_a_rebuild_moves_to_the_top(beanie_test_db, monkeypatch):
+    monkeypatch.setattr(project_build, "BUILD_HISTORY_LIMIT", 3)
+    pocket_id = await _make_project_pocket()
+    records = _Records()
+    for i in range(4):
+        project_build.write_build_record(
+            records,
+            pocket_id,
+            project_build.new_record(f"site-preview-{pocket_id}-{i}", str(i), "failed"),
+        )
+    # The oldest fell off; a re-queue of an older job starts a fresh entry on top.
+    project_build.write_build_record(
+        records,
+        pocket_id,
+        project_build.new_record(f"site-preview-{pocket_id}-2", "2", "queued", trigger="draft"),
+    )
+    page = await sites_service.project_builds(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _records=records
+    )
+    assert [b["content_hash"] for b in page["builds"]] == ["2", "3", "1"]
+    assert page["builds"][0]["status"] == "queued" and page["builds"][0]["finished_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_builds_list_falls_back_to_the_latest_pointer(beanie_test_db):
+    """A pocket that built before the history existed still lists its latest build."""
+    pocket_id = await _make_project_pocket()
+    records = _Records()
+    records.write(
+        pocket_id,
+        verify_store.LATEST_BUILD_KEY,
+        {"job_id": f"site-preview-{pocket_id}-h", "content_hash": "h", "status": "built",
+         "reason": None, "updated_at": "2026-10-01T00:00:00+00:00"},
+    )  # fmt: skip
+    page = await sites_service.project_builds(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _records=records
+    )
+    assert page["total"] == 1
+    assert page["builds"][0]["job_id"] == f"site-preview-{pocket_id}-h"
+    assert page["builds"][0]["trigger"] is None
+    empty = await sites_service.project_builds(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _records=_Records()
+    )
+    assert empty["builds"] == [] and empty["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_builds_list_is_scoped_to_the_workspace_and_the_pocket(beanie_test_db):
+    pocket_id = await _make_project_pocket()
+    records = _Records()
+    project_build.write_build_record(
+        records, pocket_id, project_build.new_record(f"site-preview-{pocket_id}-h", "h", "built")
+    )
+    with pytest.raises(NotFound):
+        await sites_service.project_builds(
+            workspace_id="ws2", user_id="intruder", pocket_id=pocket_id, _records=records
+        )
+    doc = await Pocket.get(ObjectId(pocket_id))
+    await doc.set({"visibility": "private"})
+    with pytest.raises((NotFound, Forbidden)):
+        await sites_service.project_builds(
+            workspace_id="ws1", user_id="intruder", pocket_id=pocket_id, _records=records
+        )
+    _view, html_id, err = await pockets_service.agent_create(
+        workspace_id="ws1", owner_id="u1", name="H", type_="site", pattern="landing",
+        ripple_spec=None, engine="html", source={"index.html": "<p>a</p>"}, trusted=True,
+    )  # fmt: skip
+    assert err is None
+    with pytest.raises(ValidationError):
+        await sites_service.project_builds(
+            workspace_id="ws1", user_id="u1", pocket_id=html_id, _records=records
+        )
+
+
+@pytest.mark.asyncio
+async def test_builds_list_route_pages_and_carries_the_guards(monkeypatch):
+    from tests.ee.sites.test_router import _build_app
+
+    seen: dict = {}
+
+    async def _builds(**kw):
+        seen.update(kw)
+        return {
+            "pocket_id": kw["pocket_id"],
+            "builds": [
+                {"job_id": "j2", "status": "queued", "reason": None, "trigger": "agent",
+                 "content_hash": "h2", "started_at": None, "finished_at": None,
+                 "updated_at": "2026-10-23T00:00:00+00:00"},
+            ],
+            "total": 2,
+            "limit": kw["limit"],
+            "offset": kw["offset"],
+        }  # fmt: skip
+
+    monkeypatch.setattr(sites_service, "project_builds", _builds)
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/api/v1/sites/by-pocket/pk1/builds", params={"limit": 1, "offset": 1})
+        assert r.status_code == 200, r.text
+        assert r.json()["builds"][0]["trigger"] == "agent"
+        assert seen["limit"] == 1 and seen["offset"] == 1 and seen["pocket_id"] == "pk1"
+        for bad in ({"limit": 0}, {"limit": 51}, {"offset": -1}):
+            r = await c.get("/api/v1/sites/by-pocket/pk1/builds", params=bad)
+            assert r.status_code == 422, (bad, r.text)
+
+    from pocketpaw_ee.sites.router import router
+
+    route = next(
+        r for r in router.routes if getattr(r, "path", "").endswith("/by-pocket/{pocket_id}/builds")
+    )
+    deps = [repr(d.call) for d in route.dependant.dependencies]
+    assert any("require_action" in d for d in deps), deps
+
+
+@pytest.mark.asyncio
 async def test_build_log_routes_require_fabric_write_and_return_the_shape(monkeypatch):
     from tests.ee.sites.test_router import _build_app
 

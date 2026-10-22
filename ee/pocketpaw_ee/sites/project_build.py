@@ -27,7 +27,9 @@
 #     (``preview_origin``), unless they have no root index.html (``preview_mode``);
 #   * a build record in ``verify_store`` (``build-<job id>``): status, rung, the
 #     redacted and capped build log, ``preview_mode`` and the framework; plus the
-#     pocket's ``latest-build`` pointer.
+#     pocket's ``latest-build`` pointer and its ``build-history`` (the newest
+#     :data:`BUILD_HISTORY_LIMIT` builds without logs: status, trigger, start and
+#     finish times; :func:`read_build_history`), both exempt from eviction.
 #
 # Invariants: nothing here runs author code on this host; the content hash is the
 # source plus the draft tag mode, so the site config (id + signed key) never moves it:
@@ -131,6 +133,17 @@ BUILD_KEY_PREFIX = "build-"
 #: Statuses a build record carries. ``queued`` / ``building`` / ``failed`` are the
 #: publish lane's wire vocabulary; ``built`` is a finished, stored draft.
 STATUS_BUILT = "built"
+
+#: Statuses of a build that has not finished; anything else is terminal.
+_OPEN_STATUSES = ("queued", "building")
+
+#: Builds kept in a pocket's ``build-history`` record, newest first.
+BUILD_HISTORY_LIMIT = 50
+
+#: What started a build: an owner or editor (the preview, a Code view save, a visual
+#: edit) or the agent's tools. Publish never builds: it deploys the stored draft.
+TRIGGER_DRAFT = "draft"
+TRIGGER_AGENT = "agent"
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +324,7 @@ async def build_no_build_draft(
     store: Any,
     records: Any,
     site_config: Mapping[str, Any] | None = None,
+    trigger: str | None = None,
 ) -> dict[str, Any]:
     """Build a no-build draft in-process (no sandbox, well under a second): store the
     bundle under :func:`bundle_key` and the served tree as the preview, and record the
@@ -328,7 +342,9 @@ async def build_no_build_draft(
 
     def _finish(status: str, reason: str | None, **extra: Any) -> dict[str, Any]:
         write_build_record(
-            records, pocket_id, new_record(job_id, content_hash, status, reason=reason, **extra)
+            records,
+            pocket_id,
+            new_record(job_id, content_hash, status, reason=reason, trigger=trigger, **extra),
         )
         return {
             "status": status,
@@ -790,7 +806,8 @@ def _now() -> str:
 
 
 def write_build_record(store: Any, pocket_id: str, record: dict[str, Any]) -> None:
-    """Persist a build record and point ``latest-build`` at it. Best effort."""
+    """Persist a build record, point ``latest-build`` at it and fold it into the
+    pocket's ``build-history``. Best effort."""
     from pocketpaw_ee.sites import verify_store
 
     job_id = str(record.get("job_id") or "")
@@ -800,8 +817,78 @@ def write_build_record(store: Any, pocket_id: str, record: dict[str, Any]) -> No
         store.write(pocket_id, build_record_key(job_id), record)
         pointer = {k: record.get(k) for k in _POINTER_FIELDS}
         store.write(pocket_id, verify_store.LATEST_BUILD_KEY, pointer)
+        history = store.read(pocket_id, verify_store.BUILD_HISTORY_KEY) or {}
+        builds = history.get("builds") if isinstance(history.get("builds"), list) else []
+        store.write(
+            pocket_id, verify_store.BUILD_HISTORY_KEY, {"builds": _fold_history(builds, record)}
+        )
     except Exception:  # noqa: BLE001 — a lost record costs a log, never a build
         logger.warning("sites.project: could not record build %s", job_id, exc_info=True)
+
+
+def _fold_history(builds: list[Any], record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """``builds`` (newest first) with ``record`` folded in. A job seen for the first
+    time, or queued again after it finished (the same content rebuilt), opens a fresh
+    entry on top carrying the record's ``trigger``; otherwise its entry is updated in
+    place and keeps the trigger it opened with. ``started_at`` is stamped when it
+    starts building, ``finished_at`` when it reaches a terminal status (a build that
+    finished with no ``building`` record started then too). Read-modify-write on a
+    best-effort store: a worker and the web process racing can lose one update, the
+    same exposure ``latest-build`` has."""
+    job_id = record.get("job_id")
+    status = str(record.get("status") or "queued")
+    now = record.get("updated_at") or _now()
+    entries = [dict(b) for b in builds if isinstance(b, dict)]
+    prev = next((b for b in entries if b.get("job_id") == job_id), None)
+    reopened = prev is not None and status == "queued" and prev.get("status") not in _OPEN_STATUSES
+    if prev is None or reopened:
+        entries = [b for b in entries if b.get("job_id") != job_id]
+        prev = {"job_id": job_id, "trigger": record.get("trigger")}
+        prev.update(started_at=None, finished_at=None)
+        entries.insert(0, prev)
+    prev.update(
+        status=status,
+        reason=record.get("reason"),
+        content_hash=record.get("content_hash"),
+        updated_at=now,
+    )
+    if status == "building" and not prev.get("started_at"):
+        prev["started_at"] = now
+    if status not in _OPEN_STATUSES:
+        prev["started_at"] = prev.get("started_at") or now
+        prev["finished_at"] = now
+    return entries[:BUILD_HISTORY_LIMIT]
+
+
+def read_build_history(store: Any, pocket_id: str) -> list[dict[str, Any]]:
+    """The pocket's recent builds, newest first, without logs: ``job_id``, ``status``,
+    ``reason``, ``trigger``, ``content_hash``, ``started_at``, ``finished_at``,
+    ``updated_at``. A pocket whose builds predate the history lists its
+    ``latest-build`` pointer alone; one that never built is ``[]``."""
+    from pocketpaw_ee.sites import verify_store
+
+    try:
+        history = store.read(pocket_id, verify_store.BUILD_HISTORY_KEY) or {}
+    except Exception:  # noqa: BLE001
+        history = {}
+    builds = history.get("builds") if isinstance(history, dict) else None
+    if isinstance(builds, list) and builds:
+        return [dict(b) for b in builds if isinstance(b, dict) and b.get("job_id")]
+    latest = read_latest_build(store, pocket_id)
+    if not latest or not latest.get("job_id"):
+        return []
+    return [
+        {
+            "job_id": latest.get("job_id"),
+            "status": latest.get("status") or "queued",
+            "reason": latest.get("reason"),
+            "trigger": None,
+            "content_hash": latest.get("content_hash"),
+            "started_at": None,
+            "finished_at": None,
+            "updated_at": latest.get("updated_at"),
+        }
+    ]
 
 
 _POINTER_FIELDS = (
