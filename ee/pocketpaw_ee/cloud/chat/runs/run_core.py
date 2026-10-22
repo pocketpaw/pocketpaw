@@ -35,7 +35,10 @@ then ``guards.reserve_free_run`` must fit the run under the daily early-access
 ceiling or it ends with ``early_access.paused``.
 
 Every terminal path persists the streamed text as an assistant ``Message`` with
-its steps, records token usage (latest-wins), and sets the stream TTL. A looping
+its steps, records token usage (latest-wins), and sets the stream TTL. A
+completed run that asked an ``ask_user`` question (either backend spelling,
+``ASK_USER_TOOL_NAMES``) stores it on the Message as ``ask_user``; an ask-only
+turn still writes a row, with the question as its text. A looping
 reply (``RepetitionGuard``) is stopped and kept to one copy: completed with a
 notice when its tools did work, failed otherwise. A concierge run never trains
 the agent's soul; a Sites run neither trains it nor reads its recall (each Sites
@@ -82,7 +85,11 @@ from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped
     get_session_supervisor,
 )
 from pocketpaw.observability import baggage  # type: ignore[import-untyped]
-from pocketpaw_ee.agent.mcp_servers.ask import ASK_USER_TOOL_ID, ask_user_payload
+from pocketpaw_ee.agent.mcp_servers.ask import (
+    ASK_USER_TOOL_ID,
+    ASK_USER_TOOL_NAMES,
+    ask_user_payload,
+)
 from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.agent_sessions import runtime_service
 from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
@@ -561,6 +568,9 @@ _SUPERVISOR_TRUTHY = {"1", "true", "yes", "on"}
 # svelte-create). ``ask_user_payload`` is the frame's gate: the claude_sdk
 # ``input_pending`` placeholder and any call the tool would reject emit nothing.
 _ASK_USER_TOOL_ID = ASK_USER_TOOL_ID
+# The SDK id plus pydantic_ai's bridged ``pocketpaw_ask_ask_user``: a call under
+# either name becomes the same frame.
+_ASK_USER_TOOL_NAMES = ASK_USER_TOOL_NAMES
 
 
 def _session_supervisor_enabled() -> bool:
@@ -797,15 +807,18 @@ async def _persist_assistant_message(
     run_status: str | None = None,
     steps: list[dict[str, Any]] | None = None,
     steps_omitted: int = 0,
+    ask_user: dict[str, Any] | None = None,
 ) -> Any:
     from pocketpaw_ee.cloud.chat import message_service
 
-    # ``run_status`` and the steps only ride when set, so a plain completed
-    # reply's call is byte-identical to before.
+    # ``run_status``, the steps and the ask only ride when set, so a plain
+    # completed reply's call is byte-identical to before.
     extra: dict[str, Any] = {"run_status": run_status} if run_status else {}
     if steps or steps_omitted:
         extra["steps"] = steps or []
         extra["steps_omitted"] = steps_omitted
+    if ask_user:
+        extra["ask_user"] = ask_user
     return await message_service.persist_assistant_message_for_scope(
         kind=ctx.kind.value,
         scope_id=ctx.scope_id,
@@ -1340,12 +1353,35 @@ def _chunk_text(event_data: dict[str, Any]) -> str:
     return content if isinstance(content, str) else ""
 
 
+def _ask_user_record(run_id: str, frame: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The ``MessageAskUser`` dict for a run's last ``ask_user_question`` frame.
+
+    The frame already passed ``ask_user_payload`` in ``_drive_agent_loop``, so
+    question and options are trimmed and capped. The run id is the ask id: the
+    tool asks one question per turn and the client shows the latest. Single
+    choice only today, so ``multi_select`` is ``False``.
+    """
+    if not frame:
+        return None
+    question = frame.get("question")
+    options = frame.get("options")
+    if not isinstance(question, str) or not isinstance(options, list) or not options:
+        return None
+    return {
+        "id": run_id,
+        "question": question,
+        "options": [str(o) for o in options],
+        "multi_select": False,
+    }
+
+
 async def _persist_and_complete(
     spec: RunSpec,
     ctx: ScopeContext,
     full_text: str,
     attachments: list[dict[str, Any]],
     usage: dict[str, Any] | None = None,
+    ask_user: dict[str, Any] | None = None,
     **step_fields: Any,
 ) -> str:
     """Persist the assistant message, mark the run completed, broadcast.
@@ -1353,12 +1389,17 @@ async def _persist_and_complete(
     ``step_fields`` is ``StepRecorder.persist_kwargs()``: ``steps`` /
     ``steps_omitted`` when the run recorded any, else empty.
 
+    ``ask_user`` is the run's pending question (``_ask_user_record``), stored on
+    the Message so the option chips survive a reload.
+
     ``usage`` (W3a) is the per-run token-metering dict assembled from the
     backend's ``token_usage`` event; it is persisted onto the run doc so each
     completed run carries its real prompt / completion / cached token counts.
     ``None`` / empty leaves the stored usage untouched (legacy / no-usage runs).
     """
-    msg = await _persist_assistant_message(ctx, full_text, attachments, **step_fields)
+    msg = await _persist_assistant_message(
+        ctx, full_text, attachments, ask_user=ask_user, **step_fields
+    )
     assistant_id = str(msg.id)
     await run_service.mark_completed(
         spec.run_id,
@@ -2578,7 +2619,7 @@ async def _drive_agent_loop(
                         tool_input = econtent
                     elif isinstance(econtent, str):
                         name = econtent
-                if name == _ASK_USER_TOOL_ID:
+                if name in _ASK_USER_TOOL_NAMES:
                     # Interactive question: emit an ``ask_user_question`` frame the
                     # client renders as clickable option chips, NOT a generic
                     # tool_start. The agent ends its turn after asking; the user's
@@ -2683,7 +2724,7 @@ async def _drive_agent_loop(
                         yield ("open_surface", _os_clean)
                 # The ask_user ack is internal (the question UI already rendered
                 # from the tool_use); don't surface a tool_result chip for it.
-                if name != _ASK_USER_TOOL_ID:
+                if name not in _ASK_USER_TOOL_NAMES:
                     yield ("tool_result", {"tool": name, "output": output})
             elif etype == "token_usage":
                 # Real per-run token metering (W3a). The backend (claude_sdk and
@@ -3410,6 +3451,9 @@ async def execute_run(spec: RunSpec) -> None:
         usage: dict[str, Any] = {}
         repetition = RepetitionGuard()
         tool_work_done = False
+        # The latest ``ask_user_question`` frame, stored on the Message so the
+        # option chips survive a reload.
+        ask_frame: dict[str, Any] | None = None
         agent_events = _iter_agent_events(spec, ctx)
         try:
             async for event_name, event_data in agent_events:
@@ -3465,6 +3509,9 @@ async def execute_run(spec: RunSpec) -> None:
                     repetition.break_run()
                     if event_name == "tool_result":
                         tool_work_done = True
+                elif event_name == "ask_user_question":
+                    if isinstance(event_data, dict):
+                        ask_frame = event_data
                 elif event_name == "token_usage":
                     if isinstance(event_data, dict) and event_data:
                         # LATEST-WINS, FLOORED. Every backend reports a
@@ -3586,7 +3633,8 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
 
-    if cancelled or (not full_text.strip() and not delivered_artifacts):
+    ask_record = _ask_user_record(spec.run_id, ask_frame)
+    if cancelled or (not full_text.strip() and not delivered_artifacts and ask_record is None):
         # Empty-text non-cancelled runs still complete cleanly — without this,
         # the doc would sit in ``running`` until the 10-minute sweeper marked
         # it ``interrupted``, surfacing a phantom active_run to the frontend.
@@ -3649,8 +3697,17 @@ async def execute_run(spec: RunSpec) -> None:
         attachments.append({"type": "artifact", "meta": meta})
         await transport.append_event(spec.run_id, "artifact", meta)
 
+    # An ask-only turn (the agent called ask_user and said nothing else) still
+    # writes a row, with the question as its text: the chips need a row to
+    # render on after a reload, and the agent's history needs its question.
+    # The ask only rides when set, so a plain reply's call is unchanged.
+    persist_fields = recorder.persist_kwargs()
+    if ask_record is not None:
+        persist_fields["ask_user"] = ask_record
+        if not full_text.strip():
+            full_text = ask_record["question"]
     assistant_id = await _persist_and_complete(
-        spec, ctx, full_text, attachments, usage=usage, **recorder.persist_kwargs()
+        spec, ctx, full_text, attachments, usage=usage, **persist_fields
     )
     await transport.append_event(
         spec.run_id,

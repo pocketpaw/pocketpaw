@@ -23,7 +23,9 @@
 # Clones the icons.py / palette.py shape: a single ``create_sdk_mcp_server`` with
 # an SDK import-guard, ``SERVER_NAME`` / ``*_TOOL_ID`` allowlist constants, and
 # the ``_error_response`` / ``_success_response`` helpers. PURE LOCAL: no
-# network, no identity, persists nothing. Surfaced to core via the
+# network, no identity, persists nothing itself (run_core stores the ask on the
+# reply's Message). The pydantic_ai backend reaches the same handler through
+# the in-process bridge, under the name in ``ASK_USER_TOOL_NAMES``. Surfaced to core via the
 # ``CloudAskMcpProvider`` ``pocketpaw.mcp_servers`` entry-point (extensions.py)
 # and added to ``sites_allow`` in surface_registry.py so it is callable on
 # /sites. Tool id namespaces as ``mcp__pocketpaw_ask__ask_user``.
@@ -42,6 +44,13 @@ SERVER_NAME = "pocketpaw_ask"
 ASK_USER_TOOL_ID = f"mcp__{SERVER_NAME}__ask_user"
 
 ASK_TOOL_IDS = (ASK_USER_TOOL_ID,)
+
+# Every name a backend reports for a call to this tool. claude_sdk uses the SDK
+# id; pydantic_ai bridges in-process servers through ``PrefixedToolset``
+# (``tool_bridge.build_inprocess_mcp_toolsets``), so the same handler reaches
+# its model as ``<server>_<tool>``. run_core matches on this set so both
+# backends emit the same ``ask_user_question`` frame.
+ASK_USER_TOOL_NAMES = frozenset({ASK_USER_TOOL_ID, f"{SERVER_NAME}_ask_user"})
 
 # Bounds on the option list — enough for a real choice, few enough to render as
 # a tidy chip row. A single question per call (the client renders the latest
