@@ -953,6 +953,8 @@ async def run_project_preview_build(
             ssr_markers=(),
             log_tail_bytes=LOG_CAP_BYTES,
             labels=build_job.sandbox_labels(ctx, pocket_id),
+            on_lease_wait=_record_as(records, pocket_id, job_id, content_hash, "queued"),
+            on_lease_admit=_record_as(records, pocket_id, job_id, content_hash, "building"),
         )
     except Exception as exc:
         if capacity.is_capacity_error(exc):
@@ -1023,6 +1025,19 @@ async def run_project_preview_build(
         **draft_extra,
         **logged,
     )
+
+
+def _record_as(records: Any, pocket_id: str, job_id: str, content_hash: str, status: str) -> Any:
+    """An admission hook that records the draft as ``status``: ``queued`` /
+    ``waiting_for_capacity`` while it waits for a memory lease, ``building`` once admitted."""
+    reason = capacity.WAITING_REASON if status == "queued" else None
+
+    async def hook() -> None:
+        write_build_record(
+            records, pocket_id, new_record(job_id, content_hash, status, reason=reason)
+        )
+
+    return hook
 
 
 async def _draft_worker_mode(

@@ -40,9 +40,16 @@
 #     create is logged at WARNING with Daytona's message (secrets redacted) and, for a
 #     capacity refusal, which limit matched (``capacity.describe_refusal``).
 #
-# While a lease waits under Redis, ``waiting:<tag>`` is set (``wait_tag`` is the job's
-# bounded ``paw_job`` label) so ``build_job._preview_job_outcome`` can tell a poller
-# ``queued`` / ``waiting_for_capacity`` rather than ``building``.
+# Telling a poller the build is waiting, not building, two ways:
+#   * ``on_wait`` / ``on_admit`` (either backend): ``on_wait`` runs once when the lease
+#     first has to wait, ``on_admit`` once that wait ends (granted, or given up and going
+#     unleased) just before the caller creates. A lease granted at once runs neither.
+#     The publish lane stamps its Site row and the project lane its build record with
+#     them (``queued`` / ``waiting_for_capacity``, then ``building``). A hook that raises
+#     is logged and never costs the lease.
+#   * Under Redis, ``waiting:<tag>`` is set while queued (``wait_tag`` is the job's bounded
+#     ``paw_job`` label) so ``build_job._preview_job_outcome`` can tell a poller of a
+#     preview job ``queued`` / ``waiting_for_capacity`` rather than ``building``.
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +60,7 @@ import time
 import uuid
 import weakref
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -95,6 +102,9 @@ _WAITER_TTL_MS = 30_000
 _POLL_SECONDS = 1.0
 
 _redis: Any = None
+
+#: A wait hook: no arguments, awaited (see the header).
+WaitHook = Callable[[], Awaitable[None]]
 
 
 def eviction_enabled() -> bool:
@@ -171,7 +181,7 @@ class _LocalBudget:
             self._grant(gib)
             fut.set_result(True)
 
-    async def acquire(self, gib: int, timeout: float) -> bool:
+    async def acquire(self, gib: int, timeout: float, on_wait: WaitHook | None = None) -> bool:
         if not self.queue and _fits(self.used, self.holders, gib, budget_gib()):
             self._grant(gib)
             return True
@@ -179,6 +189,8 @@ class _LocalBudget:
         entry = (gib, fut)
         self.queue.append(entry)
         try:
+            if on_wait is not None:
+                await on_wait()
             async with asyncio.timeout(timeout):
                 return await fut
         except TimeoutError:
@@ -272,7 +284,12 @@ async def _redis_release(client: Any, lease_id: str, tag: str | None) -> None:
 
 
 async def _redis_acquire(
-    client: Any, lease_id: str, gib: int, timeout: float, tag: str | None
+    client: Any,
+    lease_id: str,
+    gib: int,
+    timeout: float,
+    tag: str | None,
+    on_wait: WaitHook | None = None,
 ) -> bool:
     """Poll the acquire script until granted (True) or ``timeout`` (False). Raises on a
     Redis error so the caller can fall back to the local budget."""
@@ -297,6 +314,8 @@ async def _redis_acquire(
             if not waiting:
                 waiting = True
                 logger.info("admission: %s GiB lease %s waiting for the budget", gib, lease_id)
+                if on_wait is not None:
+                    await on_wait()
             await asyncio.sleep(min(remaining, _POLL_SECONDS * random.uniform(0.75, 1.25)))
     except BaseException:
         await asyncio.shield(_redis_release(client, lease_id, tag))
@@ -332,20 +351,45 @@ async def is_waiting(client: Any, tag: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+async def _run_hook(hook: WaitHook | None, name: str) -> None:
+    """Await a wait hook; a raise is logged, never propagated (a status write that
+    failed must not cost the build its lease)."""
+    if hook is None:
+        return
+    try:
+        await hook()
+    except Exception:  # noqa: BLE001
+        logger.warning("admission: %s hook failed", name, exc_info=True)
+
+
 @asynccontextmanager
 async def memory_lease(
     gib: int,
     *,
     wait_tag: str | None = None,
     max_wait_seconds: float | None = None,
+    on_wait: WaitHook | None = None,
+    on_admit: WaitHook | None = None,
 ) -> AsyncIterator[bool]:
     """Hold ``gib`` of the sites memory budget for the body. Yields whether the caller
     was admitted: True when a lease was granted or admission is off (no budget set, a
     pass-through), False only after the bounded wait ran out. Released on every exit
-    path, cancellation included."""
+    path, cancellation included.
+
+    ``on_wait`` runs once if the lease has to wait; ``on_admit`` runs once after such a
+    wait ends, before the body. Neither runs for an immediate grant or a pass-through,
+    and a hook that raises is logged and ignored."""
     if budget_gib() is None:
         yield True
         return
+    waited = False
+
+    async def _notify_wait() -> None:
+        nonlocal waited
+        if not waited:  # once, even when a Redis error moves the wait to the local budget
+            waited = True
+            await _run_hook(on_wait, "on_wait")
+
     gib = max(0, int(gib))
     timeout = MAX_WAIT_SECONDS if max_wait_seconds is None else max_wait_seconds
     deadline = time.monotonic() + timeout
@@ -356,7 +400,7 @@ async def memory_lease(
 
     if client is not None:
         try:
-            if await _redis_acquire(client, lease_id, gib, timeout, wait_tag):
+            if await _redis_acquire(client, lease_id, gib, timeout, wait_tag, _notify_wait):
                 backend = "redis"
                 refresher = asyncio.create_task(_refresh_loop(client, lease_id))
         except Exception as exc:  # noqa: BLE001 — Redis down: still admit within this process
@@ -365,14 +409,15 @@ async def memory_lease(
     # Only what is left of the wait: a Redis error part way through must not restart it,
     # or the total could exceed the one wait the job timeout allows for.
     remaining = max(0.0, deadline - time.monotonic())
-    if client is None and await _local_budget().acquire(gib, remaining):
-        backend = "local"
-    if backend is None:
-        logger.warning(
-            "admission: no %s GiB lease within %.0fs; going to Daytona unleased", gib, timeout
-        )
-
     try:
+        if client is None and await _local_budget().acquire(gib, remaining, _notify_wait):
+            backend = "local"
+        if backend is None:
+            logger.warning(
+                "admission: no %s GiB lease within %.0fs; going to Daytona unleased", gib, timeout
+            )
+        if waited:
+            await _run_hook(on_admit, "on_admit")
         yield backend is not None
     finally:
         if refresher is not None:
@@ -532,6 +577,7 @@ __all__ = [
     "IDLE_FOR_SECONDS",
     "MAX_WAIT_SECONDS",
     "WORKSPACE_VM_PREFIX",
+    "WaitHook",
     "budget_gib",
     "create_admitted",
     "eviction_enabled",

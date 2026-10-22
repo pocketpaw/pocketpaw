@@ -13,8 +13,8 @@
   {
     "label": "the lease is only released on a clean exit, so a build that raised or was cancelled holds its memory forever",
     "file": "ee/pocketpaw_ee/sites/admission.py",
-    "find": "    try:\n        yield backend is not None\n    finally:",
-    "replace": "    if True:\n        yield backend is not None\n    if True:",
+    "find": "        yield backend is not None\n    finally:",
+    "replace": "        yield backend is not None\n    except BaseException:\n        raise\n    else:",
     "tests": [
       "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_an_error_inside_the_lease_releases_it",
       "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_a_cancel_inside_the_lease_releases_it",
@@ -43,8 +43,8 @@
   {
     "label": "run_build skips admission: a full lane overcommits the org cap and Daytona refuses builds",
     "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
-    "find": "    lease = memory_lease(memory_gb, wait_tag=create_kwargs[\"labels\"].get(JOB_LABEL))",
-    "replace": "    lease = memory_lease(0, wait_tag=create_kwargs[\"labels\"].get(JOB_LABEL))",
+    "find": "    lease = memory_lease(\n        memory_gb,\n",
+    "replace": "    lease = memory_lease(\n        0,\n",
     "tests": [
       "tests/ee/sites/test_build_admission.py::TestAdmissionAgainstTheOrgCap::test_a_full_lane_of_builds_all_complete_under_a_10gib_cap"
     ]
@@ -171,8 +171,8 @@
   {
     "label": "a Redis error mid-wait restarts the full wait locally, so the total can exceed the job timeout's allowance",
     "file": "ee/pocketpaw_ee/sites/admission.py",
-    "find": "    if client is None and await _local_budget().acquire(gib, remaining):",
-    "replace": "    if client is None and await _local_budget().acquire(gib, timeout):",
+    "find": "    if client is None and await _local_budget().acquire(gib, remaining, _notify_wait):",
+    "replace": "    if client is None and await _local_budget().acquire(gib, timeout, _notify_wait):",
     "tests": [
       "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_a_redis_error_mid_wait_does_not_restart_the_wait"
     ]
@@ -220,6 +220,45 @@
     "replace": "    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS) if admission.budget_gib() else 0\n",
     "tests": [
       "tests/ee/sites/test_admission_job_timeout.py"
+    ]
+  },
+  {
+    "label": "a publish admitted after a lease wait never flips back to building, so the row reads waiting_for_capacity for the whole build",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        await sites_service.mark_build_admitted(site, job_id=job_id)\n",
+    "replace": "        return None\n",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestWaitingRowStatus::test_a_publish_reads_waiting_then_building"
+    ]
+  },
+  {
+    "label": "the lease never reports its wait, so a publish or project draft queued for memory still reads building",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "            await _run_hook(on_wait, \"on_wait\")\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestLeaseWaitHooks::test_a_wait_is_reported_once_then_the_admit",
+      "tests/ee/sites/test_admission_lease.py::TestWaitingRowStatus::test_a_publish_reads_waiting_then_building",
+      "tests/ee/sites/test_admission_lease.py::TestWaitingRowStatus::test_a_project_draft_reads_waiting_then_building"
+    ]
+  },
+  {
+    "label": "the acquire script ignores the budget, so concurrent leases overcommit the org's memory",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "if holders > 0 and used + gib > budget then\n",
+    "replace": "if false then\n",
+    "tests": [
+      "tests/ee/sites/test_admission_lua.py::TestAcquireScript::test_refuses_over_the_budget_and_queues_the_waiter",
+      "tests/ee/sites/test_admission_lua.py::TestMemoryLeaseOverRedis::test_concurrent_admits_never_exceed_the_budget"
+    ]
+  },
+  {
+    "label": "the acquire script never purges expired leases, so a crashed holder's memory is never given back",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "  redis.call('HDEL', KEYS[2], m)\n",
+    "replace": "  local _ = m\n",
+    "tests": [
+      "tests/ee/sites/test_admission_lua.py::TestAcquireScript::test_a_crashed_holders_lease_expires"
     ]
   }
 ]

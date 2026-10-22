@@ -1,12 +1,12 @@
 # tests/ee/sites/test_admission_lease.py — the edges of ``pocketpaw_ee.sites.admission``
 # that test_build_admission.py's three contract tests do not pin: lease accounting on
 # every exit path (error, cancel, a timed-out wait), FIFO order, an oversized request,
-# the Redis-down fallback, ``free_capacity``'s eviction rules, and the preview status a
-# poller sees while a build waits for a lease.
+# the Redis-down fallback, ``free_capacity``'s eviction rules, the ``on_wait`` /
+# ``on_admit`` hooks, and the status a poller sees while a build waits for a lease
+# (preview job outcome, publish Site row, project draft build record).
 #
-# All process-local: CI has no Redis. The Lua script was exercised by hand against a
-# local Redis 7 (grant two, queue the third, cancel and bounded-wait release the queue
-# entry); the fake below only proves the Python around it falls back when Redis errors.
+# All process-local; the Redis fake here only proves the Python falls back when Redis
+# errors. The Lua scripts themselves run on fakeredis in test_admission_lua.py.
 from __future__ import annotations
 
 import asyncio
@@ -456,3 +456,199 @@ class TestWaitingStatus:
             "waiting_for_capacity",
         )
         assert await bj._preview_job_outcome(_Pool(set()), "j1") == ("building", None)
+
+
+async def _until(check: Any, *, timeout: float = 3.0) -> None:
+    """Poll ``check`` (async, returns bool) until it holds or ``timeout`` runs out."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not await check():
+        assert loop.time() < deadline, "condition never held"
+        await asyncio.sleep(0.01)
+
+
+class _HeldBudget:
+    """Holds the whole budget until ``release()``, so the next lease has to wait."""
+
+    def __init__(self) -> None:
+        self.held = asyncio.Event()
+        self._release = asyncio.Event()
+        self.task: asyncio.Task[None] | None = None
+
+    async def __aenter__(self) -> _HeldBudget:
+        async def hold() -> None:
+            async with admission.memory_lease(ORG_MEMORY_GIB):
+                self.held.set()
+                await self._release.wait()
+
+        self.task = asyncio.create_task(hold())
+        await self.held.wait()
+        return self
+
+    def release(self) -> None:
+        self._release.set()
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        self._release.set()
+        assert self.task is not None
+        await self.task
+
+
+class TestLeaseWaitHooks:
+    async def test_an_immediate_grant_never_reports_a_wait(self) -> None:
+        calls: list[str] = []
+
+        async def on_wait() -> None:
+            calls.append("wait")
+
+        async def on_admit() -> None:
+            calls.append("admit")
+
+        async with admission.memory_lease(4, on_wait=on_wait, on_admit=on_admit) as ok:
+            assert ok is True
+        assert calls == []
+
+    async def test_a_wait_is_reported_once_then_the_admit(self) -> None:
+        calls: list[str] = []
+
+        async def on_wait() -> None:
+            calls.append("wait")
+
+        async def on_admit() -> None:
+            calls.append("admit")
+
+        async with _HeldBudget() as held:
+            task = asyncio.create_task(_enter(4, on_wait, on_admit, calls))
+            await _until(lambda: _true(calls == ["wait"]))
+            held.release()
+            await task
+        assert calls == ["wait", "admit", "body"]
+
+    async def test_a_raising_hook_never_costs_the_lease(self) -> None:
+        async def boom() -> None:
+            raise RuntimeError("row write failed")
+
+        async with _HeldBudget() as held:
+            task = asyncio.create_task(_enter(4, boom, boom, []))
+            await asyncio.sleep(0.05)
+            held.release()
+            assert await task is True
+
+
+async def _true(value: bool) -> bool:
+    return value
+
+
+async def _enter(gib: int, on_wait: Any, on_admit: Any, calls: list[str]) -> bool:
+    async with admission.memory_lease(gib, on_wait=on_wait, on_admit=on_admit) as ok:
+        calls.append("body")
+        return ok
+
+
+class TestWaitingRowStatus:
+    """A publish or project draft waiting for a lease reads ``queued`` /
+    ``waiting_for_capacity`` on the row the client polls, and ``building`` once
+    admitted (checked from inside the create, i.e. after the lease was granted)."""
+
+    async def test_a_publish_reads_waiting_then_building(self, beanie_test_db) -> None:
+        from tests.ee.sites.test_build_job import FakeRunner, _input, _insert_site, _reread
+
+        site = await _insert_site(build_job_id="job-1", build_status="queued")
+        at_create: list[tuple[str, str | None]] = []
+
+        class _Client(LedgerDaytona):
+            async def create_sandbox(self, **kwargs: Any) -> Any:
+                row = await _reread(site)
+                at_create.append((row.build_status, row.build_reason))
+                return await super().create_sandbox(**kwargs)
+
+        async def waiting() -> bool:
+            row = await _reread(site)
+            return (row.build_status, row.build_reason) == ("queued", "waiting_for_capacity")
+
+        async with _HeldBudget() as held:
+            build = asyncio.create_task(
+                bj.run_site_build(
+                    {"job_try": 1, "job_id": "job-1"},
+                    "ws1",
+                    str(site.id),
+                    _input(),
+                    "react",
+                    600,
+                    _runner=FakeRunner(),
+                    _client=_Client(),
+                )
+            )
+            await _until(waiting)
+            assert at_create == []
+            held.release()
+            await build
+        assert at_create == [("building", None)]
+        assert (await _reread(site)).build_status == "built"
+
+    async def test_a_superseded_publish_does_not_claim_the_row(self, beanie_test_db) -> None:
+        from tests.ee.sites.test_build_job import FakeRunner, _input, _insert_site, _reread
+
+        site = await _insert_site(build_job_id="job-2", build_status="building")
+        async with _HeldBudget() as held:
+            build = asyncio.create_task(
+                bj.run_site_build(
+                    {"job_try": 1, "job_id": "job-1"},
+                    "ws1",
+                    str(site.id),
+                    _input(),
+                    "react",
+                    600,
+                    _runner=FakeRunner(),
+                    _client=LedgerDaytona(),
+                )
+            )
+            await asyncio.sleep(0.1)
+            row = await _reread(site)
+            assert row.build_reason != "waiting_for_capacity"
+            held.release()
+            await build
+
+    async def test_a_project_draft_reads_waiting_then_building(self) -> None:
+        from pocketpaw_ee.sites import project_build
+
+        from tests.ee.sites.test_preview_build_lane import MemoryArtifactStore
+        from tests.ee.sites.test_sandbox_capacity import GEN, SOURCE, _ctx, _Records
+
+        records = _Records()
+        job_id = bj._preview_job_id("pk1", "h1")
+        at_create: list[tuple[str, str | None]] = []
+
+        def latest() -> dict[str, Any]:
+            return project_build.read_latest_build(records, "pk1") or {}
+
+        class _Client(LedgerDaytona):
+            async def create_sandbox(self, **kwargs: Any) -> Any:
+                at_create.append((latest().get("status"), latest().get("reason")))
+                return await super().create_sandbox(**kwargs)
+
+        async def waiting() -> bool:
+            return (latest().get("status"), latest().get("reason")) == (
+                "queued",
+                "waiting_for_capacity",
+            )
+
+        async with _HeldBudget() as held:
+            build = asyncio.create_task(
+                project_build.run_project_preview_build(
+                    _ctx(1, job_id=job_id),
+                    "pk1",
+                    "h1",
+                    {"source": SOURCE},
+                    600,
+                    _client=_Client(),
+                    _store=MemoryArtifactStore(),
+                    _verify_store=records,
+                    _gen_uploads=GEN,
+                )
+            )
+            await _until(waiting)
+            assert at_create == []
+            held.release()
+            await build
+        assert at_create == [("building", None)]
