@@ -42,6 +42,12 @@ DEFAULT_RUN_JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
 # waiting for and report a spurious error on a healthy run.
 STREAM_LIFETIME_GRACE_SECONDS = 120
 
+# How many times one chat run may be driven: the first attempt plus one automatic
+# retry when the WORKER killed it (deploy or restart past the drain window). Both the
+# run doc's ``attempt`` cap and arq's ``max_tries`` for ``execute_run_job`` read this,
+# so arq never re-runs a job the run doc would refuse, and vice versa.
+MAX_RUN_ATTEMPTS = 2
+
 
 def run_job_timeout_seconds() -> int:
     """Resolve the per-run arq job_timeout from ``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT``.

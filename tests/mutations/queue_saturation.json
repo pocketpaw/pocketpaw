@@ -38,8 +38,8 @@
   {
     "label": "the queued arm uses the running cutoff, so the queued timeout env changes nothing",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/sweeper.py",
-    "find": "{\"status\": \"queued\", \"createdAt\": {\"$lt\": queued_cutoff or cutoff}}",
-    "replace": "{\"status\": \"queued\", \"createdAt\": {\"$lt\": cutoff}}",
+    "find": "    queued_before = queued_cutoff or cutoff\n",
+    "replace": "    queued_before = cutoff\n",
     "tests": [
       "tests/cloud/runs/test_queue_saturation.py"
     ]

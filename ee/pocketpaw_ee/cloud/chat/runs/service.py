@@ -9,9 +9,12 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
 - Lifecycle writes are conditional where a race matters: ``mark_running`` is an
   atomic ``queued -> running`` move that seeds ``last_heartbeat_at``, and
   ``touch_heartbeat`` only stamps a run still ``running``, so neither can revive
-  a run the sweeper already ended. ``mark_completed`` / ``mark_terminal`` record
-  the backend's ``usage`` and trigger a spend ingest; ``mark_billed`` is the
-  metering service's write, made here so metering never writes this document.
+  a run the sweeper already ended. ``requeue_for_retry`` is the worker-shutdown
+  move back from ``running`` to ``queued`` (``attempt`` + 1, capped), and
+  ``is_queued`` is what a retried arq job checks before driving the run again.
+  ``mark_completed`` / ``mark_terminal`` record the backend's ``usage`` and
+  trigger a spend ingest; ``mark_billed`` is the metering service's write, made
+  here so metering never writes this document.
   ``set_credential_source`` records who paid the provider (``platform`` or
   ``byok``), which ``bill_run`` reads to decide whether to debit.
   ``wait_until_terminal`` polls a run until it leaves the active statuses, so a
@@ -181,6 +184,43 @@ async def mark_running(run_id: str) -> bool:
         {"$set": {"status": "running", "started_at": now, "last_heartbeat_at": now}},
     )
     return result.modified_count == 1
+
+
+async def requeue_for_retry(run_id: str, *, max_attempts: int) -> int | None:
+    """Put a ``running`` run back to ``queued`` for one more attempt.
+
+    For a run the worker cancelled while shutting down. Returns the new attempt
+    number, or None when the run has used its attempts or is no longer running
+    (the user stopped it, the sweeper ended it). The text the cancelled attempt
+    streamed is dropped: the retry writes the whole reply, so keeping it would
+    duplicate it. Conditional on ``running`` and on the attempt read, so a racing
+    terminal write or a second requeue leaves the doc alone.
+    """
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+    if doc is None or doc.status != "running" or doc.attempt >= max_attempts:
+        return None
+    attempt_filter: Any = doc.attempt if doc.attempt != 1 else {"$in": [1, None]}
+    nxt = doc.attempt + 1
+    result = await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id, "status": "running", "attempt": attempt_filter},
+        {
+            "$set": {
+                "status": "queued",
+                "attempt": nxt,
+                "requeued_at": _utcnow(),
+                "partial_text": "",
+                "started_at": None,
+                "last_heartbeat_at": None,
+            }
+        },
+    )
+    return nxt if result.modified_count == 1 else None
+
+
+async def is_queued(run_id: str) -> bool:
+    """True when the run exists and is waiting to be driven."""
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+    return doc is not None and doc.status == "queued"
 
 
 async def touch_heartbeat(run_id: str) -> bool:

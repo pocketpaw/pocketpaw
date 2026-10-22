@@ -133,6 +133,7 @@ class StepRecorder:
         self._thinking: dict[str, Any] | None = None
         self._thinking_raw = ""
         self._finalized = False
+        self._called_tools = False
 
     # -- feeding -------------------------------------------------------------
 
@@ -146,6 +147,7 @@ class StepRecorder:
             if isinstance(content, str) and content:
                 self._on_thinking(content, at)
         elif event_name == "tool_start":
+            self._called_tools = True
             self._close_thinking(at)
             self._on_tool_start(data, at)
         elif event_name == "tool_result":
@@ -306,6 +308,14 @@ class StepRecorder:
     @property
     def steps_omitted(self) -> int:
         return self._omitted
+
+    @property
+    def called_tools(self) -> bool:
+        """True once any tool call started, even one the step cap dropped.
+
+        A run that called a tool may have changed something outside the chat, so
+        it is never re-run from the top automatically."""
+        return self._called_tools
 
     def persist_kwargs(self) -> dict[str, Any]:
         """``steps`` / ``steps_omitted`` for the Message write, or ``{}``.
