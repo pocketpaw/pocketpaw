@@ -1,136 +1,47 @@
-# ee/pocketpaw_ee/sites/daytona_runner.py — drives one ephemeral Daytona build
-# round-trip: create → upload → build → read the sentinel → extract → delete.
+# ee/pocketpaw_ee/sites/daytona_runner.py â€” drives one ephemeral Daytona build
+# round-trip: create â†’ upload â†’ build â†’ read the sentinel â†’ extract â†’ delete.
 #
-# Created 2026-08-09 (SG-9i slice 1). The decision procedure lives next door in
-# ``daytona_build.py`` as pure functions; this module is the I/O half that feeds it.
-# Split that way on purpose: the part that must be right (what happened, and who is
-# to blame) is testable without a sandbox, and this part is testable with a fake
-# client.
+# The decision procedure (what happened, who is to blame) lives in ``daytona_build.py``
+# as pure functions; this module is the I/O half that feeds it, testable with a fake
+# client. The downloaded artifact passes ``daytona_build.verify_artifact`` before the
+# result is assembled: an empty, truncated, unreadable or ``node_modules``-carrying
+# artifact demotes the build to a non-deployable ``infra_lost`` (with the rejection's
+# own ``retryable``) and the bytes are dropped.
 #
-# The upload step writes the sandbox ``bunfig.toml`` (see :data:`SANDBOX_BUNFIG`) when
-# the project ships none. Since 2026-10-07 it is OPEN — no release-age floor, install
-# scripts allowed — because author packages install only here and the sandbox is the
-# isolation boundary. An author-supplied bunfig.toml is respected.
+# Optional arguments, all inert when omitted: ``image`` (the preview lane's
+# Playwright image), ``on_artifact`` (stores the draft as soon as a clean artifact is
+# verified), ``after_build`` (the browser harness, run in the same sandbox before
+# teardown; a raise is logged and never costs the build its verdict), ``labels``.
+# The sandbox ``bunfig.toml`` is OPEN (no release-age floor, scripts allowed) because
+# the sandbox is the isolation boundary; an author-supplied one wins.
+# ``--frozen-lockfile`` is NOT used: the generator emits no lockfile, so the flag would
+# fail every build. Enforcing it needs a vetted lockfile, owed as its own design.
 #
-# NOT DONE, and deliberately not faked: ``--frozen-lockfile``. The generator emits no
-# lockfile — verified, nothing under paw-sites writes one — so the flag would fail every
-# build rather than harden it. Enforcing it needs a vetted lockfile for the allowlisted
-# dependency set, which is its own design and is recorded as owed rather than pretended.
+# THE ORDER OF STEPS IS THE CONTRACT:
+#   1. The clock starts BEFORE ``create_sandbox``; it is what separates a timeout from
+#      an eviction when no sentinel comes back.
+#   2. The sentinel is read BEFORE teardown; once the box is gone the evidence is too.
+#   3. Teardown is explicit. A ``finally`` deletes by id once create returned one. A
+#      create that raised or was cancelled before returning an id may still have
+#      registered the box (the SDK POSTs, then waits for ``started``), so it is found by
+#      its unique name and deleted, shielded from a second cancel
+#      (``sandbox_reaper.teardown_unreturned``). Every box carries ``paw_lane=site-build``
+#      plus the caller's labels (``paw_pocket``, ``paw_job``); with a ``paw_job``, a box
+#      an earlier attempt of the same job left is deleted before the create. Backstops:
+#      Daytona's auto-delete on stop (``auto_delete_interval=0``) and the reaper cron.
+#      Not an unconditional immediate self-delete: that would also destroy the log.
 #
-# Edited 2026-09-24 (PP-2, feat/sites-verify-pipeline): ``run_build`` takes two optional
-# arguments, both inert when omitted so every existing caller is byte-identical.
-#   * ``image`` — forwarded to ``create_sandbox`` only when set. The preview lane passes
-#     ``PAW_SITES_VERIFY_IMAGE`` (an image carrying Playwright's chromium) so the browser
-#     layer can run in the same sandbox as the build.
-#   * ``on_artifact`` — an async hook ``(artifact_bytes)`` run the moment a clean
-#     build's artifact is downloaded and verified, BEFORE ``after_build``. The preview
-#     lane stores the draft there, so the preview appears while the browser check is
-#     still running. A raise is logged and swallowed, like ``after_build``'s.
-#   * ``after_build`` — an async hook ``(client, sandbox_id, static_dir)`` run AFTER a
-#     clean build's artifact has been downloaded and verified, and BEFORE teardown. The
-#     browser harness rides it, so the build and its browser check share one sandbox.
-#     Its return value lands on ``BuildRunResult.post_build``; a hook that raises is
-#     logged and recorded as ``None`` — it can never cost the build its verdict or its
-#     artifact. It is never run for a build that failed, so a broken build is never
-#     "browser-checked" into looking like something else.
-# The never-snapshot invariant below is unchanged: the hook runs inside the same
-# create → delete window.
-#
-# THE ORDER OF STEPS IS THE CONTRACT, not an implementation detail:
-#
-#   1. Our clock starts BEFORE ``create_sandbox``. It is the only timing signal that
-#      survives the sandbox's death, and it is what separates a timeout from an
-#      eviction when no sentinel comes back.
-#   2. The sentinel is read BEFORE any teardown. Once the sandbox is gone the
-#      evidence is gone with it, and "not found" cannot distinguish "deleted
-#      normally" from "died and was reaped".
-#   3. Teardown is EXPLICIT and in a ``finally``, with Daytona's own auto-delete as a
-#      backstop rather than the primary mechanism (see ``_lifecycle_minutes``).
-#
-# WHY NOT LET THE SANDBOX SELF-DELETE UNCONDITIONALLY, which is the literal ruling:
-# an unconditional immediate self-delete also destroys the build log, so a genuine
-# build failure would reach the user as "your site failed to build" with no reason to
-# act on. Deleting after the read costs exactly the same and keeps the stderr. The
-# auto-delete backstop still guarantees no sandbox outlives us if THIS process dies.
-#
-# ┌───────────────────────────────────────────────────────────────────────────────────┐
-# │ INVARIANT — THIS LANE NEVER SNAPSHOTS THE SANDBOX.                                │
-# └───────────────────────────────────────────────────────────────────────────────────┘
-#
-# THE PRIMARY REASON IS LIVE. A svelte project carries ``__CAPTURE_SIGNED_KEY__``
-# substituted into ``src/routes/api/submit/+server.ts`` — a real per-site secret, minted at
-# ``sites/service.py:1068`` and substituted by ``paw-sites/src/scaffold.ts:71`` (and again
-# for the dynamic track at ``dynamic-scaffold.ts:232``). React has no server route and so
-# no key. The decision that this exposure is acceptable rests ENTIRELY on the key living
-# only in a container that is then destroyed. A snapshot would make it durable.
-#
-# ── CORRECTION, 2026-08-09. This header previously said the opposite. ────────────────
-#
-# It read: *"Lead capture was then dropped (captain: do not serve ``/api/submit``), so no
-# route and no key enters any sandbox on either engine, and that specific justification is
-# gone."* Quoted rather than deleted, because a reader one ``git blame`` away should be able
-# to see the correction happened rather than assume the header was always right.
-#
-# THAT WAS FALSE, and the distinction is the whole lesson. The captain's ruling was about
-# SERVING ``/api/submit``, not about GENERATING it, and it was never implemented in the
-# generator: the route template still exists and the key is still substituted into every
-# svelte build. What WAS true is narrower — no key enters a DAYTONA sandbox today, but only
-# because NOTHING does, since this lane has no callers yet. That narrow truth was
-# generalised into a claim about "either engine", which is false about the path that
-# actually runs.
-#
-# THE GAP WORTH REMEMBERING: the distance between "the captain decided X" and "X is true of
-# the artifact" was ONE GREP, and nobody ran it for several turns — including the author of
-# this header, while writing this header. A decision reported as made arrives formatted as a
-# fact about the code. It is not one until you have looked.
-#
-# TWO FURTHER GROUNDS, now ADDITIONAL rather than replacements:
-#   1. Build inputs are customer content. A snapshot moves them from an ephemeral
-#      container into durable blob storage, which is a different data-residency
-#      question than the one this lane was cleared for (SG-0 conditions 4 and 6).
-#   2. Lead capture is "we will see what we can do about leads" — not deleted forever.
-#      Even once the generator does stop emitting the route, a returning server route
-#      brings the secret back with it.
-#
-# WIRING CONTRACT THIS IMPLIES: the moment this lane gets callers, the key enters the
-# sandbox unless the wiring strips it — substitute the tokens after the artifact returns,
-# or inject them at deploy via wrangler ``[vars]``. Today's protection is the accident that
-# nothing calls ``run_build``.
-#
-# WHAT WOULD ENTER IS NO LONGER AN INFERENCE — it has a filename. A canary build on
-# 2026-08-10 (a real generated svelte project built with a marked
-# ``capture_signed_key``, run by SG-7) found the key in
-# ``src/routes/api/submit/+server.ts`` — i.e. in the source map this runner UPLOADS — and
-# compiled into ``.svelte-kit/output/server/entries/endpoints/api/submit/_server.ts.js``.
-# The contract above is therefore checkable rather than merely cautionary: the file is
-# known by name before anyone writes the wiring.
-#
-# THE SAME CANARY FOUND THE KEY NOWHERE IN THE DEPLOYABLE ARTIFACT
-# (``.svelte-kit/cloudflare/``), including under ``_app/`` on the widest client-bundle
-# setting. DO NOT read that as reassurance about this lane. The key is absent from the
-# artifact because the compiled server route is absent from it — and that same missing file
-# is what the shipped ``_worker.js`` imports (``./../output/server/index.js``, verified on
-# a local adapter-cloudflare build). So the svelte artifact this lane tars CANNOT EXECUTE.
-# The security pass and the correctness bug are one fact; see §8 item 14 of the findings
-# record cited below.
-#
-# Recorded as an OBLIGATION, not a note, in the proving-phase findings record — see §9a of
-# ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace, which
-# also carries the three options and why patching the built output is the worst of them.
-# Cross-referenced deliberately: whoever finds this header while about to add a caller
-# should land on the obligation, not just on the history of a corrected claim.
-#
-# CACHING ``node_modules`` IN A SNAPSHOT IS THE OBVIOUS OPTIMISATION HERE, and it is the
-# thing that would undo this. If you are reading this because you were about to do it: the
-# primary reason above is live, so re-make the security decision first — do not reason from
-# the retracted claim that the signed key is gone.
-#
-# Updated 2026-08-11 (SG-7, fault ladder): the downloaded artifact now passes through
-# ``daytona_build.verify_artifact`` before the result is assembled, so an empty, truncated,
-# unreadable or ``node_modules``-carrying artifact demotes the classification to a
-# non-deployable ``infra_lost`` and the bytes are dropped, instead of leaving ``deployable``
-# True on a result a caller would deploy. The rejection carries its OWN ``retryable``: a
-# truncated transfer is worth another attempt, a build that produced garbage is not.
+# INVARIANT â€” THIS LANE NEVER SNAPSHOTS THE SANDBOX. A svelte project carries
+# ``__CAPTURE_SIGNED_KEY__`` substituted into ``src/routes/api/submit/+server.ts``, a
+# real per-site secret, and a canary build confirmed it lands in the uploaded source
+# and the compiled server route. Accepting that rests entirely on the key living only
+# in a container that is then destroyed; a snapshot would make it durable. Build inputs
+# are also customer content, and a snapshot moves them into durable storage (a
+# different data-residency question). Caching ``node_modules`` in a snapshot is the
+# obvious optimisation and the thing that would undo this: re-make the security
+# decision first. The obligation (strip or inject the key at deploy) and the svelte
+# artifact's missing server output are recorded in Â§9a and Â§8 item 14 of
+# ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace.
 from __future__ import annotations
 
 import logging
@@ -149,6 +60,11 @@ from pocketpaw_ee.sites.daytona_build import (
     classify_build,
     promised_artifact_bytes,
     verify_artifact,
+)
+from pocketpaw_ee.sites.sandbox_reaper import (
+    delete_job_leftovers,
+    lane_labels,
+    teardown_unreturned,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -184,6 +100,9 @@ SANDBOX_BUNFIG = BUILD_BUNFIG
 #: stopped responding altogether. If they were equal, a race would decide whether we
 #: get evidence.
 EXEC_TIMEOUT_SLACK_SECONDS = 120
+
+#: The ``paw_lane`` label value on every sandbox this module creates.
+BUILD_LANE = "site-build"
 
 #: Minutes of headroom between the build's own timeout and Daytona's idle auto-stop.
 _LIFECYCLE_MARGIN_MINUTES = 10
@@ -278,6 +197,7 @@ async def run_build(
     extra_uploads: list[tuple[bytes, str]] | None = None,
     ssr_markers: tuple[str, ...] | None = None,
     log_tail_bytes: int | None = None,
+    labels: dict[str, str] | None = None,
 ) -> BuildRunResult:
     """Build ``files`` in a fresh Daytona sandbox and return the verdict + artifact.
 
@@ -309,6 +229,10 @@ async def run_build(
     ``after_build`` receives ``(client, sandbox_id, static_dir)`` where ``static_dir`` is
     the absolute in-sandbox path of the output dir this build wrote; ``on_artifact``
     receives the verified artifact bytes before it.
+
+    ``labels`` are merged over ``{"paw_lane": "site-build"}`` and stamped on the
+    sandbox; the build jobs pass ``paw_pocket`` and ``paw_job``. With a ``paw_job``, a
+    box an earlier attempt of the same job left behind is deleted before the create.
     """
     if client is None:
         from pocketpaw_ee.cloud.daytona.client import get_daytona_client
@@ -365,9 +289,18 @@ async def run_build(
     if image:
         # PP-2: only when set, so a caller that passes nothing creates exactly as before.
         create_kwargs["image"] = image
+    create_kwargs["labels"] = lane_labels(BUILD_LANE, labels)
+    await delete_job_leftovers(client, create_kwargs["labels"])
 
     try:
-        info = await client.create_sandbox(**create_kwargs)
+        try:
+            info = await client.create_sandbox(**create_kwargs)
+        except BaseException:
+            # The SDK registers the box BEFORE it waits for ``started``, so a create that
+            # timed out or was cancelled can leave a box we hold no id for. Find it by
+            # its unique name and delete it (shielded), then re-raise the original.
+            await teardown_unreturned(client, name)
+            raise
         sandbox_id = info.id
         await client.wait_for_sandbox(sandbox_id, target_state="started")
         t_created = time.monotonic()

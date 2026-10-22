@@ -1,55 +1,38 @@
 # ee/pocketpaw_ee/sites/build_worker.py — the site-build lane's OWN arq worker settings.
 #
-# Edited 2026-09-24 (PP-2, feat/sites-verify-pipeline): registers the html verify job
-# (``build_job.run_site_html_verify``) with the preview job's timeout — build budget plus
-# the browser step — and the build jobs' capacity-only ``max_tries`` (``sites.capacity``).
+# WHY A SEPARATE LANE. Every background lane once shared arq's default queue and one
+# ``max_jobs`` ceiling (10). Site builds are the worst neighbour for that: a publish
+# storm is one customer pressing Publish on ten sites, each build budgeted at ~1020s,
+# which left chat with zero slots while its requests sat in Redis. This module is the
+# consumer of the split-off site queue. It is deliberately thin: job functions, the
+# bootstrap, the Redis resolver and the health-key period are the chat lane's objects,
+# imported rather than redefined. The lane owns only its concurrency ceiling.
 #
-# Created 2026-09-04 (fix/queue-lanes, backend-perf C1). Until now every background lane
-# this product runs — chat runs, workspace jobs, both /ship jobs and both site builds —
-# shared arq's default queue, and therefore shared ONE ``max_jobs`` ceiling whose default
-# is 10. That is a cluster-wide number, not a per-lane one, and site builds are the worst
-# possible neighbour to share it with: a publish storm is one customer pressing Publish on
-# ten sites, and a single build's budget is 1020s at today's defaults. Ten of them left
-# chat with zero slots, and the eleventh request did not fail — it sat in Redis until the
-# stale-run sweeper marked it interrupted ten minutes later, while the user watched an SSE
-# stream deliver nothing but heartbeats.
+# WHAT RUNS HERE. Site publish builds and preview builds (the chat lane's wrapped
+# functions), the html verify job (preview timeout, capacity-only ``max_tries`` from
+# ``sites.capacity``), the site delete cascade (its own timeout, ``max_tries=1``), the
+# AI visibility site check, and two crons: the AI visibility sweep and the build
+# sandbox reaper (``sandbox_reaper.reap_cron``, every 10 minutes), which deletes
+# ``paw-build-*`` / ``paw-verify-*`` Daytona boxes older than the longest sites job
+# budget so a leaked box cannot hold the org's memory cap.
 #
-# Splitting the queue is what fixes that, and a queue without a consumer is worse than no
-# split at all, so this module exists to BE that consumer. It is deliberately thin: every
-# job function, the bootstrap, the Redis resolver and the health-key period are the same
-# objects the chat lane uses, imported rather than redefined. The only thing this lane
-# owns is its own concurrency ceiling.
-#
-# HOW IT RUNS. ``pocketpaw_ee.cloud.worker_supervisor`` starts this lane and the chat lane
-# as two arq Workers in ONE process, because the Coolify compose file cannot take a third
-# service that declares ``build:`` (Coolify base64s the Dockerfile into one SSH argv per
-# build service; a third one blew the argv limit and broke every deploy — paw-workspace
-# #193, reverted in #194). Running it standalone also works and needs no code change::
+# HOW IT RUNS. ``pocketpaw_ee.cloud.worker_supervisor`` starts this lane and the chat
+# lane as two arq Workers in ONE process, because the Coolify compose file cannot take
+# a third ``build:`` service (the base64'd Dockerfiles blew the SSH argv limit,
+# paw-workspace #193, reverted in #194). Standalone also works::
 #
 #     arq pocketpaw_ee.sites.build_worker.WorkerSettings
 #
-# WHY 4 AND NOT 10. A chat run spawns a Node subprocess per run on the default
-# ``claude_agent_sdk`` backend, so the chat lane's ceiling is bounded by container RAM. A
-# site build is not: the compile happens in a Daytona sandbox and what runs here is an
-# await on a remote exec. So these four slots cost the worker container almost nothing,
-# and the number is about how many sandboxes the account should be paying for at once
-# rather than about memory. Raise it with the Daytona quota, not with the memory limit.
-# Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): the lane
-# grew a THIRD job — ``run_site_delete``, the forced export plus the teardown cascade.
-# It rides this queue rather than opening a fourth one: this is already the consumer
-# of site work, and a third ``build:`` service cannot be added to the Coolify compose
-# file anyway (paw-workspace #193/#194).
+# WHY 4 SLOTS. The compile happens in a Daytona sandbox; what runs here is an await on
+# a remote exec, so the slots cost this container almost nothing. The number is how
+# many sandboxes the account should pay for at once: raise it with the Daytona quota.
 #
-# The lane also runs the AI visibility site check and its daily sweep cron
-# (``cloud/ai_visibility/worker.py``): site work, network-bound awaits, no sandbox.
-#
-# THERE IS EXACTLY ONE ``functions = [...]`` ASSIGNMENT IN THIS CLASS, and it must stay
-# that way. A second one silently wins over the first — ``chat/runs/worker.py`` carries
-# a comment about the merge that produced two there and would have registered NEITHER
-# ship job. Adding a lane means editing the existing list, never appending a new
-# assignment.
+# THERE IS EXACTLY ONE ``functions = [...]`` ASSIGNMENT IN THIS CLASS. A second one
+# silently wins over the first (``chat/runs/worker.py`` once registered neither ship
+# job that way). Adding a job means editing the existing list.
 """The site lane's arq WorkerSettings (backend-perf C1): builds, previews, deletes,
-html verify, and AI visibility site checks with their monthly sweep."""
+html verify, AI visibility site checks with their monthly sweep, and the build sandbox
+reaper cron."""
 
 from __future__ import annotations
 
@@ -80,6 +63,7 @@ from pocketpaw_ee.sites.delete_job import (
     run_site_delete,
     site_delete_job_timeout_seconds,
 )
+from pocketpaw_ee.sites.sandbox_reaper import reap_cron
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +148,9 @@ class WorkerSettings:
         site_check_fn,
     ]
     # The AI visibility monthly sweep (a daily tick, opt-in through
-    # POCKETPAW_CLOUD_SCHEDULER_ENABLED; see ``cloud/ai_visibility/worker.py``).
-    cron_jobs = [sweep_cron]
+    # POCKETPAW_CLOUD_SCHEDULER_ENABLED; see ``cloud/ai_visibility/worker.py``), and the
+    # orphaned build-sandbox reaper (every 10 minutes; a no-op without Daytona).
+    cron_jobs = [sweep_cron, reap_cron]
     on_startup = worker_startup
     on_shutdown = worker_shutdown
     # No auto-retry, matching every other lane: a build is billed per attempt in a

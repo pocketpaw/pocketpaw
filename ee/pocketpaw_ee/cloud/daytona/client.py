@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from daytona import (
@@ -29,6 +29,7 @@ from daytona import (
     ExecuteResponse,
     FileUpload,
     Image,
+    ListSandboxesQuery,
     PtySize,
     Resources,
 )
@@ -59,6 +60,7 @@ class SandboxInfo:
     region_id: str = ""
     created_at: str = ""
     last_activity_at: str = ""
+    labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -163,6 +165,7 @@ class DaytonaClient:
         auto_stop_interval: int = 30,
         auto_archive_interval: int | None = None,
         auto_delete_interval: int | None = None,
+        labels: dict[str, str] | None = None,
     ) -> SandboxInfo:
         """Create a new sandbox using the SDK.
 
@@ -195,6 +198,9 @@ class DaytonaClient:
             auto_delete_interval: MINUTES after a stop before the VM is
                 auto-deleted (``0`` = delete immediately on stop, ``-1`` =
                 never). ``None`` leaves the SDK default in place.
+            labels: Daytona labels stamped on the sandbox (``paw_lane``,
+                ``paw_job``, ...), so it can be found by label later. ``None``
+                sends none.
         """
         daytona = await self._ensure_daytona()
 
@@ -228,6 +234,8 @@ class DaytonaClient:
             create_kwargs["auto_archive_interval"] = auto_archive_interval
         if auto_delete_interval is not None:
             create_kwargs["auto_delete_interval"] = auto_delete_interval
+        if labels:
+            create_kwargs["labels"] = dict(labels)
         params = CreateSandboxFromImageParams(**create_kwargs)
         if language:
             params.language = language
@@ -243,18 +251,19 @@ class DaytonaClient:
         sandbox = await daytona.get(sandbox_id)
         return await self._parse_sandbox(sandbox)
 
-    async def list_sandboxes(self) -> list[SandboxInfo]:
-        """List all sandboxes via the SDK."""
+    async def list_sandboxes(self, labels: dict[str, str] | None = None) -> list[SandboxInfo]:
+        """List sandboxes via the SDK; ``labels`` filters server-side when given."""
         daytona = await self._ensure_daytona()
+        query = ListSandboxesQuery(labels=dict(labels)) if labels else None
         results = []
-        async for sb in daytona.list():
+        async for sb in daytona.list(query):
             results.append(await self._parse_sandbox(sb))
         return results
 
     async def find_sandbox_by_name(self, name: str) -> SandboxInfo | None:
-        """Find a sandbox by name using the SDK."""
+        """Find a sandbox by its exact name (the server filters by name prefix)."""
         daytona = await self._ensure_daytona()
-        async for sb in daytona.list():
+        async for sb in daytona.list(ListSandboxesQuery(name=name)):
             if sb.name == name:
                 return await self._parse_sandbox(sb)
         return None
@@ -500,6 +509,7 @@ class DaytonaClient:
             region_id=getattr(sandbox, "region_id", ""),
             created_at=getattr(sandbox, "created_at", ""),
             last_activity_at=getattr(sandbox, "last_activity_at", ""),
+            labels=dict(getattr(sandbox, "labels", None) or {}),
         )
 
 

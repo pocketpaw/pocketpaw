@@ -952,6 +952,7 @@ async def run_project_preview_build(
             extra_uploads=uploads,
             ssr_markers=(),
             log_tail_bytes=LOG_CAP_BYTES,
+            labels=build_job.sandbox_labels(ctx, pocket_id),
         )
     except Exception as exc:
         if capacity.is_capacity_error(exc):

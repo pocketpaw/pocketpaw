@@ -184,7 +184,9 @@ class TestHtmlVerifyJob:
     async def test_it_skips_the_build_and_checks_the_tree(self) -> None:
         seen: dict[str, Any] = {}
 
-        async def standalone(files: dict[str, Any], *, static_rel: str, client: Any):
+        async def standalone(
+            files: dict[str, Any], *, static_rel: str, client: Any, labels: Any = None
+        ):
             seen["files"] = sorted(files)
             seen["static_rel"] = static_rel
             return bc.BrowserCheckResult("passed")

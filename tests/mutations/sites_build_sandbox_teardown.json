@@ -1,0 +1,113 @@
+[
+  {
+    "label": "run_build drops the by-name teardown: a create that timed out or was cancelled leaves a 4 GiB box holding the org cap",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "            await teardown_unreturned(client, name)\n            raise",
+    "replace": "            raise",
+    "tests": [
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestCreateTimeoutStillTearsDown::test_run_build_deletes_the_box_a_timed_out_create_registered",
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestCancellationStillTearsDown::test_run_build_cancelled_inside_create_deletes_the_box"
+    ]
+  },
+  {
+    "label": "run_standalone drops the by-name teardown: a failed or cancelled verify create leaks a 2 GiB box",
+    "file": "ee/pocketpaw_ee/sites/browser_check.py",
+    "find": "            await teardown_unreturned(client, name)\n            raise",
+    "replace": "            raise",
+    "tests": [
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestCreateTimeoutStillTearsDown::test_run_standalone_deletes_the_box_a_timed_out_create_registered",
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestCancellationStillTearsDown::test_run_standalone_cancelled_inside_create_deletes_the_box"
+    ]
+  },
+  {
+    "label": "the create teardown catches Exception only, so a cancel inside create (a superseded preview) skips the delete",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "            info = await client.create_sandbox(**create_kwargs)\n        except BaseException:",
+    "replace": "            info = await client.create_sandbox(**create_kwargs)\n        except Exception:",
+    "tests": [
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestCancellationStillTearsDown::test_run_build_cancelled_inside_create_deletes_the_box"
+    ]
+  },
+  {
+    "label": "the by-name teardown is not shielded, so a second cancel abandons the delete half-way and the box leaks",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "    return await asyncio.shield(task)",
+    "replace": "    return await task",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestShieldedTeardown"
+    ]
+  },
+  {
+    "label": "the lane label is dropped, so boxes in the Daytona console cannot be told apart by lane",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "    return {LANE_LABEL: lane, **(labels or {})}",
+    "replace": "    return dict(labels or {})",
+    "tests": [
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestSandboxesCarryLabels"
+    ]
+  },
+  {
+    "label": "DaytonaClient never sends labels to the SDK, so every label above is silently lost in production",
+    "file": "ee/pocketpaw_ee/cloud/daytona/client.py",
+    "find": "        if labels:\n            create_kwargs[\"labels\"] = dict(labels)",
+    "replace": "        if False:\n            create_kwargs[\"labels\"] = dict(labels)",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestClientLabels"
+    ]
+  },
+  {
+    "label": "the leftover check trusts the server filter blindly, so another job's box is deleted on a re-run",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "        if (getattr(info, \"labels\", None) or {}).get(JOB_LABEL) != job:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestJobLeftovers"
+    ]
+  },
+  {
+    "label": "a re-run never deletes its first attempt's box, so a redeploy-killed build holds 4 GiB until the reaper",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "    await delete_job_leftovers(client, create_kwargs[\"labels\"])",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestJobLeftovers"
+    ]
+  },
+  {
+    "label": "the reaper ignores the name prefix and deletes workspace VMs and foreign boxes",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "        if not name.startswith(REAPABLE_PREFIXES):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestOrphanReaper"
+    ]
+  },
+  {
+    "label": "the reaper ignores age and deletes a box a running build is using",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "        if created is None or (now - created).total_seconds() <= max_age:",
+    "replace": "        if created is None:",
+    "tests": [
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestOrphanReaper",
+      "tests/ee/sites/test_sandbox_reaper.py::TestReaper"
+    ]
+  },
+  {
+    "label": "one failed delete aborts the sweep, so a single stuck box keeps every other orphan alive",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "        except Exception as exc:  # noqa: BLE001 — one stuck box must not stop the sweep",
+    "replace": "        except ZeroDivisionError as exc:  # noqa: BLE001",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestReaper"
+    ]
+  },
+  {
+    "label": "the reaper cron is not scheduled, so nothing reaps a box stuck in creating",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    cron_jobs = [sweep_cron, reap_cron]",
+    "replace": "    cron_jobs = [sweep_cron]",
+    "tests": [
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestOrphanReaper::test_build_worker_schedules_a_build_sandbox_reaper"
+    ]
+  }
+]
