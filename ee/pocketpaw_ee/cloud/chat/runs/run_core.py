@@ -1883,6 +1883,31 @@ def _forced_pydantic_ai_model(instance: Any, backend_name: str | None, override:
     return getattr(settings, "pydantic_ai_model", None) or get_settings().pydantic_ai_model
 
 
+def _turn_model(instance: Any, backend_name: str | None, run_kwargs: dict[str, Any]) -> str:
+    """Best guess at the model this turn runs on, for the out-of-credit mark.
+
+    A free run uses whatever pydantic_ai will run. Otherwise the per-send pick,
+    else the agent's own ``model``, else (pydantic_ai only, the cloud default)
+    the backend's ``pydantic_ai_model``. Empty when none is known; the mark is
+    then skipped.
+    """
+    override = run_kwargs.get("model_override")
+    try:
+        if run_kwargs.get("force_pydantic_ai"):
+            # A free run: the pool keeps the per-send model only on pydantic_ai.
+            return _forced_pydantic_ai_model(instance, backend_name, override)
+        if override:
+            return str(override)
+        config = getattr(instance, "config", None)
+        if isinstance(config, dict) and config.get("model"):
+            return str(config["model"])
+        if backend_name == "pydantic_ai":
+            return _forced_pydantic_ai_model(instance, backend_name, None)
+    except Exception:
+        logger.debug("turn model lookup failed", exc_info=True)
+    return ""
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -2558,6 +2583,9 @@ async def _drive_agent_loop(
         # (logfire's ``invoke_agent``) would attach in one copy and fail to detach
         # in another.
         step_ctx = contextvars.copy_context()
+        # What ran and who paid, for the out-of-credit mark (``_note_availability``).
+        ctx.turn_model = _turn_model(instance, backend_name, run_kwargs)
+        ctx.turn_byok = "byok_api_key" in run_kwargs
         agent_iter = pool.run(
             ctx.target_agent_id,
             user_content,
@@ -3278,6 +3306,27 @@ async def _reject_if_guest_over_limit(spec: RunSpec, ctx: ScopeContext, transpor
     )
 
 
+async def _note_availability(ctx: ScopeContext, error_code: str | None) -> None:
+    """Keep the model picker's out-of-credit marks in step with this run.
+
+    An ``agent.provider_out_of_credit`` failure marks the turn's provider (or,
+    on the workspace's own key, every model) for this workspace; any run that
+    finished without an error clears it. Other failures say nothing about
+    credit and leave the marks alone. Best effort: never raises.
+    """
+    from pocketpaw_ee.catalog import availability
+
+    model = getattr(ctx, "turn_model", None) or ""
+    byok = bool(getattr(ctx, "turn_byok", False))
+    try:
+        if error_code == OUT_OF_CREDIT_CODE:
+            await availability.record_out_of_credit(ctx.workspace_id, model, byok=byok)
+        elif error_code is None and (model or byok):
+            await availability.clear(ctx.workspace_id, model, byok=byok)
+    except Exception:
+        logger.debug("model availability update failed", exc_info=True)
+
+
 async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
@@ -3504,6 +3553,8 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
         cancelled = False
         error: Exception | None = None
         backend_error_message: str | None = None
+        # The ``code`` of the error frame the chat got, for ``_note_availability``.
+        error_code: str | None = None
         # Per-run token metering (W3a). The backend yields a ``token_usage`` event
         # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
         # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
@@ -3603,6 +3654,7 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
                     # writing and route to the failed-mark path below so the doc
                     # doesn't get flipped to ``completed`` by the empty-text branch.
                     backend_error_message = str(event_data.get("message") or "")
+                    error_code = str(event_data.get("code") or "")
                     break
         except asyncio.CancelledError:
             # The task itself was cancelled (worker shutdown, host signal). Run
@@ -3634,7 +3686,9 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
         except Exception as exc:
             error = exc
             logger.exception("execute_run %s crashed", spec.run_id)
-            await transport.append_event(spec.run_id, "error", _crash_error_frame(exc))
+            crash_frame = _crash_error_frame(exc)
+            error_code = crash_frame["code"]
+            await transport.append_event(spec.run_id, "error", crash_frame)
         finally:
             # A ``break`` (user stop, backend error frame) leaves the generator
             # suspended; close it here so the backend and its bookkeeping in
@@ -3664,6 +3718,9 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
         await _broadcast_agent_typing(ctx, active=False)
     except Exception:
         logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
+
+    if not cancelled:
+        await _note_availability(ctx, error_code)
 
     if error is not None or backend_error_message is not None:
         # The run doc keeps the provider's own words; the chat got the plain one.

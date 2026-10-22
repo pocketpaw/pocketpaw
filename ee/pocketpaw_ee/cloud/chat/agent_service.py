@@ -772,6 +772,12 @@ class ScopeContext:
     # sentence. Set by ``run_core._drive_agent_loop`` so the run doc's ``error``
     # field keeps the provider's own words for operators.
     backend_error_detail: str | None = None
+    # The model this turn ran on (the per-send pick, else the agent's own) and
+    # whether the workspace's own key paid. Stamped by ``_drive_agent_loop`` just
+    # before ``AgentPool.run``; ``execute_run`` keys the out-of-credit mark and
+    # its clear on them (``catalog.availability``). Best effort, never a gate.
+    turn_model: str | None = None
+    turn_byok: bool = False
     # The anchored pocket's orientation data: {name, description, type,
     # template_slug, pattern, ripple} where ``ripple`` is
     # ``spec_ops.summarize_ripple_spec`` over the pocket's rippleSpec
