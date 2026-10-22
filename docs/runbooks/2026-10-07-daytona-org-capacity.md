@@ -75,9 +75,9 @@ and holds it until its sandbox is deleted.
 - **Bounded wait.** A lease waits at most the capacity retry window (270 s) in total,
   including any time spent on Redis before it failed over. After that the build goes
   to Daytona anyway and gets the normal capacity handling below, so nothing waits
-  forever. With admission on, the arq job timeout includes this wait (read at worker
-  start, so set the env var before the worker boots), and a wait never eats the
-  build's own budget.
+  forever. The arq job timeout always includes this wait (on or off, so the
+  registered timeout and the code that reads it never disagree), so a wait never eats
+  the build's own budget.
 - **While it waits** a preview poll reads `queued` / `waiting_for_capacity`. Worker
   log: `admission: ... waiting for the budget`, and `going to Daytona unleased` when
   the wait ran out.

@@ -91,10 +91,10 @@
 #      (``POCKETPAW_JOB_TIMEOUT_SECONDS``, default 900s). A build needs
 #      :func:`site_build_job_timeout_seconds` — the widest per-engine build budget plus
 #      ``run_build``'s own exec slack plus the phases that sit outside the sandbox plus
-#      the bounded memory-admission wait when it is on — 1020s at today's defaults
-#      (1290s with admission), i.e. ALREADY over the shared 900s. An arq cancellation
-#      at 900s kills the job before the in-sandbox ``timeout(1)`` fires, so the
-#      sentinel is never written and a healthy-but-slow build classifies as
+#      the bounded memory-admission wait — 1290s at today's defaults, i.e. ALREADY
+#      over the shared 900s. An arq cancellation at 900s kills the job before the
+#      in-sandbox ``timeout(1)`` fires, so the sentinel is never written and a
+#      healthy-but-slow build classifies as
 #      ``infra_lost``: exactly the mis-report ``daytona_build``'s evidence design exists
 #      to prevent. A dedicated ``arq.worker.func(timeout=...)`` derived from the same env
 #      knob keeps the two coupled, which no registry job can do.
@@ -466,11 +466,13 @@ def site_build_job_timeout_seconds() -> int:
     which a deploy does anyway.
     """
     widest = max(resolve_build_timeout_seconds(engine) for engine in BUILDABLE_ENGINES)
-    # Plus the longest ``admission.memory_lease`` wait when admission is on (it runs
-    # before the build's clock: an arq timeout that ate into the build budget would
-    # lose the sentinel). Off, the lease never waits and the timeout is unchanged.
-    admission_on = admission.budget_gib() is not None
-    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS) if admission_on else 0
+    # Plus the longest ``admission.memory_lease`` wait, which runs before the build's
+    # clock: an arq timeout that ate into the build budget would lose the sentinel.
+    # ALWAYS added, whether or not admission is on. The arq registrations evaluate this
+    # once at import while callers evaluate it later; making it depend on the admission
+    # env var lets the two disagree inside one process (a test, or a worker whose env
+    # changed). With admission off it only raises the ceiling on a wedged job.
+    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS)
     return widest + EXEC_TIMEOUT_SLACK_SECONDS + OUT_OF_SANDBOX_MARGIN_SECONDS + admission_wait
 
 

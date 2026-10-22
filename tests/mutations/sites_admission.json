@@ -212,5 +212,14 @@
     "tests": [
       "tests/ee/sites/test_admission_lease.py::TestCreateFailureLogging::test_secrets_are_redacted_and_the_limit_named"
     ]
+  },
+  {
+    "label": "the job timeout includes the admission wait only when the env var is set, so the arq registration made at import and a later caller disagree",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS)\n",
+    "replace": "    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS) if admission.budget_gib() else 0\n",
+    "tests": [
+      "tests/ee/sites/test_admission_job_timeout.py"
+    ]
   }
 ]
