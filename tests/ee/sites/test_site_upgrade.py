@@ -1,7 +1,8 @@
 # tests/ee/sites/test_site_upgrade.py — "Upgrade this site" (``sites/site_upgrade.py``)
 # end to end over the HTTP routes against a mongomock pocket: an html site (and an
-# imported one) becomes a static project with the starter's manifest and AGENTS.md,
-# its Site doc untouched and its first preview staged by the no-build lane; the
+# imported one) becomes a static project with the starter's manifest and AGENTS.md
+# and a tokens file themed from its own CSS and linked from every page, its Site doc
+# untouched and its first preview staged by the no-build lane; the
 # refusals (starter files already there, no root index.html, a non-html engine); undo
 # while untouched and its 409 after an edit; and the auth matrix. The paw-sites CLI
 # (``copy_template``) and the artifact / verify stores are faked.
@@ -16,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud.pockets import service as pockets_service  # noqa: E402
-from pocketpaw_ee.sites import engines, project_build, project_tools  # noqa: E402
+from pocketpaw_ee.sites import engines, project_build, project_tools, site_tokens  # noqa: E402
 from pocketpaw_ee.sites import service as sites_service  # noqa: E402
 
 from tests.ee.sites.test_project_engine import _Records, _Store  # noqa: E402
@@ -166,7 +167,7 @@ async def test_upgrade_converts_an_html_site_in_place(
     body = r.json()
     assert starter == ["static"]
     assert body["engine"] == "project" and body["template"] == "static"
-    assert body["added"] == ["AGENTS.md", "paw.template.json"]
+    assert body["added"] == ["AGENTS.md", "paw.template.json", "styles/tokens.css"]
     assert body["upgraded_from"]["engine"] == "html"
     # The first preview went through the no-build lane, in-process.
     assert body["verification"]["status"] == "passed"
@@ -175,12 +176,16 @@ async def test_upgrade_converts_an_html_site_in_place(
     doc = await _doc(pid)
     assert doc.engine == "project"
     assert doc.pattern == pattern
-    # The html files are carried over byte for byte; only the two starter files join.
-    assert doc.source == {
-        **HTML,
-        "paw.template.json": STARTER["paw.template.json"],
-        "AGENTS.md": STARTER["AGENTS.md"],
-    }
+    # The html files are carried over; each page also links the new tokens file, and
+    # the two starter files plus that tokens file join.
+    assert set(doc.source) == {*HTML, "paw.template.json", "AGENTS.md", "styles/tokens.css"}
+    assert doc.source["paw.template.json"] == STARTER["paw.template.json"]
+    assert doc.source["AGENTS.md"] == STARTER["AGENTS.md"]
+    assert doc.source["styles.css"] == HTML["styles.css"]
+    for page in ("index.html", "about.html"):
+        assert doc.source[page] == site_tokens.link_tokens(HTML[page])
+        assert site_tokens.TOKENS_HREF in doc.source[page]
+    assert ":root" in doc.source["styles/tokens.css"]
     assert doc.site_meta["project"] == {"template": "static", "framework": "static", "recipes": []}
     record = doc.site_meta["upgraded_from"]
     assert record["source_hash"] == body["upgraded_from"]["source_hash"]
@@ -199,6 +204,54 @@ async def test_upgrade_converts_an_html_site_in_place(
     rows = await versions_service.list_versions(scope_type="pocket", scope_id=pid)
     snapshot = next(r for r in rows if str(r.id) == record["version_id"])
     assert snapshot.content == HTML
+
+
+async def test_upgrade_themes_the_tokens_file_from_the_site(beanie_test_db, starter, stores):
+    source = {
+        "index.html": "<html><head><style>h1 { font-family: Georgia, serif }</style></head>"
+        "<body><h1>Bakery</h1></body></html>",
+        "site.css": "body { background-color: #fdf6ec; color: #3b2f2f; "
+        "font-family: 'Lora', serif }\n.btn { background: #c2410c }\n",
+    }
+    pid = await _pocket(source=source)
+    async with _client(_app()) as c:
+        r = await c.post(BASE.format(pid=pid))
+    assert r.status_code == 200, r.text
+    tokens = site_tokens.root_declarations((await _doc(pid)).source["styles/tokens.css"])
+    assert tokens["--background"] == "#fdf6ec"
+    assert tokens["--foreground"] == "#3b2f2f"
+    assert tokens["--primary"] == "#c2410c"
+    assert tokens["--font-sans"] == "'Lora', serif"
+    assert tokens["--font-heading"] == "Georgia, serif"
+
+
+async def test_upgrade_falls_back_to_the_starter_tokens(
+    beanie_test_db, starter, stores, monkeypatch
+):
+    themed = (
+        ":root {\n  color-scheme: light dark;\n  --background: #fefefe;\n  --space-1: 0.5rem;\n}\n"
+    )
+    monkeypatch.setitem(STARTER, "styles/tokens.css", themed)
+    pid = await _pocket()
+    async with _client(_app()) as c:
+        assert (await c.post(BASE.format(pid=pid))).status_code == 200
+    css = (await _doc(pid)).source["styles/tokens.css"]
+    tokens = site_tokens.root_declarations(css)
+    assert tokens["--background"] == "#fefefe"
+    assert tokens["--space-1"] == "0.5rem"
+    assert "color-scheme" not in css
+
+
+async def test_upgrade_keeps_an_owner_tokens_file(beanie_test_db, starter, stores):
+    source = {**HTML, "styles/tokens.css": ":root { --brand: red; }\n"}
+    pid = await _pocket(source=source)
+    async with _client(_app()) as c:
+        r = await c.post(BASE.format(pid=pid))
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] == ["AGENTS.md", "paw.template.json"]
+    doc = await _doc(pid)
+    assert doc.source["styles/tokens.css"] == source["styles/tokens.css"]
+    assert site_tokens.TOKENS_HREF in doc.source["index.html"]
 
 
 async def test_upgraded_site_reads_as_upgradable_no_longer(beanie_test_db, starter, stores):
