@@ -40,8 +40,8 @@
   {
     "label": "the lane label is dropped, so boxes in the Daytona console cannot be told apart by lane",
     "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
-    "find": "    return {LANE_LABEL: lane, **(labels or {})}",
-    "replace": "    return dict(labels or {})",
+    "find": "    merged = {LANE_LABEL: lane, **(labels or {})}",
+    "replace": "    merged = dict(labels or {})",
     "tests": [
       "tests/ee/sites/test_build_sandbox_teardown.py::TestSandboxesCarryLabels"
     ]
@@ -99,6 +99,24 @@
     "replace": "        except ZeroDivisionError as exc:  # noqa: BLE001",
     "tests": [
       "tests/ee/sites/test_sandbox_reaper.py::TestReaper"
+    ]
+  },
+  {
+    "label": "long label values are sent unbounded, so a ~100-char preview job id fails every create if Daytona enforces the 63-char limit",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "    if _LABEL_VALUE_OK.match(value):",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestLabelBound"
+    ]
+  },
+  {
+    "label": "the leftover lookup filters on the raw job id instead of the bounded one, so a long-id re-run never finds its first attempt's box",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "    job, lane = label_value(job), label_value(lane)",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestLabelBound"
     ]
   },
   {

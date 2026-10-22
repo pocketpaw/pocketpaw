@@ -4,6 +4,7 @@
 # without Daytona, the build jobs' labels, and DaytonaClient forwarding labels to the SDK.
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -186,3 +187,56 @@ class TestShieldedTeardown:
         gate.set()
         await asyncio.wait_for(asyncio.gather(*list(sr._background)), timeout=2)
         assert client.boxes == {}
+
+
+# A real preview job id: "site-preview-" + a 24-hex pocket id + "-" + a sha256 content hash.
+LONG_JOB = "site-preview-" + "a" * 24 + "-" + "b" * 64
+_K8S_VALUE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
+
+
+class TestLabelBound:
+    def test_a_long_preview_job_id_becomes_a_valid_bounded_label(self) -> None:
+        assert len(LONG_JOB) > 100
+        value = sr.label_value(LONG_JOB)
+        assert len(value) <= sr.LABEL_VALUE_MAX
+        assert _K8S_VALUE.match(value), value
+        assert value.startswith("site-preview-")
+
+    def test_the_bound_is_stable_and_idempotent(self) -> None:
+        value = sr.label_value(LONG_JOB)
+        assert sr.label_value(LONG_JOB) == value
+        assert sr.label_value(value) == value
+        assert sr.label_value(LONG_JOB + "x") != value
+
+    def test_short_valid_values_pass_through_and_unsafe_ones_are_fixed(self) -> None:
+        assert sr.label_value("site-build") == "site-build"
+        assert sr.label_value("p-1") == "p-1"
+        for raw in ("-lead", "trail_", "has space", "slash/es", "é", ""):
+            value = sr.label_value(raw)
+            assert _K8S_VALUE.match(value), (raw, value)
+
+    def test_every_stamped_value_is_bounded(self) -> None:
+        labels = sr.lane_labels("site-build", {"paw_pocket": "p" * 80, "paw_job": LONG_JOB})
+        assert all(_K8S_VALUE.match(v) for v in labels.values()), labels
+
+    async def test_a_rerun_with_a_long_job_id_still_finds_its_leftover(self) -> None:
+        client = LabelledLedger(memory_cap_gib=100)
+        first = client.add_box("paw-build-1")
+        client.labels[first.id] = sr.lane_labels("site-build", {"paw_job": LONG_JOB})
+
+        # Raw id in, as a caller that skipped lane_labels would pass it.
+        deleted = await sr.delete_job_leftovers(
+            client, {"paw_lane": "site-build", "paw_job": LONG_JOB}
+        )
+        assert deleted == [first.id]
+
+    async def test_run_build_stamps_the_bounded_id_and_cleans_up_by_it(self) -> None:
+        client = LabelledLedger(memory_cap_gib=100)
+        first = client.add_box("paw-build-1")
+        client.labels[first.id] = sr.lane_labels("site-build", {"paw_job": LONG_JOB})
+
+        await _build(client, labels={"paw_job": LONG_JOB})
+
+        assert first.id in client.deleted
+        sent = client.create_kwargs[-1]["labels"]
+        assert sent["paw_job"] == sr.label_value(LONG_JOB)

@@ -21,12 +21,18 @@
 #     own auto-stop never touches. Matches by NAME so boxes created before labels
 #     existed are reaped too. Never touches workspace VMs (``paw-ws-*``) or other names.
 #
+# Label values are bounded by ``label_value`` (<= 63 chars, Kubernetes charset) both
+# where they are stamped and where they are filtered or matched, so a long arq job id
+# never fails a create and lookups still find the box.
+#
 # Every function here swallows and logs Daytona errors: cleanup must never replace the
 # exception (or result) of the build it is cleaning up after.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -52,9 +58,38 @@ JOB_LABEL = "paw_job"
 _background: set[asyncio.Task[Any]] = set()
 
 
+#: Longest label value sent to Daytona. Kubernetes' limit, assumed in case Daytona
+#: enforces it: a rejected label would fail every create, which is worse than a leak.
+LABEL_VALUE_MAX = 63
+_LABEL_VALUE_OK = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
+_LABEL_BAD_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_LABEL_TAIL_HEX = 12
+
+
+def label_value(value: str) -> str:
+    """A label value Kubernetes-style validation accepts (<= 63 chars, ``[A-Za-z0-9._-]``,
+    alphanumeric at both ends).
+
+    A value that already passes is returned as-is. Anything else becomes a readable
+    prefix plus a sha256 tail of the ORIGINAL value, so it is deterministic (a filter
+    built from the same input matches the stamped label) and idempotent (a bounded
+    value passes through unchanged). Every label we stamp or filter on goes through it.
+    """
+    value = str(value)
+    if _LABEL_VALUE_OK.match(value):
+        return value
+    tail = hashlib.sha256(value.encode("utf-8")).hexdigest()[:_LABEL_TAIL_HEX]
+    room = LABEL_VALUE_MAX - _LABEL_TAIL_HEX - 1
+    prefix = _LABEL_BAD_CHARS.sub("-", value)[:room]
+    prefix = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", prefix)
+    return f"{prefix}-{tail}" if prefix else tail
+
+
 def lane_labels(lane: str, labels: dict[str, str] | None) -> dict[str, str]:
-    """The labels a create sends: the lane label, with the caller's labels over it."""
-    return {LANE_LABEL: lane, **(labels or {})}
+    """The labels a create sends: the lane label, with the caller's labels over it,
+    every value bounded by :func:`label_value`."""
+    merged = {LANE_LABEL: lane, **(labels or {})}
+    return {k: label_value(v) for k, v in merged.items()}
 
 
 async def _find_and_delete(client: Any, name: str) -> str | None:
@@ -98,6 +133,8 @@ async def delete_job_leftovers(client: Any, labels: dict[str, str]) -> list[str]
     lane = labels.get(LANE_LABEL)
     if not job or not lane:
         return []
+    # The same bound the create stamped with, so filter and match agree with the label.
+    job, lane = label_value(job), label_value(lane)
     try:
         found = await client.list_sandboxes(labels={JOB_LABEL: job, LANE_LABEL: lane})
     except Exception as exc:  # noqa: BLE001 — a client without label filtering, or Daytona down
@@ -214,10 +251,12 @@ reap_cron = cron(
 __all__ = [
     "JOB_LABEL",
     "LANE_LABEL",
+    "LABEL_VALUE_MAX",
     "REAPABLE_PREFIXES",
     "REAP_MARGIN_SECONDS",
     "default_max_age_seconds",
     "delete_job_leftovers",
+    "label_value",
     "lane_labels",
     "reap_build_sandboxes_job",
     "reap_cron",
