@@ -5445,6 +5445,26 @@ e.g. an unverified domain), the platform sender delivers that message and a
 refused sender marks the binding `setup_required`. A Resend 409 / 429 / 5xx is
 retried on the outbox's usual backoff.
 
+## Sites — Integrations: connect params and the Stripe account country
+
+`ProviderView.connect_params` lists what an owner gives before Connect, sent back
+as `POST /integrations/{provider}/connect` body `params`. Each entry is
+`{key, label, placeholder, type: "text"|"select", required, options, help}`;
+`options` (`[{value, label}]`) is set for a `select`. The server checks every
+value (`422 integrations.invalid_connect_params` for an unknown key, a missing
+required value, an over-long one, or a `select` value outside its options); an
+optional param may be left out.
+
+Stripe declares one optional `select`, `country`: the ISO 3166-1 alpha-2 code
+of the country the owner's business is based in, which Stripe needs as
+`identity.country` when it creates the connected account and which can't change
+afterwards. The options are the 44 countries where Stripe takes direct business
+signups (stripe.com/global; India and Indonesia are preview-only and not
+offered). Left out, the account uses the workspace's partner country, else
+`POCKETPAW_STRIPE_DEFAULT_COUNTRY`, else US, each only when Stripe supports it.
+Restarting Connect reuses the owner's unfinished account only when it is in the
+country they picked this time.
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and

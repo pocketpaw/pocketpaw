@@ -4,9 +4,15 @@
 # (``POCKETPAW_STRIPE_SECRET_KEY``) creates one connected account per owner with
 # ``POST /v2/core/accounts`` (merchant configuration requesting card_payments, full
 # Stripe dashboard, fees_collector + losses_collector ``stripe``, and the required
-# ``identity.country``: the workspace's partner country, else
-# ``POCKETPAW_STRIPE_DEFAULT_COUNTRY``, default US; fixed once created) and a v2
-# ``account_onboarding`` link back to our callback with ``code=<acct id>``. New
+# ``identity.country``, fixed once created) and a v2 ``account_onboarding`` link
+# back to our callback with ``code=<acct id>``.
+#
+# COUNTRY. The owner picks it before Connect (connect param ``country``, a select
+# of ``CONNECT_COUNTRIES``: the countries where Stripe takes direct business
+# signups, per stripe.com/global, checked 2026-10-23; India and Indonesia are
+# preview-only and left out). A value outside that list is refused before Stripe
+# is called. Left empty, it is the workspace's partner country, else
+# ``POCKETPAW_STRIPE_DEFAULT_COUNTRY``, default US, each only when supported. New
 # platforms can't create v1 accounts, so nothing here calls ``POST /v1/accounts``.
 # /v2 calls send JSON and ``V2_STRIPE_VERSION``; /v1 calls stay form-encoded on
 # ``STRIPE_VERSION``. No token is stored: the grant's ``access_token`` is the
@@ -18,7 +24,8 @@
 # equals the bound id. The query-string ``code`` is never trusted alone. An owner
 # who restarts connect, or whose callback came back after the 2 h flow expired,
 # gets their pending account back (keyed per workspace + user; reused whatever its
-# onboarding state while no connection holds it). Accounts carry metadata
+# onboarding state while no connection holds it, unless the owner now picked a
+# different country, which makes a new account). Accounts carry metadata
 # {workspace_id, user_id}, checked on reuse and in ``complete``.
 #
 # STATUS. Connection meta is ``charges_enabled`` / ``details_submitted`` /
@@ -70,6 +77,7 @@ from pocketpaw_ee.integrations.providers.base import (
     ActionSpec,
     Availability,
     BaseProvider,
+    ConnectParam,
     NormalizedEvent,
     ProviderError,
     SettingOption,
@@ -126,6 +134,56 @@ CURRENCIES = tuple(
     normalize_currency(c)
     for c in ("USD", "EUR", "GBP", "INR", "AUD", "CAD", "SGD", "AED", "JPY", "CHF", "NZD")
 )
+
+
+# Where Stripe takes direct business signups (stripe.com/global, 2026-10-23), the
+# countries a connected account's ``identity.country`` may be. Code -> name.
+CONNECT_COUNTRIES: dict[str, str] = {
+    "AU": "Australia",
+    "AT": "Austria",
+    "BE": "Belgium",
+    "BR": "Brazil",
+    "BG": "Bulgaria",
+    "CA": "Canada",
+    "HR": "Croatia",
+    "CY": "Cyprus",
+    "CZ": "Czech Republic",
+    "DK": "Denmark",
+    "EE": "Estonia",
+    "FI": "Finland",
+    "FR": "France",
+    "DE": "Germany",
+    "GI": "Gibraltar",
+    "GR": "Greece",
+    "HK": "Hong Kong",
+    "HU": "Hungary",
+    "IE": "Ireland",
+    "IT": "Italy",
+    "JP": "Japan",
+    "LV": "Latvia",
+    "LI": "Liechtenstein",
+    "LT": "Lithuania",
+    "LU": "Luxembourg",
+    "MY": "Malaysia",
+    "MT": "Malta",
+    "MX": "Mexico",
+    "NL": "Netherlands",
+    "NZ": "New Zealand",
+    "NO": "Norway",
+    "PL": "Poland",
+    "PT": "Portugal",
+    "RO": "Romania",
+    "SG": "Singapore",
+    "SK": "Slovakia",
+    "SI": "Slovenia",
+    "ES": "Spain",
+    "SE": "Sweden",
+    "CH": "Switzerland",
+    "TH": "Thailand",
+    "AE": "United Arab Emirates",
+    "GB": "United Kingdom",
+    "US": "United States",
+}
 
 
 def secret_key() -> str:
@@ -296,15 +354,18 @@ async def _has_connection(account_id: str) -> bool:
     return row is not None
 
 
-async def _pending_account(workspace_id: str, user_id: str) -> str:
+async def _pending_account(workspace_id: str, user_id: str, country: str = "") -> str:
     """The caller's account from an earlier connect that never became a connection
     (abandoned, or onboarded but its callback came back too late), else "". Its
-    onboarding state does not matter: a verified account is still theirs."""
+    onboarding state does not matter: a verified account is still theirs. With a
+    ``country`` picked, only an account in that country (it can't be changed)."""
     account_id = str(await _redis().get(_pending_key(workspace_id, user_id)) or "")
     if not account_id.startswith("acct_") or await _has_connection(account_id):
         return ""
     account = await _get_account(account_id, missing_ok=True)
     if not account or not _owned_by(account, workspace_id, user_id):
+        return ""
+    if country and _iso2((account.get("identity") or {}).get("country")) != country:
         return ""
     return account_id
 
@@ -325,10 +386,19 @@ def _iso2(value: Any) -> str:
     return code if len(code) == 2 and code.isascii() and code.isalpha() else ""
 
 
-async def _account_country(workspace_id: str) -> str:
+def supported_country(value: Any) -> str:
+    """``value`` as a country Stripe takes connected accounts in, else ""."""
+    code = _iso2(value)
+    return code if code in CONNECT_COUNTRIES else ""
+
+
+async def _account_country(workspace_id: str, chosen: str = "") -> str:
     """``identity.country`` for a new account, which Stripe needs before the merchant
-    configuration and which can't change afterwards: the workspace's own country
-    (today only a partner profile carries one), else ``DEFAULT_COUNTRY_ENV``."""
+    configuration and which can't change afterwards: the owner's pick, else the
+    workspace's own country (today only a partner profile carries one), else
+    ``DEFAULT_COUNTRY_ENV``; each only when Stripe supports it."""
+    if code := supported_country(chosen):
+        return code
     from beanie import PydanticObjectId
 
     from pocketpaw_ee.cloud.models.workspace import Workspace
@@ -339,22 +409,22 @@ async def _account_country(workspace_id: str) -> str:
         workspace = None
     partner = getattr(workspace, "partner", None)
     for value in (getattr(partner, "country", None), getattr(partner, "billing_country", None)):
-        if code := _iso2(value):
+        if code := supported_country(value):
             return code
     raw = os.environ.get(DEFAULT_COUNTRY_ENV, "").strip() or "US"
-    code = _iso2(raw)
+    code = supported_country(raw)
     if not code:
-        logger.warning("stripe: %s is not an ISO 3166-1 alpha-2 code", DEFAULT_COUNTRY_ENV)
+        logger.warning("stripe: %s is not a Stripe-supported country code", DEFAULT_COUNTRY_ENV)
         raise ProviderError("stripe default country is invalid")
     return code
 
 
-async def _create_account(workspace_id: str, user_id: str) -> str:
+async def _create_account(workspace_id: str, user_id: str, chosen: str = "") -> str:
     """A v2 merchant account: card payments, the full Stripe dashboard, Stripe
     collects its fees from the account and owns negative balances (so Stripe also
     collects the requirements, through its hosted onboarding). ``identity.country``
     is required before the merchant configuration."""
-    country = await _account_country(workspace_id)
+    country = await _account_country(workspace_id, chosen)
     account = await _stripe(
         "POST",
         "/v2/core/accounts",
@@ -639,6 +709,20 @@ class StripeProvider(BaseProvider):
     plan = "site"
     supports_pkce = True
     state_ttl_seconds = FLOW_TTL_SECONDS
+    connect_params = (
+        ConnectParam(
+            key="country",
+            label="country your business is based in",
+            type="select",
+            options=tuple(
+                SettingOption(code, name)
+                for code, name in sorted(CONNECT_COUNTRIES.items(), key=lambda kv: kv[1])
+            ),
+            required=False,
+            max_length=2,
+            help="Stripe sets this once; it can't be changed after the account is made.",
+        ),
+    )
     actions = {
         "create_checkout": ActionSpec(
             args=CheckoutArgs,
@@ -674,13 +758,20 @@ class StripeProvider(BaseProvider):
         return "available" if secret_key() else "unconfigured"
 
     async def authorize_url(  # type: ignore[override]
-        self, state: str, redirect_uri: str, code_challenge: str | None = None
+        self,
+        state: str,
+        redirect_uri: str,
+        code_challenge: str | None = None,
+        *,
+        params: Mapping[str, Any] | None = None,
     ) -> str:
         flow = await _flow(state)
         workspace_id, user_id = str(flow["workspace_id"]), str(flow["user_id"])
-        account_id = await _pending_account(workspace_id, user_id)
+        # ``params`` were checked against ``connect_params`` at connect; re-check.
+        chosen = supported_country((params or {}).get("country"))
+        account_id = await _pending_account(workspace_id, user_id, chosen)
         if not account_id:
-            account_id = await _create_account(workspace_id, user_id)
+            account_id = await _create_account(workspace_id, user_id, chosen)
             await _redis().setex(
                 _pending_key(workspace_id, user_id), PENDING_TTL_SECONDS, account_id
             )
@@ -688,7 +779,12 @@ class StripeProvider(BaseProvider):
         return await _account_link(account_id, state, redirect_uri)
 
     async def complete(
-        self, code: str, redirect_uri: str, code_verifier: str | None = None
+        self,
+        code: str,
+        redirect_uri: str,
+        code_verifier: str | None = None,
+        *,
+        params: Mapping[str, Any] | None = None,  # noqa: ARG002 - the account holds it
     ) -> TokenGrant:
         if not code_verifier:
             raise ProviderError("stripe flow has no verifier")

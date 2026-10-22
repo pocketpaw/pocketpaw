@@ -52,12 +52,17 @@ class SettingsFieldView(BaseModel):
 
 
 class ConnectParamView(BaseModel):
-    """A value the owner types before Connect (e.g. a Shopify shop domain); the
-    client sends it back as ``ConnectBody.params[key]``."""
+    """A value the owner gives before Connect (a Shopify shop domain typed in, a
+    Stripe account country picked from ``options``); the client sends it back as
+    ``ConnectBody.params[key]``, omitting an optional one left empty."""
 
     key: str
     label: str
     placeholder: str = ""
+    type: Literal["text", "select"] = "text"
+    required: bool = True
+    options: list[SettingOptionView] | None = None
+    help: str | None = None
 
 
 class ProviderView(BaseModel):
