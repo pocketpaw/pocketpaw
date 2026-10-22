@@ -4157,9 +4157,18 @@ imported) into a `project` site on the `static` starter, in place. Same auth as
 publish: session, `sites` plan feature, `fabric.write`, pockets edit access, workspace
 match. No body.
 
-- The html source map becomes the project's file map unchanged, plus the starter's
-  `paw.template.json` (`"build": "none"`) and `AGENTS.md`. Nothing else in the files
-  is touched (`data-uid` is only stamped on the preview, never stored).
+- The html source map becomes the project's file map, plus the starter's
+  `paw.template.json` (`"build": "none"`) and `AGENTS.md`, and the theme file that
+  starter names, `styles/tokens.css`, so the Design rail and theme edits have a file
+  to write. Its background, text, primary colour and the body and heading fonts are
+  read from the site's own top-level CSS rules where they can be (`@media` blocks and
+  values that are not a single colour are skipped); every other token is the starter's
+  light default. It declares custom properties only, with no `color-scheme` or dark
+  block, so the site renders as before. Every page gets
+  `<link rel="stylesheet" href="/styles/tokens.css">` first in its head. An existing
+  `styles/tokens.css` is kept and only linked, and `added` lists it only when it was
+  written. Nothing else in the files is touched (`data-uid` is only stamped on the
+  preview, never stored).
 - The pocket becomes `engine: "project"` with
   `site_meta.project = {"template": "static", "framework": "static", "recipes": []}`.
   `pattern` is kept. The Site doc (id, domains, signed key, integrations, leads) is

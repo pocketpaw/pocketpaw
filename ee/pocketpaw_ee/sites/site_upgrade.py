@@ -3,18 +3,21 @@
 # ``static`` starter, in place, and undo it while nothing has been edited since.
 #
 # The conversion is mechanical. The html source map already is a static tree, so it
-# becomes the project file map unchanged, plus the static starter's
-# ``paw.template.json`` (``"build": "none"``, the no-build lane) and ``AGENTS.md``,
-# read through ``project_tools.copy_template`` like ``start_site_from_template``.
+# becomes the project file map, plus the static starter's ``paw.template.json``
+# (``"build": "none"``, the no-build lane) and ``AGENTS.md``, read through
+# ``project_tools.copy_template`` like ``start_site_from_template``, and the theme file
+# that starter names (``styles/tokens.css``, built by ``site_tokens.add_tokens`` from
+# the site's own colours and fonts) linked from every page.
 # ``data-uid`` needs no stripping: the html lane stamps it only on the served preview
 # (``html_uid_stamp`` / ``arm-html``) and never writes it into the source map.
 # ``pattern`` is left as is: no publish gate reads ``"imported"`` any more.
 #
 # Invariants: an owner file is never overwritten (a source that already has either
-# starter file is a 409); the result must be a no-build tree with a root index.html
-# (422 otherwise), so the first draft preview stages in-process with no sandbox. The
-# Site doc (id, domains, signed key, integrations, leads) is not touched: it is the
-# same site, and the live deploy keeps serving until the next publish. Undo needs
+# starter file is a 409; an existing tokens file is kept and only linked); the result
+# must be a no-build tree with a root index.html (422 otherwise), so the first draft
+# preview stages in-process with no sandbox. The Site doc (id, domains, signed key,
+# integrations, leads) is not touched: it is the same site, and the live deploy keeps
+# serving until the next publish. Undo needs
 # the snapshot ``pockets.service.convert_html_to_project`` writes as a draft version
 # and a source whose digest still matches the one stamped at upgrade time.
 from __future__ import annotations
@@ -25,9 +28,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, NotFound, ValidationError
+from pocketpaw_ee.sites import site_tokens
 from pocketpaw_ee.sites.engines import is_upgradable, safe_rel
 
-#: The starter an upgraded site lands on, and the two files it contributes.
+#: The starter an upgraded site lands on, and the two files it contributes as they are.
 UPGRADE_TEMPLATE = "static"
 STARTER_FILES = ("paw.template.json", "AGENTS.md")
 
@@ -51,8 +55,9 @@ async def _owned_pocket(workspace_id: str, user_id: str, pocket_id: str) -> dict
     return pocket
 
 
-async def _starter_files() -> dict[str, str]:
-    """The static starter's manifest and AGENTS.md, from the vendored generator."""
+async def _starter_files() -> tuple[dict[str, str], str | None]:
+    """The static starter's manifest and AGENTS.md, plus its tokens file (``None`` on
+    a starter copy that ships none), from the vendored generator."""
     from pocketpaw_ee.sites import project_tools
 
     try:
@@ -73,7 +78,10 @@ async def _starter_files() -> dict[str, str]:
             "sites.upgrade_starter_unavailable",
             f"The static starter is missing {', '.join(missing)}.",
         )
-    return {name: str(text) for name, text in files.items()}
+    tokens = starter.get(site_tokens.TOKENS_REL)
+    return {name: str(text) for name, text in files.items()}, (
+        tokens if isinstance(tokens, str) else None
+    )
 
 
 def _refuse_unless_upgradable(pocket: dict[str, Any]) -> dict[str, Any]:
@@ -113,8 +121,9 @@ async def upgrade_html_site(*, workspace_id: str, user_id: str, pocket_id: str) 
 
     pocket = await _owned_pocket(workspace_id, user_id, pocket_id)
     old_source = _refuse_unless_upgradable(pocket)
-    added = await _starter_files()
-    new_source = {**old_source, **added}
+    added, starter_tokens = await _starter_files()
+    themed, tokens_added = site_tokens.add_tokens(old_source, starter_tokens)
+    new_source = {**themed, **added}
     if not project_build.is_no_build(new_source):
         raise CloudError(
             503,
@@ -138,7 +147,7 @@ async def upgrade_html_site(*, workspace_id: str, user_id: str, pocket_id: str) 
         "pocket_id": pocket_id,
         "engine": "project",
         "template": UPGRADE_TEMPLATE,
-        "added": sorted(added),
+        "added": sorted([*added, *tokens_added]),
         "upgraded_from": {**upgraded_from, **snapshot},
         "verification": await project_tools.build_verification(
             workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
