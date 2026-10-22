@@ -24,8 +24,11 @@
 # nothing.
 #
 # THE SANDBOX IS NEVER SNAPSHOTTED (daytona_runner's invariant). The standalone path
-# deletes in a ``finally`` with Daytona's auto-delete as the backstop, exactly like
-# ``run_build``.
+# tears down exactly like ``run_build``: a ``finally`` deletes by id, a create that
+# raised or was cancelled before returning an id is deleted by name
+# (``sandbox_reaper.teardown_unreturned``), the box carries ``paw_lane=site-verify``
+# plus the caller's labels, and Daytona's auto-delete plus the reaper cron are the
+# backstops.
 from __future__ import annotations
 
 import json
@@ -38,10 +41,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pocketpaw_ee.sites.sandbox_reaper import (
+    delete_job_leftovers,
+    lane_labels,
+    teardown_unreturned,
+)
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pocketpaw_ee.cloud.daytona.client import DaytonaClient
 
 logger = logging.getLogger(__name__)
+
+#: The ``paw_lane`` label value on the standalone verify sandbox.
+VERIFY_LANE = "site-verify"
 
 #: Where the harness lives inside the sandbox. A sibling of the build project, never
 #: inside it, so the build's include-list tar cannot pick it up.
@@ -274,11 +286,13 @@ async def run_standalone(
     client: DaytonaClient | None = None,
     budget_seconds: int = BROWSER_CHECK_BUDGET_SECONDS,
     harness: dict[str, bytes] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> BrowserCheckResult:
     """Open a sandbox, upload a site tree, run the harness over it, tear it down (html).
 
     RAISES when the sandbox cannot be created at all — the same contract
     ``daytona_runner.run_build`` keeps, so the job can report ``sandbox_unavailable``.
+    ``labels`` are merged over ``{"paw_lane": "site-verify"}``, as in ``run_build``.
     """
     if client is None:
         from pocketpaw_ee.cloud.daytona.client import get_daytona_client
@@ -289,8 +303,9 @@ async def run_standalone(
                 "Daytona is not configured (DAYTONA_API_URL / DAYTONA_API_KEY unset)"
             )
 
+    name = f"paw-verify-{int(time.time() * 1000)}"
     create_kwargs: dict[str, Any] = {
-        "name": f"paw-verify-{int(time.time() * 1000)}",
+        "name": name,
         "cpu": 1,
         "memory": 2,
         "disk": 5,
@@ -301,9 +316,17 @@ async def run_standalone(
     image = verify_image()
     if image:
         create_kwargs["image"] = image
+    create_kwargs["labels"] = lane_labels(VERIFY_LANE, labels)
+    await delete_job_leftovers(client, create_kwargs["labels"])
     sandbox_id: str | None = None
     try:
-        info = await client.create_sandbox(**create_kwargs)
+        try:
+            info = await client.create_sandbox(**create_kwargs)
+        except BaseException:
+            # A create that timed out or was cancelled may have registered the box
+            # already; delete it by name (shielded) before re-raising.
+            await teardown_unreturned(client, name)
+            raise
         sandbox_id = info.id
         await client.wait_for_sandbox(sandbox_id, target_state="started")
         await client.bulk_upload(

@@ -666,6 +666,7 @@ async def run_site_build(
                 timeout_seconds=timeout_seconds,
                 client=_client,
                 artifact_rel=artifact_rel,
+                labels=sandbox_labels(ctx, str(getattr(site, "pocket_id", "") or "")),
             )
         except Exception as exc:
             if capacity.is_capacity_error(exc):
@@ -1431,6 +1432,7 @@ async def run_site_preview_build(
                 image=browser_check.verify_image(),
                 after_build=_after_build,
                 on_artifact=_on_artifact,
+                labels=sandbox_labels(ctx, pocket_id),
             )
         except Exception as exc:
             if capacity.is_capacity_error(exc):
@@ -1550,7 +1552,12 @@ async def run_site_html_verify(
         if not files:
             return {"status": "failed", "reason": f"{RUNG_SCAFFOLD_EMPTY}:no_files_generated"}
         try:
-            browser = await standalone(files, static_rel=static_output_rel("html"), client=_client)
+            browser = await standalone(
+                files,
+                static_rel=static_output_rel("html"),
+                client=_client,
+                labels=sandbox_labels(ctx, pocket_id),
+            )
         except Exception as exc:
             if capacity.is_capacity_error(exc):
                 return await preview_capacity_outcome(
@@ -1569,6 +1576,18 @@ async def run_site_html_verify(
     )
     _write_sandbox_report(pocket_id, content_hash, report, _verify_store)
     return {"status": "checked", "reason": f"browser:{browser.status}", **report}
+
+
+def sandbox_labels(ctx: Any, pocket_id: str) -> dict[str, str]:
+    """Daytona labels naming the pocket and arq job a sandbox belongs to.
+
+    ``paw_job`` lets a re-run of the same job delete the box its first attempt left
+    (``sandbox_reaper.delete_job_leftovers``), and lets an operator map a box in the
+    Daytona console back to a job. Empty values are left out.
+    """
+    job_id = ctx.get("job_id") if isinstance(ctx, dict) else None
+    labels = {"paw_pocket": pocket_id, "paw_job": str(job_id or "")}
+    return {k: v for k, v in labels.items() if v}
 
 
 def _log_queue_wait(lane: str, pocket_id: str, ctx: Any) -> None:
