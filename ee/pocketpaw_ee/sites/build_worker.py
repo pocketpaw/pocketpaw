@@ -24,8 +24,12 @@
 #     arq pocketpaw_ee.sites.build_worker.WorkerSettings
 #
 # WHY 4 SLOTS. The compile happens in a Daytona sandbox; what runs here is an await on
-# a remote exec, so the slots cost this container almost nothing. The number is how
-# many sandboxes the account should pay for at once: raise it with the Daytona quota.
+# a remote exec, so the slots cost this container almost nothing. Slots x replicas can
+# still ask for more memory than the Daytona org allows, so each build and verify also
+# takes a lease from ``sites.admission`` (budget ``PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB``)
+# before it creates a sandbox; ``on_startup`` points that ledger at this worker's Redis
+# so all replicas share it. A slot waiting on a lease is cheap; raise the budget, not
+# the slots, when the Daytona plan grows.
 #
 # THERE IS EXACTLY ONE ``functions = [...]`` ASSIGNMENT IN THIS CLASS. A second one
 # silently wins over the first (``chat/runs/worker.py`` once registered neither ship
@@ -38,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from arq import func
 
@@ -50,6 +55,7 @@ from pocketpaw_ee.cloud.chat.runs.worker import (
     worker_shutdown,
     worker_startup,
 )
+from pocketpaw_ee.sites import admission
 from pocketpaw_ee.sites.build_job import (
     HTML_VERIFY_ARQ_FUNCTION_NAME,
     SITE_BUILD_QUEUE_NAME,
@@ -132,6 +138,18 @@ _site_html_verify_fn = func(
 )
 
 
+async def _sites_startup(ctx: dict[str, Any]) -> None:
+    """The shared bootstrap, then share the sites memory budget through this worker's
+    Redis so every replica admits builds against one ledger (``sites.admission``)."""
+    await worker_startup(ctx)
+    admission.use_redis(ctx.get("redis"))
+
+
+async def _sites_shutdown(ctx: dict[str, Any]) -> None:
+    admission.use_redis(None)
+    await worker_shutdown(ctx)
+
+
 class WorkerSettings:
     """arq worker configuration for the site-build queue."""
 
@@ -151,8 +169,8 @@ class WorkerSettings:
     # POCKETPAW_CLOUD_SCHEDULER_ENABLED; see ``cloud/ai_visibility/worker.py``), and the
     # orphaned build-sandbox reaper (every 10 minutes; a no-op without Daytona).
     cron_jobs = [sweep_cron, reap_cron]
-    on_startup = worker_startup
-    on_shutdown = worker_shutdown
+    on_startup = _sites_startup
+    on_shutdown = _sites_shutdown
     # No auto-retry, matching every other lane: a build is billed per attempt in a
     # third-party sandbox, and the retry decision belongs to ``build_state.settle``, which
     # records WHY it gave up, not to arq silently re-running a job whose row says failed.

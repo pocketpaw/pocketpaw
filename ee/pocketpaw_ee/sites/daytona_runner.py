@@ -18,8 +18,12 @@
 # fail every build. Enforcing it needs a vetted lockfile, owed as its own design.
 #
 # THE ORDER OF STEPS IS THE CONTRACT:
-#   1. The clock starts BEFORE ``create_sandbox``; it is what separates a timeout from
-#      an eviction when no sentinel comes back.
+#   0. Admission first: ``admission.memory_lease(memory_gb)`` waits for room in the
+#      sites memory budget and is held until the delete has run, on every exit path.
+#      A capacity refusal still happens if the org is full of non-site boxes;
+#      ``admission.create_admitted`` then stops idle workspace VMs once and retries.
+#   1. The clock starts BEFORE ``create_sandbox`` (after admission); it is what
+#      separates a timeout from an eviction when no sentinel comes back.
 #   2. The sentinel is read BEFORE teardown; once the box is gone the evidence is too.
 #   3. Teardown is explicit. A ``finally`` deletes by id once create returned one. A
 #      create that raised or was cancelled before returning an id may still have
@@ -51,6 +55,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pocketpaw_ee.sites.admission import create_admitted, memory_lease
 from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG, BUILD_BUNFIG_REL
 from pocketpaw_ee.sites.daytona_build import (
     BUILD_RESULT_FILENAME,
@@ -62,9 +67,9 @@ from pocketpaw_ee.sites.daytona_build import (
     verify_artifact,
 )
 from pocketpaw_ee.sites.sandbox_reaper import (
+    JOB_LABEL,
     delete_job_leftovers,
     lane_labels,
-    teardown_unreturned,
     unique_sandbox_name,
 )
 
@@ -269,13 +274,6 @@ async def run_build(
     name = sandbox_name or unique_sandbox_name("paw-build-")
     idle_minutes = _lifecycle_minutes(timeout_seconds)
 
-    # ── The clock starts here, before anything exists. ──────────────────────
-    t_start = time.monotonic()
-    sandbox_id: str | None = None
-    deleted = False
-    t_created = t_uploaded = t_exec_done = t_extracted = t_start
-
-    post_build: Any = None
     create_kwargs: dict[str, Any] = {
         "name": name,
         "cpu": cpu,
@@ -293,15 +291,25 @@ async def run_build(
     create_kwargs["labels"] = lane_labels(BUILD_LANE, labels)
     await delete_job_leftovers(client, create_kwargs["labels"])
 
+    # Admission: wait for room in the sites memory budget BEFORE asking Daytona. Held
+    # until the delete in the ``finally`` below has run; entered with no await between
+    # it and the ``try``, so no exit path skips the release.
+    lease = memory_lease(memory_gb, wait_tag=create_kwargs["labels"].get(JOB_LABEL))
+    await lease.__aenter__()
+
+    # ── The clock starts here, after admission and before anything exists. ─────
+    t_start = time.monotonic()
+    sandbox_id: str | None = None
+    deleted = False
+    t_created = t_uploaded = t_exec_done = t_extracted = t_start
+    post_build: Any = None
+
     try:
-        try:
-            info = await client.create_sandbox(**create_kwargs)
-        except BaseException:
-            # The SDK registers the box BEFORE it waits for ``started``, so a create that
-            # timed out or was cancelled can leave a box we hold no id for. Find it by
-            # its unique name and delete it (shielded), then re-raise the original.
-            await teardown_unreturned(client, name, create_kwargs["labels"])
-            raise
+        # The SDK registers the box BEFORE it waits for ``started``, so a create that
+        # timed out or was cancelled can leave a box we hold no id for: it is found by
+        # its unique name and deleted (shielded) before the original re-raises. A
+        # capacity refusal stops idle workspace VMs once and retries the create.
+        info = await create_admitted(client, create_kwargs)
         sandbox_id = info.id
         await client.wait_for_sandbox(sandbox_id, target_state="started")
         t_created = time.monotonic()
@@ -429,18 +437,21 @@ async def run_build(
         # this lane, since the whole point of the concurrency ceiling is that several
         # builds run at once and would have raced on that dict. Assembling the result
         # AFTER the try/finally gets the same information with no shared state.
-        if sandbox_id is not None:
-            try:
-                await client.delete_sandbox(sandbox_id)
-                deleted = True
-                logger.info("daytona_runner: deleted sandbox %s", sandbox_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "daytona_runner: explicit delete of %s failed (%s); "
-                    "auto_delete_interval=0 remains the backstop",
-                    sandbox_id,
-                    exc,
-                )
+        try:
+            if sandbox_id is not None:
+                try:
+                    await client.delete_sandbox(sandbox_id)
+                    deleted = True
+                    logger.info("daytona_runner: deleted sandbox %s", sandbox_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "daytona_runner: explicit delete of %s failed (%s); "
+                        "auto_delete_interval=0 remains the backstop",
+                        sandbox_id,
+                        exc,
+                    )
+        finally:
+            await lease.__aexit__(None, None, None)
 
     # Reached only when the try-block completed: an exception during create/upload
     # propagates through the ``finally`` and never gets here, which is correct — there

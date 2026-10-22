@@ -14,6 +14,9 @@
 #     is spent and the job settles as ``sandbox_unavailable:capacity``.
 #   * ``reason_message`` — the one sentence agent tools show for these rungs, so no
 #     caller has to improvise "the build server is down" out of a machine reason.
+#   * ``describe_refusal`` — which limit a refusal names (cpu / memory / disk / gpu /
+#     sandbox_count) plus Daytona's message with secrets redacted, for the WARNING every
+#     failed create logs (``admission.create_admitted``).
 #
 # The arq functions that retry register ``max_tries=CAPACITY_MAX_TRIES``; the schedule
 # and that cap are one constant so they cannot drift.
@@ -55,6 +58,20 @@ _CAPACITY_PATTERN = re.compile(
 
 _VALIDATION_ERROR_NAME = "DaytonaValidationError"
 
+_RESOURCE_PATTERN = re.compile(r"total\s+(cpu|memory|disk|gpu)\s+limit", re.IGNORECASE)
+# Things that must never reach a log line: auth headers, key=value secrets, and long
+# opaque tokens (API keys, signed URLs' signatures).
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)(bearer|basic)\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(
+        r"(?i)((?:api[_-]?key|token|secret|password|authorization|signature|sig)"
+        r"[\"']?\s*[:=]\s*[\"']?)[^\s\"'&,;]+"
+    ),
+    # No dashes, so UUIDs and our sandbox names (short dash-separated parts) survive.
+    re.compile(r"[A-Za-z0-9_]{32,}"),
+)
+_MESSAGE_CAP = 2000
+
 
 def _is_validation_error(exc: BaseException) -> bool:
     try:
@@ -74,6 +91,25 @@ def is_capacity_error(exc: BaseException | None) -> bool:
             return True
         exc = exc.__cause__ or exc.__context__
     return False
+
+
+def _redact(text: str) -> str:
+    text = _SECRET_PATTERNS[0].sub(r"\1 [redacted]", text)
+    text = _SECRET_PATTERNS[1].sub(r"\1[redacted]", text)
+    text = _SECRET_PATTERNS[2].sub("[redacted]", text)
+    return text[:_MESSAGE_CAP]
+
+
+def describe_refusal(exc: BaseException) -> tuple[str | None, str]:
+    """``(limit, message)`` for a failed create. ``limit`` is ``cpu`` / ``memory`` /
+    ``disk`` / ``gpu`` / ``sandbox_count`` when ``exc`` is a capacity refusal (see
+    :func:`is_capacity_error`), else ``None``. ``message`` is the full text, secrets
+    redacted, capped at a couple of thousand characters."""
+    message = _redact(str(exc))
+    if not is_capacity_error(exc):
+        return None, message
+    found = _RESOURCE_PATTERN.search(message)
+    return (found.group(1).lower() if found else "sandbox_count"), message
 
 
 def next_retry_delay(ctx: Any, *, rng: random.Random | None = None) -> float | None:
@@ -128,6 +164,7 @@ __all__ = [
     "NO_SANDBOX_MESSAGE",
     "RETRY_DELAYS_SECONDS",
     "WAITING_REASON",
+    "describe_refusal",
     "is_capacity_error",
     "next_retry_delay",
     "reason_message",
