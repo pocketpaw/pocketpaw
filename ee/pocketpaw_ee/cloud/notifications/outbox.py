@@ -19,13 +19,16 @@
 # 5 m, 30 m, 2 h, 6 h, then ``dead``; ``dead`` straight away for a permanent
 # failure (bad request, unsafe or removed webhook, unconfirmed recipient,
 # permanent bounce). A Cloudflare 401/403 is logged at error level and rings the
-# workspace admins once a day (an atomic marker, ``claim_marker``).
+# workspace admins once a day (an atomic marker, ``claim_marker``). A site's mail
+# goes through the owner's own sender when the site has a connected Resend
+# binding (``integrations.providers.resend.owner_send``, keyed for idempotency by
+# the row id); when it has none or that sender refuses, the platform's sends it.
 #
 # Webhooks and Slack go out through ``sites.safe_fetch.SafeFetcher.post``: DNS is
 # resolved and checked at send time (failing closed), and the connection is
 # pinned to the checked address, so rebinding can't redirect it. A site
 # destination's row holds only the URL's fingerprint (``fp:<hex>``) as ``target``:
-# the URL is a secret, decrypted at send time, and must still match it. A crash
+# the URL is a secret, read at send time, and must still match it. A crash
 # is logged with URLs scrubbed from the message and no traceback (httpx errors
 # quote the URL). A webhook row's target is re-read at send time from
 # ``webhook_ref``: "workspace:<id>", or
@@ -535,12 +538,24 @@ async def _warn_email_failing(workspace_id: str, error: str) -> None:
         logger.warning("could not raise the email-failing notice", exc_info=True)
 
 
+async def _owner_send(item: NotificationOutboxItem, site_ref: str, message: Any):
+    """The site owner's own sender (``integrations.providers.resend.owner_send``),
+    or None to use the platform's. A crash there falls back too."""
+    try:
+        from pocketpaw_ee.integrations.providers import resend
+
+        return await resend.owner_send(
+            item.workspace, site_ref, message, idempotency_key=f"paw-outbox-{item.id}"
+        )
+    except Exception as exc:  # noqa: BLE001 - the platform sender still delivers
+        logger.warning("owner email sender failed (%s); using the platform", type(exc).__name__)
+        return None
+
+
 async def _send_email(item: NotificationOutboxItem, client: httpx.AsyncClient) -> Outcome:
     from pocketpaw_ee.cloud.notifications import email as email_mod
 
     config = email_mod.load_config()
-    if config is None:
-        return Outcome("dead", "email sink not configured")
     site_ref = str(item.payload.get("site_ref") or "")
     # A per-site recipient must still be on the list and confirmed at send time
     # (the confirm email itself is the one message an unconfirmed address gets).
@@ -551,19 +566,22 @@ async def _send_email(item: NotificationOutboxItem, client: httpx.AsyncClient) -
     rendered = await _render_email(item)
     if rendered is None:
         return Outcome("dead", "nothing to render")
-    result = await email_mod.send_email(
-        email_mod.EmailMessage(
-            to=[item.target],
-            subject=rendered.subject,
-            html=rendered.html,
-            text=rendered.text,
-            reply_to=rendered.reply_to,
-        ),
-        config=config,
-        client=client,
+    message = email_mod.EmailMessage(
+        to=[item.target],
+        subject=rendered.subject,
+        html=rendered.html,
+        text=rendered.text,
+        reply_to=rendered.reply_to,
     )
-    if result.auth_failure:
-        await _warn_email_failing(item.workspace, result.error)
+    # A site whose owner connected their own sender (Resend) mails through it;
+    # otherwise, or when that sender can't take it, the platform sender does.
+    result = await _owner_send(item, site_ref, message) if site_ref else None
+    if result is None:
+        if config is None:
+            return Outcome("dead", "email sink not configured")
+        result = await email_mod.send_email(message, config=config, client=client)
+        if result.auth_failure:
+            await _warn_email_failing(item.workspace, result.error)
     if result.outcome == "retry":
         return Outcome("retry", result.error)
     if result.outcome == "permanent":

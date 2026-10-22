@@ -5279,6 +5279,30 @@ GET .../integrations/airtable/fields/table_name/options?base_id=appXXXXXXXXXXXXX
 | 422 | `invalid_settings` | a draft parent fails its field's check |
 | 502 | `provider_error` | the provider failed (not cached) |
 
+## Sites — Integrations: the owner's email sender (Resend)
+
+Provider `resend` (kind `connect`, category `email`, plan `site`) lets an owner
+send a site's lead notifications (new lead, handoff, booking, recipient confirm,
+test) from their own domain through their own Resend account, instead of the
+platform's Cloudflare sender. The owner taps Connect and approves on Resend's
+consent screen (OAuth 2.1 with PKCE, scope `emails:send`); no API key is pasted.
+The server needs `POCKETPAW_INTEGRATIONS_RESEND_CLIENT_ID` (a client registered
+with Resend) and, for a confidential client, `_CLIENT_SECRET`; without the id the
+provider is `unconfigured`.
+
+Settings: `from_address` (required; one address on a domain verified in Resend)
+and `from_name` (optional). The site reads `setup_required` until the sender is
+set and valid. There are no public actions, so a site visitor can't send mail
+through it.
+
+Delivery: when the site's `resend` binding is `connected`, its notification
+mail goes to `POST https://api.resend.com/emails` with the vault's token and an
+`Idempotency-Key` of `paw-outbox-<row id>`. When there is no binding, the grant
+needs a reconnect, or Resend refuses the sender (any 4xx except 409 / 429,
+e.g. an unverified domain), the platform sender delivers that message and a
+refused sender marks the binding `setup_required`. A Resend 409 / 429 / 5xx is
+retried on the outbox's usual backoff.
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and
@@ -5631,7 +5655,14 @@ is false while the server has no Cloudflare email credentials.
 `webhooks` lists the site's webhook destinations (see "Webhook destinations").
 A webhook URL is a secret (a chat app's incoming-webhook URL is the channel's
 credential): no response ever carries one. Each destination shows `url_hint`
-(host, `/…/`, `••••` and the last 4 characters) and the URL is stored encrypted.
+(host, `/…/`, `••••` and the last 4 characters). The URL is kept in the
+integrations vault (an internal `lead_webhook` connection per destination,
+never listed under connected accounts and not reachable through the
+integrations routes); a server without `CLOUD_ENCRYPTION_KEY` keeps it
+encrypted on the destination instead. URLs saved before the vault move into it
+on the site's next webhook write, or all at once with
+`scripts/migrations/2026_10_23_lead_webhooks_to_vault.py` (dry run by default,
+idempotent, prints counts only).
 The flat `webhook_url_hint`, `has_webhook_secret`, `webhook_disabled_at` and
 `webhook_failure_count` describe the FIRST destination and stay for older
 clients. A site saved before destinations existed shows its single webhook as
