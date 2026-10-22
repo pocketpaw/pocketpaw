@@ -1,0 +1,225 @@
+[
+  {
+    "label": "a released local lease never gives its memory back, so the budget fills and every later build waits out the bounded wait",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "        self.used = max(0, self.used - gib)",
+    "replace": "        self.used = max(0, self.used)",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_released_memory_is_reusable_beside_a_live_holder",
+      "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_an_error_inside_the_lease_releases_it",
+      "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_a_cancel_inside_the_lease_releases_it"
+    ]
+  },
+  {
+    "label": "the lease is only released on a clean exit, so a build that raised or was cancelled holds its memory forever",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    try:\n        yield backend is not None\n    finally:",
+    "replace": "    if True:\n        yield backend is not None\n    if True:",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_an_error_inside_the_lease_releases_it",
+      "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_a_cancel_inside_the_lease_releases_it",
+      "tests/ee/sites/test_admission_lease.py::TestRunBuildAdmission::test_a_create_error_releases_the_lease"
+    ]
+  },
+  {
+    "label": "run_build releases its lease only after a create that returned an id, so a failed create leaks 4 GiB of budget",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "            await lease.__aexit__(None, None, None)",
+    "replace": "            if sandbox_id is not None:\n                await lease.__aexit__(None, None, None)",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestRunBuildAdmission::test_a_create_error_releases_the_lease",
+      "tests/ee/sites/test_admission_lease.py::TestRunBuildAdmission::test_a_cancel_inside_create_tears_down_and_releases"
+    ]
+  },
+  {
+    "label": "run_standalone releases its lease only after a create that returned an id, so a failed verify create leaks 2 GiB of budget",
+    "file": "ee/pocketpaw_ee/sites/browser_check.py",
+    "find": "            await lease.__aexit__(None, None, None)",
+    "replace": "            if sandbox_id is not None:\n                await lease.__aexit__(None, None, None)",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestRunBuildAdmission::test_a_verify_create_error_releases_the_lease"
+    ]
+  },
+  {
+    "label": "run_build skips admission: a full lane overcommits the org cap and Daytona refuses builds",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "    lease = memory_lease(memory_gb, wait_tag=create_kwargs[\"labels\"].get(JOB_LABEL))",
+    "replace": "    lease = memory_lease(0, wait_tag=create_kwargs[\"labels\"].get(JOB_LABEL))",
+    "tests": [
+      "tests/ee/sites/test_build_admission.py::TestAdmissionAgainstTheOrgCap::test_a_full_lane_of_builds_all_complete_under_a_10gib_cap"
+    ]
+  },
+  {
+    "label": "a new request barges past the queue when it fits, so a 4 GiB build starves behind a stream of 2 GiB verifies",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "        if not self.queue and _fits(self.used, self.holders, gib, budget_gib()):",
+    "replace": "        if _fits(self.used, self.holders, gib, budget_gib()):",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_waiters_are_served_first_come_first_served"
+    ]
+  },
+  {
+    "label": "a request larger than the whole budget is never admitted, so it waits out the bounded wait every time",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    return budget is None or holders == 0 or used + gib <= budget",
+    "replace": "    return budget is None or used + gib <= budget",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_a_request_over_the_whole_budget_runs_alone"
+    ]
+  },
+  {
+    "label": "free_capacity stops the MOST recently active VM first, interrupting the user who was just working",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    candidates.sort(key=lambda pair: pair[0])",
+    "replace": "    candidates.sort(key=lambda pair: pair[0], reverse=True)",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_stops_least_recently_active_idle_vms_until_enough_is_freed",
+      "tests/ee/sites/test_build_admission.py::TestIdleWorkspaceVmsYield"
+    ]
+  },
+  {
+    "label": "free_capacity stops every idle VM instead of only as many as the build needs",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "        if freed >= need_gib:\n            break",
+    "replace": "        if False:\n            break",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_stops_least_recently_active_idle_vms_until_enough_is_freed",
+      "tests/ee/sites/test_build_admission.py::TestIdleWorkspaceVmsYield"
+    ]
+  },
+  {
+    "label": "free_capacity ignores the idle threshold and stops a VM an agent used two minutes ago",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "        if active is None or (now - active).total_seconds() < idle_for:",
+    "replace": "        if active is None:",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_respects_the_auto_stop_floor_and_never_touches_other_boxes"
+    ]
+  },
+  {
+    "label": "free_capacity stops build, verify and Code Mode boxes, not just workspace VMs",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "        if not name.startswith(WORKSPACE_VM_PREFIX) or getattr(info, \"state\", \"\") != \"started\":",
+    "replace": "        if getattr(info, \"state\", \"\") != \"started\":",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_respects_the_auto_stop_floor_and_never_touches_other_boxes"
+    ]
+  },
+  {
+    "label": "a failed stop aborts the eviction instead of trying the next idle VM",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "            logger.warning(\"admission: stop of idle workspace VM %s failed (%s)\", info.id, exc)\n            continue",
+    "replace": "            logger.warning(\"admission: stop of idle workspace VM %s failed (%s)\", info.id, exc)\n            break",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_a_failed_stop_is_skipped_and_the_next_vm_tried"
+    ]
+  },
+  {
+    "label": "a capacity refusal never retries after evicting idle VMs, so the build still ends in 'Build capacity is full'",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    if not stopped:\n        raise refusal",
+    "replace": "    raise refusal",
+    "tests": [
+      "tests/ee/sites/test_build_admission.py::TestIdleWorkspaceVmsYield"
+    ]
+  },
+  {
+    "label": "a waiting build reads as 'building' to the preview poller instead of queued / waiting_for_capacity",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if status is JobStatus.in_progress and await admission.is_waiting(pool, label_value(job_id)):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestWaitingStatus"
+    ]
+  },
+  {
+    "label": "idle-VM eviction runs without the opt-in, so a user's long-running dev server is stopped by default",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    if not eviction_enabled():\n        return []",
+    "replace": "    if False:\n        return []",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_off_by_default_nothing_is_stopped"
+    ]
+  },
+  {
+    "label": "a caller's shorter idle threshold wins over the 30 min auto-stop floor",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    idle_for = max(idle_for_seconds, IDLE_FOR_SECONDS)",
+    "replace": "    idle_for = idle_for_seconds",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_respects_the_auto_stop_floor_and_never_touches_other_boxes"
+    ]
+  },
+  {
+    "label": "our own last-use signal is ignored, so a VM an agent used a minute ago is stopped because Daytona calls it idle",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    return max(theirs, ours) if ours is not None else theirs",
+    "replace": "    return theirs",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_our_own_recent_use_keeps_a_vm_daytona_calls_idle"
+    ]
+  },
+  {
+    "label": "a VM of unknown size is stopped and counted as freeing nothing, so an extra VM is stopped",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "        if _memory_gib(info) <= 0:\n            continue",
+    "replace": "        if False:\n            continue",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestFreeCapacity::test_stops_least_recently_active_idle_vms_until_enough_is_freed"
+    ]
+  },
+  {
+    "label": "a Redis error mid-wait restarts the full wait locally, so the total can exceed the job timeout's allowance",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    if client is None and await _local_budget().acquire(gib, remaining):",
+    "replace": "    if client is None and await _local_budget().acquire(gib, timeout):",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestLeaseAccounting::test_a_redis_error_mid_wait_does_not_restart_the_wait"
+    ]
+  },
+  {
+    "label": "admission runs with no budget set, so merging changes build behaviour before ops opts in",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    if budget_gib() is None:\n        yield True\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestOffByDefault"
+    ]
+  },
+  {
+    "label": "a failed create is not logged, so prod never shows which Daytona limit is exceeded",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "        _log_create_failure(exc, create_kwargs, attempt=\"create\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestCreateFailureLogging::test_a_capacity_refusal_logs_the_full_message_and_the_limit"
+    ]
+  },
+  {
+    "label": "every refusal is reported as the sandbox-count limit, hiding a memory or disk limit",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "    return (found.group(1).lower() if found else \"sandbox_count\"), message",
+    "replace": "    return \"sandbox_count\", message",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestCreateFailureLogging"
+    ]
+  },
+  {
+    "label": "bearer tokens in a Daytona error reach the worker log",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "    text = _SECRET_PATTERNS[0].sub(r\"\\1 [redacted]\", text)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_admission_lease.py::TestCreateFailureLogging::test_secrets_are_redacted_and_the_limit_named"
+    ]
+  },
+  {
+    "label": "the job timeout includes the admission wait only when the env var is set, so the arq registration made at import and a later caller disagree",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS)\n",
+    "replace": "    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS) if admission.budget_gib() else 0\n",
+    "tests": [
+      "tests/ee/sites/test_admission_job_timeout.py"
+    ]
+  }
+]

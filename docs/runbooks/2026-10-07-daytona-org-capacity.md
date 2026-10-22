@@ -1,5 +1,6 @@
-<!-- Runbook: Daytona org resource limits, how site builds behave when the org is full,
-     and how to free capacity from the Daytona dashboard. -->
+<!-- Runbook: Daytona org resource limits, the sites memory budget builds are admitted
+     against, how site builds behave when the org is full, and how to free capacity
+     from the Daytona dashboard. -->
 
 # Runbook — Daytona org capacity and sandbox cleanup
 
@@ -50,6 +51,99 @@ three layers, so a box cannot hold quota after the job that made it is gone:
 
 Daytona's own auto-stop plus `auto_delete_interval=0` stays as the last backstop.
 
+## The sites memory budget (admission)
+
+The sites lane runs `POCKETPAW_SITES_ARQ_MAX_JOBS` (default 4) jobs per worker, times
+the worker replicas, and each build asks for 4 GiB. That is 16 GiB of demand per
+worker against a 10 GiB org. When admission is on, each build and html verify first
+takes a **memory lease** (`sites/admission.py`) for the memory it is about to request,
+and holds it until its sandbox is deleted.
+
+- **Off by default.** With `PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB` unset or empty (or not
+  a positive integer, which also logs a warning) the lease is a pass-through: no Redis
+  call, no wait, builds go straight to Daytona as before. Turn it on once the logs
+  (below) show memory is the limit being hit.
+- **Budget:** `PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB=<GiB>`. A lease waits until its GiB
+  fits under the budget. Waiters are served in arrival order. A request bigger than the
+  whole budget runs only when nothing else holds a lease.
+- **Shared across replicas.** The site-build worker points the ledger at its Redis on
+  startup (`{paw-sites-admission}:*` keys, one hash tag so it also works on Redis
+  Cluster), so every worker and replica draws from one budget. A lease expires on its
+  own after the reaper's orphan age (longest sites job budget plus 15 minutes), so a
+  crashed worker's lease frees when the reaper deletes its box. Without Redis, or if
+  Redis errors, the budget is per process.
+- **Bounded wait.** A lease waits at most the capacity retry window (270 s) in total,
+  including any time spent on Redis before it failed over. After that the build goes
+  to Daytona anyway and gets the normal capacity handling below, so nothing waits
+  forever. The arq job timeout always includes this wait (on or off, so the
+  registered timeout and the code that reads it never disagree), so a wait never eats
+  the build's own budget.
+- **While it waits** a preview poll reads `queued` / `waiting_for_capacity`. Worker
+  log: `admission: ... waiting for the budget`, and `going to Daytona unleased` when
+  the wait ran out.
+
+### Which limit is actually hit
+
+Every failed sandbox create logs one WARNING line from `pocketpaw_ee.sites.admission`:
+
+```
+admission: sandbox create failed (paw-build-...; limit=memory; asked cpu=2 memory=4GiB disk=10GiB; pocket=... job=...): DaytonaValidationError: Failed to create sandbox: Total memory limit exceeded. Maximum allowed: 10GiB.
+```
+
+`limit=` is `cpu`, `memory`, `disk`, `gpu` or `sandbox_count` for a capacity refusal,
+and `not a capacity refusal` for anything else; the rest is Daytona's own message with
+keys and tokens redacted. Disk counts stopped sandboxes too (only archived and deleted
+ones free it), so a `limit=disk` line with free memory on the dashboard points at old
+stopped boxes, not at concurrency. Grep for `admission: sandbox` before choosing a
+budget.
+
+### How to size it
+
+Set the budget to **your plan's org memory cap**. That stops the lane from
+overcommitting Daytona without throttling builds when there is room.
+
+Lower it only to reserve headroom for things the budget does not count, when you would
+rather have builds wait in our queue than hit Daytona refusals:
+
+```
+budget = org memory cap
+       - 4 GiB x workspace VMs you want to always have room for (paw-ws-*)
+       - Code Mode sandboxes you want room for (websandbox-*, about 1 GiB each)
+```
+
+With the budget at the cap, a workspace VM or Code Mode box that is running can still
+cause a refusal. That refusal goes to the capacity retries below, and (if enabled) the
+idle-VM eviction. On a bigger Daytona plan, set the new cap in the worker's environment
+and redeploy, for example `PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB=50` for a 50 GiB org.
+Raising `POCKETPAW_SITES_ARQ_MAX_JOBS` without raising the budget only adds jobs that
+wait.
+
+### Eviction of idle workspace VMs (opt-in)
+
+Off by default. Set `PAW_SITES_EVICT_IDLE_WORKSPACE_VMS=1` on the worker to turn it
+on. It is opt-in because Daytona's `last_activity_at` may not move during a long
+command or a background process the agent started, so an "idle" VM can still be running
+a user's dev server or test run.
+
+When it is on and Daytona refuses a create for capacity, the build stops idle
+workspace VMs once and retries the create once:
+
+- only `paw-ws-*` VMs in `started`, idle for at least **30 minutes** (the VM's own
+  auto-stop, so we never stop one sooner than Daytona would);
+- idle means the later of Daytona's `last_activity_at` and the last time this worker
+  process resolved the VM for a tool call (`context.last_resolved_at`). That second
+  signal only sees this process; there is no shared last-tool-call record, and the
+  eviction does not check for an active chat run;
+- least recently active first, and only until the build's memory is freed, counted
+  from each VM's reported memory (a VM whose size is unknown is skipped);
+- **stop, never delete**: the disk stays, and the agent's next tool call resumes the VM
+  (`cloud/daytona/context.py`, `_ensure_started`);
+- never build, verify or Code Mode (`websandbox-*`) sandboxes;
+- a failed stop is logged and the next VM is tried.
+
+Worker log: `admission: stopped idle workspace VM`. If nothing could be stopped (or
+eviction is off), the original refusal goes to the capacity retries below.
+
 ## What a build does when the org is full
 
 Only a `DaytonaValidationError` whose message names an org limit (`Total memory/cpu/
@@ -91,4 +185,5 @@ The same from the CLI: `daytona sandbox list`, `daytona sandbox stop <id>`,
 `daytona sandbox delete <id>`.
 
 If the org is routinely full with nothing leaked, the fix is a bigger org limit (ask
-Daytona support), not shorter retries.
+Daytona support) plus a matching `PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB`, not shorter
+retries.

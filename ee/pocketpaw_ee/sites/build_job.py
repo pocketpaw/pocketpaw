@@ -90,10 +90,11 @@
 #      registry job shares ONE budget: ``jobs.domain.job_timeout_seconds()``
 #      (``POCKETPAW_JOB_TIMEOUT_SECONDS``, default 900s). A build needs
 #      :func:`site_build_job_timeout_seconds` — the widest per-engine build budget plus
-#      ``run_build``'s own exec slack plus the phases that sit outside the sandbox —
-#      which is 1020s at today's defaults, i.e. ALREADY over the shared 900s. An arq
-#      cancellation at 900s kills the job before the in-sandbox ``timeout(1)`` fires, so
-#      the sentinel is never written and a healthy-but-slow build classifies as
+#      ``run_build``'s own exec slack plus the phases that sit outside the sandbox plus
+#      the bounded memory-admission wait — 1290s at today's defaults, i.e. ALREADY
+#      over the shared 900s. An arq cancellation at 900s kills the job before the
+#      in-sandbox ``timeout(1)`` fires, so the sentinel is never written and a
+#      healthy-but-slow build classifies as
 #      ``infra_lost``: exactly the mis-report ``daytona_build``'s evidence design exists
 #      to prevent. A dedicated ``arq.worker.func(timeout=...)`` derived from the same env
 #      knob keeps the two coupled, which no registry job can do.
@@ -230,6 +231,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -244,7 +246,7 @@ from arq.jobs import Job, JobStatus
 from arq.worker import Retry
 
 from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
-from pocketpaw_ee.sites import capacity
+from pocketpaw_ee.sites import admission, capacity
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.build_state import BuildStatus, settle
 from pocketpaw_ee.sites.daytona_build import resolve_build_timeout_seconds
@@ -254,6 +256,7 @@ from pocketpaw_ee.sites.daytona_runner import (
     run_build,
 )
 from pocketpaw_ee.sites.engines import needs_node_build, normalize_engine, static_output_rel
+from pocketpaw_ee.sites.sandbox_reaper import label_value
 from pocketpaw_ee.sites.verify_diagnostics import finalize, parse_build_stderr
 
 logger = logging.getLogger(__name__)
@@ -463,7 +466,14 @@ def site_build_job_timeout_seconds() -> int:
     which a deploy does anyway.
     """
     widest = max(resolve_build_timeout_seconds(engine) for engine in BUILDABLE_ENGINES)
-    return widest + EXEC_TIMEOUT_SLACK_SECONDS + OUT_OF_SANDBOX_MARGIN_SECONDS
+    # Plus the longest ``admission.memory_lease`` wait, which runs before the build's
+    # clock: an arq timeout that ate into the build budget would lose the sentinel.
+    # ALWAYS added, whether or not admission is on. The arq registrations evaluate this
+    # once at import while callers evaluate it later; making it depend on the admission
+    # env var lets the two disagree inside one process (a test, or a worker whose env
+    # changed). With admission off it only raises the ceiling on a wedged job.
+    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS)
+    return widest + EXEC_TIMEOUT_SLACK_SECONDS + OUT_OF_SANDBOX_MARGIN_SECONDS + admission_wait
 
 
 def site_preview_job_timeout_seconds() -> int:
@@ -1103,6 +1113,8 @@ async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]
     Three answers, and the middle one is why this function exists at all:
 
       * still queued / running → ``building``. The polling case, and the common one.
+        A running job still waiting for a memory lease (``admission.is_waiting``) reads
+        ``queued`` / ``waiting_for_capacity``, the same as one deferred for capacity.
       * COMPLETE → the store missed, so whatever that job did it did not leave a usable
         artifact: report ``failed`` with its rung. Reporting ``building`` here would spin
         a client forever on a build that is over; re-enqueueing would rebuild identical
@@ -1115,6 +1127,9 @@ async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]
     if status is JobStatus.deferred:
         # Nothing on this lane enqueues with a delay, so a deferred job is one that
         # ``preview_capacity_outcome`` put back to wait for a Daytona slot.
+        return "queued", capacity.WAITING_REASON
+    if status is JobStatus.in_progress and await admission.is_waiting(pool, label_value(job_id)):
+        # Running, but still queued for room in the sites memory budget.
         return "queued", capacity.WAITING_REASON
     if status is not JobStatus.complete:
         return "building", None

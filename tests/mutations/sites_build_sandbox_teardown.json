@@ -2,8 +2,8 @@
   {
     "label": "run_build drops the by-name teardown: a create that timed out or was cancelled leaves a 4 GiB box holding the org cap",
     "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
-    "find": "            await teardown_unreturned(client, name, create_kwargs[\"labels\"])\n            raise",
-    "replace": "            raise",
+    "find": "        info = await create_admitted(client, create_kwargs)",
+    "replace": "        info = await client.create_sandbox(**create_kwargs)",
     "tests": [
       "tests/ee/sites/test_build_sandbox_teardown.py::TestCreateTimeoutStillTearsDown::test_run_build_deletes_the_box_a_timed_out_create_registered",
       "tests/ee/sites/test_build_sandbox_teardown.py::TestCancellationStillTearsDown::test_run_build_cancelled_inside_create_deletes_the_box"
@@ -12,8 +12,8 @@
   {
     "label": "run_standalone drops the by-name teardown: a failed or cancelled verify create leaks a 2 GiB box",
     "file": "ee/pocketpaw_ee/sites/browser_check.py",
-    "find": "            await teardown_unreturned(client, name, create_kwargs[\"labels\"])\n            raise",
-    "replace": "            raise",
+    "find": "        info = await create_admitted(client, create_kwargs)",
+    "replace": "        info = await client.create_sandbox(**create_kwargs)",
     "tests": [
       "tests/ee/sites/test_build_sandbox_teardown.py::TestCreateTimeoutStillTearsDown::test_run_standalone_deletes_the_box_a_timed_out_create_registered",
       "tests/ee/sites/test_build_sandbox_teardown.py::TestCancellationStillTearsDown::test_run_standalone_cancelled_inside_create_deletes_the_box"
@@ -21,9 +21,9 @@
   },
   {
     "label": "the create teardown catches Exception only, so a cancel inside create (a superseded preview) skips the delete",
-    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
-    "find": "            info = await client.create_sandbox(**create_kwargs)\n        except BaseException:",
-    "replace": "            info = await client.create_sandbox(**create_kwargs)\n        except Exception:",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "    except BaseException as exc:\n        await teardown_unreturned(client, name, create_kwargs.get(\"labels\"))\n        _log_create_failure(exc, create_kwargs, attempt=\"create\")",
+    "replace": "    except Exception as exc:\n        await teardown_unreturned(client, name, create_kwargs.get(\"labels\"))\n        _log_create_failure(exc, create_kwargs, attempt=\"create\")",
     "tests": [
       "tests/ee/sites/test_build_sandbox_teardown.py::TestCancellationStillTearsDown::test_run_build_cancelled_inside_create_deletes_the_box"
     ]

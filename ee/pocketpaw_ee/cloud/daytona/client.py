@@ -515,7 +515,8 @@ class DaytonaClient:
             state=sandbox.state.value if hasattr(sandbox.state, "value") else str(sandbox.state),
             organization_id=sandbox.organization_id,
             cpu=getattr(sandbox, "cpu", 1) or 1,
-            memory=getattr(sandbox, "memory", 2) or 2,
+            # 0 = unknown, never guessed: idle-VM eviction counts freed memory from it.
+            memory=getattr(sandbox, "memory", 0) or 0,
             disk=getattr(sandbox, "disk", 10) or 10,
             region_id=getattr(sandbox, "region_id", ""),
             created_at=getattr(sandbox, "created_at", ""),

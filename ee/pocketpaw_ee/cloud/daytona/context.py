@@ -10,7 +10,8 @@ A stopped or archived VM (its idle auto-stop / auto-archive) is started before t
 context is returned, so the agent never sees a VM that went to sleep between turns.
 The first resolve per process also re-applies ``store.workspace_vm_lifecycle`` to the
 VM, so a VM created under the old 60-hour auto-stop converges without re-provisioning.
-The store's workspace-VM accessors are async and DB-backed.
+The store's workspace-VM accessors are async and DB-backed. ``last_resolved_at``
+exposes this process's last resolve of a VM so idle-VM eviction can respect it.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import contextvars
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -219,6 +221,18 @@ async def _ensure_started(client: DaytonaClient, sandbox_id: str) -> None:
         _last_seen_started[sandbox_id] = time.monotonic()
     except Exception as exc:  # noqa: BLE001
         logger.warning("resolve_daytona_context: could not resume VM %s: %s", sandbox_id, exc)
+
+
+def last_resolved_at(sandbox_id: str, *, now: datetime | None = None) -> datetime | None:
+    """Wall-clock time this process last resolved (so last used) ``sandbox_id``, to within
+    ``_STARTED_TTL_SECONDS``; ``None`` if it never did. Process-local: a resolve in
+    another replica is invisible here. ``sites.admission`` uses it so idle-VM eviction
+    never stops a VM an agent just used through this process."""
+    seen = _last_seen_started.get(sandbox_id)
+    if seen is None:
+        return None
+    now = now or datetime.now(UTC)
+    return now - timedelta(seconds=max(0.0, time.monotonic() - seen))
 
 
 #: VMs whose lifecycle this process already re-applied.
