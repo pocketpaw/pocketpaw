@@ -427,3 +427,169 @@ async def test_the_sites_leads_move_with_it():
 
     fresh = await Site.get(site.id)
     assert fresh.transfer_ledger["records"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# Per-site secrets move with the site
+# ---------------------------------------------------------------------------
+
+_SECRET_VALUE = "sk_live_TRANSFER_9f8e7d6c"
+
+
+@pytest.fixture()
+def _encryption_key(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+
+async def _secrets(workspace: str, owner: str, pocket_id: str) -> None:
+    from pocketpaw_ee.sites import site_secrets
+
+    await site_secrets.set_secret(
+        workspace_id=workspace,
+        user_id=owner,
+        pocket_id=pocket_id,
+        name="STRIPE_KEY",
+        value=_SECRET_VALUE,
+    )
+    await site_secrets.set_managed_secret(
+        workspace_id=workspace,
+        pocket_id=pocket_id,
+        name="SUPABASE_URL",
+        value="https://x.supabase.co",
+        managed_by="integration:supabase",
+        description="Supabase project URL",
+    )
+    await site_secrets.request_secret(
+        workspace_id=workspace,
+        user_id=owner,
+        pocket_id=pocket_id,
+        name="RESEND_KEY",
+        description="Sends the contact form",
+        requested_by="agent",
+    )
+
+
+@pytest.mark.usefixtures("_encryption_key")
+async def test_the_sites_secrets_move_with_it_and_still_deploy(caplog):
+    """The rows are re-keyed to the destination with their names, states and
+    ``managed_by`` intact, the values still decrypt for the destination's deploy,
+    another site's secrets stay put, and no value reaches a log or a response.
+
+    Mutation that must break this: have ``_TransferDeps.move_secrets`` return 0
+    without moving anything.
+    """
+    from pocketpaw_ee.cloud.models.site_secret import SiteSecret
+    from pocketpaw_ee.sites import site_secrets
+
+    sender, recipient, source, dest, site = await _offered()
+    await _secrets(source, sender, site.pocket_id)
+    other = await _site(source, sender, name="Other")
+    await site_secrets.set_secret(
+        workspace_id=source,
+        user_id=sender,
+        pocket_id=other.pocket_id,
+        name="STRIPE_KEY",
+        value="sk_other",
+    )
+
+    caplog.set_level("DEBUG")
+    wire = await sites_service.accept_site_transfer(
+        workspace_id=dest, user_id=recipient, site_id=str(site.id)
+    )
+    assert _SECRET_VALUE not in repr(wire)
+    assert _SECRET_VALUE not in caplog.text
+
+    rows = await SiteSecret.find({"pocket_id": site.pocket_id}).to_list()
+    assert {r.workspace for r in rows} == {dest}
+    by_name = {r.name: r for r in rows}
+    assert set(by_name) == {"STRIPE_KEY", "SUPABASE_URL", "RESEND_KEY"}
+    assert by_name["SUPABASE_URL"].managed_by == "integration:supabase"
+    assert by_name["RESEND_KEY"].encrypted_value is None
+
+    fresh = await Site.get(site.id)
+    assert fresh.transfer_ledger["secrets"] == "done"
+    assert await site_secrets.secrets_for_deploy(fresh) == {
+        "STRIPE_KEY": _SECRET_VALUE,
+        "SUPABASE_URL": "https://x.supabase.co",
+    }
+    # The new owner manages them; the old workspace no longer reaches them.
+    view = await site_secrets.list_secrets(
+        workspace_id=dest, user_id=recipient, pocket_id=site.pocket_id
+    )
+    assert view.can_manage and {s.name for s in view.secrets} == set(by_name)
+    with pytest.raises(CloudError):
+        await site_secrets.list_secrets(
+            workspace_id=source, user_id=sender, pocket_id=site.pocket_id
+        )
+
+    stayed = await SiteSecret.find({"pocket_id": other.pocket_id}).to_list()
+    assert [(r.workspace, r.name) for r in stayed] == [(source, "STRIPE_KEY")]
+
+
+@pytest.mark.usefixtures("_encryption_key")
+async def test_a_destination_request_made_mid_transfer_does_not_block_the_move():
+    """After the ownership step the pocket already sits in the destination, so its
+    agent can ask for a secret there before a failed transfer is resumed. The
+    owner's value from the source fills that pending request; a value the new owner
+    already set is kept."""
+    from pocketpaw_ee.cloud._core import crypto
+    from pocketpaw_ee.cloud.models.site_secret import SiteSecret
+    from pocketpaw_ee.sites import site_secrets
+
+    sender, recipient, source, dest, site = await _offered()
+    await _secrets(source, sender, site.pocket_id)
+    await SiteSecret(
+        workspace=dest, pocket_id=site.pocket_id, name="STRIPE_KEY", description="pending"
+    ).insert()
+    await SiteSecret(
+        workspace=dest,
+        pocket_id=site.pocket_id,
+        name="RESEND_KEY",
+        encrypted_value=crypto.encrypt("re_dest"),
+    ).insert()
+
+    await sites_service.accept_site_transfer(
+        workspace_id=dest, user_id=recipient, site_id=str(site.id)
+    )
+    rows = await SiteSecret.find({"pocket_id": site.pocket_id}).to_list()
+    assert sorted((r.workspace, r.name) for r in rows) == [
+        (dest, "RESEND_KEY"),
+        (dest, "STRIPE_KEY"),
+        (dest, "SUPABASE_URL"),
+    ]
+    fresh = await Site.get(site.id)
+    deployed = await site_secrets.secrets_for_deploy(fresh)
+    assert deployed["STRIPE_KEY"] == _SECRET_VALUE
+    assert deployed["RESEND_KEY"] == "re_dest"
+
+
+@pytest.mark.usefixtures("_encryption_key")
+async def test_a_failed_secret_move_leaves_the_transfer_resumable(monkeypatch):
+    from pocketpaw_ee.cloud.models.site_secret import SiteSecret
+
+    sender, recipient, source, dest, site = await _offered()
+    await _secrets(source, sender, site.pocket_id)
+
+    async def _boom(**_kw):
+        raise RuntimeError("mongo said no")
+
+    real = sites_service._TransferDeps.move_secrets
+    monkeypatch.setattr(sites_service._TransferDeps, "move_secrets", staticmethod(_boom))
+    with pytest.raises(CloudError) as exc:
+        await sites_service.accept_site_transfer(
+            workspace_id=dest, user_id=recipient, site_id=str(site.id)
+        )
+    assert exc.value.code == "transfer.failed"
+    fresh = await Site.get(site.id)
+    assert fresh.transfer_status == "failed"
+    assert fresh.transfer_reason == "secrets:runtimeerror"
+
+    monkeypatch.setattr(sites_service._TransferDeps, "move_secrets", staticmethod(real))
+    await sites_service.accept_site_transfer(
+        workspace_id=dest, user_id=recipient, site_id=str(site.id)
+    )
+    rows = await SiteSecret.find({"pocket_id": site.pocket_id}).to_list()
+    assert {r.workspace for r in rows} == {dest}
+    assert (await Site.get(site.id)).transfer_status == "none"

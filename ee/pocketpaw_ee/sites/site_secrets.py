@@ -19,6 +19,8 @@
 #     access to the pocket (the same rule as ``pockets.service.has_edit_access``).
 #     A pocket outside the caller's workspace is a 404, so ids cannot be probed.
 #   * The site delete cascade calls ``purge_for_pocket``; it is best effort there.
+#     A site transfer calls ``move_for_pocket`` to re-key the rows to the new
+#     workspace (the Fernet key is deployment-wide, so tokens move as they are).
 #   * ``ensure_generated_secret`` / ``secret_matches`` serve platform-minted secrets
 #     (the integrations gateway's ``PAW_GATEWAY_TOKEN``). The first skips the owner
 #     gate, so its callers authorize first; the second compares in constant time
@@ -465,6 +467,45 @@ async def secrets_for_deploy(site) -> dict[str, str]:
         for row in await _rows(workspace_id, pocket_id)
         if row.encrypted_value
     }
+
+
+async def move_for_pocket(*, pocket_id: str, destination_workspace_id: str) -> int:
+    """Re-key every secret of one site pocket to ``destination_workspace_id`` (a site
+    transfer). Returns how many rows moved.
+
+    Rows are matched by ``pocket_id`` in any OTHER workspace: a pocket id is unique,
+    so these are this site's rows wherever an earlier step left them, and the call is
+    idempotent. The encrypted token, name, state, description and ``managed_by``
+    move untouched. When the destination already has a row of the same name (its
+    agent asked for it after the pocket moved), a destination VALUE wins and the
+    source row is dropped; a destination PENDING request is replaced by the source
+    row. Logs names and counts only."""
+    doc = _doc()
+    destination = (destination_workspace_id or "").strip()
+    if not pocket_id or not destination:
+        return 0
+    rows = await doc.find(doc.pocket_id == pocket_id, doc.workspace != destination).to_list()
+    moved = 0
+    for row in rows:
+        existing = await _row(destination, pocket_id, row.name)
+        if existing is not None:
+            if existing.encrypted_value:
+                await row.delete()
+                logger.info(
+                    "sites.secret: transfer kept the destination's %s for %s", row.name, pocket_id
+                )
+                continue
+            await existing.delete()
+        await row.set({"workspace": destination})
+        moved += 1
+    if rows:
+        logger.info(
+            "sites.secret: moved %d secret(s) of %s to workspace %s",
+            moved,
+            pocket_id,
+            destination,
+        )
+    return moved
 
 
 async def purge_for_pocket(*, workspace_id: str, pocket_id: str) -> int:

@@ -61,12 +61,14 @@ logger = logging.getLogger(__name__)
 # renumber a half-finished transfer's record of itself.
 STEP_OWNERSHIP = "ownership"
 STEP_RECORDS = "records"
+STEP_SECRETS = "secrets"
 STEP_ASSETS = "assets"
 STEP_FINALIZE = "finalize"
 
 TRANSFER_STEPS: tuple[str, ...] = (
     STEP_OWNERSHIP,
     STEP_RECORDS,
+    STEP_SECRETS,
     STEP_ASSETS,
     STEP_FINALIZE,
 )
@@ -308,7 +310,8 @@ async def run_transfer(
 ) -> None:
     """Move the site to ``destination_workspace_id``, recording each step.
 
-    ``deps`` supplies the side effects (``move_pocket``, ``move_records``, ``now``)
+    ``deps`` supplies the side effects (``move_pocket``, ``move_records``,
+    ``move_secrets``, ``asset_prefix_for``, ``now``)
     so the order and the ledger are testable without Mongo. ``save`` persists after
     every step — a ledger written only at the end records nothing about the crash it
     exists to survive.
@@ -366,6 +369,8 @@ async def _run_step(
         )
     if step == STEP_RECORDS:
         return await _move_records(site=site, destination=destination, deps=deps)
+    if step == STEP_SECRETS:
+        return await _move_secrets(site=site, destination=destination, deps=deps)
     if step == STEP_ASSETS:
         return await _move_assets(site=site, deps=deps)
     if step == STEP_FINALIZE:
@@ -426,6 +431,29 @@ async def _move_records(*, site: Any, destination: str, deps: Any) -> str:
         source_workspace_id=getattr(site, "identity_workspace", "") or "",
         destination_workspace_id=destination,
     )
+    return OUTCOME_DONE if moved else OUTCOME_SKIPPED
+
+
+async def _move_secrets(*, site: Any, destination: str, deps: Any) -> str:
+    """The site's per-site secrets (``SiteSecret`` rows), AFTER the ownership record.
+
+    They are keyed by the pocket's workspace, so left behind they would be invisible
+    to the new owner, missing from the destination's next publish (which binds
+    ``secrets_for_deploy`` of ``site.workspace``) and stranded in a tenant that can no
+    longer reach the pocket. The rows move as they are: name, pending/set state,
+    description and ``managed_by`` included. The values are NOT re-encrypted because
+    nothing about them is workspace-scoped: ``cloud._core.crypto`` uses one
+    deployment key, so the destination decrypts the same token.
+
+    Found by ``pocket_id`` in any workspace other than the destination rather than by
+    a remembered source, so a resume after the ownership step (when ``site.workspace``
+    already names the destination) still finds them. A failure here fails the step
+    like any other, and the ledger resumes from it on the next accept.
+    """
+    pocket_id = (getattr(site, "pocket_id", "") or "").strip()
+    if not pocket_id:
+        return OUTCOME_SKIPPED
+    moved = await deps.move_secrets(pocket_id=pocket_id, destination_workspace_id=destination)
     return OUTCOME_DONE if moved else OUTCOME_SKIPPED
 
 
