@@ -324,6 +324,13 @@ def _file_error(tool: str, exc: Exception) -> dict[str, Any]:
         return _error_response(
             f"{exc.code}: {exc.message}. Nothing was changed; call list_site_files to see the tree."
         )
+    if isinstance(exc, CloudError) and exc.code == "sites.project_file_conflict":
+        paths = [c.get("path") for c in (exc.details or {}).get("conflicts") or []]
+        return _error_response(
+            f"{exc.code}: {', '.join(p for p in paths if p)} changed since you read it "
+            "(the owner may be editing it). Nothing was saved. Call read_site_file again "
+            "and apply your change to the current text."
+        )
     return _cli_error(exc)
 
 
@@ -720,7 +727,7 @@ async def _read(tool: str, args: dict, paths: Any) -> dict:
     budget = project_tools.MAX_READ_CALL_BYTES
     for f in files:
         data = f["content"].encode("utf-8")
-        entry: dict[str, Any] = {"path": f["path"], "size": f["size"]}
+        entry: dict[str, Any] = {"path": f["path"], "size": f["size"], "hash": f["hash"]}
         if budget <= 0:
             entry["omitted"] = True
             meta.append(entry)
@@ -769,7 +776,7 @@ async def _write_site_files_handler(args: dict) -> dict:
         return err
     from pocketpaw_ee.sites import project_tools
 
-    args = coerce_json_object_args(args, ("files",))
+    args = coerce_json_object_args(args, ("files", "base_hashes"))
     pocket_id = args.get("pocket_id")
     if not isinstance(pocket_id, str) or not pocket_id:
         return _error_response(f"{tool} requires a `pocket_id` (the project site).")
@@ -779,6 +786,7 @@ async def _write_site_files_handler(args: dict) -> dict:
             user_id=user_id,
             pocket_id=pocket_id,
             files=args.get("files"),
+            base_hashes=args.get("base_hashes"),
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
@@ -803,6 +811,7 @@ async def _patch_site_file_handler(args: dict) -> dict:
             pocket_id=pocket_id,
             path=args.get("path"),
             edits=args.get("edits"),
+            base_hash=args.get("base_hash") if isinstance(args.get("base_hash"), str) else None,
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
@@ -1169,7 +1178,9 @@ def make_project_tools(tool: Any) -> list[Any]:
             "node_modules, .git, .paw/, paw-build.json and real .env / .dev.vars files "
             "are refused (secret values never go in the source). Changing package.json "
             "dependencies drops the stale lockfile. Saves to the draft and queues a "
-            "build (verification.status pending). Prefer patch_site_file for small edits."
+            "build (verification.status pending). Prefer patch_site_file for small edits. "
+            "Pass base_hashes with the hash read_site_file gave you so a file the owner "
+            "changed since is refused instead of overwritten."
         ),
         {
             "type": "object",
@@ -1179,6 +1190,14 @@ def make_project_tools(tool: Any) -> list[Any]:
                     "type": "object",
                     "additionalProperties": {"type": "string"},
                     "description": "{relative path: full file contents}.",
+                },
+                "base_hashes": {
+                    "type": "object",
+                    "additionalProperties": {"type": ["string", "null"]},
+                    "description": (
+                        "Optional {relative path: hash from read_site_file}; null means "
+                        "the file must not exist yet."
+                    ),
                 },
             },
             "required": ["pocket_id", "files"],
@@ -1213,6 +1232,10 @@ def make_project_tools(tool: Any) -> list[Any]:
                         "required": ["old", "new"],
                         "additionalProperties": False,
                     },
+                },
+                "base_hash": {
+                    "type": "string",
+                    "description": "Optional: the file's hash from read_site_file.",
                 },
             },
             "required": ["pocket_id", "path", "edits"],

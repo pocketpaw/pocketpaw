@@ -405,6 +405,42 @@ class TestFileTools:
         # Every write queued the draft build of the new source.
         assert len(builds.calls) == 4
 
+    async def test_a_write_over_a_file_the_owner_changed_is_refused(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        """read_site_file hands the agent each file's hash; a write that names it is
+        refused, with nothing saved, once the owner has saved that file since."""
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        _ws, user = identity
+        pocket_id = await _start(cli)
+        out = await _call("read_site_file", {"pocket_id": pocket_id, "path": "AGENTS.md"})
+        seen = _body(out)["files"][0]["hash"]
+        await pockets_service.set_project_source(pocket_id, user, writes={"AGENTS.md": "# owner\n"})
+
+        out = await _call(
+            "write_site_files",
+            {
+                "pocket_id": pocket_id,
+                "files": {"AGENTS.md": "# agent\n"},
+                "base_hashes": {"AGENTS.md": seen},
+            },
+        )
+        assert out["is_error"]
+        text = out["content"][0]["text"]
+        assert "sites.project_file_conflict" in text and "read_site_file" in text
+        out = await _call(
+            "patch_site_file",
+            {
+                "pocket_id": pocket_id,
+                "path": "AGENTS.md",
+                "edits": [{"old": "owner", "new": "agent"}],
+                "base_hash": seen,
+            },
+        )
+        assert out["is_error"]
+        assert (await _doc(pocket_id)).source["AGENTS.md"] == "# owner\n"
+
     async def test_patch_needs_exactly_one_match_and_saves_nothing_otherwise(
         self, cli, identity, builds, beanie_test_db, recording_bus
     ) -> None:

@@ -4051,9 +4051,9 @@ access to the pocket. A non-project pocket is `422 sites.not_a_project`.
 | Method + path | Body / query | `200` response |
 |---|---|---|
 | `GET .../files` | `?prefix=src/` (optional) | `{pocket_id, files: [{path, size}], file_count}` (`size` = UTF-8 bytes, sorted by path) |
-| `GET .../files/content` | `?path=src/app.ts` | `{path, size, content}`, the whole file (never truncated) |
-| `PUT .../files` | `{files: {path: contents}}` | write response |
-| `POST .../files/patch` | `{path, edits: [{old, new}]}` | write response (`path` set) |
+| `GET .../files/content` | `?path=src/app.ts` | `{path, size, content, hash}`, the whole file (never truncated) |
+| `PUT .../files` | `{files: {path: contents}, base_hashes?: {path: hash or null}}` | write response |
+| `POST .../files/patch` | `{path, edits: [{old, new}], base_hash?}` | write response (`path` set) |
 | `DELETE .../files` | `{paths: [path, ...]}` | write response (`deleted` set) |
 
 The write response:
@@ -4066,6 +4066,7 @@ The write response:
   "deleted": [],
   "path": null,
   "lockfile_removed": [],
+  "hashes": {"src/pages/about.astro": "3b1f…"},
   "verification": {
     "status": "pending",
     "build": "pending",
@@ -4074,6 +4075,43 @@ The write response:
   }
 }
 ```
+
+`hash` (on a read) and `hashes` (on a write, one per written or patched file) are the
+sha256 hex of the file's UTF-8 text, the same value the visual-edit route calls
+`file_hash`.
+
+**Base hashes stop the agent and the owner overwriting each other.** A `PUT` may send
+`base_hashes`, mapping a path it writes to the `hash` it last read (`null` means "this
+file must not exist yet"); a patch may send `base_hash`. When a file's stored hash is
+not its base, the call is a `409 sites.project_file_conflict` and nothing in it is
+saved:
+
+```json
+{
+  "error": {
+    "code": "sites.project_file_conflict",
+    "message": "src/pages/index.astro changed since it was read, so nothing was saved. …",
+    "details": {
+      "conflicts": [
+        {
+          "path": "src/pages/index.astro",
+          "current_hash": "9a0c…",
+          "current_content": "<h1>The agent's version</h1>
+"
+        }
+      ]
+    }
+  }
+}
+```
+
+A file that is gone has `current_hash` and `current_content` both `null`. The check
+runs against the pocket as read and again on the document the save writes, so a
+change landing in between is still caught. A path left out of `base_hashes`, or a call
+without the field (older clients), is written unchecked, last write wins. A base for a
+path the call does not write is `422 sites.project_bad_base`. The agent's
+`write_site_files` / `patch_site_file` take the same optional `base_hashes` /
+`base_hash`, and `read_site_file(s)` returns each file's `hash`.
 
 Every write saves the draft as one version, which changes the source's content hash,
 and queues that hash's draft build: poll `GET .../builds/latest` (or the

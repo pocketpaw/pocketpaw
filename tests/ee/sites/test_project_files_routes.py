@@ -130,7 +130,12 @@ async def test_list_read_write_patch_delete(beanie_test_db, enqueued) -> None:
 
         r = await c.get(f"{url}/content", params={"path": "AGENTS.md"})
         assert r.status_code == 200, r.text
-        assert r.json() == {"path": "AGENTS.md", "size": 6, "content": "# map\n"}
+        assert r.json() == {
+            "path": "AGENTS.md",
+            "size": 6,
+            "content": "# map\n",
+            "hash": _sha("# map\n"),
+        }
 
         r = await c.put(url, json={"files": {"src/pages/about.astro": "<h1>About</h1>\n"}})
         assert r.status_code == 200, r.text
@@ -192,6 +197,159 @@ async def test_patch_needs_exactly_one_match(beanie_test_db, enqueued) -> None:
         assert r.status_code == 422, r.text
     assert (await _source(pid))["a.ts"] == "x\nx\n"
     assert enqueued == []
+
+
+# ---------------------------------------------------------------------------
+# Base hashes: the server refuses to overwrite a file that moved on
+# ---------------------------------------------------------------------------
+
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def test_put_with_a_matching_base_hash_writes(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    page = "src/pages/index.astro"
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {page: "<h1>Mine</h1>\n"}, "base_hashes": {page: _sha(SOURCE[page])}},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["hashes"] == {page: _sha("<h1>Mine</h1>\n")}
+    assert (await _source(pid))[page] == "<h1>Mine</h1>\n"
+
+
+async def test_put_over_a_changed_file_is_409_with_theirs(beanie_test_db, enqueued) -> None:
+    """The agent saved index.astro after the owner opened it: the owner's save, sent
+    with the hash it loaded, must not land, and the answer carries the current text."""
+    pid = await _pocket()
+    page = "src/pages/index.astro"
+    stale = _sha(SOURCE[page])
+    await project_tools.write_files(
+        workspace_id="ws1", user_id="u1", pocket_id=pid, files={page: "<h1>Agent</h1>\n"}
+    )
+    enqueued.clear()
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={
+                "files": {page: "<h1>Owner</h1>\n", "src/new.ts": "export {}\n"},
+                "base_hashes": {page: stale},
+            },
+        )
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "sites.project_file_conflict"
+    assert err["details"]["conflicts"] == [
+        {
+            "path": page,
+            "current_hash": _sha("<h1>Agent</h1>\n"),
+            "current_content": "<h1>Agent</h1>\n",
+        }
+    ]
+    source = await _source(pid)
+    assert source[page] == "<h1>Agent</h1>\n"
+    assert "src/new.ts" not in source  # all or nothing
+    assert enqueued == []
+
+
+async def test_a_null_base_means_the_file_must_not_exist(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {"AGENTS.md": "# mine\n"}, "base_hashes": {"AGENTS.md": None}},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["error"]["details"]["conflicts"][0]["current_content"] == "# map\n"
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {"src/fresh.ts": "1\n"}, "base_hashes": {"src/fresh.ts": None}},
+        )
+        assert r.status_code == 200, r.text
+
+
+async def test_a_base_for_a_deleted_file_is_409_with_no_content(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {"gone.ts": "1\n"}, "base_hashes": {"gone.ts": _sha("0\n")}},
+        )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["details"]["conflicts"] == [
+        {"path": "gone.ts", "current_hash": None, "current_content": None}
+    ]
+    assert "gone.ts" not in await _source(pid)
+
+
+async def test_a_base_for_a_path_not_written_is_422(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {"a.ts": "1\n"}, "base_hashes": {"b.ts": _sha("1\n")}},
+        )
+    assert r.status_code == 422, r.text
+
+
+async def test_patch_with_a_stale_base_hash_is_409(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    url = f"{BASE.format(pid=pid)}/patch"
+    edits = [{"old": "map", "new": "x"}]
+    async with _client(_app()) as c:
+        r = await c.post(url, json={"path": "AGENTS.md", "edits": edits, "base_hash": "0" * 64})
+        assert r.status_code == 409, r.text
+        assert r.json()["error"]["details"]["conflicts"][0]["current_hash"] == _sha("# map\n")
+        assert (await _source(pid))["AGENTS.md"] == "# map\n"
+        r = await c.post(
+            url, json={"path": "AGENTS.md", "edits": edits, "base_hash": _sha("# map\n")}
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["hashes"] == {"AGENTS.md": _sha("# x\n")}
+
+
+async def test_a_write_racing_between_read_and_save_is_409(
+    beanie_test_db, enqueued, monkeypatch
+) -> None:
+    """The check runs again on the document the save is about to persist, so a write
+    that lands after the route read the pocket still cannot be overwritten."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+
+    pid = await _pocket()
+    real_load = project_tools.load_project
+
+    async def _load_then_race(**kw):
+        pocket = await real_load(**kw)
+        await pockets_service.set_project_source(pid, "u1", writes={"AGENTS.md": "# agent\n"})
+        return pocket
+
+    monkeypatch.setattr(project_tools, "load_project", _load_then_race)
+    with pytest.raises(CloudError) as exc:
+        await project_tools.write_files(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id=pid,
+            files={"AGENTS.md": "# owner\n"},
+            base_hashes={"AGENTS.md": _sha("# map\n")},
+        )
+    assert exc.value.status_code == 409
+    assert (await _source(pid))["AGENTS.md"] == "# agent\n"
+
+
+async def test_no_base_keeps_last_write_wins(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    await project_tools.write_files(
+        workspace_id="ws1", user_id="u1", pocket_id=pid, files={"AGENTS.md": "# agent\n"}
+    )
+    async with _client(_app()) as c:
+        r = await c.put(BASE.format(pid=pid), json={"files": {"AGENTS.md": "# owner\n"}})
+    assert r.status_code == 200, r.text
+    assert (await _source(pid))["AGENTS.md"] == "# owner\n"
 
 
 # ---------------------------------------------------------------------------

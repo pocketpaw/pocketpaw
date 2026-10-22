@@ -9,6 +9,10 @@
 # preview click's edit to the stamped source file (``sites.visual_edit``) and saves it
 # through the same writer.
 #
+# Every write can carry the base hash (sha256 of the text, the hash the read route
+# returns) of each file it replaces; a file that moved since is a 409 with its current
+# hash and text and nothing is saved (project_tools.check_bases). No base, no check.
+#
 # Auth, the same as A1's build routes: a session (``request_context``), the "sites"
 # plan feature, and ``fabric.write`` (owner / editor) on every route, reads included,
 # since the source is the author's own. The pocket is resolved through
@@ -80,9 +84,15 @@ async def write_project_files(
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> ProjectFileWriteResponse:
     """Create or overwrite files (full contents) in one draft save, then queue the
-    draft build. One refused path or size saves nothing."""
+    draft build. One refused path or size saves nothing. A file whose stored hash is
+    not its base_hashes entry is a 409 sites.project_file_conflict carrying
+    the current hash and text; nothing is saved."""
     result = await project_tools.write_files(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, files=body.files
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        files=body.files,
+        base_hashes=body.base_hashes,
     )
     return ProjectFileWriteResponse(**result)
 
@@ -95,13 +105,15 @@ async def patch_project_file(
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> ProjectFileWriteResponse:
     """Apply ``edits`` to one existing file; each ``old`` must match the running text
-    exactly once (422 otherwise, nothing saved)."""
+    exactly once (422 otherwise, nothing saved). A base_hash the file no longer
+    has is a 409, like the PUT."""
     result = await project_tools.patch_file(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
         pocket_id=pocket_id,
         path=body.path,
         edits=[e.model_dump() for e in body.edits],
+        base_hash=body.base_hash,
     )
     return ProjectFileWriteResponse(**result)
 
