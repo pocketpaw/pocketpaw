@@ -3182,22 +3182,25 @@ async def set_imported_source(
     workspace_id: str,
     source: dict[str, str],
 ) -> None:
-    """Replace an IMPORTED html-engine pocket's whole ``source`` map (SI-5).
+    """Replace an IMPORTED pocket's whole ``source`` map (SI-5).
 
-    Called by the sites URL-import crawler after a successful crawl, so the
-    pocket — the durable source of truth every re-publish reads — carries the
-    harvested files. Background-safe: takes an explicit ``workspace_id`` and
-    fails CLOSED on a mismatch with the same NotFound a missing pocket raises
-    (no cross-tenant existence signal). html-engine pockets only — a spec/svelte
-    pocket must never have its content swapped by the import path.
+    Called by the sites import paths once the files are rewired, so the pocket (the
+    durable source of truth every re-publish reads) carries them. Background-safe:
+    takes an explicit ``workspace_id`` and fails CLOSED on a mismatch with the same
+    NotFound a missing pocket raises (no cross-tenant existence signal). Only an
+    html pocket, or a ``project`` pocket stamped ``pattern="imported"`` (an import
+    copied onto the static starter): a spec, svelte or authored project pocket must
+    never have its content swapped by the import path.
     """
     doc = await _fetch_pocket(pocket_id)
     if doc.workspace != workspace_id:
         raise NotFound("pocket", pocket_id)
-    if getattr(doc, "engine", "ripple") != "html":
+    engine = getattr(doc, "engine", "ripple")
+    imported_project = engine == "project" and getattr(doc, "pattern", None) == "imported"
+    if engine != "html" and not imported_project:
         raise ValidationError(
             "pocket.not_html_site",
-            "Only an imported html-engine pocket can receive crawled source.",
+            "Only an imported site's pocket can receive imported source.",
         )
     # Reassign a fresh dict so Beanie tracks the change (mirrors
     # set_svelte_source_file's dirty-tracking note).

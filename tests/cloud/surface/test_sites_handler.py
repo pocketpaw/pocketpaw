@@ -689,50 +689,57 @@ async def test_frontend_preamble_renders_sitemap_and_copy_from_brief() -> None:
     assert "no dental jargon" in preamble
 
 
-async def test_frontend_preamble_routes_svelte_to_create_svelte_site() -> None:
-    """engine="svelte" routes the build to `create_svelte_site` and must NOT
-    name the ripple landing tool."""
-    brief = _landing_brief(engine="svelte")
+_LEGACY_CREATE_TOOLS = (
+    "create_landing_site",
+    "create_dynamic_site",
+    "create_svelte_site",
+    "create_react_site",
+    "create_html_site",
+    "pocket_specialist",
+)
+
+
+@pytest.mark.parametrize("engine", ["ripple", "svelte"])
+async def test_frontend_preamble_builds_a_project_from_a_template(engine: str) -> None:
+    """A rebuild is a new site, so it takes the one site model whatever engine the
+    brief was stamped with: a repo from a template through ``pocketpaw-site``,
+    ``static`` for a page like this one, and never an old per-engine create tool."""
+    brief = _landing_brief(engine=engine)
     preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
 
-    assert 'engine="svelte"' in preamble
-    assert "create_svelte_site" in preamble
-    # The ripple landing tool must be absent on the svelte track.
-    assert "create_landing_site" not in preamble
+    assert 'engine="project"' in preamble
+    assert 'mode="frontend"' in preamble
+    assert "pocketpaw-site" in preamble
+    assert "mcp__pocketpaw_sites_manager__start_site_from_template" in preamble
+    assert "`static`" in preamble
+    assert sites_handler._PROJECT_LOOP in preamble
+    for tool in _LEGACY_CREATE_TOOLS:
+        assert tool not in preamble, tool
 
 
-async def test_frontend_preamble_routes_ripple_to_landing_tool() -> None:
-    """engine="ripple" routes the build to the ripple create path
-    (`create_landing_site`) and must NOT name `create_svelte_site`."""
-    brief = _landing_brief(engine="ripple")
+async def test_frontend_preamble_sends_a_live_data_brief_to_a_framework() -> None:
+    """A dynamic brief needs its own database, which ``static`` cannot have."""
+    brief = _landing_brief().model_copy(update={"pattern": "dynamic"})
     preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
+    assert sites_handler._STORED_DATA_RULE in preamble
+    assert "list_site_recipes" in preamble
+    assert "framework template" in preamble
+    for tool in _LEGACY_CREATE_TOOLS:
+        assert tool not in preamble, tool
 
-    assert 'engine="ripple"' in preamble
-    assert "create_landing_site" in preamble
-    # The svelte create tool must be absent on the ripple track.
-    assert "create_svelte_site" not in preamble
 
-
-async def test_frontend_preamble_preserves_ssr_rules_for_landing_brief() -> None:
-    """The static-site (SSR) rules language survives into the brief-driven
-    preamble — flat lead form (not form/newsletter), pricing-table tiers, and
-    anchor CTAs — so a brief-driven build can't reintroduce a static-site trap."""
+async def test_frontend_preamble_keeps_the_static_page_rules() -> None:
+    """The brief-driven build follows the same page rules as create: the native
+    form contract on ``static``, the verify contract, and draft-first."""
     brief = _landing_brief()
     preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
-    lower = preamble.lower()
-
-    # Rule 1 — flat native lead form, never the form/newsletter widget.
-    assert "flat" in lower
-    assert "newsletter" in lower
-    # Rule 2 — pricing-table uses tiers.
-    assert "tiers" in lower
-    # Rule 3 — FAQ never accordion.
-    assert "accordion" in lower
-    # Rule 4 — CTAs are anchor href, never on_click.
-    assert "href" in lower
-    assert "on_click" in lower
-    # Animation Tier-0 only.
-    assert "tier-0" in lower or "tier 0" in lower
+    assert sites_handler.native_form_contract() in preamble
+    assert sites_handler._VERIFY_RULE in preamble
+    assert sites_handler._CLOSING_RULE in preamble
+    assert "DRAFT" in preamble
+    # Widget rules belong to the retired ripple track.
+    for widget in ("pricing-table", "accordion", "on_click"):
+        assert widget not in preamble, widget
 
 
 async def test_build_preamble_unchanged_for_create_path() -> None:

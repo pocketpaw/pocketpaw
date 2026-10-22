@@ -1,85 +1,52 @@
-# ee/pocketpaw_ee/sites/import_service.py — Paw Sites IMPORT control plane (SI-4).
+# ee/pocketpaw_ee/sites/import_service.py — Paw Sites IMPORT control plane: bring an
+# existing site in as a new Paw Site.
 #
-# Edited 2026-09-04 (IR-2a, feat/sites-import-design-brief): added REBUILD mode
-# beside the existing byte mirror. ``regenerate_from_url`` validates the same URL
-# floors, inserts a queued ``SiteDesignBrief`` and schedules a background capture
-# that harvests the page and persists a typed ``DesignBrief``. It mints NO pocket
-# and NO Site doc, deliberately — see the section header at the foot of the file.
-# The mirror path above is untouched.
+# Two ways in, both onto the one site model:
+#   * COPY AS-IS (``POST /sites/import`` zip upload, ``POST /sites/import/from-url``
+#     ``mode="copy"``): the site's own files become a ``project`` pocket on the
+#     ``static`` starter (no build step). Zip: safe in-memory unpack (zip-slip,
+#     entry-count and uncompressed-size caps, junk filtering, single-root
+#     flattening). URL: seed validation (SSRF floors, 422 before anything is minted),
+#     a queued draft whose pocket is already a static project, then the same-site
+#     crawl (``url_crawler``) as a detached background task under a wall-clock cap.
+#     Both then run the generator's ``import`` (``_plan_import``: forms rewired to the
+#     capture API with the draft Site's signed key, an authoritative report), move
+#     binary files out of the text-only source map (``_place_binary_assets``: media
+#     onto the public asset rail, anything else back to the source site's URL, or
+#     dropped with a warning for a zip), add the starter's manifest, AGENTS.md and a
+#     themed ``styles/tokens.css`` (``site_tokens``), store that source on the pocket
+#     and publish it through the no-build project lane.
+#   * REBUILD (``mode="rebuild"``): ``regenerate_from_url`` captures a typed
+#     ``DesignBrief`` and mints nothing; the /sites agent builds a new project from
+#     it (``handlers/sites._frontend_preamble``).
 #
-# Edited 2026-07-23 (SI-FIX review): the zip path now persists the REWIRED source on
-# the pocket too (set_imported_source), not just the deployed artifact — a re-publish
-# from the builder was reading the raw upload and redeploying un-rewired forms.
-#
-# Edited 2026-07-23 (SI-FIX — wire the rewire pipeline): both the zip and crawl
-# paths now run the unpacked/harvested files through the generator's ``import``
-# subcommand (``_plan_import`` -> ``generator_client.run_import``) BEFORE publish, so
-# imported ``<form>``s are actually rewired to the capture API and the report carries
-# real per-form ``rewired`` verdicts. This replaces the interim Python
-# ``derive_import_report`` (which shipped raw source + ``rewired: False``) — the
-# rewired source is what we persist on the pocket and deploy. The draft Site doc is
-# minted first so its ``signed_key`` can be baked into the forms.
-#
-# Created 2026-07-22 (feat/sites-import-endpoint): the service half of the two
-# import endpoints — POST /sites/import (zip upload) and POST /sites/import/from-url
-# (crawler-backed, next slice). Owns:
-#   * SAFE zip unpacking, fully in memory: zip-slip guard (absolute paths, drive
-#     letters, backslashes, ``..`` traversal all rejected), an entry-count cap and a
-#     total-uncompressed-size cap (decompression-bomb guard), junk filtering
-#     (__MACOSX/, .DS_Store), and single-root flattening (a zip whose only top-level
-#     dir holds index.html imports as if that dir were the root).
-#   * Text/binary split by CONTENT sniff (NUL byte or non-UTF-8 → binary), building
-#     the generator input: text files ride ``source`` ({path: text}) — the existing
-#     html-engine source map — and binary files ride ``assets`` ({path: base64}).
-#     CROSS-REPO SEAM: the generator's ``assets`` base64 sideband is being added in a
-#     parallel paw-sites slice; this codes to that contract (see generator_client).
-#   * The import flow: mint the html POCKET (the durable source of truth, same as
-#     every other site) → mint the DRAFT Site doc (create_draft_site — the
-#     draft-first pattern) → publish through the EXISTING html/static deploy path →
-#     persist an ``import_report`` on the Site doc → best-effort Journal event.
-#   * A MINIMAL import report derived from the zip contents (pages + titles, asset
-#     count/bytes, forms with their original actions, script refs). ENRICHMENT SEAM:
-#     the generator-side import plan (form rewiring verdicts etc.) replaces this
-#     derivation once the parallel paw-sites slice lands — ``rewired`` is False until
-#     the generator confirms it.
-#   * from-url (SI-5, updated 2026-07-23 feat/sites-import-crawler): full seed
-#     validation (SSRF shape floors from url_crawler — scheme/port/credentials/
-#     literal-IP checks → 422 BEFORE anything is minted) + draft Site mint + a
-#     queued report, then the crawl runs as a DETACHED BACKGROUND TASK (the
-#     pre-warm scheduler pattern from sites/service.py — patchable module attr,
-#     strong-ref task set) under a hard wall-clock cap. ``crawl_site_from_url``
-#     is now REAL: crawl (url_crawler — SSRF-pinned fetcher, same-host BFS,
-#     robots, caps) → the SAME pipeline as zip (text/binary split → publish with
-#     the assets sideband) → import_report with crawl stats; every failure mode
-#     lands as a safe ``status:"failed"`` report, never a stack trace.
-#     WHY background, not the workspace-jobs (ARQ) machinery: the jobs worker's
-#     writeback merges result state into the pocket's rippleSpec — an imported
-#     html pocket has no spec, so a successful crawl could be marked failed by
-#     the writeback gate. Tradeoff (documented): a web-process restart drops an
-#     in-flight crawl and the report stays "queued" — acceptable for v1, the
-#     durable-queue upgrade is a follow-up.
-# Tenancy: every entry point takes workspace_id/user_id and funnels through the
-# tenant-scoped pockets + sites services; the plan gate (require_sites_plan) runs
-# before any write.
-# Edited 2026-07-23 (security review): crafted/abnormal zip members (bad CRC,
-# encrypted, exotic compression) now map to 422 instead of escaping as 500s;
-# entry names carrying control characters are rejected as unsafe.
+# Invariants: the REWIRED source is what is stored and deployed, never the raw
+# upload (a rewire failure fails closed, so leads never post to the old backend);
+# every failure of a background crawl lands as a safe ``status:"failed"`` report,
+# never a stack trace; the plan gate (``require_sites_plan``) runs before any write;
+# every entry point is tenant-scoped through the pockets and sites services. A
+# web-process restart drops an in-flight crawl (its report stays "queued"); the
+# durable-queue upgrade is a follow-up.
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import io
 import logging
+import posixpath
+import re
 import zipfile
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 from uuid import uuid4
 
 from pocketpaw_ee.cloud._core.errors import CloudError, Internal, ValidationError
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites import site_tokens, site_upgrade
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +68,12 @@ MAX_CRAWL_WALL_CLOCK_SEC = 120
 # The pocket authoring pattern stamped on imported sites so the gallery can badge
 # them and later slices (crawler, re-import) can find them.
 IMPORT_PATTERN = "imported"
+
+# The starter a copied site lands on: ``static``, the no-build project template.
+IMPORT_TEMPLATE = site_upgrade.UPGRADE_TEMPLATE
+_IMPORT_SITE_META = {
+    "project": {"template": IMPORT_TEMPLATE, "framework": IMPORT_TEMPLATE, "recipes": []}
+}
 
 # macOS zip junk that should never become site files.
 _JUNK_PREFIXES = ("__MACOSX/",)
@@ -367,13 +340,173 @@ def _emit_import_journal(
         logger.warning("sites import: failed to append %s journal event", action, exc_info=True)
 
 
+# --------------------------------------------------------------------------- #
+# Copy as-is lands on the static starter
+# --------------------------------------------------------------------------- #
+
+# References a page or stylesheet makes to a file of the site, the ones a moved
+# binary file has to be rewritten in: url-valued attributes, srcset lists, CSS url().
+_ATTR_REF = re.compile(r"""(\b(?:src|href|poster|data-src)\s*=\s*)(["']?)([^"'\s>]+)\2""", re.I)
+_SRCSET_REF = re.compile(r"""(\b(?:srcset|data-srcset)\s*=\s*)(["'])([^"']*)\2""", re.I)
+_CSS_URL_REF = re.compile(r"""(url\(\s*)(["']?)([^"')\s]+)\2(\s*\))""", re.I)
+_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _asset_key(ref: str, from_path: str) -> str | None:
+    """The site-relative path ``ref`` names from the file at ``from_path``, or None
+    for an external, data, fragment-only or escaping reference."""
+    ref = ref.strip()
+    if not ref or ref.startswith(("#", "//")) or _SCHEME.match(ref):
+        return None
+    ref = ref.split("#", 1)[0].split("?", 1)[0]
+    if not ref:
+        return None
+    joined = (
+        ref.lstrip("/")
+        if ref.startswith("/")
+        else posixpath.join(posixpath.dirname(from_path), ref)
+    )
+    norm = posixpath.normpath(unquote(joined))
+    if norm in (".", "") or norm.startswith("../") or norm == "..":
+        return None
+    return norm
+
+
+def _rewrite_refs(text: str, from_path: str, urls: dict[str, str], *, page: bool) -> str:
+    """``text`` with every reference to a key of ``urls`` pointed at its value."""
+
+    def _swap(ref: str) -> str:
+        key = _asset_key(ref, from_path)
+        return urls.get(key, ref) if key else ref
+
+    def _single(m: re.Match[str]) -> str:
+        return f"{m.group(1)}{m.group(2)}{_swap(m.group(3))}{m.group(2)}"
+
+    def _css(m: re.Match[str]) -> str:
+        return f"{m.group(1)}{m.group(2)}{_swap(m.group(3))}{m.group(2)}{m.group(4)}"
+
+    def _srcset(m: re.Match[str]) -> str:
+        parts = []
+        for candidate in m.group(3).split(","):
+            bits = candidate.strip().split(None, 1)
+            if bits:
+                bits[0] = _swap(bits[0])
+            parts.append(" ".join(bits))
+        return f"{m.group(1)}{m.group(2)}{', '.join(parts)}{m.group(2)}"
+
+    text = _CSS_URL_REF.sub(_css, text)
+    if page:
+        text = _SRCSET_REF.sub(_srcset, text)
+        text = _ATTR_REF.sub(_single, text)
+    return text
+
+
+async def _place_binary_assets(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    source: dict[str, str],
+    assets: dict[str, str],
+    origin: str | None,
+) -> tuple[dict[str, str], list[str]]:
+    """``(source, warnings)``: a project's source map holds text only, so every binary
+    file of the import (``assets``, ``{path: base64}``) gets an address and the
+    pages and stylesheets that reference it are rewritten to it. Publishable media
+    goes to the public asset rail (``public_assets``); anything the rail refuses
+    (fonts, icons, documents), or everything when the deployment has no public
+    bucket, points back at the source site (``origin``, a URL import) or is left
+    out with a warning (a zip has no origin)."""
+    if not assets:
+        return source, []
+    from pocketpaw_ee.sites import public_assets
+
+    store = public_assets.public_asset_store()
+    urls: dict[str, str] = {}
+    left_out: list[str] = []
+    for path, encoded in assets.items():
+        url: str | None = None
+        if store is not None:
+            try:
+                stored = await store.put(
+                    base64.b64decode(encoded),
+                    filename=posixpath.basename(path) or "asset",
+                    workspace_id=workspace_id,
+                    pocket_id=pocket_id,
+                )
+                url = stored.url
+            except public_assets.PublicAssetError:
+                url = None
+            except Exception:  # noqa: BLE001 — a storage hiccup costs one file, not the import
+                logger.warning("sites import: could not store %s for %s", path, pocket_id)
+        if url is None and origin:
+            url = f"{origin}/{quote(path)}"
+        if url is None:
+            left_out.append(path)
+            continue
+        urls[path] = url
+    out: dict[str, str] = {}
+    for path, text in source.items():
+        lower = path.lower()
+        if lower.endswith((".html", ".htm")):
+            out[path] = _rewrite_refs(text, path, urls, page=True)
+        elif lower.endswith(".css"):
+            out[path] = _rewrite_refs(text, path, urls, page=False)
+        else:
+            out[path] = text
+    warnings = [
+        f"{path} was left out: a copied site keeps its text files, and only images "
+        "and video move to the site's media storage. Upload it again or remove the "
+        "reference."
+        for path in left_out
+    ]
+    return out, warnings
+
+
+def _static_project_source(
+    source: dict[str, str], starter: tuple[dict[str, str], str | None]
+) -> dict[str, str]:
+    """The imported files as a ``static`` starter project: the starter's manifest and
+    AGENTS.md beside them (an imported file of the same name is kept) and a themed
+    ``styles/tokens.css`` linked from every page (``site_tokens``). 422 when the
+    result is not a no-build tree (an imported ``paw.template.json`` with a build)."""
+    from pocketpaw_ee.sites import project_build
+
+    starter_files, starter_tokens = starter
+    out: dict[str, str] = dict(source)
+    for name, text in starter_files.items():
+        out.setdefault(name, text)
+    themed, _added = site_tokens.add_tokens(out, starter_tokens)
+    result = {path: text for path, text in themed.items() if isinstance(text, str)}
+    if not project_build.is_no_build(result):
+        raise ValidationError(
+            "sites.import_not_static",
+            "This site carries a paw.template.json that needs a build step, so it "
+            "cannot be copied as a static site.",
+        )
+    return result
+
+
+def _queued_placeholder(host: str) -> dict[str, str]:
+    """The one page a URL import's pocket holds while its crawl runs."""
+    safe = html.escape(host)
+    return {
+        "index.html": (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>Importing {safe}</title></head><body>"
+            f"<p>Copying {safe}. This page is replaced when the import finishes.</p>"
+            "</body></html>"
+        )
+    }
+
+
 async def _mint_import_pocket(
     *, workspace_id: str, user_id: str, name: str, source: dict[str, str]
 ) -> str:
-    """Create the html POCKET an import is rooted on (the durable source of truth
-    every other site flow — publish/preview/status/versions — already reads), then
-    mint the DRAFT Site doc for it (create_draft_site — the draft-first pattern, so
-    the site lists in the gallery and publish flips the SAME doc live)."""
+    """Create the ``project`` POCKET (``static`` starter, ``pattern="imported"``) an
+    import is rooted on, the durable source of truth every site flow reads, then mint
+    the DRAFT Site doc for it (create_draft_site: the site lists in the gallery and
+    publish flips the SAME doc live). ``source`` is replaced once the files are
+    rewired (``set_imported_source``)."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     _view, pocket_id, err = await pockets_service.agent_create(
@@ -383,11 +516,12 @@ async def _mint_import_pocket(
         type_="site",
         pattern=IMPORT_PATTERN,
         ripple_spec=None,
-        engine="html",
+        engine="project",
         source=source,
-        # The source is the user's own uploaded files, not LLM-drafted ripple JSON —
-        # there is no catalog gate to run (same rationale as the svelte create path).
+        # The source is the user's own files, not LLM-drafted ripple JSON: there is
+        # no catalog gate to run.
         trusted=True,
+        site_meta=_IMPORT_SITE_META,
     )
     if err is not None or pocket_id is None:
         raise Internal("sites.import_pocket_failed", f"Could not create the site pocket: {err}")
@@ -408,9 +542,10 @@ async def import_zip_site(
     _local_deploy: Any | None = None,
     _run_import: Any | None = None,
 ) -> Any:
-    """Import an uploaded site zip end to end: unpack safely → mint pocket + draft
-    Site doc → publish through the EXISTING html/static deploy path (with the
-    binary ``assets`` sideband) → persist the import_report → Journal event.
+    """Import an uploaded site zip end to end: unpack safely → mint the static
+    project pocket + draft Site doc → rewire → binary files onto the asset rail →
+    starter files and tokens → publish through the no-build project lane → persist
+    the import_report → Journal event.
 
     Returns the live Site doc (import_report set). The generator / CF / local-deploy
     seams forward to ``publish`` so tests never shell out to bun/workerd."""
@@ -419,6 +554,8 @@ async def import_zip_site(
     await sites_service.require_sites_plan(workspace_id)
 
     source, assets = unpack_zip(data)
+    # The starter before anything is minted: without it the copy cannot land.
+    starter = await site_upgrade.static_starter_files()
     site_name = name.strip() or "Imported site"
     pocket_id = await _mint_import_pocket(
         workspace_id=workspace_id, user_id=user_id, name=site_name, source=source
@@ -433,6 +570,11 @@ async def import_zip_site(
         assets=assets,
         _run_import=_run_import,
     )
+    source, left_out = await _place_binary_assets(
+        workspace_id=workspace_id, pocket_id=pocket_id, source=source, assets=assets, origin=None
+    )
+    report.setdefault("warnings", []).extend(left_out)
+    source = _static_project_source(source, starter)
     report["status"] = "imported"
 
     # Persist the REWIRED source on the pocket (the durable re-publish source),
@@ -451,11 +593,8 @@ async def import_zip_site(
         ripple_spec=None,
         theme={},
         name=site_name,
-        engine="html",
+        engine="project",
         source=source,
-        # ``assets`` is the base64 binary sideband ({path: base64}) the html
-        # generator writes verbatim into the static tree.
-        assets=assets or None,
         pattern=IMPORT_PATTERN,
         _generator=_generator,
         _cloudflare=_cloudflare,
@@ -572,6 +711,8 @@ async def crawl_site_from_url(
     if doc is None:
         raise ValidationError("sites.import_site_missing", "Unknown import site id.")
     pocket_id = doc.pocket_id
+    seed = urlparse(url)
+    origin = f"{seed.scheme}://{seed.netloc}"
 
     try:
         async with asyncio.timeout(MAX_CRAWL_WALL_CLOCK_SEC):
@@ -611,6 +752,15 @@ async def crawl_site_from_url(
             assets=assets,
             _run_import=_run_import,
         )
+        source, left_out = await _place_binary_assets(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            source=source,
+            assets=assets,
+            origin=origin,
+        )
+        report.setdefault("warnings", []).extend(left_out)
+        source = _static_project_source(source, await site_upgrade.static_starter_files())
     except Exception as exc:  # noqa: BLE001 — a planning failure is a safe failed report
         logger.warning("sites import: planning crawl of %s failed", url, exc_info=True)
         await _mark_import_failed(doc, url=url, message=_safe_crawl_failure(exc))
@@ -637,9 +787,8 @@ async def crawl_site_from_url(
             ripple_spec=None,
             theme={},
             name=site_name,
-            engine="html",
+            engine="project",
             source=source,
-            assets=assets or None,
             pattern=IMPORT_PATTERN,
             _generator=_generator,
             _cloudflare=_cloudflare,
@@ -715,8 +864,12 @@ async def import_from_url(*, workspace_id: str, user_id: str, url: str) -> dict[
     candidate = _validate_import_url(url)
     host = urlparse(candidate).netloc
     site_name = f"Import of {host}"
+    # Already a static project while the crawl runs, so the builder can open it.
+    placeholder = _static_project_source(
+        _queued_placeholder(host), await site_upgrade.static_starter_files()
+    )
     pocket_id = await _mint_import_pocket(
-        workspace_id=workspace_id, user_id=user_id, name=site_name, source={}
+        workspace_id=workspace_id, user_id=user_id, name=site_name, source=placeholder
     )
     from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
@@ -762,13 +915,11 @@ async def import_from_url(*, workspace_id: str, user_id: str, url: str) -> dict[
 #
 # WHY IT MINTS NOTHING: the /sites surface routes a run to REFINE whenever a
 # pocket_id rides in its meta, engine hint or not. A create flow therefore has to
-# run with no pocket, and the agent mints its own through ``create_svelte_site``
-# (which stamps engine="svelte" and the right pattern). Pre-minting a pocket here
-# to have an id to return would hand the agent the ripple refine toolset pointed
-# at an html pocket. It would also stamp IMPORT_PATTERN, which is what
-# ``service._refs_must_resolve`` reads to RELAX the publish smoke gate — correct
-# for a byte mirror that can reference something the crawl did not harvest, wrong
-# for a site we authored ourselves.
+# run with no pocket, and the agent mints its own through
+# ``start_site_from_template``. Pre-minting a pocket here to have an id to return
+# would hand the agent the refine toolset. It would also stamp IMPORT_PATTERN,
+# which marks a byte mirror (a copy that can reference something the crawl did not
+# harvest), wrong for a site we authored ourselves.
 
 
 class _MetaScan(HTMLParser):

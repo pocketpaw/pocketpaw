@@ -457,3 +457,57 @@ def edit_verifier(monkeypatch) -> EditVerifier:
     verifier = EditVerifier()
     monkeypatch.setattr(sites_service, "_default_edit_verifier", verifier)
     return verifier
+
+
+# ── one site model: imports land on the ``static`` starter ───────────────────────
+#: The ``static`` starter files ``project_tools.copy_template("static")`` returns.
+STATIC_STARTER = {
+    "paw.template.json": (
+        '{"slug": "static", "name": "Static HTML", "target": "assets", '
+        '"backend": {"builtin": []}, "secrets": [], '
+        '"customization": {"tokens": "styles/tokens.css"}, "build": "none"}'
+    ),
+    "AGENTS.md": "# Static site\nEdit the html files.\n",
+    "index.html": "<html><body>starter</body></html>",
+    "styles/tokens.css": ":root {\n  color-scheme: light dark;\n  --background: #fff;\n}\n",
+}
+
+
+@pytest.fixture
+def _fake_static_starter(monkeypatch) -> list[str]:
+    """``project_tools.copy_template`` without the paw-sites CLI (records slugs)."""
+    from pocketpaw_ee.sites import project_tools
+
+    asked: list[str] = []
+
+    async def _copy(slug: str) -> dict[str, str]:
+        asked.append(slug)
+        return dict(STATIC_STARTER)
+
+    monkeypatch.setattr(project_tools, "copy_template", _copy)
+    return asked
+
+
+@pytest.fixture
+def public_assets_put(monkeypatch) -> list[str]:
+    """A public asset rail that takes PNG/JPEG only and hands back cdn.test URLs."""
+    from pocketpaw_ee.sites import public_assets
+
+    stored: list[str] = []
+
+    class _Store:
+        async def put(self, data, *, filename, workspace_id, pocket_id):
+            if not data.startswith((b"\x89PNG", b"\xff\xd8")):
+                raise public_assets.PublicAssetError("not media")
+            stored.append(filename)
+            return public_assets.PublicAsset(
+                key=f"k/{filename}",
+                url=f"https://cdn.test/{pocket_id}/{filename}",
+                mime="image/png",
+                size=len(data),
+                filename=filename,
+                sha256="0" * 64,
+            )
+
+    monkeypatch.setattr(public_assets, "public_asset_store", lambda: _Store())
+    return stored

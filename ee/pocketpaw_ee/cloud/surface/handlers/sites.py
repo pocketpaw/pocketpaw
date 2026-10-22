@@ -10,8 +10,8 @@
 #     create-time ``meta.engine`` is only a template hint (``CREATE_ENGINE_TEMPLATE``:
 #     html and ripple -> static, react -> vite-react-hono, svelte -> sveltekit).
 #   * IMPORT-CREATE (``brief_id``): ``_frontend_preamble`` builds from a captured
-#     DesignBrief and still routes on ``brief.engine``; an unreadable brief falls back
-#     to the create preamble.
+#     DesignBrief on the same one site model as create (a project from a template);
+#     an unreadable brief falls back to the create preamble.
 #   * CHAT (``mode == "chat"``): ``_chat_preamble``, questions only, no mutation.
 #   * REFINE (a pocket): ``_refine_preamble`` forks on the engine the site was BUILT
 #     with, read from the source pocket (``_refine_engine``): ripple edits its spec
@@ -1872,24 +1872,20 @@ def _render_copy(block: Any) -> str:
 
 
 def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
-    """Render the Frontend stage's build instructions FROM a structured brief.
+    """Render the import-create ("Rebuild with Paw") build instructions FROM a
+    structured brief.
 
-    The crew's baton (``DesignBrief``) in → the build preamble out. This is the
-    additive, brief-driven twin of ``_create_preamble``: instead of orienting the
-    agent off a raw user message, it walks the brief's ordered ``sitemap``,
-    injects the matching ``copy`` blocks and ``asset_manifest`` imagery, threads
-    the branding design-system tokens/voice, and ROUTES by ``brief.engine``
-    (``"svelte"`` → ``create_svelte_site``; ``"ripple"`` → ``create_landing_site``
-    / the pocket specialist). It preserves the same static-site (SSR) rules the
-    create/refine preambles enforce so a brief-driven build can't reintroduce a
-    static-site trap.
-
-    NOTE: NOT wired into ``build_preamble`` — the live create/refine dispatch is
-    byte-for-byte unchanged. Exercised by tests now; the orchestration slice
-    (SC-9) wires it in behind a flag (SC-11).
+    The crew's baton (``DesignBrief``) in, the build preamble out: the brief-driven
+    twin of ``_create_preamble``. It walks the brief's ordered ``sitemap``, injects
+    the matching ``copy`` blocks and ``asset_manifest`` media, and prints the
+    branding design-system tokens and voice. The build itself follows the one site
+    model exactly like create: a project started from a template through the
+    ``pocketpaw-site`` skill, ``static`` unless the brief is a live-data site (a
+    framework template plus the database recipe) or the source is an app.
+    ``brief.engine`` is a capture-time stamp and no longer routes anything. Draft
+    first, like create: publishing is the user's call.
     """
     route = meta.route_path or "/sites"
-    engine = brief.engine
 
     # --- Ordered sitemap → build-in-order instructions, with copy injected. ---
     section_lines: list[str] = []
@@ -1984,47 +1980,53 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
     if branding.voice:
         design_block += f'Match this brand voice throughout the copy: "{branding.voice}". '
 
-    # --- Route by engine. svelte → hand-written components; ripple → landing spec. ---
-    if engine == "svelte":
-        route_block = (
-            "BUILD ENGINE: svelte. Author this page as hand-written SvelteKit "
-            "components (the svelte track) — one component per section above, at "
-            "the premium design quality bar. There is NO rippleSpec and NO widget "
-            "catalog on this track: do not draft a rippleSpec, do not call the "
-            "pocket specialist. Assemble the components into the source map and "
-            "persist via `create_svelte_site` "
-            "(`mcp__pocketpaw_sites_manager__create_svelte_site`), which stamps "
-            'the source pocket `type="site"` + `pattern="landing"` + '
-            '`engine="svelte"`; then `mcp__pocketpaw_sites_manager__publish`. Do '
-            "NOT fall back to any ripple/landing create tool on this track."
+    # --- The one site model: a project from a template, whatever the brief's stamp. ---
+    dynamic = brief.pattern == "dynamic"
+    if dynamic:
+        pick = (
+            "This brief is a live-data site: it needs its own database, which `static` "
+            "cannot have. Start from a framework template by `when_to_use` and add the "
+            "database recipe (`list_site_recipes`, then `apply_site_recipe`)."
         )
     else:
-        route_block = (
-            "BUILD ENGINE: ripple. Compose this page as a conversion-ordered "
-            "ripple landing spec via the pocket specialist / `create_landing_site` "
-            "(`mcp__pocketpaw_sites_manager__create_landing_site`), which stamps "
-            'the source pocket `type="site"` + `pattern="landing"`; then '
-            "`mcp__pocketpaw_sites_manager__publish` with the returned pocket_id."
+        pick = (
+            "Start from `static` (hand-written HTML and CSS, no build step): this is a "
+            "page rebuilt from an existing site. Pick a framework template by "
+            "`when_to_use` only when the source is an app rather than a page (a game, "
+            "3D/WebGL or canvas, a tool, a dashboard) or needs npm packages, server "
+            "logic, accounts or a database. Before calling `start_site_from_template`, "
+            "state the template you chose and a one-line reason."
         )
-        if brief.pattern == "dynamic":
-            route_block += (
-                ' This brief is marked `pattern="dynamic"` (a live-data site): the '
-                "dynamic create path is `create_dynamic_site` "
-                "(`mcp__pocketpaw_sites_manager__create_dynamic_site`), but keep "
-                "the static landing build as the primary focus."
-            )
+    build_block = (
+        "BUILD via the `pocketpaw-site` skill. Invoke it by intent (no slash command); "
+        f"it carries the platform contract for every new site. {pick}\n"
+        "If the skill is unavailable: `mcp__pocketpaw_sites_manager__list_site_templates`, "
+        "then `mcp__pocketpaw_sites_manager__start_site_from_template` ONCE (it returns "
+        "the pocket_id and the repo's AGENTS.md), then follow the loop below. Never call "
+        "an old per-engine create tool: every new site is a project.\n"
+        + _STORED_DATA_RULE
+        + _PROJECT_LOOP
+        + "THEME FIRST: write the brief's design tokens into the template's tokens file "
+        "(`styles/tokens.css` on `static`; AGENTS.md names it on a framework) before any "
+        "section, then build every section from them.\n"
+        "On `static` there is no server route, so the lead form follows this contract:\n"
+        + native_form_contract()
+        + "CHANGES GO THROUGH THE FILE TOOLS. Once the site exists, any further change "
+        "is `patch_site_file` / `write_site_files` on the SAME pocket_id, never a second "
+        "`start_site_from_template`: that mints a SECOND site.\n"
+    )
+    template_attr = "" if dynamic else ' template="static"'
 
     return (
-        f'<surface kind="sites" route="{route}" engine="{engine}" mode="frontend" />\n'
+        f'<surface kind="sites" route="{route}" engine="project"{template_attr} '
+        'mode="frontend" />\n'
         "<sites-orientation>\n"
         "You are the FRONTEND stage of the site-authoring crew. Build a "
-        "publishable WEBSITE from the structured brief below — a real marketing "
-        "landing page that deploys as a standalone static page on the edge, NOT "
-        "an in-app pocket dashboard. It reads top to bottom as a conversion "
-        "funnel. Talk about it as a 'site' or 'page' — never a 'pocket'. The "
-        "pocket is only the source spec; it auto-publishes to a live URL. The "
-        "page renders STATICALLY (no JavaScript runs for the visitor), so every "
-        "section must work as plain HTML.\n"
+        "publishable WEBSITE from the structured brief below, a rebuild of an "
+        "existing site, NOT an in-app pocket dashboard. Every new site is a repo "
+        "started from a template. Talk about it as a 'site' or 'page', never a "
+        "'pocket'. You create it as a reviewable DRAFT the user previews in-app; "
+        "publishing is their call.\n"
         "</sites-orientation>\n"
         "<sites-brief>\n"
         f"GOAL: {brief.goal}\n"
@@ -2035,35 +2037,24 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
         + assets_block
         + (design_block + "\n" if design_block else "")
         + "</sites-brief>\n"
-        "<sites-procedure>\n" + route_block + "\n"
-        "PRESERVE the source page's existing sections and their order, and keep "
-        "the static-site (SSR) rules intact while you build:\n"
-        "1. Lead capture stays FLAT native `input`/`textarea`/"
-        '`button{type:"submit"}` with real field names (name, email, phone, '
-        "message) — NEVER the `form` or `newsletter` widget, which nests an "
-        "invalid `<form>` inside the site template's outer POST form and captures "
-        "zero leads.\n"
-        "2. `pricing-table` uses `tiers` (never `plans`/`columns`).\n"
-        "3. An FAQ is `heading` + `text` pairs — NEVER the `accordion` widget "
-        "(its panels only open with JS, so on a static site the answers never "
-        "expand).\n"
-        "4. Every CTA is an anchor `href` (or `tel:` / `mailto:`) — never an "
-        "`on_click` handler, which is a dead button with no client JS.\n"
-        "5. `hero` is the marketing Hero widget — never the dashboard `hero+grid` "
-        "(a page-header plus a KPI `stat` grid); no metric grid, no charts. This "
-        "is marketing, not analytics.\n"
-        "Any animation stays Tier-0 (CSS-only, static-safe) — `aurora`, "
-        "`marquee`, `border-beam`, `shimmer`, `text-effect`; never `reveal`, "
-        "`parallax`, or `spotlight` (they need client JS and hide content on a "
-        "static page).\n"
+        "<sites-procedure>\n" + build_block + "\n"
+        "PRESERVE the source page's existing sections and their order. Every CTA is a "
+        "real link (`href`, or `tel:` / `mailto:` / `https://wa.me/…`), and the page "
+        "reads complete before any script runs.\n"
         + _WHATSAPP_ORDERS_RULE
         + _FACTS_RULE
         + _BLOCKED_RULE
-        + "After it publishes, relay any publish error — never claim a phantom "
-        "publish — and SHOW the live `url` plus a link to /sites. Keep talking "
-        "'site' / 'page', never 'pocket'.\n"
+        + "DRAFT-FIRST: STOP at the draft and do NOT publish by default. "
+        + _VERIFY_RULE
+        + "Once it passed, tell the user the draft is ready, point them at the "
+        "Preview, and offer to take it live. "
+        + _CLOSING_RULE
+        + "Publish IN THIS SAME TURN only if the request already asked to go live: call "
+        "`mcp__pocketpaw_sites_manager__publish` with the pocket_id, relay any publish "
+        "error (never claim a phantom publish) and SHOW the live `url` plus a link to "
+        "/sites. Keep talking 'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>\n"
-        f"{_CONCIERGE_NOTE}"
+        f"{_CONCIERGE_NOTE}\n" + _design_skills_note("create") + _CRAFT_FLOOR
     )
 
 

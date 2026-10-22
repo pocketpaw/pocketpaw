@@ -7,7 +7,7 @@
 # engine hint it carries; refine (a pocket or a site id) keeps every sites tool,
 # forks ripple on the site's own engine and loads an exact per-engine skill
 # allowlist (the design skills, ``pocketpaw-site``, and only the legacy skill an old
-# engine needs); import-create keeps the earlier tools with its own allowlist.
+# engine needs); import-create is a create (the deny, its own exact allowlist).
 # Also pins the /sites authoring toolbelt allow-list and that every skill a profile
 # names resolves to a real skill.
 
@@ -80,11 +80,7 @@ _REFINE_SKILLS_BY_ENGINE = {
     },
 }
 
-_IMPORT_CREATE_SKILLS = _DESIGN_SKILLS | {
-    "pocketpaw-site",
-    "pocketpaw-create-svelte-site",
-    "webgl-components",
-}
+_IMPORT_CREATE_SKILLS = _DESIGN_SKILLS | {"pocketpaw-site", "webgl-components"}
 
 # Legacy skills that teach what sites-check bans (popular badges, eyebrows,
 # "plausible copy"), or that build the wrong thing on a site. No refine and no
@@ -208,15 +204,17 @@ def test_sites_create_keeps_the_project_tools():
         assert tid not in profile.deny_mcp_tool_ids, tid
 
 
-def test_sites_import_create_keeps_the_old_create_profile():
-    """Import-create (a captured brief) still routes on the brief's engine through the
-    old create tools, so it must not inherit the new-site deny. Its skills are an
-    exact allowlist: the brief routes to ``create_svelte_site`` (every captured brief
-    is svelte), and an unreadable brief falls back to the create preamble."""
+def test_sites_import_create_runs_the_one_site_model():
+    """Import-create (a captured brief) builds a NEW site, so it gets the create
+    profile: the old per-engine authoring tools denied, ripple off, and an exact skill
+    allowlist (``pocketpaw-site``, the create design skills, ``webgl-components``),
+    never a legacy create skill. An unreadable brief falls back to the create
+    preamble, which needs the same skills."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(brief_id="b1"))
     assert profile.ripple_mode == "off"
-    assert _own_deny(profile) == _SITES_BUILTIN_DENY
+    assert _own_deny(profile) == _SITES_LEGACY_AUTHORING_DENY | _SITES_BUILTIN_DENY
     assert profile.skill_names == _IMPORT_CREATE_SKILLS
+    assert "pocketpaw-create-svelte-site" not in profile.skill_names
     assert not (_BANNED_ON_REFINE & profile.skill_names)
     # The create fallback's skills, so a missing brief still has what it advertises.
     assert _SITES_CREATE_DESIGN_SKILLS | {"pocketpaw-site"} <= profile.skill_names
