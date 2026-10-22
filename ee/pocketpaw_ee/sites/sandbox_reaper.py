@@ -14,12 +14,16 @@
 #   * ``delete_job_leftovers`` — run before a create that carries a ``paw_job`` label.
 #     An arq re-run of the same job (a worker killed by a redeploy, then retried) finds
 #     the first attempt's box by that label and deletes it before making a second.
+#     Names are ``<prefix><ms>-<8 hex>`` (``unique_sandbox_name``) so concurrent
+#     replicas never share one, and the lookup also requires a matching ``paw_job``.
 #   * ``reap_orphan_build_sandboxes`` + ``reap_cron`` — the backstop, an arq cron on the
 #     site-build worker (``build_worker.WorkerSettings.cron_jobs``). Deletes any
 #     ``paw-build-*`` / ``paw-verify-*`` box older than the longest sites job budget
 #     plus a margin, in any state, including one stuck in ``creating`` that Daytona's
 #     own auto-stop never touches. Matches by NAME so boxes created before labels
-#     existed are reaped too. Never touches workspace VMs (``paw-ws-*``) or other names.
+#     existed are reaped too; the server query is narrowed by name prefix and
+#     ``created_at`` before the exact prefix and age re-check here. Never touches
+#     workspace VMs (``paw-ws-*``) or other names.
 #
 # Label values are bounded by ``label_value`` (<= 63 chars, Kubernetes charset) both
 # where they are stamped and where they are filtered or matched, so a long arq job id
@@ -33,7 +37,9 @@ import asyncio
 import hashlib
 import logging
 import re
-from datetime import UTC, datetime
+import time
+import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from arq import cron
@@ -92,13 +98,29 @@ def lane_labels(lane: str, labels: dict[str, str] | None) -> dict[str, str]:
     return {k: label_value(v) for k, v in merged.items()}
 
 
-async def _find_and_delete(client: Any, name: str) -> str | None:
+def unique_sandbox_name(prefix: str) -> str:
+    """``<prefix><ms>-<8 hex>``: the millisecond keeps names sortable by age in the
+    console, the random tail keeps two replicas creating in the same millisecond from
+    sharing a name (and so from deleting each other's box on a failed create)."""
+    return f"{prefix}{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+
+
+async def _find_and_delete(
+    client: Any, name: str, labels: dict[str, str] | None = None
+) -> str | None:
     finder = getattr(client, "find_sandbox_by_name", None)
     if finder is None:
         return None
+    job = (labels or {}).get(JOB_LABEL)
     try:
         info = await finder(name)
         if info is None:
+            return None
+        if job and (getattr(info, "labels", None) or {}).get(JOB_LABEL) != job:
+            # Same name, different job: not the box our create registered.
+            logger.warning(
+                "sandbox_reaper: box %s (%s) belongs to another job; kept", name, info.id
+            )
             return None
         await client.delete_sandbox(info.id)
     except Exception as exc:  # noqa: BLE001 — cleanup never masks the build's own error
@@ -108,15 +130,19 @@ async def _find_and_delete(client: Any, name: str) -> str | None:
     return str(info.id)
 
 
-async def teardown_unreturned(client: Any, name: str) -> str | None:
+async def teardown_unreturned(
+    client: Any, name: str, labels: dict[str, str] | None = None
+) -> str | None:
     """Delete the box named ``name`` that a failed or cancelled create left behind.
 
     Returns the deleted id, or None when there was nothing to delete. Runs the lookup
     and delete in a shielded task: called from an ``except`` that is handling a
     ``CancelledError``, so a second cancel must not abandon the delete half-way. If it
     does arrive, the delete carries on in the background and the cancel propagates.
+    ``labels`` are the ones the create sent; when they carry a ``paw_job``, a box with
+    that name is only deleted if its ``paw_job`` matches.
     """
-    task = asyncio.ensure_future(_find_and_delete(client, name))
+    task = asyncio.ensure_future(_find_and_delete(client, name, labels))
     _background.add(task)
     task.add_done_callback(_background.discard)
     return await asyncio.shield(task)
@@ -180,6 +206,19 @@ def _parse_created(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+async def _candidates(client: Any, created_before: datetime) -> list[Any]:
+    """Boxes that might be orphans. Asks the server for each reapable name prefix
+    created before the cutoff when the client supports it (``DaytonaClient`` does),
+    else lists everything; the caller re-checks prefix and age either way."""
+    by_prefix = getattr(client, "list_sandboxes_by_prefix", None)
+    if by_prefix is None:
+        return list(await client.list_sandboxes())
+    found: list[Any] = []
+    for prefix in REAPABLE_PREFIXES:
+        found.extend(await by_prefix(prefix, created_before=created_before))
+    return found
+
+
 async def reap_orphan_build_sandboxes(
     client: Any,
     *,
@@ -194,7 +233,7 @@ async def reap_orphan_build_sandboxes(
     now = now or datetime.now(UTC)
     max_age = default_max_age_seconds() if max_age_seconds is None else max_age_seconds
     deleted: list[str] = []
-    for info in await client.list_sandboxes():
+    for info in await _candidates(client, now - timedelta(seconds=max_age)):
         name = str(getattr(info, "name", "") or "")
         if not name.startswith(REAPABLE_PREFIXES):
             continue
@@ -262,4 +301,5 @@ __all__ = [
     "reap_cron",
     "reap_orphan_build_sandboxes",
     "teardown_unreturned",
+    "unique_sandbox_name",
 ]

@@ -27,6 +27,10 @@ class LabelledLedger(LedgerDaytona):
                 boxes.append(replace(info, labels=dict(have)))
         return boxes
 
+    async def find_sandbox_by_name(self, name: str) -> Any:
+        info = await super().find_sandbox_by_name(name)
+        return None if info is None else replace(info, labels=dict(self.labels.get(info.id, {})))
+
 
 class TestJobLeftovers:
     async def test_a_rerun_deletes_the_box_its_first_attempt_left(self) -> None:
@@ -240,3 +244,91 @@ class TestLabelBound:
         assert first.id in client.deleted
         sent = client.create_kwargs[-1]["labels"]
         assert sent["paw_job"] == sr.label_value(LONG_JOB)
+
+
+class TestUniqueNames:
+    async def test_two_creates_in_the_same_millisecond_get_distinct_names(
+        self, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.sites import browser_check as bc
+
+        from tests.ee.sites.test_build_sandbox_teardown import _verify
+
+        monkeypatch.setattr(sr.time, "time", lambda: 1_700_000_000.123)
+        client = LedgerDaytona(memory_cap_gib=0)  # records the create, then refuses
+        for _ in range(2):
+            with pytest.raises(Exception):
+                await _build(client)
+            with pytest.raises(Exception):
+                await _verify(client)
+        names = [kw["name"] for kw in client.create_kwargs]
+        assert len(set(names)) == 4, names
+        assert all(n.startswith(sr.REAPABLE_PREFIXES) for n in names)
+        assert all(re.fullmatch(r"paw-(build|verify)-1700000000123-[0-9a-f]{8}", n) for n in names)
+        assert bc.VERIFY_LANE == "site-verify"
+
+    async def test_a_failed_create_never_deletes_another_jobs_box(self) -> None:
+        """Even if two creates did share a name, the by-name teardown only deletes a box
+        stamped with its own ``paw_job``."""
+        client = LabelledLedger(memory_cap_gib=4)
+        theirs = client.add_box("paw-build-shared")
+        client.labels[theirs.id] = {"paw_lane": "site-build", "paw_job": "j-theirs"}
+
+        # The org is full (their box holds it all), so our create refuses after the
+        # teardown path has looked the shared name up.
+        with pytest.raises(Exception):
+            await _build(client, sandbox_name="paw-build-shared", labels={"paw_job": "j-mine"})
+        assert theirs.id in client.boxes, "a failed create deleted another job's live box"
+
+    async def test_a_matching_job_label_is_still_torn_down(self) -> None:
+        client = LabelledLedger()
+        client.fail_after_register = RuntimeError("create wait timed out")
+        with pytest.raises(RuntimeError):
+            await _build(client, sandbox_name="paw-build-mine", labels={"paw_job": "j-mine"})
+        assert client.boxes == {}
+
+
+class TestReaperQuery:
+    async def test_the_reaper_asks_the_server_per_prefix_with_an_age_cutoff(self) -> None:
+        now = datetime.now(UTC)
+        old = now - timedelta(days=1)
+        ledger = LedgerDaytona(memory_cap_gib=100)
+        build = ledger.add_box("paw-build-1", created_at=old)
+        ledger.add_box("PAW-BUILD-2", created_at=old)  # the server prefix is case-insensitive
+        calls: list[tuple[str, datetime | None]] = []
+
+        async def by_prefix(prefix: str, *, created_before: datetime | None = None) -> list[Any]:
+            calls.append((prefix, created_before))
+            return [b for b in ledger.boxes.values() if b.name.lower().startswith(prefix)]
+
+        async def everything() -> list[Any]:
+            raise AssertionError("the reaper listed the whole org")
+
+        ledger.list_sandboxes_by_prefix = by_prefix  # type: ignore[attr-defined]
+        ledger.list_sandboxes = everything  # type: ignore[method-assign]
+        deleted = await sr.reap_orphan_build_sandboxes(ledger, now=now, max_age_seconds=60)
+
+        assert deleted == [build.id], "the exact prefix check still applies"
+        assert [p for p, _ in calls] == list(sr.REAPABLE_PREFIXES)
+        assert all(c == now - timedelta(seconds=60) for _, c in calls)
+
+    async def test_daytona_client_builds_the_narrowed_query(self, monkeypatch) -> None:
+        from pocketpaw_ee.cloud.daytona import client as client_mod
+
+        queries: list[Any] = []
+
+        class _Sdk:
+            async def list(self, query: Any = None):
+                queries.append(query)
+                return
+                yield
+
+        c = client_mod.DaytonaClient.__new__(client_mod.DaytonaClient)
+
+        async def _ensure() -> Any:
+            return _Sdk()
+
+        monkeypatch.setattr(c, "_ensure_daytona", _ensure)
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
+        assert await c.list_sandboxes_by_prefix("paw-build-", created_before=cutoff) == []
+        assert (queries[0].name, queries[0].created_at_before) == ("paw-build-", cutoff)
