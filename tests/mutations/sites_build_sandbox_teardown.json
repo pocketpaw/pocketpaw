@@ -2,7 +2,7 @@
   {
     "label": "run_build drops the by-name teardown: a create that timed out or was cancelled leaves a 4 GiB box holding the org cap",
     "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
-    "find": "            await teardown_unreturned(client, name)\n            raise",
+    "find": "            await teardown_unreturned(client, name, create_kwargs[\"labels\"])\n            raise",
     "replace": "            raise",
     "tests": [
       "tests/ee/sites/test_build_sandbox_teardown.py::TestCreateTimeoutStillTearsDown::test_run_build_deletes_the_box_a_timed_out_create_registered",
@@ -12,7 +12,7 @@
   {
     "label": "run_standalone drops the by-name teardown: a failed or cancelled verify create leaks a 2 GiB box",
     "file": "ee/pocketpaw_ee/sites/browser_check.py",
-    "find": "            await teardown_unreturned(client, name)\n            raise",
+    "find": "            await teardown_unreturned(client, name, create_kwargs[\"labels\"])\n            raise",
     "replace": "            raise",
     "tests": [
       "tests/ee/sites/test_build_sandbox_teardown.py::TestCreateTimeoutStillTearsDown::test_run_standalone_deletes_the_box_a_timed_out_create_registered",
@@ -117,6 +117,33 @@
     "replace": "    pass",
     "tests": [
       "tests/ee/sites/test_sandbox_reaper.py::TestLabelBound"
+    ]
+  },
+  {
+    "label": "sandbox names lose their random tail, so two replicas creating in the same millisecond share a name and a failed create deletes the other job's box",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "    return f\"{prefix}{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}\"",
+    "replace": "    return f\"{prefix}{int(time.time() * 1000)}\"",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestUniqueNames"
+    ]
+  },
+  {
+    "label": "the by-name teardown ignores paw_job, so a failed create deletes a live box another job owns under the same name",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "        if job and (getattr(info, \"labels\", None) or {}).get(JOB_LABEL) != job:\n            # Same name",
+    "replace": "        if False:\n            # Same name",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestUniqueNames"
+    ]
+  },
+  {
+    "label": "the reaper lists the whole org every tick instead of asking for its own prefixes",
+    "file": "ee/pocketpaw_ee/sites/sandbox_reaper.py",
+    "find": "    by_prefix = getattr(client, \"list_sandboxes_by_prefix\", None)",
+    "replace": "    by_prefix = None",
+    "tests": [
+      "tests/ee/sites/test_sandbox_reaper.py::TestReaperQuery"
     ]
   },
   {

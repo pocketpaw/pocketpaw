@@ -1,5 +1,5 @@
-# ee/pocketpaw_ee/sites/daytona_runner.py â€” drives one ephemeral Daytona build
-# round-trip: create â†’ upload â†’ build â†’ read the sentinel â†’ extract â†’ delete.
+# ee/pocketpaw_ee/sites/daytona_runner.py -- drives one ephemeral Daytona build
+# round-trip: create -> upload -> build -> read the sentinel -> extract -> delete.
 #
 # The decision procedure (what happened, who is to blame) lives in ``daytona_build.py``
 # as pure functions; this module is the I/O half that feeds it, testable with a fake
@@ -31,7 +31,7 @@
 #      Daytona's auto-delete on stop (``auto_delete_interval=0``) and the reaper cron.
 #      Not an unconditional immediate self-delete: that would also destroy the log.
 #
-# INVARIANT â€” THIS LANE NEVER SNAPSHOTS THE SANDBOX. A svelte project carries
+# INVARIANT -- THIS LANE NEVER SNAPSHOTS THE SANDBOX. A svelte project carries
 # ``__CAPTURE_SIGNED_KEY__`` substituted into ``src/routes/api/submit/+server.ts``, a
 # real per-site secret, and a canary build confirmed it lands in the uploaded source
 # and the compiled server route. Accepting that rests entirely on the key living only
@@ -40,7 +40,7 @@
 # different data-residency question). Caching ``node_modules`` in a snapshot is the
 # obvious optimisation and the thing that would undo this: re-make the security
 # decision first. The obligation (strip or inject the key at deploy) and the svelte
-# artifact's missing server output are recorded in Â§9a and Â§8 item 14 of
+# artifact's missing server output are recorded in section 9a and section 8 item 14 of
 # ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace.
 from __future__ import annotations
 
@@ -65,6 +65,7 @@ from pocketpaw_ee.sites.sandbox_reaper import (
     delete_job_leftovers,
     lane_labels,
     teardown_unreturned,
+    unique_sandbox_name,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -265,7 +266,7 @@ async def run_build(
         engine, SANDBOX_PROJECT_DIR, SANDBOX_ARTIFACT_PATH, output_rel=artifact_rel
     )
 
-    name = sandbox_name or f"paw-build-{int(time.time() * 1000)}"
+    name = sandbox_name or unique_sandbox_name("paw-build-")
     idle_minutes = _lifecycle_minutes(timeout_seconds)
 
     # ── The clock starts here, before anything exists. ──────────────────────
@@ -299,7 +300,7 @@ async def run_build(
             # The SDK registers the box BEFORE it waits for ``started``, so a create that
             # timed out or was cancelled can leave a box we hold no id for. Find it by
             # its unique name and delete it (shielded), then re-raise the original.
-            await teardown_unreturned(client, name)
+            await teardown_unreturned(client, name, create_kwargs["labels"])
             raise
         sandbox_id = info.id
         await client.wait_for_sandbox(sandbox_id, target_state="started")

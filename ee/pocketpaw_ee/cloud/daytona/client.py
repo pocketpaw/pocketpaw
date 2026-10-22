@@ -19,6 +19,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from daytona import (
@@ -259,6 +260,16 @@ class DaytonaClient:
         async for sb in daytona.list(query):
             results.append(await self._parse_sandbox(sb))
         return results
+
+    async def list_sandboxes_by_prefix(
+        self, prefix: str, *, created_before: datetime | None = None
+    ) -> list[SandboxInfo]:
+        """Sandboxes whose name starts with ``prefix`` (server-side, case-insensitive),
+        optionally only those created before ``created_before``. Callers re-check the
+        exact prefix."""
+        daytona = await self._ensure_daytona()
+        query = ListSandboxesQuery(name=prefix, created_at_before=created_before)
+        return [await self._parse_sandbox(sb) async for sb in daytona.list(query)]
 
     async def find_sandbox_by_name(self, name: str) -> SandboxInfo | None:
         """Find a sandbox by its exact name (the server filters by name prefix)."""

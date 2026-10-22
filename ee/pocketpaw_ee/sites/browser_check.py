@@ -36,7 +36,6 @@ import logging
 import math
 import os
 import shlex
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -45,6 +44,7 @@ from pocketpaw_ee.sites.sandbox_reaper import (
     delete_job_leftovers,
     lane_labels,
     teardown_unreturned,
+    unique_sandbox_name,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -303,7 +303,7 @@ async def run_standalone(
                 "Daytona is not configured (DAYTONA_API_URL / DAYTONA_API_KEY unset)"
             )
 
-    name = f"paw-verify-{int(time.time() * 1000)}"
+    name = unique_sandbox_name("paw-verify-")
     create_kwargs: dict[str, Any] = {
         "name": name,
         "cpu": 1,
@@ -325,7 +325,7 @@ async def run_standalone(
         except BaseException:
             # A create that timed out or was cancelled may have registered the box
             # already; delete it by name (shielded) before re-raising.
-            await teardown_unreturned(client, name)
+            await teardown_unreturned(client, name, create_kwargs["labels"])
             raise
         sandbox_id = info.id
         await client.wait_for_sandbox(sandbox_id, target_state="started")
