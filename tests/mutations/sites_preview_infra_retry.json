@@ -1,0 +1,29 @@
+[
+  {
+    "label": "preview lane: an infrastructure failure (capacity, no sandbox) is replayed as failed for the hour arq keeps the result, instead of queuing the render again",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return reason.split(\":\", 1)[0] == RUNG_SANDBOX_UNAVAILABLE",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: every completed failure is retryable, so a site whose own code fails to build is rebuilt on every poll",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if not isinstance(result, dict) or result.get(\"status\") != \"failed\":\n        return False\n    reason = str(result.get(\"reason\") or \"\")",
+    "replace": "    if not isinstance(result, dict) or result.get(\"status\") != \"failed\":\n        return False\n    return True\n    reason = str(result.get(\"reason\") or \"\")",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: a job that raised before reaching a sandbox stays failed instead of being queued again",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if not info.success:\n        return True\n    result = info.result",
+    "replace": "    if not info.success:\n        return isinstance(info.result, asyncio.CancelledError)\n    result = info.result",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  }
+]
