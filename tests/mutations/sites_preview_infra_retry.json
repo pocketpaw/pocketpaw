@@ -1,0 +1,56 @@
+[
+  {
+    "label": "preview lane: an infrastructure failure (capacity, no sandbox) is replayed as failed for the hour arq keeps the result, instead of queuing the render again",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if reason.split(\":\", 1)[0] == RUNG_SANDBOX_UNAVAILABLE:\n        return \"sandbox_unavailable\"\n    return None",
+    "replace": "    return None",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: every completed failure is retryable, so a site whose own code fails to build is rebuilt on every poll",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if reason.split(\":\", 1)[0] == RUNG_SANDBOX_UNAVAILABLE:\n        return \"sandbox_unavailable\"\n    return None",
+    "replace": "    return \"sandbox_unavailable\"",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: a job that raised before reaching a sandbox stays failed instead of being queued again",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        return \"aborted\" if isinstance(info.result, asyncio.CancelledError) else \"raised\"",
+    "replace": "        return \"aborted\" if isinstance(info.result, asyncio.CancelledError) else None",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: the per-id retry budget is never spent, so a deterministic raise or a broken Daytona config re-enqueues after every job forever",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return count <= RETRY_LIMITS[kind]",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: the retry counter never expires, so a render that failed once stays failed for good",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if count == 1:\n        await pool.expire(key, RETRY_WINDOW_SECONDS)",
+    "replace": "    if count == 1:\n        pass",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: a pool without a counter retries budgeted failures without any bound",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        if kind != \"aborted\" and not await _spend_retry(pool, job_id, kind):",
+    "replace": "        if kind != \"aborted\" and hasattr(pool, \"incr\") and not await _spend_retry(pool, job_id, kind):",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  }
+]

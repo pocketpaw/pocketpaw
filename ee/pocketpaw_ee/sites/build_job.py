@@ -54,7 +54,11 @@
 # flight. A build that already FINISHED and left the store empty is reported as failed,
 # with its reason — not as a build that is still coming. Re-enqueueing there instead
 # would put a polling client in a rebuild loop, one sandbox per build duration, on inputs
-# that just failed.
+# that just failed. The exception is a result the site did not cause: an aborted job, or
+# an infrastructure failure (``sandbox_unavailable:*``: capacity stayed full, no sandbox,
+# the job raised). That result is freed and the render queued again, a bounded number of
+# times per render per hour (:func:`_clear_retryable_result`); otherwise a full org would
+# pin every render that hit it to "capacity full" for the hour, long after a slot freed.
 #
 # WHICH ENGINES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it is
 # react-only today. The reason is the artifact, not the queue: an adapter-cloudflare build
@@ -200,7 +204,7 @@
 #   * A newly accepted preview / html-verify job ABORTS the pocket's previous one
 #     (:func:`_supersede_previous_job`, a per-pocket Redis pointer; the worker sets
 #     ``allow_abort_jobs``). A render whose job was aborted is re-queued, not read as
-#     failed, when its source comes back (:func:`_clear_aborted_result`).
+#     failed, when its source comes back (:func:`_clear_retryable_result`).
 #   * Each job logs its queue wait and its build / browser elapsed ms
 #     (``sites.verify: layer=…``).
 #   * Its result gains ``layers`` ({build, browser}), ``diagnostics`` ({errors, warnings})
@@ -1699,13 +1703,70 @@ async def preview_capacity_outcome(
     return {"status": "failed", "reason": reason, **report}
 
 
-async def _clear_aborted_result(pool: Any, job_id: str) -> bool:
-    """Free a job id whose last run was ABORTED (superseded), so the same render can be
-    queued again — an undo back to that source must build, not read "failed" for the
-    hour arq keeps the result. ``True`` when a result was cleared. Never raises."""
+#: How many times one job id's stored result may be cleared and re-queued in a window,
+#: per kind (:func:`_retry_kind`). A job that RAISED may be a deterministic fault (a code
+#: bug, a bad verify image, a Daytona 4xx, an arq timeout the site's build causes), so it
+#: gets two more tries. A settled ``sandbox_unavailable:*`` gets three: under a full org
+#: each new job already waits through the capacity budget, and the cap stops a
+#: permanently broken Daytona config from looping. Spent → the failure is reported.
+RETRY_LIMITS: dict[str, int] = {"raised": 2, "sandbox_unavailable": 3}
+#: The window the per-id retry counter lives for: arq's result lifetime, so a render
+#: that is still failing an hour later gets a fresh budget.
+RETRY_WINDOW_SECONDS = 3600
+_RETRY_COUNTER_PREFIX = "sites:preview-retry:"
+
+
+def _retry_kind(info: Any) -> str | None:
+    """Which retry rule a stored result falls under, or ``None`` for none (sticky).
+
+      * ``"aborted"``: superseded by a newer edit (a ``CancelledError``). The source came
+        back to this render (an undo), so it is wanted after all. Not budgeted: an abort
+        only happens when another job took the pocket.
+      * ``"raised"``: the job raised anything else. Budgeted (:data:`RETRY_LIMITS`).
+      * ``"sandbox_unavailable"``: it settled ``failed`` under that rung (capacity stayed
+        full, no sandbox, generator missing). The site never ran. Budgeted.
+
+    Anything else, above all a failure of the site's own code (``build_failed``,
+    ``scaffold_failed``, …), is sticky: rebuilding identical inputs would fail again."""
+    if not info.success:
+        return "aborted" if isinstance(info.result, asyncio.CancelledError) else "raised"
+    result = info.result
+    if not isinstance(result, dict) or result.get("status") != "failed":
+        return None
+    reason = str(result.get("reason") or "")
+    if reason.split(":", 1)[0] == RUNG_SANDBOX_UNAVAILABLE:
+        return "sandbox_unavailable"
+    return None
+
+
+async def _spend_retry(pool: Any, job_id: str, kind: str) -> bool:
+    """Count one clear of ``job_id`` (Redis INCR, TTL :data:`RETRY_WINDOW_SECONDS` set on
+    the first) and say whether it is within :data:`RETRY_LIMITS`. Raises when the pool
+    has no counter, which the caller reads as "do not retry"."""
+    key = _RETRY_COUNTER_PREFIX + job_id
+    count = int(await pool.incr(key))
+    if count == 1:
+        await pool.expire(key, RETRY_WINDOW_SECONDS)
+    return count <= RETRY_LIMITS[kind]
+
+
+async def _clear_retryable_result(pool: Any, job_id: str) -> bool:
+    """Free a job id whose stored result is retryable (:func:`_retry_kind`), so the same
+    render can be queued again instead of reading "failed" for the hour arq keeps the
+    result. ``True`` when a result was cleared. Never raises.
+
+    No loop follows from this. Only a COMPLETE job leaves a result, so a render that is
+    queued, deferred for capacity or running is never cleared, and arq refuses a second
+    job with the same id: every poll while the new job waits attaches to it. And the
+    budgeted kinds are capped per id per window (:func:`_spend_retry`); without a Redis
+    counter they are not retried at all. Past the cap the failure is reported as is."""
     try:
         info = await Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME).result_info()
-        if info is None or info.success or not isinstance(info.result, asyncio.CancelledError):
+        kind = None if info is None else _retry_kind(info)
+        if kind is None:
+            return False
+        if kind != "aborted" and not await _spend_retry(pool, job_id, kind):
+            logger.warning("sites.preview: %s retry budget spent for %s", kind, job_id)
             return False
         await pool.delete(result_key_prefix + job_id)
     except Exception:  # noqa: BLE001
@@ -1744,7 +1805,9 @@ async def enqueue_html_verify(
         )
 
     job = await _enqueue()
-    if job is None and await _clear_aborted_result(pool, job_id):
+    # Same retry rule as the preview lane: an aborted or infrastructure-failed result is
+    # freed and queued again; anything else attaches to the job that owns the id.
+    if job is None and await _clear_retryable_result(pool, job_id):
         job = await _enqueue()
     if job is None:
         return PreviewBuildEnqueue(job_id=job_id, status="building")
@@ -1826,9 +1889,10 @@ async def enqueue_preview_build(
         )
 
     job = await _enqueue()
-    # A render whose last job was aborted as superseded is queued again, not reported
-    # as failed: the source came back to it (an undo), so it is wanted after all.
-    if job is None and await _clear_aborted_result(pool, job_id):
+    # A render whose last job was aborted as superseded, or failed for infrastructure
+    # (``sandbox_unavailable:*``), is queued again rather than reported failed: the site
+    # was never at fault. A failure of the site's own code stays sticky below.
+    if job is None and await _clear_retryable_result(pool, job_id):
         job = await _enqueue()
     if job is None:
         status, reason = await _preview_job_outcome(pool, job_id)
