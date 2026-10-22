@@ -8,10 +8,13 @@
 # one), nothing about the site was wrong: the stored failure is freed and a new job queued.
 # A failure of the site's own code (build_failed, scaffold_failed, …) stays sticky, since
 # rebuilding identical inputs would only fail again. A poll while the new job is in
-# flight attaches to it rather than opening another.
+# flight attaches to it rather than opening another. Each id may be re-queued only a
+# bounded number of times per hour (a raised job twice, sandbox_unavailable three
+# times), so a deterministic fault ends in ``failed`` instead of an endless rebuild.
 #
 # The pool and ``Job`` stand-ins model the one arq behaviour that matters here: an id is
-# refused while it has a live job OR a stored result, and deleting the result key frees it.
+# refused while it has a live job OR a stored result, and deleting the result key frees it,
+# plus INCR / EXPIRE for the per-id retry counter.
 from __future__ import annotations
 
 from typing import Any
@@ -28,14 +31,16 @@ class _Info:
         self.result = result
 
 
-class _ArqLike:
-    """Job ids with a live job (``live``: id → JobStatus) or a stored result."""
+class _NoCounter:
+    """Job ids with a live job (``live``: id → JobStatus) or a stored result. No INCR."""
 
     def __init__(self) -> None:
         self.live: dict[str, JobStatus] = {}
         self.results: dict[str, _Info] = {}
         self.enqueued: list[str] = []
         self.deleted: list[str] = []
+        self.counters: dict[str, int] = {}
+        self.ttls: dict[str, int] = {}
 
     async def enqueue_job(self, _fn: str, *_a: Any, _job_id: str, **_k: Any) -> Any:
         if _job_id in self.live or _job_id in self.results:
@@ -53,6 +58,23 @@ class _ArqLike:
     def finish(self, job_id: str, info: _Info) -> None:
         self.live.pop(job_id, None)
         self.results[job_id] = info
+
+
+class _ArqLike(_NoCounter):
+    """The same, with the INCR / EXPIRE the per-id retry counter needs."""
+
+    async def incr(self, key: str) -> int:
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.ttls[key] = seconds
+        return True
+
+    def lapse_counters(self) -> None:
+        """Every counter's TTL ran out."""
+        self.counters.clear()
+        self.ttls.clear()
 
 
 @pytest.fixture
@@ -182,3 +204,101 @@ async def test_html_verify_keeps_a_site_failure_too(arq_like: _ArqLike, failure:
 
     assert arq_like.enqueued == []
     assert arq_like.deleted == []
+
+
+def _raised(exc: BaseException) -> _Info:
+    return _Info(success=False, result=exc)
+
+
+BUDGETED = {
+    # A deterministic raise (a code bug, a bad verify image, a Daytona 4xx).
+    "deterministic_raise": (_raised(ValueError("bad image")), bj.RETRY_LIMITS["raised"]),
+    # arq's own timeout: a build the site makes overrun.
+    "arq_timeout": (_raised(TimeoutError()), bj.RETRY_LIMITS["raised"]),
+    "capacity": (INFRA_FAILURES["capacity"], bj.RETRY_LIMITS["sandbox_unavailable"]),
+    "no_sandbox": (INFRA_FAILURES["no_sandbox"], bj.RETRY_LIMITS["sandbox_unavailable"]),
+}
+
+
+async def _fail_every_run(pool: _ArqLike, job_id: str, info: _Info, runs: int) -> list[Any]:
+    """Each job this render gets ends with ``info``; return every enqueue's answer."""
+    pool.finish(job_id, info)
+    answers = []
+    for _ in range(runs):
+        answers.append(await _preview(pool))
+        if job_id in pool.live:
+            pool.finish(job_id, info)
+    return answers
+
+
+@pytest.mark.parametrize("case", list(BUDGETED))
+async def test_a_failure_that_keeps_recurring_is_retried_a_bounded_number_of_times(
+    arq_like: _ArqLike, case: str
+) -> None:
+    """Without the bound, every poll after the job ends would clear and re-enqueue: one
+    job (often one sandbox) per job length, forever, and the client would never see
+    ``failed``."""
+    info, limit = BUDGETED[case]
+    job_id = bj._preview_job_id("p1", "h1")
+
+    answers = await _fail_every_run(arq_like, job_id, info, runs=limit + 3)
+
+    assert len(arq_like.enqueued) == limit
+    assert [a.status for a in answers[:limit]] == ["queued"] * limit
+    assert {a.status for a in answers[limit:]} == {"failed"}
+    assert answers[-1].reason.startswith(bj.RUNG_SANDBOX_UNAVAILABLE)
+    key = bj._RETRY_COUNTER_PREFIX + job_id
+    assert arq_like.ttls[key] == bj.RETRY_WINDOW_SECONDS
+
+
+async def test_the_budget_comes_back_when_the_counter_expires(arq_like: _ArqLike) -> None:
+    job_id = bj._preview_job_id("p1", "h1")
+    info = INFRA_FAILURES["capacity"]
+    limit = bj.RETRY_LIMITS["sandbox_unavailable"]
+    await _fail_every_run(arq_like, job_id, info, runs=limit + 1)
+    assert (await _preview(arq_like)).status == "failed"
+
+    arq_like.lapse_counters()
+
+    assert (await _preview(arq_like)).status == "queued"
+    assert len(arq_like.enqueued) == limit + 1
+
+
+@pytest.mark.parametrize("failure", ["job_raised", "capacity"])
+async def test_without_a_counter_a_budgeted_failure_is_not_retried(
+    monkeypatch, failure: str
+) -> None:
+    pool = _NoCounter()
+    job_id = bj._preview_job_id("p1", "h1")
+    pool.finish(job_id, INFRA_FAILURES[failure])
+
+    class _Job:
+        def __init__(self, job_id: str, _pool: Any, _queue_name: str | None = None) -> None:
+            self.job_id = job_id
+
+        async def status(self) -> JobStatus:
+            return JobStatus.complete
+
+        async def result_info(self) -> Any:
+            return pool.results.get(self.job_id)
+
+    monkeypatch.setattr(bj, "Job", _Job)
+
+    out = await _preview(pool)
+
+    assert out.status == "failed"
+    assert pool.enqueued == []
+
+
+async def test_an_aborted_render_is_not_budgeted(arq_like: _ArqLike) -> None:
+    """An abort only happens when another job took the pocket, so undoing back to this
+    render keeps working however often it happens."""
+    import asyncio
+
+    job_id = bj._preview_job_id("p1", "h1")
+    answers = await _fail_every_run(
+        arq_like, job_id, _raised(asyncio.CancelledError()), runs=bj.RETRY_LIMITS["raised"] + 3
+    )
+
+    assert {a.status for a in answers} == {"queued"}
+    assert arq_like.counters == {}

@@ -56,9 +56,9 @@
 # would put a polling client in a rebuild loop, one sandbox per build duration, on inputs
 # that just failed. The exception is a result the site did not cause: an aborted job, or
 # an infrastructure failure (``sandbox_unavailable:*``: capacity stayed full, no sandbox,
-# the job raised). That result is freed and the render queued again
-# (:func:`_clear_retryable_result`); otherwise a full org would pin every render that hit
-# it to "capacity full" for the hour, long after a slot came free.
+# the job raised). That result is freed and the render queued again, a bounded number of
+# times per render per hour (:func:`_clear_retryable_result`); otherwise a full org would
+# pin every render that hit it to "capacity full" for the hour, long after a slot freed.
 #
 # WHICH ENGINES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it is
 # react-only today. The reason is the artifact, not the queue: an adapter-cloudflare build
@@ -1703,42 +1703,70 @@ async def preview_capacity_outcome(
     return {"status": "failed", "reason": reason, **report}
 
 
-def _result_is_retryable(info: Any) -> bool:
-    """Is this stored result one the SAME render should be queued again over?
+#: How many times one job id's stored result may be cleared and re-queued in a window,
+#: per kind (:func:`_retry_kind`). A job that RAISED may be a deterministic fault (a code
+#: bug, a bad verify image, a Daytona 4xx, an arq timeout the site's build causes), so it
+#: gets two more tries. A settled ``sandbox_unavailable:*`` gets three: under a full org
+#: each new job already waits through the capacity budget, and the cap stops a
+#: permanently broken Daytona config from looping. Spent → the failure is reported.
+RETRY_LIMITS: dict[str, int] = {"raised": 2, "sandbox_unavailable": 3}
+#: The window the per-id retry counter lives for: arq's result lifetime, so a render
+#: that is still failing an hour later gets a fresh budget.
+RETRY_WINDOW_SECONDS = 3600
+_RETRY_COUNTER_PREFIX = "sites:preview-retry:"
 
-    Two kinds, neither of them the site's fault:
 
-      * ABORTED (superseded): the source came back to this render (an undo), so it is
-        wanted after all.
-      * INFRASTRUCTURE: the job raised (it never reached a sandbox), or it settled
-        ``sandbox_unavailable:*`` (org capacity stayed full for the whole retry budget,
-        no sandbox could be created). The site never ran, so a later attempt can work.
+def _retry_kind(info: Any) -> str | None:
+    """Which retry rule a stored result falls under, or ``None`` for none (sticky).
+
+      * ``"aborted"``: superseded by a newer edit (a ``CancelledError``). The source came
+        back to this render (an undo), so it is wanted after all. Not budgeted: an abort
+        only happens when another job took the pocket.
+      * ``"raised"``: the job raised anything else. Budgeted (:data:`RETRY_LIMITS`).
+      * ``"sandbox_unavailable"``: it settled ``failed`` under that rung (capacity stayed
+        full, no sandbox, generator missing). The site never ran. Budgeted.
 
     Anything else, above all a failure of the site's own code (``build_failed``,
-    ``scaffold_failed``, …), is NOT retryable: rebuilding identical inputs would fail
-    again, so it is reported rather than rebuilt per poll."""
+    ``scaffold_failed``, …), is sticky: rebuilding identical inputs would fail again."""
     if not info.success:
-        return True
+        return "aborted" if isinstance(info.result, asyncio.CancelledError) else "raised"
     result = info.result
     if not isinstance(result, dict) or result.get("status") != "failed":
-        return False
+        return None
     reason = str(result.get("reason") or "")
-    return reason.split(":", 1)[0] == RUNG_SANDBOX_UNAVAILABLE
+    if reason.split(":", 1)[0] == RUNG_SANDBOX_UNAVAILABLE:
+        return "sandbox_unavailable"
+    return None
+
+
+async def _spend_retry(pool: Any, job_id: str, kind: str) -> bool:
+    """Count one clear of ``job_id`` (Redis INCR, TTL :data:`RETRY_WINDOW_SECONDS` set on
+    the first) and say whether it is within :data:`RETRY_LIMITS`. Raises when the pool
+    has no counter, which the caller reads as "do not retry"."""
+    key = _RETRY_COUNTER_PREFIX + job_id
+    count = int(await pool.incr(key))
+    if count == 1:
+        await pool.expire(key, RETRY_WINDOW_SECONDS)
+    return count <= RETRY_LIMITS[kind]
 
 
 async def _clear_retryable_result(pool: Any, job_id: str) -> bool:
-    """Free a job id whose stored result is retryable (:func:`_result_is_retryable`), so
-    the same render can be queued again instead of reading "failed" for the hour arq
-    keeps the result. ``True`` when a result was cleared. Never raises.
+    """Free a job id whose stored result is retryable (:func:`_retry_kind`), so the same
+    render can be queued again instead of reading "failed" for the hour arq keeps the
+    result. ``True`` when a result was cleared. Never raises.
 
     No loop follows from this. Only a COMPLETE job leaves a result, so a render that is
     queued, deferred for capacity or running is never cleared, and arq refuses a second
-    job with the same id: every poll while the new job waits attaches to it. A
-    persistently full org therefore costs one job per render at a time, and that job
-    spends its own capacity retry budget before it can fail again."""
+    job with the same id: every poll while the new job waits attaches to it. And the
+    budgeted kinds are capped per id per window (:func:`_spend_retry`); without a Redis
+    counter they are not retried at all. Past the cap the failure is reported as is."""
     try:
         info = await Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME).result_info()
-        if info is None or not _result_is_retryable(info):
+        kind = None if info is None else _retry_kind(info)
+        if kind is None:
+            return False
+        if kind != "aborted" and not await _spend_retry(pool, job_id, kind):
+            logger.warning("sites.preview: %s retry budget spent for %s", kind, job_id)
             return False
         await pool.delete(result_key_prefix + job_id)
     except Exception:  # noqa: BLE001
