@@ -1120,6 +1120,7 @@ async def download_site_export(
 @router.delete("/sites/{site_id}", response_model=SiteDeleteQueuedResponse, status_code=202)
 async def delete_site(
     site_id: str,
+    force: bool = Query(default=False),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteDeleteQueuedResponse:
@@ -1140,9 +1141,12 @@ async def delete_site(
     service — a workspace member who may edit a site may not destroy it. The owner
     check is in the service rather than here because jobs, bus handlers and MCP tools
     reach services directly; see ``sites_service.start_site_delete``.
+
+    ``?force=true`` deletes even when that export fails (the owner chose to lose the
+    data); the export is still attempted first.
     """
     return await sites_service.start_site_delete(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id, force=force
     )
 
 

@@ -13295,6 +13295,7 @@ async def create_site_export(
 
     tables: dict[str, list[dict[str, Any]]] = {}
     leads: list[dict[str, Any]] = []
+    database: dict[str, Any] | None = None
     try:
         _spec, objects = await _dynamic_pocket_objects(
             workspace_id=workspace_id, user_id=user_id, pocket_id=doc.pocket_id
@@ -13323,6 +13324,14 @@ async def create_site_export(
         if getattr(exc, "code", "") != "sites.not_dynamic":
             await _fail_export(export, exc, site_id)
             raise
+        # ...unless the site has its OWN database (a project site): no spec declares
+        # its tables, so the whole D1 is dumped as SQL. Without this the export read
+        # "ready" with no data and the delete then dropped every row.
+        try:
+            database = await _project_database_dump(doc, _cloudflare)
+        except Exception as dump_exc:
+            await _fail_export(export, dump_exc, site_id)
+            raise _export_error(dump_exc) from dump_exc
     except Exception as exc:
         await _fail_export(export, exc, site_id)
         raise _export_error(exc) from exc
@@ -13342,6 +13351,7 @@ async def create_site_export(
             },
             tables=tables,
             leads=leads,
+            database=database,
         )
         key = export_key(workspace_id, str(export.id))
         size = await store_export(adapter=_export_adapter(), key=key, payload=payload)
@@ -13354,9 +13364,31 @@ async def create_site_export(
     export.size_bytes = size
     export.table_counts = {name: len(rows) for name, rows in tables.items()}
     export.lead_count = len(leads)
+    export.database_dump = "sql" if database is not None else ""
     export.expires_at = datetime.now(UTC) + timedelta(days=retention_days())
     await export.save()
     return _export_response(export)
+
+
+async def _project_database_dump(doc: _SiteDoc, cloudflare: Any | None) -> dict[str, Any] | None:
+    """``{format: "sql", database_id, sql}`` for a site holding a D1 that Cloudflare
+    actually created, or None when it has none (no id, or the legacy derived
+    placeholder that was never created). Raises ``ExportUnavailable`` when the dump
+    cannot be taken; the id comes from the tenant-scoped Site doc, never a caller."""
+    db_id = (getattr(doc, "d1_database_id", "") or "").strip()
+    if not db_id or db_id == _derive_d1_database_id(doc.workspace, doc.pocket_id):
+        return None
+    cf = cloudflare or (None if _local_mode() else _cf_client())
+    if cf is None:
+        raise ExportUnavailable(
+            "This site's database cannot be read from this deployment, so its data "
+            "cannot be exported."
+        )
+    try:
+        sql = await cf.export_d1_sql(db_id)
+    except Exception as exc:  # noqa: BLE001 - re-raised as the honest failure
+        raise ExportUnavailable("Could not export this site's database from Cloudflare.") from exc
+    return {"format": "sql", "database_id": db_id, "sql": sql}
 
 
 def _export_error(exc: Exception) -> Exception:
@@ -14096,7 +14128,7 @@ async def delete_site_document(site: _SiteDoc) -> None:
 
 
 async def start_site_delete(
-    *, workspace_id: str, user_id: str, site_id: str
+    *, workspace_id: str, user_id: str, site_id: str, force: bool = False
 ) -> SiteDeleteQueuedResponse:
     """Queue the destruction of one site. OWNER ONLY. Answers before it is done.
 
@@ -14124,7 +14156,11 @@ async def start_site_delete(
         )
         raise Forbidden("site.not_owner", "Only the site's owner can delete it.")
 
-    job_id = await enqueue_site_delete(site)
+    job_id = await enqueue_site_delete(site) if not force else None
+    if force:
+        # The owner asked to delete even if the data export fails. Without it a failed
+        # export stays a hard stop.
+        job_id = await enqueue_site_delete(site, force=True)
     if job_id is None:
         # Another attempt holds the slot. NOT an error: the site is already being
         # deleted, which is what this caller asked for, so report the in-flight

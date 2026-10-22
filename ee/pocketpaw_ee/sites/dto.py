@@ -342,6 +342,9 @@ class SiteExportResponse(BaseModel):
     size_bytes: int = 0
     table_counts: dict[str, int] = Field(default_factory=dict)
     lead_count: int = 0
+    # "sql" when the download includes a full SQL dump of the site's own D1 database
+    # (``database.sql`` in the bundle); "" when it has none.
+    database_dump: str = ""
     created_at: str | None = None
     # When the sweeper will purge these bytes. Surfaced so the UI can say how long
     # the owner has to download it rather than implying it is kept forever.
