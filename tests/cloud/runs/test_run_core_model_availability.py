@@ -232,3 +232,124 @@ async def test_the_agent_loop_stamps_the_turn_model(monkeypatch):
 
     assert ctx.turn_model == _FLASH
     assert ctx.turn_byok is False
+
+
+# --- Auto skips an out-of-credit default ---------------------------------------
+
+
+def _catalog(*ids: str):
+    from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
+
+    return [
+        ModelCatalogEntry(
+            id=i,
+            display_name=i,
+            provider=i.split("/")[0] if "/" in i else "anthropic",
+            modality=Modality.CHAT,
+        )
+        for i in ids
+    ]
+
+
+async def _loop_kwargs(monkeypatch, *, agent_model: str, override: str | None = None):
+    seen: dict = {}
+
+    class _Pool:
+        async def get(self, _agent_id):
+            return SimpleNamespace(config={"backend": "pydantic_ai", "model": agent_model})
+
+        def run(self, *args, **kwargs):
+            seen.update(kwargs)
+
+            async def _events():
+                yield SimpleNamespace(type="message", content="ok", metadata={})
+
+            return _events()
+
+        async def prewarm(self, *args, **kwargs):
+            return None
+
+    async def _fake_knowledge(*a, **k):
+        return "KB"
+
+    async def _is_cancelled():
+        return False
+
+    async def _known(_model):
+        return False
+
+    monkeypatch.setattr(run_core, "get_agent_pool", lambda: _Pool())
+    monkeypatch.setattr(run_core, "build_knowledge_context", _fake_knowledge)
+    monkeypatch.setattr(run_core, "build_behavior_instructions", lambda *a, **k: "INSTR")
+    monkeypatch.setattr(run_core, "attach_sse_event_sink", lambda *a, **k: None)
+    monkeypatch.setattr(run_core, "attach_agent_identity", lambda **k: None)
+    monkeypatch.setattr(run_core, "detach_sse_event_sink", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(run_core, "detach_agent_identity", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(run_core, "_model_is_unknown_to_gateway", _known)
+
+    ctx = _ctx()
+    ctx.model_override = override
+    _ = [
+        ev
+        async for ev in run_core._drive_agent_loop(
+            ctx,
+            user_content="hi",
+            attachments_in=None,
+            mentions_in=None,
+            history=[],
+            is_cancelled=_is_cancelled,
+            emit_stream_start=False,
+        )
+    ]
+    return seen, ctx
+
+
+@pytest.fixture
+def catalog(monkeypatch):
+    from pocketpaw_ee.catalog import service as catalog_service
+
+    from pocketpaw.config import get_settings
+
+    async def _list(**kwargs):
+        return _catalog(_FLASH, "claude-haiku-4-5", "claude-sonnet-4-6")
+
+    monkeypatch.setattr(catalog_service, "list_models", _list)
+    monkeypatch.setattr(
+        get_settings(),
+        "free_model_allowlist",
+        [_FLASH, "claude-haiku-4-5", "claude-sonnet-4-6"],
+    )
+
+
+async def test_auto_skips_an_out_of_credit_default(monkeypatch, fake_redis, catalog):  # noqa: ARG001
+    await availability.record_out_of_credit("w1", _FLASH, byok=False)
+
+    seen, ctx = await _loop_kwargs(monkeypatch, agent_model=_FLASH)
+
+    assert seen["model_override"] == "claude-haiku-4-5"
+    assert ctx.turn_model == "claude-haiku-4-5"
+
+
+async def test_auto_keeps_the_default_when_nothing_is_marked(monkeypatch, fake_redis, catalog):  # noqa: ARG001
+    seen, ctx = await _loop_kwargs(monkeypatch, agent_model=_FLASH)
+
+    assert "model_override" not in seen
+    assert ctx.turn_model == _FLASH
+
+
+async def test_a_picked_model_is_never_swapped(monkeypatch, fake_redis, catalog):  # noqa: ARG001
+    await availability.record_out_of_credit("w1", _FLASH, byok=False)
+
+    seen, _ = await _loop_kwargs(monkeypatch, agent_model="claude-sonnet-4-6", override=_FLASH)
+
+    assert seen["model_override"] == _FLASH
+
+
+async def test_auto_keeps_the_default_when_no_alternative_is_left(monkeypatch, fake_redis, catalog):  # noqa: ARG001
+    await availability.record_out_of_credit("w1", _FLASH, byok=False)
+    await availability.record_out_of_credit("w1", "litellm:claude-haiku-4-5", byok=False)
+    await availability.record_out_of_credit("w1", "claude-sonnet-4-6", byok=False)
+
+    seen, _ = await _loop_kwargs(monkeypatch, agent_model=_FLASH)
+
+    assert "model_override" not in seen

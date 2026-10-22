@@ -1908,6 +1908,42 @@ def _turn_model(instance: Any, backend_name: str | None, run_kwargs: dict[str, A
     return ""
 
 
+async def _auto_model_fallback(workspace_id: str, default_model: str) -> str | None:
+    """The model an Auto turn should run when its default is out of credit.
+
+    None (run the default) unless this workspace has an out-of-credit mark on
+    ``default_model``. Then the first ``free_model_allowlist`` entry that is not
+    marked and that the gateway serves (an exact catalog id). The allowlist is
+    the operator's own ordered list of cheap, priced models, so the swap never
+    picks an expensive or unpriced one. None when no such model is left or
+    anything here fails: the default then runs as before.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw_ee.catalog import availability
+    from pocketpaw_ee.catalog import service as catalog_service
+
+    try:
+        marks = await availability.read_marks(workspace_id)
+        if not default_model or not availability.is_marked(default_model, marks):
+            return None
+        served = {e.id.lower(): e.id for e in await catalog_service.list_models(modality="chat")}
+        # The default is marked, so the ``is_marked`` check also skips it.
+        for candidate in get_settings().free_model_allowlist:
+            cid = served.get(candidate.lower())
+            if not cid or availability.is_marked(cid, marks):
+                continue
+            logger.info(
+                "auto model skips out-of-credit %s for %s (ws=%s)",
+                default_model,
+                cid,
+                workspace_id,
+            )
+            return cid
+    except Exception:
+        logger.debug("auto model fallback lookup failed", exc_info=True)
+    return None
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -2472,6 +2508,20 @@ async def _drive_agent_loop(
         # (the per-send model only survives on an agent already on pydantic_ai;
         # the pool drops it otherwise). A stored key is withheld: this turn was
         # gated and is billed as platform, so it runs on our gateway, bounded.
+        # Auto (no per-send pick) on a provider this workspace just saw run out
+        # of credit: run the next served model on the free allowlist instead.
+        # Only on pydantic_ai, the backend that honours ``model_override`` under
+        # a free run too, and never on the workspace's own key.
+        if (
+            not ctx.model_override
+            and "byok_api_key" not in run_kwargs
+            and backend_name == "pydantic_ai"
+        ):
+            auto_alt = await _auto_model_fallback(
+                ctx.workspace_id, _turn_model(instance, backend_name, run_kwargs)
+            )
+            if auto_alt:
+                run_kwargs["model_override"] = auto_alt
         free_run_bounds = getattr(ctx, "free_run_bounds", None)
         if free_run_bounds is not None:
             from pocketpaw_ee.cloud.credits import guards
@@ -2480,7 +2530,9 @@ async def _drive_agent_loop(
             run_kwargs.pop("byok_settings_override", None)
             run_kwargs["force_pydantic_ai"] = True
             run_kwargs["max_requests"] = free_run_bounds.max_turns
-            turn_model = _forced_pydantic_ai_model(instance, backend_name, ctx.model_override)
+            turn_model = _forced_pydantic_ai_model(
+                instance, backend_name, run_kwargs.get("model_override")
+            )
             token_limit = guards.free_run_token_limit(free_run_bounds.balance_micro, turn_model)
             if token_limit is not None:
                 run_kwargs["total_tokens_limit"] = token_limit

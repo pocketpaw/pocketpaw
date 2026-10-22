@@ -189,6 +189,23 @@ def availability_for(entry: _Entry, marks: dict[str, dict[str, Any]]) -> ModelAv
     return ModelAvailability()
 
 
+def is_marked(model: str, marks: dict[str, dict[str, Any]]) -> bool:
+    """True when ``model`` (any id form, see ``_normalize``) is under a mark."""
+    model = _normalize(model)
+    if not model or not marks:
+        return False
+    provider = model.split("/", 1)[0] if "/" in model else ""
+    return availability_for(_Id(model, provider), marks).status == "out_of_credit"
+
+
+class _Id:
+    __slots__ = ("id", "provider")
+
+    def __init__(self, id_: str, provider: str) -> None:
+        self.id = id_
+        self.provider = provider
+
+
 async def overlay(
     workspace_id: str | None, entries: Iterable[ModelCatalogEntry]
 ) -> list[ModelCatalogEntry]:
@@ -209,6 +226,7 @@ __all__ = [
     "PROVIDER_MESSAGE",
     "availability_for",
     "clear",
+    "is_marked",
     "overlay",
     "read_marks",
     "record_out_of_credit",
