@@ -551,11 +551,12 @@ async def test_orders_paid_refunded_failed_and_deduped(beanie_test_db, rzp, cata
         # A late failed attempt on the same order never undoes paid.
         await _post(c, _failed("order_A", {"site_id": sid}), eid="evt_2")
         assert (await SiteOrder.find_one()).status == "paid"
-        # A partial refund leaves it paid; a full one (no notes on the payment)
+        # A partial refund is recorded and leaves it paid; a full one (no notes)
         # routes by the order id and settles it.
         partial = await _post(c, _refund("order_A", refunded=100, status="partial"), eid="evt_3")
-        assert partial.json()["ignored"] is True
-        assert (await SiteOrder.find_one()).status == "paid"
+        assert partial.json() == {"ok": True}
+        order = await SiteOrder.find_one()
+        assert order.status == "paid" and order.provider_refunded_minor == 100
         full = await _post(c, _refund("order_A", refunded=375000, status="full"), eid="evt_4")
         assert full.json() == {"ok": True}
         assert (await SiteOrder.find_one()).status == "refunded"

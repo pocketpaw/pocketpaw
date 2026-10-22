@@ -30,6 +30,12 @@
 #     requests) taken before site routing; True acks and records the event id
 #   * expand_event(event) -> NormalizedEvent   (async) fills in a thin webhook (one
 #     that names a resource but not its state) after dedupe; raising is retried
+#   * refund_payment(order, amount_minor, key, get_token) -> (status, external_id)
+#     (async) refunds part or all of a ``SiteOrder`` on the provider with ``key`` as
+#     its idempotency key; status pending | succeeded | failed. ``RefundRefused``
+#     when the provider definitely refused (nothing refunded); any other
+#     ``ProviderError`` is an unknown outcome. Bounds are checked by the caller
+#     (``integrations.refunds``), never here
 #   * field_options(binding, ctx, key) -> list[SettingOption]   (async) live choices
 #     of a ``select`` with ``options_source="remote"``; ``binding`` may be None;
 #     raise ``ProviderError`` on failure (capped and cached in field_options.py);
@@ -70,6 +76,10 @@ class ProviderError(Exception):
 
 class InvalidGrant(ProviderError):
     """The refresh token is dead (``invalid_grant`` / ``BAD_REFRESH_TOKEN``)."""
+
+
+class RefundRefused(ProviderError):
+    """The provider refused a refund outright: nothing was refunded."""
 
 
 class ActionRefused(ProviderError):

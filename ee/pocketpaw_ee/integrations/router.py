@@ -13,6 +13,8 @@
 #          ?<depends_on key>=<draft>                     {options} (select choices; 409/422/502)
 #   GET    /sites/by-pocket/{pocket_id}/integrations/newsletter/export.csv  (owner)
 #   GET    /sites/by-pocket/{pocket_id}/orders?limit&cursor
+#   POST   /sites/by-pocket/{pocket_id}/orders/{order_id}/refunds
+#          {amount_minor?, idempotency_key} -> OrderView (pocket owner or admin)
 #
 # ``public_router`` (no session by design; each names its own credential):
 #   GET  /integrations/{provider}/start      one-time ticket -> browser cookie -> provider
@@ -44,14 +46,24 @@ from pocketpaw_ee.cloud._core.deps import (
     require_action_any_workspace,
     require_plan_feature,
 )
-from pocketpaw_ee.integrations import bindings, gateway, oauth, social_broker, vault, webhooks
+from pocketpaw_ee.integrations import (
+    bindings,
+    gateway,
+    oauth,
+    refunds,
+    social_broker,
+    vault,
+    webhooks,
+)
 from pocketpaw_ee.integrations.dto import (
     ConnectBody,
     ConnectionView,
     ConnectResponse,
     FieldOptionsView,
     OrdersPage,
+    OrderView,
     ProviderView,
+    RefundBody,
     SiteIntegrationPut,
     SiteIntegrationView,
 )
@@ -238,6 +250,28 @@ async def list_orders(
         pocket_id=pocket_id,
         limit=limit,
         cursor=cursor,
+        is_admin=is_admin,
+    )
+
+
+@router.post(_SITE + "/orders/{order_id}/refunds", response_model=OrderView)
+async def refund_order(
+    pocket_id: str,
+    order_id: str,
+    body: RefundBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+    is_admin: bool = Depends(action_allowed_any_workspace("workspace.update")),
+) -> OrderView:
+    """Refund part or all of a paid order (owner or admin). The amount is bounded
+    by what is left on the order, server-side; see ``integrations.refunds``."""
+    return await refunds.refund_order(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        order_id=order_id,
+        amount_minor=body.amount_minor,
+        idempotency_key=body.idempotency_key,
         is_admin=is_admin,
     )
 

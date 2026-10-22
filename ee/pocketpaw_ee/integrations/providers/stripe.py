@@ -42,11 +42,18 @@
 # units; success/cancel URLs are the site's own origin + the owner's paths. The
 # platform fee is ``PLATFORM_FEE_BPS`` (0: off).
 #
+# ``refund_payment`` refunds part or all of an order: ``POST /v1/refunds`` on the
+# connected account with the order's PaymentIntent, the amount in minor units and
+# our refund id as ``Idempotency-Key``. A 4xx other than 409 / 429 is a refusal
+# (``RefundRefused``); anything else is an unknown outcome.
+#
 # Webhooks: the ``Stripe-Signature`` header is checked (HMAC-SHA256, 5 min
 # tolerance) before anything is read. Orders are keyed by PaymentIntent id so
 # refunds and failures land on the order checkout created; a refund never creates
-# one (one that arrives first is redelivered until it can apply). A platform with
-# no Connect signup is logged as a WARNING naming the misconfiguration.
+# one (one that arrives first is redelivered until it can apply). Every
+# ``charge.refunded`` carries the charge's cumulative ``amount_refunded``, which
+# the ingest records (partial or full). A platform with no Connect signup is
+# logged as a WARNING naming the misconfiguration.
 
 from __future__ import annotations
 
@@ -80,6 +87,7 @@ from pocketpaw_ee.integrations.providers.base import (
     ConnectParam,
     NormalizedEvent,
     ProviderError,
+    RefundRefused,
     SettingOption,
     SettingsField,
     TokenGrant,
@@ -233,9 +241,11 @@ async def _stripe(
     account: str = "",
     missing_ok: bool = False,
     query: Mapping[str, Any] | None = None,
+    idempotency_key: str = "",
 ) -> dict[str, Any] | None:
     """One Stripe call. /v2 paths send JSON on ``V2_STRIPE_VERSION``; /v1 paths
-    send Stripe's form encoding on ``STRIPE_VERSION``."""
+    send Stripe's form encoding on ``STRIPE_VERSION``. A refused call raises
+    ``ProviderError`` with ``status_code`` set."""
     key = secret_key()
     if not key:
         raise ProviderError("stripe is not configured")
@@ -244,6 +254,8 @@ async def _stripe(
     headers = {"Authorization": f"Bearer {key}", "Stripe-Version": version}
     if account:
         headers["Stripe-Account"] = account
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     body = None
     if data is not None and v2:
         headers["Content-Type"] = "application/json"
@@ -275,7 +287,9 @@ async def _stripe(
                 "for this key's account (test and live mode are separate).",
                 SECRET_KEY_ENV,
             )
-        raise ProviderError(f"stripe {resp.status_code} {str(code)[:60]}")
+        error = ProviderError(f"stripe {resp.status_code} {str(code)[:60]}")
+        error.status_code = resp.status_code  # type: ignore[attr-defined]
+        raise error
     return payload
 
 
@@ -650,12 +664,50 @@ def _session_order(obj: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fully_refunded(charge: Mapping[str, Any]) -> bool:
-    """Only a full refund settles an order as refunded; a partial one leaves it paid."""
-    amount, refunded = charge.get("amount"), charge.get("amount_refunded")
-    if not isinstance(amount, int) or not isinstance(refunded, int):
-        return False
-    return amount > 0 and refunded >= amount
+def _amount_refunded(charge: Mapping[str, Any]) -> int:
+    """The charge's cumulative refunded amount (minor units), 0 when unreadable."""
+    refunded = charge.get("amount_refunded")
+    if not isinstance(refunded, int) or isinstance(refunded, bool):
+        return 0
+    return max(refunded, 0)
+
+
+_REFUND_STATUS = {
+    "succeeded": "succeeded",
+    "pending": "pending",
+    "requires_action": "pending",
+    "failed": "failed",
+    "canceled": "failed",
+}
+
+
+async def _refund_payment(order: Any, amount_minor: int, key: str, get_token: Any):
+    account_id = await get_token()
+    if not account_id.startswith("acct_"):
+        raise ProviderError("stripe connection has no account")
+    intent = str(order.external_id or "")
+    if not intent.startswith("pi_"):
+        raise RefundRefused("stripe order has no payment intent")
+    try:
+        refund = await _stripe(
+            "POST",
+            "/v1/refunds",
+            {
+                "payment_intent": intent,
+                "amount": int(amount_minor),
+                "metadata": {"paw_refund": key, "site_id": order.site_id or ""},
+            },
+            account=account_id,
+            idempotency_key=key,
+        )
+    except ProviderError as exc:
+        code = getattr(exc, "status_code", 0) or 0
+        if 400 <= code < 500 and code not in (409, 429):
+            raise RefundRefused(str(exc)) from None
+        raise
+    refund = refund or {}
+    status = _REFUND_STATUS.get(str(refund.get("status") or ""), "pending")
+    return status, str(refund.get("id") or "")
 
 
 def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -691,9 +743,13 @@ def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]
             {"order_id": str(obj.get("id") or ""), "only_if_exists": True},
             (site_id),
         )
-    if kind == "charge.refunded" and obj.get("payment_intent") and _fully_refunded(obj):
+    if kind == "charge.refunded" and obj.get("payment_intent") and _amount_refunded(obj):
         # No site_id on a charge is fine: the ingest finds the order by its id.
-        data = {"order_id": str(obj["payment_intent"]), "only_if_exists": True}
+        data = {
+            "order_id": str(obj["payment_intent"]),
+            "only_if_exists": True,
+            "refunded_minor": _amount_refunded(obj),
+        }
         return "order.refunded", data, site_id
     return "ignored", {}, ""
 
@@ -817,6 +873,11 @@ class StripeProvider(BaseProvider):
             raise ProviderError("stripe resume for another workspace")
         await _bind(flow, account_id, owner=str(connection.created_by or ""))
         return await _account_link(account_id, state, redirect_uri)
+
+    async def refund_payment(
+        self, order: Any, amount_minor: int, key: str, get_token: Any
+    ) -> tuple[str, str]:
+        return await _refund_payment(order, amount_minor, key, get_token)
 
     def connection_attention(self, connection: Any) -> str | None:
         meta = connection.meta or {}
