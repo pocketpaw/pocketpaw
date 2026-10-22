@@ -62,6 +62,7 @@ import copy
 import logging
 import secrets
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -2875,6 +2876,7 @@ async def set_project_source(
     deletes: list[str] | None = None,
     add_recipe: str | None = None,
     label: str | None = None,
+    guard: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Write and delete files of a ``project`` pocket's source map in ONE save.
 
@@ -2886,8 +2888,10 @@ async def set_project_source(
 
     ``add_recipe`` appends a recipe id to ``site_meta.project.recipes`` in the same
     save. A delete of a path that is not there is a ``NotFound`` (nothing saved).
-    Returns ``{files, bytes, changed}`` for the saved map; a call that changes
-    nothing saves nothing and records no version.
+    ``guard`` sees the source map just read, before anything changes, and refuses
+    the save by raising (``sites.project_tools.check_bases``: a file that moved
+    since the caller read it is a 409). Returns ``{files, bytes, changed}`` for the
+    saved map; a call that changes nothing saves nothing and records no version.
     """
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
@@ -2896,6 +2900,8 @@ async def set_project_source(
             "pocket.not_project_site",
             "This pocket is not a project site, so it has no project files to edit.",
         )
+    if guard is not None:
+        guard(dict(doc.source))
     updated = dict(doc.source)
     missing = [path for path in deletes or [] if path not in updated]
     if missing:

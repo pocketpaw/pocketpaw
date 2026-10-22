@@ -77,8 +77,8 @@
   {
     "label": "a write no longer queues the draft build, so the preview never rebuilds",
     "file": "ee/pocketpaw_ee/sites/project_tools.py",
-    "find": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"verification\": await build_verification(\n            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id\n        ),",
-    "replace": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"verification\": {\"status\": \"pending\", \"job_id\": \"site-preview-p-abc\"},",
+    "find": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"hashes\": {p: file_hash(writes[p]) for p in sorted(writes)},\n        \"verification\": await build_verification(\n            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id\n        ),",
+    "replace": "        \"created\": sorted(p for p in writes if p not in source),\n        \"lockfile_removed\": dropped,\n        \"hashes\": {p: file_hash(writes[p]) for p in sorted(writes)},\n        \"verification\": {\"status\": \"pending\", \"job_id\": \"site-preview-p-abc\"},",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestFileTools::test_write_patch_delete_round_trip",
       "tests/ee/sites/test_project_files_routes.py::test_a_write_bumps_the_hash_and_queues_that_build"
@@ -123,8 +123,8 @@
   {
     "label": "the HTTP read returns a truncated file, which the Code view would save back",
     "file": "ee/pocketpaw_ee/sites/project_tools.py",
-    "find": "    return [{\"path\": p, \"size\": _text_bytes(source[p]), \"content\": source[p]} for p in wanted]",
-    "replace": "    return [{\"path\": p, \"size\": _text_bytes(source[p]), \"content\": source[p][:3]} for p in wanted]",
+    "find": "            \"content\": source[p],\n",
+    "replace": "            \"content\": source[p][:3],\n",
     "tests": [
       "tests/ee/sites/test_project_files_routes.py::test_list_read_write_patch_delete"
     ]
@@ -136,6 +136,24 @@
     "replace": "",
     "tests": [
       "tests/cloud/auth/test_route_auth_coverage.py"
+    ]
+  },
+  {
+    "label": "a write with a stale base hash overwrites the file anyway",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "        if now != base:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/ee/sites/test_project_files_routes.py::test_put_over_a_changed_file_is_409_with_theirs"
+    ]
+  },
+  {
+    "label": "the save stops re-checking bases, so a write that raced the read wins",
+    "file": "ee/pocketpaw_ee/sites/project_tools.py",
+    "find": "        guard=(lambda current: check_bases(current, bases)) if bases else None,\n",
+    "replace": "        guard=None,\n",
+    "tests": [
+      "tests/ee/sites/test_project_files_routes.py::test_a_write_racing_between_read_and_save_is_409"
     ]
   }
 ]

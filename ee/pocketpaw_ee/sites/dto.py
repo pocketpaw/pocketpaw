@@ -1669,15 +1669,25 @@ class ProjectFileListResponse(BaseModel):
 
 
 class ProjectFileContentResponse(BaseModel):
+    """One file, whole. ``hash`` is the sha256 hex of its UTF-8 text: send it back as
+    the file's base on the next write so a change made since is a 409, not lost."""
+
     path: str
     size: int
     content: str
+    hash: str
 
 
 class ProjectFilesWriteRequest(BaseModel):
-    """``{files: {path: full contents}}``; every path is checked before any is saved."""
+    """``{files: {path: full contents}}``; every path is checked before any is saved.
+
+    ``base_hashes`` (optional, per path) is the ``hash`` the client last read: a file
+    whose stored hash differs is a 409 ``sites.project_file_conflict`` and nothing is
+    saved. ``null`` means "this file must not exist yet". A path left out is written
+    unchecked, as is every path when the field is absent (older clients)."""
 
     files: dict[str, str]
+    base_hashes: dict[str, str | None] | None = None
 
 
 class ProjectFilePatchEdit(BaseModel):
@@ -1690,6 +1700,8 @@ class ProjectFilePatchRequest(BaseModel):
 
     path: str
     edits: list[ProjectFilePatchEdit] = Field(min_length=1)
+    # The file's ``hash`` as the client last read it; a mismatch is a 409. Optional.
+    base_hash: str | None = Field(default=None, max_length=128)
 
 
 class ProjectFilesDeleteRequest(BaseModel):
@@ -1700,7 +1712,10 @@ class ProjectFileWriteResponse(BaseModel):
     """What every write answers. ``verification`` is the queued draft build of the new
     source: ``{status: "pending", build: "pending", job_id}`` (``passed`` when that
     exact source already built; ``failed`` / ``unverified`` with a ``reason``).
-    ``lockfile_removed`` lists lockfiles a package.json dependency change made stale."""
+    ``lockfile_removed`` lists lockfiles a package.json dependency change made stale.
+    A refused base hash is a 409 ``sites.project_file_conflict`` whose
+    ``details.conflicts`` lists ``{path, current_hash, current_content}`` per file
+    (both null for a file that is gone)."""
 
     pocket_id: str
     written: list[str] = Field(default_factory=list)
@@ -1708,6 +1723,8 @@ class ProjectFileWriteResponse(BaseModel):
     deleted: list[str] = Field(default_factory=list)
     path: str | None = None
     lockfile_removed: list[str] = Field(default_factory=list)
+    # The new ``hash`` of every written or patched file: the client's next base.
+    hashes: dict[str, str] = Field(default_factory=dict)
     verification: dict[str, Any]
 
 
