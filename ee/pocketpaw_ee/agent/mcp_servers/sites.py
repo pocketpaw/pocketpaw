@@ -19,6 +19,9 @@
 #     from ``build_wire_state`` (shared with ``get_site_build_status``). An async
 #     build (react, static svelte) returns before it runs, so ``is_live`` is the
 #     only honest "it is live" signal;
+#   * a publish refused by ``sites.migration_destructive`` files a request-publish
+#     review card (``request_publish_pocket``) and returns its id: only an owner's
+#     approve of that card confirms deleting data, never the agent;
 #   * identity comes from the per-stream ContextVars in ``ee.cloud.chat.
 #     agent_service``; outside a chat stream every tool errors instead of guessing
 #     a tenant.
@@ -196,6 +199,41 @@ def _identity() -> tuple[str | None, str | None]:
         return None, None
 
 
+async def _request_destructive_approval(
+    workspace_id: str, user_id: str, pocket_id: str, refusal: Exception
+) -> dict:
+    """A publish refused for a destructive migration becomes a review card in the
+    Tray (``request_publish_pocket`` records the migrations, tables and statements).
+    Returns the card's id and what it lists; falls back to the refusal text when the
+    card cannot be filed."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        action = await sites_service.request_publish_pocket(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        )
+    except Exception:  # noqa: BLE001 - the refusal still reaches the agent
+        logger.warning("sites publish: could not file the destructive review", exc_info=True)
+        return _error_response(f"{refusal} Ask the owner to publish from the publish dialog.")
+    blob = (getattr(action, "parameters", None) or {}).get("_artifact_change") or {}
+    return _success_response(
+        {
+            "ok": False,
+            "approval_required": True,
+            "action_id": str(action.id),
+            "destructive_migrations": blob.get("destructive_migrations") or [],
+            "message": (
+                "Not published. This publish runs a database migration that would "
+                "permanently delete data the site holds, so it was sent to the owner "
+                "for approval in the Tray. Tell the user which tables and statements "
+                "are listed in `destructive_migrations` and that the site goes live "
+                "when they approve that card. Do not retry the publish and never try "
+                "to confirm the deletion yourself."
+            ),
+        }
+    )
+
+
 async def _publish_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__publish``.
 
@@ -240,6 +278,11 @@ async def _publish_handler(args: dict) -> dict:
             name=name,
         )
     except CloudError as exc:
+        if exc.code == "sites.migration_destructive":
+            # Deleting stored rows is the owner's call. File the review card that
+            # names what would be lost; approving that card is the only thing that
+            # confirms it. The agent never confirms.
+            return await _request_destructive_approval(workspace_id, user_id, pocket_id, exc)
         # NotFound / Forbidden from the pockets service surface here — relay the
         # code + message so the agent can tell the user the pocket is missing or
         # not theirs, instead of reporting a phantom publish. A Durable Objects

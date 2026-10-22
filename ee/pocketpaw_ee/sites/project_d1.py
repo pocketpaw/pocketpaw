@@ -22,6 +22,10 @@
 #     would hit a table holding rows refuses the publish unless the owner confirmed
 #     destructive migrations. Drizzle's table rebuild (copy into a new table, drop
 #     the old, rename the new one into place) keeps the data and is not refused.
+#     ``find_destructive`` lists those hits so a review card can show them. A confirm
+#     is either True (the owner ticked the box in the publish dialog) or the
+#     ``name:sha256`` keys of the migrations a reviewer approved, which then covers
+#     those exact files only: a migration edited after the review is refused again.
 #   * A failed migration aborts the publish with the migration's name and D1's
 #     error; nothing has been uploaded at that point.
 from __future__ import annotations
@@ -29,7 +33,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -242,20 +246,23 @@ def _short(statement: str, limit: int = 120) -> str:
     return one if len(one) <= limit else one[: limit - 3] + "..."
 
 
-async def apply_migrations(
-    cf: Any,
-    database_id: str,
-    migrations: list[Migration],
-    *,
-    confirm_destructive: bool = False,
-) -> list[str]:
-    """Apply the pending ``migrations`` to ``database_id``; return the names applied.
+def destructive_key(migration: Migration) -> str:
+    """What a reviewer's confirm names: the file AND its content hash."""
+    return f"{migration.name}:{migration.sha256}"
 
-    Raises ``ValidationError`` (``sites.migration_changed`` /
-    ``sites.migration_destructive`` / ``sites.migration_failed``) before or instead
-    of applying anything the rules above refuse."""
-    if not migrations:
-        return []
+
+def normalize_confirm(raw: Any) -> bool | list[str]:
+    """A stored or wire confirm as ``apply_migrations`` takes it. Only a real True
+    confirms everything; a list stays a list of keys; anything else confirms nothing."""
+    if raw is True:
+        return True
+    if isinstance(raw, (list, tuple, set, frozenset)) and raw:
+        return [str(k) for k in raw]
+    return False
+
+
+async def _applied(cf: Any, database_id: str) -> dict[str, str]:
+    """``{name: sha256}`` of the migrations this database already ran."""
     try:
         await cf.query_d1(
             database_id=database_id,
@@ -265,7 +272,7 @@ async def apply_migrations(
                 "sha256 TEXT NOT NULL)"
             ),
         )
-        applied = {
+        return {
             str(row.get("name")): str(row.get("sha256") or "")
             for row in await cf.query_d1(
                 database_id=database_id, sql=f"SELECT name, sha256 FROM {TRACKING_TABLE}"
@@ -277,6 +284,55 @@ async def apply_migrations(
             f"Could not read this site's migration history from its D1 database: {exc.message}",
         ) from exc
 
+
+async def _destructive_hits(
+    cf: Any, database_id: str, pending: list[Migration]
+) -> list[dict[str, str]]:
+    hits: list[dict[str, str]] = []
+    for migration in pending:
+        for table, statement in destructive_targets(migration):
+            if await _table_has_rows(cf, database_id, table):
+                hits.append(
+                    {
+                        "migration": migration.name,
+                        "sha256": migration.sha256,
+                        "key": destructive_key(migration),
+                        "table": table,
+                        "statement": _short(statement, 300),
+                    }
+                )
+    return hits
+
+
+async def find_destructive(
+    cf: Any, database_id: str, migrations: list[Migration]
+) -> list[dict[str, str]]:
+    """The pending statements in ``migrations`` that would delete rows this database
+    holds: ``{migration, sha256, key, table, statement}`` each. Read-only apart from
+    creating the empty tracking table."""
+    if not migrations:
+        return []
+    applied = await _applied(cf, database_id)
+    pending = [m for m in migrations if m.name not in applied]
+    return await _destructive_hits(cf, database_id, pending)
+
+
+async def apply_migrations(
+    cf: Any,
+    database_id: str,
+    migrations: list[Migration],
+    *,
+    confirm_destructive: bool | Collection[str] = False,
+) -> list[str]:
+    """Apply the pending ``migrations`` to ``database_id``; return the names applied.
+
+    Raises ``ValidationError`` (``sites.migration_changed`` /
+    ``sites.migration_destructive`` / ``sites.migration_failed``) before or instead
+    of applying anything the rules above refuse."""
+    if not migrations:
+        return []
+    applied = await _applied(cf, database_id)
+
     changed = [m.name for m in migrations if m.name in applied and applied[m.name] != m.sha256]
     if changed:
         raise _refuse(
@@ -287,16 +343,19 @@ async def apply_migrations(
         )
     pending = [m for m in migrations if m.name not in applied]
 
-    if not confirm_destructive:
-        for migration in pending:
-            for table, statement in destructive_targets(migration):
-                if await _table_has_rows(cf, database_id, table):
-                    raise _refuse(
-                        "sites.migration_destructive",
-                        f"Migration {migration.name} would delete data this site already "
-                        f"holds ({_short(statement)}). Publish again and confirm "
-                        "destructive migrations to apply it, or change the migration.",
-                    )
+    confirmed = normalize_confirm(confirm_destructive)
+    if confirmed is not True:
+        approved = set(confirmed or ())
+        unconfirmed = [m for m in pending if destructive_key(m) not in approved]
+        hits = await _destructive_hits(cf, database_id, unconfirmed)
+        if hits:
+            hit = hits[0]
+            raise _refuse(
+                "sites.migration_destructive",
+                f"Migration {hit['migration']} would delete data this site already "
+                f"holds ({_short(hit['statement'])}). Publish again and confirm "
+                "destructive migrations to apply it, or change the migration.",
+            )
 
     done: list[str] = []
     for migration in pending:
@@ -325,7 +384,10 @@ __all__ = [
     "Migration",
     "Statement",
     "apply_migrations",
+    "destructive_key",
     "destructive_targets",
+    "find_destructive",
     "migrations_from_source",
+    "normalize_confirm",
     "split_statements",
 ]

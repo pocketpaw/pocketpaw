@@ -2582,7 +2582,7 @@ async def publish(
     builder_origin: str | None = None,
     keeps_client_bundle: bool = False,
     preview: bool = False,
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -2838,7 +2838,7 @@ async def _deploy_project_site(
     builder_origin: str | None,
     cloudflare: Any | None,
     local_deploy: Callable[[str, str], str] | None,
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     _store: Any | None = None,
 ) -> _SiteDoc:
@@ -3022,7 +3022,7 @@ async def _deploy_site_doc(
     prebuilt_project_dir: str | None = None,
     # A project publish may run migrations that delete data the site holds only when
     # the owner confirmed it (``project_d1``). Ignored by every other engine.
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     # The Turnstile sitekey a PREBUILT artifact was built with (the async lane puts
     # it in ``deploy_inputs``). An inline build looks its own up.
@@ -3576,7 +3576,7 @@ async def _deploy_paw_bundle(
     is_dynamic: bool,
     d1_database_id: str,
     source: dict[str, str] | None,
-    confirm_destructive: bool,
+    confirm_destructive: bool | list[str],
     confirm_do_data_loss: list[str] | None = None,
 ) -> None:
     """Deploy a ``paw-build.json`` build through ``bundle_deploy`` to ``target``.
@@ -5912,8 +5912,19 @@ async def deploy_bundle(
     )
 
 
+def _normalize_destructive_confirm(raw: Any) -> bool | list[str]:
+    """A destructive-migration confirm as stored or replayed (``project_d1``)."""
+    from pocketpaw_ee.sites import project_d1
+
+    return project_d1.normalize_confirm(raw)
+
+
 def _project_migrator(
-    cf: Any, *, site_id: str, source: dict[str, str] | None, confirm_destructive: bool
+    cf: Any,
+    *,
+    site_id: str,
+    source: dict[str, str] | None,
+    confirm_destructive: bool | list[str],
 ) -> Any:
     """The ``before_upload`` hook of a project's bundle deploy: apply the project's
     ``migrations/*.sql`` (from ``source``, the files the bundle was built from) to the
@@ -7884,7 +7895,7 @@ async def publish_pocket(
     purchase_authorized: bool = False,
     preview: bool = False,
     # Owner confirmed a project migration that deletes data (``project_d1``).
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -9420,7 +9431,7 @@ async def _publish_credits_site(
     keeps_client_bundle: bool,
     tier: Any,
     covered_by_plan: bool = False,
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -9601,7 +9612,7 @@ async def _publish_pending_site(
     keeps_client_bundle: bool,
     tier: Any,
     rail: str = _CREDITS_RAIL,
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
 ) -> tuple[_SiteDoc, dict[str, Any] | None]:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
@@ -9676,7 +9687,9 @@ async def _publish_pending_site(
         "keeps_client_bundle": keeps_client_bundle,
         "name": site_name,
         # Replayed so a confirmed destructive project migration stays confirmed.
-        "confirm_destructive_migrations": confirm_destructive_migrations,
+        "confirm_destructive_migrations": _normalize_destructive_confirm(
+            confirm_destructive_migrations
+        ),
         "confirm_do_data_loss": list(confirm_do_data_loss or []),
     }
 
@@ -9923,7 +9936,11 @@ async def activate_site(
         # MT-1 — replay the authored declaration. A pending doc captured before
         # this field existed has no key and reads False (the prior behaviour).
         keeps_client_bundle=bool(inputs.get("keeps_client_bundle")),
-        confirm_destructive_migrations=bool(inputs.get("confirm_destructive_migrations")),
+        # True (the publish dialog) or the reviewed migration keys (an approval);
+        # ``bool()`` here would widen a key list into "confirm everything".
+        confirm_destructive_migrations=_normalize_destructive_confirm(
+            inputs.get("confirm_destructive_migrations")
+        ),
         confirm_do_data_loss=[str(c) for c in inputs.get("confirm_do_data_loss") or []],
         generator=_generator,
         cloudflare=_cloudflare,
@@ -12717,11 +12734,48 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     )
 
 
+async def _destructive_review(
+    *, workspace_id: str, pocket_id: str, content: Any, cloudflare: Any | None
+) -> tuple[list[dict[str, str]], str]:
+    """``(findings, check)`` for a review card: the draft's pending project migrations
+    that would delete rows the site's D1 holds (``project_d1.find_destructive``).
+
+    ``check`` is "none" (no migrations, or no database created yet), "ok" (checked;
+    ``findings`` may be empty) or "failed" (could not check). A failed check records
+    nothing, so an approve confirms nothing and a destructive migration is refused at
+    deploy time instead of slipping through unseen. The Site read is workspace-scoped."""
+    from pocketpaw_ee.sites import project_d1
+
+    try:
+        migrations = project_d1.migrations_from_source(content if isinstance(content, dict) else {})
+    except ValidationError:
+        return [], "failed"
+    if not migrations:
+        return [], "none"
+    doc = await _canonical_site_doc(workspace_id, pocket_id)
+    db_id = ((getattr(doc, "d1_database_id", "") or "") if doc is not None else "").strip()
+    if not db_id or db_id == _derive_d1_database_id(workspace_id, pocket_id):
+        return [], "none"
+    try:
+        cf = cloudflare or (None if _local_mode() else _cf_client())
+        if cf is None:
+            return [], "failed"
+        return await project_d1.find_destructive(cf, db_id, migrations), "ok"
+    except Exception:  # noqa: BLE001 - a review card still files; the deploy re-checks
+        logger.warning(
+            "sites.request_publish: could not check pocket %s for destructive migrations",
+            pocket_id,
+            exc_info=True,
+        )
+        return [], "failed"
+
+
 async def request_publish_pocket(
     *,
     workspace_id: str,
     user_id: str,
     pocket_id: str,
+    _cloudflare: Any | None = None,
 ) -> Any:
     """Submit a pocket's current draft for human review (BP-4 Part C).
 
@@ -12816,6 +12870,29 @@ async def request_publish_pocket(
         "correlation_id": None,
         "proposed_event_id": None,
     }
+    # A project draft whose migrations would delete stored rows: recorded here so the
+    # Tray can show them, and pinned on approve (``instinct.router``) so an edit
+    # cannot widen them. Only an individual approve turns these keys into the
+    # migrator's confirm (``versions.instinct_executor``).
+    destructive, destructive_check = await _destructive_review(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        content=draft.content,
+        cloudflare=_cloudflare,
+    )
+    blob["destructive_migrations"] = destructive
+    blob["destructive_check"] = destructive_check
+    description = (
+        "Take the current draft of this site live. Approving merges the "
+        "reviewed version and deploys it."
+    )
+    if destructive:
+        lost = ", ".join(sorted({d["table"] for d in destructive}))
+        description += (
+            f" WARNING: approving also runs migrations that permanently delete data "
+            f"this site holds (tables: {lost}). "
+            + " ".join(f"{d['migration']}: {d['statement']}" for d in destructive)
+        )
 
     # ISO: scope the store to the caller's workspace (this can run on an HTTP
     # path with no ``current_workspace`` ContextVar) so the publish proposal
@@ -12823,12 +12900,13 @@ async def request_publish_pocket(
     store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.propose(
         pocket_id=pocket_id,
-        title="Publish site changes",
-        description=(
-            "Take the current draft of this site live. Approving merges the "
-            "reviewed version and deploys it."
+        title="Publish site changes" + (" (deletes data)" if destructive else ""),
+        description=description,
+        recommendation=(
+            "Check the data the migrations delete, then approve this card on its own."
+            if destructive
+            else "Review the draft, then approve to publish."
         ),
-        recommendation="Review the draft, then approve to publish.",
         trigger=ActionTrigger(
             type="user",
             source="request-publish",
@@ -13171,6 +13249,7 @@ def _export_response(doc: _SiteExportDoc) -> SiteExportResponse:
         size_bytes=doc.size_bytes,
         table_counts=dict(doc.table_counts or {}),
         lead_count=doc.lead_count,
+        database_dump=getattr(doc, "database_dump", "") or "",
         # ``createdAt``, not ``created_at``. ``TimestampedDocument`` declares the
         # camelCase field and nothing aliases it, so the snake_case spelling this
         # line carried since the export shipped raised ``AttributeError`` on EVERY
