@@ -19,9 +19,11 @@
 # ``confirm_nonce`` is rotated on every (re)send, so a stale link can't confirm.
 #
 # Webhooks: ``webhooks`` holds up to ``MAX_WEBHOOKS`` destinations, each with its
-# own URL (a secret: a chat webhook URL is the channel's credential, so it is
-# stored as Fernet ``url_enc`` plus a keyed ``url_fp`` for dedupe and a display
-# ``url_hint``; a row written before that carries plaintext ``url``), platform
+# own URL (a secret: a chat webhook URL is the channel's credential, so it lives
+# in the integrations vault behind ``connection_id``, with a keyed ``url_fp`` for
+# dedupe, a display ``url_hint`` and the ``detected_platform``; without a vault key
+# it is Fernet ``url_enc``, and a row written before encryption carries plaintext
+# ``url``; ``cloud.leads.webhook_vault`` moves both into the vault), platform
 # override, message template, events, Fernet-encrypted signing secret (the
 # previous one co-signs for a grace window after a rotation) and failure counter
 # (10 consecutive dead deliveries switch that one destination off until it is
@@ -84,6 +86,12 @@ class LeadWebhook(BaseModel):
     url_enc: str = ""
     url_fp: str = ""
     url_hint: str = ""
+    # The integrations vault row holding the URL (``cloud.leads.webhook_vault``).
+    # Set: ``url`` / ``url_enc`` are "" and the URL is read from the vault.
+    connection_id: str = ""
+    # The platform ``webhook_platforms`` detected from the URL when it was stored,
+    # so a vault-held URL needn't be read to show it.
+    detected_platform: str = ""
     label: str = ""
     # None: use the platform detected from the URL.
     platform_override: WebhookPlatform | None = None
