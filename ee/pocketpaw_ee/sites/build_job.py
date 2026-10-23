@@ -1187,7 +1187,12 @@ def _logs_its_raise(lane: str) -> Any:
     arq stores the exception and logs it on its own logger, which our log pipeline does
     not surface, so a crash used to be visible nowhere. ``Retry`` (a capacity wait),
     cancellation (an abort, arq's timeout, a worker shutdown) and
-    :class:`SandboxUnavailableError` (already logged where it is raised) pass through."""
+    :class:`SandboxUnavailableError` (already logged where it is raised) pass through.
+
+    arq's timeout reaches the body as a cancellation, so a ``TimeoutError`` escaping it is
+    OUR code's (an SDK call or await with its own deadline). It is re-raised as a
+    ``RuntimeError`` from the original, so ``timed_out:job_timeout`` only ever means
+    arq's limit and this reads as ``job_crashed``."""
 
     def wrap(fn: Any) -> Any:
         @functools.wraps(fn)
@@ -1196,9 +1201,11 @@ def _logs_its_raise(lane: str) -> Any:
                 return await fn(ctx, pocket_id, *args, **kwargs)
             except (Retry, SandboxUnavailableError):
                 raise
-            except Exception:
+            except Exception as exc:
                 job_id = ctx.get("job_id") if isinstance(ctx, dict) else None
                 logger.exception("sites.%s: job %s for pocket %s crashed", lane, job_id, pocket_id)
+                if isinstance(exc, TimeoutError):
+                    raise RuntimeError("the job body raised TimeoutError") from exc
                 raise
 
         return run

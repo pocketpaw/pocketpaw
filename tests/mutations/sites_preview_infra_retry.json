@@ -207,5 +207,32 @@
     "tests": [
       "tests/ee/sites/test_verify_pipeline.py"
     ]
+  },
+  {
+    "label": "verify: arq's job timeout (re-raised by Job.result) reads as our wait running out",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "            if info is not None and not info.success:\n                return build_job.raised_job_reason(info.result)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py"
+    ]
+  },
+  {
+    "label": "verify: a finished job that succeeded is read as raised, so a genuine wait timeout gets a crash reason",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "            if info is not None and not info.success:",
+    "replace": "            if info is not None:",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py"
+    ]
+  },
+  {
+    "label": "preview job: a TimeoutError our own code raises escapes as-is and reads as arq's job timeout",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "                if isinstance(exc, TimeoutError):\n                    raise RuntimeError(\"the job body raised TimeoutError\") from exc\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py"
+    ]
   }
 ]
