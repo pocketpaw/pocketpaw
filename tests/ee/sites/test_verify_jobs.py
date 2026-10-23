@@ -210,7 +210,7 @@ class TestHtmlVerifyJob:
         async def standalone(*_a: Any, **_k: Any):
             raise RuntimeError("daytona down")
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(bj.SandboxUnavailableError):
             await bj.run_site_html_verify(
                 {},
                 "pk1",
@@ -220,6 +220,26 @@ class TestHtmlVerifyJob:
                 _harness=standalone,
                 _verify_store=MemoryVerifyStore(),
             )
+
+    async def test_an_unexpected_raise_is_logged_with_its_traceback(self, caplog) -> None:
+        import logging
+
+        async def standalone(*_a: Any, **_k: Any):
+            return object()  # no ``as_dict``: the report step crashes
+
+        caplog.set_level(logging.ERROR, logger=bj.logger.name)
+        with pytest.raises(AttributeError):
+            await bj.run_site_html_verify(
+                {},
+                "pk-crash",
+                "h1",
+                {"engine": "html", "source": {}, "siteConfig": {}},
+                _runner=FakeRunner(tree={"index.html": b"x"}),
+                _harness=standalone,
+                _verify_store=MemoryVerifyStore(),
+            )
+        hits = [r for r in caplog.records if "pk-crash" in r.getMessage() and r.exc_info]
+        assert hits and hits[0].exc_info[0] is AttributeError
 
     def test_it_is_registered_on_the_sites_lane(self, monkeypatch) -> None:
         monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://localhost:6379")

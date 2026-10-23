@@ -54,11 +54,17 @@
 # flight. A build that already FINISHED and left the store empty is reported as failed,
 # with its reason — not as a build that is still coming. Re-enqueueing there instead
 # would put a polling client in a rebuild loop, one sandbox per build duration, on inputs
-# that just failed. The exception is a result the site did not cause: an aborted job, or
-# an infrastructure failure (``sandbox_unavailable:*``: capacity stayed full, no sandbox,
-# the job raised). That result is freed and the render queued again, a bounded number of
+# that just failed. The exception is a result the site did not cause: an aborted job, an
+# infrastructure failure (``sandbox_unavailable:*``: capacity stayed full, no sandbox), or
+# a job that raised. That result is freed and the render queued again, a bounded number of
 # times per render per hour (:func:`_clear_retryable_result`); otherwise a full org would
 # pin every render that hit it to "capacity full" for the hour, long after a slot freed.
+#
+# A JOB THAT RAISED IS REPORTED FOR WHAT IT RAISED (:func:`raised_job_reason`): arq's own
+# timeout, arq refusing a run past ``max_tries`` (only capacity ``Retry``s spend tries), a
+# sandbox the job never got (:class:`SandboxUnavailableError`), an abort, or our own crash
+# (:data:`RUNG_JOB_CRASHED`). Each read of one logs its class and a redacted message once,
+# and both jobs log their traceback before re-raising (:func:`_logs_its_raise`).
 #
 # WHICH ENGINES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it is
 # react-only today. The reason is the artifact, not the queue: an adapter-cloudflare build
@@ -230,6 +236,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import math
 import os
@@ -243,7 +250,7 @@ from typing import Any
 
 from arq.constants import result_key_prefix
 from arq.jobs import Job, JobStatus
-from arq.worker import Retry
+from arq.worker import JobExecutionFailed, Retry
 
 from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
 from pocketpaw_ee.sites import admission, capacity
@@ -370,6 +377,23 @@ RUNG_DEPLOY_FAILED = "deploy_failed"
 #: raised. Its own rung for the same reason :data:`RUNG_DEPLOY_FAILED` is: the user's
 #: build compiled, so naming this a build failure would send them to debug working code.
 RUNG_PREVIEW_UNREADABLE = "preview_unreadable"
+#: A preview / html-verify job raised something we did not plan for: a bug on our side.
+#: Not ``sandbox_unavailable`` (we may well have had one) and never the site's fault, so
+#: it is budgeted like any raise and its user-facing sentence says so
+#: (``capacity.JOB_CRASHED_REASON``).
+RUNG_JOB_CRASHED = "job_crashed"
+
+
+class SandboxUnavailableError(RuntimeError):
+    """A preview / html-verify job's sandbox step raised for a reason other than
+    capacity (Daytona unconfigured or refusing, a box that never started, a failed
+    upload). Raised ``from`` the original so the worker log keeps it; its own message is
+    the original's class and redacted text, because arq stores it in Redis. Read back as
+    ``sandbox_unavailable:no_sandbox`` (:func:`raised_job_reason`)."""
+
+    @classmethod
+    def wrapping(cls, exc: BaseException) -> SandboxUnavailableError:
+        return cls(f"{type(exc).__name__}: {capacity.redact(str(exc), cap=_RAISED_LOG_CAP)}")
 
 
 @dataclass(frozen=True)
@@ -1104,6 +1128,91 @@ def _preview_job_id(pocket_id: str, content_hash: str) -> str:
     return f"site-preview-{pocket_id}-{content_hash}"
 
 
+#: How much of a raised job's message reaches a log line.
+_RAISED_LOG_CAP = 300
+#: arq's ``JobExecutionFailed`` text when a job is picked up past ``max_tries``.
+_MAX_TRIES_TEXT = "retries exceeded"
+#: (job id, finish time) pairs whose raise was already logged by this process.
+_LOGGED_RAISES: dict[tuple[str, Any], None] = {}
+_LOGGED_RAISES_CAP = 1024
+
+
+def raised_job_reason(exc: BaseException | None) -> str:
+    """The ``"<rung>:<cause>"`` for a preview / html-verify job that RAISED ``exc``.
+
+    * ``TimeoutError`` (arq's ``asyncio.wait_for`` hit the function timeout) →
+      ``timed_out:job_timeout``.
+    * ``JobExecutionFailed("max N retries exceeded")`` → ``sandbox_unavailable:capacity``.
+      Only a capacity ``Retry`` spends a try on these functions, so arq refusing the
+      next pickup is a capacity wait that ran out (a worker restart mid-wait re-runs
+      the job and spends one more, which is how the last try never gets to settle).
+    * :class:`SandboxUnavailableError` → ``sandbox_unavailable:no_sandbox``.
+    * ``CancelledError`` (aborted as superseded) → :data:`SUPERSEDED_REASON`.
+    * anything else → ``job_crashed:unhandled_exception``.
+    """
+    if isinstance(exc, asyncio.CancelledError):
+        return SUPERSEDED_REASON
+    if isinstance(exc, TimeoutError):
+        return capacity.JOB_TIMEOUT_REASON
+    if isinstance(exc, JobExecutionFailed) and _MAX_TRIES_TEXT in str(exc):
+        return f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}"
+    if isinstance(exc, SandboxUnavailableError):
+        return f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.NO_SANDBOX_CAUSE}"
+    return capacity.JOB_CRASHED_REASON
+
+
+def _log_raised_result(job_id: str, info: Any) -> None:
+    """WARNING, once per job result in this process, naming what a failed job raised:
+    class and redacted, capped message. The worker's traceback is in the worker log
+    (:func:`_logs_its_raise`); this line is what the API side sees."""
+    key = (job_id, getattr(info, "finish_time", None))
+    if key in _LOGGED_RAISES:
+        return
+    if len(_LOGGED_RAISES) >= _LOGGED_RAISES_CAP:
+        _LOGGED_RAISES.pop(next(iter(_LOGGED_RAISES)))
+    _LOGGED_RAISES[key] = None
+    exc = info.result
+    logger.warning(
+        "sites.preview: job %s raised %s (reported as %s): %s",
+        job_id,
+        type(exc).__name__,
+        raised_job_reason(exc),
+        capacity.redact(str(exc), cap=_RAISED_LOG_CAP),
+    )
+
+
+def _logs_its_raise(lane: str) -> Any:
+    """Log a job's unexpected raise with its traceback before arq records it.
+
+    arq stores the exception and logs it on its own logger, which our log pipeline does
+    not surface, so a crash used to be visible nowhere. ``Retry`` (a capacity wait),
+    cancellation (an abort, arq's timeout, a worker shutdown) and
+    :class:`SandboxUnavailableError` (already logged where it is raised) pass through.
+
+    arq's timeout reaches the body as a cancellation, so a ``TimeoutError`` escaping it is
+    OUR code's (an SDK call or await with its own deadline). It is re-raised as a
+    ``RuntimeError`` from the original, so ``timed_out:job_timeout`` only ever means
+    arq's limit and this reads as ``job_crashed``."""
+
+    def wrap(fn: Any) -> Any:
+        @functools.wraps(fn)
+        async def run(ctx: Any, pocket_id: str, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(ctx, pocket_id, *args, **kwargs)
+            except (Retry, SandboxUnavailableError):
+                raise
+            except Exception as exc:
+                job_id = ctx.get("job_id") if isinstance(ctx, dict) else None
+                logger.exception("sites.%s: job %s for pocket %s crashed", lane, job_id, pocket_id)
+                if isinstance(exc, TimeoutError):
+                    raise RuntimeError("the job body raised TimeoutError") from exc
+                raise
+
+        return run
+
+    return wrap
+
+
 async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]:
     """Read a REFUSED enqueue: is that id an in-flight build, or one that already ended?
 
@@ -1137,10 +1246,10 @@ async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]
     if info is None:
         return "building", None
     if not info.success:
-        # The job raised. ``run_site_preview_build`` only re-raises for a sandbox it
-        # never reached, and the exception text can name paths, so the rung is all that
-        # travels.
-        return "failed", f"{RUNG_SANDBOX_UNAVAILABLE}:job_raised"
+        # The job raised. Report what it raised; the exception text can name paths, so
+        # only the rung travels, and the class + redacted text go to the log.
+        _log_raised_result(job_id, info)
+        return "failed", raised_job_reason(info.result)
     result = info.result
     if isinstance(result, dict):
         return str(result.get("status") or "failed"), result.get("reason")
@@ -1303,6 +1412,7 @@ def _scaffold_error_entry(exc: BaseException) -> dict[str, Any]:
     return {"layer": "build", "code": "scaffold_failed", "message": type(exc).__name__}
 
 
+@_logs_its_raise("preview")
 async def run_site_preview_build(
     ctx: dict[str, Any],
     pocket_id: str,
@@ -1346,10 +1456,11 @@ async def run_site_preview_build(
     store (tests).
 
     NEVER RAISES FOR A BUILD OUTCOME, matching the publish job: a failed build, a timeout
-    and a lost sandbox are results. It DOES re-raise when the sandbox could not be reached
-    at all, after the settlement is already lost to the raise — the worker log is where
-    that condition belongs, and ``_preview_job_outcome`` maps the failed job back to the
-    ``sandbox_unavailable`` rung.
+    and a lost sandbox are results. It DOES raise :class:`SandboxUnavailableError` when
+    the sandbox could not be reached at all — the worker log is where that condition
+    belongs, and ``_preview_job_outcome`` maps it back to ``sandbox_unavailable:no_sandbox``.
+    Any other raise is logged with its traceback (:func:`_logs_its_raise`) and read back
+    as ``job_crashed`` (:func:`raised_job_reason`).
     """
     if normalize_engine(engine) == "project":
         # The project engine has no scaffold and its own bundle/record shape.
@@ -1457,7 +1568,7 @@ async def run_site_preview_build(
             if capacity.is_capacity_error(exc):
                 return await preview_capacity_outcome(ctx, pocket_id, content_hash, lane="preview")
             logger.exception("sites.preview: no sandbox for pocket %s", pocket_id)
-            raise
+            raise SandboxUnavailableError.wrapping(exc) from exc
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -1524,6 +1635,7 @@ async def run_site_preview_build(
     return {"status": "built", "reason": settlement.reason, **report}
 
 
+@_logs_its_raise("verify")
 async def run_site_html_verify(
     ctx: dict[str, Any],
     pocket_id: str,
@@ -1542,8 +1654,9 @@ async def run_site_html_verify(
     ``paw.dependencies.json``), upload it to a fresh sandbox, run the harness, tear the
     sandbox down (``browser_check.run_standalone``).
 
-    Re-raises when no sandbox could be created, like the preview job, so a waiting
-    verify reads ``sandbox_unavailable`` off the failed job.
+    Raises :class:`SandboxUnavailableError` when no sandbox could be created, like the
+    preview job, so a waiting verify reads ``sandbox_unavailable:no_sandbox`` off the
+    failed job.
     """
     from pocketpaw_ee.sites import browser_check
 
@@ -1583,7 +1696,7 @@ async def run_site_html_verify(
                     ctx, pocket_id, content_hash, lane="html_verify"
                 )
             logger.exception("sites.verify: no sandbox for html pocket %s", pocket_id)
-            raise
+            raise SandboxUnavailableError.wrapping(exc) from exc
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -1756,14 +1869,22 @@ def _retry_kind(info: Any) -> str | None:
       * ``"aborted"``: superseded by a newer edit (a ``CancelledError``). The source came
         back to this render (an undo), so it is wanted after all. Not budgeted: an abort
         only happens when another job took the pocket.
-      * ``"raised"``: the job raised anything else. Budgeted (:data:`RETRY_LIMITS`).
+      * ``"raised"``: the job raised anything else (a crash, arq's timeout, a sandbox it
+        never got). Budgeted (:data:`RETRY_LIMITS`).
       * ``"sandbox_unavailable"``: it settled ``failed`` under that rung (capacity stayed
-        full, no sandbox, generator missing). The site never ran. Budgeted.
+        full, no sandbox, generator missing), or arq refused it past ``max_tries`` after
+        capacity retries (read as ``sandbox_unavailable:capacity``). The site never ran.
+        Budgeted.
 
     Anything else, above all a failure of the site's own code (``build_failed``,
     ``scaffold_failed``, …), is sticky: rebuilding identical inputs would fail again."""
     if not info.success:
-        return "aborted" if isinstance(info.result, asyncio.CancelledError) else "raised"
+        if isinstance(info.result, asyncio.CancelledError):
+            return "aborted"
+        reason = raised_job_reason(info.result)
+        if reason == f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}":
+            return "sandbox_unavailable"
+        return "raised"
     result = info.result
     if not isinstance(result, dict) or result.get("status") != "failed":
         return None
@@ -1799,8 +1920,13 @@ async def _clear_retryable_result(pool: Any, job_id: str) -> bool:
         kind = None if info is None else _retry_kind(info)
         if kind is None:
             return False
+        if not info.success and kind != "aborted":
+            _log_raised_result(job_id, info)
         if kind != "aborted" and not await _spend_retry(pool, job_id, kind):
-            logger.warning("sites.preview: %s retry budget spent for %s", kind, job_id)
+            last = type(info.result).__name__ if not info.success else info.result.get("reason")
+            logger.warning(
+                "sites.preview: %s retry budget spent for %s (last: %s)", kind, job_id, last
+            )
             return False
         await pool.delete(result_key_prefix + job_id)
     except Exception:  # noqa: BLE001
@@ -1857,7 +1983,7 @@ async def wait_for_preview_result(
     ``arq.jobs.Job.result`` on :data:`SITE_BUILD_QUEUE_NAME`: raises ``TimeoutError``
     when the job does not finish inside ``timeout`` (the job keeps running and its report
     lands in ``verify_store`` for the next call), and re-raises the job's own exception
-    when the job failed — which for this lane means no sandbox could be created. Looked up
+    when the job failed (:func:`raised_job_reason` names it). Looked up
     on the module by ``verify`` so a test can substitute it without faking arq's Redis.
     """
     job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)
@@ -1955,6 +2081,7 @@ __all__ = [
     "RUNG_ENGINE_NOT_BUILDABLE",
     "RUNG_DEPLOY_FAILED",
     "RUNG_ENQUEUE_FAILED",
+    "RUNG_JOB_CRASHED",
     "RUNG_PREVIEW_UNREADABLE",
     "RUNG_SANDBOX_UNAVAILABLE",
     "RUNG_SCAFFOLD_EMPTY",
@@ -1962,11 +2089,13 @@ __all__ = [
     "SKIPPED_TREE_DIRS",
     "BuildSettlement",
     "PreviewBuildEnqueue",
+    "SandboxUnavailableError",
     "enqueue_html_verify",
     "enqueue_preview_build",
     "html_verify_job_id",
     "enqueue_site_build",
     "is_buildable_engine",
+    "raised_job_reason",
     "read_generated_tree",
     "resolve_build_settlement",
     "run_site_build",

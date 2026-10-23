@@ -332,10 +332,10 @@ async def _sandbox_layers(
                 [],
                 [],
             )
-        except Exception:
-            # The job raised: for this lane that means no sandbox could be created.
+        except Exception as exc:
+            # The job raised: name what it raised (no sandbox, arq's limit, our crash).
             logger.warning("sites.verify: build job for %s raised", pocket_id, exc_info=True)
-            reason = "sandbox_unavailable"
+            reason = build_job.raised_job_reason(exc)
             return (
                 [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)],
                 [],
@@ -351,18 +351,28 @@ async def _sandbox_layers(
 
 
 async def _timeout_reason(pool: Any, job_id: str) -> str:
-    """``waiting_for_capacity`` when the job we gave up waiting on is parked for a
-    Daytona slot, else ``timeout``. Never raises."""
+    """Why the wait raised ``TimeoutError``. ``waiting_for_capacity`` when the job is
+    parked for a Daytona slot. When the job already FINISHED by raising, the timeout was
+    its own stored exception re-raised by ``Job.result()`` (arq's limit), so the job's
+    raise is named (``build_job.raised_job_reason``: ``timed_out:job_timeout``,
+    ``job_crashed:*``, …). Otherwise our wait ran out: ``timeout``. Never raises."""
     from arq.jobs import Job, JobStatus
 
     from pocketpaw_ee.sites import build_job
     from pocketpaw_ee.sites.capacity import WAITING_REASON
 
     try:
-        status = await Job(job_id, pool, _queue_name=build_job.SITE_BUILD_QUEUE_NAME).status()
+        job = Job(job_id, pool, _queue_name=build_job.SITE_BUILD_QUEUE_NAME)
+        status = await job.status()
+        if status is JobStatus.deferred:
+            return WAITING_REASON
+        if status is JobStatus.complete:
+            info = await job.result_info()
+            if info is not None and not info.success:
+                return build_job.raised_job_reason(info.result)
     except Exception:  # noqa: BLE001
         return "timeout"
-    return WAITING_REASON if status is JobStatus.deferred else "timeout"
+    return "timeout"
 
 
 def _report_layers(

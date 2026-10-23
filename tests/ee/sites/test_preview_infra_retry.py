@@ -12,15 +12,25 @@
 # bounded number of times per hour (a raised job twice, sandbox_unavailable three
 # times), so a deterministic fault ends in ``failed`` instead of an endless rebuild.
 #
+# A job that RAISED is read for what it raised, not lumped in as a lost sandbox: arq's
+# own timeout reads ``timed_out:job_timeout``, arq refusing a run past ``max_tries``
+# (only capacity retries spend tries) reads ``sandbox_unavailable:capacity``, a sandbox
+# the job never got reads ``sandbox_unavailable:no_sandbox``, and anything else is our
+# crash, ``job_crashed:unhandled_exception``. Each read logs the exception class and a
+# redacted message once per job, so the worker's failure is visible from the API side.
+#
 # The pool and ``Job`` stand-ins model the one arq behaviour that matters here: an id is
 # refused while it has a live job OR a stored result, and deleting the result key frees it,
 # plus INCR / EXPIRE for the per-id retry counter.
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import pytest
 from arq.jobs import JobStatus
+from arq.worker import JobExecutionFailed
 from pocketpaw_ee.sites import build_job as bj
 from pocketpaw_ee.sites import capacity
 
@@ -77,6 +87,13 @@ class _ArqLike(_NoCounter):
         self.ttls.clear()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_raise_log(monkeypatch) -> None:
+    """The read logs a raise once per job result per process; these stand-ins carry no
+    finish time, so every test starts with an empty memo."""
+    monkeypatch.setattr(bj, "_LOGGED_RAISES", {})
+
+
 @pytest.fixture
 def arq_like(monkeypatch) -> _ArqLike:
     pool = _ArqLike()
@@ -108,9 +125,10 @@ def _failed(reason: str) -> _Info:
 INFRA_FAILURES = {
     "capacity": _failed(f"{bj.RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}"),
     "no_sandbox": _failed(f"{bj.RUNG_SANDBOX_UNAVAILABLE}:{capacity.NO_SANDBOX_CAUSE}"),
-    # ``run_site_preview_build`` re-raises for a sandbox it never reached; the outcome
-    # read maps that to ``sandbox_unavailable:job_raised``.
+    # Any job that raised is our failure, never the site's, so it is queued again.
     "job_raised": _Info(success=False, result=RuntimeError("could not create sandbox")),
+    "arq_timeout": _Info(success=False, result=TimeoutError()),
+    "max_tries": _Info(success=False, result=JobExecutionFailed("max 7 retries exceeded")),
 }
 
 SITE_FAILURES = {
@@ -212,11 +230,30 @@ def _raised(exc: BaseException) -> _Info:
 
 BUDGETED = {
     # A deterministic raise (a code bug, a bad verify image, a Daytona 4xx).
-    "deterministic_raise": (_raised(ValueError("bad image")), bj.RETRY_LIMITS["raised"]),
+    "deterministic_raise": (
+        _raised(ValueError("bad image")),
+        bj.RETRY_LIMITS["raised"],
+        "job_crashed:unhandled_exception",
+    ),
     # arq's own timeout: a build the site makes overrun.
-    "arq_timeout": (_raised(TimeoutError()), bj.RETRY_LIMITS["raised"]),
-    "capacity": (INFRA_FAILURES["capacity"], bj.RETRY_LIMITS["sandbox_unavailable"]),
-    "no_sandbox": (INFRA_FAILURES["no_sandbox"], bj.RETRY_LIMITS["sandbox_unavailable"]),
+    "arq_timeout": (_raised(TimeoutError()), bj.RETRY_LIMITS["raised"], "timed_out:job_timeout"),
+    # arq refusing a run past ``max_tries``: only capacity retries spend tries, so this is
+    # a capacity wait that ran out, budgeted like a settled capacity failure.
+    "max_tries_after_capacity": (
+        _raised(JobExecutionFailed("max 7 retries exceeded")),
+        bj.RETRY_LIMITS["sandbox_unavailable"],
+        "sandbox_unavailable:capacity",
+    ),
+    "capacity": (
+        INFRA_FAILURES["capacity"],
+        bj.RETRY_LIMITS["sandbox_unavailable"],
+        "sandbox_unavailable:capacity",
+    ),
+    "no_sandbox": (
+        INFRA_FAILURES["no_sandbox"],
+        bj.RETRY_LIMITS["sandbox_unavailable"],
+        "sandbox_unavailable:no_sandbox",
+    ),
 }
 
 
@@ -238,7 +275,7 @@ async def test_a_failure_that_keeps_recurring_is_retried_a_bounded_number_of_tim
     """Without the bound, every poll after the job ends would clear and re-enqueue: one
     job (often one sandbox) per job length, forever, and the client would never see
     ``failed``."""
-    info, limit = BUDGETED[case]
+    info, limit, reason = BUDGETED[case]
     job_id = bj._preview_job_id("p1", "h1")
 
     answers = await _fail_every_run(arq_like, job_id, info, runs=limit + 3)
@@ -246,7 +283,7 @@ async def test_a_failure_that_keeps_recurring_is_retried_a_bounded_number_of_tim
     assert len(arq_like.enqueued) == limit
     assert [a.status for a in answers[:limit]] == ["queued"] * limit
     assert {a.status for a in answers[limit:]} == {"failed"}
-    assert answers[-1].reason.startswith(bj.RUNG_SANDBOX_UNAVAILABLE)
+    assert {a.reason for a in answers[limit:]} == {reason}
     key = bj._RETRY_COUNTER_PREFIX + job_id
     assert arq_like.ttls[key] == bj.RETRY_WINDOW_SECONDS
 
@@ -302,3 +339,150 @@ async def test_an_aborted_render_is_not_budgeted(arq_like: _ArqLike) -> None:
 
     assert {a.status for a in answers} == {"queued"}
     assert arq_like.counters == {}
+
+
+# -- a raised job is reported for what it raised ------------------------------------
+
+#: Built lazily: ``SandboxUnavailableError`` is the job's own wrapper for a sandbox it
+#: never got.
+RAISED_READS = {
+    "arq_timeout": (lambda: TimeoutError(), "timed_out:job_timeout"),
+    "max_tries_after_capacity": (
+        lambda: JobExecutionFailed("max 7 retries exceeded"),
+        "sandbox_unavailable:capacity",
+    ),
+    "no_sandbox": (
+        lambda: bj.SandboxUnavailableError("RuntimeError: Daytona is not configured"),
+        "sandbox_unavailable:no_sandbox",
+    ),
+    "aborted": (lambda: asyncio.CancelledError(), bj.SUPERSEDED_REASON),
+    "code_bug": (lambda: KeyError("layers"), "job_crashed:unhandled_exception"),
+    "runtime_error": (lambda: RuntimeError("boom"), "job_crashed:unhandled_exception"),
+    # arq's other JobExecutionFailed (an expired job, an unregistered function) is not a
+    # capacity wait, so it is not dressed up as one.
+    "job_expired": (lambda: JobExecutionFailed("job expired"), "job_crashed:unhandled_exception"),
+}
+
+
+@pytest.mark.parametrize("case", list(RAISED_READS))
+async def test_a_raised_job_reads_as_what_it_raised(arq_like: _ArqLike, case: str) -> None:
+    make, reason = RAISED_READS[case]
+    job_id = bj._preview_job_id("p1", "h1")
+    arq_like.finish(job_id, _raised(make()))
+
+    assert await bj._preview_job_outcome(arq_like, job_id) == ("failed", reason)
+
+
+async def test_a_crash_is_ours_and_never_reads_as_an_unreachable_service(
+    arq_like: _ArqLike,
+) -> None:
+    """The production bug: a job that crashed was told to the user as "the build
+    service could not be reached". A crash is not a sandbox we never got."""
+    job_id = bj._preview_job_id("p1", "h1")
+    arq_like.finish(job_id, _raised(RuntimeError("boom")))
+
+    _status, reason = await bj._preview_job_outcome(arq_like, job_id)
+
+    assert not reason.startswith(bj.RUNG_SANDBOX_UNAVAILABLE)
+    assert reason.split(":", 1)[0] == bj.RUNG_JOB_CRASHED
+    assert capacity.reason_message(reason) == capacity.JOB_CRASHED_MESSAGE
+
+
+@pytest.mark.parametrize(
+    ("case", "kind"),
+    [
+        ("arq_timeout", "raised"),
+        ("code_bug", "raised"),
+        ("no_sandbox", "raised"),
+        ("max_tries_after_capacity", "sandbox_unavailable"),
+        ("job_expired", "raised"),
+        ("aborted", "aborted"),
+    ],
+)
+def test_each_raise_spends_the_right_retry_budget(case: str, kind: str) -> None:
+    make, _reason = RAISED_READS[case]
+    assert bj._retry_kind(_raised(make())) == kind
+
+
+_SECRET = "sk_live_" + "a1B2c3D4" * 6
+_LEAKY = RuntimeError(f"create refused: Authorization: Bearer {_SECRET} api_key=hunter2hunter2")
+
+
+def _raised_lines(caplog: pytest.LogCaptureFixture, job_id: str) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and job_id in r.getMessage() and "raised" in r.getMessage()
+    ]
+
+
+async def test_reading_a_raised_job_logs_its_class_and_a_redacted_message_once(
+    arq_like: _ArqLike, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The worker's exception used to vanish: the API side read ``success=False`` and
+    kept only a rung. The read now says what was raised, without what must not leak."""
+    job_id = bj._preview_job_id("p1", "h1")
+    arq_like.finish(job_id, _raised(_LEAKY))
+    caplog.set_level(logging.WARNING, logger=bj.logger.name)
+
+    for _ in range(3):
+        await bj._preview_job_outcome(arq_like, job_id)
+
+    lines = _raised_lines(caplog, job_id)
+    assert len(lines) == 1, [r.getMessage() for r in lines]
+    text = lines[0].getMessage()
+    assert "RuntimeError" in text
+    assert "create refused" in text
+    assert _SECRET not in text
+    assert "hunter2hunter2" not in text
+
+
+async def test_a_long_exception_message_is_capped_in_the_log(
+    arq_like: _ArqLike, caplog: pytest.LogCaptureFixture
+) -> None:
+    job_id = bj._preview_job_id("p1", "h1")
+    arq_like.finish(job_id, _raised(RuntimeError("x-" * 5000)))
+    caplog.set_level(logging.WARNING, logger=bj.logger.name)
+
+    await bj._preview_job_outcome(arq_like, job_id)
+
+    (line,) = _raised_lines(caplog, job_id)
+    assert len(line.getMessage()) < 1000
+
+
+async def test_the_retry_path_logs_the_raise_too_and_the_budget_still_applies(
+    arq_like: _ArqLike, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``_clear_retryable_result`` reads the same result first; it must say what was
+    raised as well, or a retried crash is invisible until the budget runs out."""
+    caplog.set_level(logging.WARNING, logger=bj.logger.name)
+    job_id = bj._preview_job_id("p1", "h1")
+    limit = bj.RETRY_LIMITS["raised"]
+
+    answers = await _fail_every_run(arq_like, job_id, _raised(_LEAKY), runs=limit + 2)
+
+    assert len(arq_like.enqueued) == limit
+    assert answers[-1].status == "failed"
+    assert answers[-1].reason == "job_crashed:unhandled_exception"
+    lines = _raised_lines(caplog, job_id)
+    assert lines, "no WARNING named the raised job"
+    for line in lines:
+        assert "RuntimeError" in line.getMessage()
+        assert _SECRET not in line.getMessage()
+
+
+async def test_clearing_a_raised_result_for_a_retry_logs_what_was_raised(
+    arq_like: _ArqLike, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A retried crash never reaches ``_preview_job_outcome`` (the render is simply
+    queued again), so the clear is the only read that can say what the job raised."""
+    caplog.set_level(logging.WARNING, logger=bj.logger.name)
+    job_id = bj._preview_job_id("p1", "h1")
+    arq_like.finish(job_id, _raised(_LEAKY))
+
+    assert await bj._clear_retryable_result(arq_like, job_id) is True
+
+    (line,) = _raised_lines(caplog, job_id)
+    assert "RuntimeError" in line.getMessage()
+    assert "job_crashed:unhandled_exception" in line.getMessage()
+    assert _SECRET not in line.getMessage()
