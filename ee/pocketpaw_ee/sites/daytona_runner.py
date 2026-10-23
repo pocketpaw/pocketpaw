@@ -11,7 +11,8 @@
 # Optional arguments, all inert when omitted: ``image`` (the preview lane's
 # Playwright image), ``on_artifact`` (stores the draft as soon as a clean artifact is
 # verified), ``after_build`` (the browser harness, run in the same sandbox before
-# teardown; a raise is logged and never costs the build its verdict), ``labels``.
+# teardown; a raise is logged and never costs the build its verdict), ``labels``,
+# ``on_lease_wait`` / ``on_lease_admit`` (the admission wait hooks, step 0).
 # Box size: ``PAW_SITES_BUILD_{CPU,MEMORY_GIB,DISK_GIB}`` (2/4/10, max 8/16/50). ``build_usage``
 # measures the box alongside ``on_artifact``, before ``after_build``; never changes a verdict.
 # The sandbox ``bunfig.toml`` is OPEN (no release-age floor, scripts allowed) because
@@ -276,6 +277,8 @@ async def run_build(
     ssr_markers: tuple[str, ...] | None = None,
     log_tail_bytes: int | None = None,
     labels: dict[str, str] | None = None,
+    on_lease_wait: Callable[[], Awaitable[None]] | None = None,
+    on_lease_admit: Callable[[], Awaitable[None]] | None = None,
 ) -> BuildRunResult:
     """Build ``files`` in a fresh Daytona sandbox and return the verdict + artifact.
 
@@ -313,6 +316,8 @@ async def run_build(
     box an earlier attempt of the same job left behind is deleted before the create.
 
     ``cpu`` / ``memory_gb`` / ``disk_gb`` default to :func:`build_resources` (the env).
+    ``on_lease_wait`` / ``on_lease_admit`` are ``admission.memory_lease``'s ``on_wait`` /
+    ``on_admit``: the job's status write for "waiting for capacity", then "building".
     """
     env_cpu, env_memory, env_disk = build_resources()
     cpu = env_cpu if cpu is None else cpu
@@ -372,7 +377,12 @@ async def run_build(
     # Admission: wait for room in the sites memory budget BEFORE asking Daytona. Held
     # until the delete in the ``finally`` below has run; entered with no await between
     # it and the ``try``, so no exit path skips the release.
-    lease = memory_lease(memory_gb, wait_tag=create_kwargs["labels"].get(JOB_LABEL))
+    lease = memory_lease(
+        memory_gb,
+        wait_tag=create_kwargs["labels"].get(JOB_LABEL),
+        on_wait=on_lease_wait,
+        on_admit=on_lease_admit,
+    )
     await lease.__aenter__()
 
     # ── The clock starts here, after admission and before anything exists. ─────

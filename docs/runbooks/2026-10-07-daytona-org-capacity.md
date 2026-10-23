@@ -153,7 +153,10 @@ and holds it until its sandbox is deleted.
   forever. The arq job timeout always includes this wait (on or off, so the
   registered timeout and the code that reads it never disagree), so a wait never eats
   the build's own budget.
-- **While it waits** a preview poll reads `queued` / `waiting_for_capacity`. Worker
+- **While it waits** the build reads `queued` / `waiting_for_capacity` everywhere a
+  client polls: a preview job's outcome, the Site row (`build_status` / `build_reason`)
+  for a publish, and the project draft's build record (`latest-build`). It flips to
+  `building` (reason cleared) once the lease is granted. Worker
   log: `admission: ... waiting for the budget`, and `going to Daytona unleased` when
   the wait ran out.
 

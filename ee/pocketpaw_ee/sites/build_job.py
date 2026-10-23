@@ -705,6 +705,7 @@ async def run_site_build(
                 client=_client,
                 artifact_rel=artifact_rel,
                 labels=sandbox_labels(ctx, str(getattr(site, "pocket_id", "") or "")),
+                **_publish_lease_hooks(ctx, site),
             )
         except Exception as exc:
             if capacity.is_capacity_error(exc):
@@ -763,6 +764,22 @@ async def run_site_build(
             raise
 
     await _record(site, settlement)
+
+
+def _publish_lease_hooks(ctx: Any, site: Any) -> dict[str, Any]:
+    """``run_build``'s admission hooks for a publish: while the build waits for a memory
+    lease the Site row reads ``queued`` / ``waiting_for_capacity`` (clock re-stamped, so
+    the wait never reads as stale), then ``building`` once admitted. Both writes are
+    conditional on the row still naming this job, so a newer publish is never clobbered."""
+    job_id = ctx.get("job_id") if isinstance(ctx, dict) else None
+
+    async def on_wait() -> None:
+        await sites_service.mark_build_waiting(site, job_id=job_id, reason=capacity.WAITING_REASON)
+
+    async def on_admit() -> None:
+        await sites_service.mark_build_admitted(site, job_id=job_id)
+
+    return {"on_lease_wait": on_wait, "on_lease_admit": on_admit}
 
 
 async def _publish_capacity_wait(ctx: Any, site: Any, site_id: str, attempts_left: int) -> None:

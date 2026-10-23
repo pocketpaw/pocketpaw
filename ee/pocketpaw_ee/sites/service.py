@@ -6250,6 +6250,32 @@ async def mark_build_waiting(site: _SiteDoc, *, job_id: str | None, reason: str)
     return True
 
 
+async def mark_build_admitted(site: _SiteDoc, *, job_id: str | None) -> bool:
+    """Flip a build that waited for a memory lease back to ``building``, clear the wait
+    reason and RE-STAMP its clock (the attempt starts now, as in :func:`mark_build_running`).
+
+    Conditional on ``build_job_id == job_id`` like :func:`mark_build_waiting`: False means
+    a newer publish owns the row and it is left alone. ``job_id=None`` writes
+    unconditionally."""
+    values: dict[str, Any] = {
+        "build_status": "building",
+        "build_reason": None,
+        "build_started_at": datetime.now(UTC),
+    }
+    if job_id is None:
+        await site.set(values)
+        return True
+    collection = type(site).get_pymongo_collection()
+    won = await collection.find_one_and_update(
+        {"_id": site.id, "build_job_id": job_id}, {"$set": values}
+    )
+    if won is None:
+        return False
+    for field, value in values.items():
+        setattr(site, field, value)
+    return True
+
+
 async def record_build_outcome(site: _SiteDoc, *, status: str, reason: str) -> None:
     """Record a finished attempt's terminal status and the rung that produced it.
 
