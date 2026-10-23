@@ -1,0 +1,47 @@
+[
+  {
+    "label": "the build box size ignores PAW_SITES_BUILD_MEMORY_GIB, so ops cannot shrink it from the usage lines",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "    memory_gb = env_memory if memory_gb is None else memory_gb\n",
+    "replace": "    memory_gb = DEFAULT_BUILD_MEMORY_GIB if memory_gb is None else memory_gb\n",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::TestBuildResources"
+    ]
+  },
+  {
+    "label": "a bad build size env value (0, negative) reaches Daytona instead of falling back to the default",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "    if value < 1:\n        logger.warning(\"%s=%r is not a positive integer; using %d\", name, raw, default)\n",
+    "replace": "    if value < -100:\n        logger.warning(\"%s=%r is not a positive integer; using %d\", name, raw, default)\n",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::TestBuildResources"
+    ]
+  },
+  {
+    "label": "a probe that raises fails the whole build instead of logging unknowns",
+    "file": "ee/pocketpaw_ee/sites/build_usage.py",
+    "find": "    except Exception as exc:  # noqa: BLE001 -- measuring must never fail a build\n",
+    "replace": "    except ValueError as exc:  # noqa: BLE001 -- measuring must never fail a build\n",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::TestRunBuildMeasures"
+    ]
+  },
+  {
+    "label": "a hung probe is not cut off, so a wedged exec holds the build (and its sandbox) open",
+    "file": "ee/pocketpaw_ee/sites/build_usage.py",
+    "find": "            timeout=PROBE_TIMEOUT_SECONDS,\n        )\n",
+    "replace": "            timeout=None,\n        )\n",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::TestRunBuildMeasures::test_a_hung_probe_is_cut_off"
+    ]
+  },
+  {
+    "label": "the probe drops the cgroup v2 peak, so builds log a /proc used-now figure instead of the real peak",
+    "file": "ee/pocketpaw_ee/sites/build_usage.py",
+    "find": "            \"for f in /sys/fs/cgroup/memory.peak:cgroup_v2\"\n",
+    "replace": "            \"for f in\"\n",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::TestProbe"
+    ]
+  }
+]

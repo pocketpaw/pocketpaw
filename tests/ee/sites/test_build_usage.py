@@ -218,10 +218,9 @@ class TestRunBuildMeasures:
 
     async def test_the_probe_sizes_the_engines_output_dir(self) -> None:
         client = FaultyDaytonaClient()
-        await dr.run_build(
-            REACT_FILES, engine="react", timeout_seconds=600, client=client, artifact_rel="build"
-        )
-        assert f"{dr.SANDBOX_PROJECT_DIR}/build" in client.probe_commands[0]
+        await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
+        assert f"{dr.SANDBOX_PROJECT_DIR}/dist" in client.probe_commands[0]
+        assert f"{dr.SANDBOX_PROJECT_DIR}/node_modules" in client.probe_commands[0]
 
 
 # ---------------------------------------------------------------------------

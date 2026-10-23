@@ -12,6 +12,8 @@
 # Playwright image), ``on_artifact`` (stores the draft as soon as a clean artifact is
 # verified), ``after_build`` (the browser harness, run in the same sandbox before
 # teardown; a raise is logged and never costs the build its verdict), ``labels``.
+# Box size: ``PAW_SITES_BUILD_CPU`` / ``_MEMORY_GIB`` / ``_DISK_GIB`` (2/4/10; args win).
+# Before teardown ``build_usage`` logs what the box used; it never changes a verdict.
 # The sandbox ``bunfig.toml`` is OPEN (no release-age floor, scripts allowed) because
 # the sandbox is the isolation boundary; an author-supplied one wins.
 # ``--frozen-lockfile`` is NOT used: the generator emits no lockfile, so the flag would
@@ -41,20 +43,21 @@
 # and the compiled server route. Accepting that rests entirely on the key living only
 # in a container that is then destroyed; a snapshot would make it durable. Build inputs
 # are also customer content, and a snapshot moves them into durable storage (a
-# different data-residency question). Caching ``node_modules`` in a snapshot is the
-# obvious optimisation and the thing that would undo this: re-make the security
-# decision first. The obligation (strip or inject the key at deploy) and the svelte
-# artifact's missing server output are recorded in section 9a and section 8 item 14 of
+# different data-residency question). Caching ``node_modules`` in a snapshot would undo
+# this: re-make the security decision first. The obligation (strip or inject the key at
+# deploy) and the svelte artifact's missing server output are in section 9a and 8.14 of
 # ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace.
 from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pocketpaw_ee.sites import build_usage
 from pocketpaw_ee.sites.admission import create_admitted, memory_lease
 from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG, BUILD_BUNFIG_REL
 from pocketpaw_ee.sites.daytona_build import (
@@ -112,6 +115,38 @@ BUILD_LANE = "site-build"
 
 #: Minutes of headroom between the build's own timeout and Daytona's idle auto-stop.
 _LIFECYCLE_MARGIN_MINUTES = 10
+
+#: The build box's size, per build, from the environment so ops can right-size it from
+#: the ``sites.build_usage:`` log lines without a code change. Defaults are today's size.
+BUILD_CPU_ENV = "PAW_SITES_BUILD_CPU"
+BUILD_MEMORY_ENV = "PAW_SITES_BUILD_MEMORY_GIB"
+BUILD_DISK_ENV = "PAW_SITES_BUILD_DISK_GIB"
+DEFAULT_BUILD_CPU = 2
+DEFAULT_BUILD_MEMORY_GIB = 4
+DEFAULT_BUILD_DISK_GIB = 10
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning("%s=%r is not a positive integer; using %d", name, raw, default)
+        return default
+    return value
+
+
+def build_resources() -> tuple[int, int, int]:
+    """``(cpu, memory GiB, disk GiB)`` for a build sandbox, read from the env now."""
+    return (
+        _positive_int_env(BUILD_CPU_ENV, DEFAULT_BUILD_CPU),
+        _positive_int_env(BUILD_MEMORY_ENV, DEFAULT_BUILD_MEMORY_GIB),
+        _positive_int_env(BUILD_DISK_ENV, DEFAULT_BUILD_DISK_GIB),
+    )
 
 
 def _lifecycle_minutes(timeout_seconds: int) -> int:
@@ -184,6 +219,20 @@ async def _read_sentinel(client: DaytonaClient, sandbox_id: str) -> bytes | None
         return None
 
 
+def _output_dir(engine: str, artifact_rel: str | None) -> str:
+    """Absolute in-sandbox path of the dir this build writes (the project dir when the
+    engine is unknown, so the probe still sizes something real)."""
+    rel = artifact_rel
+    if rel is None:
+        try:
+            from pocketpaw_ee.sites.engines import static_output_rel
+
+            rel = static_output_rel(engine)
+        except Exception:  # noqa: BLE001 -- only feeds a measurement
+            rel = "."
+    return f"{SANDBOX_PROJECT_DIR}/{rel}".rstrip("/.") or SANDBOX_PROJECT_DIR
+
+
 async def run_build(
     files: dict[str, str | bytes],
     *,
@@ -191,9 +240,9 @@ async def run_build(
     timeout_seconds: int,
     client: DaytonaClient | None = None,
     sandbox_name: str | None = None,
-    cpu: int = 2,
-    memory_gb: int = 4,
-    disk_gb: int = 10,
+    cpu: int | None = None,
+    memory_gb: int | None = None,
+    disk_gb: int | None = None,
     install_command: str = "bun install",
     build_command: str = "bun run build",
     artifact_rel: str | None = None,
@@ -239,7 +288,13 @@ async def run_build(
     ``labels`` are merged over ``{"paw_lane": "site-build"}`` and stamped on the
     sandbox; the build jobs pass ``paw_pocket`` and ``paw_job``. With a ``paw_job``, a
     box an earlier attempt of the same job left behind is deleted before the create.
+
+    ``cpu`` / ``memory_gb`` / ``disk_gb`` default to :func:`build_resources` (the env).
     """
+    env_cpu, env_memory, env_disk = build_resources()
+    cpu = env_cpu if cpu is None else cpu
+    memory_gb = env_memory if memory_gb is None else memory_gb
+    disk_gb = env_disk if disk_gb is None else disk_gb
     if client is None:
         from pocketpaw_ee.cloud.daytona.client import get_daytona_client
 
@@ -405,6 +460,28 @@ async def run_build(
                     artifact = None
         t_extracted = time.monotonic()
 
+        # Right-sizing evidence, read in the box before teardown and before the hooks
+        # below (so the browser harness is not counted). Skipped when no sentinel came
+        # back: the box is likely gone and an exec would only wait out its timeout.
+        usage = None
+        if sentinel is not None:
+            usage = await build_usage.measure(
+                client,
+                sandbox_id,
+                project_dir=SANDBOX_PROJECT_DIR,
+                output_dir=_output_dir(engine, artifact_rel),
+            )
+        build_usage.log_usage(
+            usage,
+            engine=engine,
+            labels=create_kwargs["labels"],
+            outcome=classification.outcome,
+            cpu=cpu,
+            memory_gib=memory_gb,
+            disk_gib=disk_gb,
+            duration_seconds=t_extracted - t_start,
+        )
+
         # The artifact hook first (the preview lane stores the draft here), so the
         # draft is visible before the browser check below spends its time. Same rule
         # as after_build: only a clean, verified artifact, and a raise is swallowed.
@@ -474,11 +551,15 @@ async def run_build(
 
 
 __all__ = [
+    "BUILD_CPU_ENV",
+    "BUILD_DISK_ENV",
+    "BUILD_MEMORY_ENV",
     "EXEC_TIMEOUT_SLACK_SECONDS",
     "SANDBOX_ARTIFACT_PATH",
     "SANDBOX_PROJECT_DIR",
     "SANDBOX_WRAPPER_PATH",
     "BuildRunResult",
     "BuildTimings",
+    "build_resources",
     "run_build",
 ]
