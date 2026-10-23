@@ -16,6 +16,9 @@ Invariants a reader must not break:
 - ``run_status`` marks an assistant row a failed / cancelled / interrupted run cut
   off; ``steps`` / ``steps_omitted`` carry the reply's thinking and tool calls via
   ``steps_wire_fields``. Both wire keys appear only when set.
+- ``ask_user`` holds the question an agent reply asked through the ``ask_user``
+  tool; ``persist_user_message_for_scope`` marks it answered on the user's next
+  message in that scope. The ``askUser`` wire key appears only when set.
 - Per-member fan-out on send is batched or bounded: notifications (message and
   mention kinds) go through ``notifications_service.create_many`` (one
   ``insert_many``, external webhook delivery in a background task), and the
@@ -427,6 +430,8 @@ def _message_response(msg: _MessageDoc, *, parent: _MessageDoc | None = None) ->
     out.update(
         steps_wire_fields(getattr(msg, "steps", None), getattr(msg, "steps_omitted", 0) or 0)
     )
+    if getattr(msg, "ask_user", None) is not None:
+        out["askUser"] = msg.ask_user.to_wire()
     return out
 
 
@@ -1435,7 +1440,34 @@ async def persist_user_message_for_scope(
             workspace_id=workspace_id,
         )
     await msg.insert()
+    await _answer_pending_ask(kind, scope_id, session_key, content)
     return str(msg.id)
+
+
+async def _answer_pending_ask(kind: str, scope_id: str, session_key: str, content: str) -> None:
+    """Mark the scope's pending ``ask_user`` question answered by ``content``.
+
+    Only the newest agent reply can hold a pending ask (the client offers chips
+    on the latest reply alone), so this reads that one row through the
+    ``(session_key|group, createdAt)`` index. Any reply answers it, a clicked
+    chip or typed text, so the chips never come back after a reload once the
+    user has moved on. Best-effort: a failure here must never fail the send.
+    """
+    if kind in ("pocket", "session"):
+        query: dict = {"session_key": session_key, "role": "assistant"}
+    else:
+        query = {"group": scope_id, "sender_type": "agent"}
+    try:
+        latest = await _MessageDoc.find(query).sort("-createdAt").limit(1).to_list()
+        ask = latest[0].ask_user if latest else None
+        if ask is None or ask.answered:
+            return
+        await _MessageDoc.get_pymongo_collection().update_one(
+            {"_id": latest[0].id},
+            {"$set": {"ask_user.answered": True, "ask_user.answer": content}},
+        )
+    except Exception:
+        logger.warning("marking the pending ask answered failed for %s", scope_id, exc_info=True)
 
 
 async def persist_assistant_message_for_scope(
@@ -1451,6 +1483,7 @@ async def persist_assistant_message_for_scope(
     run_status: str | None = None,
     steps: list[dict] | None = None,
     steps_omitted: int = 0,
+    ask_user: dict | None = None,
 ) -> _MessageDoc:
     """Persist an agent's reply in an agent-stream context.
 
@@ -1463,6 +1496,9 @@ async def persist_assistant_message_for_scope(
 
     ``steps`` / ``steps_omitted`` are the thinking blocks and tool calls the
     reply streamed (see ``chat/runs/steps.py``); display-only.
+
+    ``ask_user`` is the ``MessageAskUser`` dict when the reply asked the user a
+    question through the ``ask_user`` tool; display-only.
     """
     att_models = [_AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])]
     if kind == "concierge":
@@ -1509,6 +1545,7 @@ async def persist_assistant_message_for_scope(
             run_status=run_status,
             steps=steps or [],
             steps_omitted=steps_omitted,
+            ask_user=ask_user,
         )
     else:
         msg = _MessageDoc(
@@ -1523,6 +1560,7 @@ async def persist_assistant_message_for_scope(
             run_status=run_status,
             steps=steps or [],
             steps_omitted=steps_omitted,
+            ask_user=ask_user,
         )
     await msg.insert()
     return msg

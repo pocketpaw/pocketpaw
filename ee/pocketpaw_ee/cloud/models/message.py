@@ -1,19 +1,18 @@
 """Message document — unified message store for pocket agent memory and group chat.
 
-Updated: 2026-09-28 (feat/persist-tool-steps) — added ``MessageStep`` and
-``Message.steps`` / ``steps_omitted``: the ordered thinking blocks and tool calls
-an agent reply streamed, recorded by ``chat/runs/steps.StepRecorder``. Before,
-they reached only the Redis run stream (1h TTL), so a refresh lost them.
-Display-only: the LLM history reader never reads them. Additive, so legacy rows
-load with ``[]`` / ``0`` and need no migration.
+Agent replies carry extras beyond their text:
 
-Updated: 2026-09-27 (fix/chat-run-heartbeat) — added ``run_status``. A run that
-ends failed / cancelled / interrupted now persists the text it had already
-streamed as a real assistant Message (before, it lived only on
-``ChatRunDoc.partial_text``, which the chat history never reads, so a refresh
-showed the user's question and no answer). ``run_status`` carries that terminal
-status so the UI can mark the reply as cut off and the agent's history reader can
-still tell the model the reply is incomplete. ``None`` on every normal message.
+- ``run_status``: the terminal status (``failed`` | ``cancelled`` |
+  ``interrupted``) when the row is the partial text of a run that did not
+  complete, so the UI can mark it cut off and the history reader can tell the
+  model the reply is incomplete. ``None`` on every complete reply.
+- ``steps`` / ``steps_omitted`` (display only): the ordered thinking blocks and
+  tool calls the reply streamed (``chat/runs/steps.StepRecorder``).
+- ``ask_user`` (display only): the question the reply asked through the ``ask_user`` tool
+  (``MessageAskUser``), so the option chips survive a reload. The user's next
+  message in the scope marks it answered.
+
+All are additive with empty defaults, so legacy rows load without a migration.
 """
 
 from __future__ import annotations
@@ -68,6 +67,35 @@ class MessageStep(BaseModel):
     status: Literal["running", "complete", "error", "missing_result"] = "running"
     started_at: datetime | None = None
     ended_at: datetime | None = None
+
+
+class MessageAskUser(BaseModel):
+    """The ``ask_user`` question an agent reply is waiting on.
+
+    ``id`` is the run that asked. ``options`` are the normalized labels the
+    client renders as chips (``ask_user_payload``). ``multi_select`` is ``False``
+    today: the tool asks single-choice questions only. ``answered`` flips, and
+    ``answer`` takes the reply's text, when the user's next message in the same
+    scope lands.
+    """
+
+    id: str
+    question: str
+    options: list[str] = Field(default_factory=list)
+    multi_select: bool = False
+    answered: bool = False
+    answer: str | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """The ``askUser`` value the history wire dicts carry (camelCase)."""
+        return {
+            "id": self.id,
+            "question": self.question,
+            "options": list(self.options),
+            "multiSelect": self.multi_select,
+            "answered": self.answered,
+            "answer": self.answer,
+        }
 
 
 class Message(TimestampedDocument):
@@ -135,6 +163,10 @@ class Message(TimestampedDocument):
     # cap dropped are counted in ``steps_omitted`` rather than stored.
     steps: list[MessageStep] = Field(default_factory=list)
     steps_omitted: int = 0
+
+    # --- Interactive question ---------------------------------------------
+    # Set when the reply called ``ask_user``; ``None`` everywhere else.
+    ask_user: MessageAskUser | None = None
 
     @model_validator(mode="after")
     def _enforce_context(self) -> Message:

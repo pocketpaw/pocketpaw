@@ -7,7 +7,9 @@
 # contract: canned backend events through the real ``_drive_agent_loop`` must
 # yield exactly one ``ask_user_question`` frame per valid call (never for the
 # claude_sdk ``input_pending`` placeholder, never for a call the handler would
-# reject) and no generic ``tool_start`` chip for the ask tool.
+# reject) and no generic ``tool_start`` chip for the ask tool. The pydantic_ai
+# backend bridges the same handler as ``pocketpaw_ask_ask_user``; a call under
+# that name yields the same frame and no tool chip either.
 """MCP registration + handler tests for the ask_user interactive question tool."""
 
 from __future__ import annotations
@@ -253,3 +255,73 @@ async def test_valid_call_emits_one_normalized_frame_and_no_tool_start(monkeypat
     ]
     assert len(ack["options"]) == ask_mcp._MAX_OPTIONS
     assert _frames(frames, "tool_start") == []
+
+
+# --------------------------------------------------------------------------- #
+# pydantic_ai backend: the same tool under its bridged name                    #
+# --------------------------------------------------------------------------- #
+
+# pydantic_ai bridges in-process MCP servers through ``PrefixedToolset``, so the
+# tool the model calls is ``<server>_<tool>``, not the SDK's ``mcp__`` id.
+_PYDANTIC_AI_ASK_NAME = f"{ask_mcp.SERVER_NAME}_ask_user"
+
+
+def test_both_backend_spellings_are_ask_names() -> None:
+    assert ask_mcp.ASK_USER_TOOL_ID in ask_mcp.ASK_USER_TOOL_NAMES
+    assert _PYDANTIC_AI_ASK_NAME in ask_mcp.ASK_USER_TOOL_NAMES
+
+
+async def test_pydantic_ai_bridges_the_ask_tool(monkeypatch) -> None:
+    # The pydantic_ai backend offers the very same handler, under the bridged name.
+    pytest.importorskip("pydantic_ai")
+    pytest.importorskip("claude_agent_sdk")
+    from pocketpaw_ee.extensions import CloudAskMcpProvider
+    from pydantic_ai import Agent
+    from pydantic_ai.models.function import FunctionModel
+
+    import pocketpaw._registry as registry
+    from pocketpaw.agents.tool_bridge import build_inprocess_mcp_toolsets
+
+    monkeypatch.setattr(registry, "providers", lambda group: [CloudAskMcpProvider()])
+    toolsets = await build_inprocess_mcp_toolsets()
+    seen: set[str] = set()
+
+    async def capture(messages, info):
+        seen.update(t.name for t in info.function_tools)
+        yield "ok"
+
+    agent = Agent(FunctionModel(stream_function=capture), toolsets=toolsets)
+    async with agent.run_stream_events("hi") as stream:
+        async for _ in stream:
+            pass
+    assert _PYDANTIC_AI_ASK_NAME in seen
+
+
+def _pydantic_ai_ask_use(tool_input: dict, *, pending: bool = False) -> SimpleNamespace:
+    """A ``tool_use`` event in the pydantic_ai backend's shape."""
+    return SimpleNamespace(
+        type="tool_use",
+        content=f"Using {_PYDANTIC_AI_ASK_NAME}...",
+        metadata={"name": _PYDANTIC_AI_ASK_NAME, "input": tool_input, "input_pending": pending},
+    )
+
+
+async def test_pydantic_ai_ask_call_emits_the_same_frame(monkeypatch) -> None:
+    frames = await _drive(
+        monkeypatch,
+        [
+            _pydantic_ai_ask_use({}, pending=True),
+            _pydantic_ai_ask_use({"question": "Which vibe?", "options": ["Clean", "Warm"]}),
+            SimpleNamespace(
+                type="tool_result",
+                content='{"ok": true}',
+                metadata={"name": _PYDANTIC_AI_ASK_NAME},
+            ),
+            _DONE,
+        ],
+    )
+    assert _frames(frames, "ask_user_question") == [
+        {"question": "Which vibe?", "options": ["Clean", "Warm"]}
+    ]
+    assert _frames(frames, "tool_start") == []
+    assert _frames(frames, "tool_result") == []
