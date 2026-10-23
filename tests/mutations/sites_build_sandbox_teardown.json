@@ -154,5 +154,33 @@
     "tests": [
       "tests/ee/sites/test_build_sandbox_teardown.py::TestOrphanReaper::test_build_worker_schedules_a_build_sandbox_reaper"
     ]
+  },
+  {
+    "label": "the build box is never deleted on stop, so a build our process lost sits stopped on 10 GiB of org disk until archived",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "        \"auto_delete_interval\": 0,\n",
+    "replace": "        \"auto_delete_interval\": -1,\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes",
+      "tests/ee/sites/test_daytona_runner.py::TestLifecycleAndTimeoutWiring"
+    ]
+  },
+  {
+    "label": "the html verify box is never deleted on stop, so a lost verify sits stopped on 5 GiB of org disk",
+    "file": "ee/pocketpaw_ee/sites/browser_check.py",
+    "find": "        \"auto_delete_interval\": 0,\n",
+    "replace": "        \"auto_delete_interval\": -1,\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
+    ]
+  },
+  {
+    "label": "the Code Mode box is kept after it stops, so every idle Code Mode session holds 10 GiB of org disk",
+    "file": "ee/pocketpaw_ee/cloud/websandbox/provision.py",
+    "find": "_AUTO_DELETE_MINUTES = 0\n",
+    "replace": "_AUTO_DELETE_MINUTES = -1\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
+    ]
   }
 ]
