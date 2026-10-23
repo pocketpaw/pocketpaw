@@ -435,7 +435,7 @@ class TestLifetimes:
 
         assert workspace_vm_lifecycle(config) == {
             "auto_stop_interval": stop,
-            "auto_archive_interval": 1,
+            "auto_archive_interval": 15,
             "auto_delete_interval": -1,
         }
 
@@ -443,13 +443,17 @@ class TestLifetimes:
         ("raw", "archive"),
         [
             ("15", 15),
-            (" 120 ", 120),
+            (" 30 ", 30),
+            # 1 is the ops override for a disk crunch.
             ("1", 1),
+            ("60", 60),
+            # Clamped to 1..60: a long archive holds 10 GiB of disk per stopped VM.
+            ("120", 60),
             # 0 is Daytona's "use the MAXIMUM interval" (7+ days), the opposite of fast.
             ("0", 1),
             ("-5", 1),
-            ("junk", 1),
-            ("", 1),
+            ("junk", 15),
+            ("", 15),
         ],
     )
     def test_workspace_vm_archive_interval_reads_the_env(self, monkeypatch, raw, archive) -> None:
@@ -514,7 +518,7 @@ class TestLifetimes:
 
         await router_mod.get_workspace_vm(workspace_id="ws1")
         assert created["auto_stop_interval"] == 60
-        assert created["auto_archive_interval"] == 1
+        assert created["auto_archive_interval"] == 15
         assert created["auto_delete_interval"] == -1
 
     def test_the_client_default_is_minutes_not_hours(self) -> None:
@@ -524,6 +528,99 @@ class TestLifetimes:
 
         default = inspect.signature(DaytonaClient.create_sandbox).parameters["auto_stop_interval"]
         assert default.default == 30
+
+
+class _StatefulVm:
+    """A VM whose ``get`` walks through ``states`` (the last one repeats), recording
+    every call, so a test can drive it through Daytona's transitional states."""
+
+    def __init__(self, states: list[str]) -> None:
+        self.states = list(states)
+        self.calls: list[str] = []
+
+    async def get_sandbox_by_id(self, sandbox_id: str) -> Any:
+        self.calls.append("get")
+        state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        return SimpleNamespace(state=state)
+
+    async def start_sandbox(self, sandbox_id: str) -> None:
+        self.calls.append("start")
+
+    async def wait_for_sandbox(self, sandbox_id: str, **kw: Any) -> None:
+        self.calls.append("wait")
+
+
+class TestWorkspaceVmTransitionalStates:
+    """A VM caught mid-transition (the 30-45 minute "back from a break" moment, when it
+    is stopping or archiving) must end up running before the tool call, and a state
+    that is not ``started`` is never cached as started."""
+
+    @pytest.fixture(autouse=True)
+    def _fast(self, monkeypatch: Any) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        context._last_seen_started.clear()
+        monkeypatch.setattr(context, "_SETTLE_POLL_SECONDS", 0.0)
+
+    @pytest.mark.parametrize(
+        ("states", "rest"),
+        [
+            (["archiving", "archiving", "archived"], "archived"),
+            (["stopping", "stopped"], "stopped"),
+            (["stopping", "archiving", "archived"], "archived"),
+        ],
+    )
+    async def test_a_settling_vm_is_waited_for_then_started(
+        self, states: list[str], rest: str
+    ) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        vm = _StatefulVm(states)
+        await context._ensure_started(vm, "sb-settling")
+        assert vm.calls == ["get"] * len(states) + ["start", "wait"]
+        assert "sb-settling" in context._last_seen_started
+
+    @pytest.mark.parametrize("state", ["starting", "restoring", "resuming", "creating"])
+    async def test_a_booting_vm_is_waited_for_not_restarted(self, state: str) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        vm = _StatefulVm([state])
+        await context._ensure_started(vm, f"sb-{state}")
+        assert vm.calls == ["get", "wait"]
+        assert f"sb-{state}" in context._last_seen_started
+
+    async def test_a_vm_that_never_settles_is_bounded_and_not_cached(
+        self, monkeypatch: Any
+    ) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        monkeypatch.setattr(context, "_RESUME_TIMEOUT_SECONDS", 0.0)
+        vm = _StatefulVm(["archiving"])
+        await context._ensure_started(vm, "sb-stuck")
+        assert "start" not in vm.calls
+        assert "sb-stuck" not in context._last_seen_started
+
+    @pytest.mark.parametrize("state", ["error", "unknown", "destroyed", "build_failed"])
+    async def test_an_unusable_state_is_not_cached_as_started(self, state: str) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        vm = _StatefulVm([state])
+        await context._ensure_started(vm, f"sb-{state}")
+        await context._ensure_started(vm, f"sb-{state}")
+        assert vm.calls == ["get", "get"]  # re-checked, never cached
+        assert f"sb-{state}" not in context._last_seen_started
+
+    async def test_a_failed_wait_is_not_cached(self) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        class _Slow(_StatefulVm):
+            async def wait_for_sandbox(self, sandbox_id: str, **kw: Any) -> None:
+                self.calls.append("wait")
+                raise TimeoutError("still starting")
+
+        vm = _Slow(["starting"])
+        await context._ensure_started(vm, "sb-slow")
+        assert "sb-slow" not in context._last_seen_started
 
 
 class TestWorkspaceVmResumes:
@@ -582,8 +679,31 @@ class TestWorkspaceVmResumes:
         await context._ensure_lifecycle(_Client(), "sb-old", "ws1")
         await context._ensure_lifecycle(_Client(), "sb-old", "ws1")
         assert applied == [
-            {"auto_stop_interval": 60, "auto_archive_interval": 1, "auto_delete_interval": -1}
+            {"auto_stop_interval": 60, "auto_archive_interval": 15, "auto_delete_interval": -1}
         ]
+
+    async def test_a_failed_lifecycle_set_is_retried_on_the_next_resolve(
+        self, monkeypatch: Any
+    ) -> None:
+        from pocketpaw_ee.cloud.daytona import context, store
+
+        attempts: list[str] = []
+
+        class _Client:
+            async def set_sandbox_lifecycle(self, sandbox_id: str, **kw: Any) -> None:
+                attempts.append(sandbox_id)
+                if len(attempts) == 1:
+                    raise RuntimeError("daytona 503")
+
+        async def _config(_ws: str) -> dict:
+            return {}
+
+        monkeypatch.setattr(store, "get_workspace_vm_config", _config)
+        context._lifecycle_applied.clear()
+        await context._ensure_lifecycle(_Client(), "sb-flaky", "ws1")
+        await context._ensure_lifecycle(_Client(), "sb-flaky", "ws1")
+        await context._ensure_lifecycle(_Client(), "sb-flaky", "ws1")
+        assert attempts == ["sb-flaky", "sb-flaky"]
 
     async def test_an_old_vm_gets_the_env_archive_interval(self, monkeypatch: Any) -> None:
         """A VM created under the old one-day archive converges on the configured

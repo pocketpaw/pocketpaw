@@ -7,6 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -216,6 +220,54 @@ class TestRunBuildMeasures:
         assert "measure" not in client.calls
         assert "peak_memory_mib=unknown" in _usage_records(caplog)[0].getMessage()
 
+    async def test_the_probe_does_not_hold_up_the_artifact_hook(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The draft (``on_artifact``) is what the user sees first: the probe runs
+        alongside it, not before it, and still finishes before ``after_build`` (so the
+        browser harness is not counted in the peak) and before teardown."""
+        stored = asyncio.Event()
+        order: list[str] = []
+
+        class _WaitsForTheDraft(FaultyDaytonaClient):
+            async def execute_command(
+                self, sandbox_id: str, command: str, timeout: int = 30
+            ) -> Any:
+                if build_usage.USAGE_PROBE_MARKER in command:
+                    try:
+                        await asyncio.wait_for(stored.wait(), timeout=2)
+                    except TimeoutError:
+                        order.append("probe_blocked_the_draft")
+                        return SimpleNamespace(result="")
+                    order.append("measure")
+                    return SimpleNamespace(result=V2_OUTPUT)
+                return await super().execute_command(sandbox_id, command, timeout)
+
+            async def delete_sandbox(self, sandbox_id: str) -> None:
+                order.append("delete")
+                await super().delete_sandbox(sandbox_id)
+
+        async def on_artifact(_artifact: bytes) -> None:
+            order.append("on_artifact")
+            stored.set()
+
+        async def after_build(_client: Any, _sid: str, _static: str) -> None:
+            order.append("after_build")
+
+        client = _WaitsForTheDraft()
+        with caplog.at_level(logging.INFO, logger="pocketpaw_ee.sites.build_usage"):
+            got = await dr.run_build(
+                REACT_FILES,
+                engine="react",
+                timeout_seconds=600,
+                client=client,
+                on_artifact=on_artifact,
+                after_build=after_build,
+            )
+        assert got.ok
+        assert order == ["on_artifact", "measure", "after_build", "delete"]
+        assert "peak_memory_mib=1024" in _usage_records(caplog)[0].getMessage()
+
     async def test_the_probe_sizes_the_engines_output_dir(self) -> None:
         client = FaultyDaytonaClient()
         await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
@@ -276,10 +328,117 @@ class TestBuildResources:
         await self._create_kwargs()
         assert asked == [3]
 
+    @pytest.mark.parametrize(
+        ("env", "value", "expected"),
+        [
+            ("PAW_SITES_BUILD_CPU", "64", (8, 4, 10)),
+            ("PAW_SITES_BUILD_MEMORY_GIB", "256", (2, 16, 10)),
+            ("PAW_SITES_BUILD_DISK_GIB", "500", (2, 4, 50)),
+        ],
+    )
+    def test_a_huge_value_is_clamped_with_a_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        env: str,
+        value: str,
+        expected: tuple[int, int, int],
+    ) -> None:
+        monkeypatch.setenv(env, value)
+        with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.sites.daytona_runner"):
+            assert dr.build_resources() == expected
+        assert any(env in r.getMessage() for r in caplog.records)
+
+    def test_memory_over_the_admission_budget_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("PAW_SITES_BUILD_MEMORY_GIB", "12")
+        monkeypatch.setenv("PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB", "10")
+        with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.sites.daytona_runner"):
+            assert dr.build_resources()[1] == 12
+        assert any("PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB" in r.getMessage() for r in caplog.records)
+
+    def test_no_budget_warning_when_admission_is_off(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("PAW_SITES_BUILD_MEMORY_GIB", "12")
+        monkeypatch.delenv("PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB", raising=False)
+        with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.sites.daytona_runner"):
+            dr.build_resources()
+        assert not caplog.records
+
     def test_the_resolver_reads_at_call_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
         assert dr.build_resources() == (2, 4, 10)
         monkeypatch.setenv("PAW_SITES_BUILD_CPU", "4")
         assert dr.build_resources() == (4, 4, 10)
+
+
+class TestProbeBudget:
+    def test_the_step_timeouts_fit_inside_the_outer_cap(self) -> None:
+        """If the steps add up past the cap, one slow ``du`` makes the outer cut fire
+        and every number is lost, not just the slow one."""
+        import re
+
+        cmd = build_usage.usage_probe_command("/w", "/w/dist")
+        steps = [int(n) for n in re.findall(r"timeout (\d+) ", cmd)]
+        assert len(steps) >= 5
+        assert sum(steps) < build_usage.PROBE_TIMEOUT_SECONDS
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or not (shutil.which("sh") and shutil.which("timeout")),
+        reason="needs a POSIX sh and coreutils timeout",
+    )
+    def test_a_slow_du_still_yields_the_other_numbers(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``du`` that hangs on node_modules loses only its own number."""
+        monkeypatch.setattr(build_usage, "_STEP_TIMEOUT_SECONDS", 1)
+        work = tmp_path / "w"
+        (work / "dist").mkdir(parents=True)
+        (work / "node_modules").mkdir()
+        (work / "dist" / "index.html").write_text("hi")
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        real_du = shutil.which("du")
+        fake = bindir / "du"
+        fake.write_text(
+            f'#!/bin/sh\ncase "$2" in *node_modules) sleep 30;; esac\nexec {real_du} "$@"\n'
+        )
+        fake.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+        cmd = build_usage.usage_probe_command(str(work), str(work / "dist"))
+        out = subprocess.run(
+            cmd, shell=True, env=env, capture_output=True, text=True, timeout=20, check=False
+        ).stdout
+        got = build_usage.parse_usage(out)
+        assert got["disk_node_modules_bytes"] is None
+        assert got["disk_workdir_bytes"] is not None
+        assert got["disk_output_bytes"] is not None
+
+
+def test_parse_ignores_non_ascii_digits() -> None:
+    """``"²".isdigit()`` is True and ``int("²")`` raises: it must read as unknown."""
+    got = build_usage.parse_usage("mem_peak_bytes=\u00b2\ndisk_workdir_bytes=\u0663\n")
+    assert got["mem_peak_bytes"] is None
+    assert got["disk_workdir_bytes"] is None
+
+
+async def test_a_parse_failure_never_escapes_measure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(_raw: Any) -> Any:
+        raise RuntimeError("parser bug")
+
+    real = build_usage.parse_usage
+    calls = {"n": 0}
+
+    def _first_boom(raw: Any) -> Any:
+        calls["n"] += 1
+        return _boom(raw) if calls["n"] == 1 else real(raw)
+
+    monkeypatch.setattr(build_usage, "parse_usage", _first_boom)
+    client = FaultyDaytonaClient()
+    client.probe_output = V2_OUTPUT
+    got = await build_usage.measure(client, "sb", project_dir="/w", output_dir="/w/dist")
+    assert got["mem_peak_bytes"] is None
 
 
 def test_the_fakes_know_the_probe_marker() -> None:
