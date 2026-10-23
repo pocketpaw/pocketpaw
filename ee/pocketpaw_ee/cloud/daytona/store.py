@@ -70,32 +70,47 @@ WORKSPACE_VM_DEFAULT_AUTO_STOP_MINUTES = 30
 WORKSPACE_VM_MAX_AUTO_STOP_MINUTES = 24 * 60
 WORKSPACE_VM_MIN_AUTO_STOP_MINUTES = 5
 #: Minutes a STOPPED VM keeps its 10 GiB disk on the org quota before Daytona archives
-#: it. 1 is the smallest interval the API accepts (0 means its MAXIMUM, not "now"), and
-#: the VM has already sat idle for its auto-stop window before this clock starts.
-WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 1
+#: it. 15 lets a user back from a short break resume a stopped VM (fast) rather than
+#: restore an archived one (slow), and the VM has already sat idle for its auto-stop
+#: window before this clock starts. The env override is clamped to 1..60: 1 is
+#: Daytona's smallest interval (0 means its MAXIMUM, not "now") and the ops setting for
+#: a disk crunch; past an hour a stopped VM is just holding disk.
+WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 15
+WORKSPACE_VM_MIN_AUTO_ARCHIVE_MINUTES = 1
+WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES = 60
 WORKSPACE_VM_AUTO_ARCHIVE_ENV = "PAW_DAYTONA_WORKSPACE_VM_AUTO_ARCHIVE_MINUTES"
 WORKSPACE_VM_AUTO_DELETE_MINUTES = -1  # never
 
 
 def workspace_vm_archive_minutes() -> int:
-    """Auto-archive interval for workspace VMs: the env override when it is a positive
-    integer, else the default. Read per call, so an env change needs no code deploy."""
+    """Auto-archive interval for workspace VMs: the env override clamped to 1..60, or
+    the default when unset or not an integer. Read per call (no code deploy to change)."""
     raw = os.environ.get(WORKSPACE_VM_AUTO_ARCHIVE_ENV, "").strip()
     if not raw:
         return WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES
     try:
         minutes = int(raw)
     except ValueError:
-        minutes = 0
-    if minutes < 1:
         logger.warning(
-            "%s=%r is not a positive number of minutes; using %d",
+            "%s=%r is not a number of minutes; using %d",
             WORKSPACE_VM_AUTO_ARCHIVE_ENV,
             raw,
             WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES,
         )
         return WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES
-    return minutes
+    clamped = max(
+        WORKSPACE_VM_MIN_AUTO_ARCHIVE_MINUTES, min(minutes, WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES)
+    )
+    if clamped != minutes:
+        logger.warning(
+            "%s=%d is outside %d..%d minutes; using %d",
+            WORKSPACE_VM_AUTO_ARCHIVE_ENV,
+            minutes,
+            WORKSPACE_VM_MIN_AUTO_ARCHIVE_MINUTES,
+            WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES,
+            clamped,
+        )
+    return clamped
 
 
 def workspace_vm_lifecycle(config: dict | None) -> dict[str, int]:

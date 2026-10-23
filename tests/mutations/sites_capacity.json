@@ -77,7 +77,7 @@
   {
     "label": "a stopped workspace VM waits a day to be archived again, holding its 10 GiB on the org disk quota (three fill Tier 1)",
     "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
-    "find": "WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 1\n",
+    "find": "WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 15\n",
     "replace": "WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 24 * 60\n",
     "tests": [
       "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes",
@@ -97,8 +97,8 @@
   {
     "label": "an env archive interval of 0 is passed through, which Daytona reads as its MAXIMUM, so a stopped VM holds disk for days",
     "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
-    "find": "    if minutes < 1:\n",
-    "replace": "    if minutes < 0:\n",
+    "find": "    clamped = max(\n        WORKSPACE_VM_MIN_AUTO_ARCHIVE_MINUTES, min(minutes, WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES)\n    )\n",
+    "replace": "    clamped = min(minutes, WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES)\n",
     "tests": [
       "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
     ]
@@ -108,6 +108,51 @@
     "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
     "find": "        await client.set_sandbox_lifecycle(sandbox_id, **workspace_vm_lifecycle(config))\n",
     "replace": "        pass\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  },
+  {
+    "label": "the archive env has no ceiling, so a mistyped 1440 holds a stopped VM's disk for a day again",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES = 60\n",
+    "replace": "WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES = 10**6\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
+    ]
+  },
+  {
+    "label": "a VM caught stopping or archiving is not waited for, so start is refused and the tool call runs against a VM that is not running",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        while state in _SETTLING_STATES:\n",
+    "replace": "        while False:\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmTransitionalStates"
+    ]
+  },
+  {
+    "label": "a VM in an unusable state (error, unknown) is cached as started for a minute, so every tool call in that minute hits a dead VM",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "            logger.warning(\n                \"resolve_daytona_context: workspace VM %s is %s, not resumable\", sandbox_id, state\n            )\n            return\n",
+    "replace": "            _last_seen_started[sandbox_id] = time.monotonic()\n            return\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmTransitionalStates"
+    ]
+  },
+  {
+    "label": "a booting VM is started a second time instead of waited for",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        if state in _RESUMABLE_STATES:\n",
+    "replace": "        if state in _RESUMABLE_STATES or state in _BOOTING_STATES:\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmTransitionalStates"
+    ]
+  },
+  {
+    "label": "a failed lifecycle set is marked applied, so an old VM keeps its one-day archive for the life of the process",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        return\n    _lifecycle_applied.add(sandbox_id)\n",
+    "replace": "        _lifecycle_applied.add(sandbox_id)\n        return\n    _lifecycle_applied.add(sandbox_id)\n",
     "tests": [
       "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
     ]
