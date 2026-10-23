@@ -13990,6 +13990,16 @@ class _TransferDeps:
         )
         return bool(getattr(result, "modified_count", 0) or 0)
 
+    @staticmethod
+    async def move_secrets(*, pocket_id: str, destination_workspace_id: str) -> int:
+        """Re-key the site's per-site secrets (``site_secrets.move_for_pocket``).
+        Values are never read or decrypted here; the tokens move as stored."""
+        from pocketpaw_ee.sites import site_secrets
+
+        return await site_secrets.move_for_pocket(
+            pocket_id=pocket_id, destination_workspace_id=destination_workspace_id
+        )
+
 
 # The delete lifecycle (sites lifecycle wave 1)
 # ---------------------------------------------------------------------------

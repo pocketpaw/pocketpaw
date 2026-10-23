@@ -197,5 +197,23 @@
     "tests": [
       "tests/ee/sites/test_transfer.py"
     ]
+  },
+  {
+    "label": "the transfer leaves the site's secrets in the source workspace",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    STEP_RECORDS,\n    STEP_SECRETS,\n    STEP_ASSETS,\n",
+    "replace": "    STEP_RECORDS,\n    STEP_ASSETS,\n",
+    "tests": [
+      "tests/ee/sites/test_transfer.py::test_the_sites_secrets_move_to_the_destination_after_ownership"
+    ]
+  },
+  {
+    "label": "the secret move reports a move it never made",
+    "file": "ee/pocketpaw_ee/sites/site_secrets.py",
+    "find": "        await row.set({\"workspace\": destination})\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_transfer_authz.py::test_the_sites_secrets_move_with_it_and_still_deploy"
+    ]
   }
 ]

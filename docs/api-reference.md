@@ -4840,6 +4840,17 @@ poll. The re-key is still ledgered (`Site.transfer_ledger`), because a crash par
 would leave ownership split across two tenants; accepting again resumes from the step
 that stopped rather than repeating the ones that finished.
 
+The steps, in order: `ownership` (the Site and its pocket together), `records` (the
+site's leads), `secrets` (the per-site secrets), `assets` (the public image prefix is
+recorded, not copied), `finalize`. The `secrets` step re-keys every `SiteSecret` row of
+the pocket to the destination with its name, pending/set state and `managed_by` tag
+unchanged; values are not re-encrypted because the encryption key is deployment-wide,
+and no value is read, logged or returned. If the destination already has a secret of
+the same name (its agent asked for it after the pocket moved), a value the new owner
+set is kept and a pending request is replaced. A failure there leaves the transfer
+`failed` with `transfer_reason: "secrets:<cause>"`, and accepting again resumes at that
+step.
+
 ### Forbidding transfers out
 
 `WorkspaceSettings.site_transfers_allowed` (default `true`). A site leaving takes its
