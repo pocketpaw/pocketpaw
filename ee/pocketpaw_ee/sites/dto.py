@@ -1167,6 +1167,33 @@ class SiteBuildResponse(BaseModel):
     current: bool = False
 
 
+class SiteBuildSummary(BaseModel):
+    """One build in the builds list: never its log. ``trigger`` is ``draft`` (an
+    owner or editor: the preview, a Code view save, a visual edit) or ``agent``;
+    null for a build recorded before triggers were. ``started_at`` is null while
+    queued, ``finished_at`` until it is ``built`` / ``failed``."""
+
+    job_id: str
+    status: str
+    reason: str | None = None
+    trigger: str | None = None
+    content_hash: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    updated_at: str | None = None
+
+
+class SiteBuildListResponse(BaseModel):
+    """GET /sites/by-pocket/{pocket_id}/builds: the pocket's recent builds, newest
+    first, one page (``limit`` from ``offset``) of ``total``."""
+
+    pocket_id: str
+    builds: list[SiteBuildSummary] = Field(default_factory=list)
+    total: int = 0
+    limit: int
+    offset: int
+
+
 class SiteBuildLogResponse(BaseModel):
     """GET /sites/by-pocket/{pocket_id}/builds/{job_id}/log: one project build's
     install / build / dry-run output, secrets redacted and capped to the last 64 KiB

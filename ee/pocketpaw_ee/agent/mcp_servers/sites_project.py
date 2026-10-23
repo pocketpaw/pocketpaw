@@ -296,7 +296,7 @@ async def _queue_build(workspace_id: str, user_id: str, pocket_id: str) -> dict[
     from pocketpaw_ee.sites import project_tools
 
     out = await project_tools.build_verification(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger="agent"
     )
     if out.get("status") == "pending":
         out["next"] = "call run_site_build to wait for it, or get_site_build_log to read it"
@@ -787,6 +787,7 @@ async def _write_site_files_handler(args: dict) -> dict:
             pocket_id=pocket_id,
             files=args.get("files"),
             base_hashes=args.get("base_hashes"),
+            trigger="agent",
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
@@ -812,6 +813,7 @@ async def _patch_site_file_handler(args: dict) -> dict:
             path=args.get("path"),
             edits=args.get("edits"),
             base_hash=args.get("base_hash") if isinstance(args.get("base_hash"), str) else None,
+            trigger="agent",
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
@@ -835,6 +837,7 @@ async def _delete_site_files_handler(args: dict) -> dict:
             user_id=user_id,
             pocket_id=pocket_id,
             paths=args.get("paths"),
+            trigger="agent",
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
@@ -880,7 +883,7 @@ async def _run_site_build_handler(args: dict) -> dict:
 
     try:
         art = await sites_service.queue_project_build(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger="agent"
         )
     except CloudError as exc:
         return _error_response(agent_error_text(exc.code, exc.message))
@@ -892,7 +895,7 @@ async def _run_site_build_handler(args: dict) -> dict:
         record = await _wait_for_build(pocket_id, job_id)
         if record and record.get("status") == "built":
             art = await sites_service.queue_project_build(
-                workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+                workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger="agent"
             )
     status = (
         "built"

@@ -75,6 +75,7 @@ from pocketpaw_ee.sites.dto import (
     SiteAssetListResponse,
     SiteAssetResponse,
     SiteBrandingUpdate,
+    SiteBuildListResponse,
     SiteBuildLogResponse,
     SiteBuildResponse,
     SiteClientResponse,
@@ -679,6 +680,28 @@ async def latest_build_by_pocket(
         workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
     )
     return SiteBuildResponse(**result)
+
+
+@router.get("/sites/by-pocket/{pocket_id}/builds", response_model=SiteBuildListResponse)
+async def list_builds_by_pocket(
+    pocket_id: str,
+    limit: int = Query(20, ge=1, le=50),
+    offset: int = Query(0, ge=0, le=1_000),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteBuildListResponse:
+    """A project pocket's recent builds, newest first and paged: id, status, reason,
+    trigger (``draft`` / ``agent``), start / finish times and content hash, no logs.
+    Same auth and scoping as ``builds/latest``; a pocket that never built is an empty
+    page."""
+    result = await sites_service.project_builds(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        limit=limit,
+        offset=offset,
+    )
+    return SiteBuildListResponse(**result)
 
 
 @router.get(

@@ -10731,9 +10731,12 @@ async def _project_draft_artifact(
     site_config: dict[str, Any] | None = None,
     _pool: Any | None = None,
     _records: Any | None = None,
+    trigger: str = "draft",
 ) -> dict[str, Any]:
     """A ``project`` draft: served from its build when one finished for the current
-    source, else built. A no-build tree (``project_build.is_no_build``) builds right
+    source, else built. ``trigger`` (``draft`` / ``agent``) is recorded on a build
+    this call starts, for the builds list. A no-build tree
+    (``project_build.is_no_build``) builds right
     here, in-process, and answers ``built`` at once; anything else is queued in the
     sandbox preview lane (``project_build``). ``site_config`` is the site's paw.js
     config (:func:`_project_site_config`), applied to a build that starts now.
@@ -10805,6 +10808,7 @@ async def _project_draft_artifact(
             store=store,
             records=records,
             site_config=site_config,
+            trigger=trigger,
         )
         ok = built["status"] == project_build.STATUS_BUILT
         return {
@@ -10844,7 +10848,7 @@ async def _project_draft_artifact(
             records,
             pocket_id,
             project_build.new_record(
-                enqueued.job_id, content_hash, "queued", reason=enqueued.reason
+                enqueued.job_id, content_hash, "queued", reason=enqueued.reason, trigger=trigger
             ),
         )
     return {
@@ -10963,6 +10967,39 @@ async def project_latest_build(
     }
 
 
+async def project_builds(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    _records: Any | None = None,
+) -> dict[str, Any]:
+    """The pocket's recent project builds, newest first, ``limit`` from ``offset``:
+    ``{pocket_id, builds, total, limit, offset}``. Each build carries ``job_id``,
+    ``status``, ``reason``, ``trigger``, ``content_hash``, ``started_at``,
+    ``finished_at`` and ``updated_at``; never its log (the log route has that). Same
+    access and scoping as :func:`project_latest_build`; a pocket that never built is
+    an empty page, not a 404."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    await _project_pocket(workspace_id, user_id, pocket_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    builds = [
+        b
+        for b in project_build.read_build_history(records, pocket_id)
+        if project_build.job_belongs_to(str(b.get("job_id")), pocket_id)
+    ]
+    return {
+        "pocket_id": pocket_id,
+        "builds": builds[offset : offset + limit],
+        "total": len(builds),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 async def project_build_log(
     *, workspace_id: str, user_id: str, pocket_id: str, job_id: str, _records: Any | None = None
 ) -> dict[str, Any]:
@@ -11013,12 +11050,17 @@ async def project_pocket(*, workspace_id: str, user_id: str, pocket_id: str) -> 
 
 
 async def queue_project_build(
-    *, workspace_id: str, user_id: str, pocket_id: str, _pool: Any | None = None
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    _pool: Any | None = None,
+    trigger: str = "draft",
 ) -> dict[str, Any]:
     """Queue the draft build of a project pocket's CURRENT source, the same lane the
     preview opens (a finished build for this source is returned, not rebuilt). Returns
     the native-artifact shape: ``build_status``, ``build_job_id``, ``preview_url``,
-    ``preview_mode``."""
+    ``preview_mode``. ``trigger`` names who asked (``draft`` / ``agent``)."""
     pocket = await _project_pocket(workspace_id, user_id, pocket_id)
     return await _project_draft_artifact(
         pocket_id=pocket_id,
@@ -11028,6 +11070,7 @@ async def queue_project_build(
             workspace_id, pocket_id, mint_key=_no_build_source(pocket.get("source"))
         ),
         _pool=_pool,
+        trigger=trigger,
     )
 
 

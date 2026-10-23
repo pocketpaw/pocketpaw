@@ -546,17 +546,20 @@ def source_of(pocket: Mapping[str, Any]) -> dict[str, Any]:
     return dict(source) if isinstance(source, dict) else {}
 
 
-async def build_verification(*, workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+async def build_verification(
+    *, workspace_id: str, user_id: str, pocket_id: str, trigger: str = "draft"
+) -> dict[str, Any]:
     """Queue the draft build of the pocket's current source and say so: ``pending``
     with the job id, ``passed`` when that exact source already built, ``failed`` when
     the tree cannot build at all (no package.json), ``unverified`` when the queue is
-    down. Never raises."""
+    down. Never raises. ``trigger`` (``draft`` for the HTTP routes, ``agent`` for the
+    agent's tools) is recorded on the build for the builds list."""
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites import service as sites_service
 
     try:
         art = await sites_service.queue_project_build(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         )
     except CloudError as exc:
         return {"status": "failed", "build": "failed", "reason": exc.code, "message": exc.message}
@@ -721,7 +724,13 @@ async def read_files(
 
 
 async def write_files(
-    *, workspace_id: str, user_id: str, pocket_id: str, files: Any, base_hashes: Any = None
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    files: Any,
+    base_hashes: Any = None,
+    trigger: str = "draft",
 ) -> dict[str, Any]:
     """Create or overwrite files: ``{pocket_id, written, created, lockfile_removed,
     hashes, verification}``. Every path and size is checked before anything is saved;
@@ -756,7 +765,7 @@ async def write_files(
         "lockfile_removed": dropped,
         "hashes": {p: file_hash(writes[p]) for p in sorted(writes)},
         "verification": await build_verification(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         ),
     }
 
@@ -769,6 +778,7 @@ async def patch_file(
     path: Any,
     edits: Any,
     base_hash: str | None = None,
+    trigger: str = "draft",
 ) -> dict[str, Any]:
     """Apply ``[{old, new}]`` blocks to one existing file; each ``old`` must match the
     running text exactly once (``sites.service.apply_edits``), else nothing is saved.
@@ -806,13 +816,13 @@ async def patch_file(
         "lockfile_removed": dropped,
         "hashes": {rel: file_hash(new_text)},
         "verification": await build_verification(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         ),
     }
 
 
 async def delete_files(
-    *, workspace_id: str, user_id: str, pocket_id: str, paths: Any
+    *, workspace_id: str, user_id: str, pocket_id: str, paths: Any, trigger: str = "draft"
 ) -> dict[str, Any]:
     """Delete files: ``{pocket_id, deleted, verification}``. Every path must exist
     (else 404, nothing deleted); package.json cannot be deleted."""
@@ -844,7 +854,7 @@ async def delete_files(
         "pocket_id": pocket_id,
         "deleted": rels,
         "verification": await build_verification(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         ),
     }
 
