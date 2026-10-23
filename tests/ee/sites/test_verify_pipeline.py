@@ -236,10 +236,21 @@ class TestInfrastructure:
         assert verdict["status"] == "unverified"
         assert verdict["reason"] == "timeout"
 
-    async def test_a_job_that_raised_is_sandbox_unavailable(self, beanie_test_db) -> None:
-        verdict = await _verify(await _pocket(), _wait=Waiter(raises=RuntimeError("no daytona")))
+    async def test_a_job_that_never_got_a_sandbox_is_sandbox_unavailable(
+        self, beanie_test_db
+    ) -> None:
+        from pocketpaw_ee.sites import build_job as bj
+
+        verdict = await _verify(
+            await _pocket(), _wait=Waiter(raises=bj.SandboxUnavailableError("no daytona"))
+        )
         assert verdict["status"] == "unverified"
-        assert verdict["reason"] == "sandbox_unavailable"
+        assert verdict["reason"] == "sandbox_unavailable:no_sandbox"
+
+    async def test_a_job_that_crashed_is_reported_as_our_crash(self, beanie_test_db) -> None:
+        verdict = await _verify(await _pocket(), _wait=Waiter(raises=RuntimeError("boom")))
+        assert verdict["status"] == "unverified"
+        assert verdict["reason"] == "job_crashed:unhandled_exception"
 
     async def test_a_lost_build_is_unverified_not_the_authors_fault(self, beanie_test_db) -> None:
         verdict = await _verify(

@@ -137,9 +137,32 @@ class TestCopy:
     def test_no_sandbox_keeps_its_own_message(self, reason: str) -> None:
         assert capacity.reason_message(reason) == capacity.NO_SANDBOX_MESSAGE
 
-    @pytest.mark.parametrize("reason", [None, "", "timeout", "build_failed:install_failed"])
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            None,
+            "",
+            "timeout",
+            "build_failed:install_failed",
+            # A settled in-sandbox timeout has a build log; its caller shows that.
+            "timed_out:no_sentinel_at_timeout",
+        ],
+    )
     def test_other_reasons_are_left_to_their_callers(self, reason: Any) -> None:
         assert capacity.reason_message(reason) is None
+
+    def test_a_job_timeout_says_the_build_ran_out_of_time(self) -> None:
+        msg = capacity.reason_message("timed_out:job_timeout")
+        assert msg == capacity.JOB_TIMEOUT_MESSAGE
+        assert "time" in msg
+        assert "could not be reached" not in msg
+
+    def test_a_crash_says_it_is_ours_not_an_unreachable_service(self) -> None:
+        msg = capacity.reason_message("job_crashed:unhandled_exception")
+        assert msg == capacity.JOB_CRASHED_MESSAGE
+        assert "Nothing is wrong with the site" in msg
+        assert "could not be reached" not in msg
+        assert "capacity" not in msg.lower()
 
     def test_capacity_never_says_the_server_is_down(self) -> None:
         for msg in (capacity.CAPACITY_WAITING_MESSAGE, capacity.CAPACITY_EXHAUSTED_MESSAGE):
@@ -213,8 +236,9 @@ class TestPreviewLane:
 
     async def test_a_non_capacity_failure_still_raises_without_retry(self) -> None:
         client = _sandbox(fail_at="create", error=DaytonaUnavailable(status=503))
-        with pytest.raises(DaytonaUnavailable):
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
             await _preview(_ctx(1), client)
+        assert isinstance(raised.value.__cause__, DaytonaUnavailable)
 
     async def test_a_waiting_job_reads_as_queued_for_capacity(self, monkeypatch) -> None:
         class _Job:
@@ -239,6 +263,45 @@ class TestPreviewLane:
 
         monkeypatch.setattr(arq.jobs, "Job", _Job)
         assert await verify._timeout_reason(object(), "j") == "waiting_for_capacity"
+
+    @pytest.mark.parametrize(
+        ("status", "info", "reason"),
+        [
+            # arq's own limit: ``Job.result()`` re-raises the stored TimeoutError, which
+            # lands in verify's ``except TimeoutError`` branch.
+            (
+                JobStatus.complete,
+                SimpleNamespace(success=False, result=TimeoutError()),
+                "timed_out:job_timeout",
+            ),
+            (
+                JobStatus.complete,
+                SimpleNamespace(success=False, result=RuntimeError("boom")),
+                "job_crashed:unhandled_exception",
+            ),
+            # Our wait ran out while the job is still going: a genuine wait timeout.
+            (JobStatus.in_progress, None, "timeout"),
+            (JobStatus.complete, SimpleNamespace(success=True, result={}), "timeout"),
+            (JobStatus.complete, None, "timeout"),
+        ],
+    )
+    async def test_verify_timeout_reads_a_finished_jobs_own_raise(
+        self, monkeypatch, status: JobStatus, info: Any, reason: str
+    ) -> None:
+        import arq.jobs
+
+        class _Job:
+            def __init__(self, *_a: Any, **_k: Any) -> None:
+                pass
+
+            async def status(self) -> JobStatus:
+                return status
+
+            async def result_info(self) -> Any:
+                return info
+
+        monkeypatch.setattr(arq.jobs, "Job", _Job)
+        assert await verify._timeout_reason(object(), "j") == reason
 
 
 class TestHtmlVerifyLane:
@@ -327,8 +390,9 @@ class TestProjectLane:
 
     async def test_unreachable_daytona_is_still_no_sandbox(self) -> None:
         records = _Records()
-        with pytest.raises(DaytonaUnavailable):
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
             await _project(_ctx(1, job_id=self.JOB), _RaisingRunner(DaytonaUnavailable()), records)
+        assert isinstance(raised.value.__cause__, DaytonaUnavailable)
         assert _project_record(records)["reason"] == "sandbox_unavailable:no_sandbox"
 
 

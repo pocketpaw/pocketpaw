@@ -18,10 +18,10 @@
     ]
   },
   {
-    "label": "preview lane: a job that raised before reaching a sandbox stays failed instead of being queued again",
+    "label": "preview lane: a job that raised stays failed instead of being queued again",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "        return \"aborted\" if isinstance(info.result, asyncio.CancelledError) else \"raised\"",
-    "replace": "        return \"aborted\" if isinstance(info.result, asyncio.CancelledError) else None",
+    "find": "        return \"raised\"\n    result = info.result",
+    "replace": "        return None\n    result = info.result",
     "tests": [
       "tests/ee/sites/test_preview_infra_retry.py"
     ]
@@ -51,6 +51,188 @@
     "replace": "        if kind != \"aborted\" and hasattr(pool, \"incr\") and not await _spend_retry(pool, job_id, kind):",
     "tests": [
       "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: arq's own timeout is reported as our crash instead of a build that ran out of time",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if isinstance(exc, TimeoutError):\n        return capacity.JOB_TIMEOUT_REASON\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: arq refusing a run past max_tries after capacity retries is reported as a crash, not a capacity wait",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if isinstance(exc, JobExecutionFailed) and _MAX_TRIES_TEXT in str(exc):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: any JobExecutionFailed (an expired job, a missing function) is dressed up as a capacity wait",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if isinstance(exc, JobExecutionFailed) and _MAX_TRIES_TEXT in str(exc):",
+    "replace": "    if isinstance(exc, JobExecutionFailed):",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: a sandbox the job never got is reported as our crash",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if isinstance(exc, SandboxUnavailableError):\n        return f\"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.NO_SANDBOX_CAUSE}\"\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: a crashed job is told to the user as an unreachable build service again (the production bug)",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return capacity.JOB_CRASHED_REASON\n",
+    "replace": "    return f\"{RUNG_SANDBOX_UNAVAILABLE}:job_raised\"\n",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: a job refused past max_tries after capacity spends the smaller raised budget instead of the capacity one",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        if reason == f\"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}\":\n            return \"sandbox_unavailable\"\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: reading a raised job logs nothing, so the worker's exception is invisible again",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        _log_raised_result(job_id, info)\n        return \"failed\", raised_job_reason(info.result)",
+    "replace": "        return \"failed\", raised_job_reason(info.result)",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: the raised-job log line carries the raw exception text, secrets and all",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        capacity.redact(str(exc), cap=_RAISED_LOG_CAP),\n    )",
+    "replace": "        str(exc),\n    )",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: the raised-job log line repeats on every poll for the hour arq keeps the result",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if key in _LOGGED_RAISES:\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: the retry path reads a raised result without logging what was raised",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        if not info.success and kind != \"aborted\":\n            _log_raised_result(job_id, info)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview / html verify jobs: an unexpected raise is not logged with its traceback before arq records it",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "                logger.exception(\"sites.%s: job %s for pocket %s crashed\", lane, job_id, pocket_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py",
+      "tests/ee/sites/test_verify_jobs.py"
+    ]
+  },
+  {
+    "label": "preview job: a sandbox it never got re-raises the bare exception, which reads back as a crash",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            logger.exception(\"sites.preview: no sandbox for pocket %s\", pocket_id)\n            raise SandboxUnavailableError.wrapping(exc) from exc\n",
+    "replace": "            logger.exception(\"sites.preview: no sandbox for pocket %s\", pocket_id)\n            raise\n",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py",
+      "tests/ee/sites/test_sandbox_capacity.py"
+    ]
+  },
+  {
+    "label": "html verify job: a sandbox it never got re-raises the bare exception, which reads back as a crash",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            logger.exception(\"sites.verify: no sandbox for html pocket %s\", pocket_id)\n            raise SandboxUnavailableError.wrapping(exc) from exc\n",
+    "replace": "            logger.exception(\"sites.verify: no sandbox for html pocket %s\", pocket_id)\n            raise\n",
+    "tests": [
+      "tests/ee/sites/test_verify_jobs.py"
+    ]
+  },
+  {
+    "label": "capacity copy: a crashed job gets no sentence, so callers improvise one",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "    if rung == JOB_CRASHED_REASON.partition(\":\")[0]:\n        return JOB_CRASHED_MESSAGE\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py"
+    ]
+  },
+  {
+    "label": "capacity copy: arq's job timeout gets no sentence",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "    if reason == JOB_TIMEOUT_REASON:\n        return JOB_TIMEOUT_MESSAGE\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py"
+    ]
+  },
+  {
+    "label": "capacity copy: every timed_out reason gets the job-timeout sentence, hiding a settled build's own log",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "    if reason == JOB_TIMEOUT_REASON:",
+    "replace": "    if rung == \"timed_out\":",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py"
+    ]
+  },
+  {
+    "label": "verify: a job that raised is always reported as sandbox_unavailable again",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "            reason = build_job.raised_job_reason(exc)\n",
+    "replace": "            reason = \"sandbox_unavailable\"\n",
+    "tests": [
+      "tests/ee/sites/test_verify_pipeline.py"
+    ]
+  },
+  {
+    "label": "verify: arq's job timeout (re-raised by Job.result) reads as our wait running out",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "            if info is not None and not info.success:\n                return build_job.raised_job_reason(info.result)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py"
+    ]
+  },
+  {
+    "label": "verify: a finished job that succeeded is read as raised, so a genuine wait timeout gets a crash reason",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "            if info is not None and not info.success:",
+    "replace": "            if info is not None:",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py"
+    ]
+  },
+  {
+    "label": "preview job: a TimeoutError our own code raises escapes as-is and reads as arq's job timeout",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "                if isinstance(exc, TimeoutError):\n                    raise RuntimeError(\"the job body raised TimeoutError\") from exc\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py"
     ]
   }
 ]
