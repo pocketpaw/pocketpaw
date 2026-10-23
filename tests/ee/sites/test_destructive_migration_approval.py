@@ -392,10 +392,9 @@ class _FakeUser:
         self.workspaces = [_FakeMembership(WS)]
 
 
-def _instinct_client(monkeypatch) -> Any:
-    from unittest.mock import AsyncMock
-
-    import pocketpaw_ee.cloud.workspace.service as ws_svc
+def _instinct_client() -> Any:
+    # The plan gate is the conftest's autouse ``_default_sites_plan``; patching
+    # get_workspace_plan again here would double-patch it (test_router guard).
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from pocketpaw_ee.cloud._core.deps import current_workspace_id
@@ -404,7 +403,6 @@ def _instinct_client(monkeypatch) -> Any:
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.instinct.router import router as instinct_router
 
-    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="enterprise"))
     user = _FakeUser()
     app = FastAPI()
     add_error_handler(app)
@@ -439,7 +437,7 @@ async def test_the_router_confirms_only_on_an_individual_approve(
         calls.append(kw)
 
     monkeypatch.setattr(sites_service, "publish_pocket", _deploy)
-    client = _instinct_client(monkeypatch)
+    client = _instinct_client()
     with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
         if bulk:
             resp = client.post("/instinct/actions/bulk-approve", json={"ids": [action.id]})
