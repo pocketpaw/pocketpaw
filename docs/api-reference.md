@@ -4262,14 +4262,31 @@ match. No body.
   block, so the site renders as before. Every page gets
   `<link rel="stylesheet" href="/styles/tokens.css">` first in its head. An existing
   `styles/tokens.css` is kept and only linked, and `added` lists it only when it was
-  written. Nothing else in the files is touched (`data-uid` is only stamped on the
-  preview, never stored).
+  written.
+- The site's own CSS is then pointed at the tokens, so a theme edit changes the
+  elements that used those values. In every `.css` file and inline `<style>` block,
+  a literal equal to a value the tokens file pins in its `:root` (`--background`,
+  `--foreground`, `--primary`, `--font-sans`, `--font-heading`) becomes
+  `var(--token)`: colours in `color`, `background(-color)`, `border(-side)-color`,
+  `fill` and `stroke` (matched by value, so `#ABC`, `#aabbcc` and
+  `rgb(170, 187, 204)` are the same colour; a shorthand or gradient keeps its other
+  parts), whole values in `font-family` (a heading rule takes `--font-heading`), and
+  whole values of the site's own custom properties (`--ink: #222` becomes
+  `--ink: var(--foreground)`). Only top-level rules change. Left as written:
+  `@media`, `@supports`, `@font-face` and every other at-rule block, `url()` contents,
+  a `<style media=…>` block, a declaration carrying a comment, the tokens file, CSS
+  under `vendor/` or `node_modules/` or named or bannered as a library (Bootstrap,
+  Tailwind output, Font Awesome and the like), and any token the site's CSS already
+  declares itself. Each replaced literal equals its token's value, so the page renders
+  exactly as before, and running it again changes nothing. Nothing else in the files
+  is touched (`data-uid` is only stamped on the preview, never stored).
 - The pocket becomes `engine: "project"` with
   `site_meta.project = {"template": "static", "framework": "static", "recipes": []}`.
   `pattern` is kept. The Site doc (id, domains, signed key, integrations, leads) is
   not touched, and the live site keeps serving until the next publish.
 - Undo: the old source is written as its own draft version first (label "Before the
   upgrade to a static project"), then the new source is versioned like a file write.
+  Undo restores that snapshot, so the CSS comes back exactly as it was.
   `site_meta.upgraded_from` keeps `{engine, at, source_hash, version_id, version_no,
   site_meta}` (`site_meta` is the old one).
 - The draft preview switches to the no-build lane at once: `verification` is the first
@@ -4315,6 +4332,33 @@ restored source is recorded as a new draft version.
 | `409` | `sites.upgrade_snapshot_missing` | the snapshot version is gone |
 | `409` | `sites.upgrade_conflict` | an edit landed while the undo ran |
 
+#### `POST /sites/by-pocket/{pocket_id}/upgrade/tokens`
+
+Opt-in re-run of the CSS-to-tokens step for a site already on the `static` starter,
+such as one upgraded or imported before that step existed. Same auth, no body. Every
+page is linked to `styles/tokens.css` and the site's CSS is rewritten to the values
+that file pins, with the rules described under `POST .../upgrade` (a token the file
+also sets inside `@media`, or sets to a `var()`, is not used). Rendering does not
+change. It saves only when something changed, as one draft version labelled "Pointed
+the site's CSS at its theme tokens". A site untouched since its upgrade keeps its
+undo: `site_meta.upgraded_from.source_hash` moves to the new source, and undo still
+restores the snapshot from before the upgrade. Nothing is migrated in bulk; the owner
+or a caller runs this per site.
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "changed": true,
+  "rewritten": ["index.html", "site.css"],
+  "verification": {"status": "passed", "build": "passed", "job_id": "…", "preview_mode": "full"}
+}
+```
+
+| Status | Code | When |
+|---|---|---|
+| `422` | `sites.tokens_unsupported` | the site is not a `static` project with a `styles/tokens.css` |
+| `409` | `sites.upgrade_conflict` | an edit landed while it ran |
+
 #### Importing a site: `POST /sites/import`, `POST /sites/import/from-url`
 
 Both copy modes create a new site on the one site model: a `project` pocket on the
@@ -4327,7 +4371,8 @@ pocket is already a static project (one placeholder page) until the crawl lands.
 - The site's files go through the generator's `import` first (forms rewired to the
   capture API), then the starter's `paw.template.json` and `AGENTS.md` are added
   (an imported file of the same name is kept) and a `styles/tokens.css` themed from
-  the site's own CSS is linked from every page, as in `POST .../upgrade`.
+  the site's own CSS is linked from every page, with that CSS pointed at the tokens,
+  as in `POST .../upgrade`.
 - A project source map holds text only. Images and video (PNG, JPEG, GIF, WebP, MP4,
   WebM) are stored on the public asset rail and every reference to them (`src`,
   `href`, `poster`, `srcset`, CSS `url()`) is rewritten to the stored URL. Other

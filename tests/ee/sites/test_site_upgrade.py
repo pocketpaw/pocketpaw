@@ -4,7 +4,9 @@
 # and a tokens file themed from its own CSS and linked from every page, its Site doc
 # untouched and its first preview staged by the no-build lane; the
 # refusals (starter files already there, no root index.html, a non-html engine); undo
-# while untouched and its 409 after an edit; and the auth matrix. The paw-sites CLI
+# while untouched and its 409 after an edit; the site's CSS pointed at the tokens and
+# restored byte for byte by undo; the opt-in re-run for a site already on the
+# starter; and the auth matrix. The paw-sites CLI
 # (``copy_template``) and the artifact / verify stores are faked.
 from __future__ import annotations
 
@@ -363,6 +365,102 @@ async def test_revert_of_a_site_never_upgraded_is_422(beanie_test_db, starter, s
 
 
 # ---------------------------------------------------------------------------
+# The site's CSS pointed at the tokens, the round trip, and the opt-in re-run
+# ---------------------------------------------------------------------------
+
+THEMED = {
+    "index.html": "<html><head><style>h1 { font-family: Georgia, serif }</style></head>"
+    "<body><h1>Bakery</h1></body></html>",
+    "site.css": "body { background: #FDF6EC; color: #3b2f2f }\n.btn { background: #c2410c }\n"
+    "@media (max-width: 600px) { body { background: #fdf6ec } }\n",
+    "vendor/lib.css": ".btn { background: #c2410c }\n",
+}
+
+
+async def test_upgrade_points_the_site_css_at_the_tokens_and_undo_restores_it(
+    beanie_test_db, starter, stores
+):
+    pid = await _pocket(source=THEMED)
+    async with _client(_app()) as c:
+        up = await c.post(BASE.format(pid=pid))
+        assert up.status_code == 200, up.text
+        upgraded = (await _doc(pid)).source
+        assert upgraded["site.css"] == (
+            "body { background: var(--background); color: var(--foreground) }\n"
+            ".btn { background: var(--primary) }\n"
+            "@media (max-width: 600px) { body { background: #fdf6ec } }\n"
+        )
+        assert "h1 { font-family: var(--font-heading) }" in upgraded["index.html"]
+        assert upgraded["vendor/lib.css"] == THEMED["vendor/lib.css"]
+        r = await c.post(f"{BASE.format(pid=pid)}/revert")
+    assert r.status_code == 200, r.text
+    doc = await _doc(pid)
+    assert doc.engine == "html"
+    assert doc.source == THEMED  # the original CSS, byte for byte
+
+
+async def _upgraded_without_rewrite(monkeypatch, source: dict) -> str:
+    """An html site upgraded the way it was before the CSS rewrite existed."""
+    from pocketpaw_ee.sites import site_token_rewrite
+
+    pid = await _pocket(source=source)
+    with monkeypatch.context() as m:
+        m.setattr(site_token_rewrite, "rewrite_source", lambda src, theme, **kw: dict(src))
+        async with _client(_app()) as c:
+            assert (await c.post(BASE.format(pid=pid))).status_code == 200
+    assert (await _doc(pid)).source["site.css"] == source["site.css"]
+    return pid
+
+
+async def test_rerun_rewrites_an_already_upgraded_site_and_undo_still_works(
+    beanie_test_db, starter, stores, monkeypatch
+):
+    pid = await _upgraded_without_rewrite(monkeypatch, THEMED)
+    async with _client(_app()) as c:
+        r = await c.post(f"{BASE.format(pid=pid)}/tokens")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["pocket_id"] == pid
+        assert body["changed"] is True
+        assert body["rewritten"] == ["index.html", "site.css"]
+        assert body["verification"]["status"] == "passed"
+        doc = await _doc(pid)
+        assert "background: var(--background)" in doc.source["site.css"]
+        # Running it again finds nothing left to do and saves nothing.
+        again = await c.post(f"{BASE.format(pid=pid)}/tokens")
+        assert again.status_code == 200, again.text
+        assert again.json()["changed"] is False
+        assert again.json()["rewritten"] == []
+        # Undo still restores the source from before the upgrade, exactly.
+        back = await c.post(f"{BASE.format(pid=pid)}/revert")
+    assert back.status_code == 200, back.text
+    doc = await _doc(pid)
+    assert doc.engine == "html"
+    assert doc.source == THEMED
+
+
+async def test_rerun_after_an_edit_keeps_undo_stale(beanie_test_db, starter, stores, monkeypatch):
+    pid = await _upgraded_without_rewrite(monkeypatch, THEMED)
+    await project_tools.write_files(
+        workspace_id="ws1", user_id="u1", pocket_id=pid, files={"about.html": "<p>new</p>"}
+    )
+    async with _client(_app()) as c:
+        assert (await c.post(f"{BASE.format(pid=pid)}/tokens")).json()["changed"] is True
+        r = await c.post(f"{BASE.format(pid=pid)}/revert")
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "sites.upgrade_revert_stale"
+
+
+async def test_rerun_refuses_a_site_not_on_the_static_starter(beanie_test_db, starter, stores):
+    pid = await _pocket()
+    async with _client(_app()) as c:
+        r = await c.post(f"{BASE.format(pid=pid)}/tokens")
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "sites.tokens_unsupported"
+    assert (await _doc(pid)).source == HTML
+
+
+# ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 
@@ -370,7 +468,11 @@ async def test_revert_of_a_site_never_upgraded_is_422(beanie_test_db, starter, s
 async def test_a_non_member_is_403(beanie_test_db, starter, stores) -> None:
     pid = await _pocket()
     async with _client(_app(user_id="stranger", member_of=[])) as c:
-        for url in (BASE.format(pid=pid), f"{BASE.format(pid=pid)}/revert"):
+        for url in (
+            BASE.format(pid=pid),
+            f"{BASE.format(pid=pid)}/revert",
+            f"{BASE.format(pid=pid)}/tokens",
+        ):
             assert (await c.post(url)).status_code == 403
     assert (await _doc(pid)).engine == "html"
 
@@ -395,9 +497,13 @@ async def test_a_private_pocket_refuses_another_member(beanie_test_db, starter, 
 def test_both_routes_carry_the_guards() -> None:
     from pocketpaw_ee.sites.router import router
 
-    paths = {"/sites/by-pocket/{pocket_id}/upgrade", "/sites/by-pocket/{pocket_id}/upgrade/revert"}
+    paths = {
+        "/sites/by-pocket/{pocket_id}/upgrade",
+        "/sites/by-pocket/{pocket_id}/upgrade/revert",
+        "/sites/by-pocket/{pocket_id}/upgrade/tokens",
+    }
     routes = [r for r in router.routes if getattr(r, "path", "") in paths]
-    assert len(routes) == 2
+    assert len(routes) == 3
     for route in routes:
         deps = [repr(d.call) for d in route.dependant.dependencies]
         assert any("request_context" in d for d in deps), (route.path, deps)

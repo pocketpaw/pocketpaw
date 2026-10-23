@@ -7,7 +7,9 @@
 # (``"build": "none"``, the no-build lane) and ``AGENTS.md``, read through
 # ``project_tools.copy_template`` like ``start_site_from_template``, and the theme file
 # that starter names (``styles/tokens.css``, built by ``site_tokens.add_tokens`` from
-# the site's own colours and fonts) linked from every page.
+# the site's own colours and fonts) linked from every page, with the site's own CSS
+# pointed at it (``site_token_rewrite``). ``retheme_site`` is the opt-in re-run of
+# that last step for a site already on the starter.
 # ``data-uid`` needs no stripping: the html lane stamps it only on the served preview
 # (``html_uid_stamp`` / ``arm-html``) and never writes it into the source map.
 # ``pattern`` is left as is: no publish gate reads ``"imported"`` any more.
@@ -204,9 +206,60 @@ async def revert_html_upgrade(*, workspace_id: str, user_id: str, pocket_id: str
     return {"pocket_id": pocket_id, "engine": "html", "version_no": snapshot.version_no}
 
 
+async def retheme_site(*, workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """The opt-in re-run for a site already on the static starter (upgraded or
+    imported before its CSS was pointed at the tokens): link ``styles/tokens.css``
+    from every page and rewrite the site's CSS to the values that file pins
+    (``site_tokens.add_tokens``). Saves only when something changed. A site still
+    untouched since its upgrade keeps its undo: the stored digest moves to the new
+    source, and undo restores the snapshot from before the upgrade, original CSS
+    included. 422 ``sites.tokens_unsupported`` unless the pocket is a ``static``
+    project with a tokens file."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import project_tools
+
+    pocket = await _owned_pocket(workspace_id, user_id, pocket_id)
+    raw_meta = pocket.get("siteMeta") or pocket.get("site_meta")
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    project = meta.get("project") if isinstance(meta.get("project"), dict) else {}
+    source = pocket.get("source")
+    if (
+        pocket.get("engine") != "project"
+        or project.get("template") != UPGRADE_TEMPLATE
+        or not isinstance(source, dict)
+        or not isinstance(source.get(site_tokens.TOKENS_REL), str)
+    ):
+        raise ValidationError(
+            "sites.tokens_unsupported",
+            "Only a site on the static starter with a styles/tokens.css can have its CSS "
+            "pointed at the theme tokens.",
+        )
+    new_source, _added = site_tokens.add_tokens(source, None)
+    rewritten = sorted(path for path, text in new_source.items() if source.get(path) != text)
+    if rewritten:
+        record = meta.get("upgraded_from")
+        untouched = isinstance(record, dict) and source_digest(source) == record.get("source_hash")
+        await pockets_service.retheme_project_source(
+            pocket_id,
+            user_id,
+            expected_source=source,
+            source=new_source,
+            upgraded_source_hash=source_digest(new_source) if untouched else None,
+        )
+    return {
+        "pocket_id": pocket_id,
+        "changed": bool(rewritten),
+        "rewritten": rewritten,
+        "verification": await project_tools.build_verification(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        ),
+    }
+
+
 __all__ = [
     "STARTER_FILES",
     "UPGRADE_TEMPLATE",
+    "retheme_site",
     "revert_html_upgrade",
     "source_digest",
     "static_starter_files",
