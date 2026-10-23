@@ -3929,12 +3929,17 @@ framework config, wrangler config) is also served here, with two extra fields:
   dynamic spec) and `data_viewer` (`has_database` on an engine the data endpoint below
   serves: `ripple`, `svelte` or `project`). Gate the owner's Data tab and the delete
   dialog's table list on `data_viewer`; an older backend omits it.
-- Visual-edit stamps live in drafts only. A sandbox draft on a generator with
-  `project-build --source-tags` builds twice: untagged for the stored bundle publish
-  deploys, tagged for the preview (and the draft Worker). A no-build draft's preview
-  pages go through `paw-sites-gen stamp-html` (a failed stamp serves them plain). The
-  draft's content hash includes the tag mode, so an untagged draft is never reused as a
-  tagged one. The build record carries `source_tags: true|false`.
+- Visual-edit stamps live in drafts only. With `PAW_SITES_LAZY_SOURCE_TAGS=1` a
+  sandbox draft builds its source-tagged copy (`project-build --source-tags`) only
+  during an edit session (`POST .../edit-session`, below); otherwise it builds once,
+  untagged. With it off (the default until every builder sends the session) each
+  sandbox draft builds both copies under its content hash. In a session the draft
+  is built, recorded and previewed under a separate tagged view of the content hash:
+  only the tagged build runs when the untagged bundle for that source is already
+  stored, both otherwise. Publish always deploys the untagged bundle. A no-build
+  draft's preview pages always go through `paw-sites-gen stamp-html` (in-process, no
+  sandbox; a failed stamp serves them plain). The build record carries
+  `source_tags: true|false`.
 - A project with no `package.json`, or a path that leaves the project, is a `422`.
 - `build_reason` on a failed project build is `build_failed:<code>` with the CLI's
   code (`install_failed`, `build_failed`, `output_missing`, `wrangler_failed`,
@@ -4221,8 +4226,24 @@ no-build site rebuilds in-process, so `build_status` is already `passed`).
 | `500` | `sites.visual_edit_failed` | the generator crashed or answered off the contract (logged) |
 
 The generator's `message` is passed through on every refusal. Nothing is saved on any
-non-`200` answer. `PAW_SITES_VISUAL_EDIT=0` turns visual editing (this route, the
-draft tags and the capabilities) off.
+non-`200` answer. A visual edit also renews the pocket's edit session (below).
+`PAW_SITES_VISUAL_EDIT=0` turns visual editing (this route, the draft tags and the
+capabilities) off.
+
+#### `POST` / `DELETE /sites/by-pocket/{pocket_id}/edit-session`
+
+The builder's "someone is visually editing this draft" signal. Same auth as the file
+routes; a non-project pocket is `422`. No body.
+
+`POST` starts or renews the session for 20 minutes and answers the native-artifact
+shape for the draft plus `editing: true` and `expires_at` (ISO 8601). While the session
+lasts every draft build of the pocket is source-tagged, so the first `POST` on a draft
+built untagged queues the tagged copy: poll it like `GET .../native-artifact` and
+reframe the preview when `build_status` reads `"none"`. Call it when a select or design
+tool turns on, and again before `expires_at` while one stays on.
+
+`DELETE` ends the session (`{"pocket_id", "editing": false}`); later builds are
+untagged only. Idempotent. A lapsed session ends by itself.
 
 #### `POST /sites/by-pocket/{pocket_id}/upgrade`
 

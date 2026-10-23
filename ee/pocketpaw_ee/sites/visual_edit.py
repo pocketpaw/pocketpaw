@@ -10,7 +10,8 @@
 #   * :func:`apply_visual_edit`: parse ``src`` (``<file>:<line>:<col>``, the
 #     ``data-paw-src`` stamp), run ``paw-sites-gen visual-edit`` over that one file, and
 #     save the result through ``project_tools.save_changes`` (the same writer as every
-#     project file write: history, undo, Review changes) and queue the draft build;
+#     project file write: history, undo, Review changes), renew the pocket's edit
+#     session (``project_build.mark_edit_session``) and queue the draft build;
 #   * :func:`stamp_html`: ``paw-sites-gen stamp-html`` over a no-build draft's pages,
 #     so a ``static`` preview carries the same ``data-paw-src`` stamps a framework draft
 #     build gets from ``--source-tags``.
@@ -300,6 +301,10 @@ async def apply_visual_edit(
         logger.error("sites.visual_edit: %s on %s answered no content", kind, pocket_id)
         raise _failed("The site generator returned no file contents.")
     changed = new_text != current
+    # Someone is editing: keep this pocket's draft builds source-tagged.
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    project_build.mark_edit_session(verify_store.default_verify_store(), pocket_id)
     if changed:
         await project_tools.save_changes(
             user_id=user_id,

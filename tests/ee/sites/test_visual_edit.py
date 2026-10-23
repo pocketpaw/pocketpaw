@@ -408,11 +408,11 @@ def _tagged_artifact() -> bytes:
     return _tar(files)
 
 
-async def test_a_draft_builds_tagged_for_the_preview_and_untagged_for_publish(cli_text):
+async def test_an_edited_draft_builds_tagged_for_the_preview_and_untagged_for_publish(cli_text):
     store, records = _Store(), _Records()
     runner = _Runner(_result(artifact=_tagged_artifact()))
     out = await project_build.run_project_preview_build(
-        {}, "pk1", "h1", {"source": SOURCE}, 600,
+        {}, "pk1", "h1", {"source": SOURCE, "sourceTags": "both"}, 600,
         _runner=runner, _store=store, _verify_store=records, _gen_uploads=_gen(FULL_CLI),
     )  # fmt: skip
     assert out["status"] == "built"

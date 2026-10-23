@@ -7,7 +7,9 @@
 # so the path policy, size caps, lockfile rule and "every write queues the draft build"
 # behaviour cannot drift between the two. A sixth, ``POST .../visual-edit``, applies a
 # preview click's edit to the stamped source file (``sites.visual_edit``) and saves it
-# through the same writer.
+# through the same writer, renewing the pocket's edit session. ``POST`` / ``DELETE
+# .../edit-session`` start (or renew) and end that session: while it lasts a framework
+# draft builds its source-tagged copy, and outside it only the untagged bundle.
 #
 # Every write can carry the base hash (sha256 of the text, the hash the read route
 # returns) of each file it replaces; a file that moved since is a 409 with its current
@@ -27,7 +29,10 @@ from fastapi import APIRouter, Depends, Query
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.sites import project_tools, visual_edit
+from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
+    EditSessionEndResponse,
+    EditSessionResponse,
     ProjectFileContentResponse,
     ProjectFileListResponse,
     ProjectFilePatchRequest,
@@ -154,3 +159,36 @@ async def visual_edit_project_file(
         base_hash=body.base_hash,
     )
     return VisualEditResponse(**result)
+
+
+_EDIT_SESSION = "/sites/by-pocket/{pocket_id}/edit-session"
+
+
+@router.post(_EDIT_SESSION, response_model=EditSessionResponse)
+async def start_edit_session(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> EditSessionResponse:
+    """Start or renew the visual-edit session on a project draft (a select / design
+    tool turned on) and answer the draft: its source-tagged copy is queued when only
+    the untagged one was built, so poll it like ``/native-artifact``. 404 for another
+    workspace's pocket, 403 without edit access, 422 for a site that is not a project."""
+    result = await sites_service.start_project_edit_session(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return EditSessionResponse(**result)
+
+
+@router.delete(_EDIT_SESSION, response_model=EditSessionEndResponse)
+async def end_edit_session(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> EditSessionEndResponse:
+    """End the visual-edit session (the builder left its edit tools): later draft
+    builds are untagged only. Idempotent."""
+    result = await sites_service.end_project_edit_session(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return EditSessionEndResponse(**result)

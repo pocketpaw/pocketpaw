@@ -457,6 +457,8 @@ async def _every_route(c: AsyncClient, pid: str) -> list:
             f"{url}/patch", json={"path": "AGENTS.md", "edits": [{"old": "map", "new": "m"}]}
         ),
         await c.request("DELETE", url, json={"paths": ["AGENTS.md"]}),
+        await c.post(f"/api/v1/sites/by-pocket/{pid}/edit-session"),
+        await c.delete(f"/api/v1/sites/by-pocket/{pid}/edit-session"),
     ]
 
 
@@ -510,7 +512,7 @@ async def test_every_route_carries_the_guards() -> None:
     from pocketpaw_ee.sites.files_router import router
 
     routes = [r for r in router.routes if getattr(r, "path", "").startswith("/sites/")]
-    assert len(routes) == 6  # five file routes + visual-edit
+    assert len(routes) == 8  # five file routes, visual-edit, edit-session start and end
     for route in routes:
         deps = [repr(d.call) for d in route.dependant.dependencies]
         assert any("request_context" in d for d in deps), (route.path, deps)
