@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 SiteIntegrationStatus = Literal[
     "connected", "needs_connection", "needs_reconnect", "setup_required", "disabled"
@@ -108,6 +108,14 @@ class OrderItemView(BaseModel):
     amount_minor: int
 
 
+class OrderRefundView(BaseModel):
+    id: str
+    amount_minor: int
+    # reserved (no answer from the provider yet) | pending | succeeded | failed
+    status: Literal["reserved", "pending", "succeeded", "failed"]
+    created_at: datetime | None = None
+
+
 class OrderView(BaseModel):
     id: str
     provider: str
@@ -118,6 +126,19 @@ class OrderView(BaseModel):
     customer_email: str | None = None
     items: list[OrderItemView] = Field(default_factory=list)
     created_at: datetime | None = None
+    # Refunds, ISO 4217 minor units. A partially refunded order stays "paid".
+    refunded_minor: int = 0
+    refundable_minor: int = 0
+    can_refund: bool = False
+    refunds: list[OrderRefundView] = Field(default_factory=list)
+
+
+class RefundBody(BaseModel):
+    """``POST .../orders/{order_id}/refunds``. No amount: everything still refundable.
+    The same ``idempotency_key`` again returns the first attempt's result."""
+
+    amount_minor: StrictInt | None = Field(default=None, ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class FieldOptionsView(BaseModel):

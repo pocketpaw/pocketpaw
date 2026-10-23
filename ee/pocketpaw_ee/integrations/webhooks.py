@@ -16,7 +16,12 @@
 #        one (a failed card attempt is not an order); a miss is acked and recorded,
 #        except for a REFUND, which answers 500 unrecorded so the provider redelivers
 #        it until the paid event that makes the order has landed. Status moves by
-#        ``_NEXT_STATUS``: refunded is terminal, only a refund replaces paid.
+#        ``_NEXT_STATUS``: refunded is terminal, only a refund replaces paid. A
+#        refund carrying ``refunded_minor`` (the provider's cumulative total) raises
+#        ``provider_refunded_minor`` and settles the order only once all of it is
+#        refunded (``refunds.refunded_minor``); a partial one leaves it paid. An
+#        existing order is updated with targeted ``$set`` / ``$max``, never saved
+#        whole, so the owner's concurrent refund entries survive.
 #     5. only then the event id is recorded (unique index), and
 #        ``integrations.event`` goes on the in-process bus with identifiers only
 #
@@ -31,7 +36,9 @@
 #
 #   list_orders: GET /sites/by-pocket/{pocket_id}/orders, newest first, cursor = the
 #   last row's id. Amounts are ISO 4217 minor units. Customer emails are masked
-#   unless the caller owns the pocket or is a workspace admin.
+#   unless the caller owns the pocket or is a workspace admin. Each order carries
+#   its refund state (``refunded_minor``, ``refundable_minor``, ``can_refund``,
+#   ``refunds``); refunds themselves are ``integrations.refunds``.
 
 from __future__ import annotations
 
@@ -274,6 +281,7 @@ async def _upsert_order(event: NormalizedEvent, binding: Any, site: Any) -> None
 
 async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
     from pocketpaw_ee.cloud.models.integration import SiteOrder
+    from pocketpaw_ee.integrations import refunds
 
     data = event.data
     external_id = str(data.get("order_id") or data.get("external_id") or event.id)[:200]
@@ -286,6 +294,38 @@ async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
             # Refund before paid (out-of-order delivery): unrecorded, so it's retried.
             raise _OrderNotYet(external_id)
         return
+    if row is not None and (
+        row.workspace != binding.workspace or row.pocket_id != binding.pocket_id
+    ):
+        logger.warning("integrations: order %s belongs to another site, ignored", row.id)
+        return
+    sets: dict[str, Any] = {}
+    if "amount_minor" in data:
+        sets["amount_minor"] = _int(data.get("amount_minor"))
+    currency = str(data.get("currency") or "").upper()
+    if _CURRENCY.match(currency):
+        sets["currency"] = currency
+    email = data.get("customer_email")
+    if isinstance(email, str) and email:
+        sets["customer_email"] = email[:254]
+    items = _items(data.get("items"))
+    if items:
+        sets["items"] = items
+    if event.account_ref:
+        sets["account_ref"] = event.account_ref[:120]
+    payment_ref = str(data.get("payment_ref") or "")[:120]
+    if payment_ref:
+        sets["payment_ref"] = payment_ref
+    reported = None
+    if event.type == "order.refunded":
+        amount = sets.get("amount_minor", row.amount_minor if row is not None else 0)
+        # No cumulative total on the event: the provider only sends it for a full refund.
+        reported = _int(data["refunded_minor"]) if "refunded_minor" in data else amount
+        if row is not None:
+            total = max(reported, refunds.refunded_minor(row))
+            if not (amount > 0 and total >= amount):
+                status = row.status  # a partial refund leaves the order as it is
+
     if row is None:
         row = SiteOrder(
             workspace=binding.workspace,
@@ -293,25 +333,25 @@ async def _apply_order(event: NormalizedEvent, binding: Any, site: Any) -> None:
             site_id=str(site.id) if site is not None else "",
             provider=event.provider,
             external_id=external_id,
+            status=status,
+            **sets,
         )
-    elif row.workspace != binding.workspace or row.pocket_id != binding.pocket_id:
-        logger.warning("integrations: order %s belongs to another site, ignored", row.id)
+        await row.insert()
         return
     # Out-of-order deliveries: see ``_NEXT_STATUS``. Data still merges either way.
-    if status in _NEXT_STATUS.get(row.status, frozenset(_NEXT_STATUS)):
-        row.status = status
-    if "amount_minor" in data:
-        row.amount_minor = _int(data.get("amount_minor"))
-    currency = str(data.get("currency") or "").upper()
-    if _CURRENCY.match(currency):
-        row.currency = currency
-    email = data.get("customer_email")
-    if isinstance(email, str) and email:
-        row.customer_email = email[:254]
-    items = _items(data.get("items"))
-    if items:
-        row.items = items
-    await row.save()
+    if status != row.status and status in _NEXT_STATUS.get(row.status, frozenset(_NEXT_STATUS)):
+        sets["status"] = status
+    update: dict[str, Any] = {"$set": sets} if sets else {}
+    if reported is not None:
+        update["$max"] = {"provider_refunded_minor": reported}
+    if update:
+        await SiteOrder.get_pymongo_collection().update_one({"_id": row.id}, update)
+    refund_ref = str(data.get("refund_ref") or "")
+    if refund_ref:
+        await SiteOrder.get_pymongo_collection().update_one(
+            {"_id": row.id, "refunds": {"$elemMatch": {"external_id": refund_ref}}},
+            {"$set": {"refunds.$.status": "succeeded"}},
+        )
 
 
 async def _connection_updated(event: NormalizedEvent) -> JSONResponse:
@@ -400,7 +440,9 @@ def mask_email(email: str | None) -> str | None:
     return f"{local[:1]}***@{domain}" if domain else "***"
 
 
-def _order_view(row: Any, *, full_email: bool) -> OrderView:
+def order_view(row: Any, *, full_email: bool) -> OrderView:
+    from pocketpaw_ee.integrations import refunds
+
     return OrderView(
         id=str(row.id),
         provider=row.provider,
@@ -411,6 +453,20 @@ def _order_view(row: Any, *, full_email: bool) -> OrderView:
         customer_email=row.customer_email if full_email else mask_email(row.customer_email),
         items=[i.model_dump() for i in row.items],
         created_at=vault._utc(row.createdAt),
+        refunded_minor=refunds.refunded_minor(row),
+        refundable_minor=refunds.refundable_minor(row),
+        can_refund=refunds.can_refund(row),
+        refunds=[
+            {
+                "id": r.id,
+                "amount_minor": r.amount_minor,
+                "status": r.status
+                if r.status in ("reserved", "pending", "succeeded", "failed")
+                else "pending",
+                "created_at": vault._utc(r.created_at),
+            }
+            for r in row.refunds or ()
+        ],
     )
 
 
@@ -441,6 +497,6 @@ async def list_orders(
     more = len(rows) > limit
     rows = rows[:limit]
     return OrdersPage(
-        items=[_order_view(r, full_email=full_email) for r in rows],
+        items=[order_view(r, full_email=full_email) for r in rows],
         next_cursor=str(rows[-1].id) if more and rows else None,
     )

@@ -5465,6 +5465,53 @@ offered). Left out, the account uses the workspace's partner country, else
 Restarting Connect reuses the owner's unfinished account only when it is in the
 country they picked this time.
 
+## Sites — Integrations: order refunds
+
+`GET /sites/by-pocket/{pocket_id}/orders` items (`OrderView`) carry their refund
+state, all in ISO 4217 minor units of the order's currency:
+`refunded_minor` (refunded so far: the larger of the provider's last reported
+cumulative total and the owner's accepted refunds, so a refund the provider
+reports back is never counted twice), `refundable_minor` (what is still left,
+minus refunds in flight; 0 unless the order is `paid`), `can_refund` (the
+provider supports refunds and something is left) and `refunds`
+(`[{id, amount_minor, status: reserved|pending|succeeded|failed, created_at}]`).
+A partially refunded order stays `paid`; it becomes `refunded` once all of it is
+refunded, whether through Paw or the provider's dashboard (Stripe
+`charge.refunded` and Razorpay `refund.processed` webhooks report the
+cumulative amount, partial or full).
+
+### `POST /sites/by-pocket/{pocket_id}/orders/{order_id}/refunds`
+
+```json
+{"amount_minor": 1000, "idempotency_key": "6c0f2a8e-refund-1"}
+```
+
+Refunds part or all of a `paid` order through the provider (Stripe and
+Razorpay; Shopify orders aren't recorded here). Only the pocket owner or a
+workspace admin (`403 sites.not_owner` otherwise); an order outside the
+caller's workspace or pocket is a `404`. `amount_minor` is a positive integer;
+leave it out to refund everything left. Returns the `OrderView`.
+
+- The bound is computed on the server from the stored order, never from the
+  client: more than `refundable_minor` is `422 integrations.refund_too_large`
+  (`details.refundable_minor` says how much is left). Concurrent refunds are
+  serialised, so two at once can't both pass it.
+- `idempotency_key` (8-100 of `A-Z a-z 0-9 _ -`) is the client's: sending the
+  same key again returns the order as it is and never refunds twice (a first try
+  that got no answer from the provider is re-sent with the same provider key).
+  Each refund also has its own id, sent as Stripe's `Idempotency-Key` or
+  Razorpay's `X-Refund-Idempotency` + `receipt`.
+- The refund goes through the site's current connection, which must be to the
+  account the payment landed on (`409 integrations.refund_account_mismatch`);
+  no live connection is `409 integrations.not_connected`; an order that isn't
+  paid, is fully refunded, or whose provider has no refunds is
+  `409 integrations.not_refundable`.
+- The provider refusing (a 4xx it won't retry) marks the refund `failed`, frees
+  its amount and answers `502 provider_error`. An unknown outcome (timeout, 5xx)
+  keeps it `reserved` and also answers `502`; retry with the same key.
+- Razorpay refunds go to the order's captured payment (stored from the paid
+  webhook, or looked up for an order recorded before that) at normal speed.
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and

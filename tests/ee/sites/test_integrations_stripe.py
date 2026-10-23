@@ -833,12 +833,13 @@ async def test_orders_paid_refunded_failed_and_deduped(beanie_test_db, stripe, c
         failed = {"id": "pi_1", "metadata": {"site_id": sid}}
         await _post(c, _evt("evt_2", "payment_intent.payment_failed", failed))
         assert (await SiteOrder.find_one()).status == "paid"
-        # A partial refund leaves the order paid.
+        # A partial refund is recorded and leaves the order paid.
         charge = {"id": "ch_1", "payment_intent": "pi_1", "metadata": {}, "amount": 3750}
         part = {**charge, "amount_refunded": 50}
         partial = await _post(c, _evt("evt_3a", "charge.refunded", part))
-        assert partial.json()["ignored"] is True
-        assert (await SiteOrder.find_one()).status == "paid"
+        assert partial.json() == {"ok": True}
+        order = await SiteOrder.find_one()
+        assert order.status == "paid" and order.provider_refunded_minor == 50
         # A full refund with no site metadata routes by the order's PaymentIntent.
         full = {**charge, "amount_refunded": 3750, "refunded": True}
         refund = await _post(c, _evt("evt_3", "charge.refunded", full))
