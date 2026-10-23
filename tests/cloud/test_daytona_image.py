@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 from pocketpaw_ee.cloud.daytona.image import (
+    IMAGE_REV,
     build_paw_dev_image,
     resolve_sandbox_image,
     sandbox_image_override,
@@ -102,3 +103,21 @@ class TestOverrideContract:
     ) -> None:
         monkeypatch.setenv("DAYTONA_SANDBOX_IMAGE", "python:3.12-slim")
         assert resolve_sandbox_image() == "python:3.12-slim"
+
+
+class TestImageRevision:
+    """Daytona caches a cancelled build of this dockerfile as BUILD_FAILED; the rev
+    layer is how a new deploy (or an env bump) gets a fresh build."""
+
+    def test_default_rev_is_the_last_layer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("PAW_DAYTONA_IMAGE_REV", raising=False)
+        last = build_paw_dev_image().dockerfile().strip().splitlines()[-1]
+        assert "PAW_IMAGE_REV" in last and IMAGE_REV in last
+
+    def test_env_bump_changes_the_dockerfile(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("PAW_DAYTONA_IMAGE_REV", raising=False)
+        before = build_paw_dev_image().dockerfile()
+        monkeypatch.setenv("PAW_DAYTONA_IMAGE_REV", "rev-bump")
+        after = build_paw_dev_image().dockerfile()
+        assert before != after
+        assert "rev-bump" in after
