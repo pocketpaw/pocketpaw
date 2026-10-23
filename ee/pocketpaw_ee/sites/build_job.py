@@ -57,8 +57,11 @@
 # that just failed. The exception is a result the site did not cause: an aborted job, an
 # infrastructure failure (``sandbox_unavailable:*``: capacity stayed full, no sandbox), or
 # a job that raised. That result is freed and the render queued again, a bounded number of
-# times per render per hour (:func:`_clear_retryable_result`); otherwise a full org would
-# pin every render that hit it to "capacity full" for the hour, long after a slot freed.
+# times per render per hour per sandbox image rev (:func:`_clear_retryable_result`);
+# otherwise a full org would pin every render that hit it to "capacity full" for the
+# hour, long after a slot freed. That budget stops POLL loops, so an explicit build
+# (``force``: the agent's ``run_site_build``) clears an infra result without spending it,
+# at most once per pocket per :data:`FORCE_GUARD_SECONDS`.
 #
 # A JOB THAT RAISED IS REPORTED FOR WHAT IT RAISED (:func:`raised_job_reason`): arq's own
 # timeout, arq refusing a run past ``max_tries`` (only capacity ``Retry``s spend tries), a
@@ -1141,11 +1144,16 @@ class PreviewBuildEnqueue:
     ``reason`` is populated on ``failed`` only, and carries a RUNG — never stderr. The
     same rule ``Site.build_reason`` follows, for the same reason: this value crosses to a
     client, and a build's error text is the user's own content.
+
+    ``previous_attempt`` is ``True`` when that ``failed`` is a stored infrastructure
+    result this call did not retry (budget spent, a forced retry inside its guard, a
+    sticky image failure without force): an earlier attempt's outcome, not this one's.
     """
 
     job_id: str
     status: str
     reason: str | None = None
+    previous_attempt: bool = False
 
 
 def _preview_job_id(pocket_id: str, content_hash: str) -> str:
@@ -1901,6 +1909,11 @@ RETRY_LIMITS: dict[str, int] = {"raised": 2, "sandbox_unavailable": 3}
 #: that is still failing an hour later gets a fresh budget.
 RETRY_WINDOW_SECONDS = 3600
 _RETRY_COUNTER_PREFIX = "sites:preview-retry:"
+#: An explicit build clears an infra result at most once per pocket in this window
+#: (:func:`_claim_forced_retry`), so an agent calling it in a loop cannot open a sandbox
+#: create per call when the failure settles in under a second.
+FORCE_GUARD_SECONDS = 15
+_FORCE_GUARD_PREFIX = "sites:preview-force:"
 
 
 def _retry_kind(info: Any) -> str | None:
@@ -1917,9 +1930,10 @@ def _retry_kind(info: Any) -> str | None:
         Budgeted.
 
     ``sandbox_unavailable:image_build_failed``, raised or settled, is sticky: Daytona has
-    cached a failed build of the box image, so a retry fails the same way at once.
-    Anything else, above all a failure of the site's own code (``build_failed``,
-    ``scaffold_failed``, …), is sticky: rebuilding identical inputs would fail again."""
+    cached a failed build of the box image, so a retry fails the same way at once (only
+    an explicit build retries it, :func:`_forced_kind`). Anything else, above all a
+    failure of the site's own code (``build_failed``, ``scaffold_failed``, …), is sticky:
+    rebuilding identical inputs would fail again."""
     if not info.success:
         if isinstance(info.result, asyncio.CancelledError):
             return "aborted"
@@ -1940,11 +1954,46 @@ def _retry_kind(info: Any) -> str | None:
     return None
 
 
+def _forced_kind(info: Any) -> str | None:
+    """:func:`_retry_kind`, plus ``image_build_failed``, which only an explicit build
+    retries: the cached image may have been fixed since (a rev bump, a Daytona fix)."""
+    kind = _retry_kind(info)
+    if kind is not None:
+        return kind
+    reason = (
+        raised_job_reason(info.result)
+        if not info.success
+        else info.result.get("reason")
+        if isinstance(info.result, dict)
+        else None
+    )
+    return "image_build_failed" if reason == IMAGE_BUILD_FAILED_REASON else None
+
+
+def _retry_counter_key(job_id: str) -> str:
+    """The retry counter for ``job_id`` under the current sandbox image rev, so a rev bump
+    (the fix for a bad cached image) starts every render on a fresh budget."""
+    from pocketpaw_ee.cloud.daytona.image import image_rev
+
+    return f"{_RETRY_COUNTER_PREFIX}{image_rev()}:{job_id}"
+
+
+async def _claim_forced_retry(pool: Any, pocket_id: str) -> bool:
+    """Take the pocket's forced-retry slot (Redis ``SET NX EX`` for
+    :data:`FORCE_GUARD_SECONDS`). ``False`` inside the window or when the pool cannot do
+    it, which the caller reads as "do not force", like :func:`_spend_retry`."""
+    try:
+        key = _FORCE_GUARD_PREFIX + pocket_id
+        return bool(await pool.set(key, "1", nx=True, ex=FORCE_GUARD_SECONDS))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _spend_retry(pool: Any, job_id: str, kind: str) -> bool:
     """Count one clear of ``job_id`` (Redis INCR, TTL :data:`RETRY_WINDOW_SECONDS` set on
     the first) and say whether it is within :data:`RETRY_LIMITS`. Raises when the pool
     has no counter, which the caller reads as "do not retry"."""
-    key = _RETRY_COUNTER_PREFIX + job_id
+    key = _retry_counter_key(job_id)
     count = int(await pool.incr(key))
     if count == 1:
         await pool.expire(key, RETRY_WINDOW_SECONDS)
@@ -1961,11 +2010,32 @@ async def _clear_retryable_result(pool: Any, job_id: str) -> bool:
     job with the same id: every poll while the new job waits attaches to it. And the
     budgeted kinds are capped per id per window (:func:`_spend_retry`); without a Redis
     counter they are not retried at all. Past the cap the failure is reported as is."""
+    cleared, _kept = await _clear_or_keep(pool, job_id)
+    return cleared
+
+
+async def _clear_or_keep(
+    pool: Any, job_id: str, *, force_pocket: str | None = None
+) -> tuple[bool, bool]:
+    """:func:`_clear_retryable_result` for the preview lane: ``(cleared, kept)``, where
+    ``kept`` means an infrastructure result stayed (the caller replays an earlier attempt).
+
+    ``force_pocket`` (an explicit build) clears any :func:`_forced_kind` result without
+    spending the budget, once per pocket per guard window (:func:`_claim_forced_retry`);
+    inside the window, or when the guard is unavailable, the budget rule applies as usual.
+    """
     try:
         info = await Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME).result_info()
         kind = None if info is None else _retry_kind(info)
+        forced = None if info is None or force_pocket is None else _forced_kind(info)
+        if forced not in (None, "aborted") and await _claim_forced_retry(pool, force_pocket):
+            if not info.success:
+                _log_raised_result(job_id, info)
+            logger.info("sites.preview: explicit build clears %s result for %s", forced, job_id)
+            await pool.delete(result_key_prefix + job_id)
+            return True, False
         if kind is None:
-            return False
+            return False, info is not None and _forced_kind(info) is not None
         if not info.success and kind != "aborted":
             _log_raised_result(job_id, info)
         if kind != "aborted" and not await _spend_retry(pool, job_id, kind):
@@ -1973,11 +2043,11 @@ async def _clear_retryable_result(pool: Any, job_id: str) -> bool:
             logger.warning(
                 "sites.preview: %s retry budget spent for %s (last: %s)", kind, job_id, last
             )
-            return False
+            return False, True
         await pool.delete(result_key_prefix + job_id)
     except Exception:  # noqa: BLE001
-        return False
-    return True
+        return False, False
+    return True, False
 
 
 def html_verify_job_id(pocket_id: str, content_hash: str) -> str:
@@ -2055,9 +2125,14 @@ async def enqueue_preview_build(
     engine: str,
     generator_input: dict[str, Any],
     timeout_seconds: int | None = None,
+    force: bool = False,
     _pool_override: Any = None,
 ) -> PreviewBuildEnqueue:
     """Queue a preview build for one render, or report the one already running.
+
+    ``force`` marks an EXPLICIT build request (the agent's ``run_site_build``), never a
+    poll or a write-triggered verify: a stored infrastructure failure is retried even past
+    the poll budget (:func:`_clear_or_keep`). The site's own failures stay sticky.
 
     No claim write, because there is no row to claim: the deterministic job id IS the
     single-flight guard (see :func:`_preview_job_id`). arq refuses a duplicate id by
@@ -2098,8 +2173,13 @@ async def enqueue_preview_build(
     # A render whose last job was aborted as superseded, or failed for infrastructure
     # (``sandbox_unavailable:*``), is queued again rather than reported failed: the site
     # was never at fault. A failure of the site's own code stays sticky below.
-    if job is None and await _clear_retryable_result(pool, job_id):
-        job = await _enqueue()
+    kept = False
+    if job is None:
+        cleared, kept = await _clear_or_keep(
+            pool, job_id, force_pocket=pocket_id if force else None
+        )
+        if cleared:
+            job = await _enqueue()
     if job is None:
         status, reason = await _preview_job_outcome(pool, job_id)
         logger.info(
@@ -2108,7 +2188,12 @@ async def enqueue_preview_build(
             content_hash[:12],
             status,
         )
-        return PreviewBuildEnqueue(job_id=job_id, status=status, reason=reason)
+        return PreviewBuildEnqueue(
+            job_id=job_id,
+            status=status,
+            reason=reason,
+            previous_attempt=kept and status == "failed",
+        )
 
     logger.info(
         "sites.preview: queued build %s for pocket %s (%ds budget)", job_id, pocket_id, timeout
@@ -2120,6 +2205,7 @@ async def enqueue_preview_build(
 __all__ = [
     "ARQ_FUNCTION_NAME",
     "BUILDABLE_ENGINES",
+    "FORCE_GUARD_SECONDS",
     "HTML_VERIFY_ARQ_FUNCTION_NAME",
     "OUT_OF_SANDBOX_MARGIN_SECONDS",
     "PREVIEW_ARQ_FUNCTION_NAME",

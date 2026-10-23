@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import time
-from types import SimpleNamespace
 
 import pytest
 from pocketpaw_ee.sites import (
@@ -85,7 +84,7 @@ def enqueued(monkeypatch) -> list[dict]:
 
     async def _enqueue(*, pocket_id, content_hash, engine, generator_input, **_kw):
         calls.append({"content_hash": content_hash, "input": generator_input})
-        return SimpleNamespace(
+        return build_job.PreviewBuildEnqueue(
             status="queued", job_id=f"site-preview-{pocket_id}-{content_hash}", reason=None
         )
 

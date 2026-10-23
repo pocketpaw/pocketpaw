@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -53,7 +52,7 @@ def enqueued(monkeypatch) -> list[str]:
 
     async def _enqueue(*, pocket_id, content_hash, engine, generator_input, **_kw):
         hashes.append(content_hash)
-        return SimpleNamespace(
+        return build_job.PreviewBuildEnqueue(
             status="queued", job_id=f"site-preview-{pocket_id}-{content_hash}", reason=None
         )
 

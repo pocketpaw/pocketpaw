@@ -10732,10 +10732,14 @@ async def _project_draft_artifact(
     _pool: Any | None = None,
     _records: Any | None = None,
     trigger: str = "draft",
+    force: bool = False,
 ) -> dict[str, Any]:
     """A ``project`` draft: served from its build when one finished for the current
     source, else built. ``trigger`` (``draft`` / ``agent``) is recorded on a build
-    this call starts, for the builds list. A no-build tree
+    this call starts, for the builds list. ``force`` (an explicit build request) retries
+    a stored infrastructure failure past the poll budget
+    (``build_job.enqueue_preview_build``); ``build_previous_attempt`` on a ``failed``
+    answer says that failure is an earlier attempt's, not retried. A no-build tree
     (``project_build.is_no_build``) builds right
     here, in-process, and answers ``built`` at once; anything else is queued in the
     sandbox preview lane (``project_build``). ``site_config`` is the site's paw.js
@@ -10839,6 +10843,7 @@ async def _project_draft_artifact(
             content_hash=content_hash,
             engine="project",
             generator_input=generator_input,
+            force=force,
             _pool_override=_pool,
         )
     except Exception as exc:
@@ -10862,6 +10867,7 @@ async def _project_draft_artifact(
         "css": "",
         "build_status": enqueued.status,
         "build_reason": enqueued.reason,
+        "build_previous_attempt": enqueued.previous_attempt,
         "build_job_id": enqueued.job_id,
         "preview_url": None,
         "preview_mode": None,
@@ -11098,11 +11104,13 @@ async def queue_project_build(
     pocket_id: str,
     _pool: Any | None = None,
     trigger: str = "draft",
+    force: bool = False,
 ) -> dict[str, Any]:
     """Queue the draft build of a project pocket's CURRENT source, the same lane the
     preview opens (a finished build for this source is returned, not rebuilt). Returns
     the native-artifact shape: ``build_status``, ``build_job_id``, ``preview_url``,
-    ``preview_mode``. ``trigger`` names who asked (``draft`` / ``agent``)."""
+    ``preview_mode``. ``trigger`` names who asked (``draft`` / ``agent``). ``force`` only
+    for an explicit build request (``run_site_build``), never a write's verification."""
     pocket = await _project_pocket(workspace_id, user_id, pocket_id)
     return await _project_draft_artifact(
         pocket_id=pocket_id,
@@ -11113,6 +11121,7 @@ async def queue_project_build(
         ),
         _pool=_pool,
         trigger=trigger,
+        force=force,
     )
 
 
