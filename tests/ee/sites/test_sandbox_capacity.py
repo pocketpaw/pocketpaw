@@ -137,9 +137,32 @@ class TestCopy:
     def test_no_sandbox_keeps_its_own_message(self, reason: str) -> None:
         assert capacity.reason_message(reason) == capacity.NO_SANDBOX_MESSAGE
 
-    @pytest.mark.parametrize("reason", [None, "", "timeout", "build_failed:install_failed"])
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            None,
+            "",
+            "timeout",
+            "build_failed:install_failed",
+            # A settled in-sandbox timeout has a build log; its caller shows that.
+            "timed_out:no_sentinel_at_timeout",
+        ],
+    )
     def test_other_reasons_are_left_to_their_callers(self, reason: Any) -> None:
         assert capacity.reason_message(reason) is None
+
+    def test_a_job_timeout_says_the_build_ran_out_of_time(self) -> None:
+        msg = capacity.reason_message("timed_out:job_timeout")
+        assert msg == capacity.JOB_TIMEOUT_MESSAGE
+        assert "time" in msg
+        assert "could not be reached" not in msg
+
+    def test_a_crash_says_it_is_ours_not_an_unreachable_service(self) -> None:
+        msg = capacity.reason_message("job_crashed:unhandled_exception")
+        assert msg == capacity.JOB_CRASHED_MESSAGE
+        assert "Nothing is wrong with the site" in msg
+        assert "could not be reached" not in msg
+        assert "capacity" not in msg.lower()
 
     def test_capacity_never_says_the_server_is_down(self) -> None:
         for msg in (capacity.CAPACITY_WAITING_MESSAGE, capacity.CAPACITY_EXHAUSTED_MESSAGE):
