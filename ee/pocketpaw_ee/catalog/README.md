@@ -32,6 +32,23 @@ the models the proxy serves, grouped by modality, to clients.
 entry `status="available"` — `/model/info` exposes no per-model readiness signal
 yet (see the MCG-1 note below).
 
+## Availability (per workspace)
+
+With a session, each list entry carries the caller's workspace availability:
+
+```json
+"availability": {"status": "out_of_credit", "since": "2026-10-23T10:00:00Z",
+                 "message": "This provider ran out of credit on a recent run. ..."}
+```
+
+`status` is `"ok"` or `"out_of_credit"`; without a session the field is `null`.
+`availability.py` keeps the marks in Redis, one hash per workspace. A chat run
+that fails with `agent.provider_out_of_credit` marks the turn's provider (every
+model with that `provider/` prefix), or every model when the workspace's own
+key paid. A run that completes clears it. A mark otherwise expires after
+`POCKETPAW_MODEL_AVAILABILITY_TTL_SECONDS` (default 1200). Redis down reads as
+"nothing marked". The cached catalog is copied, never written.
+
 ## Configuration (env — see `.env.enterprise.example`)
 
 | Var | Default | Meaning |
@@ -40,6 +57,7 @@ yet (see the MCG-1 note below).
 | `POCKETPAW_LITELLM_API_KEY` | _(unset)_ | proxy admin/virtual key (Bearer) |
 | `CATALOG_CACHE_TTL_SECONDS` | `300` | assembled-catalog TTL |
 | `CATALOG_MODELS_DEV_ENABLED` | `true` | toggle models.dev enrichment |
+| `POCKETPAW_MODEL_AVAILABILITY_TTL_SECONDS` | `1200` | how long an out-of-credit mark lasts |
 
 ## Known gaps (carried forward)
 
