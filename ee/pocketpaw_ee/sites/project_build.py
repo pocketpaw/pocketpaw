@@ -959,7 +959,7 @@ async def run_project_preview_build(
             return await _capacity_outcome(ctx, pocket_id, job_id, _finish, records, content_hash)
         logger.exception("sites.project: no sandbox for pocket %s", pocket_id)
         _finish("failed", f"{build_job.RUNG_SANDBOX_UNAVAILABLE}:{capacity.NO_SANDBOX_CAUSE}")
-        raise
+        raise build_job.SandboxUnavailableError.wrapping(exc) from exc
 
     settlement = build_job.resolve_build_settlement(result)
     log, truncated = redact_build_log(result.classification.stderr_tail)

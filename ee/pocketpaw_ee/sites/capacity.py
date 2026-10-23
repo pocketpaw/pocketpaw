@@ -5,18 +5,22 @@
 # 4 GiB, so a few idle agent boxes are enough to refuse every build. That refusal is
 # not an outage: a slot frees as soon as another sandbox stops or is deleted.
 #
-# This module owns three things the build jobs share:
+# This module owns what the build jobs share:
 #   * ``is_capacity_error`` — the NARROW classifier. Only a ``DaytonaValidationError``
 #     whose message names an org resource limit counts; every other create failure
 #     (Daytona unconfigured, auth, network, a bad image) stays ``no_sandbox``.
 #   * ``next_retry_delay`` — the jittered backoff the jobs feed to arq's ``Retry``.
 #     The schedule is bounded (about five minutes in total); ``None`` means the budget
 #     is spent and the job settles as ``sandbox_unavailable:capacity``.
-#   * ``reason_message`` — the one sentence agent tools show for these rungs, so no
-#     caller has to improvise "the build server is down" out of a machine reason.
+#   * ``reason_message`` — the one sentence users and agent tools see for the reasons
+#     no build log explains: capacity waits, a sandbox we never got, a job arq stopped at
+#     its own timeout (``timed_out:job_timeout``) and a job that crashed on our side
+#     (``job_crashed:unhandled_exception``), so no caller improvises "the build server is
+#     down" out of a machine reason.
 #   * ``describe_refusal`` — which limit a refusal names (cpu / memory / disk / gpu /
 #     sandbox_count) plus Daytona's message with secrets redacted, for the WARNING every
-#     failed create logs (``admission.create_admitted``).
+#     failed create logs (``admission.create_admitted``). ``redact`` is that scrubber on
+#     its own, for any exception text headed for a log line.
 #
 # The arq functions that retry register ``max_tries=CAPACITY_MAX_TRIES``; the schedule
 # and that cap are one constant so they cannot drift.
@@ -93,11 +97,13 @@ def is_capacity_error(exc: BaseException | None) -> bool:
     return False
 
 
-def _redact(text: str) -> str:
+def redact(text: str, *, cap: int = _MESSAGE_CAP) -> str:
+    """``text`` with auth headers, ``key=value`` secrets and long opaque tokens replaced
+    by ``[redacted]``, cut to ``cap`` characters. For exception text headed for a log."""
     text = _SECRET_PATTERNS[0].sub(r"\1 [redacted]", text)
     text = _SECRET_PATTERNS[1].sub(r"\1[redacted]", text)
     text = _SECRET_PATTERNS[2].sub("[redacted]", text)
-    return text[:_MESSAGE_CAP]
+    return text[:cap]
 
 
 def describe_refusal(exc: BaseException) -> tuple[str | None, str]:
@@ -105,7 +111,7 @@ def describe_refusal(exc: BaseException) -> tuple[str | None, str]:
     ``disk`` / ``gpu`` / ``sandbox_count`` when ``exc`` is a capacity refusal (see
     :func:`is_capacity_error`), else ``None``. ``message`` is the full text, secrets
     redacted, capped at a couple of thousand characters."""
-    message = _redact(str(exc))
+    message = redact(str(exc))
     if not is_capacity_error(exc):
         return None, message
     found = _RESOURCE_PATTERN.search(message)
@@ -137,17 +143,38 @@ NO_SANDBOX_MESSAGE = (
     "on our side. Nothing is wrong with the site."
 )
 
+#: arq stopped the job at its own timeout. Reuses the classifier's ``timed_out`` rung;
+#: the cause tells it apart from an in-sandbox timeout, which has a build log to show.
+JOB_TIMEOUT_REASON = "timed_out:job_timeout"
+#: The job raised something we did not plan for: a bug on our side, not the site's and
+#: not a sandbox we never got. ``job_crashed`` is the rung (``build_job.RUNG_JOB_CRASHED``).
+JOB_CRASHED_REASON = "job_crashed:unhandled_exception"
+
+JOB_TIMEOUT_MESSAGE = (
+    "The build ran past its time limit and was stopped before it finished. Try again in "
+    "a few minutes; if it keeps happening, the build itself may be too slow."
+)
+JOB_CRASHED_MESSAGE = (
+    "The build stopped because of an error on our side, not in the site. Nothing is "
+    "wrong with the site; try again in a few minutes."
+)
+
 
 def reason_message(reason: str | None) -> str | None:
     """The user-facing sentence for a capacity / sandbox reason, else ``None``.
 
-    Accepts a bare reason or ``"<rung>:<cause>"``. Only these rungs get a sentence
-    here; every other reason keeps whatever its caller already says."""
+    Accepts a bare reason or ``"<rung>:<cause>"``. Only these reasons get a sentence
+    here; every other reason (a settled in-sandbox ``timed_out:*`` included, which has a
+    build log) keeps whatever its caller already says."""
     if not isinstance(reason, str) or not reason:
         return None
     rung, _, cause = reason.partition(":")
     if WAITING_REASON in (rung, cause):
         return CAPACITY_WAITING_MESSAGE
+    if reason == JOB_TIMEOUT_REASON:
+        return JOB_TIMEOUT_MESSAGE
+    if rung == JOB_CRASHED_REASON.partition(":")[0]:
+        return JOB_CRASHED_MESSAGE
     if rung != "sandbox_unavailable":
         return None
     if cause == CAPACITY_CAUSE:
@@ -160,6 +187,10 @@ __all__ = [
     "CAPACITY_EXHAUSTED_MESSAGE",
     "CAPACITY_MAX_TRIES",
     "CAPACITY_WAITING_MESSAGE",
+    "JOB_CRASHED_MESSAGE",
+    "JOB_CRASHED_REASON",
+    "JOB_TIMEOUT_MESSAGE",
+    "JOB_TIMEOUT_REASON",
     "NO_SANDBOX_CAUSE",
     "NO_SANDBOX_MESSAGE",
     "RETRY_DELAYS_SECONDS",
@@ -168,4 +199,5 @@ __all__ = [
     "is_capacity_error",
     "next_retry_delay",
     "reason_message",
+    "redact",
 ]

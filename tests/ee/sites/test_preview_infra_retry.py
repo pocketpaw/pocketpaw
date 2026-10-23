@@ -87,6 +87,13 @@ class _ArqLike(_NoCounter):
         self.ttls.clear()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_raise_log(monkeypatch) -> None:
+    """The read logs a raise once per job result per process; these stand-ins carry no
+    finish time, so every test starts with an empty memo."""
+    monkeypatch.setattr(bj, "_LOGGED_RAISES", {})
+
+
 @pytest.fixture
 def arq_like(monkeypatch) -> _ArqLike:
     pool = _ArqLike()
@@ -462,3 +469,20 @@ async def test_the_retry_path_logs_the_raise_too_and_the_budget_still_applies(
     for line in lines:
         assert "RuntimeError" in line.getMessage()
         assert _SECRET not in line.getMessage()
+
+
+async def test_clearing_a_raised_result_for_a_retry_logs_what_was_raised(
+    arq_like: _ArqLike, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A retried crash never reaches ``_preview_job_outcome`` (the render is simply
+    queued again), so the clear is the only read that can say what the job raised."""
+    caplog.set_level(logging.WARNING, logger=bj.logger.name)
+    job_id = bj._preview_job_id("p1", "h1")
+    arq_like.finish(job_id, _raised(_LEAKY))
+
+    assert await bj._clear_retryable_result(arq_like, job_id) is True
+
+    (line,) = _raised_lines(caplog, job_id)
+    assert "RuntimeError" in line.getMessage()
+    assert "job_crashed:unhandled_exception" in line.getMessage()
+    assert _SECRET not in line.getMessage()

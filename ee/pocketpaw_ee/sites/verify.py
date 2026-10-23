@@ -332,10 +332,10 @@ async def _sandbox_layers(
                 [],
                 [],
             )
-        except Exception:
-            # The job raised: for this lane that means no sandbox could be created.
+        except Exception as exc:
+            # The job raised: name what it raised (no sandbox, arq's limit, our crash).
             logger.warning("sites.verify: build job for %s raised", pocket_id, exc_info=True)
-            reason = "sandbox_unavailable"
+            reason = build_job.raised_job_reason(exc)
             return (
                 [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)],
                 [],

@@ -236,8 +236,9 @@ class TestPreviewLane:
 
     async def test_a_non_capacity_failure_still_raises_without_retry(self) -> None:
         client = _sandbox(fail_at="create", error=DaytonaUnavailable(status=503))
-        with pytest.raises(DaytonaUnavailable):
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
             await _preview(_ctx(1), client)
+        assert isinstance(raised.value.__cause__, DaytonaUnavailable)
 
     async def test_a_waiting_job_reads_as_queued_for_capacity(self, monkeypatch) -> None:
         class _Job:
@@ -350,8 +351,9 @@ class TestProjectLane:
 
     async def test_unreachable_daytona_is_still_no_sandbox(self) -> None:
         records = _Records()
-        with pytest.raises(DaytonaUnavailable):
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
             await _project(_ctx(1, job_id=self.JOB), _RaisingRunner(DaytonaUnavailable()), records)
+        assert isinstance(raised.value.__cause__, DaytonaUnavailable)
         assert _project_record(records)["reason"] == "sandbox_unavailable:no_sandbox"
 
 
