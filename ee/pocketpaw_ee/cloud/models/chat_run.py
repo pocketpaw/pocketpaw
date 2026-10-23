@@ -21,6 +21,10 @@ the lifecycle fields it carries:
   length-capped by the writer.
 - ``last_heartbeat_at``: the worker's liveness stamp; the stale-run sweeper
   judges running runs by it.
+- ``attempt`` / ``requeued_at``: which drive of the run this is, and when a
+  worker shutdown last put it back to ``queued`` for one automatic retry
+  (``domain.MAX_RUN_ATTEMPTS``). The sweeper times a requeued run from
+  ``requeued_at``, not ``createdAt``.
 - ``card_audits``: the browser's audit counts per chat card, keyed by the
   stream's card id. Integers and widget type names only, never spec or text.
 - ``card_breaches``: chat cards that streamed past the prompt's card ceiling,
@@ -99,6 +103,9 @@ class ChatRunDoc(Document):
     # anything. ``None`` until the run is marked running (and on legacy docs).
     last_heartbeat_at: datetime | None = None
     ended_at: datetime | None = None
+    # 1 for the first drive; 2 once a worker shutdown requeued it for its one retry.
+    attempt: int = 1
+    requeued_at: datetime | None = None
 
     class Settings:
         name = "chat_runs"

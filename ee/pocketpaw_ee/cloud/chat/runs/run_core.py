@@ -34,7 +34,13 @@ Before anything is built, every model in ``guards.free_run_models`` must pass
 then ``guards.reserve_free_run`` must fit the run under the daily early-access
 ceiling or it ends with ``early_access.paused``.
 
-Every terminal path persists the streamed text as an assistant ``Message`` with
+A host cancel while the worker is shutting down (``_core.shutdown``) requeues a
+run that called no tools for one retry (``MAX_RUN_ATTEMPTS``): back to ``queued``,
+a non-terminal ``retrying`` frame, no partial Message. arq re-runs the job on the
+next worker and ``execute_run(retry=True)`` skips the gates that spend (guest
+turn, daily turns, early-access reservation), which attempt 1 already paid.
+
+Every other terminal path persists the streamed text as an assistant ``Message`` with
 its steps, records token usage (latest-wins), and sets the stream TTL. A
 completed run that asked an ``ask_user`` question (either backend spelling,
 ``ASK_USER_TOOL_NAMES``) stores it on the Message as ``ask_user``; an ask-only
@@ -90,6 +96,7 @@ from pocketpaw_ee.agent.mcp_servers.ask import (
     ASK_USER_TOOL_NAMES,
     ask_user_payload,
 )
+from pocketpaw_ee.cloud._core import shutdown
 from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.agent_sessions import runtime_service
 from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
@@ -128,7 +135,11 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_scope_context as resolve_scope_context,
 )
 from pocketpaw_ee.cloud.chat.runs import service as run_service
-from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+from pocketpaw_ee.cloud.chat.runs.domain import (
+    MAX_RUN_ATTEMPTS,
+    RunSpec,
+    queued_stream_ttl_seconds,
+)
 from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.shared.errors import CloudError
@@ -2976,6 +2987,8 @@ async def _handle_interrupted_cleanup(
         await _broadcast_agent_typing(ctx, active=False)
     except Exception:
         logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
+    if await _requeue_if_retryable(spec, transport, recorder):
+        return
     step_fields = recorder.persist_kwargs() if recorder is not None else {}
     assistant_id = await _persist_partial_reply(spec, ctx, full_text, "interrupted", **step_fields)
     try:
@@ -2993,6 +3006,50 @@ async def _handle_interrupted_cleanup(
         await transport.set_ttl(spec.run_id, _stream_ttl())
     except Exception:
         logger.debug("interrupted stream write failed", exc_info=True)
+
+
+RETRYING_MESSAGE = "The service restarted mid-reply. Starting your reply again."
+
+
+async def _requeue_if_retryable(
+    spec: RunSpec, transport: Any, recorder: StepRecorder | None
+) -> bool:
+    """Requeue a run the WORKER cancelled while shutting down. True when requeued.
+
+    Only a shutdown qualifies (no flag means arq's own job_timeout fired, and a
+    retry would time out again), only a run that called no tools (re-running a
+    tool could repeat its side effect), and only while attempts remain. The
+    ``retrying`` frame is not terminal, so a connected client keeps listening and
+    can drop the text it already shows: the retry streams the reply from the top.
+    """
+    if not shutdown.is_stopping() or (recorder is not None and recorder.called_tools):
+        return False
+    try:
+        attempt = await run_service.requeue_for_retry(spec.run_id, max_attempts=MAX_RUN_ATTEMPTS)
+    except Exception:
+        logger.exception("requeue_for_retry failed for %s", spec.run_id)
+        return False
+    if attempt is None:
+        return False
+    logger.info(
+        "execute_run %s: worker shutting down; requeued as attempt %d", spec.run_id, attempt
+    )
+    try:
+        await transport.append_event(
+            spec.run_id,
+            "retrying",
+            {
+                "run_id": spec.run_id,
+                "reason": "system_restart",
+                "attempt": attempt,
+                "message": RETRYING_MESSAGE,
+            },
+        )
+        # Bound the key until the retry's own terminal write refreshes it.
+        await transport.set_ttl(spec.run_id, queued_stream_ttl_seconds())
+    except Exception:
+        logger.debug("retrying stream write failed", exc_info=True)
+    return True
 
 
 async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
@@ -3221,11 +3278,14 @@ async def _reject_if_guest_over_limit(spec: RunSpec, ctx: ScopeContext, transpor
     )
 
 
-async def execute_run(spec: RunSpec) -> None:
+async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
     A stream that produced no text is treated like ``cancelled`` for
-    persistence purposes (no assistant message created).
+    persistence purposes (no assistant message created). ``retry`` marks the
+    automatic second attempt of a run a worker shutdown requeued: the run-start
+    gates that SPEND (guest turn, daily turns, early-access reservation) already
+    charged attempt 1, so they are skipped; the check-only gates still run.
     """
     transport = get_stream_transport()
     # Thread the authenticated, route-validated workspace from the spec into
@@ -3340,7 +3400,7 @@ async def execute_run(spec: RunSpec) -> None:
     # the browser gets a clean pre-stream 402; only THIS seam increments, so a
     # turn costs exactly one. No-op for non-guest users; fail-CLOSED for
     # guests (an unreadable counter refuses the run).
-    if await _reject_if_guest_over_limit(spec, ctx, transport):
+    if not retry and await _reject_if_guest_over_limit(spec, ctx, transport):
         return
 
     # Workspace daily turn ceiling (feat/abuse-budgets) — the always-on abuse
@@ -3350,7 +3410,7 @@ async def execute_run(spec: RunSpec) -> None:
     # this one only says "come back tomorrow". No-op when the cap is 0;
     # fail-CLOSED on an unreadable counter, which costs nothing because the run
     # persists to the same database.
-    if await _reject_if_over_daily_turns(spec, ctx, transport):
+    if not retry and await _reject_if_over_daily_turns(spec, ctx, transport):
         return
 
     # Free-run bounds, read after every gate passed so the wallet is the one
@@ -3372,11 +3432,13 @@ async def execute_run(spec: RunSpec) -> None:
                 return
         # Last gate: reserve this run's estimate on the platform-wide daily
         # early-access ceiling. ``bill_run`` reconciles it, so a run that ends
-        # before the model call gives it all back.
-        refusal = await _guards.reserve_free_run(spec.run_id, ctx.free_run_bounds)
-        if refusal is not None:
-            await _guards.refuse_run(spec.run_id, refusal, transport=transport)
-            return
+        # before the model call gives it all back. A retry still holds attempt
+        # 1's reservation (nothing billed the requeued run), so it takes none.
+        if not retry:
+            refusal = await _guards.reserve_free_run(spec.run_id, ctx.free_run_bounds)
+            if refusal is not None:
+                await _guards.refuse_run(spec.run_id, refusal, transport=transport)
+                return
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's
     # fail-closed (fix/cloud-artifacts-reland). ``agent_jail.resolve_agent_cwd``

@@ -2,8 +2,8 @@
   {
     "label": "free runs never reserve, so the ceiling never refuses",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
-    "find": "        refusal = await _guards.reserve_free_run(spec.run_id, ctx.free_run_bounds)\n",
-    "replace": "        refusal = None\n",
+    "find": "            refusal = await _guards.reserve_free_run(spec.run_id, ctx.free_run_bounds)\n",
+    "replace": "            refusal = None\n",
     "tests": ["tests/cloud/credits/test_early_access_daily_ceiling.py"]
   },
   {

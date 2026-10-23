@@ -3,7 +3,8 @@
 A ``running`` run is judged by its liveness stamp,
 ``coalesce(last_heartbeat_at, started_at, createdAt)``; the worker refreshes
 ``last_heartbeat_at`` on a timer, so a run is only stale once its worker stopped
-beating. A ``queued`` run is judged by ``createdAt`` against its own cutoff
+beating. A ``queued`` run is judged by ``coalesce(requeued_at, createdAt)``
+(a run a worker shutdown requeued re-entered the queue then) against its own cutoff
 (``domain.queued_timeout_minutes``, env-configurable, default 10): nobody has
 picked it up, so nothing can beat, and the usual cause is every worker slot
 being busy.
@@ -141,12 +142,15 @@ def _stale_filter(cutoff: datetime, queued_cutoff: datetime | None = None) -> di
     three ``$or`` arms, because the fallbacks only apply when the newer stamp is
     absent: a running run with a FRESH heartbeat and an ancient ``createdAt`` is
     alive. ``{"field": None}`` matches both a missing field and an explicit null,
-    which covers docs written before these fields existed. ``queued_cutoff``
-    (default ``cutoff``) applies to the queued arm alone.
+    which covers docs written before these fields existed. The queued arms are
+    ``coalesce(requeued_at, createdAt) < queued_cutoff`` the same way; ``queued_cutoff``
+    (default ``cutoff``) applies to them alone.
     """
+    queued_before = queued_cutoff or cutoff
     return {
         "$or": [
-            {"status": "queued", "createdAt": {"$lt": queued_cutoff or cutoff}},
+            {"status": "queued", "requeued_at": {"$lt": queued_before}},
+            {"status": "queued", "requeued_at": None, "createdAt": {"$lt": queued_before}},
             {"status": "running", "last_heartbeat_at": {"$lt": cutoff}},
             {"status": "running", "last_heartbeat_at": None, "started_at": {"$lt": cutoff}},
             {
