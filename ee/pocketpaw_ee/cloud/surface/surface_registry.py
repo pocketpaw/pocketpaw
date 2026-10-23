@@ -23,8 +23,8 @@
 # exact ALLOWLIST that suppresses the bundled plugin, so every /sites mode names
 # its skills explicitly: the design skills (sourced from handlers/sites.py so
 # advertised == allowed), ``pocketpaw-site``, and on refine only the legacy skill
-# an old engine still needs to be edited. Create also denies the old per-engine
-# authoring tools; refine keeps them. A deny-only profile still needs a
+# an old engine still needs to be edited. Create and import-create also deny the
+# old per-engine authoring tools; refine keeps them. A deny-only profile still needs a
 # ``system_message_override`` that states the surface's own deliverable, or the
 # trained-in default wins.
 # ``POCKETPAW_SITES_MCP_SERVERS`` grants external MCP servers to /sites alone.
@@ -911,14 +911,13 @@ _SITES_REFINE_UNKNOWN_ENGINE_SKILLS: frozenset[str] = frozenset().union(
     *_SITES_REFINE_ENGINE_SKILLS.values()
 )
 
-# Import-create builds from a captured brief. Every brief captured today is stamped
-# ``engine="svelte"`` (``sites.design_brief``), so it routes to ``create_svelte_site``;
-# an unreadable brief falls back to the create preamble, which needs ``pocketpaw-site``
-# and the create design skills. A ripple brief (only ever written by the first
-# capture build, before the svelte stamp) gets no ripple authoring skill.
+# Import-create builds a NEW site from a captured brief, so it takes the one site
+# model like create: a project from a template through ``pocketpaw-site``, whatever
+# engine the brief was stamped with. An unreadable brief falls back to the create
+# preamble, which needs the same skills. ``webgl-components`` stays for a rebuilt
+# page whose source had a canvas or shader visual.
 _SITES_IMPORT_CREATE_SKILLS: frozenset[str] = (
-    frozenset({_SITES_CREATE_SKILL, "pocketpaw-create-svelte-site", "webgl-components"})
-    | _SITES_CREATE_DESIGN_SKILLS
+    frozenset({_SITES_CREATE_SKILL, "webgl-components"}) | _SITES_CREATE_DESIGN_SKILLS
 )
 
 
@@ -940,10 +939,10 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
         allowlist per engine (``_sites_refine_skill_names``). A ``site_id`` alone
         counts as refine because ``build_preamble`` resolves it to the site's pocket;
         treating it as a create would deny the edit tools the refine preamble names.
-      * IMPORT-CREATE (``meta.brief_id``): ``_frontend_preamble`` still routes on the
-        brief's engine and names the old create tools, so this keeps the earlier
-        create profile (ripple off, no deny) with the ``_SITES_IMPORT_CREATE_SKILLS``
-        allowlist.
+      * IMPORT-CREATE (``meta.brief_id``): a new site built from a captured brief,
+        so the create profile (ripple off, the old authoring tools denied) with the
+        ``_SITES_IMPORT_CREATE_SKILLS`` allowlist; ``_frontend_preamble`` starts a
+        project from a template.
       * CREATE (none of those): every new site is a project. Ripple off, the old
         authoring tools denied (``_SITES_LEGACY_AUTHORING_DENY``), and exactly the
         ``pocketpaw-site`` skill plus the create-scoped design skills. The create
@@ -965,7 +964,7 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
         return SurfaceProfile(
             ripple_mode="off",
             allow_mcp_tool_ids=sites_allow,
-            deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
+            deny_mcp_tool_ids=_SITES_LEGACY_AUTHORING_DENY | _SITES_BUILTIN_DENY,
             skill_names=_SITES_IMPORT_CREATE_SKILLS,
         )
     return SurfaceProfile(

@@ -501,10 +501,11 @@ async def import_site(
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteResponse:
     """Import an uploaded site zip (SI-4): unpack safely in memory (zip-slip +
-    decompression-bomb guards in the service), mint the html pocket + DRAFT Site
-    doc, publish through the existing html/static deploy path (binary files ride
-    the generator's ``assets`` base64 sideband), persist the ``import_report`` on
-    the Site doc, and return the SiteResponse (carrying the report).
+    decompression-bomb guards in the service), mint a ``static`` starter project
+    pocket + DRAFT Site doc, publish it through the no-build project lane (images
+    and video move to the public asset rail, since the source map holds text only),
+    persist the ``import_report`` on the Site doc, and return the SiteResponse
+    (carrying the report).
 
     The 25MB upload cap gates PROCESSING, not ingress: Starlette's multipart
     parser spools the whole request body to a temp file before this handler
@@ -524,7 +525,7 @@ async def import_site(
         data=data,
         name=name,
     )
-    return sites_service._to_response(doc, pattern=import_service.IMPORT_PATTERN, engine="html")
+    return sites_service._to_response(doc, pattern=import_service.IMPORT_PATTERN, engine="project")
 
 
 @router.post(

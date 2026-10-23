@@ -55,7 +55,7 @@ async def _owned_pocket(workspace_id: str, user_id: str, pocket_id: str) -> dict
     return pocket
 
 
-async def _starter_files() -> tuple[dict[str, str], str | None]:
+async def static_starter_files() -> tuple[dict[str, str], str | None]:
     """The static starter's manifest and AGENTS.md, plus its tokens file (``None`` on
     a starter copy that ships none), from the vendored generator."""
     from pocketpaw_ee.sites import project_tools
@@ -121,7 +121,7 @@ async def upgrade_html_site(*, workspace_id: str, user_id: str, pocket_id: str) 
 
     pocket = await _owned_pocket(workspace_id, user_id, pocket_id)
     old_source = _refuse_unless_upgradable(pocket)
-    added, starter_tokens = await _starter_files()
+    added, starter_tokens = await static_starter_files()
     themed, tokens_added = site_tokens.add_tokens(old_source, starter_tokens)
     new_source = {**themed, **added}
     if not project_build.is_no_build(new_source):
@@ -209,5 +209,6 @@ __all__ = [
     "UPGRADE_TEMPLATE",
     "revert_html_upgrade",
     "source_digest",
+    "static_starter_files",
     "upgrade_html_site",
 ]

@@ -4315,6 +4315,33 @@ restored source is recorded as a new draft version.
 | `409` | `sites.upgrade_snapshot_missing` | the snapshot version is gone |
 | `409` | `sites.upgrade_conflict` | an edit landed while the undo ran |
 
+#### Importing a site: `POST /sites/import`, `POST /sites/import/from-url`
+
+Both copy modes create a new site on the one site model: a `project` pocket on the
+`static` starter (`pattern: "imported"`,
+`site_meta.project = {"template": "static", "framework": "static", "recipes": []}`),
+published through the no-build lane. The zip route answers the `SiteResponse` with
+`engine: "project"`; `from-url` with `mode: "copy"` answers `202` and its queued
+pocket is already a static project (one placeholder page) until the crawl lands.
+
+- The site's files go through the generator's `import` first (forms rewired to the
+  capture API), then the starter's `paw.template.json` and `AGENTS.md` are added
+  (an imported file of the same name is kept) and a `styles/tokens.css` themed from
+  the site's own CSS is linked from every page, as in `POST .../upgrade`.
+- A project source map holds text only. Images and video (PNG, JPEG, GIF, WebP, MP4,
+  WebM) are stored on the public asset rail and every reference to them (`src`,
+  `href`, `poster`, `srcset`, CSS `url()`) is rewritten to the stored URL. Other
+  binary files (fonts, icons, documents), or all of them when the deployment has no
+  public bucket, point back at the source site on a URL import and are left out on a
+  zip import, each with a line in `import_report.warnings`.
+- A zip whose own `paw.template.json` needs a build step is `422
+  sites.import_not_static`. When the static starter cannot be read the import is
+  `503 sites.upgrade_starter_unavailable` before anything is minted.
+
+`mode: "rebuild"` mints nothing: it captures a design brief, and the /sites agent
+builds a new project from a template from it (`static` unless the brief is a
+live-data site), like any create.
+
 ### Site images — `/sites/by-pocket/{pocket_id}/assets`
 
 Three endpoints for the images a site DISPLAYS. Added 2026-08-31
