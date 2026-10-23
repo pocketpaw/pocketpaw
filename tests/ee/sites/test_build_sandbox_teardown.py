@@ -49,7 +49,8 @@ class LedgerDaytona:
 
     ``fail_after_register`` makes the next create register the box and then raise
     (the SDK's create-wait timing out on a box that does exist). ``block_create`` makes
-    create register the box and then hang until cancelled. ``step_delay`` yields inside
+    create register the box and then hang until ``create_gate`` is set (the image still
+    building), then return it. ``step_delay`` yields inside
     wait / exec so concurrent builds overlap the way real ones do.
     """
 
@@ -65,6 +66,7 @@ class LedgerDaytona:
         self.peak_memory_gib = 0
         self.fail_after_register: BaseException | None = None
         self.block_create = False
+        self.create_gate = asyncio.Event()
         self.registered = asyncio.Event()
         self._seq = 0
 
@@ -107,7 +109,7 @@ class LedgerDaytona:
         self.labels[info.id] = dict(kwargs.get("labels") or {})
         self.registered.set()
         if self.block_create:
-            await asyncio.Event().wait()  # the SDK's create-wait, never finishing
+            await self.create_gate.wait()  # the SDK's create-wait, image still building
         if self.fail_after_register is not None:
             exc, self.fail_after_register = self.fail_after_register, None
             raise exc
@@ -218,7 +220,17 @@ async def _cancel_once_registered(coro: Any, client: LedgerDaytona) -> None:
     await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=2)
+
+
+async def finish_create_and_settle(client: LedgerDaytona) -> None:
+    """Let the blocked create return, then wait for the background delete of its box.
+    The box must still exist first: a delete mid-create poisons Daytona's image build."""
+    assert client.boxes, "the box was deleted while its create was still in flight"
+    client.create_gate.set()
+    async with asyncio.timeout(2):
+        while client.boxes:
+            await asyncio.sleep(0.01)
 
 
 class TestCancellationStillTearsDown:
@@ -228,13 +240,15 @@ class TestCancellationStillTearsDown:
         ``_supersede_previous_job`` aborts the previous preview job, and arq cancels a
         job past its timeout. When that lands while create is still waiting for
         ``started``, the box exists but ``sandbox_id`` is None, so nothing deletes it.
-        Intended: the cancel path looks the box up by name and deletes it before
-        re-raising. Symptom: fast successive edits (each superseding the last preview)
-        leak one 4 GiB box apiece and the next build hits "Build capacity is full".
+        Intended: the cancel propagates at once, the create finishes in the background
+        (deleting mid-create would poison the image build) and its box is then deleted.
+        Symptom: fast successive edits (each superseding the last preview) leak one 4 GiB
+        box apiece and the next build hits "Build capacity is full".
         """
         client = LedgerDaytona()
         client.block_create = True
         await _cancel_once_registered(_build(client, sandbox_name="paw-build-cancel"), client)
+        await finish_create_and_settle(client)
         assert client.boxes == {}, (
             f"cancelled create leaked {[b.name for b in client.boxes.values()]}"
         )
@@ -248,6 +262,7 @@ class TestCancellationStillTearsDown:
         client = LedgerDaytona()
         client.block_create = True
         await _cancel_once_registered(_verify(client), client)
+        await finish_create_and_settle(client)
         assert client.boxes == {}, (
             f"cancelled verify create leaked {[b.name for b in client.boxes.values()]}"
         )

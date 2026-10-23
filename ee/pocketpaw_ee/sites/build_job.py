@@ -355,6 +355,8 @@ RUNG_SCAFFOLD_EMPTY = "scaffold_empty"
 #: ``run_build`` raised rather than returning a verdict: Daytona unconfigured, or the
 #: sandbox could not be created. Nothing ran, so it is ours and retryable.
 RUNG_SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+#: Daytona's build of the box image failed; every create fails until it changes.
+IMAGE_BUILD_FAILED_REASON = f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.IMAGE_BUILD_FAILED_CAUSE}"
 #: The classification cleared the build and the download delivered no bytes. Distinct
 #: from the sentinel's ``artifact_empty`` because this one is a property of the TRANSFER,
 #: so it is worth another attempt.
@@ -393,7 +395,25 @@ class SandboxUnavailableError(RuntimeError):
 
     @classmethod
     def wrapping(cls, exc: BaseException) -> SandboxUnavailableError:
-        return cls(f"{type(exc).__name__}: {capacity.redact(str(exc), cap=_RAISED_LOG_CAP)}")
+        """The wrapper for ``exc``: :class:`SandboxImageBuildFailedError` when Daytona's
+        image build failed (logged at ERROR here, once per job, since only the job's
+        raise wraps), else this class."""
+        message = f"{type(exc).__name__}: {capacity.redact(str(exc), cap=_RAISED_LOG_CAP)}"
+        if not capacity.is_image_build_failed(exc):
+            return cls(message)
+        logger.error(
+            "sites: Daytona's build of the sandbox image failed and is cached, so every "
+            "create fails until the image changes. Fix: bump PAW_DAYTONA_IMAGE_REV and "
+            "restart the web service and the worker. (%s)",
+            message,
+        )
+        return SandboxImageBuildFailedError(message)
+
+
+class SandboxImageBuildFailedError(SandboxUnavailableError):
+    """A create failed because Daytona's (cached) build of the box image failed
+    (``SandboxState.BUILD_FAILED``). A subclass, so it survives arq's pickle into Redis
+    and reads back as ``sandbox_unavailable:image_build_failed``, which is not retried."""
 
 
 @dataclass(frozen=True)
@@ -1163,7 +1183,8 @@ def raised_job_reason(exc: BaseException | None) -> str:
       Only a capacity ``Retry`` spends a try on these functions, so arq refusing the
       next pickup is a capacity wait that ran out (a worker restart mid-wait re-runs
       the job and spends one more, which is how the last try never gets to settle).
-    * :class:`SandboxUnavailableError` → ``sandbox_unavailable:no_sandbox``.
+    * :class:`SandboxImageBuildFailedError` → ``sandbox_unavailable:image_build_failed``.
+    * any other :class:`SandboxUnavailableError` → ``sandbox_unavailable:no_sandbox``.
     * ``CancelledError`` (aborted as superseded) → :data:`SUPERSEDED_REASON`.
     * anything else → ``job_crashed:unhandled_exception``.
     """
@@ -1173,6 +1194,8 @@ def raised_job_reason(exc: BaseException | None) -> str:
         return capacity.JOB_TIMEOUT_REASON
     if isinstance(exc, JobExecutionFailed) and _MAX_TRIES_TEXT in str(exc):
         return f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}"
+    if isinstance(exc, SandboxImageBuildFailedError):
+        return IMAGE_BUILD_FAILED_REASON
     if isinstance(exc, SandboxUnavailableError):
         return f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.NO_SANDBOX_CAUSE}"
     return capacity.JOB_CRASHED_REASON
@@ -1893,12 +1916,16 @@ def _retry_kind(info: Any) -> str | None:
         capacity retries (read as ``sandbox_unavailable:capacity``). The site never ran.
         Budgeted.
 
+    ``sandbox_unavailable:image_build_failed``, raised or settled, is sticky: Daytona has
+    cached a failed build of the box image, so a retry fails the same way at once.
     Anything else, above all a failure of the site's own code (``build_failed``,
     ``scaffold_failed``, …), is sticky: rebuilding identical inputs would fail again."""
     if not info.success:
         if isinstance(info.result, asyncio.CancelledError):
             return "aborted"
         reason = raised_job_reason(info.result)
+        if reason == IMAGE_BUILD_FAILED_REASON:
+            return None
         if reason == f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}":
             return "sandbox_unavailable"
         return "raised"
@@ -1906,6 +1933,8 @@ def _retry_kind(info: Any) -> str | None:
     if not isinstance(result, dict) or result.get("status") != "failed":
         return None
     reason = str(result.get("reason") or "")
+    if reason == IMAGE_BUILD_FAILED_REASON:
+        return None
     if reason.split(":", 1)[0] == RUNG_SANDBOX_UNAVAILABLE:
         return "sandbox_unavailable"
     return None
@@ -2100,12 +2129,14 @@ __all__ = [
     "RUNG_ENQUEUE_FAILED",
     "RUNG_JOB_CRASHED",
     "RUNG_PREVIEW_UNREADABLE",
+    "IMAGE_BUILD_FAILED_REASON",
     "RUNG_SANDBOX_UNAVAILABLE",
     "RUNG_SCAFFOLD_EMPTY",
     "RUNG_SCAFFOLD_FAILED",
     "SKIPPED_TREE_DIRS",
     "BuildSettlement",
     "PreviewBuildEnqueue",
+    "SandboxImageBuildFailedError",
     "SandboxUnavailableError",
     "enqueue_html_verify",
     "enqueue_preview_build",

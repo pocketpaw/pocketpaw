@@ -5,12 +5,12 @@
 # Three layers, all keyed on things a sandbox carries on Daytona's side rather than on
 # our process state, because the leak cases are exactly the ones where that state died:
 #
-#   * ``teardown_unreturned`` — run by ``daytona_runner.run_build`` and
-#     ``browser_check.run_standalone`` when create raised or was cancelled before it
-#     returned an id. The SDK registers the box before it waits for ``started``, so the
-#     box can exist while our ``sandbox_id`` is None. Looks the box up by its unique
-#     name and deletes it. Shielded, so the cancel that got us here cannot cancel the
-#     delete too.
+#   * ``teardown_unreturned`` — run by ``admission.create_admitted`` when create raised
+#     before it returned an id (for a cancelled create, only once that create has
+#     settled in the background). The SDK registers the box before it waits for
+#     ``started``, so the box can exist while our ``sandbox_id`` is None. Looks the box
+#     up by its unique name and deletes it. Shielded, so a cancel that arrives during
+#     the delete cannot abandon it.
 #   * ``delete_job_leftovers`` — run before a create that carries a ``paw_job`` label.
 #     An arq re-run of the same job (a worker killed by a redeploy, then retried) finds
 #     the first attempt's box by that label and deletes it before making a second.

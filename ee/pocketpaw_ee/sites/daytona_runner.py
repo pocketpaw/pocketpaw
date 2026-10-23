@@ -22,20 +22,21 @@
 #
 # THE ORDER OF STEPS IS THE CONTRACT:
 #   0. Admission first: ``admission.memory_lease(memory_gb)`` waits for room in the
-#      sites memory budget and is held until the delete has run, on every exit path.
-#      A capacity refusal still happens if the org is full of non-site boxes;
-#      ``admission.create_admitted`` then stops idle workspace VMs once and retries.
+#      sites budget and is held until the delete has run (except a cancel mid-create, 3).
+#      On a refusal ``admission.create_admitted`` stops idle workspace VMs once, retries.
 #   1. The clock starts BEFORE ``create_sandbox`` (after admission); it is what
 #      separates a timeout from an eviction when no sentinel comes back.
 #   2. The sentinel is read BEFORE teardown; once the box is gone the evidence is too.
 #   3. Teardown is explicit. A ``finally`` deletes by id once create returned one. A
-#      create that raised or was cancelled before returning an id may still have
-#      registered the box (the SDK POSTs, then waits for ``started``), so it is found by
-#      its unique name and deleted, shielded from a second cancel
-#      (``sandbox_reaper.teardown_unreturned``). Every box carries ``paw_lane=site-build``
-#      plus the caller's labels (``paw_pocket``, ``paw_job``); with a ``paw_job``, a box
-#      an earlier attempt of the same job left is deleted before the create. Backstops:
-#      Daytona's auto-delete on stop (``auto_delete_interval=0``) and the reaper cron.
+#      create that raised first may still have registered the box, so it is deleted by
+#      its unique name (``sandbox_reaper.teardown_unreturned``). A cancel mid-create (a
+#      superseded preview, arq's timeout) propagates at once, but the box is deleted only
+#      after create settles in the background: deleting it while Daytona builds the
+#      dynamic image caches that build as failed (``admission.create_admitted``). The
+#      lease is released with the cancel, so that tail runs unleased; accepted. Boxes
+#      carry ``paw_lane=site-build`` plus the caller's ``paw_pocket`` / ``paw_job``; a
+#      box an earlier attempt of the same job left is deleted before the create.
+#      Backstops: auto-delete on stop (``auto_delete_interval=0``) and the reaper cron.
 #      Not an unconditional immediate self-delete: that would also destroy the log.
 #
 # INVARIANT -- THIS LANE NEVER SNAPSHOTS THE SANDBOX. A svelte project carries

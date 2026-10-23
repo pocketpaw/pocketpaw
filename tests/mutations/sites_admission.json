@@ -189,7 +189,7 @@
   {
     "label": "a failed create is not logged, so prod never shows which Daytona limit is exceeded",
     "file": "ee/pocketpaw_ee/sites/admission.py",
-    "find": "        _log_create_failure(exc, create_kwargs, attempt=\"create\")\n",
+    "find": "        _log_create_failure(exc, create_kwargs, attempt=attempt)\n",
     "replace": "",
     "tests": [
       "tests/ee/sites/test_admission_lease.py::TestCreateFailureLogging::test_a_capacity_refusal_logs_the_full_message_and_the_limit"

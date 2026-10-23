@@ -42,6 +42,14 @@ from pocketpaw_ee.cloud.daytona.image import resolve_sandbox_image
 
 logger = logging.getLogger(__name__)
 
+#: ``timeout`` for ``AsyncDaytona.create``: 0, no SDK timeout. The SDK default (60s) is
+#: shorter than a cold server-side build of a dynamic ``Image``, and a create abandoned
+#: mid-build leaves Daytona's cached build of that image failed for every later create
+#: (``BUILD_FAILED: context canceled``). The caller's own deadline (the arq job timeout)
+#: is the bound; a cancel from it goes through ``admission.create_admitted``, which lets
+#: the create finish before deleting the box.
+CREATE_TIMEOUT_SECONDS = 0
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
@@ -241,7 +249,7 @@ class DaytonaClient:
         if language:
             params.language = language
 
-        sandbox = await daytona.create(params)
+        sandbox = await daytona.create(params, timeout=CREATE_TIMEOUT_SECONDS)
         sb = await self._parse_sandbox(sandbox)
         logger.info("Sandbox created: id=%s name=%s state=%s", sb.id, sb.name, sb.state)
         return sb
