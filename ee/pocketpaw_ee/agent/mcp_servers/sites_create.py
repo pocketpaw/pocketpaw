@@ -3876,6 +3876,11 @@ _INTEGRATION_NEXT_STEPS = {
     "supabase recipe and skip its step that requests them. SUPABASE_SERVICE_ROLE_KEY "
     "is off by default: only if an admin job needs it, ask the owner to turn on Admin "
     "access for Supabase in Connections.",
+    "resend": "Nothing to write in the site: Resend is the owner's own sender for "
+    "this site's lead notifications (new lead, handoff, booking). Once connected, ask "
+    "the owner to set 'Send from' to an address on a domain they verified in Resend; "
+    "until then the site reads setup_required and mail goes out from Paw. Visitors "
+    "can't send mail through it, and it never replaces a contact form's own handling.",
     "calendly": "Search the web for Calendly's current inline embed snippet and use "
     "it with the owner's link: in the page HTML on static, in a page component on a "
     "framework template. There are no gateway calls.",
