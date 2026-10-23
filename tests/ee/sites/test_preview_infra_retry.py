@@ -19,9 +19,16 @@
 # crash, ``job_crashed:unhandled_exception``. Each read logs the exception class and a
 # redacted message once per job, so the worker's failure is visible from the API side.
 #
+# An EXPLICIT build (``force=True``: the agent's ``run_site_build``) is not refused by that
+# budget, which exists to stop poll loops: an infrastructure result, ``image_build_failed``
+# included, is cleared and queued again without spending it, at most once per pocket per
+# guard window. A failure of the site's own code stays sticky even then. The budget
+# counter is keyed by the sandbox image rev, so bumping the rev starts a fresh budget, and
+# a stored infra failure that is replayed says so (``previous_attempt``).
+#
 # The pool and ``Job`` stand-ins model the one arq behaviour that matters here: an id is
 # refused while it has a live job OR a stored result, and deleting the result key frees it,
-# plus INCR / EXPIRE for the per-id retry counter.
+# plus INCR / EXPIRE for the per-id retry counter and SET NX EX for the forced-retry guard.
 from __future__ import annotations
 
 import asyncio
@@ -51,6 +58,7 @@ class _NoCounter:
         self.deleted: list[str] = []
         self.counters: dict[str, int] = {}
         self.ttls: dict[str, int] = {}
+        self.guards: dict[str, int | None] = {}
 
     async def enqueue_job(self, _fn: str, *_a: Any, _job_id: str, **_k: Any) -> Any:
         if _job_id in self.live or _job_id in self.results:
@@ -85,6 +93,15 @@ class _ArqLike(_NoCounter):
         """Every counter's TTL ran out."""
         self.counters.clear()
         self.ttls.clear()
+
+    async def set(self, key: str, _value: Any, *, nx: bool = False, ex: int | None = None) -> Any:
+        if nx and key in self.guards:
+            return None
+        self.guards[key] = ex
+        return True
+
+    def lapse_guards(self) -> None:
+        self.guards.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -138,13 +155,14 @@ SITE_FAILURES = {
 }
 
 
-async def _preview(pool: _ArqLike) -> bj.PreviewBuildEnqueue:
+async def _preview(pool: _ArqLike, **kw: Any) -> bj.PreviewBuildEnqueue:
     return await bj.enqueue_preview_build(
         pocket_id="p1",
         content_hash="h1",
         engine="react",
         generator_input={},
         _pool_override=pool,
+        **kw,
     )
 
 
@@ -284,7 +302,7 @@ async def test_a_failure_that_keeps_recurring_is_retried_a_bounded_number_of_tim
     assert [a.status for a in answers[:limit]] == ["queued"] * limit
     assert {a.status for a in answers[limit:]} == {"failed"}
     assert {a.reason for a in answers[limit:]} == {reason}
-    key = bj._RETRY_COUNTER_PREFIX + job_id
+    key = bj._retry_counter_key(job_id)
     assert arq_like.ttls[key] == bj.RETRY_WINDOW_SECONDS
 
 
@@ -486,3 +504,189 @@ async def test_clearing_a_raised_result_for_a_retry_logs_what_was_raised(
     assert "RuntimeError" in line.getMessage()
     assert "job_crashed:unhandled_exception" in line.getMessage()
     assert _SECRET not in line.getMessage()
+
+
+# -- an explicit build is not refused by the poll budget ----------------------------
+
+IMAGE_BUILD_FAILED = {
+    "image_build_failed_settled": _failed(bj.IMAGE_BUILD_FAILED_REASON),
+    "image_build_failed_raised": _raised(bj.SandboxImageBuildFailedError("BUILD_FAILED")),
+}
+
+
+async def _spend_the_budget(pool: _ArqLike, job_id: str, info: _Info) -> None:
+    """Fail this render until a plain enqueue reports the stored failure."""
+    pool.finish(job_id, info)
+    for _ in range(max(bj.RETRY_LIMITS.values()) + 2):
+        await _preview(pool)
+        if job_id in pool.live:
+            pool.finish(job_id, info)
+    assert (await _preview(pool)).status == "failed"
+
+
+@pytest.mark.parametrize("case", [*BUDGETED, *IMAGE_BUILD_FAILED])
+async def test_an_explicit_build_requeues_an_infra_failure_past_its_budget(
+    arq_like: _ArqLike, case: str
+) -> None:
+    """The prod bug: the image was fixed, but ``run_site_build`` on unchanged files read
+    the hour-old failure back in 0.36s because polls had spent the render's budget."""
+    info = BUDGETED[case][0] if case in BUDGETED else IMAGE_BUILD_FAILED[case]
+    job_id = bj._preview_job_id("p1", "h1")
+    await _spend_the_budget(arq_like, job_id, info)
+    enqueued, counters = len(arq_like.enqueued), dict(arq_like.counters)
+
+    out = await _preview(arq_like, force=True)
+
+    assert out.status == "queued", f"{case} replayed as {out.status} / {out.reason}"
+    assert len(arq_like.enqueued) == enqueued + 1
+    assert arq_like.counters == counters, "a forced retry must not spend the budget"
+
+
+@pytest.mark.parametrize("failure", list(SITE_FAILURES))
+async def test_an_explicit_build_keeps_a_failure_of_the_sites_own_code(
+    arq_like: _ArqLike, failure: str
+) -> None:
+    job_id = bj._preview_job_id("p1", "h1")
+    arq_like.finish(job_id, SITE_FAILURES[failure])
+
+    out = await _preview(arq_like, force=True)
+
+    assert out.status == "failed"
+    assert out.reason == SITE_FAILURES[failure].result["reason"]
+    assert out.previous_attempt is False, "the site's own failure is current, not stale"
+    assert arq_like.enqueued == [] and arq_like.deleted == []
+    assert arq_like.guards == {}, "nothing was forced, so the guard is not spent"
+
+
+async def test_without_force_the_budget_still_applies_and_says_so(arq_like: _ArqLike) -> None:
+    job_id = bj._preview_job_id("p1", "h1")
+    await _spend_the_budget(arq_like, job_id, INFRA_FAILURES["no_sandbox"])
+    enqueued = len(arq_like.enqueued)
+
+    out = await _preview(arq_like)
+
+    assert out.status == "failed"
+    assert out.reason == "sandbox_unavailable:no_sandbox"
+    assert out.previous_attempt is True
+    assert len(arq_like.enqueued) == enqueued
+    assert arq_like.guards == {}
+
+
+async def test_a_second_explicit_build_inside_the_guard_does_not_clear_again(
+    arq_like: _ArqLike,
+) -> None:
+    """An image failure settles in under a second, so without the guard an agent calling
+    ``run_site_build`` in a loop would open a sandbox create per call."""
+    info = IMAGE_BUILD_FAILED["image_build_failed_raised"]
+    job_id = bj._preview_job_id("p1", "h1")
+    arq_like.finish(job_id, info)
+
+    first = await _preview(arq_like, force=True)
+    attached = await _preview(arq_like, force=True)  # the forced job is still in flight
+    arq_like.finish(job_id, info)
+    replayed = await _preview(arq_like, force=True)
+
+    assert first.status == "queued"
+    assert attached.status != "failed"
+    assert replayed.status == "failed"
+    assert replayed.reason == bj.IMAGE_BUILD_FAILED_REASON
+    assert replayed.previous_attempt is True
+    assert arq_like.enqueued == [job_id]
+    assert list(arq_like.guards.values()) == [bj.FORCE_GUARD_SECONDS]
+    assert all(k.startswith(bj._FORCE_GUARD_PREFIX) for k in arq_like.guards)
+
+    arq_like.lapse_guards()
+
+    assert (await _preview(arq_like, force=True)).status == "queued"
+    assert len(arq_like.enqueued) == 2
+
+
+async def test_force_without_a_guard_falls_back_to_the_budget(arq_like: _ArqLike) -> None:
+    """Fail-safe, like a pool without a counter: no guard, no forcing."""
+
+    async def _down(*_a: Any, **_k: Any) -> Any:
+        raise ConnectionError("redis down")
+
+    arq_like.set = _down  # type: ignore[method-assign]
+    job_id = bj._preview_job_id("p1", "h1")
+    await _spend_the_budget(arq_like, job_id, INFRA_FAILURES["capacity"])
+    enqueued = len(arq_like.enqueued)
+
+    out = await _preview(arq_like, force=True)
+
+    assert out.status == "failed"
+    assert out.previous_attempt is True
+    assert len(arq_like.enqueued) == enqueued
+
+
+async def test_the_retry_budget_is_per_image_rev(arq_like: _ArqLike, monkeypatch) -> None:
+    """A rev bump is how a cached bad image is fixed, so it also ends the old failures."""
+    monkeypatch.setenv("PAW_DAYTONA_IMAGE_REV", "5")
+    job_id = bj._preview_job_id("p1", "h1")
+    await _spend_the_budget(arq_like, job_id, INFRA_FAILURES["no_sandbox"])
+    enqueued = len(arq_like.enqueued)
+
+    monkeypatch.setenv("PAW_DAYTONA_IMAGE_REV", "6")
+
+    assert (await _preview(arq_like)).status == "queued"
+    assert len(arq_like.enqueued) == enqueued + 1
+    assert any(":6:" in k for k in arq_like.counters)
+
+
+# -- the service passes force only for an explicit build ----------------------------
+
+
+async def test_queue_project_build_forwards_force(monkeypatch) -> None:
+    from pocketpaw_ee.sites import service as sites_service
+
+    seen: list[bool] = []
+
+    async def _pocket(*_a: Any, **_k: Any) -> dict:
+        return {"source": {}}
+
+    async def _config(*_a: Any, **_k: Any) -> None:
+        return None
+
+    async def _artifact(**kw: Any) -> dict:
+        seen.append(kw.get("force", False))
+        return {}
+
+    monkeypatch.setattr(sites_service, "_project_pocket", _pocket)
+    monkeypatch.setattr(sites_service, "_project_site_config", _config)
+    monkeypatch.setattr(sites_service, "_default_artifact_store", lambda: object())
+    monkeypatch.setattr(sites_service, "_project_draft_artifact", _artifact)
+
+    ids = {"workspace_id": "w", "user_id": "u", "pocket_id": "p"}
+    await sites_service.queue_project_build(**ids)
+    await sites_service.queue_project_build(**ids, force=True)
+
+    assert seen == [False, True]
+
+
+async def test_the_draft_artifact_forwards_force_and_flags_a_replayed_failure(
+    beanie_test_db, monkeypatch
+) -> None:
+    from pocketpaw_ee.sites import service as sites_service
+
+    from tests.ee.sites.test_project_engine import SOURCE, _Records, _Store
+
+    calls: list[dict] = []
+
+    async def _enqueue(**kw: Any) -> bj.PreviewBuildEnqueue:
+        calls.append(kw)
+        return bj.PreviewBuildEnqueue(
+            job_id="j",
+            status="failed",
+            reason="sandbox_unavailable:no_sandbox",
+            previous_attempt=True,
+        )
+
+    monkeypatch.setattr(bj, "enqueue_preview_build", _enqueue)
+
+    out = await sites_service._project_draft_artifact(
+        pocket_id="p-force", source=dict(SOURCE), store=_Store(), _records=_Records(), force=True
+    )
+
+    assert calls[0]["force"] is True
+    assert out["build_status"] == "failed"
+    assert out["build_previous_attempt"] is True

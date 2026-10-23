@@ -234,5 +234,41 @@
     "tests": [
       "tests/ee/sites/test_preview_build_lane.py"
     ]
+  },
+  {
+    "label": "preview lane: an explicit build replays an infra failure once polls spent the budget, as run_site_build did in prod",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        cleared, kept = await _clear_or_keep(\n            pool, job_id, force_pocket=pocket_id if force else None\n        )",
+    "replace": "        cleared, kept = await _clear_or_keep(pool, job_id)",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: an explicit build clears on every call, so a fast-failing image opens a sandbox create per agent call",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        return bool(await pool.set(key, \"1\", nx=True, ex=FORCE_GUARD_SECONDS))",
+    "replace": "        return True",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: an explicit build also clears the site's own failures, rebuilding inputs that cannot build",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return \"image_build_failed\" if reason == IMAGE_BUILD_FAILED_REASON else None",
+    "replace": "    return \"image_build_failed\"",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: the retry budget ignores the image rev, so a rev bump does not end stale infra failures",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return f\"{_RETRY_COUNTER_PREFIX}{image_rev()}:{job_id}\"",
+    "replace": "    return f\"{_RETRY_COUNTER_PREFIX}{job_id}\"",
+    "tests": [
+      "tests/ee/sites/test_preview_infra_retry.py"
+    ]
   }
 ]

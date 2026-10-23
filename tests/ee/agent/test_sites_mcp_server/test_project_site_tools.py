@@ -64,6 +64,7 @@ class BuildQueue:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.triggers: list[str] = []
+        self.forces: list[bool] = []
         self.answer: dict[str, Any] = {
             "build_status": "queued",
             "build_job_id": "site-preview-p-abc",
@@ -72,10 +73,17 @@ class BuildQueue:
         }
 
     async def __call__(
-        self, *, workspace_id: str, user_id: str, pocket_id: str, trigger: str = "draft"
+        self,
+        *,
+        workspace_id: str,
+        user_id: str,
+        pocket_id: str,
+        trigger: str = "draft",
+        force: bool = False,
     ) -> dict:
         self.calls.append(pocket_id)
         self.triggers.append(trigger)
+        self.forces.append(force)
         return dict(self.answer)
 
 
@@ -783,6 +791,52 @@ class TestBuilds:
         body = _body(out)
         assert body["status"] == "failed" and body["reason"] == "build_failed:build_failed"
         assert out["content"][1]["text"].endswith("x" * 50)
+
+    async def test_run_build_asks_for_a_fresh_attempt_and_writes_do_not(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        """run_site_build is an explicit request, so a stale infra failure is retried;
+        the write tools' verification is not, so it keeps the poll budget."""
+        from pocketpaw_ee.sites import project_tools
+
+        pocket_id = await _start(cli)
+        builds.answer = {**builds.answer, "build_status": "none", "preview_mode": "full"}
+        await _call("run_site_build", {"pocket_id": pocket_id})
+        assert builds.forces[-1] is True
+
+        ws, user = identity
+        await project_tools.build_verification(
+            workspace_id=ws, user_id=user, pocket_id=pocket_id, trigger="agent"
+        )
+        assert builds.forces[-1] is False
+
+    async def test_run_build_says_a_replayed_infra_failure_is_the_previous_attempt(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_project
+        from pocketpaw_ee.sites import project_build
+
+        pocket_id = await _start(cli)
+        reason = "sandbox_unavailable:no_sandbox"
+        builds.answer = {
+            **builds.answer,
+            "build_status": "failed",
+            "build_reason": reason,
+            "build_previous_attempt": True,
+        }
+        monkeypatch.setattr(sites_project, "RUN_BUILD_POLL_SEC", 0)
+        monkeypatch.setattr(
+            project_build,
+            "read_build_record",
+            lambda *_a: {"status": "failed", "reason": reason, "log": ""},
+        )
+        out = await _call("run_site_build", {"pocket_id": pocket_id})
+        body = _body(out)
+        assert out["is_error"]
+        assert body["previous_attempt"] is True
+        assert "previous attempt" in body["message"]
+        assert "try again in a few minutes" in body["message"]
+        assert "edit the files" in body["message"]
 
     async def test_run_build_reports_static_preview_mode(
         self, cli, identity, builds, beanie_test_db, recording_bus

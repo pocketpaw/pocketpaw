@@ -17,7 +17,9 @@
 # Invariants: the file tools refuse every engine but ``project`` (the other engines
 # have their own edit tools and path rules); every write queues the draft build of
 # the new source and answers ``verification.status: "pending"`` with the job id,
-# like the fast-edit contract; a recipe conflict writes nothing; secret VALUES are
+# like the fast-edit contract, while ``run_site_build`` is the explicit build that
+# retries a stored infrastructure failure (``force``) and says when it could only
+# replay the previous attempt's; a recipe conflict writes nothing; secret VALUES are
 # never written by any tool here — recipes return secret NAMES and the agent asks
 # the owner through ``request_site_secret`` (another lane; absent tools are named in
 # text only, never called from here).
@@ -104,6 +106,12 @@ PUBLISHED_PREVIEW_NOTE = (
     "preview_mode is published: these files are exactly what is live, so preview_url "
     "is the published site (null when its address is not known). Edit the files to "
     "get a new draft."
+)
+
+#: Prefixed to a failure the build lane replayed instead of retrying (retry limit spent).
+PREVIOUS_ATTEMPT_NOTE = (
+    "This is the previous attempt's result for these exact files, not a new build: the "
+    "retry limit is reached, so try again in a few minutes or edit the files."
 )
 
 
@@ -882,8 +890,14 @@ async def _run_site_build_handler(args: dict) -> dict:
     from pocketpaw_ee.sites import service as sites_service
 
     try:
+        # An explicit build: a stored infrastructure failure is tried again rather than
+        # replayed (the retry budget only stops poll loops).
         art = await sites_service.queue_project_build(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger="agent"
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            trigger="agent",
+            force=True,
         )
     except CloudError as exc:
         return _error_response(agent_error_text(exc.code, exc.message))
@@ -955,6 +969,9 @@ async def _run_site_build_handler(args: dict) -> dict:
             f"Still {status} after {int(RUN_BUILD_WAIT_SEC)}s. Keep working and call "
             "run_site_build or get_site_build_log again shortly; do not report the site as built."
         )
+    if status == "failed" and art.get("build_previous_attempt"):
+        body["previous_attempt"] = True
+        body["message"] = f"{PREVIOUS_ATTEMPT_NOTE} {body['message']}"
     out = _with_text_blocks(body, blocks)
     if status == "failed":
         out["is_error"] = True

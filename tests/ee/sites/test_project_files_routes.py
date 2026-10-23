@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -81,7 +80,7 @@ def enqueued(monkeypatch) -> list[str]:
     async def _enqueue(*, pocket_id, content_hash, engine, generator_input, **_kw):
         assert engine == "project"
         hashes.append(content_hash)
-        return SimpleNamespace(
+        return build_job.PreviewBuildEnqueue(
             status="queued", job_id=f"site-preview-{pocket_id}-{content_hash}", reason=None
         )
 
