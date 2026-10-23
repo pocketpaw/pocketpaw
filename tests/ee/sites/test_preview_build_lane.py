@@ -679,6 +679,23 @@ class TestThePreviewJob:
             await _run_preview_job(client=_sandbox(fail_at="create"))
         assert raised.value.__cause__ is not None
 
+    async def test_a_timeout_our_own_code_raises_reads_as_a_crash(self, monkeypatch) -> None:
+        """arq's limit reaches the job as a cancellation, so a ``TimeoutError`` escaping
+        the body is ours (an SDK call, an await with its own deadline). It must not read
+        as ``timed_out:job_timeout``, which means arq stopped the job."""
+
+        def _slow(*_a: Any, **_k: Any) -> Any:
+            raise TimeoutError("an SDK call gave up")
+
+        monkeypatch.setattr(bj, "resolve_build_settlement", _slow)
+
+        with pytest.raises(Exception) as raised:
+            await _run_preview_job()
+
+        assert not isinstance(raised.value, TimeoutError)
+        assert isinstance(raised.value.__cause__, TimeoutError)
+        assert bj.raised_job_reason(raised.value) == f"{bj.RUNG_JOB_CRASHED}:unhandled_exception"
+
     async def test_an_unexpected_raise_is_logged_with_its_traceback(
         self, monkeypatch, caplog
     ) -> None:

@@ -264,6 +264,45 @@ class TestPreviewLane:
         monkeypatch.setattr(arq.jobs, "Job", _Job)
         assert await verify._timeout_reason(object(), "j") == "waiting_for_capacity"
 
+    @pytest.mark.parametrize(
+        ("status", "info", "reason"),
+        [
+            # arq's own limit: ``Job.result()`` re-raises the stored TimeoutError, which
+            # lands in verify's ``except TimeoutError`` branch.
+            (
+                JobStatus.complete,
+                SimpleNamespace(success=False, result=TimeoutError()),
+                "timed_out:job_timeout",
+            ),
+            (
+                JobStatus.complete,
+                SimpleNamespace(success=False, result=RuntimeError("boom")),
+                "job_crashed:unhandled_exception",
+            ),
+            # Our wait ran out while the job is still going: a genuine wait timeout.
+            (JobStatus.in_progress, None, "timeout"),
+            (JobStatus.complete, SimpleNamespace(success=True, result={}), "timeout"),
+            (JobStatus.complete, None, "timeout"),
+        ],
+    )
+    async def test_verify_timeout_reads_a_finished_jobs_own_raise(
+        self, monkeypatch, status: JobStatus, info: Any, reason: str
+    ) -> None:
+        import arq.jobs
+
+        class _Job:
+            def __init__(self, *_a: Any, **_k: Any) -> None:
+                pass
+
+            async def status(self) -> JobStatus:
+                return status
+
+            async def result_info(self) -> Any:
+                return info
+
+        monkeypatch.setattr(arq.jobs, "Job", _Job)
+        assert await verify._timeout_reason(object(), "j") == reason
+
 
 class TestHtmlVerifyLane:
     async def test_capacity_retries_and_then_gives_up(self) -> None:
