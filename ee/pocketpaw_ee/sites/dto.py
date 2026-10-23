@@ -1780,6 +1780,17 @@ class SiteUpgradeResponse(BaseModel):
     verification: dict[str, Any]
 
 
+class SiteTokensRewriteResponse(BaseModel):
+    """POST /sites/by-pocket/{pocket_id}/upgrade/tokens. ``rewritten`` is the files the
+    re-run changed (empty, with ``changed`` false, when nothing was left to point at
+    the tokens); ``verification`` is the draft build of the current source."""
+
+    pocket_id: str
+    changed: bool
+    rewritten: list[str]
+    verification: dict[str, Any]
+
+
 class SiteUpgradeRevertResponse(BaseModel):
     """POST /sites/by-pocket/{pocket_id}/upgrade/revert. ``version_no`` is the
     snapshot version the source was restored from."""

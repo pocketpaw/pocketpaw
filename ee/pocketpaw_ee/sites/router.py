@@ -95,6 +95,7 @@ from pocketpaw_ee.sites.dto import (
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
+    SiteTokensRewriteResponse,
     SiteTransferListResponse,
     SiteTransferOfferRequest,
     SiteTransferResponse,
@@ -931,6 +932,25 @@ async def revert_site_upgrade_by_pocket(
         workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
     )
     return SiteUpgradeRevertResponse(**result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/upgrade/tokens", response_model=SiteTokensRewriteResponse
+)
+async def retheme_site_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTokensRewriteResponse:
+    """Opt-in re-run for a site already on the static starter: point its own CSS at
+    ``styles/tokens.css`` so theme edits reach it (``sites.site_upgrade.retheme_site``).
+    Rendering is unchanged; it saves only when something changed. 422
+    ``sites.tokens_unsupported`` unless it is a static project with a tokens file, 409
+    ``sites.upgrade_conflict`` when an edit raced it."""
+    result = await site_upgrade.retheme_site(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteTokensRewriteResponse(**result)
 
 
 @router.post("/sites/by-pocket/{pocket_id}/open-draft", response_model=OpenDraftResponse)

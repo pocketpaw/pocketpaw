@@ -3029,6 +3029,41 @@ async def restore_upgraded_html(
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_UNDONE)
 
 
+_RETHEME_LABEL = "Pointed the site's CSS at its theme tokens"
+
+
+async def retheme_project_source(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    upgraded_source_hash: str | None = None,
+) -> None:
+    """Save the source ``sites.site_upgrade.retheme_site`` built (the site's CSS pointed
+    at its theme tokens). The pocket must still be the ``project`` with exactly
+    ``expected_source`` (409 ``sites.upgrade_conflict`` otherwise).
+    ``upgraded_source_hash``, when given, replaces ``site_meta.upgraded_from.source_hash``
+    in the same save, so a site untouched since its upgrade can still be undone. The
+    saved map is recorded as a draft version like any other edit."""
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while its CSS was being updated. Reload it and try again.",
+        )
+    doc.source = dict(source)
+    meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    record = meta.get("upgraded_from")
+    if upgraded_source_hash is not None and isinstance(record, dict):
+        meta["upgraded_from"] = {**record, "source_hash": upgraded_source_hash}
+        doc.site_meta = meta
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_RETHEME_LABEL)
+
+
 #: Engines whose source map may carry an author dependency manifest.
 _DEPENDENCY_MANIFEST_ENGINES = ("svelte", "react", "html")
 

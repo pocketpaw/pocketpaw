@@ -2,7 +2,8 @@
 # onto the ``static`` starter (``sites/site_tokens.py``): colours and fonts read from the
 # site's own top-level rules (``var()`` resolved, ``@media`` and non-colour backgrounds
 # ignored), the starter's defaults for the rest, no colour-scheme or dark block that
-# would change how the page renders, and one idempotent ``<link>`` per page.
+# would change how the page renders, one idempotent ``<link>`` per page, and the
+# site's CSS pointed at the file (the rewrite itself: test_site_token_rewrite.py).
 from __future__ import annotations
 
 import pytest
@@ -123,7 +124,7 @@ def test_add_tokens_writes_the_file_and_links_every_page():
     assert _decls(out[site_tokens.TOKENS_REL])["--foreground"] == "#222"
     assert site_tokens.TOKENS_HREF in out["index.html"]
     assert site_tokens.TOKENS_HREF in out["about/index.html"]
-    assert out["styles.css"] == source["styles.css"]
+    assert out["styles.css"] == "body { color: var(--foreground) }"
     assert source["index.html"] == "<html><head></head><body></body></html>"  # not mutated
 
 

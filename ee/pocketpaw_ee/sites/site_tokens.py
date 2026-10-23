@@ -17,11 +17,14 @@
 #     not detected (``FALLBACK`` when the starter has none).
 #   * :func:`link_tokens` puts one ``<link>`` at the top of ``<head>``, before the
 #     site's own stylesheets.
+#   * ``site_token_rewrite`` then points the site's own CSS at the values the file pins
+#     (:func:`file_theme`), so a theme edit reaches the elements that used them.
 #
 # Invariants: nothing here changes how the site renders. The file only declares
 # custom properties, with no ``color-scheme`` and no dark-mode block, and it loads
-# first, so the site's own CSS still wins. An owner's existing tokens file is never
-# overwritten. Pure functions over the source map; no I/O.
+# first, so the site's own CSS still wins; every rewritten literal equals its token.
+# An owner's existing tokens file is never overwritten. Pure functions over the
+# source map; no I/O.
 from __future__ import annotations
 
 import re
@@ -174,6 +177,22 @@ def root_declarations(css: str | None) -> dict[str, str]:
     return {}
 
 
+def file_theme(css: str | None) -> dict[str, str]:
+    """The roles a tokens file pins unconditionally: each of ``ROLES`` its first
+    top-level ``:root`` gives a literal (not ``var()``) value and that the file
+    declares nowhere else (an ``@media`` override would make the value conditional).
+    These are the values the site's CSS may be pointed at."""
+    clean = _COMMENT.sub("", css or "")
+    root = root_declarations(clean)
+    theme: dict[str, str] = {}
+    for role in ROLES:
+        value = root.get(role)
+        declared = re.findall(rf"(?<![-\w]){re.escape(role)}\s*:", clean)
+        if value and "var(" not in value.lower() and len(declared) == 1:
+            theme[role] = value
+    return theme
+
+
 def tokens_css(starter_css: str | None, detected: Mapping[str, str]) -> str:
     """The tokens file: the starter's light ``:root`` tokens (``FALLBACK`` for roles it
     lacks) with ``detected`` over them. No ``color-scheme``, no dark-mode block."""
@@ -200,8 +219,11 @@ def add_tokens(
     source: Mapping[str, object], starter_css: str | None
 ) -> tuple[dict[str, object], list[str]]:
     """``(new source, added paths)``: ``source`` with ``styles/tokens.css`` written
-    (unless the owner already has one) and linked from every page. ``source`` is not
-    mutated."""
+    (unless the owner already has one), linked from every page, and the site's own
+    CSS pointed at the file's values (``site_token_rewrite``). ``source`` is not
+    mutated. Running it again on its own output changes nothing."""
+    from pocketpaw_ee.sites import site_token_rewrite
+
     out = dict(source)
     added: list[str] = []
     if TOKENS_REL not in out:
@@ -210,7 +232,9 @@ def add_tokens(
     for path, text in source.items():
         if isinstance(text, str) and path.lower().endswith(_PAGE_EXTS):
             out[path] = link_tokens(text)
-    return out, added
+    tokens = out[TOKENS_REL]
+    theme = file_theme(tokens if isinstance(tokens, str) else None)
+    return site_token_rewrite.rewrite_source(out, theme), added
 
 
 __all__ = [
@@ -220,6 +244,7 @@ __all__ = [
     "TOKENS_REL",
     "add_tokens",
     "detect_theme",
+    "file_theme",
     "link_tokens",
     "root_declarations",
     "tokens_css",
