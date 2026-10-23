@@ -58,6 +58,9 @@ REAP_MARGIN_SECONDS = 15 * 60
 LANE_LABEL = "paw_lane"
 #: Label the build jobs stamp with their arq job id.
 JOB_LABEL = "paw_job"
+#: Daytona states of a box whose image is still being built or pulled. Deleting one
+#: caches that image build as failed (``BUILD_FAILED: context canceled``).
+IMAGE_BUILDING_STATES = frozenset({"pending_build", "building_snapshot", "pulling_snapshot"})
 
 # Cleanup tasks that outlived a second cancel of their caller. Held so the event loop
 # does not garbage-collect a running delete.
@@ -170,6 +173,14 @@ async def delete_job_leftovers(client: Any, labels: dict[str, str]) -> list[str]
     for info in found:
         if (getattr(info, "labels", None) or {}).get(JOB_LABEL) != job:
             continue  # the filter is the server's; trust only an exact match
+        if str(getattr(info, "state", "")).lower() in IMAGE_BUILDING_STATES:
+            # Its own follow-up, auto-delete-on-stop and the reaper cron get it later.
+            logger.info(
+                "sandbox_reaper: leftover %s of job %s is still building its image; kept",
+                info.id,
+                job,
+            )
+            continue
         try:
             await client.delete_sandbox(info.id)
         except Exception as exc:  # noqa: BLE001

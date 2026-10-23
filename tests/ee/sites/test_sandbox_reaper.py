@@ -61,6 +61,16 @@ class TestJobLeftovers:
         assert await sr.delete_job_leftovers(client, labels) == []
         assert other.id in client.boxes
 
+    @pytest.mark.parametrize("state", ["pending_build", "building_snapshot", "pulling_snapshot"])
+    async def test_a_leftover_still_building_its_image_is_kept(self, state: str) -> None:
+        """Deleting it mid-build would cache the image build as failed for every create."""
+        client = LabelledLedger(memory_cap_gib=100)
+        building = client.add_box("paw-build-1", state=state)
+        client.labels[building.id] = {"paw_lane": "site-build", "paw_job": "j-1"}
+        labels = {"paw_lane": "site-build", "paw_job": "j-1"}
+        assert await sr.delete_job_leftovers(client, labels) == []
+        assert building.id in client.boxes
+
     async def test_no_job_label_means_no_lookup(self) -> None:
         client = LabelledLedger(memory_cap_gib=100)
         stray = client.add_box("paw-build-1")
