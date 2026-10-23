@@ -6,7 +6,8 @@
 # Daytona for ``PAW_SITES_BUILD_CPU`` / ``_MEMORY_GIB`` / ``_DISK_GIB`` (2 / 4 / 10 by
 # default) against a small org quota, and these lines say how much of it a build used.
 #
-# One exec, one shell script, every step bounded by ``timeout``:
+# One exec, one shell script, every step bounded by ``timeout`` and the steps summing to
+# less than the outer cap, so a slow step loses only its own number:
 #   * peak memory: cgroup v2 ``memory.peak``, else cgroup v1
 #     ``memory.max_usage_in_bytes``, else ``/proc/meminfo`` used-now (NOT a peak; the
 #     line says ``memory_source=proc_meminfo_now`` so nobody sizes from it blindly);
@@ -15,7 +16,8 @@
 #
 # INVARIANT: measuring never changes a build. :func:`measure` never raises (a raise,
 # a timeout, missing files or garbage output all become ``None`` fields) and is
-# bounded by ``PROBE_TIMEOUT_SECONDS``. The probe command carries
+# bounded by ``PROBE_TIMEOUT_SECONDS``. ``run_build`` runs it alongside ``on_artifact``
+# (so the draft is not held up) and before ``after_build`` and teardown. The probe command carries
 # ``USAGE_PROBE_MARKER`` so test fakes can tell it from the build exec.
 from __future__ import annotations
 
@@ -30,10 +32,11 @@ logger = logging.getLogger(__name__)
 #: A no-op token at the top of the probe script; see the header.
 USAGE_PROBE_MARKER = "paw-usage-probe"
 
-#: Our await bound on the whole probe. The steps inside are bounded tighter, so a slow
-#: ``du`` loses its own number, not the rest.
+#: Our await bound on the whole probe. The steps inside are bounded tighter and sum to
+#: less (3 x du + 2 small reads = 22 s), so a slow ``du`` loses its own number only.
 PROBE_TIMEOUT_SECONDS: float = 30.0
-_STEP_TIMEOUT_SECONDS = 15
+_STEP_TIMEOUT_SECONDS = 6
+_READ_TIMEOUT_SECONDS = 2
 
 _INT_FIELDS = (
     "mem_peak_bytes",
@@ -50,6 +53,7 @@ def usage_probe_command(project_dir: str, output_dir: str) -> str:
     """The one shell command that prints ``key=value`` usage lines and exits 0."""
     q = shlex.quote
     t = _STEP_TIMEOUT_SECONDS
+    r = _READ_TIMEOUT_SECONDS
     script = "\n".join(
         [
             f": {USAGE_PROBE_MARKER}",
@@ -58,7 +62,7 @@ def usage_probe_command(project_dir: str, output_dir: str) -> str:
             " /sys/fs/cgroup/memory/memory.max_usage_in_bytes:cgroup_v1; do",
             '  path="${f%%:*}"',
             '  if [ -r "$path" ]; then',
-            '    p="$(timeout 5 cat "$path" 2>/dev/null)"',
+            f'    p="$(timeout {r} cat "$path" 2>/dev/null)"',
             '    if [ -n "$p" ]; then src="${f##*:}"; break; fi',
             "  fi",
             "done",
@@ -76,7 +80,7 @@ def usage_probe_command(project_dir: str, output_dir: str) -> str:
             f'echo "disk_node_modules_bytes=$(timeout {t} du -sb'
             f' {q(project_dir + "/node_modules")} 2>/dev/null | cut -f1)"',
             f'echo "disk_output_bytes=$(timeout {t} du -sb {q(output_dir)} 2>/dev/null | cut -f1)"',
-            'echo "disk_fs_used_bytes=$(timeout 5 df -B1 --output=used / 2>/dev/null'
+            f'echo "disk_fs_used_bytes=$(timeout {r} df -B1 --output=used / 2>/dev/null'
             ' | tail -n 1 | tr -d " ")"',
             "exit 0",
         ]
@@ -94,7 +98,7 @@ def parse_usage(raw: str | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in _INT_FIELDS:
         value = values.get(key, "")
-        out[key] = int(value) if value.isdigit() else None
+        out[key] = int(value) if value.isascii() and value.isdigit() else None
     source = values.get("mem_source", "")
     out["mem_source"] = source if source and source != "none" else None
     # Keep the dict's key order stable for logs: memory first, then disk.
@@ -127,10 +131,10 @@ async def measure(
             ),
             timeout=PROBE_TIMEOUT_SECONDS,
         )
+        return parse_usage(response_stdout(resp))
     except Exception as exc:  # noqa: BLE001 -- measuring must never fail a build
         logger.info("build_usage: probe skipped in %s (%s)", sandbox_id, type(exc).__name__)
         return parse_usage(None)
-    return parse_usage(response_stdout(resp))
 
 
 def _mib(value: int | None) -> str:

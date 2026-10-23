@@ -12,8 +12,8 @@
 # Playwright image), ``on_artifact`` (stores the draft as soon as a clean artifact is
 # verified), ``after_build`` (the browser harness, run in the same sandbox before
 # teardown; a raise is logged and never costs the build its verdict), ``labels``.
-# Box size: ``PAW_SITES_BUILD_CPU`` / ``_MEMORY_GIB`` / ``_DISK_GIB`` (2/4/10; args win).
-# Before teardown ``build_usage`` logs what the box used; it never changes a verdict.
+# Box size: ``PAW_SITES_BUILD_{CPU,MEMORY_GIB,DISK_GIB}`` (2/4/10, max 8/16/50). ``build_usage``
+# measures the box alongside ``on_artifact``, before ``after_build``; never changes a verdict.
 # The sandbox ``bunfig.toml`` is OPEN (no release-age floor, scripts allowed) because
 # the sandbox is the isolation boundary; an author-supplied one wins.
 # ``--frozen-lockfile`` is NOT used: the generator emits no lockfile, so the flag would
@@ -49,6 +49,7 @@
 # ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace.
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
@@ -124,9 +125,14 @@ BUILD_DISK_ENV = "PAW_SITES_BUILD_DISK_GIB"
 DEFAULT_BUILD_CPU = 2
 DEFAULT_BUILD_MEMORY_GIB = 4
 DEFAULT_BUILD_DISK_GIB = 10
+#: Ceilings on the env values: a typo (``40`` for ``4``) must not ask Daytona for a box
+#: bigger than the whole org.
+MAX_BUILD_CPU = 8
+MAX_BUILD_MEMORY_GIB = 16
+MAX_BUILD_DISK_GIB = 50
 
 
-def _positive_int_env(name: str, default: int) -> int:
+def _positive_int_env(name: str, default: int, ceiling: int) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -137,15 +143,32 @@ def _positive_int_env(name: str, default: int) -> int:
     if value < 1:
         logger.warning("%s=%r is not a positive integer; using %d", name, raw, default)
         return default
+    if value > ceiling:
+        logger.warning("%s=%d is above the ceiling; using %d", name, value, ceiling)
+        return ceiling
     return value
 
 
 def build_resources() -> tuple[int, int, int]:
-    """``(cpu, memory GiB, disk GiB)`` for a build sandbox, read from the env now."""
+    """``(cpu, memory GiB, disk GiB)`` for a build sandbox, read from the env now.
+    Warns when the memory exceeds an active admission budget (each such build would
+    then run only when nothing else holds a lease)."""
+    from pocketpaw_ee.sites.admission import BUDGET_ENV, budget_gib
+
+    memory = _positive_int_env(BUILD_MEMORY_ENV, DEFAULT_BUILD_MEMORY_GIB, MAX_BUILD_MEMORY_GIB)
+    budget = budget_gib()
+    if budget is not None and memory > budget:
+        logger.warning(
+            "%s=%d is above %s=%d: each build runs alone, past the budget",
+            BUILD_MEMORY_ENV,
+            memory,
+            BUDGET_ENV,
+            budget,
+        )
     return (
-        _positive_int_env(BUILD_CPU_ENV, DEFAULT_BUILD_CPU),
-        _positive_int_env(BUILD_MEMORY_ENV, DEFAULT_BUILD_MEMORY_GIB),
-        _positive_int_env(BUILD_DISK_ENV, DEFAULT_BUILD_DISK_GIB),
+        _positive_int_env(BUILD_CPU_ENV, DEFAULT_BUILD_CPU, MAX_BUILD_CPU),
+        memory,
+        _positive_int_env(BUILD_DISK_ENV, DEFAULT_BUILD_DISK_GIB, MAX_BUILD_DISK_GIB),
     )
 
 
@@ -358,6 +381,7 @@ async def run_build(
     deleted = False
     t_created = t_uploaded = t_exec_done = t_extracted = t_start
     post_build: Any = None
+    probe: asyncio.Future[dict[str, Any]] | None = None
 
     try:
         # The SDK registers the box BEFORE it waits for ``started``, so a create that
@@ -460,17 +484,31 @@ async def run_build(
                     artifact = None
         t_extracted = time.monotonic()
 
-        # Right-sizing evidence, read in the box before teardown and before the hooks
-        # below (so the browser harness is not counted). Skipped when no sentinel came
-        # back: the box is likely gone and an exec would only wait out its timeout.
-        usage = None
+        # Right-sizing evidence, read in the box ALONGSIDE the artifact hook (so the
+        # draft is not held up) and finished before after_build (so the browser harness
+        # is not counted in the peak). Skipped when no sentinel came back: the box is
+        # likely gone and an exec would only wait out its timeout.
         if sentinel is not None:
-            usage = await build_usage.measure(
-                client,
-                sandbox_id,
-                project_dir=SANDBOX_PROJECT_DIR,
-                output_dir=_output_dir(engine, artifact_rel),
+            probe = asyncio.ensure_future(
+                build_usage.measure(
+                    client,
+                    sandbox_id,
+                    project_dir=SANDBOX_PROJECT_DIR,
+                    output_dir=_output_dir(engine, artifact_rel),
+                )
             )
+
+        # The artifact hook first (the preview lane stores the draft here), so the
+        # draft is visible before the browser check below spends its time. Same rule
+        # as after_build: only a clean, verified artifact, and a raise is swallowed.
+        if on_artifact is not None and artifact is not None and classification.deployable:
+            try:
+                await on_artifact(artifact)
+            except Exception as exc:  # noqa: BLE001 — see after_build below
+                logger.warning("daytona_runner: on_artifact hook raised (%s)", exc)
+
+        usage = await probe if probe is not None else None
+        probe = None
         build_usage.log_usage(
             usage,
             engine=engine,
@@ -481,15 +519,6 @@ async def run_build(
             disk_gib=disk_gb,
             duration_seconds=t_extracted - t_start,
         )
-
-        # The artifact hook first (the preview lane stores the draft here), so the
-        # draft is visible before the browser check below spends its time. Same rule
-        # as after_build: only a clean, verified artifact, and a raise is swallowed.
-        if on_artifact is not None and artifact is not None and classification.deployable:
-            try:
-                await on_artifact(artifact)
-            except Exception as exc:  # noqa: BLE001 — see after_build below
-                logger.warning("daytona_runner: on_artifact hook raised (%s)", exc)
 
         # PP-2: the post-build hook (the browser harness), only on a CLEAN build and
         # still inside the sandbox's lifetime. A raise is logged and swallowed: the
@@ -505,6 +534,10 @@ async def run_build(
                 logger.warning("daytona_runner: after_build hook raised (%s)", exc)
                 post_build = None
     finally:
+        # A probe still in flight (on_artifact raised a BaseException) must not outlive
+        # the box it is reading.
+        if probe is not None and not probe.done():
+            probe.cancel()
         # Explicit teardown. Swallows its own errors: a delete that fails must not mask
         # the build result, and the auto-delete backstop still reaps the sandbox.
         #

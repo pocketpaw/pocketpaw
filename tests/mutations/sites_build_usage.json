@@ -43,5 +43,41 @@
     "tests": [
       "tests/ee/sites/test_build_usage.py::TestProbe"
     ]
+  },
+  {
+    "label": "the probe's du steps add up past its outer cap, so one slow du loses every number",
+    "file": "ee/pocketpaw_ee/sites/build_usage.py",
+    "find": "_STEP_TIMEOUT_SECONDS = 6\n",
+    "replace": "_STEP_TIMEOUT_SECONDS = 15\n",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::TestProbeBudget"
+    ]
+  },
+  {
+    "label": "a non-ASCII digit in the probe output raises out of the parser",
+    "file": "ee/pocketpaw_ee/sites/build_usage.py",
+    "find": "value.isascii() and value.isdigit()",
+    "replace": "value.isdigit()",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::test_parse_ignores_non_ascii_digits"
+    ]
+  },
+  {
+    "label": "the probe runs before the draft is stored, delaying the artifact the user sees",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "        # The artifact hook first (the preview lane stores the draft here), so the\n",
+    "replace": "        if probe is not None:\n            await asyncio.shield(probe)\n        # The artifact hook first (the preview lane stores the draft here), so the\n",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::TestRunBuildMeasures::test_the_probe_does_not_hold_up_the_artifact_hook"
+    ]
+  },
+  {
+    "label": "the build size env has no ceiling, so a typo asks Daytona for a box bigger than the org",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "    if value > ceiling:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/ee/sites/test_build_usage.py::TestBuildResources"
+    ]
   }
 ]
