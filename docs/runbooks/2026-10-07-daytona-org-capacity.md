@@ -1,15 +1,20 @@
-<!-- Runbook: Daytona org resource limits, the sites memory budget builds are admitted
-     against, how site builds behave when the org is full, and how to free capacity
-     from the Daytona dashboard. -->
+<!-- Runbook: Daytona org resource limits (memory and disk), how fast each of our
+     sandboxes gives its quota back, the sites memory budget builds are admitted against,
+     the per-build usage line and the build-size env vars, how site builds behave when the
+     org is full, and how to free capacity from the Daytona dashboard. -->
 
 # Runbook — Daytona org capacity and sandbox cleanup
 
 ## The limit
 
-Daytona caps an organization's **total** CPU, memory and disk across every sandbox
-that is running (stopped sandboxes free CPU and memory; archived and deleted ones
-also free disk). Our org's memory cap is **10 GiB**. When a create would cross it,
-the SDK raises:
+Daytona caps an organization's **total** CPU, memory and disk
+(<https://www.daytona.io/docs/en/limits/>; Tier 1 is 10 vCPU / 10 GiB RAM / 30 GiB disk).
+A started sandbox counts against all three. A **stopped container sandbox keeps counting
+against disk until it is archived or deleted**; only stopped VM sandboxes free disk on
+stop. Every sandbox we create is a container: they are all created from an image
+(`CreateSandboxFromImageParams`), and Daytona only makes a VM sandbox from a snapshot
+with the `LINUX_VM` sandbox class. The "workspace VM" is a container despite its name.
+Our org's memory cap is **10 GiB**. When a create would cross it, the SDK raises:
 
 ```
 DaytonaValidationError: Failed to create sandbox: Total memory limit exceeded. Maximum allowed: 10GiB.
@@ -19,14 +24,37 @@ What each of our sandboxes asks for, and how long it lives:
 
 | Caller | cpu / mem / disk | auto-stop | auto-archive | auto-delete | Torn down |
 |---|---|---|---|---|---|
-| Site publish / preview build (`sites/daytona_runner.py`) | 2 / 4 GiB / 10 GiB | build budget + margin | SDK default | 0 (on stop) | explicit delete when the build ends; by name if create failed; reaper |
-| html browser verify (`sites/browser_check.py`) | 1 / 2 GiB / 5 GiB | verify budget + 10 min | SDK default | 0 (on stop) | explicit delete when the check ends; by name if create failed; reaper |
+| Site publish / preview build and project build (`sites/daytona_runner.py`) | 2 / 4 GiB / 10 GiB (`PAW_SITES_BUILD_*`) | build budget + margin | n/a | 0 (on stop) | explicit delete when the build ends; by name if create failed; reaper |
+| html browser verify (`sites/browser_check.py`) | 1 / 2 GiB / 5 GiB | verify budget + 10 min | n/a | 0 (on stop) | explicit delete when the check ends; by name if create failed; reaper |
 | Code Mode sandbox (`cloud/websandbox/provision.py`) | per request | 5 min | 5 min | 0 (on stop) | reaper + Daytona; project lives in S3 |
-| Workspace VM (`cloud/daytona/router.py`, agent `pocketpaw_daytona` tools) | 2 / 4 GiB / 10 GiB | 30 min (config, clamped 5 min to 1 day) | 1 day | never | persistent; resumed on next use |
+| Workspace VM (`cloud/daytona/router.py`, agent `pocketpaw_daytona` tools) | 2 / 4 GiB / 10 GiB | 30 min (config, clamped 5 min to 1 day) | 1 min (`PAW_DAYTONA_WORKSPACE_VM_AUTO_ARCHIVE_MINUTES`) | never | persistent; resumed on next use |
 
-So two builds plus one idle workspace VM already fill 10 GiB. Before this change the
-workspace VM stopped after 3600 **minutes** (60 hours; the config value was seconds
-but reached Daytona unconverted), which is how idle agent boxes starved builds.
+So two builds plus one idle workspace VM already fill 10 GiB of memory. Before the
+auto-stop fix the workspace VM stopped after 3600 **minutes** (60 hours; the config
+value was seconds but reached Daytona unconverted), which is how idle agent boxes
+starved builds.
+
+### Disk: stopped workspace VMs
+
+The workspace VM is the only sandbox we keep after it stops, so it is the only one that
+can sit on disk quota while doing nothing. It used to archive a day after stopping: a
+stopped VM held its 10 GiB for 24 hours, and three of them fill Tier 1's 30 GiB, after
+which every build (10 GiB each) is refused with `limit=disk`. It now archives **1
+minute** after it stops, the smallest interval Daytona accepts (`0` means Daytona's
+maximum, not "now", so the code refuses it). The VM has already been idle for its
+30-minute auto-stop before that clock starts.
+
+- **Trade-off:** the next tool call on an archived VM restores it from object storage,
+  which takes longer than starting a stopped one (the resume waits up to 5 minutes). A
+  user who comes back within the auto-stop window never sees it.
+- **Tuning:** `PAW_DAYTONA_WORKSPACE_VM_AUTO_ARCHIVE_MINUTES=<minutes>` on the web
+  service and the worker (both resolve VMs). Unset, empty, `0`, negative or not a number
+  means the 1-minute default (a bad value logs a warning). Raise it to make a VM that is
+  used in bursts resume faster, at the cost of holding its disk for that long.
+- **Existing VMs** converge on their own: the first time a process resolves a VM for an
+  agent tool call (`cloud/daytona/context.py`, `_ensure_lifecycle`), it re-applies the
+  whole lifecycle, archive interval included. A VM nobody touches keeps its old
+  one-day interval until it next archives.
 
 ## How build and verify sandboxes are cleaned up
 
@@ -49,7 +77,49 @@ three layers, so a box cannot hold quota after the job that made it is gone:
    names, and does nothing when Daytona is not configured. Worker log:
    `sandbox_reaper: deleted orphan` and `reaped N orphaned build sandbox(es)`.
 
-Daytona's own auto-stop plus `auto_delete_interval=0` stays as the last backstop.
+Daytona's own auto-stop plus `auto_delete_interval=0` stays as the last backstop, so a
+build or verify box whose job died is deleted on stop rather than sitting stopped on
+disk quota.
+
+## What a build really uses (right-sizing)
+
+Every site build and project build logs one INFO line from
+`pocketpaw_ee.sites.build_usage` just before its sandbox is deleted:
+
+```
+sites.build_usage: engine=react lane=site-build pocket=... job=... outcome=completed_ok cpu=2 memory_gib=4 disk_gib=10 peak_memory_mib=1310 peak_memory_pct=32 memory_source=cgroup_v2 workdir_mib=480 node_modules_mib=455 output_mib=3 fs_used_mib=2950 fs_used_pct=29 duration_s=74.2
+```
+
+- `cpu` / `memory_gib` / `disk_gib`: what the box asked Daytona for.
+- `peak_memory_mib`: the box's peak memory over its life (cgroup v2 `memory.peak`, else
+  v1 `memory.max_usage_in_bytes`). `memory_source=proc_meminfo_now` means neither was
+  readable and the number is memory in use at the end, **not** a peak; do not size from
+  it. `peak_memory_pct` is the peak against `memory_gib`.
+- `workdir_mib`: the whole project dir (node_modules and the output included);
+  `node_modules_mib` and `output_mib` break it down. `fs_used_mib` is all of `/` (image
+  plus project), which is what the disk reservation has to hold; `fs_used_pct` is that
+  against `disk_gib`.
+- `duration_s`: create to artifact, as in the build timings.
+- Anything the probe could not read is `unknown`. The probe is bounded (30 s) and never
+  changes a build's outcome. A build that left no sentinel is not probed.
+
+The same values ride on the record as `build_usage` for structured log handlers. To
+right-size, take a few days of lines per engine and look at the high end (p95, and the
+max) of `peak_memory_mib` and `fs_used_mib`, plus `outcome=infra_lost` builds near the
+memory line (an OOM-killed build exits 137 and reads as `infra_lost`). Then set, on the
+**worker**:
+
+```
+PAW_SITES_BUILD_CPU=2          # vCPUs per build box
+PAW_SITES_BUILD_MEMORY_GIB=4   # GiB of memory per build box
+PAW_SITES_BUILD_DISK_GIB=10    # GiB of disk per build box
+```
+
+These are read per build, so a change needs a worker restart, not a code deploy. Unset,
+empty or not a positive integer means the default shown (a bad value logs a warning).
+Leave headroom over the observed peak (say 1.5x). The admission budget counts
+`PAW_SITES_BUILD_MEMORY_GIB` per build, so a smaller box lets more builds run at once
+under the same `PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB`.
 
 ## The sites memory budget (admission)
 
@@ -177,9 +247,13 @@ still full` (gave up).
 5. Workspace VMs (`paw-ws-*`) hold a workspace's project files.
    **Stop** (or archive) an idle one; do **not** delete it unless the workspace is
    gone. The agent restarts a stopped or archived VM on its next tool call.
-6. Existing workspace VMs keep the lifetime they were created with. To apply the new
-   30-minute auto-stop to an old VM, set it in the sandbox's settings in the
-   dashboard (or `PATCH /api/v1/workspace/vm/config` and re-provision).
+6. A `limit=disk` refusal with free memory points at stopped boxes. Filter to
+   `stopped`: a `paw-ws-*` there is waiting to be archived (1 minute by default), so
+   **archive** it if it has sat longer. A stopped `paw-build-*`, `paw-verify-*` or
+   `websandbox-*` should already be gone (they delete on stop); **delete** it.
+7. Existing workspace VMs pick up the current auto-stop and auto-archive the next time
+   the agent uses them. To apply them to an untouched VM now, set them in the sandbox's
+   settings in the dashboard.
 
 The same from the CLI: `daytona sandbox list`, `daytona sandbox stop <id>`,
 `daytona sandbox delete <id>`.
