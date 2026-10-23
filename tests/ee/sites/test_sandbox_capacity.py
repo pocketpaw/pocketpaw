@@ -435,9 +435,52 @@ class TestLifetimes:
 
         assert workspace_vm_lifecycle(config) == {
             "auto_stop_interval": stop,
-            "auto_archive_interval": 24 * 60,
+            "auto_archive_interval": 1,
             "auto_delete_interval": -1,
         }
+
+    @pytest.mark.parametrize(
+        ("raw", "archive"),
+        [
+            ("15", 15),
+            (" 120 ", 120),
+            ("1", 1),
+            # 0 is Daytona's "use the MAXIMUM interval" (7+ days), the opposite of fast.
+            ("0", 1),
+            ("-5", 1),
+            ("junk", 1),
+            ("", 1),
+        ],
+    )
+    def test_workspace_vm_archive_interval_reads_the_env(self, monkeypatch, raw, archive) -> None:
+        from pocketpaw_ee.cloud.daytona import store
+
+        monkeypatch.setenv(store.WORKSPACE_VM_AUTO_ARCHIVE_ENV, raw)
+        assert store.workspace_vm_lifecycle({})["auto_archive_interval"] == archive
+
+    def test_workspace_vm_archive_env_name_is_stable(self) -> None:
+        from pocketpaw_ee.cloud.daytona import store
+
+        assert (
+            store.WORKSPACE_VM_AUTO_ARCHIVE_ENV == "PAW_DAYTONA_WORKSPACE_VM_AUTO_ARCHIVE_MINUTES"
+        )
+
+    async def test_project_build_sandbox_self_deletes(self) -> None:
+        """The project lane builds through ``run_build``; its box must also be deleted
+        on stop, so a stopped build box never sits on the org's disk quota."""
+        from pocketpaw_ee.sites.daytona_runner import run_build
+
+        client = FaultyDaytonaClient(fail_at="create")
+
+        async def runner(files: Any, **kw: Any) -> Any:
+            kw["client"] = client
+            return await run_build(files, **kw)
+
+        with pytest.raises(DaytonaUnavailable):
+            await _project(_ctx(1, job_id=TestProjectLane.JOB), runner, _Records())
+        kw = client.create_kwargs
+        assert kw["auto_delete_interval"] == 0
+        assert 0 < kw["auto_stop_interval"] <= 60
 
     async def test_workspace_vm_auto_provision_passes_the_lifecycle(self, monkeypatch) -> None:
         from pocketpaw_ee.cloud.daytona import router as router_mod
@@ -471,7 +514,7 @@ class TestLifetimes:
 
         await router_mod.get_workspace_vm(workspace_id="ws1")
         assert created["auto_stop_interval"] == 60
-        assert created["auto_archive_interval"] == 24 * 60
+        assert created["auto_archive_interval"] == 1
         assert created["auto_delete_interval"] == -1
 
     def test_the_client_default_is_minutes_not_hours(self) -> None:
@@ -539,5 +582,25 @@ class TestWorkspaceVmResumes:
         await context._ensure_lifecycle(_Client(), "sb-old", "ws1")
         await context._ensure_lifecycle(_Client(), "sb-old", "ws1")
         assert applied == [
-            {"auto_stop_interval": 60, "auto_archive_interval": 1440, "auto_delete_interval": -1}
+            {"auto_stop_interval": 60, "auto_archive_interval": 1, "auto_delete_interval": -1}
         ]
+
+    async def test_an_old_vm_gets_the_env_archive_interval(self, monkeypatch: Any) -> None:
+        """A VM created under the old one-day archive converges on the configured
+        interval at its next resolve, without re-provisioning."""
+        from pocketpaw_ee.cloud.daytona import context, store
+
+        applied: list[dict] = []
+
+        class _Client:
+            async def set_sandbox_lifecycle(self, sandbox_id: str, **kw: Any) -> None:
+                applied.append(kw)
+
+        async def _config(_ws: str) -> dict:
+            return {}
+
+        monkeypatch.setattr(store, "get_workspace_vm_config", _config)
+        monkeypatch.setenv(store.WORKSPACE_VM_AUTO_ARCHIVE_ENV, "10")
+        context._lifecycle_applied.clear()
+        await context._ensure_lifecycle(_Client(), "sb-day-archive", "ws1")
+        assert applied[0]["auto_archive_interval"] == 10
