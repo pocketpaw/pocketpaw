@@ -24,6 +24,7 @@ from tests.ee.sites.test_build_sandbox_teardown import (
     ORG_MEMORY_GIB,
     REACT_FILES,
     LedgerDaytona,
+    finish_create_and_settle,
 )
 
 
@@ -403,8 +404,10 @@ class TestRunBuildAdmission:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert client.boxes == {}
+        # The lease goes with the cancel; the box once its background create finishes.
         assert await _granted_now(ORG_MEMORY_GIB)
+        await finish_create_and_settle(client)
+        assert client.boxes == {}
 
     async def test_a_verify_create_error_releases_the_lease(self) -> None:
         from daytona import DaytonaTimeoutError

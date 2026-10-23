@@ -20,12 +20,22 @@
     ]
   },
   {
-    "label": "the create teardown catches Exception only, so a cancel inside create (a superseded preview) skips the delete",
+    "label": "a create cancelled mid-build (a superseded preview) never deletes its box once the build finishes, so it leaks",
     "file": "ee/pocketpaw_ee/sites/admission.py",
-    "find": "    except BaseException as exc:\n        await teardown_unreturned(client, name, create_kwargs.get(\"labels\"))\n        _log_create_failure(exc, create_kwargs, attempt=\"create\")",
-    "replace": "    except Exception as exc:\n        await teardown_unreturned(client, name, create_kwargs.get(\"labels\"))\n        _log_create_failure(exc, create_kwargs, attempt=\"create\")",
+    "find": "        await client.delete_sandbox(sandbox_id)\n",
+    "replace": "        pass\n",
     "tests": [
-      "tests/ee/sites/test_build_sandbox_teardown.py::TestCancellationStillTearsDown::test_run_build_cancelled_inside_create_deletes_the_box"
+      "tests/ee/sites/test_build_sandbox_teardown.py::TestCancellationStillTearsDown::test_run_build_cancelled_inside_create_deletes_the_box",
+      "tests/ee/sites/test_sandbox_image_poison.py::TestCancelDuringCreate"
+    ]
+  },
+  {
+    "label": "a cancel mid-create deletes the box while Daytona builds its image, caching the build as BUILD_FAILED for every later create",
+    "file": "ee/pocketpaw_ee/sites/admission.py",
+    "find": "        if not create.done():\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_image_poison.py::TestCancelDuringCreate"
     ]
   },
   {

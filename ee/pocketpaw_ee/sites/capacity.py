@@ -9,6 +9,9 @@
 #   * ``is_capacity_error`` — the NARROW classifier. Only a ``DaytonaValidationError``
 #     whose message names an org resource limit counts; every other create failure
 #     (Daytona unconfigured, auth, network, a bad image) stays ``no_sandbox``.
+#   * ``is_image_build_failed`` — Daytona's cached build of the box image failed
+#     (``SandboxState.BUILD_FAILED``). Every create of that image then fails at once
+#     until the image changes, so it is its own, non-retryable cause.
 #   * ``next_retry_delay`` — the jittered backoff the jobs feed to arq's ``Retry``.
 #     The schedule is bounded (about five minutes in total); ``None`` means the budget
 #     is spent and the job settles as ``sandbox_unavailable:capacity``.
@@ -34,6 +37,8 @@ from typing import Any
 CAPACITY_CAUSE = "capacity"
 #: The cause for a sandbox that could not be created for any other reason.
 NO_SANDBOX_CAUSE = "no_sandbox"
+#: The cause for a create that failed because Daytona's build of the box image failed.
+IMAGE_BUILD_FAILED_CAUSE = "image_build_failed"
 #: The reason a build carries while it waits (status stays ``queued``).
 WAITING_REASON = "waiting_for_capacity"
 
@@ -62,6 +67,8 @@ _CAPACITY_PATTERN = re.compile(
 
 _VALIDATION_ERROR_NAME = "DaytonaValidationError"
 
+# Daytona's sandbox state when the server-side image build failed.
+_BUILD_FAILED_MARKER = "BUILD_FAILED"
 _RESOURCE_PATTERN = re.compile(r"total\s+(cpu|memory|disk|gpu)\s+limit", re.IGNORECASE)
 # Things that must never reach a log line: auth headers, key=value secrets, and long
 # opaque tokens (API keys, signed URLs' signatures).
@@ -92,6 +99,21 @@ def is_capacity_error(exc: BaseException | None) -> bool:
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
         if _is_validation_error(exc) and _CAPACITY_PATTERN.search(str(exc)):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def is_image_build_failed(exc: BaseException | str | None) -> bool:
+    """True when ``exc`` (an exception, any it was raised from, or its text) is a create
+    that failed because Daytona's build of the sandbox image failed. Retrying is
+    pointless: Daytona caches the failed build and fails every create of that image."""
+    if isinstance(exc, str):
+        return _BUILD_FAILED_MARKER in exc
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if _BUILD_FAILED_MARKER in str(exc):
             return True
         exc = exc.__cause__ or exc.__context__
     return False
@@ -142,6 +164,11 @@ NO_SANDBOX_MESSAGE = (
     "The build service could not be reached: it is not configured or not responding "
     "on our side. Nothing is wrong with the site."
 )
+IMAGE_BUILD_FAILED_MESSAGE = (
+    "The build environment on our side is broken: the image our build machines start "
+    "from failed to build. Nothing is wrong with the site; builds will work again once "
+    "we fix it."
+)
 
 #: arq stopped the job at its own timeout. Reuses the classifier's ``timed_out`` rung;
 #: the cause tells it apart from an in-sandbox timeout, which has a build log to show.
@@ -179,6 +206,8 @@ def reason_message(reason: str | None) -> str | None:
         return None
     if cause == CAPACITY_CAUSE:
         return CAPACITY_EXHAUSTED_MESSAGE
+    if cause == IMAGE_BUILD_FAILED_CAUSE:
+        return IMAGE_BUILD_FAILED_MESSAGE
     return NO_SANDBOX_MESSAGE
 
 
@@ -187,6 +216,8 @@ __all__ = [
     "CAPACITY_EXHAUSTED_MESSAGE",
     "CAPACITY_MAX_TRIES",
     "CAPACITY_WAITING_MESSAGE",
+    "IMAGE_BUILD_FAILED_CAUSE",
+    "IMAGE_BUILD_FAILED_MESSAGE",
     "JOB_CRASHED_MESSAGE",
     "JOB_CRASHED_REASON",
     "JOB_TIMEOUT_MESSAGE",
@@ -197,6 +228,7 @@ __all__ = [
     "WAITING_REASON",
     "describe_refusal",
     "is_capacity_error",
+    "is_image_build_failed",
     "next_retry_delay",
     "reason_message",
     "redact",

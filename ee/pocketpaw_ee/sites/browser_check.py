@@ -25,12 +25,12 @@
 #
 # THE SANDBOX IS NEVER SNAPSHOTTED (daytona_runner's invariant). The standalone path
 # tears down exactly like ``run_build``: a ``finally`` deletes by id, a create that
-# raised or was cancelled before returning an id is deleted by name
-# (``sandbox_reaper.teardown_unreturned``), the box carries ``paw_lane=site-verify``
-# plus the caller's labels, and Daytona's auto-delete plus the reaper cron are the
-# backstops. It is admitted the same way too: an ``admission.memory_lease`` held from
-# before create until after the delete, and one idle-workspace-VM eviction plus retry
-# on a capacity refusal (``admission.create_admitted``).
+# raised is deleted by name, one cancelled mid-create is deleted once the create
+# finishes in the background (``admission.create_admitted``), the box carries
+# ``paw_lane=site-verify`` plus the caller's labels, and Daytona's auto-delete plus the
+# reaper cron are the backstops. It is admitted the same way too: an
+# ``admission.memory_lease`` held from before create until after the delete, and one
+# idle-workspace-VM eviction plus retry on a capacity refusal.
 from __future__ import annotations
 
 import json

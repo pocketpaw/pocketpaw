@@ -1,52 +1,40 @@
 # ee/pocketpaw_ee/sites/admission.py — admits site build / verify sandboxes against a
 # memory budget BEFORE they ask Daytona, so concurrent builds wait for room instead of
 # being refused by the org's total-memory cap and failing after the capacity retries.
+# The org cap is shared with workspace VMs and Code Mode sandboxes. Four pieces:
 #
-# Daytona caps the org's total memory across running sandboxes. The sites lane runs
-# ``build_worker._sites_max_jobs()`` jobs per worker times the replica count, each asking
-# for 4 GiB (build) or 2 GiB (html verify), and workspace VMs (4 GiB, persistent) and
-# Code Mode sandboxes draw from the same cap. Three pieces:
-#
-#   * ``memory_lease(gib)`` — async context manager held from before create until after
-#     delete. OFF unless ``PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB`` is set: unset, empty or
-#     invalid, the lease is a pass-through (no Redis call, no wait), because the limit
-#     prod actually hits is not yet known to be memory. When set, blocks until ``gib``
-#     fits that budget (set it to the org's memory cap). Strict FIFO, so a big request
-#     is not starved by small ones; a request larger than the whole budget is admitted
-#     once nothing else holds a lease.
-#     Never raises for capacity: after ``MAX_WAIT_SECONDS`` in total (a Redis error part
-#     way through hands the local fallback only what is left) it proceeds unleased and
-#     the caller's create meets Daytona's own answer, so nothing waits forever.
+#   * ``memory_lease(gib)`` — held from before create until after delete. OFF unless
+#     ``PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB`` is set (unset or invalid: a pass-through,
+#     no Redis call, no wait). When set, blocks until ``gib`` fits that budget, strict
+#     FIFO; a request larger than the whole budget is admitted once nothing else holds a
+#     lease. Never raises for capacity: after ``MAX_WAIT_SECONDS`` in total it proceeds
+#     unleased and the create meets Daytona's own answer.
 #   * Backends. Redis when the worker called ``use_redis`` (``build_worker`` startup), so
-#     the budget is shared across every worker and replica: one Lua script purges
-#     expired leases, keeps a FIFO of waiters (each with a short heartbeat, so a dead
-#     waiter cannot block the head) and grants. Each lease expires after
-#     ``lease_ttl_seconds()`` (the reaper's orphan age: a crashed worker's box holds
-#     real memory until the reaper deletes it, so its lease should too) and is refreshed
-#     while held. A Redis error falls back to the process-local budget for that lease.
-#     Without Redis (tests, scripts) the budget is per event loop. Keys share one hash
-#     tag so the script also runs on Redis Cluster.
-#   * ``free_capacity(client, need_gib=...)`` — OPT-IN (``PAW_SITES_EVICT_IDLE_WORKSPACE_VMS``,
-#     default off), because stopping a VM can kill a dev server or test run an agent
-#     left running. When on, on a capacity refusal it stops started ``paw-ws-*`` VMs
-#     idle for at least the VM auto-stop (30 min), least recently active first, until
-#     ``need_gib`` of their reported memory is freed. Idle is the later of Daytona's
-#     ``last_activity_at`` and this process's last context resolve for the VM
-#     (``context.last_resolved_at``); there is no cross-process last-tool-call record
-#     and no cheap active-run check, so those are not consulted. Stop, never delete:
-#     ``context._ensure_started`` resumes the VM on its next tool call. Build, verify
-#     and Code Mode sandboxes are never touched. ``create_admitted`` wraps a create with
-#     that one eviction and one retry, plus #2633's teardown-by-name. Every failed
+#     the budget spans every worker and replica: one Lua script (keys share one hash
+#     tag, so it runs on Redis Cluster) purges expired leases, keeps a FIFO of
+#     heartbeating waiters and grants. A lease expires after ``lease_ttl_seconds()`` (the
+#     reaper's orphan age) and is refreshed while held. A Redis error falls back to the
+#     process-local budget for that lease; without Redis the budget is per event loop.
+#   * ``free_capacity(client, need_gib=...)`` — OPT-IN (``PAW_SITES_EVICT_IDLE_WORKSPACE_VMS``),
+#     because stopping a VM can kill a dev server an agent left running. On a capacity
+#     refusal it stops started ``paw-ws-*`` VMs idle for at least their auto-stop
+#     (30 min), least recently active first, until ``need_gib`` is freed. Idle is the
+#     later of Daytona's ``last_activity_at`` and ``context.last_resolved_at``. Stop,
+#     never delete (``context._ensure_started`` resumes it); other sandboxes untouched.
+#   * ``create_admitted`` — a create with that one eviction and one retry. A failed
+#     create deletes the box it registered by name. A cancelled one re-raises at once
+#     while its create runs on in a background task; the box is deleted only once it
+#     settles (by id, or by name), at most ``ABANDONED_CREATE_WAIT_SECONDS`` later.
+#     Deleting a box mid-create cancels Daytona's server-side build of the dynamic image,
+#     which Daytona then caches as ``BUILD_FAILED`` for every later create. Every failed
 #     create is logged at WARNING with Daytona's message (secrets redacted) and, for a
 #     capacity refusal, which limit matched (``capacity.describe_refusal``).
 #
 # Telling a poller the build is waiting, not building, two ways:
 #   * ``on_wait`` / ``on_admit`` (either backend): ``on_wait`` runs once when the lease
-#     first has to wait, ``on_admit`` once that wait ends (granted, or given up and going
-#     unleased) just before the caller creates. A lease granted at once runs neither.
-#     The publish lane stamps its Site row and the project lane its build record with
-#     them (``queued`` / ``waiting_for_capacity``, then ``building``). A hook that raises
-#     is logged and never costs the lease.
+#     first has to wait, ``on_admit`` once that wait ends, just before the caller
+#     creates. The publish and project lanes stamp their records with them (``queued`` /
+#     ``waiting_for_capacity``, then ``building``). A hook that raises is only logged.
 #   * Under Redis, ``waiting:<tag>`` is set while queued (``wait_tag`` is the job's bounded
 #     ``paw_job`` label) so ``build_job._preview_job_outcome`` can tell a poller of a
 #     preview job ``queued`` / ``waiting_for_capacity`` rather than ``building``.
@@ -75,6 +63,14 @@ BUDGET_ENV = "PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB"
 #: How long a lease may wait before the caller goes to Daytona unleased: the capacity
 #: retry schedule's own window, so admission never waits longer than the retries would.
 MAX_WAIT_SECONDS = float(sum(capacity.RETRY_DELAYS_SECONDS))
+
+#: How long a create whose caller was cancelled may run on before its box is deleted
+#: by name regardless. Well past a cold dynamic-image build.
+ABANDONED_CREATE_WAIT_SECONDS = 20 * 60
+
+# Follow-ups of creates whose caller was cancelled, held so the event loop does not
+# garbage-collect them before they delete the box.
+_abandoned_creates: set[asyncio.Task[Any]] = set()
 
 #: Opt-in switch for stopping idle workspace VMs on a capacity refusal.
 EVICT_ENV = "PAW_SITES_EVICT_IDLE_WORKSPACE_VMS"
@@ -544,34 +540,90 @@ def _log_create_failure(exc: BaseException, create_kwargs: dict[str, Any], *, at
     )
 
 
+async def _finish_abandoned_create(
+    client: Any, create: asyncio.Task[Any], create_kwargs: dict[str, Any]
+) -> None:
+    """Wait out a create whose caller was cancelled, then delete the box it made.
+
+    By id when create returned one, by name when it raised. Past
+    :data:`ABANDONED_CREATE_WAIT_SECONDS` the create is cancelled and the box deleted by
+    name anyway: that may poison the image build, but a box that never settles must not
+    hold the org's memory forever."""
+    name, labels = create_kwargs["name"], create_kwargs.get("labels")
+    try:
+        info = await asyncio.wait_for(create, ABANDONED_CREATE_WAIT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "admission: abandoned create of %s still running after %ss; deleting it by name",
+            name,
+            ABANDONED_CREATE_WAIT_SECONDS,
+        )
+        await teardown_unreturned(client, name, labels)
+        return
+    except Exception as exc:
+        await teardown_unreturned(client, name, labels)
+        _log_create_failure(exc, create_kwargs, attempt="create (caller cancelled)")
+        return
+    sandbox_id = getattr(info, "id", None)
+    if not sandbox_id:
+        await teardown_unreturned(client, name, labels)
+        return
+    try:
+        await client.delete_sandbox(sandbox_id)
+    except Exception as exc:  # noqa: BLE001 — the reaper cron is the backstop
+        logger.warning("admission: abandoned box %s (%s) not deleted (%s)", name, sandbox_id, exc)
+        return
+    logger.info(
+        "admission: deleted box %s (%s) once its abandoned create finished", name, sandbox_id
+    )
+
+
+async def _create_once(client: Any, create_kwargs: dict[str, Any], *, attempt: str) -> Any:
+    """One ``client.create_sandbox``, shielded from the caller's cancel.
+
+    A cancel while create is in flight propagates at once, but the create runs on in
+    the background and its box is deleted only after it settles
+    (:func:`_finish_abandoned_create`): deleting a box while Daytona builds its dynamic
+    image caches that build as failed, and every later create of the image fails. A
+    create that itself failed deletes the box it may have registered (by name,
+    shielded) before the error propagates."""
+    create = asyncio.ensure_future(client.create_sandbox(**create_kwargs))
+    try:
+        return await asyncio.shield(create)
+    except BaseException as exc:
+        if not create.done():
+            follow_up = asyncio.ensure_future(
+                _finish_abandoned_create(client, create, create_kwargs)
+            )
+            _abandoned_creates.add(follow_up)
+            follow_up.add_done_callback(_abandoned_creates.discard)
+            raise
+        await teardown_unreturned(client, create_kwargs["name"], create_kwargs.get("labels"))
+        _log_create_failure(exc, create_kwargs, attempt=attempt)
+        raise
+
+
 async def create_admitted(client: Any, create_kwargs: dict[str, Any]) -> Any:
     """``client.create_sandbox(**create_kwargs)``, evicting idle workspace VMs once.
 
-    Any failed create first deletes the box it may have registered (by name, shielded).
-    A capacity refusal then runs :func:`free_capacity` for the request's memory and, if
+    Each create goes through :func:`_create_once` (cancel-safe, teardown on failure). A
+    capacity refusal then runs :func:`free_capacity` for the request's memory and, if
     that stopped anything, retries the create once. Otherwise the original error
     propagates, so the caller's capacity path is unchanged."""
-    name = create_kwargs["name"]
     try:
-        return await client.create_sandbox(**create_kwargs)
-    except BaseException as exc:
-        await teardown_unreturned(client, name, create_kwargs.get("labels"))
-        _log_create_failure(exc, create_kwargs, attempt="create")
+        return await _create_once(client, create_kwargs, attempt="create")
+    except Exception as exc:
         if not capacity.is_capacity_error(exc):
             raise
         refusal = exc
     stopped = await free_capacity(client, need_gib=int(create_kwargs.get("memory", 0) or 0))
     if not stopped:
         raise refusal
-    try:
-        return await client.create_sandbox(**create_kwargs)
-    except BaseException as exc:
-        await teardown_unreturned(client, name, create_kwargs.get("labels"))
-        _log_create_failure(exc, create_kwargs, attempt="retry after eviction")
-        raise
+    return await _create_once(client, create_kwargs, attempt="retry after eviction")
 
 
 __all__ = [
+    "ABANDONED_CREATE_WAIT_SECONDS",
     "BUDGET_ENV",
     "EVICT_ENV",
     "IDLE_FOR_SECONDS",

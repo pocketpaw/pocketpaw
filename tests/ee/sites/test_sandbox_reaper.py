@@ -145,7 +145,7 @@ class TestClientLabels:
         sent: list[Any] = []
 
         class _Sdk:
-            async def create(self, params: Any) -> Any:
+            async def create(self, params: Any, **_kwargs: Any) -> Any:
                 sent.append(params)
                 return SimpleNamespace(
                     id="sb-1", name=params.name, state="creating", organization_id="o"
@@ -170,7 +170,7 @@ class TestShieldedTeardown:
         import asyncio
 
         client = LedgerDaytona()
-        client.block_create = True
+        client.add_box("paw-build-twice")
         gate = asyncio.Event()
         in_lookup = asyncio.Event()
         real_find = client.find_sandbox_by_name
@@ -181,9 +181,7 @@ class TestShieldedTeardown:
             return await real_find(name)
 
         client.find_sandbox_by_name = slow_find  # type: ignore[method-assign]
-        task = asyncio.create_task(_build(client, sandbox_name="paw-build-twice"))
-        await asyncio.wait_for(client.registered.wait(), timeout=2)
-        task.cancel()
+        task = asyncio.create_task(sr.teardown_unreturned(client, "paw-build-twice"))
         await asyncio.wait_for(in_lookup.wait(), timeout=2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
