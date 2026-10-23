@@ -8,8 +8,9 @@ Returns ``None`` when no sandbox is found — the caller falls back to local FS.
 
 A stopped or archived VM (its idle auto-stop / auto-archive) is started before the
 context is returned, so the agent never sees a VM that went to sleep between turns.
-The first resolve per process also re-applies ``store.workspace_vm_lifecycle`` to the
-VM, so a VM created under the old 60-hour auto-stop converges without re-provisioning.
+The first resolve per process also re-applies ``store.workspace_vm_lifecycle`` (auto-stop,
+auto-archive, never-delete) to the VM, so a VM created under an older lifecycle (the
+60-hour auto-stop, the one-day archive) converges without re-provisioning.
 The store's workspace-VM accessors are async and DB-backed. ``last_resolved_at``
 exposes this process's last resolve of a VM so idle-VM eviction can respect it.
 """

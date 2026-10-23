@@ -73,5 +73,43 @@
     "tests": [
       "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
     ]
+  },
+  {
+    "label": "a stopped workspace VM waits a day to be archived again, holding its 10 GiB on the org disk quota (three fill Tier 1)",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 1\n",
+    "replace": "WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 24 * 60\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes",
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  },
+  {
+    "label": "the archive env override is ignored, so ops cannot tune how fast a stopped VM frees disk without a code change",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "        \"auto_archive_interval\": workspace_vm_archive_minutes(),",
+    "replace": "        \"auto_archive_interval\": WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES,",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes",
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  },
+  {
+    "label": "an env archive interval of 0 is passed through, which Daytona reads as its MAXIMUM, so a stopped VM holds disk for days",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "    if minutes < 1:\n",
+    "replace": "    if minutes < 0:\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
+    ]
+  },
+  {
+    "label": "an existing VM never gets the lifecycle re-applied, so VMs made under the one-day archive keep it until re-provisioned",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        await client.set_sandbox_lifecycle(sandbox_id, **workspace_vm_lifecycle(config))\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
   }
 ]
