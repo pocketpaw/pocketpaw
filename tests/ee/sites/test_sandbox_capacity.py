@@ -544,8 +544,9 @@ class TestLifetimes:
             kw["client"] = client
             return await run_build(files, **kw)
 
-        with pytest.raises(DaytonaUnavailable):
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
             await _project(_ctx(1, job_id=TestProjectLane.JOB), runner, _Records())
+        assert isinstance(raised.value.__cause__, DaytonaUnavailable)
         kw = client.create_kwargs
         assert kw["auto_delete_interval"] == 0
         assert 0 < kw["auto_stop_interval"] <= 60
