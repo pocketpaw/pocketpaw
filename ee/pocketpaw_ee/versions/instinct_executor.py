@@ -1,54 +1,29 @@
-# ee/pocketpaw_ee/versions/instinct_executor.py
-# Created: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — the
-# apply-on-approve / discard-on-reject executor for the Branch primitive's
-# artifact-change merge gate.
+# ee/pocketpaw_ee/versions/instinct_executor.py — the apply-on-approve /
+# discard-on-reject executor for the Branch primitive's artifact-change merge gate.
 #
-# Updated 2026-06-19 (P2a — discard-all-drafts): discard_rejected_change now
-# clears ALL drafts above the published pointer in one pass via
-# versions_service.discard_all_drafts (passing the blob's branch), instead of
-# reverting only the single candidate ``to_version_id``. Fixes "discard needs N
-# clicks": a pocket edited N times accumulated N draft rows, and reverting only
-# the latest left the others standing so the unpublished-changes bar never
-# cleared. The published pointer is still left untouched (a reject never moves
-# Live).
+# The Instinct router dispatches here when an approved / rejected Action carries an
+# ``_artifact_change`` blob (the peer of the pocket-write bridge, the belt
+# code-change executor and the external-action executor). Artifact-generic over
+# (scope_type, scope_id). The router owns the tenant gate
+# (``_assert_artifact_change_workspace``, a 403 before any mutation) and the
+# Decision-Graph chain emits; this module owns the state transitions and the deploy.
 #
-# This is the executor the Instinct router dispatches to when an approved /
-# rejected Action carries an ``_artifact_change`` blob (the peer of the
-# pocket-write bridge, the belt code-change executor, and the external-action
-# executor). It is artifact-GENERIC over (scope_type, scope_id) and keeps the
-# router thin — the router owns the tenant gate (``_assert_artifact_change_
-# workspace``, a 403 before any mutation) + the Decision-Graph chain emits; this
-# module owns the actual MERGE / DISCARD state transitions + the deploy trigger.
-#
-# Contract (mirrors the belt executor):
-#   * execute_approved_change(action, human_event_id=None) — APPROVE = MERGE:
-#       1. publish the reviewed candidate (``to_version_id``) → moves the
-#          published pointer via versions.publish(). This IS the merge. In the
-#          single-row derived-pointer model (versions/models.py) published/merged
-#          are mutually exclusive, so we do NOT also mark this row "merged" — that
-#          would erase the published pointer. ``service.mark_merged`` exists for a
-#          branch-based flow where the published row lives separately on main
-#          (BP-4 / a producer path), not for this in-place promote.
-#       2. for pocket/site scope, trigger the deploy via BP-2's
-#          ``sites.service.publish_pocket(...)`` so Live reflects the new
-#          published version;
-#       3. mark the Action ``executed`` (success) or ``failed`` (any error) on
-#          the Instinct store, so The Tray shows the outcome.
-#   * discard_rejected_change(action) — REJECT = DISCARD: flip the candidate
-#       (``to_version_id``) status="discarded" so it leaves the draft pointer; the
-#       PUBLISHED pointer is left UNTOUCHED (a rejection never moves what is
-#       live). No deploy. Best-effort store nudge — the router already closed the
-#       chain on the reject path.
+#   * execute_approved_change(action, human_event_id=None, confirm_destructive=False)
+#     APPROVE = MERGE: publish ``to_version_id`` (moves the published pointer; the
+#     row is NOT also marked merged, which would erase that pointer in the
+#     single-row model), then for a pocket/site scope deploy through
+#     ``sites.service.publish_pocket``, then mark the Action executed or failed.
+#     The blob's ``destructive_migrations`` (recorded and pinned at propose time)
+#     become the deploy's ``confirm_destructive_migrations`` ONLY when the caller
+#     passes ``confirm_destructive=True``, which the single-Action approve route
+#     does and bulk approve does not: a migration that deletes data is approved one
+#     card at a time, by someone who saw it.
+#   * discard_rejected_change(action) — REJECT = DISCARD: every draft above the
+#     published pointer is discarded in one pass (``discard_all_drafts``); the
+#     published pointer is untouched and nothing deploys. Best effort.
 #
 # Both lazy-import the versions + sites services so the instinct package keeps no
-# module-top dependency on either (same discipline as the other executors), and
-# the deploy trigger is itself wrapped so a deploy failure marks the Action
-# failed rather than crashing the approve response (the router's call is also
-# best-effort).
-#
-# TODO(BP-4): revert/discard semantics deepen — BP-4 owns reverting the published
-# pointer to a prior snapshot + the Journal history projection. BP-3 only
-# promotes the candidate on approve and abandons it on reject.
+# module-top dependency on either. Neither raises: failures land on the Action.
 from __future__ import annotations
 
 import logging
@@ -82,7 +57,17 @@ def artifact_change_blob(action: Any) -> dict[str, Any] | None:
     return blob if isinstance(blob, dict) else None
 
 
-async def execute_approved_change(action: Any, *, human_event_id: Any | None = None) -> None:
+def _confirmed_migration_keys(blob: dict[str, Any]) -> list[str]:
+    """The ``name:sha256`` keys of the destructive migrations the card showed."""
+    found = blob.get("destructive_migrations")
+    if not isinstance(found, list):
+        return []
+    return sorted({str(d["key"]) for d in found if isinstance(d, dict) and d.get("key")})
+
+
+async def execute_approved_change(
+    action: Any, *, human_event_id: Any | None = None, confirm_destructive: bool = False
+) -> None:
     """MERGE an approved artifact-change Action (BP-3).
 
     Promotes the candidate draft (``to_version_id``) to published, marks it
@@ -165,10 +150,15 @@ async def execute_approved_change(action: Any, *, human_event_id: Any | None = N
         try:
             from pocketpaw_ee.sites import service as sites_service
 
+            confirm_kw: dict[str, Any] = {}
+            keys = _confirmed_migration_keys(blob) if confirm_destructive else []
+            if keys:
+                confirm_kw["confirm_destructive_migrations"] = keys
             await sites_service.publish_pocket(
                 workspace_id=workspace_id,
                 user_id=str(author or "system"),
                 pocket_id=scope_id,
+                **confirm_kw,
             )
             deploy_note = " + deploy triggered"
         except Exception as exc:  # noqa: BLE001 — failed Action, never raise

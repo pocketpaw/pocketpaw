@@ -799,6 +799,10 @@ _GATED_IMMUTABLE_FIELDS: frozenset[str] = frozenset(
         "repo",
         "base_branch",
         "connector_name",
+        # what a site publish would DELETE, recorded at propose time: the approve
+        # turns these into the migrator's confirm, so an edit must never widen them
+        "destructive_migrations",
+        "destructive_check",
     }
 )
 
@@ -2830,7 +2834,11 @@ async def approve_action(
         try:
             from pocketpaw_ee.versions import instinct_executor as artifact_executor
 
-            await artifact_executor.execute_approved_change(approved, human_event_id=human_event_id)
+            # A single, deliberate approve: the destructive migrations the card showed
+            # are confirmed. Bulk approve never passes this.
+            await artifact_executor.execute_approved_change(
+                approved, human_event_id=human_event_id, confirm_destructive=True
+            )
         except Exception:
             logger.exception("artifact-change merge after approval failed (non-fatal)")
 

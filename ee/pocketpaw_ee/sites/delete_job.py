@@ -2,11 +2,8 @@
 # that carries ONE site from "the owner pressed delete" to "there is no Site document",
 # plus the enqueue helper that starts one.
 #
-# Created 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint). The two halves
-# of this lane already existed and had no way to meet: ``delete_cascade.run_cascade``
-# could tear a site down in a survivable order and nothing called it, and
-# ``service.create_site_export`` could capture the customer's data and nothing required
-# it. This module is what joins them, and it is the FIRST caller either has ever had.
+# It joins the lane's two halves: ``service.create_site_export`` captures the customer's
+# data, then ``delete_cascade.run_cascade`` tears the site down in a survivable order.
 #
 # THE FORCED EXPORT IS STEP ZERO OF THIS JOB, AND NOT A PRECONDITION ON THE ENDPOINT.
 # That is the load-bearing decision in this file, so the reasoning is here rather than in
@@ -29,6 +26,10 @@
 #     happened. This job satisfies that guarantee exactly: the export completes and is
 #     recorded on the row BEFORE ``run_cascade`` is entered. Nothing destructive runs
 #     ahead of it.
+#
+# ``force`` (``DELETE /sites/{id}?force=true``, owner only) is the one way past a failed
+# export: the export is still attempted, and only its failure stops blocking. It rides
+# the job's arguments, never the row, so a retry without it is gated again.
 #
 # A STALE EXPORT IS NOT REUSED. If the owner took an export last week, the leads captured
 # since then are not in it, and a delete that pointed at it would satisfy the gate while
@@ -53,8 +54,8 @@
 # bounded work that shares the lane's four slots with builds, which is the right trade:
 # the alternative is a queue with no consumer, which is worse than no split at all.
 #
-# Changes (2026-10-01, CN-4): the lazy arq pool getter is gone; the pool is the
-# process-wide one in _core.redis_client (get_arq_pool), closed on shutdown.
+# The arq pool is the process-wide one in _core.redis_client (get_arq_pool), closed on
+# shutdown.
 
 """The delete job: force the export, run the cascade, remove the row."""
 
@@ -237,10 +238,26 @@ async def _force_export(site: Any) -> str:
     return export.id
 
 
+async def _export_or_nothing(site: Any) -> str:
+    """``_force_export`` for a FORCED delete: a failed export returns "" (no copy)
+    instead of raising. The owner asked for exactly that; it is logged loudly."""
+    try:
+        return await _force_export(site)
+    except Exception:  # noqa: BLE001 - the owner chose to delete without a copy
+        logger.warning(
+            "sites.delete: export failed for site %s; the owner forced the delete, so its "
+            "data is being destroyed WITHOUT a copy",
+            site.id,
+            exc_info=True,
+        )
+        return ""
+
+
 async def run_site_delete(
     ctx: dict[str, Any],
     workspace_id: str,
     site_id: str,
+    force: bool = False,
     *,
     _deps: Any = None,
 ) -> None:
@@ -254,6 +271,9 @@ async def run_site_delete(
     remove this row, so a job that wakes to find nothing has found its own earlier
     attempt's success — or a row that was already gone. Either way there is nothing left
     to tear down and nothing to record it on.
+
+    ``force`` is the owner's explicit "delete even if the export fails". The export is
+    still attempted; only its failure stops being a stop, and that is logged loudly.
 
     Nothing here raises on an operational failure. The row settles at ``failed`` carrying
     the step that stopped it, which is what the client polls for; raising as well would
@@ -270,7 +290,7 @@ async def run_site_delete(
     # ── The forced export: step zero, before anything destructive ────────────
     await sites_service.mark_delete_stage(site, status="exporting")
     try:
-        export_id = await _force_export(site)
+        export_id = await _force_export(site) if not force else await _export_or_nothing(site)
     except Exception as exc:  # noqa: BLE001 - classified into the row, never re-raised
         reason = (
             exc.reason if isinstance(exc, CascadeStepFailed) else f"{STEP_EXPORT}:{_cause_of(exc)}"
@@ -337,7 +357,9 @@ def _mint_job_id(site_id: str) -> str:
     return f"site-delete-{site_id}-{uuid.uuid4().hex}"
 
 
-async def enqueue_site_delete(site: Any, *, _pool_override: Any = None) -> str | None:
+async def enqueue_site_delete(
+    site: Any, *, force: bool = False, _pool_override: Any = None
+) -> str | None:
     """Queue the delete of ``site``; return the job id, or ``None`` when one is in flight.
 
     The workspace and site id are read OFF THE DOC rather than taken as parameters, which
@@ -382,6 +404,7 @@ async def enqueue_site_delete(site: Any, *, _pool_override: Any = None) -> str |
             SITE_DELETE_FUNCTION_NAME,
             workspace_id,
             site_id,
+            bool(force),
             _job_id=job_id,
             _queue_name=SITE_BUILD_QUEUE_NAME,
         )

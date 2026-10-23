@@ -1,8 +1,6 @@
 # ee/pocketpaw_ee/sites/export.py — build a site's data export: the copy its owner
 # keeps when the site is destroyed.
 #
-# Created 2026-09-08 (sites lifecycle wave 1 chunk 2, feat/sites-delete-export).
-#
 # THE ONE RULE THIS MODULE EXISTS TO ENFORCE: an export that could not read
 # something must FAIL, never come back empty. A delete cascade gated on "an export
 # exists" is only a safety net if the export is honest about its own completeness —
@@ -11,7 +9,10 @@
 # empties here and they are never conflated:
 #
 #   * a STATIC site has no D1 at all, so ``tables`` is legitimately ``{}``;
-#   * a DYNAMIC site whose D1 cannot be read raises ``ExportUnavailable``.
+#   * a DYNAMIC site whose D1 cannot be read raises ``ExportUnavailable``;
+#   * a PROJECT site's D1 holds tables no spec declares, so its whole database rides
+#     in the bundle as a SQL dump (``database``, from the D1 export API); a dump that
+#     cannot be taken fails the export the same way.
 #
 # ``sites/service.py`` already carries the note that the operator data-view "stays a
 # recent-records list, not an unbounded export". This is the unbounded one, and the
@@ -198,9 +199,12 @@ def render_bundle(
     tables: dict[str, list[dict[str, Any]]],
     leads: list[dict[str, Any]],
     notes: list[str] | None = None,
+    database: dict[str, Any] | None = None,
 ) -> bytes:
-    """Serialise the export. UTF-8 JSON, pretty-printed because a human opens it."""
-    payload = {
+    """Serialise the export. UTF-8 JSON, pretty-printed because a human opens it.
+    ``database`` (``{format: "sql", database_id, sql}``) is a project site's full D1
+    dump; it is omitted when there is none."""
+    payload: dict[str, Any] = {
         "format": EXPORT_FORMAT,
         "exported_at": datetime.now(UTC).isoformat(),
         "site": site,
@@ -217,4 +221,12 @@ def render_bundle(
             "included — only the tables declared in the site's own schema.",
         ],
     }
+    if database is not None:
+        payload["database"] = database
+        payload["notes"] = [
+            *payload["notes"],
+            "database.sql is the site's whole D1 database (schema and rows, internal "
+            "tables included) as SQLite statements. Restore it with "
+            "`wrangler d1 execute <db> --file dump.sql` or `sqlite3 site.db < dump.sql`.",
+        ]
     return json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")

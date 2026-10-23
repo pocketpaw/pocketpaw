@@ -33,7 +33,9 @@
 #     rename (a second POST for the same pattern is a 409).
 #   * D1: ``create_database``, ``find_database`` (exact name, crash recovery),
 #     ``delete_database``, ``query_d1`` and ``query_d1_batch`` (parameterized, never
-#     interpolated SQL). ``create_database`` adds the operator's
+#     interpolated SQL), ``export_d1_sql`` (the D1 export API: poll with the bookmark,
+#     then fetch the signed URL with a client that carries NO token, since the URL is
+#     another host). ``create_database`` adds the operator's
 #     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``) and, opt-in,
 #     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``) to the create
 #     body; both only shape NEW databases.
@@ -51,6 +53,7 @@
 # treat a 404 as already done so a resumed teardown never fails on a finished step.
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -1122,6 +1125,61 @@ class CloudflareClient:
             found = found if isinstance(found, list) else []
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
+
+    async def export_d1_sql(
+        self, database_id: str, *, poll_interval: float = 2.0, max_polls: int = 150
+    ) -> str:
+        """The whole database as SQL text (schema and rows), via the D1 export API.
+
+        ``POST /accounts/{acct}/d1/database/{id}/export`` with ``output_format:
+        polling``; re-POSTs with ``current_bookmark`` until ``status`` is
+        ``complete`` (its ``result.signed_url`` is the dump, valid an hour) or
+        ``error``. The database serves no queries while it exports, and stopping the
+        polls cancels the export. https://developers.cloudflare.com/api/resources/d1/
+        subresources/database/methods/export/
+
+        Raises ValidationError ``sites.d1_export_failed`` on an export error, on a
+        poll budget spent (default about five minutes), or on a download URL that is
+        not https. The signed URL is fetched WITHOUT the account token."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}/export"
+        body: dict[str, Any] = {"output_format": "polling"}
+        result: dict = {}
+        async with self._client() as client:
+            for attempt in range(max(1, max_polls)):
+                result = self._unwrap(await client.post(url, json=body)) or {}
+                status = result.get("status")
+                if status == "complete":
+                    break
+                if status == "error" or result.get("success") is False:
+                    raise ValidationError(
+                        "sites.d1_export_failed",
+                        f"Cloudflare could not export the database: "
+                        f"{str(result.get('error') or 'unknown error')[:_ERROR_DETAIL_MAX]}",
+                    )
+                bookmark = result.get("at_bookmark")
+                if bookmark:
+                    body["current_bookmark"] = bookmark
+                if attempt + 1 < max_polls:
+                    await asyncio.sleep(poll_interval)
+            else:
+                raise ValidationError(
+                    "sites.d1_export_failed", "The database export did not finish in time."
+                )
+        signed = str((result.get("result") or {}).get("signed_url") or "")
+        if not signed.startswith("https://"):
+            raise ValidationError(
+                "sites.d1_export_failed", "Cloudflare returned no usable export download."
+            )
+        # A separate client on purpose: the signed URL is a storage host, and the
+        # account token must never be sent anywhere but the Cloudflare API.
+        async with httpx.AsyncClient(transport=self._transport, timeout=120.0) as raw:
+            resp = await raw.get(signed)
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.d1_export_failed",
+                f"Downloading the database export failed ({resp.status_code}).",
+            )
+        return resp.text
 
     async def get_script_migration_tag(self, script_name: str, *, target: str) -> str | None:
         """The Durable Object migration tag last applied to the script, or None (no
