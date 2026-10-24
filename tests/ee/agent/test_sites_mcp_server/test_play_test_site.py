@@ -715,3 +715,24 @@ def test_the_tool_schema_offers_steps() -> None:
     assert set(props) == {"pocket_id", "path", "device", "steps"}
     assert props["steps"]["maxItems"] == 25
     assert "never claim gameplay works" in captured["description"]
+
+
+def test_the_app_plan_skill_plays_every_milestone() -> None:
+    """The app-plan skill is where the milestone loop lives, so it is where the agent
+    learns to play the game before it calls a milestone done."""
+    from pathlib import Path
+
+    import pocketpaw
+
+    skill = (
+        Path(pocketpaw.__file__).parent
+        / "bundled_skills"
+        / "_bundled"
+        / "skills"
+        / "sites-app-plan"
+        / "SKILL.md"
+    )
+    text = " ".join(skill.read_text("utf-8").split())
+    assert "play_test_site" in text
+    assert "lose or win" in text and "play again" in text
+    assert "Never claim gameplay works without a passing play-test" in text

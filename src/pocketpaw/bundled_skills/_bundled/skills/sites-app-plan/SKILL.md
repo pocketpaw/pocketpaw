@@ -2,16 +2,16 @@
 name: sites-app-plan
 description: |
   Plan an APP or GAME on a Paw Site before building it, then build it in
-  milestones you check by looking. Invoke when the site is an app rather than a
-  page: a game (2D, 3D, WebGL, three.js, React Three Fiber, canvas), a
-  simulation, an editor, a tool, a calculator or configurator, a dashboard, or
-  any multi-view app with real state. It makes you write PLAN.md (concept, core
-  loop, a small complete v1, screens and states, controls, tech with versions
-  from current docs, assets, milestones), confirm it with the user, then build
-  one milestone at a time with a build and a preview after each. It also holds
-  the 3D and game quality rules: assets, lighting, atmosphere, frame budget,
-  start screen, code layout. Not for content pages (landing, portfolio,
-  brochure): those skip planning.
+  milestones you check by looking and playing. Invoke when the site is an app
+  rather than a page: a game (2D, 3D, WebGL, three.js, React Three Fiber,
+  canvas), a simulation, an editor, a tool, a calculator or configurator, a
+  dashboard, or any multi-view app with real state. It makes you write PLAN.md
+  (concept, core loop, a small complete v1, screens and states, controls, tech
+  with versions from current docs, assets, milestones), confirm it with the
+  user, then build one milestone at a time with a build, a preview and a
+  play-test after each. It also holds the 3D and game quality rules: assets,
+  lighting, atmosphere, frame budget, start screen, code layout. Not for content
+  pages (landing, portfolio, brochure): those skip planning.
 ---
 
 # Sites: plan the app, then build it in milestones
@@ -98,11 +98,19 @@ After EACH milestone:
    preview can show the in-game view and not only the title.
 3. Look at it. A black canvas, a missing HUD, a camera inside a wall, text
    over the scene, a broken mobile layout: fix it and look again.
-4. Tick the milestone's items in PLAN.md with `patch_site_file`.
+4. Play it with `play_test_site`: steps that start the game (click the start
+   button or press its key), use each control from the plan (`press` with
+   `hold_ms` to move, `mouse_move` to look, `click` to act), then reach a lose
+   or win state, with a `screenshot` at each moment that matters. Add `wait`
+   steps so the scene can react. Read the report: fix every page error, every
+   failed request for an asset, a blank canvas, a step that could not find its
+   button. Then play again with the same steps until the run is clean.
+5. Tick the milestone's items in PLAN.md with `patch_site_file`.
 
-Never call a milestone done without having seen it. You cannot play the game,
-so never claim gameplay works beyond what you checked: say what you saw, and
-tell the user what to try (the keys, the goal). Keep going milestone by
+Never call a milestone done without having seen it and played it. Never claim
+gameplay works without a passing play-test: say what the play-test showed, and
+tell the user what to try (the keys, the goal). If `play_test_site` is
+unavailable, say gameplay was not play-tested. Keep going milestone by
 milestone; if the turn runs long, stop at a milestone boundary with a working
 build and say which milestone is next.
 
@@ -173,9 +181,9 @@ invented numbers presented as real.
 [ ] PLAN.md written before any UI or game file
 [ ] Versions and APIs taken from current docs
 [ ] Plan summary sent with ask_user, then stopped (unless "just build it")
-[ ] M1 built, previewed desktop + mobile, ticked
-[ ] M2 built, previewed, ticked
-[ ] M3 built, previewed, ticked
-[ ] M4 built, previewed, ticked
-[ ] Reply says what was checked and what the user should try
+[ ] M1 built, previewed desktop + mobile, play-tested clean, ticked
+[ ] M2 built, previewed, play-tested clean, ticked
+[ ] M3 built, previewed, play-tested clean, ticked
+[ ] M4 built, previewed, play-tested clean, ticked
+[ ] Reply says what was checked and played, and what the user should try
 ```
