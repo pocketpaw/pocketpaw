@@ -7070,6 +7070,10 @@ agent calls it once at the end of a turn's edits, after a fix, or after an
 |-----|------|-------|
 | `pocket_id` | string | Required. |
 | `device` | `desktop` \| `mobile` | Optional, default `desktop` (1280px); `mobile` is 390px. |
+| `path` | string | Optional route on a template-built draft (`/play`, `/about`): one leading `/`, no scheme, host, `//`, backslash, `..` or `#`. Ignored on one-page html, svelte and react drafts. |
+| `wait_ms` | integer | Optional settle wait before the shutter, clamped to 0-8000. Defaults to 1500 on template-built drafts so canvas, WebGL and client-routed pages can draw. |
+
+A template-built (project) draft is photographed at its own `preview_url` with its scripts running; a `published` draft uses the live URL. With no address, the tool says to call `run_site_build` first (still building or failed) or that there is no static page before publish (`server_only`).
 
 Returns MCP `image` blocks (a full-page JPEG screenshot of the current draft, cut
 into at most three tiles, top first; the capture waits for the page's `load` event)
