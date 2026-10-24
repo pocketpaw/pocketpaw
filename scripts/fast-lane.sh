@@ -31,7 +31,7 @@ LABEL="fast-lane"
 MERGED_LABEL="fast-lane-merged"
 CI_WORKFLOWS=("CI" "Tests" "PR Quality Gate")
 SELF_WORKFLOW="Fast Lane"
-DENY_RE='^\.github/|^\.claude/|(^|/)(CLAUDE|AGENTS)\.md$|(^|/)(pyproject\.toml|uv\.lock|package\.json|bun\.lock|package-lock\.json|requirements[^/]*\.txt)$|(^|/)Dockerfile|^deploy/|/migrations?/|auth|security|secret|credential|billing|payment|wallet|permission|policy|crypto|token|instinct|shield|sandbox|guardian|license'
+DENY_RE='^\.github/|^\.claude/|^scripts/fast-lane|(^|/)(CLAUDE|AGENTS)\.md$|(^|/)(pyproject\.toml|uv\.lock|package\.json|bun\.lock|package-lock\.json|requirements[^/]*\.txt)$|(^|/)Dockerfile|^deploy/|/migrations?/|auth|security|secret|credential|billing|payment|wallet|permission|policy|crypto|token|instinct|shield|sandbox|guardian|license'
 
 REPO="${GH_REPO:-pocketpaw/pocketpaw}"
 DRY_RUN=0

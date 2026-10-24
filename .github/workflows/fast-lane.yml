@@ -3,8 +3,12 @@
 #
 # Safety: this workflow never checks out or runs PR code. It checks out only
 # scripts/fast-lane.sh from the trusted dev branch and talks to the GitHub API.
-# workflow_run fires from the copy of this file on the default branch (main),
-# so that trigger starts working once this file reaches main.
+#
+# The live copy of this file is the one on main, the default branch. GitHub
+# reads pull_request_target, workflow_run and workflow_dispatch workflows from
+# the default branch only, so this dev copy is a mirror: copy it to main after
+# every change, or the change does nothing. The script is fetched from dev on
+# each run, so script changes need no copy.
 name: Fast Lane
 
 on:
