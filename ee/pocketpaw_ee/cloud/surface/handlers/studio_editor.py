@@ -67,6 +67,10 @@ _MAX_ROWS = 40
 # ``last_edit.failures`` block has used since it shipped.
 _MAX_FAILURES = 10
 
+# A generation prompt is a free description of the shot; the client cuts it at
+# 160 chars, this guards a client that does not.
+_MAX_PROMPT_CHARS = 160
+
 # Total motion-graphic HTML carried into the prompt. Matches the client's budget.
 _MAX_MOTION_SOURCE_CHARS = 100_000
 
@@ -101,9 +105,19 @@ def _asset_row(asset: dict[str, Any]) -> str:
         "duration": _fmt_ms(asset.get("duration_ms")),
         "used": ("yes" if asset.get("in_use") else "no"),
     }
+    if asset.get("size"):
+        facts["size"] = asset["size"]
+    if asset.get("has_audio") is False:
+        facts["audio"] = "none"
+    if asset.get("source") == "generation":
+        facts["source"] = "generated"
     if asset.get("attached"):
         facts["attached"] = "yes"
-    return entity_line(asset.get("name"), asset.get("id"), **facts)
+    lines = [entity_line(asset.get("name"), asset.get("id"), **facts)]
+    prompt = " ".join(str(asset.get("prompt") or "").split())[:_MAX_PROMPT_CHARS]
+    if prompt:
+        lines.append(f'    made from prompt: "{prompt}"')
+    return "\n".join(lines)
 
 
 def _attached_block(timeline: dict[str, Any], assets: list[dict[str, Any]]) -> list[str]:
