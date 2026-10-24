@@ -71,6 +71,9 @@ _MAX_FAILURES = 10
 # 160 chars, this guards a client that does not.
 _MAX_PROMPT_CHARS = 160
 
+# Scene and sound spans per asset. Matches the client's scan cap.
+_MAX_SCENES = 24
+
 # Total motion-graphic HTML carried into the prompt. Matches the client's budget.
 _MAX_MOTION_SOURCE_CHARS = 100_000
 
@@ -117,7 +120,41 @@ def _asset_row(asset: dict[str, Any]) -> str:
     prompt = " ".join(str(asset.get("prompt") or "").split())[:_MAX_PROMPT_CHARS]
     if prompt:
         lines.append(f'    made from prompt: "{prompt}"')
+    scenes = [sc for sc in (asset.get("scenes") or []) if isinstance(sc, dict)]
+    if scenes:
+        lines.append("    scenes: " + " · ".join(_scene_text(sc) for sc in scenes[:_MAX_SCENES]))
+    sound = [so for so in (asset.get("sound") or []) if isinstance(so, dict)]
+    if sound:
+        lines.append("    sound: " + " · ".join(_sound_text(so) for so in sound[:_MAX_SCENES]))
     return "\n".join(lines)
+
+
+def _span(item: dict[str, Any]) -> str:
+    try:
+        return f"{float(item['start_ms']) / 1000:.1f}-{float(item['end_ms']) / 1000:.1f}s"
+    except (KeyError, TypeError, ValueError):
+        return "?"
+
+
+def _scene_text(scene: dict[str, Any]) -> str:
+    colour = scene.get("colour")
+    light = None if colour in ("black", "white") else scene.get("light")
+    look = " ".join(str(v) for v in (light, colour) if v and v != "normal")
+    parts = [f"{_span(scene)} {look}".strip()]
+    motion = scene.get("motion")
+    if motion:
+        parts.append("still" if motion == "still" else f"{motion} motion")
+    fade = scene.get("fade")
+    if fade:
+        parts.append(
+            {"in": "fades in", "out": "fades out", "both": "fades in and out"}.get(fade, "fade")
+        )
+    return ", ".join(parts)
+
+
+def _sound_text(span: dict[str, Any]) -> str:
+    text = f"{_span(span)} {span.get('level') or '?'}"
+    return f"{text}, voice-like" if span.get("voice_like") else text
 
 
 def _attached_block(timeline: dict[str, Any], assets: list[dict[str, Any]]) -> list[str]:
