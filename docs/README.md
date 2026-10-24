@@ -92,3 +92,5 @@ Provided by Lito — no local definitions needed:
 ## License
 
 MIT
+
+<!-- fast-lane probe, safe to drop -->
