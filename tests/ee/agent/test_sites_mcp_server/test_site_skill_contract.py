@@ -18,7 +18,7 @@ pytest.importorskip("pocketpaw_ee")
 
 #: The skill is loaded on every new-site turn; keep it well under the old project
 #: skill's 6,000-byte cap. Raising it needs a reason in the commit body.
-SITE_SKILL_MAX_BYTES = 5_000
+SITE_SKILL_MAX_BYTES = 5_200
 
 
 def _site_skill():
@@ -210,3 +210,13 @@ async def test_the_plan_refusal_names_the_real_upgrade_path(monkeypatch) -> None
     with pytest.raises(Forbidden) as exc:
         await service.require_sites_plan("ws1")
     assert "Settings → Billing" in exc.value.message
+
+
+def test_the_site_skill_looks_after_every_build() -> None:
+    """Every new site is a project, and an agent that never looked shipped UI bugs it
+    assumed away. Looking is a step of the loop, not an optional extra."""
+    text = _site_skill().read_text("utf-8")
+    assert "After EVERY `built`" in text
+    for phrase in ("preview_site", "device: mobile", "`path`", "`wait_ms`"):
+        assert phrase in text, phrase
+    assert "Never" in text and "not seen" in text

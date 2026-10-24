@@ -1923,6 +1923,18 @@ async def test_create_tells_the_agent_to_look_at_its_draft() -> None:
         assert "LOOK BEFORE YOU SHOW IT" in preamble, engine
 
 
+async def test_the_project_loop_looks_after_every_build() -> None:
+    """Every new site is a project; its loop tells the agent to look at each built
+    draft (desktop, then mobile, other routes by `path`) and to say so when it could
+    not, rather than describe a page it never saw."""
+    loop = sites_handler._PROJECT_LOOP
+    assert "mcp__pocketpaw_sites_manager__preview_site" in loop
+    assert loop.index("run_site_build") < loop.index("preview_site")
+    for phrase in ("after every `built`", "device: mobile", "`path`", "`wait_ms`"):
+        assert phrase in loop, phrase
+    assert "say the page was not visually checked rather than implying it was" in loop
+
+
 async def test_the_research_step_runs_before_the_tokens_are_locked() -> None:
     """The reference decides the look, so research lands before the art direction
     is written and before any token."""
