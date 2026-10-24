@@ -49,12 +49,13 @@ Call `list_site_templates` and match `when_to_use`.
 6. Files: `list_site_files`, `read_site_files` before you change one,
    `patch_site_file` with exact-once `{old, new}` blocks, `write_site_files` for
    new or rewritten files, `delete_site_files`. Paths are from the repo root.
-7. `run_site_build` (instant on `static`). On `failed`, read the log tail (or
-   `get_site_build_log`), fix, build again: three rounds at most, then tell the
-   user what still fails.
-8. `verify_site` once at the end; call the site ready only on `passed`.
-   `preview_site` to look. If `preview_mode` is `static`, say server
-   routes run after publish.
+7. `run_site_build` (instant on `static`); on `failed` read the log tail (or
+   `get_site_build_log`), fix, rebuild: three rounds, then say what fails.
+8. After EVERY `built`, look: `preview_site`, then `device: mobile`; `path`
+   for other routes, `wait_ms` for 3D or animation. Fix, look again. Never
+   describe what you have not seen; on an error say it was not visually
+   checked. `verify_site` once at the end; ready only on `passed`. On
+   `preview_mode: static`, say server routes run after publish.
 9. Everything saves to the DRAFT. Call `publish` only when the user asks; it
    deploys the last build, so build first.
 

@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -3178,6 +3179,16 @@ _PREVIEW_MAX_TILES = 3
 #: Browser Rendering's wait. ``load`` fires once the document and its assets are in;
 #: ``networkidle0`` also waited out analytics and font polling for nothing.
 _PREVIEW_WAIT_UNTIL = "load"
+#: A page photographed at its URL runs its own scripts, and an app (a game, a three.js
+#: scene, a client router) often draws after ``load``. This pause (ms) before the
+#: shutter lets it settle; ``wait_ms`` overrides it, up to ``_PREVIEW_MAX_WAIT_MS``.
+_PREVIEW_URL_SETTLE_MS = 1_500
+_PREVIEW_MAX_WAIT_MS = 8_000
+#: A ``path`` is one route on the draft's own origin: a single leading slash, then
+#: no whitespace, backslash or fragment. ``//``, ``..`` and a scheme are refused
+#: separately so the capture can never be pointed at another host.
+_PREVIEW_PATH_RE = re.compile(r"/[^\s\\#]{0,511}")
+_PREVIEW_BUILD_PENDING = frozenset({"queued", "building", "running", "pending"})
 
 
 def _native_document(body_html: str, css: str) -> str:
@@ -3190,40 +3201,129 @@ def _native_document(body_html: str, css: str) -> str:
     )
 
 
+def _preview_path(raw: Any) -> tuple[str, str]:
+    """``(path, "")`` for a usable route on the draft (``""`` when none was given), or
+    ``("", reason)``. Only a same-origin path is allowed: the capture must never be
+    steered to another host."""
+    if raw is None or raw == "":
+        return "", ""
+    if (
+        not isinstance(raw, str)
+        or not _PREVIEW_PATH_RE.fullmatch(raw)
+        or raw.startswith("//")
+        or "://" in raw
+        or ".." in raw.split("?", 1)[0].split("/")
+    ):
+        return "", (
+            "`path` must be one route on the draft, starting with a single `/` (like "
+            "`/play` or `/about`), with no scheme, host, `//`, backslash or `..`; got "
+            f"{raw!r}."
+        )
+    return raw, ""
+
+
+def _preview_wait_ms(raw: Any) -> tuple[int | None, str]:
+    """``(ms, "")`` clamped to 0..``_PREVIEW_MAX_WAIT_MS`` (``None`` when not given),
+    or ``(None, reason)`` for a value that is not a whole number."""
+    if raw is None:
+        return None, ""
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, int | float)
+        or (isinstance(raw, float) and not raw.is_integer())
+    ):
+        return None, f"`wait_ms` must be a whole number of milliseconds; got {raw!r}."
+    return max(0, min(int(raw), _PREVIEW_MAX_WAIT_MS)), ""
+
+
+def _project_preview_target(artifact: dict[str, Any]) -> tuple[str, str]:
+    """A project draft's page address, or ``("", reason)``.
+
+    The draft is served from its preview origin (``preview_origin.py``): the real
+    page, root-absolute assets and scripts included. A published site whose drafts
+    were purged answers with its live URL. Without an address the reason says why
+    and what to do, and never that the site is broken."""
+    url = artifact.get("preview_url")
+    if isinstance(url, str) and url.startswith(("https://", "http://")):
+        return url, ""
+    mode = artifact.get("preview_mode")
+    status = artifact.get("build_status") or "none"
+    if mode == "server_only":
+        return "", (
+            "this site's draft is server-only: there is no static draft page to "
+            "photograph before publish. Do not describe the page as visually checked; "
+            "say it was not. This does not mean the site is broken."
+        )
+    if status == "failed":
+        return "", (
+            "the draft's last build failed, so there is no page to photograph. Read the "
+            "build log, fix, call run_site_build again, then call preview_site again."
+        )
+    if status in _PREVIEW_BUILD_PENDING or mode is None:
+        return "", (
+            f"the draft has no built page yet (build {status}). Call run_site_build and "
+            "wait for `built`, then call preview_site again. This does not mean the "
+            "site is broken."
+        )
+    return "", (
+        "this deployment has no draft preview address, so there is no page to "
+        "photograph. Say the page was not visually checked. This does not mean the "
+        "site is broken."
+    )
+
+
+def _join_preview_url(base: str, path: str) -> str:
+    """``base`` (an origin root) with ``path`` appended; ``base`` alone for no path."""
+    if not path:
+        return base
+    return base.split("?", 1)[0].split("#", 1)[0].rstrip("/") + path
+
+
 async def _draft_document(
     *, workspace_id: str, user_id: str, pocket_id: str, pocket: dict[str, Any]
-) -> tuple[str, str]:
-    """The draft as one self-contained HTML document, or ``("", reason)``.
+) -> tuple[str, str, str]:
+    """What to photograph: ``(html, url, "")`` with exactly one of the two set, or
+    ``("", "", reason)``.
 
-    html sites (and any pocket already built on this host) come from ``draft_markup``,
-    the card capture's source. svelte and react fall back to the cached preview
-    render: a cache miss queues that build and answers "building", so the agent
-    verifies first and asks again instead of photographing nothing.
+    A ``project`` pocket (every new site) is photographed at its preview URL. html
+    sites (and any pocket already built on this host) come from ``draft_markup``, the
+    card capture's source. svelte and react fall back to the cached preview render: a
+    cache miss queues that build and answers "building", so the agent verifies first
+    and asks again instead of photographing nothing.
     """
     from types import SimpleNamespace
 
+    from pocketpaw_ee.sites import service as sites_service
     from pocketpaw_ee.sites.draft_markup import build_draft_markup
     from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
+
+    engine = normalize_engine(pocket.get("engine"))
+    if engine == "project":
+        artifact = await sites_service.get_native_artifact(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        )
+        url, reason = _project_preview_target(artifact)
+        return "", url, reason
 
     stub = SimpleNamespace(pocket_id=pocket_id, owner=user_id, id=pocket_id, name="")
     markup = await build_draft_markup(stub, pocket=pocket)
     if markup:
-        return markup, ""
+        return markup, "", ""
 
-    if not has_native_edit_lane(normalize_engine(pocket.get("engine"))):
-        return "", "this site has no rendered draft to photograph yet."
-
-    from pocketpaw_ee.sites import service as sites_service
+    if not has_native_edit_lane(engine):
+        return "", "", "this site has no rendered draft to photograph yet."
 
     artifact = await sites_service.get_native_artifact(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
     )
     if artifact.get("body_html"):
-        return _native_document(artifact["body_html"], artifact.get("css") or ""), ""
+        return _native_document(artifact["body_html"], artifact.get("css") or ""), "", ""
     status = artifact.get("build_status") or "building"
-    return "", (
+    return (
+        "",
+        "",
         f"the draft's render is not ready (build {status}). Call verify_site to wait for "
-        "the build, then call preview_site again."
+        "the build, then call preview_site again.",
     )
 
 
@@ -3256,6 +3356,12 @@ async def _preview_site_handler(args: dict) -> dict:
             "preview_site requires a `pocket_id` — the id of the site pocket to look at."
         )
     device = args.get("device") if args.get("device") in _PREVIEW_VIEWPORTS else "desktop"
+    path, bad = _preview_path(args.get("path"))
+    if bad:
+        return _error_response(bad)
+    wait_ms, bad = _preview_wait_ms(args.get("wait_ms"))
+    if bad:
+        return _error_response(bad)
 
     if (gate := await _require_sites_plan_or_error(workspace_id, tool="preview_site")) is not None:
         return gate
@@ -3270,23 +3376,32 @@ async def _preview_site_handler(args: dict) -> dict:
         return _error_response(f"{exc.code}: {exc.message}")
 
     try:
-        document, reason = await _draft_document(
+        document, url, reason = await _draft_document(
             workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
         )
     except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
         logger.warning("sites.preview_site: draft assembly failed", exc_info=True)
         return _error_response(f"could not assemble the draft: {exc}")
-    if not document:
+    if not document and not url:
         return _error_response(reason)
 
+    # A url capture runs the page's own scripts, so it waits for them to settle; an
+    # html capture keeps the plain ``load`` unless the agent asked for a pause.
+    if url:
+        target: dict[str, Any] = {"url": _join_preview_url(url, path)}
+        settle = _PREVIEW_URL_SETTLE_MS if wait_ms is None else wait_ms
+    else:
+        target = {"html": document}
+        settle = wait_ms or 0
     try:
         from pocketpaw_ee.sites.service import _cf_client
 
         image = await _cf_client().capture_screenshot(
-            html=document,
+            **target,
             viewport=dict(_PREVIEW_VIEWPORTS[device]),
             goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
             screenshot_options={"fullPage": True},
+            wait_for_timeout=settle,
         )
     except CloudError as exc:
         return _error_response(
@@ -3308,12 +3423,20 @@ async def _preview_site_handler(args: dict) -> dict:
     except reference_images.ReferenceImageError as exc:
         return _error_response(str(exc))
 
+    where = f" at {path}" if path and url else ""
     note = (
-        f"Draft of {pocket_id} at {device} width: {len(tiles)} image(s), top of the page "
-        "first. Look at it as the visitor will: does the fold carry the offer and the "
+        f"Draft of {pocket_id}{where} at {device} width: {len(tiles)} image(s), top of the "
+        "page first. Look at it as the visitor will: does the fold carry the offer and the "
         "product, does anything overlap, crop or crowd, does it match the references you "
         "locked? Fix what is off, then look again."
     )
+    if path and not url:
+        note += f" `path` {path} was ignored: this site's draft is one page."
+    if url:
+        note += (
+            " A blank or half-drawn canvas may only need longer to render: look again "
+            "with a higher `wait_ms` before you treat it as a bug."
+        )
     return {"content": [*reference_images.image_blocks(tiles), {"type": "text", "text": note}]}
 
 
@@ -3325,13 +3448,19 @@ def make_preview_site_tool(tool: Any) -> Any:
         "preview_site",
         (
             "LOOK at a Paw Site's current DRAFT: returns a full-page screenshot as "
-            "images you can see. Args: `pocket_id` (required), optional `device`: "
-            "`desktop` (default, 1280px) or `mobile` (390px). Call it after a create or "
-            "a layout-moving edit once verify_site returns `passed`, and look "
-            "before you tell the user the page is ready: a page that builds cleanly can "
-            "still look wrong. Fix what you see and look again; one or two rounds is "
-            "normal. An error means no picture could be taken; it never means the site "
-            "is broken."
+            "images you can see. Works on every site, template-built apps included: "
+            "those are photographed at their draft preview URL with their own scripts "
+            "running. Args: `pocket_id` (required); optional `device`: `desktop` "
+            "(default, 1280px) or `mobile` (390px); `path`: a route on the draft such "
+            "as `/play` or `/about` (starts with one `/`; template-built sites only, "
+            "ignored on a one-page draft); `wait_ms`: extra milliseconds before the "
+            "shot (0-8000, default 1500 on template-built sites) for 3D, canvas or "
+            "animated scenes. Look after each milestone (every successful "
+            "run_site_build, or once verify_site returns `passed`), not only at the "
+            "end, and before you tell the user the page is ready: a page that builds "
+            "cleanly can still look wrong. Fix what you see and look again; one or two "
+            "rounds is normal. An error means no picture could be taken; it never means "
+            "the site is broken, but then do not describe the page as visually checked."
         ),
         {
             "type": "object",
@@ -3344,6 +3473,20 @@ def make_preview_site_tool(tool: Any) -> Any:
                     "type": "string",
                     "enum": ["desktop", "mobile"],
                     "description": "Viewport width to render at (default desktop).",
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Route on the draft to photograph, e.g. `/play` (default the "
+                        "home page). Template-built sites only."
+                    ),
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "description": (
+                        "Milliseconds to wait after load before the shot, for 3D or "
+                        "animated pages (clamped to 0-8000)."
+                    ),
                 },
             },
             "required": ["pocket_id"],
