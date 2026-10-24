@@ -3,10 +3,11 @@
 #
 # This module owns ``publish``, ``get_site_build_status`` and ``list_site_assets``,
 # and registers on the SAME server object the create / edit / read / verify / preview
-# tools built in sites_create.py and the twelve project-site tools built in
-# sites_project.py (templates, recipes, generic file tools, run_site_build /
-# get_site_build_log). One server, because claude_sdk keys servers by name and a second
-# ``create_sdk_mcp_server`` under this name would clobber the first.
+# tools built in sites_create.py, ``play_test_site`` (sites_play_test.py) and the
+# twelve project-site tools built in sites_project.py (templates, recipes, generic
+# file tools, run_site_build / get_site_build_log). One server, because claude_sdk
+# keys servers by name and a second ``create_sdk_mcp_server`` under this name would
+# clobber the first.
 #
 # Invariants a reader must not break:
 #   * every registered tool's id is on ``SITES_TOOL_IDS``. It feeds the hard /sites
@@ -132,6 +133,9 @@ SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
 VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 # Screenshot the draft so the agent sees what it built. Must ride SITES_TOOL_IDS.
 PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
+# Play the draft (keys, clicks, console errors) in a remote browser. Must ride
+# SITES_TOOL_IDS like every other tool on this server.
+PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
 # Per-site secrets: request one from the owner by name, list names + status. Must
 # ride SITES_TOOL_IDS like every other tool on this server.
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
@@ -157,6 +161,7 @@ SITES_TOOL_IDS = (
     SET_SITE_DEPENDENCIES_TOOL_ID,
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
+    PLAY_TEST_SITE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
     LIST_SITE_INTEGRATIONS_TOOL_ID,
@@ -688,6 +693,10 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     verify_site = make_verify_site_tool(tool)
     # Look at the draft (a screenshot the agent can see). Same server.
     preview_site = make_preview_site_tool(tool)
+    # Play the draft in Cloudflare's remote browser. Same server.
+    from pocketpaw_ee.agent.mcp_servers.sites_play_test import make_play_test_site_tool
+
+    play_test_site = make_play_test_site_tool(tool)
     # Site secrets: ask the owner for one by name; list names + status. Same server.
     request_site_secret = make_request_site_secret_tool(tool)
     list_site_secrets = make_list_site_secrets_tool(tool)
@@ -719,6 +728,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             set_site_dependencies,
             verify_site,
             preview_site,
+            play_test_site,
             request_site_secret,
             list_site_secrets,
             list_site_integrations,
@@ -743,6 +753,7 @@ __all__ = [
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "GET_SITE_BUILD_STATUS_TOOL_ID",
+    "PLAY_TEST_SITE_TOOL_ID",
     "PREVIEW_SITE_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "READ_SITE_SOURCE_TOOL_ID",

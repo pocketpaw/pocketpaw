@@ -13,8 +13,7 @@
 #     ``bundle_deploy`` for ``paw-build.json`` builds: metadata + one part per
 #     module, with compat flags, an ``assets`` block and the optional
 #     ``placement`` / ``observability`` / ``limits`` blocks ``bundle_deploy``
-#     decides (``worker_settings``). The two legacy shapes are
-#     byte-for-byte what existing engines have always sent.
+#     decides (``worker_settings``). The legacy shapes are byte-for-byte unchanged.
 #   * Static assets: ``upload_assets`` runs the dispatch assets-upload-session,
 #     uploads the requested buckets (base64 multipart, session JWT as Bearer, never
 #     the account token) and returns the completion JWT for ``put_worker``. Asset
@@ -29,21 +28,19 @@
 #   * Cloudflare for SaaS: custom hostnames (create, poll, delete). The CNAME target
 #     is configured (``PAW_CF_CNAME_TARGET``), never derived from the zone id, and
 #     create refuses when it is unset. No ``custom_metadata``: it is entitlement-gated.
-#   * Worker routes: ``<hostname>/*`` -> the site's Worker, updated in place on a
-#     rename (a second POST for the same pattern is a 409).
+#   * Worker routes: ``<hostname>/*`` -> the site's Worker, updated in place on rename.
 #   * D1: ``create_database``, ``find_database`` (exact name, crash recovery),
 #     ``delete_database``, ``query_d1`` and ``query_d1_batch`` (parameterized, never
 #     interpolated SQL), ``export_d1_sql`` (the D1 export API: poll with the bookmark,
 #     then fetch the signed URL with a client that carries NO token, since the URL is
 #     another host). ``create_database`` adds the operator's
 #     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``) and, opt-in,
-#     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``) to the create
-#     body; both only shape NEW databases.
+#     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``); NEW databases only.
 #   * KV and R2 for ``binding_provisioner``: namespaces (find by title, create,
 #     delete) and buckets (exists, create, delete, expire-all lifecycle). The REST API
-#     has no object list/delete for R2, so a non-empty bucket delete reports False
-#     instead of raising, and the caller decides what to do with it.
-#   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html).
+#     has no object list/delete for R2, so a non-empty bucket delete reports False.
+#   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html);
+#     ``browser_run_cdp`` gives the Browser Run CDP socket + auth for play-tests.
 #   * Analytics Engine: ``query_analytics_sql`` sends raw SQL and reads a body with
 #     no ``success`` key, so it deliberately does not use ``_unwrap`` on success.
 #
@@ -316,6 +313,19 @@ class CloudflareClient:
     @property
     def account_id(self) -> str:
         return self._account_id
+
+    def browser_run_cdp(self, *, keep_alive_ms: int) -> tuple[str, dict[str, str]]:
+        """The Browser Run CDP socket and the headers to open it with, for
+        ``connect_over_cdp``. Connecting acquires a fresh remote browser that lives
+        ``keep_alive_ms`` (clamped to Cloudflare's 10000-1200000) unless closed
+        first. Same token and permission (Browser Rendering - Edit) as
+        ``capture_screenshot``; the token rides only in the returned header."""
+        keep = max(10_000, min(int(keep_alive_ms), 1_200_000))
+        url = (
+            f"wss://api.cloudflare.com/client/v4/accounts/{self._account_id}"
+            f"/browser-run/devtools/browser?keep_alive={keep}"
+        )
+        return url, dict(self._headers)
 
     @staticmethod
     def _unwrap(resp: httpx.Response) -> dict:
