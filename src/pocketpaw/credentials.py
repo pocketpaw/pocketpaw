@@ -72,6 +72,8 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "lens_api_token",
         "cf_email_api_token",
         "msg91_platform_authkey",
+        "postiz_jwt_secret",
+        "postiz_telegram_bot_token",
         "ai_visibility_openai_api_key",
         "ai_visibility_perplexity_api_key",
         "ai_visibility_anthropic_api_key",

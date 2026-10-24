@@ -3,28 +3,44 @@
 # ``/api/v1/growth/social/...``). A thin shell over ``growth.social.service``.
 # Every route carries the license gate, ``request_context`` and a per-route
 # RBAC guard (pinned by the guard-coverage test in tests/cloud/growth/
-# test_gate.py): the two GETs ``growth.read``, everything else
-# ``growth.write``. Nothing here reaches outside the workspace — no posting, no
-# account connections — so there is no ``growth.manage`` verb.
+# test_gate.py): GETs ``growth.read``, workspace-internal writes
+# ``growth.write``, and connecting or disconnecting a social account, uploading
+# media or posting (which reach an outside platform) ``growth.manage``. The
+# media upload reads at most one byte past the largest size cap. The connect route builds the
+# OAuth return URL from the caller's origin, validated against the CORS
+# allowlist; it is never taken from the request body.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
+from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
+    CheckTelegramRequest,
+    CheckTelegramResponse,
+    ConnectSocialAccountRequest,
+    ConnectSocialAccountResponse,
     CreateCharacterRequest,
+    CreateSocialPostRequest,
+    CreateSocialPostResponse,
     GenerateIdeasRequest,
     MakeMediaRequest,
     MakeMemeRequest,
     MemeFormatListResponse,
     RefreshPulseRequest,
     ScheduleIdeasRequest,
+    SocialAccountListResponse,
+    SocialChannelListResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialMediaResponse,
+    SocialPostListResponse,
     SocialProfileListResponse,
     SocialProfileResponse,
     SocialPulseResponse,
@@ -33,6 +49,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     UsePulseSuggestionRequest,
 )
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.sites.public_assets import MAX_ASSET_BYTES
 
 router = APIRouter(
     prefix="/growth/social", tags=["Growth"], dependencies=[Depends(require_license)]
@@ -305,3 +322,127 @@ async def use_pulse_suggestion(
 ) -> SocialIdeaResponse:
     """File a theme's post suggestion as an idea: to Blitz (new) or straight to Content."""
     return await social_service.use_pulse_suggestion(ctx, body, profile_id)
+
+
+def _caller_origin(request: Request) -> str:
+    origin = (request.headers.get("origin") or "").strip()
+    if origin and origin != "null":
+        return origin.rstrip("/")
+    parsed = urlsplit(request.headers.get("referer") or "")
+    return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+
+
+@router.get(
+    "/accounts",
+    response_model=SocialAccountListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_accounts(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SocialAccountListResponse:
+    """The social's connected accounts and the platforms it can connect.
+    ``configured`` is false when this deployment has no Postiz."""
+    return await social_service.list_accounts(ctx, profile_id)
+
+
+@router.post(
+    "/accounts/connect",
+    response_model=ConnectSocialAccountResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def connect_account(
+    body: ConnectSocialAccountRequest,
+    request: Request,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> ConnectSocialAccountResponse:
+    """The authorize URL, or for Telegram a ``/connect`` code. 503 with no Postiz,
+    422 for an unsupported or unset-up platform."""
+    origin = safe_frontend_origin(_caller_origin(request)) or frontend_base_url()
+    return await social_service.connect_account(ctx, profile_id, body, origin)
+
+
+@router.post(
+    "/accounts/telegram/check",
+    response_model=CheckTelegramResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def check_telegram(
+    body: CheckTelegramRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> CheckTelegramResponse:
+    """Finish a Telegram connect once ``/connect <code>`` was posted; else ``pending``."""
+    return await social_service.check_telegram(ctx, profile_id, body)
+
+
+@router.delete(
+    "/accounts/{account_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def disconnect_account(
+    account_id: str,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Disconnect one account. 404 when it isn't this social's."""
+    await social_service.disconnect_account(ctx, profile_id, account_id)
+    return Response(status_code=204)
+
+
+@router.get(
+    "/accounts/{account_id}/channels",
+    response_model=SocialChannelListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_channels(
+    account_id: str,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialChannelListResponse:
+    """The channels a post to this account can go to (Slack)."""
+    return await social_service.list_channels(ctx, profile_id, account_id)
+
+
+@router.post(
+    "/media",
+    response_model=SocialMediaResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def upload_media(
+    file: UploadFile = File(...),
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialMediaResponse:
+    """Store one image or MP4 on the public bucket for a later post."""
+    data = await file.read(MAX_ASSET_BYTES + 1)
+    return await social_service.upload_media(ctx, profile_id, data)
+
+
+@router.post(
+    "/posts",
+    response_model=CreateSocialPostResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def create_post(
+    body: CreateSocialPostRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> CreateSocialPostResponse:
+    """Publish one post now (with thread parts and media) to each target account."""
+    return await social_service.create_post(ctx, profile_id, body)
+
+
+@router.get(
+    "/posts",
+    response_model=SocialPostListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_posts(
+    profile_id: str | None = _PROFILE_ID,
+    ids: str | None = Query(default=None, max_length=2000),
+    ctx: RequestContext = Depends(request_context),
+) -> SocialPostListResponse:
+    """Posts from the last 7 days, newest first; ``ids`` narrows to those post ids."""
+    return await social_service.list_posts(ctx, profile_id, ids)
