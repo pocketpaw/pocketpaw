@@ -9,8 +9,9 @@
 # other engines and unsafe paths, and every write lands in the source map and queues
 # a build; apply_site_recipe writes the CLI's files back, records the recipe, returns
 # secret names, writes NOTHING on a conflict, and refuses below the recipe's plan;
-# run_site_build / get_site_build_log read A1's build records. The CLI is the fake in
-# tests/ee/sites/project_cli_fake.py; the sandbox queue is stubbed.
+# run_site_build / get_site_build_log read A1's build records; a write or patch of the
+# repo-root PLAN.md records one chat artifact per run, and no other file does. The CLI
+# is the fake in tests/ee/sites/project_cli_fake.py; the sandbox queue is stubbed.
 from __future__ import annotations
 
 import json
@@ -937,6 +938,118 @@ class TestBuilds:
         assert body["job_id"] == "site-preview-p-1" and body["current"] is True
         assert log.await_args.kwargs["job_id"] == "site-preview-p-1"
         assert out["content"][1]["text"].endswith("error: [REDACTED]\n")
+
+
+# ---------------------------------------------------------------------------
+# PLAN.md shows in chat as an artifact
+# ---------------------------------------------------------------------------
+
+
+PLAN = "# Plan\n\n- [ ] Milestone 1\n"
+
+
+class TestPlanArtifact:
+    """A write or patch of the repo-root PLAN.md records one artifact for the run, in
+    the deliver_artifact meta shape plus the raw read route the card opens."""
+
+    async def test_writing_the_plan_records_one_artifact(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        with collect_delivered_artifacts() as artifacts:
+            out = await _call(
+                "write_site_files",
+                {"pocket_id": pocket_id, "files": {"PLAN.md": PLAN, "src/a.ts": "1"}},
+            )
+        assert not out.get("is_error"), out
+        assert artifacts == [
+            {
+                "file_id": f"site-file:{pocket_id}:PLAN.md",
+                "name": "PLAN.md",
+                "mime": "text/markdown",
+                "size": len(PLAN.encode("utf-8")),
+                "src": f"/api/v1/sites/by-pocket/{pocket_id}/source-file?path=PLAN.md",
+                "kind": "site_plan",
+                "pocket_id": pocket_id,
+            }
+        ]
+
+    async def test_patching_the_plan_replaces_the_entry_with_the_latest_size(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        with collect_delivered_artifacts() as artifacts:
+            await _call("write_site_files", {"pocket_id": pocket_id, "files": {"PLAN.md": PLAN}})
+            out = await _call(
+                "patch_site_file",
+                {
+                    "pocket_id": pocket_id,
+                    "path": "PLAN.md",
+                    "edits": [{"old": "- [ ] Milestone 1", "new": "- [x] Milestone 1 (done)"}],
+                },
+            )
+        assert not out.get("is_error"), out
+        ticked = (await _doc(pocket_id)).source["PLAN.md"]
+        assert len(artifacts) == 1
+        assert artifacts[0]["size"] == len(ticked.encode("utf-8")) != len(PLAN.encode("utf-8"))
+
+    async def test_a_patch_alone_records_the_artifact(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        await _call("write_site_files", {"pocket_id": pocket_id, "files": {"PLAN.md": PLAN}})
+        with collect_delivered_artifacts() as artifacts:
+            await _call(
+                "patch_site_file",
+                {
+                    "pocket_id": pocket_id,
+                    "path": "PLAN.md",
+                    "edits": [{"old": "[ ]", "new": "[x]"}],
+                },
+            )
+        assert [a["name"] for a in artifacts] == ["PLAN.md"]
+
+    async def test_other_files_and_a_nested_plan_record_nothing(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        with collect_delivered_artifacts() as artifacts:
+            await _call(
+                "write_site_files",
+                {"pocket_id": pocket_id, "files": {"docs/PLAN.md": PLAN, "plan.md": PLAN}},
+            )
+            await _call(
+                "patch_site_file",
+                {"pocket_id": pocket_id, "path": "AGENTS.md", "edits": [{"old": "#", "new": "##"}]},
+            )
+        assert artifacts == []
+
+    async def test_a_failed_write_or_patch_records_nothing(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        with collect_delivered_artifacts() as artifacts:
+            out = await _call(
+                "write_site_files",
+                {"pocket_id": pocket_id, "files": {"PLAN.md": PLAN, "../x.ts": "1"}},
+            )
+            assert out["is_error"]
+            out = await _call(
+                "patch_site_file",
+                {"pocket_id": pocket_id, "path": "PLAN.md", "edits": [{"old": "zz", "new": "b"}]},
+            )
+            assert out["is_error"]
+        assert artifacts == []
 
 
 # ---------------------------------------------------------------------------

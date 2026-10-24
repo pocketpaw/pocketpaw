@@ -3313,6 +3313,12 @@ does not render inline on the storage origin. Inline-safe types (images, pdf,
 plain text) still embed as before. The whole tool is gated on
 `is_multi_tenant_cloud()`.
 
+The run's artifact collector has one other producer: a project site's `PLAN.md`
+write records a non-upload artifact whose meta adds `src`, `kind: "site_plan"` and
+`pocket_id` (see `GET /sites/by-pocket/{pocket_id}/source-file` under "Project
+files"). Persisted attachments and `artifact` SSE events carry the meta as recorded,
+extra keys included.
+
 ## Agent — Open an App Surface (`open_surface`)
 
 `open_surface` is an in-process MCP tool that lets the chat agent open an app
@@ -4171,6 +4177,48 @@ sites.project_file_too_large` (over 1 MiB), `422 sites.project_call_too_large` (
 site_file.not_found` (a path to read, patch or delete that is not there).
 A change to `package.json`'s dependency lists also removes a stale lockfile and lists
 it in `lockfile_removed`.
+
+#### `GET /sites/by-pocket/{pocket_id}/source-file?path=PLAN.md`
+
+The draft's current `PLAN.md` (the agent's app or game plan, written by the
+`sites-app-plan` skill) as raw text, for the chat's PLAN.md artifact card. Same auth
+as the file routes (session, `sites` plan feature, `fabric.write`, pockets read rule,
+workspace match; a non-project pocket is `422 sites.not_a_project`). It reads the
+draft source on every call, so the card always shows the latest plan with its
+milestones ticked.
+
+`200`: the file's text, `Content-Type: text/markdown; charset=utf-8`,
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`.
+
+Only the repo-root `PLAN.md` is served. Any other path the file routes would accept
+(`docs/PLAN.md`, `src/app.ts`) is `422 sites.source_file_not_allowed`; a path they
+refuse is `422 sites.project_bad_path`. A missing `PLAN.md` is `404
+site_file.not_found`, a file over 1 MiB is `422 sites.source_file_too_large`, and one
+holding a NUL byte is `422 sites.source_file_binary`.
+
+**The PLAN.md artifact.** When the agent's `write_site_files` or `patch_site_file`
+succeeds on the repo-root `PLAN.md`, the run records one chat artifact (the same
+collector `deliver_artifact` feeds, so it lands as a `{type: "artifact", meta}`
+attachment on the reply plus one `artifact` SSE event). A later write or patch of
+`PLAN.md` in the same run replaces that entry (keyed on `file_id`), so the reply
+carries one card with the latest size. Other files, a nested `docs/PLAN.md`, and a
+failed save record nothing. The meta:
+
+```json
+{
+  "file_id": "site-file:<pocket_id>:PLAN.md",
+  "name": "PLAN.md",
+  "mime": "text/markdown",
+  "size": 1234,
+  "src": "/api/v1/sites/by-pocket/<pocket_id>/source-file?path=PLAN.md",
+  "kind": "site_plan",
+  "pocket_id": "<pocket_id>"
+}
+```
+
+`file_id` is not an upload id: viewers fetch `src` (an API path from the server root)
+instead of `/uploads/{file_id}`. `kind` and `pocket_id` let the client render a plan
+card.
 
 #### `POST /sites/by-pocket/{pocket_id}/visual-edit`
 

@@ -24,6 +24,10 @@
 # the owner through ``request_site_secret`` (another lane; absent tools are named in
 # text only, never called from here).
 #
+# A successful write or patch of the repo-root ``PLAN.md`` (the ``sites-app-plan``
+# skill's plan) also records one chat artifact for the run (``plan_artifact_meta``,
+# replaced on each later save) so the user can open the plan from the reply.
+#
 # Agent text for Durable Objects (the realtime-room recipe): ``recipe_next_steps`` adds
 # the per-template entry wiring after an apply, and ``agent_error_text`` turns every
 # DO refusal (the build's ``do_config``, the deploy's ``sites.do_*``) into a plain next
@@ -777,6 +781,42 @@ def _draft_body(result: dict[str, Any], message: str) -> dict[str, Any]:
     return _success_response(out)
 
 
+def plan_artifact_meta(pocket_id: str, size: int) -> dict[str, Any]:
+    """The chat artifact for a project site's PLAN.md: the ``deliver_artifact`` meta
+    keys plus ``src``, the raw read route the card opens (so it shows the CURRENT plan,
+    milestones ticked), and ``kind`` / ``pocket_id`` for the card."""
+    from urllib.parse import quote
+
+    from pocketpaw_ee.sites.project_tools import PLAN_FILE
+
+    return {
+        "file_id": f"site-file:{pocket_id}:{PLAN_FILE}",
+        "name": PLAN_FILE,
+        "mime": "text/markdown",
+        "size": size,
+        "src": f"/api/v1/sites/by-pocket/{quote(pocket_id, safe='')}/source-file?path={PLAN_FILE}",
+        "kind": "site_plan",
+        "pocket_id": pocket_id,
+    }
+
+
+def _record_plan_artifact(pocket_id: str, result: dict[str, Any]) -> None:
+    """After a successful write or patch: when the repo-root PLAN.md was among the
+    files saved, put it in chat as one artifact for the run (a later save replaces the
+    earlier entry). Best-effort, like ``deliver``: never fails the save."""
+    from pocketpaw_ee.sites.project_tools import PLAN_FILE
+
+    size = (result.get("sizes") or {}).get(PLAN_FILE)
+    if not isinstance(size, int):
+        return
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import record_delivered_artifact
+
+        record_delivered_artifact(plan_artifact_meta(pocket_id, size), replace=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("recording the PLAN.md artifact failed", exc_info=True)
+
+
 async def _write_site_files_handler(args: dict) -> dict:
     tool = "write_site_files"
     workspace_id, user_id, err = await _begin(tool)
@@ -799,6 +839,7 @@ async def _write_site_files_handler(args: dict) -> dict:
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
+    _record_plan_artifact(pocket_id, result)
     return _draft_body(result, "Saved to the draft; nothing is live.")
 
 
@@ -825,6 +866,7 @@ async def _patch_site_file_handler(args: dict) -> dict:
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
+    _record_plan_artifact(pocket_id, result)
     return _draft_body(result, "Saved to the draft; nothing is live.")
 
 
