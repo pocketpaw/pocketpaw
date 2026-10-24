@@ -3,11 +3,11 @@
 # Guards ``_assert_registry_complete`` (a clean 1:1 with ``SurfaceKind``) and the
 # /sites meta-fork on the SITES row's ``profile_resolver``: a NEW-site create drops
 # ripple, denies the old per-engine authoring tools and loads exactly
-# ``pocketpaw-site`` plus the create-scoped design skills, whatever create-time
-# engine hint it carries; refine (a pocket or a site id) keeps every sites tool,
-# forks ripple on the site's own engine and loads an exact per-engine skill
-# allowlist (the design skills, ``pocketpaw-site``, and only the legacy skill an old
-# engine needs); import-create is a create (the deny, its own exact allowlist).
+# ``pocketpaw-site`` and ``sites-app-plan`` plus the create-scoped design skills,
+# whatever create-time engine hint it carries; refine (a pocket or a site id) keeps
+# every sites tool, forks ripple on the site's own engine and loads an exact
+# per-engine skill allowlist (the design skills, ``pocketpaw-site``, and only the
+# extra skills an engine needs); import-create is a create (the deny, its own exact allowlist).
 # Also pins the /sites authoring toolbelt allow-list and that every skill a profile
 # names resolves to a real skill.
 
@@ -70,17 +70,19 @@ _REFINE_SKILLS_BY_ENGINE = {
     "svelte": _DESIGN_SKILLS
     | {"pocketpaw-site", "pocketpaw-create-svelte-site", "webgl-components"},
     "react": _DESIGN_SKILLS | {"pocketpaw-site", "pocketpaw-edit-react-site", "webgl-components"},
-    "project": _DESIGN_SKILLS | {"pocketpaw-site", "webgl-components"},
+    "project": _DESIGN_SKILLS | {"pocketpaw-site", "webgl-components", "sites-app-plan"},
     None: _DESIGN_SKILLS
     | {
         "pocketpaw-site",
         "pocketpaw-create-svelte-site",
         "pocketpaw-edit-react-site",
         "webgl-components",
+        "sites-app-plan",
     },
 }
 
-_IMPORT_CREATE_SKILLS = _DESIGN_SKILLS | {"pocketpaw-site", "webgl-components"}
+# The app/game planning skill rides every create and the project refine.
+_IMPORT_CREATE_SKILLS = _DESIGN_SKILLS | {"pocketpaw-site", "webgl-components", "sites-app-plan"}
 
 # Legacy skills that teach what sites-check bans (popular badges, eyebrows,
 # "plausible copy"), or that build the wrong thing on a site. No refine and no
@@ -161,15 +163,17 @@ def test_completeness_check_fails_on_orphan_kind():
 def test_sites_create_is_one_profile_for_every_engine_hint():
     """Every new site is a project, so every create-time engine hint resolves to the
     SAME profile: ripple off, the old authoring tools denied on top of the file/shell
-    built-ins, and exactly the ``pocketpaw-site`` skill plus the design skills."""
+    built-ins, and exactly ``pocketpaw-site`` and ``sites-app-plan`` plus the design
+    skills."""
     for meta in _CREATE_METAS:
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert isinstance(profile, SurfaceProfile)
         assert profile.ripple_mode == "off", f"{meta!r}"
         assert _own_deny(profile) == _SITES_LEGACY_AUTHORING_DENY | _SITES_BUILTIN_DENY, f"{meta!r}"
-        assert profile.skill_names == frozenset({"pocketpaw-site"}) | _SITES_CREATE_DESIGN_SKILLS, (
-            f"{meta!r}"
-        )
+        assert (
+            profile.skill_names
+            == frozenset({"pocketpaw-site", "sites-app-plan"}) | _SITES_CREATE_DESIGN_SKILLS
+        ), f"{meta!r}"
 
 
 def test_sites_create_never_offers_an_old_engine_authoring_skill():
@@ -342,7 +346,7 @@ def test_sites_refine_never_offers_a_banned_legacy_skill():
         ("html", {"pocketpaw-site", "webgl-components"}),
         ("svelte", {"pocketpaw-create-svelte-site", "webgl-components"}),
         ("react", {"pocketpaw-edit-react-site", "webgl-components"}),
-        ("project", {"pocketpaw-site", "webgl-components"}),
+        ("project", {"pocketpaw-site", "webgl-components", "sites-app-plan"}),
     ],
 )
 def test_sites_refine_offers_what_each_engine_needs(engine, needed):
@@ -534,6 +538,7 @@ def test_every_surface_skill_name_resolves_to_a_real_skill():
         "pocketpaw-create-svelte-site",
         "pocketpaw-edit-react-site",
         "webgl-components",
+        "sites-app-plan",
     ):
         assert expected in referenced, (
             f"{expected} is no longer reachable from any resolved profile — either "

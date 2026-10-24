@@ -7176,7 +7176,12 @@ bundler) and picks a framework template when the site is an app (game, 3D/WebGL,
 canvas, simulation, editor, dashboard), needs npm packages, needs server logic,
 accounts or a database, or the user names a framework; `vite-react-hono` is the
 default for a client-heavy app with no server needs, and when unsure it picks the
-framework. It names the template and a one-line reason before starting. A create-time engine hint from the UI picks the template
+framework. It names the template and a one-line reason before starting. An app or game also
+loads the bundled `sites-app-plan` skill: the agent writes `PLAN.md` at the repo root (core
+loop, a small complete v1, screens and states, controls, tech, assets, milestones) before any
+UI file, checks it with the user through `ask_user`, then builds one milestone at a time with a
+build and a preview after each. A project refine on a repo with a `PLAN.md` picks up the next
+unticked milestone. A create-time engine hint from the UI picks the template
 (`handlers/sites.py::CREATE_ENGINE_TEMPLATE`):
 
 | Hint (`meta.engine`) | Template |

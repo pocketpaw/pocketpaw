@@ -37,6 +37,9 @@
 # ``_LOOK_RULE`` and ``_VERIFY_RULE``. The design skills are installed and named in
 # ``<design-skills>`` for on-demand loading, not embedded. ``_CONCIERGE_NOTE`` and
 # ``_WHATSAPP_ORDERS_RULE`` state platform facts the agent would otherwise guess.
+# ``_APP_PLAN_RULE`` (both create branches) sends an app or game through the
+# ``sites-app-plan`` skill: PLAN.md and a user check before any UI file, then
+# milestones; ``_APP_PLAN_REFINE_RULE`` picks the plan up on a project refine.
 #
 # Cache keys: create and chat read only ``meta`` (``meta_key``); refine and
 # import-create read live state, so they answer ``content_key`` of the rendered text.
@@ -983,14 +986,14 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         )
     else:
         pick = (
-            "Start from `static` only for content pages: landing and marketing pages, "
-            "portfolios, brochures, event or waitlist pages, a few pages with small "
-            "sprinkles of vanilla JS; no npm packages, no bundler. Pick a framework "
+            "Start from `static` only for content pages: landing, marketing, "
+            "portfolio, brochure, event or waitlist pages with a little vanilla JS; "
+            "no npm packages, no bundler. Pick a framework "
             "template by `when_to_use` when ANY of these hold: the site is an app "
             "rather than a page (a game, 3D/WebGL or canvas, a simulation, an editor, "
             "a tool, a dashboard, a multi-view app with client routing or real state); "
-            "it needs npm packages (three, @react-three/fiber, chart or editor "
-            "libraries, physics, animation beyond a CDN snippet); it needs server "
+            "it needs npm packages (three, @react-three/fiber, charts, "
+            "physics); it needs server "
             "logic, user accounts or its own database; or the user names a framework. "
             "For a client-heavy app with no server needs, prefer `vite-react-hono`; a "
             "named framework still wins. When unsure between `static` and a framework "
@@ -1003,6 +1006,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "BUILD via the `pocketpaw-site` skill. Invoke it by intent (no slash "
         "command); it carries the platform contract for every new site: the loop, "
         f"integrations, secrets and plan rules. {pick}\n"
+        + _APP_PLAN_RULE
         + _STORED_DATA_RULE
         + "If the skill is unavailable: "
         "`mcp__pocketpaw_sites_manager__list_site_templates`, then "
@@ -1110,11 +1114,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "lists need none); when one does, take it from "
         "`mcp__pocketpaw_icons__search_icons`, never an emoji. "
         "Wire the REAL returned URLs into the page — never leave "
-        "placeholders or invent asset paths. There is NO approved-media list and no "
-        "images-only rule: if the brief hands you a video, an animation, or any other "
-        "medium, it is yours to use. Render it in its native element. The only asset "
-        "rule is that a URL has to be one you were actually given rather than one you "
-        "made up.\n"
+        "placeholders or invent asset paths. Any medium the brief hands you (a video, "
+        "an animation) is yours to use, in its native element.\n"
         "4. BRIEF. State a one-line plan back in the user's own terms — e.g. "
         "'A one-page site for the studio that leads with the work and "
         "pushes to the enquiry form.' Then build.\n"
@@ -1149,14 +1150,14 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "the template, a build log that will not load): retry once, then tell the "
         "user plainly what failed.\n"
         f"- {_BLOCKED_RULE}"
-        "- ONE round of questions maximum. If the user already gave detail or "
+        "- ONE round of questions maximum (for an app, the plan check). If the "
+        "user already gave detail or "
         "says 'just build it', go straight to building with sensible "
         "defaults.\n"
         "- When you DO publish (the user asked), never claim a publish that "
         "didn't happen — relay the real publish error and show the real `url`. "
         "No phantom URLs. On the default draft path there is no `url` yet — point "
         "at the in-app Preview, don't invent a live link.\n"
-        "- Keep the 'site' / 'page' vocabulary throughout; never say 'pocket'.\n"
         "</sites-procedure>\n"
         f"{_CONCIERGE_NOTE}\n"
         f"{_design_skills_note('create')}"
@@ -1299,6 +1300,30 @@ _STORED_DATA_RULE = (
     "signup) is the lead form or `data-paw-subscribe`. Never fake either with "
     "localStorage, which only that visitor's browser sees; if this site cannot have "
     "a database, say the feature is not available here.\n"
+)
+
+#: The bundled skill that plans an app or game before its first UI file and builds it
+#: in milestones. Public because ``surface_registry._sites_profile`` grants it on
+#: every turn whose preamble names it (create, import-create, project refine).
+APP_PLAN_SKILL = "sites-app-plan"
+
+# Apps and games written in one pass came out big and half-built (a 3D horror game
+# with crude models, an unfinished world and no fun), because nothing made the agent
+# plan a core loop or build and look in increments. One short pointer, read by both
+# create branches; the detail (PLAN.md sections, the user check, the milestones, the
+# 3D rules) lives in the skill so the create preamble stays under its size budget.
+_APP_PLAN_RULE = (
+    "APPS AND GAMES (a game, 3D, a simulation, an editor, a tool, a dashboard): "
+    "load `" + APP_PLAN_SKILL + "` before any UI or game file. It plans in `PLAN.md`, "
+    "checks with the user, then builds one milestone at a time, never all in one pass.\n"
+)
+
+# The refine half: the user's go-ahead on the plan usually lands on the site's own
+# page, so a project refine is where most milestones get built.
+_APP_PLAN_REFINE_RULE = (
+    "A repo with a `PLAN.md` is an app built in milestones: read it, load `"
+    + APP_PLAN_SKILL
+    + "`, build the next unticked one, preview it and tick it.\n"
 )
 
 _CLOSING_RULE = (
@@ -1798,7 +1823,9 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "Treat the user's message as a change to this repo. Read before you edit: "
             f"`mcp__pocketpaw_sites_manager__list_site_files` with pocket_id `{pocket_id}`, "
             "then `read_site_files` on what you will touch (AGENTS.md first). NEVER call "
-            "`start_site_from_template` again: that mints a SECOND site.\n" + _PROJECT_LOOP
+            "`start_site_from_template` again: that mints a SECOND site.\n"
+            + _APP_PLAN_REFINE_RULE
+            + _PROJECT_LOOP
         )
         rules = _REFINE_SHARED_RULES
     else:
@@ -2004,7 +2031,8 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
     build_block = (
         "BUILD via the `pocketpaw-site` skill. Invoke it by intent (no slash command); "
         f"it carries the platform contract for every new site. {pick}\n"
-        "If the skill is unavailable: `mcp__pocketpaw_sites_manager__list_site_templates`, "
+        + _APP_PLAN_RULE
+        + "If the skill is unavailable: `mcp__pocketpaw_sites_manager__list_site_templates`, "
         "then `mcp__pocketpaw_sites_manager__start_site_from_template` ONCE (it returns "
         "the pocket_id and the repo's AGENTS.md), then follow the loop below. Never call "
         "an old per-engine create tool: every new site is a project.\n"

@@ -16,8 +16,8 @@ files you edit: no rippleSpec, pocket specialist or `create_*_site` tool.
 ## Pick the template
 
 Call `list_site_templates` and match `when_to_use`.
-- `static` only for content pages: landing, marketing, portfolio, brochure,
-  event or waitlist pages, a little vanilla JS. No npm packages, no bundler.
+- `static` only for content pages: landing, marketing, portfolio, brochure or
+  event pages, a little vanilla JS. No npm packages, no bundler.
 - A framework template when ANY hold: the site is an app, not a page (a game,
   3D/WebGL or canvas, simulation, editor, tool, dashboard, client routing or
   real state); it needs npm packages (three, @react-three/fiber, charts,
@@ -29,6 +29,11 @@ Call `list_site_templates` and match `when_to_use`.
   pick the framework.
 - State the template you chose and a one-line reason in your reply before
   calling `start_site_from_template`.
+
+## Apps and games
+
+Load `sites-app-plan`: write `PLAN.md` before any UI file, then build one
+milestone at a time.
 
 ## The loop
 
@@ -61,8 +66,8 @@ Call `list_site_templates` and match `when_to_use`.
 
 ## Integrations
 
-Services are connected, never keyed. `list_site_integrations` lists the
-providers; `connect_site_integration(pocket_id, provider, purpose)` puts a
+`list_site_integrations` lists the providers;
+`connect_site_integration(pocket_id, provider, purpose)` puts a
 Connect card in chat (built-ins like `newsletter` are on at once). Its reply
 says how to wire that provider: follow it. Never ask for an API key or use
 `request_site_secret` for one.
@@ -92,7 +97,7 @@ source): only names go in `.dev.vars.example`.
 
 A recipe's plan refusal: tell the user and build the rest. A site
 tool's plan refusal: say so in one sentence with its next step and stop; never
-paste the site into chat, name `__CAPTURE_API_BASE__`, or suggest another host.
+paste the site into chat or suggest another host.
 
 ## Library docs
 
