@@ -1,0 +1,74 @@
+{
+  "id": "serial-first-non-absent",
+  "asserts": "serial runs listeners in registration order and stops at the first non-absent result; later listeners never run.",
+  "semantics": "\u00a75",
+  "plugins": {
+    "a": {
+      "listeners": [
+        {
+          "event": "sev",
+          "mode": "serial",
+          "id": "L1",
+          "action": "absent"
+        }
+      ]
+    },
+    "b": {
+      "listeners": [
+        {
+          "event": "sev",
+          "mode": "serial",
+          "id": "L2",
+          "action": "value",
+          "value": "B"
+        }
+      ]
+    },
+    "c": {
+      "listeners": [
+        {
+          "event": "sev",
+          "mode": "serial",
+          "id": "L3",
+          "action": "value",
+          "value": "C"
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "op": "mount",
+      "plugin": "c"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispatch",
+      "event": "sev",
+      "mode": "serial",
+      "expect_result": "B"
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:ACTIVE",
+    "b:LOADING",
+    "b:ACTIVE",
+    "c:LOADING",
+    "c:ACTIVE",
+    "a:listener:L1:enter",
+    "a:listener:L1:exit",
+    "b:listener:L2:enter",
+    "b:listener:L2:exit"
+  ]
+}
