@@ -449,3 +449,10 @@ async def test_a_scanned_asset_lists_its_scenes_and_sound() -> None:
     assert "    sound: 0.0-1.0s silent · 1.0-9.8s loud, voice-like" in preamble
     assert _rail_row_for(preamble, "beach.mp4")
 
+
+async def test_the_procedure_says_scene_lines_are_heuristics_and_names_the_sheet() -> None:
+    flat = " ".join((await _render(_timeline())).split())
+
+    assert "not from watching it" in flat
+    assert "SOURCE time inside that asset" in flat
+    assert "<asset>-scenes.jpg" in flat

@@ -449,6 +449,14 @@ Rules that matter:
   above and the user says "add these", "put this on the timeline" or "use it",
   those assets are the ones — place them in the ORDER LISTED, and place all of
   them unless the user narrowed it.
+- SCENES AND SOUND ARE ROUGH. The `scenes:` and `sound:` lines under a rail
+  row come from pixel and loudness maths on the file, not from watching it:
+  cut times, light, main colour, motion, silent/quiet/loud, and a voice-like
+  guess. Times are SOURCE time inside that asset, so map a clip's inMs/outMs
+  onto them before you trim or split. When the turn carries an image named
+  `<asset>-scenes.jpg`, it is one frame from the middle of each scene, numbered
+  and labelled with the same time ranges: use it to say who and what is on
+  screen. If neither tells you enough, ask the user rather than guess.
 - A TRANSITION IS EXPLICIT. Clips touching or overlapping does not create one.
   Use set_transition, and only when the user asked for one.
 - COPY IDS EXACTLY as they appear above (the `…` prefix and all).
