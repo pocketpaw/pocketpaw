@@ -199,6 +199,52 @@ async def test_create_without_a_hint_sends_client_heavy_apps_to_a_framework() ->
     assert "state the template you chose and a one-line reason" in lower
 
 
+@pytest.mark.parametrize("engine", _CREATE_HINTS)
+async def test_create_plans_apps_and_games_before_building(engine: str | None) -> None:
+    """Regression: a "3D horror game" brief was written in one pass (crude models, an
+    unfinished world, no fun) because nothing made the agent plan. Every create, on
+    every engine hint, sends an app or game through ``sites-app-plan``: PLAN.md and
+    a user check BEFORE any UI file, then milestones, never one pass. The rule is a
+    short pointer (the preamble has a size budget); the detail lives in the skill.
+
+    THE MUTATION THAT BREAKS THIS: drop ``_APP_PLAN_RULE`` from ``build_step``."""
+    preamble = await _preamble_for(engine)
+    rule = sites_handler._APP_PLAN_RULE
+    assert rule in preamble, engine
+    assert "`sites-app-plan`" in rule
+    for trigger in ("a game", "3D", "a simulation", "an editor", "a tool", "a dashboard"):
+        assert trigger in rule, trigger
+    assert "`PLAN.md`" in rule and "before any UI or game file" in rule
+    assert "checks with the user" in rule
+    assert "one milestone at a time" in rule and "never all in one pass" in rule
+    assert len(rule) < 300, len(rule)
+    # Stated once: the rule rides the build step, not a second copy elsewhere.
+    assert preamble.count(rule) == 1, engine
+    # The plan check is the app's one round of questions, not a second one.
+    assert "ONE round of questions maximum (for an app, the plan check)" in preamble
+
+
+@pytest.mark.parametrize("pattern", ["landing", "dynamic"])
+async def test_frontend_preamble_plans_apps_and_games(pattern: str) -> None:
+    """The brief-driven create is the second create branch; it reads the same rule."""
+    brief = _landing_brief().model_copy(update={"pattern": pattern})
+    preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
+    assert preamble.count(sites_handler._APP_PLAN_RULE) == 1
+
+
+async def test_project_refine_continues_the_app_plan() -> None:
+    """The plan check's go-ahead usually lands on the site's own page, so a project
+    refine reads PLAN.md and builds the next milestone through the same skill. Only
+    the project lane carries it: older engines never had a plan."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), "project")
+    assert sites_handler._APP_PLAN_REFINE_RULE in preamble
+    assert "`sites-app-plan`" in sites_handler._APP_PLAN_REFINE_RULE
+    assert "`PLAN.md`" in sites_handler._APP_PLAN_REFINE_RULE
+    for engine in ("html", "svelte", "react", "ripple"):
+        other = sites_handler._refine_preamble(_refine_meta(), engine)
+        assert "sites-app-plan" not in other, engine
+
+
 async def test_new_static_sites_carry_the_lead_form_contract() -> None:
     """`static` has no server route, so its contact form posts to the capture
     endpoint with placeholders the project publish resolves

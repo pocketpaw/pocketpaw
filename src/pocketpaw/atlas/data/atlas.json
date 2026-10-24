@@ -2361,6 +2361,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /sites-app-plan in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-app-plan",
+      "keywords": [
+        "sites-app-plan"
+      ],
+      "kind": "skill",
+      "name": "sites-app-plan",
+      "narrative": "Plan an APP or GAME on a Paw Site before building it, then build it in milestones you check by looking. Invoke when the site is an app rather than a page: a game (2D, 3D, WebGL, three.js, React Three Fiber, canvas), a simulation, an editor, a tool, a calculator or configurator, a dashboard, or any multi-view app with real state. It makes you write PLAN.md (concept, core loop, a small complete v1, screens and states, controls, tech with versions from current docs, assets, milestones), confirm it with the user, then build one milestone at a time with a build and a preview after each. It also holds the 3D and game quality rules: assets, lighting, atmosphere, frame budget, start screen, code layout. Not for content pages (landing, portfolio, brochure): those skip planning.",
+      "requires": [],
+      "summary": "Plan an APP or GAME on a Paw Site before building it, then build it in milestones you check by looking.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /sites-check in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:sites-check",
       "keywords": [

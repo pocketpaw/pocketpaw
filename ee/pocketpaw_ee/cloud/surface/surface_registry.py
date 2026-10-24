@@ -869,6 +869,11 @@ _SITES_CREATE_SKILL = "pocketpaw-site"
 # same names; pinned by ``test_sites_create_skill_names_cover_the_advertised_skills``.
 _SITES_CREATE_DESIGN_SKILLS: frozenset[str] = sites.create_design_skill_names()
 
+# The app/game planning skill. Both create branches name it in ``_APP_PLAN_RULE``
+# and the project refine names it in ``_APP_PLAN_REFINE_RULE`` (the milestones after
+# the plan check usually land on the site's own page), so all three grant it.
+_SITES_APP_PLAN_SKILL = sites.APP_PLAN_SKILL
+
 #: Engines whose refine edits a ``source`` map (no widget spec), so refine drops ripple.
 _SITES_SOURCE_REFINE_ENGINES: frozenset[str] = frozenset({"html", "svelte", "react", "project"})
 
@@ -897,7 +902,8 @@ _SITES_REFINE_DESIGN_SKILLS: frozenset[str] = sites.refine_design_skill_names()
 #     generated ``$lib/paw/``) are in no preamble, and a D1-backed svelte site cannot
 #     be edited correctly without the latter.
 #   * react: ``pocketpaw-edit-react-site`` + ``webgl-components``.
-#   * project: ``webgl-components``; ``pocketpaw-site`` is the project contract.
+#   * project: ``webgl-components`` and ``sites-app-plan``; ``pocketpaw-site`` is the
+#     project contract.
 #   * unknown (the pocket read failed, or a ``site_id``-only refine): the union of
 #     the above, because the agent reads the pocket first and may land on any of them.
 _SITES_REFINE_ENGINE_SKILLS: dict[str, frozenset[str]] = {
@@ -905,7 +911,7 @@ _SITES_REFINE_ENGINE_SKILLS: dict[str, frozenset[str]] = {
     "html": frozenset({"webgl-components"}),
     "svelte": frozenset({"pocketpaw-create-svelte-site", "webgl-components"}),
     "react": frozenset({"pocketpaw-edit-react-site", "webgl-components"}),
-    "project": frozenset({"webgl-components"}),
+    "project": frozenset({"webgl-components", _SITES_APP_PLAN_SKILL}),
 }
 _SITES_REFINE_UNKNOWN_ENGINE_SKILLS: frozenset[str] = frozenset().union(
     *_SITES_REFINE_ENGINE_SKILLS.values()
@@ -917,7 +923,8 @@ _SITES_REFINE_UNKNOWN_ENGINE_SKILLS: frozenset[str] = frozenset().union(
 # preamble, which needs the same skills. ``webgl-components`` stays for a rebuilt
 # page whose source had a canvas or shader visual.
 _SITES_IMPORT_CREATE_SKILLS: frozenset[str] = (
-    frozenset({_SITES_CREATE_SKILL, "webgl-components"}) | _SITES_CREATE_DESIGN_SKILLS
+    frozenset({_SITES_CREATE_SKILL, "webgl-components", _SITES_APP_PLAN_SKILL})
+    | _SITES_CREATE_DESIGN_SKILLS
 )
 
 
@@ -945,7 +952,8 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
         project from a template.
       * CREATE (none of those): every new site is a project. Ripple off, the old
         authoring tools denied (``_SITES_LEGACY_AUTHORING_DENY``), and exactly the
-        ``pocketpaw-site`` skill plus the create-scoped design skills. The create
+        ``pocketpaw-site`` and ``sites-app-plan`` skills plus the create-scoped
+        design skills. The create
         hint in ``meta.engine`` only picks a template in the preamble; it never
         changes this profile.
 
@@ -971,7 +979,8 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
         ripple_mode="off",
         allow_mcp_tool_ids=sites_allow,
         deny_mcp_tool_ids=_SITES_LEGACY_AUTHORING_DENY | _SITES_BUILTIN_DENY,
-        skill_names=frozenset({_SITES_CREATE_SKILL}) | _SITES_CREATE_DESIGN_SKILLS,
+        skill_names=frozenset({_SITES_CREATE_SKILL, _SITES_APP_PLAN_SKILL})
+        | _SITES_CREATE_DESIGN_SKILLS,
     )
 
 

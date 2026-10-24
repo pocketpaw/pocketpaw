@@ -1,9 +1,13 @@
 # tests/ee/agent/test_sites_mcp_server/test_site_skill_contract.py — the platform
 # contract every NEW site is built on.
 #
-# Pins three things the one-site model depends on:
+# Pins four things the one-site model depends on:
 #   * the ``pocketpaw-site`` bundled skill stays under its byte cap and carries the
-#     loop, the template rule and the integrations/secrets contract;
+#     loop, the template rule, the pointer to ``sites-app-plan`` for apps and games,
+#     and the integrations/secrets contract;
+#   * the ``sites-app-plan`` bundled skill exists with valid frontmatter, stays
+#     under 500 lines, and carries the plan, the user check, the milestones and the
+#     3D/game quality rules;
 #   * ``connect_site_integration``'s per-provider wiring (``_INTEGRATION_NEXT_STEPS``)
 #     has a line for EVERY registered provider, naming each public action the
 #     provider really exposes, in client (paw.js) and server (``pawCall``) form;
@@ -17,7 +21,8 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 #: The skill is loaded on every new-site turn; keep it well under the old project
-#: skill's 6,000-byte cap. Raising it needs a reason in the commit body.
+#: skill's 6,000-byte cap. Raising it needs a reason in the commit body (5,200: room
+#: for the app-plan pointer and the preview_site parameters).
 SITE_SKILL_MAX_BYTES = 5_200
 
 
@@ -103,6 +108,84 @@ def test_the_site_skill_sends_client_heavy_apps_to_a_framework() -> None:
     assert "when unsure between `static` and a framework" in lower
     assert "pick the framework" in lower
     assert "state the template you chose and a one-line reason" in lower
+
+
+def test_the_site_skill_sends_apps_and_games_to_the_plan_skill() -> None:
+    """An app or game is planned before it is built: the pointer sits right after
+    the template rule, so it is read at the moment a framework is picked."""
+    text = _site_skill().read_text("utf-8")
+    pick = text.index("## Pick the template")
+    apps = text.index("## Apps and games")
+    loop = text.index("## The loop")
+    assert pick < apps < loop
+    section = " ".join(text[apps:loop].split())
+    assert "`sites-app-plan`" in section
+    assert "`PLAN.md`" in section
+    assert "before any UI" in section
+    assert "one milestone at a time" in section
+
+
+def _app_plan_skill():
+    return _site_skill().parent.parent / "sites-app-plan" / "SKILL.md"
+
+
+def test_the_app_plan_skill_has_valid_frontmatter() -> None:
+    import yaml
+
+    text = _app_plan_skill().read_text("utf-8")
+    assert text.startswith("---\nname: sites-app-plan\n")
+    _, front, body = text.split("---", 2)
+    meta = yaml.safe_load(front)
+    assert meta["name"] == "sites-app-plan"
+    description = meta["description"].lower()
+    for trigger in ("game", "3d", "webgl", "simulation", "editor", "tool", "dashboard"):
+        assert trigger in description, trigger
+    assert "multi-view" in description
+    assert len(text.splitlines()) < 500
+    assert body.strip()
+
+
+def test_the_app_plan_skill_plans_before_it_builds() -> None:
+    text = _app_plan_skill().read_text("utf-8")
+    lower = text.lower()
+    # The plan, before any UI file, with every section the brief needs.
+    assert "PLAN.md" in text and "before you write a component" in lower
+    for section in (
+        "core loop",
+        "v1 scope",
+        "screens and states",
+        "controls",
+        "tech",
+        "assets",
+        "milestones",
+    ):
+        assert section in lower, section
+    assert "never guess" in lower and "web search" in lower
+    # The user check, then a stop.
+    assert "mcp__pocketpaw_ask__ask_user" in text
+    assert "Build this plan" in text and "Change the scope" in text
+    assert "STOP" in text and "just build it" in text
+    # Milestones, each built and looked at.
+    for milestone in ("**M1", "**M2", "**M3", "**M4"):
+        assert milestone in text, milestone
+    assert "greybox" in lower
+    for tool in ("run_site_build", "preview_site", "patch_site_file", "list_site_assets"):
+        assert tool in text, tool
+    assert "`path`" in text and "`wait_ms`" in text
+    assert "never call a milestone done without having seen it" in lower
+    # 3D and game quality rules.
+    assert "never hand-type vertex data" in lower
+    for source in ("Kenney", "Quaternius", "Poly Pizza"):
+        assert source in text, source
+    assert "licence" in lower
+    assert "flashlight" in lower and "fog" in lower
+    assert "pixel ratio" in lower and "instance" in lower and "dispose" in lower
+    assert "user gesture" in lower and "pointer lock" in lower
+    assert "no single giant file" in lower
+    # Non-game apps, and the shared rules referred to rather than restated.
+    assert "apps that are not games" in lower
+    assert "facts rule" in lower and "stored-data rule" in lower
+    assert "localStorage" in text
 
 
 def _registered_providers():
