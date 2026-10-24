@@ -7070,6 +7070,10 @@ agent calls it once at the end of a turn's edits, after a fix, or after an
 |-----|------|-------|
 | `pocket_id` | string | Required. |
 | `device` | `desktop` \| `mobile` | Optional, default `desktop` (1280px); `mobile` is 390px. |
+| `path` | string | Optional route on a template-built draft (`/play`, `/about`): one leading `/`, no scheme, host, `//`, backslash, `..` or `#`. Ignored on one-page html, svelte and react drafts. |
+| `wait_ms` | integer | Optional settle wait before the shutter, clamped to 0-8000. Defaults to 1500 on template-built drafts so canvas, WebGL and client-routed pages can draw. |
+
+A template-built (project) draft is photographed at its own `preview_url` with its scripts running; a `published` draft uses the live URL. With no address, the tool says to call `run_site_build` first (still building or failed) or that there is no static page before publish (`server_only`).
 
 Returns MCP `image` blocks (a full-page JPEG screenshot of the current draft, cut
 into at most three tiles, top first; the capture waits for the page's `load` event)
@@ -7088,6 +7092,43 @@ for svelte and react. Errors, none of which mean the site is broken:
 - Cloudflare Browser Rendering is not configured (`PAW_CF_ACCOUNT_ID` /
   `PAW_CF_API_TOKEN` / `PAW_CF_ZONE_ID`): screenshots are unavailable on this
   deployment.
+
+#### `play_test_site`
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. A template-built (`engine: "project"`) site. |
+| `path` | string | Optional route on the draft, validated like `preview_site`'s (one leading `/`, no host, `//`, backslash or `..`). |
+| `device` | `desktop` \| `mobile` | Optional, default `desktop` (1280x800); `mobile` is 390x844 with touch (clicks become taps). |
+| `steps` | array | Optional, at most 25. Each step is exactly one action, below. |
+
+Steps: `{"click": "<css selector>"}` or `{"click": {"x", "y"}}`; `{"press": "<Playwright
+key>", "hold_ms"?: 0-3000}` (a hold is keydown, wait, keyup); `{"type": {"selector",
+"text"}}` (text up to 200 chars); `{"mouse_move": {"dx", "dy"}}` (relative, within
+±2000); `{"scroll": {"dy"}}` (within ±5000); `{"wait": 0-5000}` ms; `{"screenshot":
+"<label>"}` (at most 4). Waits and holds may total 40 s. A bad step is refused with its
+number and the expected shape before anything connects.
+
+The tool opens ONLY the pocket's own draft `preview_url` (resolved as `preview_site`
+does) in Cloudflare Browser Run over CDP
+(`wss://api.cloudflare.com/client/v4/accounts/{id}/browser-run/devtools/browser`,
+`keep_alive=75000`), never a browser on the API host. It navigates with
+`wait_until: load` plus a 1 s settle, then plays the steps; a failed step is logged and
+the run continues unless the page closes. Returns MCP `image` blocks (viewport JPEGs,
+one per `screenshot` step, or one `final` shot when there were none), then one text
+block: the step log, uncaught page errors, console errors and warnings, failed
+requests and HTTP responses >= 400 (each list deduped, at most 20 entries of 300 chars,
+fenced as untrusted page output), an approximate frame rate from a
+`requestAnimationFrame` counter, and a flag on any screenshot whose largest canvas is
+one flat colour. Nothing is stored.
+
+Limits: about 60 s per run (later steps are skipped and reported), two runs at a time
+per API process, 30 runs per workspace per hour (in memory). The remote session is
+closed when the run ends. Errors, none of which mean the site is broken: no preview
+address yet (the same build-first / server-only answers as `preview_site`), a site
+that is not template-built, the hourly limit, and Cloudflare not configured or the CDP
+connect failing ("play-testing is unavailable on this deployment"). The token needs
+`Browser Rendering - Edit`, the permission screenshots already use.
 
 #### `GET /sites/by-pocket/{pocket_id}/status` — `verification`
 

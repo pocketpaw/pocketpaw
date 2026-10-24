@@ -12,7 +12,8 @@
 # stay registered for refining sites that already exist on those engines.
 #
 # Shared by every engine: ``verify_site`` / ``preview_site`` (the three-layer
-# verdict and a screenshot of the draft), ``set_site_dependencies`` (the only writer
+# verdict and a screenshot of the draft; ``play_test_site`` in sites_play_test.py
+# reuses the preview target helpers), ``set_site_dependencies`` (the only writer
 # of ``paw.dependencies.json``), ``list_site_assets``, ``request_site_secret`` /
 # ``list_site_secrets`` (names and status only, never values), and
 # ``list_site_integrations`` / ``connect_site_integration`` (one-click Connect: the
@@ -122,6 +123,8 @@ VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 
 # Screenshot the current draft so the agent can see what it built. Same server.
 PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
+# Play the draft in a remote browser (sites_play_test.py). Same server.
+PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
 
 # Site secrets: ask the owner for one by name, list names + status. No values.
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
@@ -144,6 +147,7 @@ SITES_CREATE_TOOL_IDS = (
     SET_SITE_DEPENDENCIES_TOOL_ID,
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
+    PLAY_TEST_SITE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
     LIST_SITE_INTEGRATIONS_TOOL_ID,
@@ -696,7 +700,7 @@ def _plan_refusal_op(tool: str) -> str:
     a create on a read or an edit."""
     if tool.startswith("create_") or tool == "start_site_from_template":
         return "create"
-    if tool.startswith(("list_", "read_", "get_", "verify_", "preview_")):
+    if tool.startswith(("list_", "read_", "get_", "verify_", "preview_", "play_test_")):
         return "read"
     return "edit"
 
@@ -3236,13 +3240,16 @@ def _preview_wait_ms(raw: Any) -> tuple[int | None, str]:
     return max(0, min(int(raw), _PREVIEW_MAX_WAIT_MS)), ""
 
 
-def _project_preview_target(artifact: dict[str, Any]) -> tuple[str, str]:
+def _project_preview_target(
+    artifact: dict[str, Any], tool: str = "preview_site"
+) -> tuple[str, str]:
     """A project draft's page address, or ``("", reason)``.
 
     The draft is served from its preview origin (``preview_origin.py``): the real
     page, root-absolute assets and scripts included. A published site whose drafts
     were purged answers with its live URL. Without an address the reason says why
-    and what to do, and never that the site is broken."""
+    and what to do (call ``tool`` again after the build), and never that the site
+    is broken."""
     url = artifact.get("preview_url")
     if isinstance(url, str) and url.startswith(("https://", "http://")):
         return url, ""
@@ -3257,12 +3264,12 @@ def _project_preview_target(artifact: dict[str, Any]) -> tuple[str, str]:
     if status == "failed":
         return "", (
             "the draft's last build failed, so there is no page to photograph. Read the "
-            "build log, fix, call run_site_build again, then call preview_site again."
+            f"build log, fix, call run_site_build again, then call {tool} again."
         )
     if status in _PREVIEW_BUILD_PENDING or mode is None:
         return "", (
             f"the draft has no built page yet (build {status}). Call run_site_build and "
-            "wait for `built`, then call preview_site again. This does not mean the "
+            f"wait for `built`, then call {tool} again. This does not mean the "
             "site is broken."
         )
     return "", (
@@ -3277,6 +3284,19 @@ def _join_preview_url(base: str, path: str) -> str:
     if not path:
         return base
     return base.split("?", 1)[0].split("#", 1)[0].rstrip("/") + path
+
+
+async def _project_draft_url(
+    *, workspace_id: str, user_id: str, pocket_id: str, tool: str = "preview_site"
+) -> tuple[str, str]:
+    """A project pocket's draft address (``(url, "")``) or ``("", reason)``: the only
+    page ``preview_site`` and ``play_test_site`` ever open."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    artifact = await sites_service.get_native_artifact(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+    return _project_preview_target(artifact, tool)
 
 
 async def _draft_document(
@@ -3299,10 +3319,9 @@ async def _draft_document(
 
     engine = normalize_engine(pocket.get("engine"))
     if engine == "project":
-        artifact = await sites_service.get_native_artifact(
+        url, reason = await _project_draft_url(
             workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
         )
-        url, reason = _project_preview_target(artifact)
         return "", url, reason
 
     stub = SimpleNamespace(pocket_id=pocket_id, owner=user_id, id=pocket_id, name="")
@@ -4238,6 +4257,7 @@ __all__ = [
     "HTML_REQUIRED_KEYS",
     "LIST_SITE_INTEGRATIONS_TOOL_ID",
     "LIST_SITE_SECRETS_TOOL_ID",
+    "PLAY_TEST_SITE_TOOL_ID",
     "REACT_REQUIRED_KEYS",
     "REACT_RESERVED_FILES",
     "REACT_RESERVED_PREFIX",

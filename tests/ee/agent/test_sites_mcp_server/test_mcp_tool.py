@@ -162,7 +162,12 @@ class TestSitesMcpServerRegistration:
 
         assert LIST_SITE_INTEGRATIONS_TOOL_ID in SITES_TOOL_IDS
         assert CONNECT_SITE_INTEGRATION_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 31
+        # Playing the draft (keys, clicks, console errors) in a remote browser.
+        from pocketpaw_ee.agent.mcp_servers.sites import PLAY_TEST_SITE_TOOL_ID
+
+        assert PLAY_TEST_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__play_test_site"
+        assert PLAY_TEST_SITE_TOOL_ID in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 32
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk
