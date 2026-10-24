@@ -2,7 +2,8 @@
 # (``sites/files_router.py``), end to end against a mongomock pocket: the auth matrix
 # (no session, no membership, another workspace, a private pocket), path safety, the
 # size caps, the non-project refusal, exact-once patching, and that a write changes the
-# content hash and queues that hash's draft build. Only the arq enqueue is stubbed.
+# content hash and queues that hash's draft build, and the raw PLAN.md read behind the
+# chat's plan artifact. Only the arq enqueue is stubbed.
 from __future__ import annotations
 
 import json
@@ -442,6 +443,78 @@ async def test_package_json_and_missing_files(beanie_test_db, enqueued) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The raw PLAN.md read (the chat's plan artifact opens it)
+# ---------------------------------------------------------------------------
+
+SOURCE_FILE = "/api/v1/sites/by-pocket/{pid}/source-file"
+PLANNED = {**SOURCE, "PLAN.md": "# Plan\n\n- [ ] Milestone 1\n", "docs/PLAN.md": "# nested\n"}
+
+
+async def test_source_file_serves_the_current_plan_as_markdown(beanie_test_db, enqueued) -> None:
+    pid = await _pocket(source=PLANNED)
+    async with _client(_app()) as c:
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.status_code == 200, r.text
+        assert r.text == PLANNED["PLAN.md"]
+        assert r.headers["content-type"] == "text/markdown; charset=utf-8"
+        assert r.headers["cache-control"] == "no-store"
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+        r = await c.post(
+            f"{BASE.format(pid=pid)}/patch",
+            json={"path": "PLAN.md", "edits": [{"old": "- [ ]", "new": "- [x]"}]},
+        )
+        assert r.status_code == 200, r.text
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.text == "# Plan\n\n- [x] Milestone 1\n"
+
+
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [
+        ("docs/PLAN.md", "sites.source_file_not_allowed"),
+        ("AGENTS.md", "sites.source_file_not_allowed"),
+        ("package.json", "sites.source_file_not_allowed"),
+        ("../PLAN.md", "sites.project_bad_path"),
+        ("/PLAN.md", "sites.project_bad_path"),
+        (".env", "sites.project_bad_path"),
+        ("a\x00b", "sites.project_bad_path"),
+    ],
+)
+async def test_source_file_refuses_every_other_path(beanie_test_db, enqueued, path, code) -> None:
+    pid = await _pocket(source=PLANNED)
+    async with _client(_app()) as c:
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": path})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == code
+
+
+async def test_source_file_missing_oversize_and_binary(
+    beanie_test_db, enqueued, monkeypatch
+) -> None:
+    async with _client(_app()) as c:
+        pid = await _pocket()
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.status_code == 404, r.text
+
+        pid = await _pocket(source={**SOURCE, "PLAN.md": "a\x00b"})
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.status_code == 422 and r.json()["error"]["code"] == "sites.source_file_binary"
+
+        monkeypatch.setattr(project_tools, "MAX_SOURCE_FILE_BYTES", 4)
+        pid = await _pocket(source=PLANNED)
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.status_code == 422 and r.json()["error"]["code"] == "sites.source_file_too_large"
+
+
+async def test_source_file_refuses_a_non_project_pocket(beanie_test_db, enqueued) -> None:
+    pid = await _pocket(engine="html", source={"index.html": "<p>x</p>", "PLAN.md": "# p\n"})
+    async with _client(_app()) as c:
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "sites.not_a_project"
+
+
+# ---------------------------------------------------------------------------
 # Auth matrix
 # ---------------------------------------------------------------------------
 
@@ -451,6 +524,7 @@ async def _every_route(c: AsyncClient, pid: str) -> list:
     return [
         await c.get(url),
         await c.get(f"{url}/content", params={"path": "AGENTS.md"}),
+        await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"}),
         await c.put(url, json={"files": {"x.ts": "1"}}),
         await c.post(
             f"{url}/patch", json={"path": "AGENTS.md", "edits": [{"old": "map", "new": "m"}]}
@@ -511,7 +585,8 @@ async def test_every_route_carries_the_guards() -> None:
     from pocketpaw_ee.sites.files_router import router
 
     routes = [r for r in router.routes if getattr(r, "path", "").startswith("/sites/")]
-    assert len(routes) == 8  # five file routes, visual-edit, edit-session start and end
+    # five file routes, the raw PLAN.md read, visual-edit, edit-session start and end
+    assert len(routes) == 9
     for route in routes:
         deps = [repr(d.call) for d in route.dependant.dependencies]
         assert any("request_context" in d for d in deps), (route.path, deps)

@@ -165,6 +165,9 @@ def test_the_app_plan_skill_plans_before_it_builds() -> None:
     assert "mcp__pocketpaw_ask__ask_user" in text
     assert "Build this plan" in text and "Change the scope" in text
     assert "STOP" in text and "just build it" in text
+    # The plan shows in chat as a card, so the summary stays short and the card current.
+    assert "PLAN.md card" in text and "never paste the plan" in lower
+    assert "3 to 5 line" in text
     # Milestones, each built and looked at.
     for milestone in ("**M1", "**M2", "**M3", "**M4"):
         assert milestone in text, milestone

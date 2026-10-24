@@ -5,9 +5,12 @@
 # many, patch one with exact-once ``{old, new}`` blocks, delete many. Each is a thin
 # shell over ``sites.project_tools``, the same functions the agent's file tools call,
 # so the path policy, size caps, lockfile rule and "every write queues the draft build"
-# behaviour cannot drift between the two. A sixth, ``POST .../visual-edit``, applies a
-# preview click's edit to the stamped source file (``sites.visual_edit``) and saves it
-# through the same writer, renewing the pocket's edit session. ``POST`` / ``DELETE
+# behaviour cannot drift between the two. ``GET .../source-file?path=PLAN.md`` serves
+# the agent's plan as raw ``text/markdown`` (``no-store``, ``nosniff``) for the chat's
+# PLAN.md artifact card; it reads only that file (``project_tools.read_source_file``).
+# ``POST .../visual-edit`` applies a preview click's edit to the stamped source file
+# (``sites.visual_edit``) and saves it through the same writer, renewing the pocket's
+# edit session. ``POST`` / ``DELETE
 # .../edit-session`` start (or renew) and end that session: while it lasts a framework
 # draft builds its source-tagged copy, and outside it only the untagged bundle.
 #
@@ -25,6 +28,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
@@ -79,6 +83,27 @@ async def read_project_file(
         workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, paths=[path]
     )
     return ProjectFileContentResponse(**files[0])
+
+
+@router.get("/sites/by-pocket/{pocket_id}/source-file")
+async def read_project_source_file(
+    pocket_id: str,
+    path: str = Query(..., min_length=1, max_length=512),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> Response:
+    """The draft's current ``PLAN.md`` as raw ``text/markdown``: what the chat's PLAN.md
+    artifact card opens, so it always shows the latest plan. Any other path is a 422
+    (``sites.source_file_not_allowed``, or ``sites.project_bad_path`` for one the file
+    tools refuse), a missing file a 404. Never cached; ``nosniff`` keeps it text."""
+    text = await project_tools.read_source_file(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, path=path
+    )
+    return Response(
+        content=text.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.put(_FILES, response_model=ProjectFileWriteResponse)
