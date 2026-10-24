@@ -59,6 +59,13 @@ MAX_READ_FILE_BYTES = 200_000
 MAX_READ_CALL_BYTES = 400_000
 MAX_PATH_CHARS = 512
 
+#: The agent's plan for an app or game (the ``sites-app-plan`` skill), at the repo root.
+#: The only file :func:`read_source_file` serves, and the one the agent's file tools
+#: show in chat as an artifact card.
+PLAN_FILE = "PLAN.md"
+#: The most :func:`read_source_file` returns (a write is already capped at the same).
+MAX_SOURCE_FILE_BYTES = MAX_WRITE_FILE_BYTES
+
 #: Lockfiles a dependency change makes stale.
 LOCKFILES = ("bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")
 _DEP_KEYS = (
@@ -723,6 +730,30 @@ async def read_files(
     ]
 
 
+async def read_source_file(*, workspace_id: str, user_id: str, pocket_id: str, path: Any) -> str:
+    """One draft file's current text for the raw read route. Only :data:`PLAN_FILE`
+    is served: any other path that passes :func:`normalize_path` is a 422
+    ``sites.source_file_not_allowed`` (a bad path is ``sites.project_bad_path``), a
+    missing file is a 404, and text past :data:`MAX_SOURCE_FILE_BYTES` or holding a NUL
+    is a 422. Same pocket resolution as :func:`read_files`."""
+    rel = normalize_path(path)
+    if rel != PLAN_FILE:
+        raise ValidationError(
+            "sites.source_file_not_allowed", f"Only {PLAN_FILE} can be read this way."
+        )
+    (file,) = await read_files(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, paths=[rel]
+    )
+    if file["size"] > MAX_SOURCE_FILE_BYTES:
+        raise ValidationError(
+            "sites.source_file_too_large",
+            f"{rel} is larger than {MAX_SOURCE_FILE_BYTES} bytes.",
+        )
+    if "\x00" in file["content"]:
+        raise ValidationError("sites.source_file_binary", f"{rel} is not a text file.")
+    return file["content"]
+
+
 async def write_files(
     *,
     workspace_id: str,
@@ -761,6 +792,7 @@ async def write_files(
     return {
         "pocket_id": pocket_id,
         "written": sorted(writes),
+        "sizes": {p: _text_bytes(writes[p]) for p in sorted(writes)},
         "created": sorted(p for p in writes if p not in source),
         "lockfile_removed": dropped,
         "hashes": {p: file_hash(writes[p]) for p in sorted(writes)},
@@ -815,6 +847,7 @@ async def patch_file(
         "path": rel,
         "lockfile_removed": dropped,
         "hashes": {rel: file_hash(new_text)},
+        "sizes": {rel: _text_bytes(new_text)},
         "verification": await build_verification(
             workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         ),
@@ -869,6 +902,7 @@ __all__ = [
     "normalize_bases",
     "patch_file",
     "read_files",
+    "read_source_file",
     "save_changes",
     "source_of",
     "write_files",
@@ -876,8 +910,10 @@ __all__ = [
     "LOCKFILES",
     "MAX_READ_CALL_BYTES",
     "MAX_READ_FILE_BYTES",
+    "MAX_SOURCE_FILE_BYTES",
     "MAX_WRITE_CALL_BYTES",
     "MAX_WRITE_FILE_BYTES",
+    "PLAN_FILE",
     "ProjectCliError",
     "apply_recipe",
     "check_project_totals",

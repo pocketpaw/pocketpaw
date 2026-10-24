@@ -556,15 +556,24 @@ def collect_delivered_artifacts() -> Iterator[list[dict[str, Any]]]:
         detach_delivered_artifacts_collector(token)
 
 
-def record_delivered_artifact(meta: dict[str, Any]) -> None:
+def record_delivered_artifact(meta: dict[str, Any], *, replace: bool = False) -> None:
     """Append one successful delivery's ``meta`` (file_id/name/mime/size) to the
     active run's collector. No-op when unbound (a deliver call outside a chat
     run). Never raises — a collector hiccup must not fail an otherwise-successful
-    delivery."""
+    delivery.
+
+    ``replace=True`` is for an artifact that tracks a file the run keeps editing
+    (a project site's PLAN.md): an entry with the same ``file_id`` is overwritten in
+    place, so the run persists ONE artifact carrying the latest meta."""
     binding = _current_turn_binding()
     collector = binding.artifacts if binding is not None else _delivered_artifacts.get()
     if collector is None:
         return
+    if replace:
+        for i, existing in enumerate(collector):
+            if existing.get("file_id") == meta.get("file_id"):
+                collector[i] = meta
+                return
     collector.append(meta)
 
 

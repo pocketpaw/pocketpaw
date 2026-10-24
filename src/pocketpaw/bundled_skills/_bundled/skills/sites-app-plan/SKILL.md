@@ -61,11 +61,13 @@ scene, a page or a game file, write `PLAN.md` at the repo root with
 
 ## 2. Confirm the plan, then stop
 
-Share a short summary (concept, core loop, what v1 includes and leaves out, the
-milestones) through `mcp__pocketpaw_ask__ask_user` with options such as
-"Build this plan", "Change the scope", "You decide". Then STOP and wait for the
-click. This is the one round of questions for the site, so put any fact you
-still need into the same question.
+Writing PLAN.md puts it in the chat as a PLAN.md card the user can open, so
+never paste the plan into a message. Share a 3 to 5 line summary (concept, core
+loop, what v1 leaves out, the milestones by name) through
+`mcp__pocketpaw_ask__ask_user` with options such as "Build this plan", "Change
+the scope", "You decide", and point at the card for the rest. Then STOP and
+wait for the click. This is the one round of questions for the site, so put any
+fact you still need into the same question.
 
 Skip the wait only when the user already said to just build it, or to not ask.
 Then say in one line that you wrote PLAN.md and are building M1.
@@ -105,7 +107,8 @@ After EACH milestone:
    steps so the scene can react. Read the report: fix every page error, every
    failed request for an asset, a blank canvas, a step that could not find its
    button. Then play again with the same steps until the run is clean.
-5. Tick the milestone's items in PLAN.md with `patch_site_file`.
+5. Tick the milestone's items in PLAN.md with `patch_site_file` as soon as it
+   is done, so the PLAN.md card in chat shows where the build is.
 
 Never call a milestone done without having seen it and played it. Never claim
 gameplay works without a passing play-test: say what the play-test showed, and
@@ -180,7 +183,7 @@ invented numbers presented as real.
 ```
 [ ] PLAN.md written before any UI or game file
 [ ] Versions and APIs taken from current docs
-[ ] Plan summary sent with ask_user, then stopped (unless "just build it")
+[ ] 3 to 5 line plan summary sent with ask_user (never the whole plan), then stopped (unless "just build it")
 [ ] M1 built, previewed desktop + mobile, play-tested clean, ticked
 [ ] M2 built, previewed, play-tested clean, ticked
 [ ] M3 built, previewed, play-tested clean, ticked
