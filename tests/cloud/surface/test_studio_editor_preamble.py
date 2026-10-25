@@ -387,3 +387,72 @@ async def test_the_procedure_teaches_placement_on_the_render_call() -> None:
     assert "start_ms = the Playhead" in flat
     assert "Use the Graphic style for new graphics unless the user names another" in flat
     assert "focusX/focusY = the centre and atMs = that time" in flat
+
+
+# --- what the asset already knows about itself ---
+
+
+async def test_a_generated_asset_carries_size_audio_and_its_prompt() -> None:
+    asset = _asset(
+        ASSET_BEACH,
+        "beach.mp4",
+        source="generation",
+        size="1080x1920",
+        has_audio=False,
+        prompt="drone over a turquoise bay\nat sunset",
+    )
+    preamble = await _render(_timeline(assets=[asset]))
+
+    row = _rail_row_for(preamble, "beach.mp4")
+    assert "size=1080x1920" in row
+    assert "audio=none" in row
+    assert "source=generated" in row
+    assert '    made from prompt: "drone over a turquoise bay at sunset"' in preamble
+
+
+async def test_a_plain_upload_gains_no_extra_facts() -> None:
+    preamble = await _render(
+        _timeline(assets=[_asset(ASSET_OLD, "old-intro.mp4", source="upload")])
+    )
+
+    row = _rail_row_for(preamble, "old-intro.mp4")
+    assert "source=" not in row and "audio=" not in row and "size=" not in row
+    assert "made from prompt" not in preamble
+
+
+async def test_a_scanned_asset_lists_its_scenes_and_sound() -> None:
+    asset = _asset(
+        ASSET_BEACH,
+        "beach.mp4",
+        scenes=[
+            {"start_ms": 0, "end_ms": 4200, "light": "bright", "colour": "blue", "motion": "some"},
+            {
+                "start_ms": 4200,
+                "end_ms": 9800,
+                "light": "dark",
+                "colour": "black",
+                "motion": "still",
+                "fade": "out",
+            },
+        ],
+        sound=[
+            {"start_ms": 0, "end_ms": 1000, "level": "silent"},
+            {"start_ms": 1000, "end_ms": 9800, "level": "loud", "voice_like": True},
+        ],
+    )
+    preamble = await _render(_timeline(assets=[asset]))
+
+    assert (
+        "    scenes: 0.0-4.2s bright blue, some motion · 4.2-9.8s black, still, fades out"
+        in preamble
+    )
+    assert "    sound: 0.0-1.0s silent · 1.0-9.8s loud, voice-like" in preamble
+    assert _rail_row_for(preamble, "beach.mp4")
+
+
+async def test_the_procedure_says_scene_lines_are_heuristics_and_names_the_sheet() -> None:
+    flat = " ".join((await _render(_timeline())).split())
+
+    assert "not from watching it" in flat
+    assert "SOURCE time inside that asset" in flat
+    assert "<asset>-scenes.jpg" in flat

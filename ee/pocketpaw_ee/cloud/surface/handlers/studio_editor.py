@@ -67,6 +67,13 @@ _MAX_ROWS = 40
 # ``last_edit.failures`` block has used since it shipped.
 _MAX_FAILURES = 10
 
+# A generation prompt is a free description of the shot; the client cuts it at
+# 160 chars, this guards a client that does not.
+_MAX_PROMPT_CHARS = 160
+
+# Scene and sound spans per asset. Matches the client's scan cap.
+_MAX_SCENES = 24
+
 # Total motion-graphic HTML carried into the prompt. Matches the client's budget.
 _MAX_MOTION_SOURCE_CHARS = 100_000
 
@@ -101,9 +108,53 @@ def _asset_row(asset: dict[str, Any]) -> str:
         "duration": _fmt_ms(asset.get("duration_ms")),
         "used": ("yes" if asset.get("in_use") else "no"),
     }
+    if asset.get("size"):
+        facts["size"] = asset["size"]
+    if asset.get("has_audio") is False:
+        facts["audio"] = "none"
+    if asset.get("source") == "generation":
+        facts["source"] = "generated"
     if asset.get("attached"):
         facts["attached"] = "yes"
-    return entity_line(asset.get("name"), asset.get("id"), **facts)
+    lines = [entity_line(asset.get("name"), asset.get("id"), **facts)]
+    prompt = " ".join(str(asset.get("prompt") or "").split())[:_MAX_PROMPT_CHARS]
+    if prompt:
+        lines.append(f'    made from prompt: "{prompt}"')
+    scenes = [sc for sc in (asset.get("scenes") or []) if isinstance(sc, dict)]
+    if scenes:
+        lines.append("    scenes: " + " · ".join(_scene_text(sc) for sc in scenes[:_MAX_SCENES]))
+    sound = [so for so in (asset.get("sound") or []) if isinstance(so, dict)]
+    if sound:
+        lines.append("    sound: " + " · ".join(_sound_text(so) for so in sound[:_MAX_SCENES]))
+    return "\n".join(lines)
+
+
+def _span(item: dict[str, Any]) -> str:
+    try:
+        return f"{float(item['start_ms']) / 1000:.1f}-{float(item['end_ms']) / 1000:.1f}s"
+    except (KeyError, TypeError, ValueError):
+        return "?"
+
+
+def _scene_text(scene: dict[str, Any]) -> str:
+    colour = scene.get("colour")
+    light = None if colour in ("black", "white") else scene.get("light")
+    look = " ".join(str(v) for v in (light, colour) if v and v != "normal")
+    parts = [f"{_span(scene)} {look}".strip()]
+    motion = scene.get("motion")
+    if motion:
+        parts.append("still" if motion == "still" else f"{motion} motion")
+    fade = scene.get("fade")
+    if fade:
+        parts.append(
+            {"in": "fades in", "out": "fades out", "both": "fades in and out"}.get(fade, "fade")
+        )
+    return ", ".join(parts)
+
+
+def _sound_text(span: dict[str, Any]) -> str:
+    text = f"{_span(span)} {span.get('level') or '?'}"
+    return f"{text}, voice-like" if span.get("voice_like") else text
 
 
 def _attached_block(timeline: dict[str, Any], assets: list[dict[str, Any]]) -> list[str]:
@@ -398,6 +449,14 @@ Rules that matter:
   above and the user says "add these", "put this on the timeline" or "use it",
   those assets are the ones — place them in the ORDER LISTED, and place all of
   them unless the user narrowed it.
+- SCENES AND SOUND ARE ROUGH. The `scenes:` and `sound:` lines under a rail
+  row come from pixel and loudness maths on the file, not from watching it:
+  cut times, light, main colour, motion, silent/quiet/loud, and a voice-like
+  guess. Times are SOURCE time inside that asset, so map a clip's inMs/outMs
+  onto them before you trim or split. When the turn carries an image named
+  `<asset>-scenes.jpg`, it is one frame from the middle of each scene, numbered
+  and labelled with the same time ranges: use it to say who and what is on
+  screen. If neither tells you enough, ask the user rather than guess.
 - A TRANSITION IS EXPLICIT. Clips touching or overlapping does not create one.
   Use set_transition, and only when the user asked for one.
 - COPY IDS EXACTLY as they appear above (the `…` prefix and all).
