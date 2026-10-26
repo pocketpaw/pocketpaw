@@ -129,8 +129,8 @@
   {
     "label": "max_requests can raise the deployment turn cap",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
-    "find": "                max_turns = min(max_turns, max_requests) if max_turns > 0 else max_requests\n",
-    "replace": "                max_turns = max_requests\n",
+    "find": "                request_cap = min(request_cap, max_requests) if request_cap > 0 else max_requests\n",
+    "replace": "                request_cap = max_requests\n",
     "tests": [
       "tests/test_pydantic_ai_backend.py::test_per_run_limits_reach_usage_limits"
     ]

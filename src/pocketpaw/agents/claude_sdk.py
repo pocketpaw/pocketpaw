@@ -15,9 +15,9 @@ native-resume launches none. ``prewarm`` therefore takes no history.
 
 Warm-client key (``_client_cache_key``): session key, cwd, model, allowed and denied
 tools, the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
-plugin/skills digest, the tenant scope, ``max_turns`` and any surface-scoped MCP
-servers the client carries. Any change forces a fresh subprocess; the same key gates reuse
-of a supervisor-leased client (WH-1).
+plugin/skills digest, the tenant scope, a raised ``max_turns`` and any
+surface-scoped MCP servers the client carries. Any change forces a fresh
+subprocess; the same key gates reuse of a supervisor-leased client (WH-1).
 Per-run skill dirs are cached per digest and dropped on eviction or cleanup.
 
 Lifecycle invariants:
@@ -40,7 +40,7 @@ Lifecycle invariants:
 
 Options: ``max_turns`` is ``claude_sdk_max_turns``, raised (never lowered) by a
 ``max_turns`` the caller passes for one run (a Sites app build, via the surface
-profile); it is fixed at connect(), so it is part of the warm-client key.
+profile); it is fixed at connect(), so a raise is part of the warm-client key.
 Permissions are always bypassed (headless), ``cli_path`` comes from
 ``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
 image-returning tools. The subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
@@ -2221,6 +2221,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         plugin_digest: str = "",
         tenant_scope: str = "",
         system_prompt_digest: str = "",
+        turn_cap: int | None = None,
     ) -> str:
         """Persistent-client cache key: session + cwd + model + tools + the deny
         set + the prompt's identity + the plugin-identity digest.
@@ -2290,9 +2291,19 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{sorted(getattr(options, 'disallowed_tools', None) or [])}:"
             f"{prompt_key}:"
             f"{plugin_digest}:"
-            f"{tenant_scope}:"
-            f"{getattr(options, 'max_turns', None)}"
+            f"{tenant_scope}"
+            f"{f':turns={turn_cap}' if turn_cap else ''}"
         ) + cls._scoped_servers_key(options)
+
+    def _raised_turn_cap(self, options: Any) -> int | None:
+        """The options' ``max_turns`` when a run RAISED it past ``claude_sdk_max_turns``
+        (``_effective_max_turns``), else None. Only a raise enters the warm-client key,
+        so an ordinary turn keys exactly as it did before the raise existed."""
+        value = getattr(options, "max_turns", None)
+        configured = self.settings.claude_sdk_max_turns or None
+        if isinstance(value, int) and not isinstance(value, bool) and value != configured:
+            return value
+        return None
 
     @staticmethod
     def _scoped_servers_key(options: Any) -> str:
@@ -2362,6 +2373,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             plugin_digest=plugin_digest,
             tenant_scope=self._tenant_scope_key(),
             system_prompt_digest=system_prompt_digest,
+            turn_cap=self._raised_turn_cap(options),
         )
 
         async with self._client_lock:
@@ -3930,6 +3942,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     plugin_digest=plugin_digest,
                     tenant_scope=self._tenant_scope_key(),
                     system_prompt_digest=system_prompt_digest,
+                    turn_cap=self._raised_turn_cap(options),
                 )
                 event_stream, _warm_lease = await self._leased_dispatch(
                     message=message,

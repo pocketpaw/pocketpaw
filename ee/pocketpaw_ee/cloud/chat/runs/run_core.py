@@ -729,8 +729,9 @@ def _app_build_turn_cap(base: SurfaceProfile, pocket: Any | None) -> SurfaceProf
     milestones: the agent builds every one of them in this turn (the
     ``sites-app-plan`` skill), each with a build, previews and a play-test, which can
     run past ``claude_sdk_max_turns``. ``sites_app_build_max_turns`` (0 = off) only
-    raises the cap, and only the Claude SDK backend reads it, so a free run on
-    pydantic_ai keeps ``free_run_max_turns``. Every other turn is unchanged."""
+    raises a backend's own cap; pydantic_ai applies a free run's ``max_requests``
+    after it, so a free run keeps ``free_run_max_turns``. Every other turn is
+    unchanged."""
     if _sites_next_milestone(pocket) is None:
         return base
     from pocketpaw.config import get_settings  # type: ignore[import-untyped]

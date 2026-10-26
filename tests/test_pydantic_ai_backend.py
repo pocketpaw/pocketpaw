@@ -3901,6 +3901,30 @@ async def test_per_run_limits_reach_usage_limits(monkeypatch):
     assert seen[-1] == {"request_limit": 100}
 
 
+async def test_a_surface_turn_cap_raises_a_paid_run_but_never_a_free_one(monkeypatch):
+    """``max_turns`` (a Sites app build's raised cap) can only raise
+    ``pydantic_ai_max_turns``, never lower it or limit an unlimited 0, and a free
+    run's ``max_requests`` is applied after it, so the free run stays at 20.
+
+    Mutation: apply ``max_requests`` before the raise, or let ``max_turns`` lower.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+    await _collect(backend, "hi", max_turns=300)
+    assert seen[-1] == {"request_limit": 300}
+
+    await _collect(backend, "hi", max_turns=20)
+    assert seen[-1] == {"request_limit": 100}
+
+    await _collect(backend, "hi", max_turns=300, max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    seen.clear()
+    unlimited = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=0)
+    await _collect(unlimited, "hi", max_turns=300)
+    assert all("request_limit" not in limits for limits in seen)
+
+
 async def test_a_token_limit_the_run_exceeds_stops_it_with_usage_first():
     """A run over its token limit ends in an error, and its usage still reaches
     the caller first so the tokens it did spend are billed."""

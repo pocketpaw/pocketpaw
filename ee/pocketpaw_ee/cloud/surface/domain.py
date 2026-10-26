@@ -424,8 +424,8 @@ class SurfaceProfile:
     # A raised tool-turn cap for this run, or None for the backend's own. Set by
     # run_core on a /sites project turn whose PLAN.md has unticked milestones
     # (``sites_app_build_max_turns``), so an approved app plan can be built through
-    # every milestone in one turn. Only the Claude SDK backend reads it, and only to
-    # RAISE ``claude_sdk_max_turns``. Never set from a per-entity override.
+    # every milestone in one turn. A backend that declares it only uses it to RAISE
+    # its own cap; a free run's bound still wins. Never set from a per-entity override.
     max_turns: int | None = None
 
 

@@ -6,8 +6,8 @@
 # through the surface profile. Pins: the cap only ever RAISES the configured one
 # (and never limits an unlimited one), it reaches ``options_kwargs["max_turns"]``,
 # it is part of the warm-client key (the CLI fixes it at connect()), and the pool
-# forwards it only to a backend that declares it, so the bounded free run on
-# pydantic_ai keeps its own limit.
+# forwards it only to a backend that declares it. pydantic_ai's side (a free run
+# stays at its bound) is pinned in tests/test_pydantic_ai_backend.py.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -106,9 +106,19 @@ async def test_the_raised_cap_reaches_the_sdk_options_and_the_warm_key() -> None
     raised = await _build(sdk, max_turns=300)
     assert plain.options_kwargs["max_turns"] == 100
     assert raised.options_kwargs["max_turns"] == 300
+
     # max_turns is fixed at connect(): a client built at 100 must not serve a 300 turn.
-    key = ClaudeSDKBackend._client_cache_key
-    assert key(plain.options, session_key="s1") != key(raised.options, session_key="s1")
+    def key(options):
+        return sdk._client_cache_key(
+            options, session_key="s1", turn_cap=sdk._raised_turn_cap(options)
+        )
+
+    assert key(plain.options) != key(raised.options)
+    # An ordinary turn keys exactly as before the raise existed, so warm reuse holds.
+    assert key(plain.options) == sdk._client_cache_key(plain.options, session_key="s1")
+    # A "raise" to the configured value is no raise.
+    same = await _build(sdk, max_turns=100)
+    assert key(same.options) == key(plain.options)
 
 
 def test_the_backend_run_and_prewarm_declare_it() -> None:
@@ -124,7 +134,7 @@ def test_a_max_turns_stop_still_names_the_limit() -> None:
 
 
 class _NarrowBackend:
-    """No ``max_turns`` and no ``**kwargs``: pydantic_ai and the other backends."""
+    """No ``max_turns`` and no ``**kwargs``: the backends that keep their own cap."""
 
     def __init__(self) -> None:
         self.called = False
@@ -194,7 +204,7 @@ async def test_the_pool_withholds_the_cap_when_unset(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_a_backend_without_the_param_keeps_its_own_cap(monkeypatch) -> None:
-    """pydantic_ai (the bounded free run) does not declare it: no TypeError, no raise."""
+    """A backend that does not declare it: no TypeError, it keeps its own cap."""
     backend = _NarrowBackend()
     await _drive(monkeypatch, backend, max_turns=300)
     assert backend.called

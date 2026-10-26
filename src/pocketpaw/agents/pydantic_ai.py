@@ -2716,6 +2716,10 @@ class PydanticAIBackend:
         # refuses a limited run on a backend that does not declare these.
         max_requests: int | None = None,
         total_tokens_limit: int | None = None,
+        # A surface's raised turn cap (a Sites app build). It can only RAISE
+        # ``pydantic_ai_max_turns`` (never limit an unlimited 0), and
+        # ``max_requests`` is applied after it, so a free run keeps its bound.
+        max_turns: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         if not self._sdk_available:
             yield AgentEvent(
@@ -2858,12 +2862,14 @@ class PydanticAIBackend:
                 # instructions at all, so this is the only system prompt on the
                 # wire — and it is THIS turn's. See ``_get_or_create_agent``.
             }
-            max_turns = self.settings.pydantic_ai_max_turns
+            request_cap = self.settings.pydantic_ai_max_turns
+            if max_turns and request_cap > 0 and max_turns > request_cap:
+                request_cap = max_turns
             if max_requests is not None and max_requests > 0:
-                max_turns = min(max_turns, max_requests) if max_turns > 0 else max_requests
+                request_cap = min(request_cap, max_requests) if request_cap > 0 else max_requests
             limits: dict[str, int] = {}
-            if max_turns and max_turns > 0:
-                limits["request_limit"] = max_turns
+            if request_cap and request_cap > 0:
+                limits["request_limit"] = request_cap
             if total_tokens_limit is not None:
                 limits["total_tokens_limit"] = max(total_tokens_limit, 0)
             if limits:
