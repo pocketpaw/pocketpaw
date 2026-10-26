@@ -245,6 +245,42 @@ async def test_project_refine_continues_the_app_plan() -> None:
         assert "sites-app-plan" not in other, engine
 
 
+async def test_project_refine_builds_every_remaining_milestone_in_one_turn() -> None:
+    """Regression: after the user clicked "Build this plan" the agent built M1, said
+    "stage 1 done" and waited. The click lands on the site's own page (a project
+    refine), and this rule told it to build "the next unticked one", so it built one
+    milestone and ended the turn. An approved plan is built to the end in ONE turn;
+    only a real blocker or a finished plan ends it.
+
+    THE MUTATION THAT BREAKS THIS: put "build the next unticked one" back."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), "project")
+    rule = sites_handler._APP_PLAN_REFINE_RULE
+    assert rule in preamble
+    lower = " ".join(rule.lower().split())
+    assert "every unticked milestone in this turn" in lower
+    assert "back to back" in lower
+    assert "do not stop between milestones" in lower
+    # The only ways out: a real blocker, or every milestone ticked.
+    assert "real blocker" in lower
+    for blocker in ("a secret", "a decision only the user can make", "a missing fact"):
+        assert blocker in lower, blocker
+    assert "every milestone is ticked" in lower
+    # The per-milestone discipline stays.
+    assert "preview" in lower and "tick" in lower
+    # No wording that licenses a stop after one milestone.
+    assert "the next unticked one" not in lower
+    assert "boundary" not in lower
+    assert "one milestone at a time" not in lower
+
+
+async def test_create_app_rule_does_not_read_as_one_milestone_per_turn() -> None:
+    """"builds one milestone at a time" read as one per turn. The create rule says the
+    approved plan is built through every milestone without stopping."""
+    rule = " ".join(sites_handler._APP_PLAN_RULE.split())
+    assert "one milestone at a time" not in rule
+    assert "every milestone" in rule and "without stopping" in rule
+
+
 async def test_new_static_sites_carry_the_lead_form_contract() -> None:
     """`static` has no server route, so its contact form posts to the capture
     endpoint with placeholders the project publish resolves
