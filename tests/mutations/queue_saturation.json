@@ -47,8 +47,8 @@
   {
     "label": "a busy provider's raw error text reaches the client again",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
-    "find": "                yield (\"error\", _backend_error_frame(message))",
-    "replace": "                yield (\"error\", {\"code\": \"agent.backend_error\", \"message\": message})",
+    "find": "                frame = _backend_error_frame(message)\n",
+    "replace": "                frame = {\"code\": \"agent.backend_error\", \"message\": message}\n",
     "tests": [
       "tests/cloud/runs/test_queue_saturation.py"
     ]
