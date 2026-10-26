@@ -39,7 +39,8 @@
 # ``_WHATSAPP_ORDERS_RULE`` state platform facts the agent would otherwise guess.
 # ``_APP_PLAN_RULE`` (both create branches) sends an app or game through the
 # ``sites-app-plan`` skill: PLAN.md and a user check before any UI file, then
-# milestones; ``_APP_PLAN_REFINE_RULE`` picks the plan up on a project refine.
+# every milestone back to back in one turn; ``_APP_PLAN_REFINE_RULE`` does the same
+# on a project refine, where the user's go-ahead usually lands.
 #
 # Cache keys: create and chat read only ``meta`` (``meta_key``); refine and
 # import-create read live state, so they answer ``content_key`` of the rendered text.
@@ -1315,15 +1316,20 @@ APP_PLAN_SKILL = "sites-app-plan"
 _APP_PLAN_RULE = (
     "APPS AND GAMES (a game, 3D, a simulation, an editor, a tool, a dashboard): "
     "load `" + APP_PLAN_SKILL + "` before any UI or game file. It plans in `PLAN.md`, "
-    "checks with the user, then builds one milestone at a time, never all in one pass.\n"
+    "checks with the user, then builds every milestone in order without stopping, each "
+    "built and looked at before the next.\n"
 )
 
 # The refine half: the user's go-ahead on the plan usually lands on the site's own
-# page, so a project refine is where most milestones get built.
+# page, so a project refine is where the milestones get built. All of them, in one
+# turn: "build the next unticked one" built M1 and ended the turn on "stage 1 done".
 _APP_PLAN_REFINE_RULE = (
     "A repo with a `PLAN.md` is an app built in milestones: read it, load `"
     + APP_PLAN_SKILL
-    + "`, build the next unticked one, preview it and tick it.\n"
+    + "` and build every unticked milestone in this turn, back to back: build, "
+    "preview, play-test and tick each one, then start the next. Do not stop between "
+    "milestones; end the turn only for a real blocker (a secret, a decision only the "
+    "user can make, a missing fact) or when every milestone is ticked.\n"
 )
 
 _CLOSING_RULE = (

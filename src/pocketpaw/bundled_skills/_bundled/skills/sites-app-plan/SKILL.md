@@ -8,8 +8,8 @@ description: |
   dashboard, or any multi-view app with real state. It makes you write PLAN.md
   (concept, core loop, a small complete v1, screens and states, controls, tech
   with versions from current docs, assets, milestones), confirm it with the
-  user, then build one milestone at a time with a build, a preview and a
-  play-test after each. It also holds the 3D and game quality rules: assets,
+  user, then build every milestone back to back in one turn, with a build, a
+  preview and a play-test after each. It also holds the 3D and game quality rules: assets,
   lighting, atmosphere, frame budget, start screen, code layout. Not for content
   pages (landing, portfolio, brochure): those skip planning.
 ---
@@ -75,9 +75,15 @@ Then say in one line that you wrote PLAN.md and are building M1.
 On "Change the scope", update PLAN.md and ask once more. On "You decide",
 build the plan as written.
 
-## 3. Build one milestone at a time
+## 3. Build every milestone back to back
 
-Each milestone ends with the app building and running, never half-wired.
+Once the user approves the plan (or said to just build it), build every
+milestone back to back in this one turn, M1 through M4, without waiting for
+the user in between. A milestone boundary is not a reason to stop: finish a
+milestone, tick it, and start the next one straight away. Never ask "shall I
+continue?" and never end the turn with "M1 done" while milestones are still
+unticked. Each milestone ends with the app building and running, never
+half-wired.
 
 - **M1 Core loop.** The loop or flow playable end to end with greybox visuals:
   boxes, capsules, flat colours, plain UI. Controls work, the goal can be
@@ -111,11 +117,21 @@ After EACH milestone:
    is done, so the PLAN.md card in chat shows where the build is.
 
 Never call a milestone done without having seen it and played it. Never claim
-gameplay works without a passing play-test: say what the play-test showed, and
-tell the user what to try (the keys, the goal). If `play_test_site` is
-unavailable, say gameplay was not play-tested. Keep going milestone by
-milestone; if the turn runs long, stop at a milestone boundary with a working
-build and say which milestone is next.
+gameplay works without a passing play-test. If `play_test_site` is
+unavailable, say gameplay was not play-tested.
+
+While you work, write one short progress line as each milestone is ticked
+("M1 core loop works, play-tested; starting M2"). That is a line in your
+running text, not a reply that ends the turn. When every milestone is ticked,
+give one final report: what each milestone added, what the play-tests showed,
+and what the user should try (the keys, the goal).
+
+End the turn before the plan is finished only for a real blocker: a secret
+the app needs, a decision only the user can make, a missing fact nobody
+supplied, a plan the platform refuses, or a build still failing after the
+loop's three rounds. Then say what you need, what is built so far, and which
+milestone is next. If the run itself is stopped by a limit, the next turn
+reads PLAN.md and carries on from the first unticked milestone.
 
 ## 4. 3D and game quality rules
 
@@ -188,5 +204,6 @@ invented numbers presented as real.
 [ ] M2 built, previewed, play-tested clean, ticked
 [ ] M3 built, previewed, play-tested clean, ticked
 [ ] M4 built, previewed, play-tested clean, ticked
-[ ] Reply says what was checked and played, and what the user should try
+[ ] No stop between milestones; short progress lines while building
+[ ] One final report: what was checked and played, and what the user should try
 ```

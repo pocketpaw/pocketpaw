@@ -122,7 +122,7 @@ def test_the_site_skill_sends_apps_and_games_to_the_plan_skill() -> None:
     assert "`sites-app-plan`" in section
     assert "`PLAN.md`" in section
     assert "before any UI" in section
-    assert "one milestone at a time" in section
+    assert "every milestone, back to back" in section
 
 
 def _app_plan_skill():
