@@ -924,6 +924,7 @@ def _pawbar_frame_config(
     consent_required: bool = False,
     voice: bool = True,
     expandable: bool = True,
+    movable: bool = True,
     branding_removable: bool = False,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
@@ -1013,6 +1014,7 @@ def _pawbar_frame_config(
         # The widget turns dictation off only on an explicit false.
         "voice": voice is not False,
         "expandable": expandable is not False,
+        "movable": movable is not False,
         # The owner may hide "Powered by Paw Sites" only on an entitled site; a
         # stored False on a site that lost the entitlement shows it again.
         "poweredBy": bool(look.show_branding) or not branding_removable,
@@ -1041,6 +1043,7 @@ def _site_visitor_options(site: Any) -> dict[str, Any]:
         "consent_required": getattr(site, "concierge_consent_required", False) is True,
         "voice": getattr(site, "concierge_voice", True) is not False,
         "expandable": getattr(site, "concierge_expandable", True) is not False,
+        "movable": getattr(site, "concierge_movable", True) is not False,
     }
 
 
@@ -1052,6 +1055,7 @@ _FRAME_DRAFT_FIELDS = (
     "concierge_consent_required",
     "concierge_voice",
     "concierge_expandable",
+    "concierge_movable",
 )
 
 
@@ -1822,6 +1826,7 @@ class ConciergeSettingsUpdate(BaseModel):
     concierge_consent_required: bool | None = None
     concierge_voice: bool | None = None
     concierge_expandable: bool | None = None
+    concierge_movable: bool | None = None
 
 
 class ConciergePreviewTokensRequest(BaseModel):
@@ -1860,6 +1865,7 @@ class ConciergePreviewConfigRequest(BaseModel):
     concierge_consent_required: bool | None = None
     concierge_voice: bool | None = None
     concierge_expandable: bool | None = None
+    concierge_movable: bool | None = None
 
 
 # The ``window.__PAWBAR__`` keys an owner setting decides, which is what the
@@ -1880,6 +1886,7 @@ _PREVIEW_CONFIG_KEYS = (
     "voice",
     "poweredBy",
     "expandable",
+    "movable",
 )
 
 
@@ -1924,6 +1931,7 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_consent_required: bool = False
     concierge_voice: bool = True
     concierge_expandable: bool = True
+    concierge_movable: bool = True
     # Whether this site may hide the "Powered by" line
     # (``concierge_appearance.show_branding=false``): the same entitlement as the
     # site badge. The editor disables the switch when False; a PATCH that hides
@@ -2097,6 +2105,7 @@ async def _concierge_settings_response(
         concierge_consent_required=visitor["consent_required"],
         concierge_voice=visitor["voice"],
         concierge_expandable=visitor["expandable"],
+        concierge_movable=visitor["movable"],
         branding_removable=await _branding_removable(site),
         concierge_exists=getattr(site, "concierge_created_at", None) is not None,
         embed_snippet=embed_snippet,
