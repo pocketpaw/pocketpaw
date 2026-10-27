@@ -10,6 +10,9 @@
 # THE WALK: the sitemaps robots.txt names (on-host only), else /sitemap.xml; one
 # level of sitemap index; at most MAX_SITEMAPS documents; only locs on the one
 # host come back. A missing or refused sitemap is an empty answer, never an error.
+# With ``rehome=True`` (the catalog import), a document with NO loc on the host
+# (a staging site whose sitemap names production) has its locs' paths moved onto
+# ``https://<host>``: still only the one host is ever fetched.
 #
 # THE PARSER's two locks against entity expansion: the body must be UTF-8 (no
 # NUL, no other declared encoding) and is fed to expat as a str, and expat raises
@@ -25,7 +28,7 @@ import codecs
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from xml.parsers import expat
 
 MAX_SITEMAPS = 4  # the index or urlset, plus up to three child sitemaps
@@ -117,6 +120,7 @@ async def sitemap_urls(
     fallback: str,
     *,
     pick_children: Callable[[list[str]], list[str]] | None = None,
+    rehome: bool = False,
 ) -> list[str]:
     """On-host page URLs from the sitemaps, in sitemap order (at most MAX_LOCS).
 
@@ -124,10 +128,23 @@ async def sitemap_urls(
     None; whatever it raises propagates, so a caller's byte budget or deadline
     still stops the walk. ``declared`` is robots.txt's Sitemap: list; ``fallback``
     is the /sitemap.xml URL tried when none of them is on ``host``.
-    ``pick_children`` reorders an index's child sitemaps before the cap applies."""
+    ``pick_children`` reorders an index's child sitemaps before the cap applies.
+    ``rehome`` reads a document whose locs are all off ``host`` as their paths
+    on ``https://<host>`` (never the other host, port or userinfo)."""
 
     def on_host(urls: list[str]) -> list[str]:
         return [u for u in urls if (urlsplit(u).hostname or "") == host]
+
+    def keep(urls: list[str]) -> list[str]:
+        kept = on_host(urls)
+        if kept or not rehome:
+            return kept
+        parts = [urlsplit(u) for u in urls]
+        return [
+            urlunsplit(("https", host, p.path or "/", p.query, ""))
+            for p in parts
+            if p.scheme in ("http", "https")
+        ]
 
     queue = on_host(declared) or [fallback]
     pages: list[str] = []
@@ -141,8 +158,8 @@ async def sitemap_urls(
         is_index, locs = sitemap_locs(result.body)
         if is_index:
             if fetched == 1:  # one level of index only
-                children = on_host(locs)
+                children = keep(locs)
                 queue = (pick_children(children) if pick_children else children)[: MAX_SITEMAPS - 1]
             continue
-        pages.extend(on_host(locs))
+        pages.extend(keep(locs))
     return pages[:MAX_LOCS]

@@ -21,13 +21,14 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.paw_bar import catalog_import as ci
-from pocketpaw_ee.sites.sitemap import sitemap_locs
+from pocketpaw_ee.sites.sitemap import sitemap_locs, sitemap_urls
 
 _WS = "ws-alpha"
 _HOST = "shop.example"
@@ -511,6 +512,22 @@ def test_a_sitemap_declaring_a_non_utf8_encoding_is_refused():
     assert sitemap_locs(body) == (False, [])
 
 
+async def test_rehoming_keeps_only_the_path_and_query_on_the_crawl_host():
+    body = (
+        b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        b"<url><loc>https://u:pw@evil.example:8443/p/1?x=1#top</loc></url>"
+        b"<url><loc>ftp://evil.example/p/2</loc></url></urlset>"
+    )
+    fallback = f"https://{_HOST}/sitemap.xml"
+
+    async def get(url: str) -> SimpleNamespace:
+        assert url == fallback
+        return SimpleNamespace(status=200, body=body)
+
+    assert await sitemap_urls(get, [], _HOST, fallback) == []
+    assert await sitemap_urls(get, [], _HOST, fallback, rehome=True) == [f"https://{_HOST}/p/1?x=1"]
+
+
 def test_the_parser_itself_refuses_a_doctype_with_no_entities():
     body = b'<!DOCTYPE urlset SYSTEM "https://evil.example/x.dtd"><urlset><url><loc>https://a/p/1</loc></url></urlset>'
     assert sitemap_locs(body) == (False, [])
@@ -987,4 +1004,46 @@ async def test_an_events_site_with_no_sitemap_is_read_from_its_homepage_links(be
     assert (preview.status, preview.source) == ("ok", "jsonld")
     assert sorted(i.name for i in preview.items) == ["Jazz Night", "Pottery Workshop"]
     assert not any(w.startswith("skipped_no_price") for w in preview.warnings)
+    assert "/about" not in _paths(seen)
+
+
+async def test_a_sitemap_naming_another_host_is_read_on_the_verified_origin(beanie_test_db):
+    # A staging site whose robots.txt and sitemap still name the production host,
+    # with products under /boutique/<category>/<slug> and the homepage linking
+    # only to the listings. The sitemap's paths are read on the verified origin;
+    # the other host is never asked for anything.
+    await _claim()
+    seen: list[httpx.Request] = []
+    locs = "".join(
+        f"<url><loc>https://evil.example{p}</loc></url>"
+        for p in (
+            "/",
+            "/about",
+            "/boutique",
+            "/boutique/jewelry/gold-chain",
+            "/events",
+            "/events/masquerade-manor",
+        )
+    )
+    sitemap = f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{locs}</urlset>'
+    home = '<html><body><a href="/boutique">Boutique</a><a href="/events">Events</a></body></html>'
+    masquerade = _event(name="Masquerade at the Manor", url="/events/masquerade-manor")
+    preview = await _preview(
+        {
+            "/robots.txt": _text("User-agent: *\nSitemap: https://evil.example/sitemap.xml\n"),
+            "/": _html(home),
+            "/sitemap.xml": _text(sitemap, "application/xml"),
+            "/boutique": _html(home),
+            "/events": _html(home),
+            "/boutique/jewelry/gold-chain": _html(_jsonld_page("Gold Chain", "30", currency="USD")),
+            "/events/masquerade-manor": _html(_ld(json.dumps(masquerade))),
+        },
+        seen,
+    )
+    assert (preview.status, preview.source) == ("ok", "jsonld")
+    by_name = {i.name: i for i in preview.items}
+    assert sorted(by_name) == ["Gold Chain", "Masquerade at the Manor"]
+    assert by_name["Gold Chain"].url == "/boutique/jewelry/gold-chain"
+    assert by_name["Masquerade at the Manor"].url == "/events/masquerade-manor"
+    assert all(r.headers["host"] == _HOST for r in seen)
     assert "/about" not in _paths(seen)
