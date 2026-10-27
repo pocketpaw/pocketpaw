@@ -19,6 +19,8 @@
 # (``knowledge_chars``, ``select_knowledge``): pinned FAQs, the visitor's page
 # article (or, when a hit off that page carries the message's own words, that
 # page first: ``_with_page_siblings``), then KB hits, each cut to what is left.
+# KB hits for the message itself lead; the earlier turns only fill the rest
+# (``_retrieve_for_turn``), so a change of topic is not outvoted.
 # ``resolve_page`` accepts the request's page only on an allowed origin; <catalog>
 # comes per turn from ``catalog_for_turn`` (small catalogs whole, else FTS hits).
 #
@@ -55,7 +57,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -980,6 +982,47 @@ def _retrieval_query(
     ][-_QUERY_TURNS:]
     parts = [message, *turns, page.title if page is not None else ""]
     return "\n".join(p.strip() for p in parts if p and p.strip())
+
+
+async def _retrieve_for_turn(
+    site: Any,
+    message: str,
+    query: str,
+    page: PageContext | None,
+    *,
+    agent_id: str | None,
+    k: int,
+) -> list[KnowledgeItem]:
+    """``retrieve`` with the current message leading. The joined query
+    (``_retrieval_query``) weighs the visitor's earlier turns like the new
+    message, so after a change of topic ("how can I apply", then "what events
+    are coming up") the old topic's articles filled every slot. So the message
+    and page title are searched on their own too: those hits come first, and the
+    joined query's hits only fill what is left of ``k``, which keeps "how much is
+    this?" answerable from the turns before it. Pinned FAQs stay first, once;
+    scores are re-ranked per scope in the merged order."""
+    lead_query = _retrieval_query(message, [], page)
+    if lead_query == query:
+        return await retrieve(site, query, agent_id=agent_id, k=k)
+    own, joined = await asyncio.gather(
+        retrieve(site, lead_query, agent_id=agent_id, k=k),
+        retrieve(site, query, agent_id=agent_id, k=k),
+    )
+    pinned = [i for i in own if i.source == "faq"]
+    seen: set[tuple[str, str]] = set()
+    hits: list[KnowledgeItem] = []
+    for item in own + joined:
+        key = (item.source, item.id)
+        if item.source == "faq" or key in seen:
+            continue
+        seen.add(key)
+        hits.append(item)
+    ranks: dict[str, int] = {}
+    ranked = []
+    for item in hits[:k]:
+        rank = ranks[item.source] = ranks.get(item.source, -1) + 1
+        ranked.append(replace(item, score=1.0 / (rank + 1)))
+    return pinned + ranked
 
 
 def _source_items(
@@ -3085,7 +3128,9 @@ async def run_concierge_v2(
         # The model the owner picked on the concierge agent rides along (memoized).
         # The ripple store (menu, services, slots) rides along, cached per site.
         retrieved, page_ctx, catalog, model_spec, storefront = await asyncio.gather(
-            retrieve(site, query, agent_id=agent_id or None, k=_top_k(budget)),
+            _retrieve_for_turn(
+                site, message, query, page_ctx, agent_id=agent_id or None, k=_top_k(budget)
+            ),
             _with_page_article(page_ctx, site, query=query, budget=budget),
             catalog_for_turn(store, widget, query, page_ctx),
             _turn_model_spec(settings, widget, site, workspace_id),
