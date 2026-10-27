@@ -848,6 +848,11 @@ class Site(TimestampedDocument):
     # is broken". "" means the last sync was clean.
     kb_synced_at: datetime | None = None
     kb_sync_error: str = ""
+    # What the last sync that reached the site's pages left out, for the owner's
+    # index view: ``{"skips": [{path, reason, detail}], "page_cap", "capped",
+    # "pages_failed", "skipped_by_robots"}`` (``kb_ingest._record_sync``). Empty
+    # until the next sync, so no migration.
+    kb_crawl_report: dict[str, Any] = Field(default_factory=dict)
     # The catalog sync a knowledge sync schedules (``paw_bar.catalog_sync``): when it
     # last ran, how it ended (the importer's ``ok`` / ``partial`` / ``empty``, its
     # failure reason, or ``sync_failed``) and what it did to the rows (added,

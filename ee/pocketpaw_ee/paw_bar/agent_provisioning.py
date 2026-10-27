@@ -27,7 +27,8 @@
 #     this module generated, so an owner's own edit and a hand-bound agent are
 #     never overwritten.
 #   * ``widget_for_agent`` is the REVERSE lookup and reads the real binding
-#     (``widget.agent_id``), not the slug, so a hand-bound agent counts too.
+#     (``widget.agent_id``), not the slug, so a hand-bound agent counts too;
+#     ``site_for_agent`` follows it to the site that bar is on.
 
 from __future__ import annotations
 
@@ -378,6 +379,22 @@ async def widget_for_agent(agent_id: str, workspace_id: str) -> Any | None:
         if str(getattr(widget, "agent_id", "") or "") == target:
             return widget
     return None
+
+
+async def site_for_agent(agent_id: str, workspace_id: str) -> Any | None:
+    """The live Site whose bar is bound to ``agent_id`` in ``workspace_id``, or
+    ``None``. ``widget_for_agent`` then the site on that widget's pocket, both
+    workspace-scoped. Lets the agent editor show the same knowledge as the site's
+    Paw Bar → Knowledge tab."""
+    widget = await widget_for_agent(agent_id, workspace_id)
+    pocket_id = str(getattr(widget, "pocket_id", "") or "")
+    if not pocket_id:
+        return None
+    from pocketpaw_ee.cloud.models.site import Site
+
+    return await Site.find_one(
+        {"workspace": workspace_id, "pocket_id": pocket_id, "archived": {"$ne": True}}
+    )
 
 
 async def ensure_site_widget_row(site: Any, workspace_id: str) -> Any:

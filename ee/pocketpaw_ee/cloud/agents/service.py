@@ -32,6 +32,8 @@ Public API:
   unions in another owner's public agents
 - ``is_visible_to_site_visitors(agent_id)`` — does a Paw Bar widget bind this
   agent to a published site, i.e. do anonymous visitors reach it?
+  ``bound_site(agent_id)`` names that site, so the agent editor can show its
+  knowledge
 - ``seed_default_agent`` / ``seed_code_agent`` (+ their all-workspace back-fills)
   — the default agent and the ``code`` agent, whose tools are capped to the four
   file tools (``tool_mode="exclusive"``)
@@ -764,6 +766,29 @@ async def get_workspace(agent_id: str) -> str | None:
         return None
     doc = await _AgentDoc.get(agent_oid)
     return doc.workspace if doc else None
+
+
+async def bound_site(agent_id: str) -> dict[str, Any]:
+    """``{"site_id", "foreign"}`` of the Paw Site whose bar binds this agent, or
+    ``{"site_id": "", "foreign": False}``. The knowledge read hands it to the agent
+    editor, which then shows that site's knowledge (Paw Bar → Knowledge) instead of
+    the agent's own scope alone. Failure-soft like the visibility badge."""
+    empty: dict[str, Any] = {"site_id": "", "foreign": False}
+    if not agent_id:
+        return empty
+    try:
+        workspace_id = await get_workspace(agent_id)
+        if not workspace_id:
+            return empty
+        from pocketpaw_ee.paw_bar.agent_provisioning import site_for_agent
+
+        site = await site_for_agent(agent_id, workspace_id)
+    except Exception:  # noqa: BLE001 — a missing link must never 500 the knowledge read
+        logger.warning("could not resolve the bound site for agent %s", agent_id, exc_info=True)
+        return empty
+    if site is None:
+        return empty
+    return {"site_id": str(site.id), "foreign": bool(getattr(site, "foreign_origin", False))}
 
 
 async def is_visible_to_site_visitors(agent_id: str) -> bool:

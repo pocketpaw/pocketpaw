@@ -37,14 +37,17 @@
 # section) are pruned, only after a trustworthy, complete sync.
 #
 # BOOKKEEPING on the Site (``_record_sync``, a targeted ``$set``): article ids,
-# ``kb_page_index`` (``{page_key: {"id", "title", "sections": [{id, title,
-# source, hash, anchor}]}}``, the only page-to-article link; ``id`` is the first
-# section so an old reader still works, and ``page_sections.index_sections``
-# also reads an entry written before sections; ``concierge_runtime.resolve_page``
-# looks the visitor's page up by the same ``page_key``), ``kb_synced_at`` and
-# ``kb_sync_error``. A full sync replaces ids and index, a partial crawl merges, a
-# failure (a crash too: ``sync_failed``) keeps them. A missing or outdated kb
-# binary stops at the first page: ``kb_unavailable``.
+# ``kb_page_index`` (``{page_key: {"id", "title", "crawled_at", "chars",
+# "sections": [{id, title, source, hash, anchor, chars}]}}``, the only
+# page-to-article link; ``id`` is the first section so an old reader still works,
+# and ``page_sections.index_sections`` also reads an entry written before
+# sections; ``concierge_runtime.resolve_page`` looks the visitor's page up by the
+# same ``page_key``), ``kb_crawl_report`` (the pages left out and why: too short,
+# past the page cap, no section compiled, or a foreign crawl's own note; plus the
+# cap and the crawl's counts), ``kb_synced_at`` and ``kb_sync_error``. A full sync
+# replaces ids and index, a partial crawl merges, a failure (a crash too:
+# ``sync_failed``) keeps them. A missing or outdated kb binary stops at the first
+# page: ``kb_unavailable``.
 #
 # THE CATALOG FOLLOWS. A sync that reached the site's content (hosted: the pocket
 # was read; foreign: the crawl reached the origin) schedules the fire-and-forget
@@ -80,6 +83,9 @@ _MAX_DOCUMENTS = 60
 # Max characters kept per page. Long enough for a real content page; past this the
 # tail is dropped rather than stored.
 _MAX_DOCUMENT_CHARS = 40_000
+
+# Most skipped pages recorded per sync, so a huge site cannot bloat the Site doc.
+_MAX_SKIPS = 200
 
 # Pages shorter than this carry no answerable content (an empty layout, a redirect
 # stub) and are skipped so they don't dilute BM25 scoring.
@@ -178,6 +184,17 @@ class SiteKnowledgeReport:
     # (``page_sections.index_sections`` reads an entry).
     page_index: dict[str, dict[str, Any]] = field(default_factory=dict)
     error: str = ""
+    # Why pages the owner has are not in ``page_index``: ``{path, reason, detail}``
+    # with reason ``too_short``, ``page_cap``, ``ingest_failed`` or ``crawl`` (a
+    # foreign crawl's own note, verbatim in ``detail``). Recorded on the Site as
+    # ``kb_crawl_report`` so the owner can see what the concierge never read.
+    skips: list[dict[str, str]] = field(default_factory=list)
+    # The page cap this sync ran under, and whether it was reached. 0 means the
+    # sync never reached any content (nothing to report).
+    page_cap: int = 0
+    capped: bool = False
+    pages_failed: int = 0
+    skipped_by_robots: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -476,26 +493,34 @@ def extract_site_documents(
     engine: str,
     ripple_spec: Any = None,
     source: dict[str, Any] | None = None,
+    skips: list[dict[str, str]] | None = None,
 ) -> list[SiteDocument]:
     """Turn a pocket's stored content into ingestable documents, one per page.
 
     Pure — no I/O, no Beanie, no kb subprocess — so the lane rules are unit-testable
     on their own. Returns [] when there is nothing to ingest (a foreign site with an
     empty pocket, a spec with no copy), which the caller reports rather than treats
-    as a failure.
+    as a failure. A page left out (too little text, past ``_MAX_DOCUMENTS``) is
+    appended to ``skips`` when the caller passes a list.
     """
     docs: list[SiteDocument] = []
+
+    def skip(path: str, reason: str) -> None:
+        if skips is not None and len(skips) < _MAX_SKIPS:
+            skips.append({"path": path, "reason": reason, "detail": ""})
 
     if engine in ("html", "svelte") and isinstance(source, dict):
         # Sorted so a sync is deterministic and the homepage tends to lead.
         for path in sorted(source):
-            if len(docs) >= _MAX_DOCUMENTS:
-                break
             body = source.get(path)
             if not isinstance(body, str) or not _is_page(path, engine):
                 continue
+            if len(docs) >= _MAX_DOCUMENTS:
+                skip(path, "page_cap")
+                continue
             text = _page_text(path, body, engine)[:_MAX_DOCUMENT_CHARS]
             if len(text) < _MIN_DOCUMENT_CHARS:
+                skip(path, "too_short")
                 continue
             anchors = heading_anchors(body) if engine == "html" else ()
             docs.append(
@@ -508,6 +533,8 @@ def extract_site_documents(
     text = spec_to_text(ripple_spec or {})[:_MAX_DOCUMENT_CHARS]
     if len(text) >= _MIN_DOCUMENT_CHARS:
         docs.append(SiteDocument(path="/", source=_path_slug("/"), text=text))
+    else:
+        skip("/", "too_short")
     return docs
 
 
@@ -565,6 +592,7 @@ async def _ingest_documents(
 
     previous_ids = set(getattr(site, "kb_article_ids", None) or [])
     previous_index = getattr(site, "kb_page_index", None) or {}
+    crawled_at = datetime.now(UTC).isoformat()
     for doc in docs:
         key = page_key(doc.path)
         sections = split_page(doc)
@@ -615,6 +643,8 @@ async def _ingest_documents(
         report.article_ids.extend(ids[i] for i in kept)
         if not landed:
             report.skipped += 1
+            if len(report.skips) < _MAX_SKIPS:
+                report.skips.append({"path": doc.path, "reason": "ingest_failed", "detail": ""})
             if kept and isinstance(old_entry, dict):
                 report.page_index.setdefault(key, old_entry)
             continue
@@ -629,6 +659,8 @@ async def _ingest_documents(
             {
                 "id": ids[kept[0]],
                 "title": title.strip(),
+                "crawled_at": crawled_at,
+                "chars": len(doc.text),
                 "sections": [
                     {
                         "id": ids[i],
@@ -636,6 +668,7 @@ async def _ingest_documents(
                         "source": sections[i].source,
                         "hash": hashes[i],
                         "anchor": sections[i].anchor,
+                        "chars": len(sections[i].text),
                     }
                     for i in kept
                 ],
@@ -710,7 +743,10 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
         engine=pocket.get("engine") or "ripple",
         ripple_spec=pocket.get("rippleSpec") or {},
         source=pocket.get("source") if isinstance(pocket.get("source"), dict) else None,
+        skips=report.skips,
     )
+    report.page_cap = _MAX_DOCUMENTS
+    report.capped = any(s["reason"] == "page_cap" for s in report.skips)
     if not docs:
         # Nothing to ingest is a real state, not an error: a foreign site's pocket
         # holds no pages. Previously-ingested articles are left alone rather than
@@ -799,7 +835,8 @@ async def _sync_foreign_site_knowledge(
     _schedule_first_foreign_screenshot(site)
     _schedule_catalog_sync(site)
 
-    docs = extract_site_documents(engine="html", source=harvest.source)
+    docs = extract_site_documents(engine="html", source=harvest.source, skips=report.skips)
+    _note_harvest(report, harvest)
     if not docs:
         # The origin was reachable and carried no answerable text (a JS-rendered
         # shell, a parked page). A real state, not a failure, and the previous
@@ -844,6 +881,23 @@ async def _sync_foreign_site_knowledge(
     for warning in harvest.warnings:
         logger.info("sites.kb: %s crawl note — %s", harvest.host, warning)
     return report
+
+
+def _note_harvest(report: SiteKnowledgeReport, harvest: Any) -> None:
+    """Copy what the crawl knows about pages it did not bring back onto the report:
+    its counts, whether it stopped at its page budget, and each of its notes
+    ("skipped <url> — HTTP 404"), verbatim, as a ``crawl`` skip."""
+    from pocketpaw_ee.sites.foreign_grounding import GROUNDING_MAX_PAGES
+
+    report.page_cap = GROUNDING_MAX_PAGES
+    report.pages_failed = int(getattr(harvest, "pages_failed", 0) or 0)
+    report.skipped_by_robots = int(getattr(harvest, "skipped_by_robots", 0) or 0)
+    fetched = len(getattr(harvest, "source", None) or {}) + report.pages_failed
+    report.capped = fetched >= GROUNDING_MAX_PAGES
+    for note in getattr(harvest, "warnings", None) or []:
+        if len(report.skips) >= _MAX_SKIPS:
+            break
+        report.skips.append({"path": "", "reason": "crawl", "detail": str(note)[:300]})
 
 
 def _schedule_foreign_card_meta(site: Any, harvest: Any) -> None:
@@ -956,6 +1010,15 @@ async def _record_sync(
         if keep_previous:
             index = {**(getattr(site, "kb_page_index", None) or {}), **index}
         updates["kb_page_index"] = index
+    # What the sync left out, whenever it reached the site's pages at all.
+    if report.page_cap:
+        updates["kb_crawl_report"] = {
+            "skips": list(report.skips),
+            "page_cap": report.page_cap,
+            "capped": report.capped,
+            "pages_failed": report.pages_failed,
+            "skipped_by_robots": report.skipped_by_robots,
+        }
     try:
         await site.set(updates)
     except Exception:  # noqa: BLE001 — bookkeeping must not fail the caller

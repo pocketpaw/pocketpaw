@@ -6,6 +6,9 @@
 #   GET/POST          …/site/{site_id}/knowledge/sources               list + caps / add (202)
 #   POST              …/site/{site_id}/knowledge/sources/{id}/refetch  re-read a link (202)
 #   DELETE            …/site/{site_id}/knowledge/sources/{id}          remove (204)
+#   GET               …/site/{site_id}/knowledge/index                 everything indexed
+#   GET               …/site/{site_id}/knowledge/article/{id}?scope=   one article's text
+#   DELETE            …/site/{site_id}/knowledge/article/{id}?scope=agent  remove (204)
 #
 # All under /paw-bar/admin, gated like the router's other owner routes
 # (``paw_bar.read`` on GETs, ``paw_bar.manage`` on writes), bound to the session's
@@ -32,7 +35,17 @@
 # ids the new set does not keep. Removal deletes a source's articles unless another
 # row or the page sync (``kb_article_ids``) holds the same id (kb-go keys an article
 # by its title). ``delete_faqs`` / ``delete_sources`` are the concierge delete's
-# hooks. Mounted beside ``paw_bar.router`` in ``pocketpaw_ee.cloud``.
+# hooks.
+#
+# The INDEX is the owner's window into all of it, read by Paw Bar → Knowledge and
+# by the bound agent's Knowledge tab in /agents alike (one store, two views): the
+# pages in ``kb_page_index`` with their sections, the pages the last sync left out
+# (``kb_crawl_report``), other articles in the pocket scope, and the articles on
+# the bound agent's own ``agent:<id>`` scope, which the concierge also reads. An
+# article is read or removed only after it is found in ``kb list`` for a scope
+# resolved from the site (the client never names the agent). Pocket articles are
+# removed through their source or the page sync, never one by one. Mounted beside
+# ``paw_bar.router`` in ``pocketpaw_ee.cloud``.
 
 from __future__ import annotations
 
@@ -41,7 +54,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -737,3 +750,264 @@ async def delete_sources(site: Any) -> int:
 
 
 __all__ = ["delete_faqs", "delete_sources", "router"]
+
+
+# --------------------------------------------------------------------------- #
+# The knowledge index: everything the concierge answers from, and its text
+# --------------------------------------------------------------------------- #
+
+_INDEX = "/paw-bar/admin/site/{site_id}/knowledge/index"
+_ARTICLE = "/paw-bar/admin/site/{site_id}/knowledge/article/{article_id}"
+_Scope = Literal["pocket", "agent"]
+
+
+class KnowledgeIndexSection(BaseModel):
+    id: str
+    title: str
+    anchor: str = ""
+    chars: int | None = None
+
+
+class KnowledgeIndexPage(BaseModel):
+    key: str
+    path: str
+    title: str
+    crawled_at: str
+    chars: int | None = None
+    sections: list[KnowledgeIndexSection]
+
+
+class KnowledgeIndexSkip(BaseModel):
+    path: str
+    reason: str
+    detail: str = ""
+
+
+class KnowledgeIndexArticle(BaseModel):
+    id: str
+    title: str
+    words: int = 0
+
+
+class KnowledgeIndexResponse(BaseModel):
+    site_id: str
+    synced_at: str
+    status: str
+    page_count: int
+    article_count: int
+    page_cap: int
+    capped: bool
+    pages: list[KnowledgeIndexPage]
+    skipped: list[KnowledgeIndexSkip]
+    pages_failed: int
+    skipped_by_robots: int
+    other_articles: list[KnowledgeIndexArticle]
+    agent_id: str
+    agent_articles: list[KnowledgeIndexArticle]
+
+
+class KnowledgeArticleResponse(BaseModel):
+    id: str
+    title: str
+    summary: str
+    content: str
+    scope: _Scope
+    words: int = 0
+
+
+async def _bound_agent_id(site: Any, workspace_id: str) -> str:
+    """The agent bound to this site's bar, the one whose ``agent:<id>`` scope the
+    concierge also reads, or "" when none is bound or the store cannot be read."""
+    from pocketpaw_ee.paw_bar.agent_provisioning import site_widget
+
+    try:
+        widget = await site_widget(site.pocket_id or "", workspace_id)
+    except Exception:  # noqa: BLE001 — the index degrades to "no agent", never 500s
+        logger.warning("paw_bar.index: widget lookup failed for site %s", site.id, exc_info=True)
+        return ""
+    return str(getattr(widget, "agent_id", "") or "")
+
+
+async def _scope_articles(scope: str) -> list[dict[str, Any]]:
+    """``kb list`` for ``scope``, fail-soft: a kb error lists nothing."""
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+    try:
+        raw = await KnowledgeService.list_articles_for_scope(scope)
+    except Exception:  # noqa: BLE001
+        logger.warning("paw_bar.index: kb list failed for %s", scope, exc_info=True)
+        return []
+    return [a for a in raw if isinstance(a, dict) and a.get("id")]
+
+
+def _listed(article: dict[str, Any]) -> KnowledgeIndexArticle:
+    return KnowledgeIndexArticle(
+        id=str(article["id"]),
+        title=str(article.get("title") or article["id"]),
+        words=int(article.get("word_count") or 0),
+    )
+
+
+def _page_path(key: str) -> str:
+    return "/" + key
+
+
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+@router.get(
+    _INDEX,
+    response_model=KnowledgeIndexResponse,
+    dependencies=[Depends(_require_paw_bar_read)],
+)
+async def get_site_knowledge_index(
+    site_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> KnowledgeIndexResponse:
+    """Every page the concierge has read (with its sections), the pages the last
+    sync left out and why, anything else in the site's pocket scope, and the
+    articles on the bound agent's own scope. One read for the owner's index view,
+    in Paw Bar and in the agent editor alike."""
+    from pocketpaw.paw_bar.pages import page_key
+    from pocketpaw_ee.sites.page_sections import index_sections
+
+    site = await _load(site_id, workspace_id)
+    synced = getattr(site, "kb_synced_at", None)
+    synced_at = synced.isoformat() if synced else ""
+    status = getattr(site, "kb_sync_error", "") or ("" if synced else "never_synced")
+
+    pages: list[KnowledgeIndexPage] = []
+    for key, entry in (getattr(site, "kb_page_index", None) or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        raw_sections = {
+            str(s.get("id")): s for s in entry.get("sections") or [] if isinstance(s, dict)
+        }
+        sections = [
+            KnowledgeIndexSection(
+                id=s["id"],
+                title=s["title"] or str(entry.get("title") or ""),
+                anchor=s["anchor"],
+                chars=_int_or_none(raw_sections.get(s["id"], {}).get("chars")),
+            )
+            for s in index_sections(entry)
+        ]
+        pages.append(
+            KnowledgeIndexPage(
+                key=str(key),
+                path=_page_path(str(key)),
+                title=str(entry.get("title") or "") or _page_path(str(key)),
+                crawled_at=str(entry.get("crawled_at") or synced_at),
+                chars=_int_or_none(entry.get("chars")),
+                sections=sections,
+            )
+        )
+    pages.sort(key=lambda p: p.path)
+
+    report = getattr(site, "kb_crawl_report", None) or {}
+    skipped = [
+        KnowledgeIndexSkip(
+            path=_page_path(page_key(str(s.get("path")))) if s.get("path") else "",
+            reason=str(s.get("reason") or ""),
+            detail=str(s.get("detail") or ""),
+        )
+        for s in report.get("skips") or []
+        if isinstance(s, dict)
+    ]
+
+    known: set[str] = set(getattr(site, "kb_article_ids", None) or [])
+    for row in getattr(site, "concierge_sources", None) or []:
+        known.update(row.article_ids)
+    other = [_listed(a) for a in await _scope_articles(_scope(site)) if str(a["id"]) not in known]
+    agent_id = await _bound_agent_id(site, workspace_id)
+    agent_articles = (
+        [_listed(a) for a in await _scope_articles(f"agent:{agent_id}")] if agent_id else []
+    )
+    return KnowledgeIndexResponse(
+        site_id=str(site.id),
+        synced_at=synced_at,
+        status=status,
+        page_count=len(pages),
+        article_count=len(getattr(site, "kb_article_ids", None) or []),
+        page_cap=int(report.get("page_cap") or 0),
+        capped=bool(report.get("capped")),
+        pages=pages,
+        skipped=skipped,
+        pages_failed=int(report.get("pages_failed") or 0),
+        skipped_by_robots=int(report.get("skipped_by_robots") or 0),
+        other_articles=other,
+        agent_id=agent_id,
+        agent_articles=agent_articles,
+    )
+
+
+async def _article_scope(site: Any, workspace_id: str, scope: str, article_id: str) -> str:
+    """The kb scope string for ``scope``, resolved from the site (never from the
+    client), once ``article_id`` is found listed there. Anything else is a 404,
+    so an id from another scope, or one shaped like a kb flag, is never read."""
+    if scope == "agent":
+        agent_id = await _bound_agent_id(site, workspace_id)
+        if not agent_id:
+            raise HTTPException(404, "Article not found")
+        kb_scope = f"agent:{agent_id}"
+    else:
+        kb_scope = _scope(site)
+    if not any(str(a["id"]) == article_id for a in await _scope_articles(kb_scope)):
+        raise HTTPException(404, "Article not found")
+    return kb_scope
+
+
+@router.get(
+    _ARTICLE,
+    response_model=KnowledgeArticleResponse,
+    dependencies=[Depends(_require_paw_bar_read)],
+)
+async def get_site_knowledge_article(
+    site_id: str,
+    article_id: str,
+    scope: _Scope = "pocket",
+    workspace_id: str = Depends(current_workspace_id),
+) -> KnowledgeArticleResponse:
+    """One indexed article's compiled text: what the concierge searches."""
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+    site = await _load(site_id, workspace_id)
+    kb_scope = await _article_scope(site, workspace_id, scope, article_id)
+    try:
+        article = await KnowledgeService.get_article_for_scope(kb_scope, article_id)
+    except Exception:  # noqa: BLE001 — listed a moment ago, gone now: a 404
+        logger.warning("paw_bar.index: kb show failed for %s", article_id, exc_info=True)
+        raise HTTPException(404, "Article not found") from None
+    return KnowledgeArticleResponse(
+        id=article_id,
+        title=str(article.get("title") or article_id),
+        summary=str(article.get("summary") or ""),
+        content=str(article.get("content") or ""),
+        scope=scope,
+        words=int(article.get("word_count") or 0),
+    )
+
+
+@router.delete(
+    _ARTICLE,
+    status_code=204,
+    dependencies=[Depends(_require_paw_bar_manage)],
+)
+async def delete_site_knowledge_article(
+    site_id: str,
+    article_id: str,
+    scope: _Scope = "agent",
+    workspace_id: str = Depends(current_workspace_id),
+) -> Response:
+    """Remove one article from the bound agent's own scope. A pocket article
+    belongs to the page sync or a source (409): remove those instead."""
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+    if scope != "agent":
+        raise HTTPException(409, "remove_the_source")
+    site = await _load(site_id, workspace_id)
+    kb_scope = await _article_scope(site, workspace_id, scope, article_id)
+    if not await KnowledgeService.remove_article(kb_scope, article_id):
+        raise HTTPException(502, "kb_delete_failed")
+    return Response(status_code=204)
