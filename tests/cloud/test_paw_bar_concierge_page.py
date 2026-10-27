@@ -379,16 +379,25 @@ def _seed_ranked_kb(monkeypatch, articles: list[dict[str, str]]) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "title"),
+    [("/membership", "Membership"), ("/", "Home"), ("/about", "About"), ("/apply", "Apply")],
+)
 async def test_a_new_topic_retrieves_its_own_knowledge_over_the_last_turns(
-    concierge_client, model, monkeypatch
+    concierge_client, model, monkeypatch, path, title
 ):
-    """Turn 1 asks how to apply, turn 2 what events are coming up. The joined
-    query (message + last turns) ranked six apply-and-events FAQ items over the
-    event listing, so it never arrived and the concierge said it had no event
-    details. The message's own hits must lead."""
+    """Turn 1 asks how to apply, turn 2 what events are coming up, from any page
+    but /events. The joined query (message + last turns + page title) ranked six
+    of the page's own apply-and-events sections over the event listing, so it
+    never arrived and the concierge said it had no event details. The message's
+    own hits must lead, whatever page the visitor is on."""
     client, store = concierge_client
     faqs = [
-        {"id": f"faq-{n}", "title": f"FAQ {n}", "content": "How to apply to attend events."}
+        {
+            "id": f"faq-{n}",
+            "title": f"{title} section {n}",
+            "content": "How to apply to attend events.",
+        }
         for n in range(6)
     ]
     salons = {"id": "forthcoming-salons", "title": "Salons", "content": "Upcoming events."}
@@ -396,9 +405,10 @@ async def test_a_new_topic_retrieves_its_own_knowledge_over_the_last_turns(
     await _site()
     widget = await store.create_widget(_widget())
 
-    first = await _chat(client, widget.id, message="how can i apply")
+    page = {"url": f"https://brewco.com{path}", "title": title}
+    first = await _chat(client, widget.id, message="how can i apply", page=page)
     assert first.status_code == 200, first.text
-    second = await _chat(client, widget.id, message="what are the events upcoming")
+    second = await _chat(client, widget.id, message="what are the events upcoming", page=page)
     assert second.status_code == 200, second.text
 
     assert "forthcoming-salons" in _item_ids(model.user_prompt())
@@ -484,8 +494,9 @@ async def test_an_indexed_page_brings_its_title_summary_and_article(
     assert _item_ids(prompt)[0] == "our-menu"
     assert _MENU_ARTICLE in _block(prompt, "knowledge")
     assert shows == [("pocket:pocket-1", "our-menu")]
-    # The indexed title joins the retrieval query.
-    assert all("Our menu" in q for _s, q in seen)
+    # The indexed title joins the retrieval query; the message is also searched alone.
+    message = "how much is the oat latte?"
+    assert {q for _s, q in seen} == {message, f"{message}\nOur menu"}
     # Owner block (none here) → page → knowledge: the PRD's fixed order.
     assert prompt.index("<page>") < prompt.index("<knowledge>")
 
@@ -511,7 +522,8 @@ async def test_a_page_that_is_not_indexed_brings_its_clipped_untrusted_title(
     assert title[:121] not in page
     assert "unverified" in page
     assert shows == []  # nothing to read: the page is not in the index
-    assert all(title[:120] in q for _s, q in seen)
+    message = "When do you open on Sunday?"
+    assert {q for _s, q in seen} == {message, f"{message}\n{title[:120]}"}
 
 
 @pytest.mark.asyncio

@@ -19,8 +19,8 @@
 # (``knowledge_chars``, ``select_knowledge``): pinned FAQs, the visitor's page
 # article (or, when a hit off that page carries the message's own words, that
 # page first: ``_with_page_siblings``), then KB hits, each cut to what is left.
-# KB hits for the message itself lead; the earlier turns only fill the rest
-# (``_retrieve_for_turn``), so a change of topic is not outvoted.
+# KB hits for the message alone lead; the page title and earlier turns only
+# fill the rest (``_retrieve_for_turn``), so neither outvotes a new topic.
 # ``resolve_page`` accepts the request's page only on an allowed origin; <catalog>
 # comes per turn from ``catalog_for_turn`` (small catalogs whole, else FTS hits).
 #
@@ -996,12 +996,14 @@ async def _retrieve_for_turn(
     """``retrieve`` with the current message leading. The joined query
     (``_retrieval_query``) weighs the visitor's earlier turns like the new
     message, so after a change of topic ("how can I apply", then "what events
-    are coming up") the old topic's articles filled every slot. So the message
-    and page title are searched on their own too: those hits come first, and the
-    joined query's hits only fill what is left of ``k``, which keeps "how much is
-    this?" answerable from the turns before it. Pinned FAQs stay first, once;
-    scores are re-ranked per scope in the merged order."""
-    lead_query = _retrieval_query(message, [], page)
+    are coming up") the old topic's articles filled every slot, and the page
+    title pulled toward the visitor's page (events listed from /events only). So
+    the message is also searched alone, the same search on every page: those
+    hits come first, and the joined query's hits only fill what is left of
+    ``k``, which keeps "how much is this?" answerable from the page and the
+    turns before it. Pinned FAQs stay first, once; scores are re-ranked per
+    scope in the merged order."""
+    lead_query = (message or "").strip()
     if lead_query == query:
         return await retrieve(site, query, agent_id=agent_id, k=k)
     own, joined = await asyncio.gather(
