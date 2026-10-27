@@ -139,18 +139,22 @@ def stores(tmp_path: Path, monkeypatch):
 
 class TestExecutorAuto:
     async def test_add_to_cart_happy_path(self, stores) -> None:
-        from pocketpaw_ee.paw_bar.actions import execute_action
+        from pocketpaw_ee.paw_bar.actions import _cart_ref, execute_action
 
         pp_store, _ = stores
         widget = await pp_store.create_widget(_widget())
-        out = await execute_action(widget, "ws-1", "c1", "add_to_cart", {"product_id": "espresso"})
+        # Non-hex characters, so the ref can never show up inside the hex cart handle by chance.
+        ref = "customer-ref-xyz"
+        out = await execute_action(widget, "ws-1", ref, "add_to_cart", {"product_id": "espresso"})
         assert out.ok
         assert out.result == {"added": "espresso", "qty": 1}
         assert out.cart["total_cents"] == 350
         assert out.cart["items"][0]["id"] == "espresso"
         # checkout_url is rendered with the opaque cart ref (no raw customer_ref).
-        assert "{cart_ref}" not in out.cart["checkout_url"]
-        assert "c1" not in out.cart["checkout_url"]
+        assert out.cart["checkout_url"] == (
+            f"https://brewco.com/checkout?cart={_cart_ref(str(widget.id), ref)}"
+        )
+        assert ref not in out.cart["checkout_url"]
 
     async def test_add_to_cart_unknown_product_rejected(self, stores) -> None:
         from pocketpaw_ee.paw_bar.actions import execute_action
