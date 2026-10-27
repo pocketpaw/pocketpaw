@@ -11,7 +11,10 @@
 #   * the default is the copy vendored in the package, served byte for byte,
 #     wrapped in one IIFE, generated (not hand-edited), and still speaking the
 #     pawbar:act / pawbar:act-result protocol the glass app posts, and writing
-#     no page globals beyond its load flag and window.pawbarTools.
+#     no page globals beyond its load flag and window.pawbarTools;
+#   * WebMCP tools are read only behind `data-webmcp`, through getTools and
+#     executeTool, skipping consequentialHint tools, and the script never
+#     defines modelContext itself (no shim).
 
 from __future__ import annotations
 
@@ -174,3 +177,16 @@ def test_vendored_script_is_generated_not_hand_edited():
     header = _vendored_source().split('"use strict";')[0]
     assert "GENERATED, DO NOT EDIT BY HAND" in header
     assert "actions/src/actions.ts" in header
+
+
+def test_vendored_script_reads_webmcp_only_when_opted_in():
+    """A site's WebMCP tools reach the concierge only when its tag says
+    data-webmcp; a tool marked consequentialHint (payments, account changes) is
+    skipped; and the script reads modelContext, it never assigns one."""
+    code = _code()
+    assert 'hasAttribute("data-webmcp")' in code
+    assert "doc.modelContext || navigator.modelContext" in code
+    assert ".getTools()" in code
+    assert ".executeTool(" in code
+    assert "consequentialHint" in code
+    assert not re.search(r"modelContext\s*=(?!=)", code)
