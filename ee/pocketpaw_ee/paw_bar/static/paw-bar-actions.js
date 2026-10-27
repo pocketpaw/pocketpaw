@@ -10,7 +10,7 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:actions` in the
 // paw-bar repo (actions/dist/actions.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar actions/src/actions.ts @ 9b0f98d (PR #50)
+// Source: qbtrix/paw-bar actions/src/actions.ts @ be49418 (PR #51)
 //
 // Vendored rather than fetched for the same reason as paw-bar.js: the URL
 // `GET /paw-bar/actions.js` is shown to site owners to paste into their pages,
@@ -111,32 +111,6 @@
       sendSoon();
     };
     if (tools.size) sendSoon();
-    const mc = script.hasAttribute("data-webmcp") && (doc.modelContext || navigator.modelContext);
-    let gen = 0;
-    async function readWeb() {
-      const n = ++gen;
-      const next = /* @__PURE__ */ new Map();
-      for (const t of await mc.getTools()) {
-        const { $schema, title, description, additionalProperties, ...s } = t.inputSchema || { type: "object" };
-        if (t.annotations?.consequentialHint || !TOOL_NAME.test(t.name)) continue;
-        next.set(t.name, [
-          { name: t.name, description: t.description, inputSchema: s, confirm: true },
-          async (a, o) => {
-            const v = JSON.parse(await mc.executeTool(t, a, o) ?? "null");
-            return typeof v == "string" ? { message: v } : v?.isError ? { ok: false } : v;
-          }
-        ]);
-      }
-      if (n == gen) {
-        web = next;
-        sendSoon();
-      }
-    }
-    const sync = () => readWeb().catch((e) => console.warn("paw-bar: webmcp", e));
-    if (mc) {
-      mc.addEventListener("toolchange", sync);
-      sync();
-    }
     const norm = (p) => p.replace(/\/+$/, "") || "/";
     function navigate(to) {
       clearOverlay();
@@ -238,5 +212,31 @@
         }
       }
     });
+    const mc = script.hasAttribute("data-webmcp") && (doc.modelContext || navigator.modelContext);
+    let gen = 0;
+    async function readWeb() {
+      const n = ++gen;
+      const next = /* @__PURE__ */ new Map();
+      for (const t of await mc.getTools()) {
+        const { $schema, title, description, additionalProperties, ...s } = t.inputSchema || { type: "object" };
+        if (t.annotations?.consequentialHint || !TOOL_NAME.test(t.name)) continue;
+        next.set(t.name, [
+          { name: t.name, description: t.description, inputSchema: s, confirm: true },
+          async (a, o) => {
+            const v = JSON.parse(await mc.executeTool(t, a, o) ?? "null");
+            return typeof v == "string" ? { message: v } : v?.isError ? { ok: false } : v;
+          }
+        ]);
+      }
+      if (n == gen) {
+        web = next;
+        sendSoon();
+      }
+    }
+    const sync = () => readWeb().catch((e) => console.warn("paw-bar: webmcp", e));
+    if (mc) {
+      mc.addEventListener?.("toolchange", sync);
+      sync();
+    }
   })(window);
 })();
