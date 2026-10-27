@@ -22,7 +22,10 @@
 # ``resolve_page`` accepts the request's page only on an allowed origin; <catalog>
 # comes per turn from ``catalog_for_turn`` (small catalogs whole, else FTS hits).
 #
-# Output passes ``FenceFilter``: a ```pawbar-card is validated and hydrated
+# Output first passes ``ThinkFilter``: a reasoning model's chain of thought (a
+# <think> block, or a reply that opens mid-thought and only closes it) is
+# dropped, and a reply that is all thinking ends as ``unavailable``.
+# It then passes ``FenceFilter``: a ```pawbar-card is validated and hydrated
 # (``card_spec.render_card``); any other code fence becomes ``CODE_REPLACEMENT``
 # unless doc code is allowed and ``is_grounded_code`` finds it in this turn's
 # knowledge; the first ```pawbar-action goes through ``action_spec.render_action``.
@@ -2327,6 +2330,95 @@ def _card_object(fence: str | None) -> dict[str, Any] | None:
     return card if isinstance(card, dict) and "ui" in card else None
 
 
+# A reasoning model can write its chain of thought into the reply text. Some
+# provider templates put the opening <think> in the PROMPT, so the reply starts
+# mid-thought and only the closer arrives; that thought quotes the frame and the
+# owner's settings. A reply whose head is one of these starts is held until a
+# closer and dropped; any other reply streams as it comes.
+_THINK_OPENERS = ("<think>", "<thinking>")
+_THINK_CLOSERS = ("</think>", "</thinking>")
+_THINK_HEADS = (*_THINK_OPENERS, "Thinking Process", "Thinking process")
+_THINK_TAGS = (*_THINK_OPENERS, *_THINK_CLOSERS)
+
+
+class ThinkingOnlyReply(RuntimeError):
+    """The model's whole reply was thinking: it never closed, so nothing can show."""
+
+
+class ThinkFilter:
+    """Drops a reasoning model's chain of thought from streamed reply text.
+
+    ``feed`` returns the visible text for each delta. The reply's head is held
+    only until it can be told apart from a thinking start (``_THINK_HEADS``, at
+    most 16 chars); a thinking head is then held, never shown, until a closer,
+    and the text after it is judged as a new head. Mid-reply, a ``<think>``
+    block is dropped and a stray closer is cut. ``close`` returns any held text
+    and sets ``unclosed`` when the reply ended inside its thinking.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._mode = "head"  # "head" | "thinking" | "text"
+        self.unclosed = False
+
+    def feed(self, chunk: str) -> str:
+        self._buf += chunk
+        out: list[str] = []
+        while True:
+            if self._mode == "head":
+                head = self._buf.lstrip()
+                if any(h.startswith(head) and h != head for h in _THINK_HEADS):
+                    return "".join(out)  # empty, or still a possible thinking start
+                self._buf = head
+                if any(head.startswith(h) for h in _THINK_HEADS):
+                    self._mode = "thinking"
+                else:
+                    self._mode = "text"
+            elif self._mode == "thinking":
+                at, tag = _first_tag(self._buf, _THINK_CLOSERS)
+                if at < 0:
+                    # Keep only what could still be the start of a closer.
+                    self._buf = self._buf[-(max(map(len, _THINK_CLOSERS)) - 1) :]
+                    return "".join(out)
+                self._buf = self._buf[at + len(tag) :]
+                self._mode = "head"
+            else:
+                at, tag = _first_tag(self._buf, _THINK_TAGS)
+                if at < 0:
+                    keep = _partial_tag_tail(self._buf)
+                    out.append(self._buf[: len(self._buf) - keep])
+                    self._buf = self._buf[len(self._buf) - keep :]
+                    return "".join(out)
+                out.append(self._buf[:at])
+                self._buf = self._buf[at + len(tag) :]
+                if tag in _THINK_OPENERS:
+                    self._mode = "thinking"
+                else:
+                    logger.warning("concierge v2: dropped a stray %s from a reply", tag)
+
+    def close(self) -> str:
+        held, self._buf = self._buf, ""
+        if self._mode == "thinking":
+            self.unclosed = True
+            return ""
+        return held
+
+
+def _first_tag(text: str, tags: Sequence[str]) -> tuple[int, str]:
+    """The earliest of ``tags`` in ``text`` as (index, tag), or (-1, "")."""
+    hits = [(text.find(t), t) for t in tags if t in text]
+    return min(hits) if hits else (-1, "")
+
+
+def _partial_tag_tail(text: str) -> int:
+    """How many trailing chars of ``text`` could begin a think tag."""
+    start = text.rfind("<")
+    if start < 0:
+        return 0
+    tail = text[start:]
+    return len(tail) if any(t.startswith(tail) and t != tail for t in _THINK_TAGS) else 0
+
+
 class FenceFilter:
     """Holds every ``` fence in a streamed reply until it closes, then decides.
 
@@ -3155,13 +3247,22 @@ async def run_concierge_v2(
         # text came back, and this agent has no tools to cut off mid-call.
         for attempt in (1, 2):
             fences = _new_fences()
+            # A reasoning model's chain of thought never reaches the fences, the
+            # visitor or the transcript (``ThinkFilter``).
+            think = ThinkFilter()
             try:
                 async with agent.run_stream(prompt, model_settings=model_settings) as result:
                     async for delta in result.stream_text(delta=True, debounce_by=None):
-                        for piece in await fences.afeed(delta or ""):
+                        for piece in await fences.afeed(think.feed(delta or "")):
                             text, frame = _piece_frame(piece)
                             full_text, shown = full_text + text, True
                             yield frame
+                    for piece in await fences.afeed(think.close()):
+                        text, frame = _piece_frame(piece)
+                        full_text, shown = full_text + text, True
+                        yield frame
+                    if think.unclosed and not shown:
+                        raise ThinkingOnlyReply("the reply was all thinking")
                     usage = {**_usage(settings, result, model_spec), **spend_tags}
                     run_usage = result.usage
                     repair_from = (
@@ -3208,8 +3309,9 @@ async def run_concierge_v2(
                     model_settings=model_settings,
                     usage=repair_from[1],
                 ) as result:
+                    repair_think = ThinkFilter()
                     async for delta in result.stream_text(delta=True, debounce_by=None):
-                        for event in await fences.afeed(delta or ""):
+                        for event in await fences.afeed(repair_think.feed(delta or "")):
                             if isinstance(event, CardEvent):
                                 text, frame = _piece_frame(event)
                                 full_text += text
