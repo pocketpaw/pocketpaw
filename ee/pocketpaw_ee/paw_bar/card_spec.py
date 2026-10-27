@@ -26,10 +26,10 @@
 # A ripple body that is not JSON only for missing closers, surplus closers, a
 # trailing or missing comma, or a raw control character in a string (``_repair``,
 # never inside a string or past the root) is repaired once and then checked like
-# any body; a ripple
-# node's declared props written flat on the node are moved under ``props``
-# (``_lift_flat_props``, which also renames a widget alias, ``RIPPLE_ALIASES``) before the checks,
-# and the moved card is the one sent.
+# any body. On either profile a node's declared props (its own manifest's) written
+# flat on the node are moved under ``props`` (``_lift_flat_props``; on ripple it also
+# renames a widget alias, ``RIPPLE_ALIASES``) before the checks, and the moved card
+# is the one sent and the one ``card_ids`` and ``has_lead_form`` read.
 #
 # Hydration runs after the checks and is not checked again: product data comes only
 # from the site catalog, and on the ripple profile ``_fill_store`` fills menu-order,
@@ -2699,7 +2699,7 @@ def _repaired(body: str, profile: CardProfile) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# Flat props repair (strict profile)
+# Flat props repair
 # --------------------------------------------------------------------------- #
 
 
@@ -2709,18 +2709,26 @@ _NODE_KEYS: frozenset[str] = frozenset(
     {"type", "id", "props", "children", "else_children", "show", "each"}
     | {"item_as", "index_as", "bind", "state"}
 )
-# Each ripple widget's declared props a flat node key may be lifted into: not a
-# node key, not a handler key, and not ``value`` on a widget that binds it.
-_LIFTABLE: dict[str, frozenset[str]] = {
-    w["type"]: frozenset(
-        k
-        for k in w.get("props") or {}
-        if k not in _NODE_KEYS
-        and not _is_handler_key(k)
-        and not (k == "value" and "bind" in w["props"])
-    )
-    for w in RIPPLE_MANIFEST["widgets"]
-}
+
+
+# Each widget's declared props a flat node key may be lifted into: not a node key,
+# not a handler key, and not ``value`` on a widget that binds it.
+def _liftable(manifest: dict[str, Any]) -> dict[str, frozenset[str]]:
+    return {
+        w["type"]: frozenset(
+            k
+            for k in w.get("props") or {}
+            if k not in _NODE_KEYS
+            and not _is_handler_key(k)
+            and not (k == "value" and "bind" in w["props"])
+        )
+        for w in manifest["widgets"]
+    }
+
+
+_LIFTABLE = _liftable(RIPPLE_MANIFEST)
+# By profile name, each read from that profile's own manifest.
+_LIFTABLE_BY_PROFILE = {RIPPLE_PROFILE.name: _LIFTABLE, PAWBAR_PROFILE.name: _liftable(MANIFEST)}
 
 
 def _is_alias_node(value: dict[str, Any], canonical: str) -> bool:
@@ -2735,12 +2743,12 @@ def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
     """``ui`` with, in place, every widget node's top-level keys that its manifest
     entry declares as props (``_LIFTABLE``) moved into ``props`` (made when
     missing; a key ``props`` already holds stays put, the flat one beside it),
-    at any depth: children, node slots inside props, flow steps, a node written under
-    an alias (``RIPPLE_ALIASES``, ``_is_alias_node``) renamed first. A node's own
-    ``props`` object is never read as a node. Strict profile only; the caller
+    at any depth. On the strict profile that is children, node slots inside props and
+    flow steps, a node written under an alias (``RIPPLE_ALIASES``, ``_is_alias_node``)
+    renamed first; on pawbar only children, as ``_check_tree`` walks (a form field is
+    not a node). A node's own ``props`` object is never read as a node. The caller
     checks the result in full. Returns it and how many keys moved."""
-    if not profile.strict:
-        return ui, 0
+    table = _LIFTABLE_BY_PROFILE.get(profile.name, {})
     moved = 0
     stack = [ui]
     while stack:
@@ -2752,18 +2760,21 @@ def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
             continue
         kind = value.get("type")
         props = value.get("props", {})
-        canonical = RIPPLE_ALIASES.get(kind) if isinstance(kind, str) else None
+        canonical = RIPPLE_ALIASES.get(kind) if profile.strict and isinstance(kind, str) else None
         if canonical and isinstance(props, dict) and _is_alias_node(value, canonical):
             value["type"] = canonical
             if canonical == "board-game" and "game" not in {*value, *props}:
                 value["props"] = props = {**props, "game": kind}
             kind = canonical
         if isinstance(kind, str) and isinstance(props, dict):
-            liftable = _LIFTABLE.get(kind, frozenset())
+            liftable = table.get(kind, frozenset())
             flat = [k for k in value if k in liftable and k not in props]
             if flat:
                 value["props"] = props = {**props, **{k: value.pop(k) for k in flat}}
                 moved += len(flat)
+            if not profile.strict:
+                stack.extend(value.get(k) for k in ("children", "else_children"))
+                continue
             # A node: its props' values may hold nodes, never the props object.
             stack.extend(props.values())
             stack.extend(v for k, v in value.items() if k != "props")
@@ -2897,7 +2908,7 @@ def has_lead_form(body: str, profile: CardProfile = PAWBAR_PROFILE) -> bool:
         return raw.get("verb") == LEAD_VERB
     if not _is_spec(raw):
         return False
-    ui = raw["ui"]
+    ui, _ = _lift_flat_props(raw["ui"], profile)
     stack = [ui]
     if isinstance(ui, dict) and any(field in ui for field in _FLOW_FIELDS):
         try:
@@ -2945,7 +2956,7 @@ def card_ids(body: str, profile: CardProfile = PAWBAR_PROFILE) -> list[str]:
         raw = _parse(_repaired(body, profile) or "")
     out: dict[str, None] = {}
     if _is_spec(raw):
-        _ids_in(raw["ui"], out, [profile.max_nodes])
+        _ids_in(_lift_flat_props(raw["ui"], profile)[0], out, [profile.max_nodes])
     elif isinstance(raw, dict):
         for item in raw.get("items") if isinstance(raw.get("items"), list) else []:
             pid = item.get("id") if isinstance(item, dict) else None

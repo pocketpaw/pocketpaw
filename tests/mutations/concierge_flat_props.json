@@ -11,8 +11,8 @@
   {
     "label": "LIFT-2: a handler-key prop is lifted",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        and not _is_handler_key(k)\n        and not (k == \"value\"",
-    "replace": "        and not (k == \"value\"",
+    "find": "            and not _is_handler_key(k)\n            and not (k == \"value\"",
+    "replace": "            and not (k == \"value\"",
     "tests": [
       "tests/cloud/test_paw_bar_flat_props.py"
     ]
@@ -38,7 +38,7 @@
   {
     "label": "LIFT-5: an undeclared key is lifted",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "            liftable = _LIFTABLE.get(kind, frozenset())",
+    "find": "            liftable = table.get(kind, frozenset())",
     "replace": "            liftable = {k for k in value if k not in _NODE_KEYS and not _is_handler_key(k)}",
     "tests": [
       "tests/cloud/test_paw_bar_flat_props.py"
@@ -72,10 +72,10 @@
     ]
   },
   {
-    "label": "LIFT-9: the pawbar profile lifts too",
+    "label": "LIFT-9: the pawbar profile does not lift",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "    if not profile.strict:\n        return ui, 0\n    moved = 0",
-    "replace": "    moved = 0",
+    "find": "    table = _LIFTABLE_BY_PROFILE.get(profile.name, {})",
+    "replace": "    table = _LIFTABLE_BY_PROFILE.get(profile.name, {}) if profile.strict else {}",
     "tests": [
       "tests/cloud/test_paw_bar_flat_props.py"
     ]
@@ -121,6 +121,42 @@
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
     "find": "            logger.info(\"card_spec: lifted %d flat prop(s) into props\", lifted)",
     "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-15: the pawbar walk reads a form's fields as nodes",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "            if not profile.strict:\n                stack.extend(value.get(k) for k in (\"children\", \"else_children\"))\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-16: the pawbar profile takes ripple's props",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "PAWBAR_PROFILE.name: _liftable(MANIFEST)}",
+    "replace": "PAWBAR_PROFILE.name: _LIFTABLE}",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-17: has_lead_form reads the flat card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    ui, _ = _lift_flat_props(raw[\"ui\"], profile)\n    stack = [ui]",
+    "replace": "    ui = raw[\"ui\"]\n    stack = [ui]",
+    "tests": [
+      "tests/cloud/test_paw_bar_flat_props.py"
+    ]
+  },
+  {
+    "label": "LIFT-18: card_ids reads the flat card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "_ids_in(_lift_flat_props(raw[\"ui\"], profile)[0], out",
+    "replace": "_ids_in(raw[\"ui\"], out",
     "tests": [
       "tests/cloud/test_paw_bar_flat_props.py"
     ]
