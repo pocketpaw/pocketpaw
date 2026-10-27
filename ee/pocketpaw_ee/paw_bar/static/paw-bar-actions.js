@@ -1,7 +1,8 @@
 // ee/pocketpaw_ee/paw_bar/static/paw-bar-actions.js — the Paw Bar PAGE-ACTIONS
 // host script, the opt-in IIFE a site includes beside the loader so the
 // concierge can act on the host page (scroll to and highlight an element, open a
-// link) and call tools the site declares on window.pawbarTools. It reads that
+// link) and call tools the site declares on window.pawbarTools, plus, when its
+// tag has data-webmcp, the WebMCP tools the page registered. It reads that
 // array, replaces its push so later declarations register too, and offers the
 // tools to the frame. It obeys only `pawbar:act` messages posted by a
 // /paw-bar/frame iframe whose origin matches its own endpoint, and replies with
@@ -9,7 +10,7 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:actions` in the
 // paw-bar repo (actions/dist/actions.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar actions/src/actions.ts @ 663feef (PR #40)
+// Source: qbtrix/paw-bar actions/src/actions.ts @ 9b0f98d (PR #50)
 //
 // Vendored rather than fetched for the same reason as paw-bar.js: the URL
 // `GET /paw-bar/actions.js` is shown to site owners to paste into their pages,
@@ -50,6 +51,7 @@
     let overlayTimer = 0;
     let sendTimer = 0;
     const tools = /* @__PURE__ */ new Map();
+    let web = /* @__PURE__ */ new Map();
     function frameWin(source) {
       for (const f of Array.from(doc.querySelectorAll("iframe"))) {
         const w = f.contentWindow;
@@ -75,19 +77,25 @@
       console.warn("paw-bar: bad tool", t);
     }
     function sendTools(w = frameWin()) {
-      w?.postMessage({ type: "pawbar:tools", tools: Array.from(tools.values(), (t) => t[0]) }, frameOrigin);
+      const all = [...tools.values()];
+      web.forEach((t, k) => tools.has(k) || all.push(t));
+      w?.postMessage({ type: "pawbar:tools", tools: all.slice(0, TOOLS_MAX).map((t) => t[0]) }, frameOrigin);
     }
     function sendSoon() {
       clearTimeout(sendTimer);
       sendTimer = setTimeout(sendTools, 50);
     }
     function runTool(d, reply) {
-      const t = tools.get(d.name);
+      const t = tools.get(d.name) || web.get(d.name);
       if (!t) return reply({ ok: false, error: "not_found" });
       let done = 0;
       const fin = (r) => done++ || reply(r);
-      setTimeout(() => fin({ ok: false, error: "timeout" }), TOOL_MS);
-      new Promise((res) => res(t[1](d.args ?? {}))).then(
+      const ac = new AbortController();
+      setTimeout(() => {
+        ac.abort();
+        fin({ ok: false, error: "timeout" });
+      }, TOOL_MS);
+      new Promise((res) => res(t[1](d.args ?? {}, { signal: ac.signal }))).then(
         (r) => {
           const ok = r?.ok !== false;
           const m = r?.message;
@@ -103,6 +111,32 @@
       sendSoon();
     };
     if (tools.size) sendSoon();
+    const mc = script.hasAttribute("data-webmcp") && (doc.modelContext || navigator.modelContext);
+    let gen = 0;
+    async function readWeb() {
+      const n = ++gen;
+      const next = /* @__PURE__ */ new Map();
+      for (const t of await mc.getTools()) {
+        const { $schema, title, description, additionalProperties, ...s } = t.inputSchema || { type: "object" };
+        if (t.annotations?.consequentialHint || !TOOL_NAME.test(t.name)) continue;
+        next.set(t.name, [
+          { name: t.name, description: t.description, inputSchema: s, confirm: true },
+          async (a, o) => {
+            const v = JSON.parse(await mc.executeTool(t, a, o) ?? "null");
+            return typeof v == "string" ? { message: v } : v?.isError ? { ok: false } : v;
+          }
+        ]);
+      }
+      if (n == gen) {
+        web = next;
+        sendSoon();
+      }
+    }
+    const sync = () => readWeb().catch((e) => console.warn("paw-bar: webmcp", e));
+    if (mc) {
+      mc.addEventListener("toolchange", sync);
+      sync();
+    }
     const norm = (p) => p.replace(/\/+$/, "") || "/";
     function navigate(to) {
       clearOverlay();
