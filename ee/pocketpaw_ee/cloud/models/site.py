@@ -814,6 +814,8 @@ class Site(TimestampedDocument):
     concierge_voice: bool = True
     # The bar's full-screen button.
     concierge_expandable: bool = True
+    # Whether a visitor may move the bar to another side of the screen.
+    concierge_movable: bool = True
     # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
     # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
     # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted
