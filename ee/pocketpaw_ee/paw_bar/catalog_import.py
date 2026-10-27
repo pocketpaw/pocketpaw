@@ -46,7 +46,8 @@
 #     the generic reader, ``IMPORT_BYTE_CAP`` bytes for the whole run.
 #   * sitemaps are found and parsed by ``sites.sitemap`` (shared with the
 #     knowledge crawl): UTF-8 only, any DOCTYPE or entity declaration refused,
-#     one index level deep, product child sitemaps first.
+#     one index level deep, product child sitemaps first. A sitemap naming only
+#     another host (staging listing production) is read as paths on this host.
 # Never raises: every failure is ``status="failed"`` with a ``reason``.
 
 """Preview a store's products from its own site (Shopify, Woo, JSON-LD, OG)."""
@@ -114,7 +115,8 @@ _WOO_PAGE_SIZE = 100
 _WOO_MAX_PAGES = 50
 
 _PRODUCT_PATH_RE = re.compile(
-    r"/(products?|shop|item|p|events?|tickets?|workshops?|courses?|classes?)/", re.IGNORECASE
+    r"/(products?|shop|boutique|item|p|events?|tickets?|workshops?|courses?|classes?)/",
+    re.IGNORECASE,
 )
 _EVENT_TYPES = frozenset({"Festival", "Hackathon", "EventSeries"})  # besides "...Event"
 _SHOPIFY_SHOP_RE = re.compile(r"Shopify\.shop\s*=")
@@ -816,6 +818,7 @@ class _Run:
             self.host,
             self.url("/sitemap.xml"),
             pick_children=_prefer_products,
+            rehome=True,
         )
         if not pages:
             pages = [
