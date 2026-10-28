@@ -470,3 +470,21 @@ async def test_undo_expires_after_24_hours(site_doc, tt, beanie_test_db):
     ).insert()
     await _raises("sites.data_restore_unknown_bookmark", 422, _undo(tt, stale))
     assert tt.restores == []
+
+
+@pytest.mark.asyncio
+async def test_a_cached_schema_follows_a_restore_done_by_another_worker(site_doc, beanie_test_db):
+    """Another worker's restore can't be seen in this process's caches, but the
+    schema cache is keyed by a fingerprint of ``sqlite_master``, which every read
+    fetches first: a restore that changed the schema misses the cache at once, and
+    one that didn't leaves a cache that is still true."""
+    cf = SqliteD1("CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT);", database_id=_DB)
+    old = cf.mark(datetime.now(UTC) - timedelta(hours=2))
+    cf.execute("ALTER TABLE t ADD COLUMN b TEXT")
+    with _pocket():
+        before = await data_service.get_table_schema(**_kw(cf, table="t"))
+    assert [c.name for c in before.columns] == ["id", "a", "b"]
+    await cf.d1_restore(_DB, bookmark=old)  # "another worker": no cache was dropped here
+    with _pocket():
+        after = await data_service.get_table_schema(**_kw(cf, table="t"))
+    assert [c.name for c in after.columns] == ["id", "a"]

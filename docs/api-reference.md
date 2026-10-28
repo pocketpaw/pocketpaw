@@ -4027,7 +4027,11 @@ answers `available: false` with `reason` `live_on_cloudflare_only` (local mode) 
   one, or `null` (read only, `read_only_reason: "no_key"`). Login tables
   (`session`, `account`, `verification` and plurals) read `login_table`; a declared
   table of a dynamic site that the database doesn't have yet reads `not_created`.
-  So do better-auth's plugin tables (`twoFactor`, `passkey`, `apikey`, `jwks`).
+  So do better-auth's plugin tables (`twoFactor`, `passkey`, `apikey`, `jwks`), and
+  any table that looks like a session store under another name: a foreign key to a
+  user table plus an `expires…` column (Lucia's `user_sessions`). On those the key
+  (often the session secret itself) and credential-like columns are masked too, and
+  reads, writes, import and export all treat them as login tables.
   Table names match in any casing, with `_` ignored and an `auth` prefix allowed
   (`auth_user` is a user table). `masked` columns read `"•••"` and can't be searched,
   filtered, sorted, written or audited. On every table that is a column named like a

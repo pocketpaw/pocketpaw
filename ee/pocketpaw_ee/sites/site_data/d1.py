@@ -11,6 +11,11 @@
 # rowid table → ``rowid``; anything else (composite key, WITHOUT ROWID without a
 # single key, a key column that holds a credential) → no key, read only.
 #
+# Login tables are read only: the better-auth names (``LOGIN_READ_ONLY``) and any
+# ``session_like`` table (a foreign key to a user table plus an ``expires…``
+# column, as Lucia's ``user_sessions``), whose key and credential columns are
+# masked too. Reads, writes, import and export all take this from ``Table``.
+#
 # ``column_writable`` / ``insertable`` are the one statement of which columns and
 # tables the dashboard may write; ``site_data.writes`` enforces them and
 # ``ColumnInfo.writable`` reports them.
@@ -36,6 +41,7 @@ from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.project_data import (
+    MASK,
     auth_table,
     is_user_table,
     mask_rows,
@@ -88,6 +94,16 @@ USER_WRITABLE = frozenset({"name", "email", "image"})
 def is_users(name: str) -> bool:
     """Whether ``name`` is a user table (``user``, ``Users``, ``auth_user`` …)."""
     return auth_table(name) in USER_TABLES
+
+
+def session_like(columns: tuple[Column, ...] | list[Column]) -> bool:
+    """A session table under any name (Lucia's ``user_sessions``, say): a foreign
+    key to a user table AND an ``expires…`` column. Its rows are sign-ins, and its
+    key is often the session secret itself."""
+    refs_user = any(
+        c.references and auth_table(c.references.partition(".")[0]) in USER_TABLES for c in columns
+    )
+    return refs_user and any(norm(c.name).startswith("expires") for c in columns)
 
 
 def norm(column: str) -> str:
@@ -220,7 +236,11 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
             )
         )
     without_rowid = bool(_WITHOUT_ROWID.search(create_sql or ""))
+    session = session_like(cols)
     masked = frozenset(masked_columns(name, [c.name for c in cols]))
+    if session:  # like a named session table: credentials and the key are secret
+        masked |= frozenset(masked_columns("session", [c.name for c in cols]))
+        masked |= frozenset(c.name for c in cols if c.pk)
     pks = sorted((c for c in cols if c.pk), key=lambda c: c.pk)
     lowered = {c.name.lower() for c in cols}
     rowid = None
@@ -240,7 +260,9 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
         first = next((quote_ident(c.name) for c in cols if c.name not in masked), None)
         order = tuple(unmasked_pks) or ((first,) if first else ())
 
-    if key is None:
+    if session:
+        reason = "login_table"
+    elif key is None:
         reason = "no_key"
     elif auth_table(name) in LOGIN_READ_ONLY:
         reason = "login_table"
@@ -792,4 +814,9 @@ def mask_page(table: Table, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     credential pattern would otherwise catch) as the row id it is."""
     keys = [r.get("__key") for r in rows]
     bare = [{k: v for k, v in r.items() if k != "__key"} for r in rows]
-    return [{**r, "__key": k} for r, k in zip(mask_rows(table.name, bare), keys, strict=True)]
+    out = [{**r, "__key": k} for r, k in zip(mask_rows(table.name, bare), keys, strict=True)]
+    for r in out:  # columns the schema masks beyond the name rule (session-like tables)
+        for c in table.masked:
+            if r.get(c) is not None:
+                r[c] = MASK
+    return out

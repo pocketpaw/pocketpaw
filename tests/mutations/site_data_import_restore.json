@@ -361,5 +361,41 @@
     "tests": [
       "tests/test_body_size_limit.py::TestSiteDataCsvPreviewCeiling"
     ]
+  },
+  {
+    "label": "a Lucia-style session table is an ordinary editable table",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "    return refs_user and any(norm(c.name).startswith(\"expires\") for c in columns)",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_lucia_style_session_table_is_a_login_table"
+    ]
+  },
+  {
+    "label": "any table referencing users counts as a session table",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "    return refs_user and any(norm(c.name).startswith(\"expires\") for c in columns)",
+    "replace": "    return refs_user",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_user_reference_or_an_expiry_alone_is_not_a_session"
+    ]
+  },
+  {
+    "label": "a session table's key (the session secret) is shown",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "        masked |= frozenset(c.name for c in cols if c.pk)",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_lucia_style_session_table_is_a_login_table"
+    ]
+  },
+  {
+    "label": "rows show columns only the schema masks",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "            if r.get(c) is not None:\n                r[c] = MASK",
+    "replace": "            if False:\n                r[c] = MASK",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_lucia_style_session_table_is_a_login_table"
+    ]
   }
 ]

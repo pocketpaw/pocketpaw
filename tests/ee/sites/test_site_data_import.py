@@ -843,3 +843,49 @@ def test_the_body_ceiling_matches_the_preview_route_and_its_cap():
     path = "/api/v1" + route.path.replace("{pocket_id}", "pk1").replace("{table}", "orders")
     assert body_limit._SITE_DATA_CSV_PATH_RE.match(path)
     assert csv_io.MAX_BYTES + 512 * 1024 <= body_limit._SITE_DATA_CSV_BYTES <= 8 * 1024 * 1024
+
+
+# --------------------------------------------------------------------------- session-like tables
+
+_LUCIA = """
+CREATE TABLE "user" (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE user_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES "user"(id),
+  expires_at INTEGER NOT NULL);
+CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id TEXT REFERENCES "user"(id), body TEXT);
+CREATE TABLE coupons (id INTEGER PRIMARY KEY, code TEXT, expires_at INTEGER);
+INSERT INTO "user" VALUES ('u1', 'Ann');
+INSERT INTO user_sessions VALUES ('sess-secret-1', 'u1', 1900000000);
+INSERT INTO posts VALUES (1, 'u1', 'hi');
+INSERT INTO coupons VALUES (1, 'X', 1900000000);
+"""
+
+
+@pytest.fixture
+def lucia() -> SqliteD1:
+    return SqliteD1(_LUCIA, database_id=_DB)
+
+
+@pytest.mark.asyncio
+async def test_a_lucia_style_session_table_is_a_login_table(site_doc, lucia, audit):
+    with _pocket():
+        schema = await data_service.get_table_schema(**_kw(lucia, "user_sessions"))
+        page = await data_service.get_rows(**_kw(lucia, "user_sessions"))
+    assert schema.read_only_reason == "login_table" and not schema.editable
+    assert "sess-secret-1" not in json.dumps(page.rows)  # the session id is the secret
+    err = await _raises("sites.data_read_only", 403, _preview(lucia, "user_sessions", "x\n1\n"))
+    assert err.details["reason"] == "login_table"
+    with _pocket():
+        with pytest.raises(CloudError) as exc:
+            await data_service.delete_rows(**_kw(lucia, "user_sessions", keys=["sess-secret-1"]))
+    assert exc.value.status_code == 403
+    _name, text = await _export(lucia, "user_sessions")
+    assert "sess-secret-1" not in text
+    assert lucia.rows("SELECT COUNT(*) AS n FROM user_sessions") == [{"n": 1}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("table", ["posts", "coupons"])
+async def test_a_user_reference_or_an_expiry_alone_is_not_a_session(site_doc, lucia, audit, table):
+    with _pocket():
+        schema = await data_service.get_table_schema(**_kw(lucia, table))
+    assert schema.editable and schema.read_only_reason == ""
