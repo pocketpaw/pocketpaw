@@ -292,6 +292,32 @@ async def test_the_pool_forwards_a_zero_no_cap_override(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_turns", [0, 300, None], ids=["no-cap", "raise", "unset"])
+async def test_the_pool_prewarm_forwards_the_override(monkeypatch, max_turns) -> None:
+    """The prewarm must key the client like the run, so a 0 rides there too."""
+    seen: dict = {}
+
+    class _Warmable:
+        async def prewarm(self, *, session_key, system_prompt=None, max_turns=None):
+            seen["max_turns"] = max_turns
+
+    pool = AgentPool()
+    inst = SimpleNamespace(backend=_Warmable(), config={})
+
+    async def _fake_get(agent_id):
+        return inst
+
+    async def _fake_assemble(*args, **kwargs):
+        return SimpleNamespace(text="P", stable_digest="d")
+
+    monkeypatch.setattr(pool, "get", _fake_get)
+    monkeypatch.setattr(pool, "_assemble_system_prompt", _fake_assemble)
+    kwargs = {} if max_turns is None else {"max_turns": max_turns}
+    await pool.prewarm("a1", "session:s1", **kwargs)
+    assert seen == {"max_turns": max_turns}
+
+
+@pytest.mark.asyncio
 async def test_the_pool_withholds_the_cap_when_unset(monkeypatch) -> None:
     backend = _WideBackend()
     await _drive(monkeypatch, backend)

@@ -725,19 +725,18 @@ def _sites_next_milestone(pocket: Any | None) -> str | None:
 
 
 def _app_build_turn_cap(base: SurfaceProfile, pocket: Any | None) -> SurfaceProfile:
-    """Raise the tool-turn cap for a /sites project turn whose PLAN.md has unticked
+    """Lift the tool-turn cap for a /sites project turn whose PLAN.md has unticked
     milestones: the agent builds every one of them in this turn (the
-    ``sites-app-plan`` skill), each with a build, previews and a play-test, which can
-    run past ``claude_sdk_max_turns``. ``sites_app_build_max_turns`` (0 = off) only
-    raises a backend's own cap; pydantic_ai applies a free run's ``max_requests``
-    after it, so a free run keeps ``free_run_max_turns``. Every other turn is
-    unchanged."""
+    ``sites-app-plan`` skill), each with a build, previews and a play-test. Such a
+    turn always carries the override: ``sites_app_build_max_turns`` is 0 (the
+    default, no cap) or an operator's N > 0 (see ``SurfaceProfile.max_turns``).
+    pydantic_ai applies a free run's ``max_requests`` after it, so a free run keeps
+    ``free_run_max_turns``. Every other turn is unchanged (no override)."""
     if _sites_next_milestone(pocket) is None:
         return base
     from pocketpaw.config import get_settings  # type: ignore[import-untyped]
 
-    cap = get_settings().sites_app_build_max_turns
-    return replace(base, max_turns=cap) if cap > 0 else base
+    return replace(base, max_turns=get_settings().sites_app_build_max_turns)
 
 
 async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
@@ -1782,10 +1781,11 @@ async def _prewarm_session(
                 # prewarmed client and paid a second cold connect.
                 model_override=ctx.model_override or None,
                 tools_enabled=ctx.tools_enabled is not False,
-                # The raised turn cap is fixed at connect(), so it is in the key too.
+                # The turn-cap override (0 = no cap) is fixed at connect(), so it is
+                # in the key too. ``is not None``: a 0 must reach the prewarm.
                 **(
                     {"max_turns": ctx.resolved_profile.max_turns}
-                    if getattr(ctx.resolved_profile, "max_turns", None)
+                    if getattr(ctx.resolved_profile, "max_turns", None) is not None
                     else {}
                 ),
             )
@@ -2333,10 +2333,11 @@ async def _drive_agent_loop(
             run_kwargs["soul_recall"] = False
         if surface_allow_mcp is not None:
             run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp
-        # A surface's raised tool-turn cap (``_app_build_turn_cap``). Withheld when
-        # unset; the pool forwards it only to a backend that declares it.
+        # A surface's tool-turn override (``_app_build_turn_cap``; 0 = no cap).
+        # Withheld only when None; the pool forwards it only to a backend that
+        # declares it.
         surface_max_turns = getattr(ctx.resolved_profile, "max_turns", None)
-        if surface_max_turns:
+        if surface_max_turns is not None:
             run_kwargs["max_turns"] = surface_max_turns
         # CX-2 — per-agent EXCLUSIVE tool policy. When the RESOLVED agent declares
         # ``tool_mode="exclusive"``, its OWN ``tools`` become the MCP allow-list and

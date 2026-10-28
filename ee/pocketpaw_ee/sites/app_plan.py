@@ -2,9 +2,10 @@
 # ``sites-app-plan`` skill's milestone checklist) to answer one question: which
 # milestone is next, or is the plan finished?
 #
-# Two callers, both in ``cloud/chat/runs/run_core``: the turn-cap raise (a project
-# turn with an unfinished plan gets ``sites_app_build_max_turns``) and the honest
-# stop note (a run cut off by its turn limit says which milestone is next).
+# Two callers, both in ``cloud/chat/runs/run_core``: the turn-cap lift (a project
+# turn with an unfinished plan runs uncapped, or at an operator's
+# ``sites_app_build_max_turns``) and the honest stop note (a run still cut off by a
+# limit, such as a free run's, says which milestone is next).
 #
 # Pure text parsing, no I/O. The agent writes PLAN.md freehand, so the parse is
 # lenient: any markdown checkbox counts, and the label is the nearest "M<n>" name
