@@ -161,7 +161,7 @@ async def test_no_primary_key_falls_back_to_rowid(site_doc, shop):
     assert s.key == "rowid" and s.editable is True
     assert [c.name for c in s.columns] == ["body", "tag"]  # rowid is never a column
     page = await _rows(shop, "notes")
-    assert sorted(r["__key"] for r in page.rows) == [1, 2]
+    assert sorted(r["__key"] for r in page.rows) == ["1", "2"]
 
 
 @pytest.mark.asyncio
@@ -362,7 +362,7 @@ async def test_weird_identifiers_are_quoted(site_doc):
     s = await _schema(cf, _WEIRD)
     assert [c.name for c in s.columns] == ["id", 'a"b', "c;--"]
     page = await _rows(cf, _WEIRD, q="uote", sort='a"b', dir="asc")
-    assert page.rows == [{"id": 1, 'a"b': 'q"uote', "c;--": "semi", "__key": 1}]
+    assert page.rows == [{"id": 1, 'a"b': 'q"uote', "c;--": "semi", "__key": "1"}]
     page = await _rows(cf, _WEIRD, f=json.dumps([{"col": "c;--", "op": "eq", "value": "semi"}]))
     assert len(page.rows) == 1
 
@@ -952,3 +952,27 @@ def test_data_routes_come_before_the_legacy_table_route():
     paths = [getattr(r, "path", "") for r in router.routes]
     legacy = paths.index("/sites/by-pocket/{pocket_id}/data/{table}")
     assert paths.index("/sites/by-pocket/{pocket_id}/data/inventory") < legacy
+
+
+def test_large_integers_and_keys_reach_the_browser_as_strings():
+    """JSON.parse rounds integers past 2**53 - 1 to other numbers, so a big rowid
+    or snowflake id would PATCH the wrong row. Keys always go out as strings, and
+    any value past the safe range goes out as its digit string."""
+    from pocketpaw_ee.sites.site_data import d1
+
+    big = 12_345_678_901_234_567
+    table = d1.Table(
+        name="orders",
+        columns=(),
+        without_rowid=False,
+        key="id",
+        key_sql='"id"',
+        order_sql=('"id"',),
+        masked=frozenset(),
+        read_only_reason="",
+        rowid_alias="id",
+    )
+    (row,) = d1.mask_page(table, [{"id": big, "qty": 2, "paid": True, "__key": big}])
+    assert row == {"id": str(big), "qty": 2, "paid": True, "__key": str(big)}
+    assert d1.json_safe(d1.JS_SAFE_INT) == d1.JS_SAFE_INT
+    assert d1.json_safe(-(d1.JS_SAFE_INT + 1)) == str(-(d1.JS_SAFE_INT + 1))

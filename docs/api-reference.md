@@ -4044,7 +4044,9 @@ answers `available: false` with `reason` `live_on_cloudflare_only` (local mode) 
 - `GET /sites/by-pocket/{pocket_id}/data/tables/{table}/rows?q=&sort=&dir=&f=&limit=&offset=` →
   `{pocket_id, table, available, reason, columns, rows, total, limit, offset,
   search_truncated}`. Each row carries `__key` (the value later write routes address
-  it by). Default order is newest first by key; `sort` must be a column, `dir` is
+  it by), always as a string. Any integer value past 2^53 - 1 is also sent as its
+  digit string, because `JSON.parse` would round it; write routes accept it back
+  in that form. Default order is newest first by key; `sort` must be a column, `dir` is
   `asc` or `desc`. `q` (≤ 100 characters) matches any text column, case-insensitive.
   `f` is a JSON list of up to 10 `{col, op, value}`: text columns take `eq`, `ne`,
   `contains`, `starts`; number and boolean columns `eq`, `ne`, `lt`, `gt`, `lte`,
@@ -4073,7 +4075,7 @@ existing values' style), JSON validated and re-serialised, `null` as `NULL`. Bod
 refuse unknown fields. Every returned row is masked like a read and carries `__key`.
 
 - `POST …/data/tables/{table}/rows` `{"values": {"name": "Cy", "vip": true}}` →
-  `{"row": {"id": 3, "name": "Cy", "vip": 1, "__key": 3}}`. Generated columns, the
+  `{"row": {"id": 3, "name": "Cy", "vip": 1, "__key": "3"}}`. Generated columns, the
   rowid alias and credentials are refused; a `NOT NULL` column without a default and
   a key the database doesn't fill are required.
 - `PATCH …/data/tables/{table}/rows/{key}`

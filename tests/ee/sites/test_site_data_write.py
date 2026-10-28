@@ -199,7 +199,7 @@ async def _raises(code: str, status: int, coro) -> CloudError:
 @pytest.mark.asyncio
 async def test_insert_returns_the_row_with_its_key(site_doc, db, audit):
     res = await _insert(db, "customers", {"name": "Cy", "email": "cy@x.io"})
-    assert res.row == {"id": 3, "name": "Cy", "email": "cy@x.io", "vip": 0, "__key": 3}
+    assert res.row == {"id": 3, "name": "Cy", "email": "cy@x.io", "vip": 0, "__key": "3"}
     assert db.rows("SELECT name FROM customers WHERE id = 3") == [{"name": "Cy"}]
     assert any(s.startswith('INSERT INTO "customers"') and "RETURNING" in s for s in _writes(db))
 
@@ -236,7 +236,7 @@ async def test_insert_unknown_or_blob_column_is_422(site_doc, db, audit):
 @pytest.mark.asyncio
 async def test_insert_rowid_table_addresses_by_rowid(site_doc, db, audit):
     res = await _insert(db, "notes", {"body": "new"})
-    assert res.row["__key"] == 3 and res.row["body"] == "new"
+    assert res.row["__key"] == "3" and res.row["body"] == "new"
     up = await _update(db, "notes", "3", {"tag": "z"}, {"tag": None})
     assert up.row["tag"] == "z"
 
@@ -428,7 +428,7 @@ def test_coerce_unit():
 @pytest.mark.asyncio
 async def test_update_with_matching_expected_lands(site_doc, db, audit):
     res = await _update(db, "customers", "1", {"email": "new@x.io"}, {"email": "ada@x.io"})
-    assert res.row["email"] == "new@x.io" and res.row["__key"] == 1
+    assert res.row["email"] == "new@x.io" and res.row["__key"] == "1"
     sql = next(s for s in _writes(db) if s.startswith("UPDATE"))
     assert '"email" IS ?' in sql and "RETURNING" in sql
 
@@ -442,7 +442,7 @@ async def test_update_conflict_is_409_with_the_current_row(site_doc, db, audit):
         _update(db, "customers", "1", {"email": "mine@x.io"}, {"email": "ada@x.io"}),
     )
     assert err.details["current"]["email"] == "changed@x.io"
-    assert err.details["current"]["__key"] == 1
+    assert err.details["current"]["__key"] == "1"
     assert db.rows("SELECT email FROM customers WHERE id = 1") == [{"email": "changed@x.io"}]
     assert audit == []
 
@@ -616,7 +616,7 @@ async def test_delete_blocked_by_a_foreign_key_is_a_clean_422(site_doc, db, audi
 async def test_duplicate_drops_auto_and_key(site_doc, db, audit):
     res = await _duplicate(db, "orders", "1")
     row = res.row
-    assert row["id"] == 3 and row["__key"] == 3
+    assert row["id"] == 3 and row["__key"] == "3"
     assert row["note"] == "first" and row["total"] == 9.5 and row["total_x2"] == 19.0
     assert db.rows("SELECT COUNT(*) AS n FROM orders") == [{"n": 3}]
 
@@ -1057,7 +1057,7 @@ async def test_member_with_an_override_can_write(routed, monkeypatch):
 async def test_route_shapes(routed):
     app = _app("admin")
     ins = await _call(app, "POST", "/tables/customers/rows", {"values": {"name": "Cy"}})
-    assert ins.json() == {"row": {"id": 3, "name": "Cy", "email": None, "vip": 0, "__key": 3}}
+    assert ins.json() == {"row": {"id": 3, "name": "Cy", "email": None, "vip": 0, "__key": "3"}}
     up = await _call(
         app, "PATCH", "/tables/customers/rows/3", {"set": {"vip": True}, "expected": {"vip": 0}}
     )
@@ -1069,7 +1069,7 @@ async def test_route_shapes(routed):
     assert conflict.json()["error"]["code"] == "sites.data_conflict"
     assert conflict.json()["error"]["details"]["current"]["vip"] == 1
     dup = await _call(app, "POST", "/tables/customers/rows:duplicate", {"key": 3})
-    assert dup.json()["row"]["__key"] == 4 and dup.json()["row"]["name"] == "Cy"
+    assert dup.json()["row"]["__key"] == "4" and dup.json()["row"]["name"] == "Cy"
     gone = await _call(app, "POST", "/tables/customers/rows:delete", {"keys": [3, 4]})
     assert gone.json()["deleted"] == 2 and gone.json()["keys"] == [3, 4]
     assert gone.json()["restore_point"]
@@ -1625,3 +1625,18 @@ async def test_a_long_numeric_key_is_refused_even_when_its_value_is_small(site_d
         "sites.data_bad_key", 422, _update(db, "notes", padded, {"tag": "x"}, {"tag": "a"})
     )
     assert _writes(db) == []
+
+
+@pytest.mark.asyncio
+async def test_big_integers_round_trip_as_digit_strings(site_doc, db, audit):
+    """A value past 2**53 - 1 reaches the browser as a digit string; sending that
+    string back as ``expected`` (and as a new value) still matches and stores the
+    exact integer, never a rounded one."""
+    big = 12_345_678_901_234_567
+    res = await _insert(db, "skus", {"sku": "snow", "qty": str(big)})
+    assert res.row["qty"] == str(big) and res.row["__key"] == "snow"
+    up = await _update(db, "skus", "snow", {"qty": str(big + 2)}, {"qty": str(big)})
+    assert up.row["qty"] == str(big + 2)
+    assert db.rows("SELECT qty, typeof(qty) t FROM skus WHERE sku = 'snow'") == [
+        {"qty": big + 2, "t": "integer"}
+    ]

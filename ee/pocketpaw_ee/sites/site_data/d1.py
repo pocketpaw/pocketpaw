@@ -809,12 +809,34 @@ async def read_page(
     return rows, mask_page(table, rows), _total(count)
 
 
+#: The largest integer a JavaScript number holds exactly (2**53 - 1).
+JS_SAFE_INT = 9_007_199_254_740_991
+
+
+def json_safe(value: Any) -> Any:
+    """``value`` as the browser can hold it: an integer beyond ``JS_SAFE_INT`` goes
+    out as its digit string, since ``JSON.parse`` would round it to another number.
+    The write paths coerce digit strings back to integers."""
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) > JS_SAFE_INT:
+        return str(value)
+    return value
+
+
+def json_safe_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: json_safe(v) for k, v in row.items()}
+
+
 def mask_page(table: Table, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``rows`` masked like the legacy viewer, keeping ``__key`` (which the
-    credential pattern would otherwise catch) as the row id it is."""
+    """``rows`` masked like the legacy viewer and made JSON-safe for the browser.
+    ``__key`` (which the credential pattern would otherwise catch) stays the row id
+    it is, always as a string so a large rowid or snowflake id survives the trip;
+    every write route accepts it back in that form."""
     keys = [r.get("__key") for r in rows]
     bare = [{k: v for k, v in r.items() if k != "__key"} for r in rows]
-    out = [{**r, "__key": k} for r, k in zip(mask_rows(table.name, bare), keys, strict=True)]
+    out = [
+        {**json_safe_row(r), "__key": None if k is None else str(k)}
+        for r, k in zip(mask_rows(table.name, bare), keys, strict=True)
+    ]
     for r in out:  # columns the schema masks beyond the name rule (session-like tables)
         for c in table.masked:
             if r.get(c) is not None:

@@ -668,8 +668,8 @@ async def row_history(
                 actor_id=e.actor_id,
                 actor_name=names.get(e.actor_id),
                 at=at.isoformat(),
-                before=before if isinstance(before, dict) else None,
-                after=after if isinstance(after, dict) else None,
+                before=d1.json_safe_row(before) if isinstance(before, dict) else None,
+                after=d1.json_safe_row(after) if isinstance(after, dict) else None,
             )
         )
     return RowHistory(events=out)
