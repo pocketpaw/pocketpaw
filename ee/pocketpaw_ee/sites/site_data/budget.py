@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import time
 from typing import Any
 
@@ -97,11 +96,12 @@ def _buckets(kind: str, workspace_id: str) -> list[tuple[str, int, int]]:
 def _client() -> Any | None:
     if _redis is not None:
         return _redis
-    if not os.environ.get("POCKETPAW_REDIS_URL", "").strip():
-        return None
     from pocketpaw_ee.cloud._core.redis_client import get_redis
 
-    return get_redis()
+    try:
+        return get_redis()
+    except RuntimeError:  # POCKETPAW_REDIS_URL unset: in-process buckets
+        return None
 
 
 def _acquire_local(buckets: list[tuple[str, int, int]]) -> float:
