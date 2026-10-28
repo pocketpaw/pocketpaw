@@ -12,9 +12,13 @@
 #   * KV keys are percent-encoded in the path, including "/"; "." and ".." are
 #     refused. kv_put is a raw body without metadata and a two-part multipart
 #     (``value`` + ``metadata``) with it; ``expiration_ttl`` rides in the query.
-#   * deletes treat a 404 as done; any other failure raises.
+#     A KV key with any "." / ".." segment is refused like an R2 key.
+#   * deletes treat a 404 as done; any other failure raises. A bucket delete is one
+#     call: teardown leaves emptying to the expire-all lifecycle rule.
+#   * r2_get asks for ``identity`` and streams raw bytes, so Content-Length holds.
 from __future__ import annotations
 
+import gzip
 import json
 import re
 
@@ -33,6 +37,43 @@ def _client(handler) -> CloudflareClient:
         zone_id="",
         dispatch_namespace="",
         _transport=httpx.MockTransport(handler),
+    )
+
+
+class _Streaming(httpx.AsyncBaseTransport):
+    """Like MockTransport, but hands the body back unread, as a real connection does
+    (MockTransport reads it first, which ``aiter_raw`` refuses)."""
+
+    def __init__(self, handler) -> None:
+        self._handler = handler
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        resp = self._handler(request)
+        body = b"".join(resp.stream)  # the raw bytes, never decoded
+
+        async def _chunks():
+            for i in range(0, len(body), 5):
+                yield body[i : i + 5]
+
+        return httpx.Response(resp.status_code, headers=resp.headers, stream=_Body(_chunks()))
+
+
+class _Body(httpx.AsyncByteStream):
+    def __init__(self, chunks) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self):
+        async for chunk in self._chunks:
+            yield chunk
+
+
+def _stream_client(handler) -> CloudflareClient:
+    return CloudflareClient(
+        account_id="acct_1",
+        api_token="tok_1",
+        zone_id="",
+        dispatch_namespace="",
+        _transport=_Streaming(handler),
     )
 
 
@@ -141,11 +182,32 @@ async def test_r2_get_streams_and_closes():
             headers={"content-type": "application/pdf", "etag": '"e9"'},
         )
 
-    obj = await _client(handler).r2_get("bkt", "docs/a.pdf")
+    obj = await _stream_client(handler).r2_get("bkt", "docs/a.pdf")
     assert obj is not None and obj.content_type == "application/pdf"
     assert obj.size == len(b"%PDF-1.7 hello")
     body = b"".join([c async for c in obj.iter_bytes()])
     assert body == b"%PDF-1.7 hello" and sent["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_r2_get_asks_for_identity_and_streams_raw_bytes():
+    """Content-Length must stay true: no transparent decompression of a stored
+    gzip body, and we ask R2 not to encode in transit."""
+    stored = gzip.compress(b"hello " * 50)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["accept"] = request.headers.get("accept-encoding")
+        return httpx.Response(
+            200,
+            content=stored,
+            headers={"content-encoding": "gzip", "content-length": str(len(stored))},
+        )
+
+    obj = await _stream_client(handler).r2_get("bkt", "a.gz")
+    assert seen["accept"] == "identity"
+    body = b"".join([c async for c in obj.iter_bytes()])
+    assert body == stored and obj.size == len(stored)
 
 
 @pytest.mark.asyncio
@@ -204,29 +266,17 @@ async def test_r2_delete_404_is_done_and_other_errors_raise():
 
 
 @pytest.mark.asyncio
-async def test_delete_r2_bucket_empties_it_first():
+async def test_delete_r2_bucket_never_lists_or_deletes_objects():
+    """Teardown keeps relying on the expire-all lifecycle rule (a day of grace on the
+    draft-discard path): a bucket delete is one call, nothing else."""
     calls: list[tuple[str, str]] = []
-    keys = {"a.txt", "dir/b.txt", "dir/../evil"}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.raw_path.decode().split("?")[0]
-        calls.append((request.method, path))
-        base = "/client/v4/accounts/acct_1/r2/buckets/bkt"
-        if request.method == "GET" and path == base + "/objects":
-            listed = [{"key": k, "size": 1} for k in sorted(keys)]
-            return _ok(listed, result_info={"is_truncated": False})
-        if request.method == "DELETE" and path.startswith(base + "/objects/"):
-            keys.discard(path[len(base + "/objects/") :])
-            return _ok({})
-        if request.method == "DELETE" and path == base:
-            # Not empty while the dot-segment key (which is skipped) remains.
-            return httpx.Response(409, json={"success": False, "errors": [{"code": 10008}]})
-        raise AssertionError(calls[-1])
+        calls.append((request.method, request.url.raw_path.decode()))
+        return httpx.Response(409, json={"success": False, "errors": [{"code": 10008}]})
 
     assert await _client(handler).delete_r2_bucket("bkt") is False
-    deleted = [p for m, p in calls if m == "DELETE" and "/objects/" in p]
-    assert sorted(p.rsplit("/objects/", 1)[1] for p in deleted) == ["a.txt", "dir/b.txt"]
-    assert ("DELETE", "/client/v4/accounts/acct_1/r2/buckets/bkt") in calls
+    assert calls == [("DELETE", "/client/v4/accounts/acct_1/r2/buckets/bkt")]
 
 
 # --------------------------------------------------------------------------- KV
@@ -281,7 +331,7 @@ async def test_kv_keys_are_percent_encoded_including_slashes():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("key", [".", "..", ""])
+@pytest.mark.parametrize("key", [".", "..", "", "a/..", "../x", "a/./b", "./a"])
 async def test_kv_dot_keys_never_reach_the_wire(key):
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
         raise AssertionError(f"request sent: {request.url}")

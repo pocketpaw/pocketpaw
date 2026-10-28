@@ -42,17 +42,18 @@
 #     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``) and, opt-in,
 #     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``); NEW databases only.
 #   * KV and R2 for ``binding_provisioner``: namespaces (find by title, create,
-#     delete) and buckets (exists, create, delete, expire-all lifecycle). A bucket
-#     delete first lists and deletes up to ``_R2_TEARDOWN_MAX`` objects; one that is
-#     still not empty reports False (the caller then sets the expire-all rule).
+#     delete) and buckets (exists, create, delete, expire-all lifecycle). A non-empty
+#     bucket delete reports False and teardown sets the expire-all rule; it does NOT
+#     empty the bucket through the object API, deliberately (a day of grace).
 #   * R2 objects and KV keys for the Sites Data dashboard: ``r2_list`` / ``r2_get``
 #     (a stream, ``R2Object``) / ``r2_put`` / ``r2_delete`` and ``kv_list_keys`` /
 #     ``kv_get`` (``KvValue``: capped bytes, full size, UTF-8 text) / ``kv_metadata``
 #     / ``kv_put`` (raw, or multipart value + metadata) / ``kv_delete``. R2 keys go in
 #     the path with "/" literal (``_r2_key_path``), KV keys fully percent-encoded
-#     (``_kv_key_path``); a "." / ".." segment is refused before any request, because
-#     httpx collapses dot segments and would send the call to another URL
-#     (``objects/../..`` is the bucket itself).
+#     (``_kv_key_path``); a "." / ".." segment is refused before any request in both,
+#     because httpx collapses dot segments and would send the call to another URL
+#     (``objects/../..`` is the bucket itself). Downloads ask for ``identity`` and
+#     stream raw bytes, so Content-Length is the stored size.
 #   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html);
 #     ``browser_run_cdp`` gives the Browser Run CDP socket + auth for play-tests.
 #   * Analytics Engine: ``query_analytics_sql`` sends raw SQL and reads a body with
@@ -300,11 +301,6 @@ def _map_status(cf_status: str, ssl_status: str) -> HostnameStatus:
     return HostnameStatus.ERROR
 
 
-# How many objects ``delete_r2_bucket`` deletes itself before leaving the rest to
-# the expire-all lifecycle rule: teardown spends the publish token's request budget.
-_R2_TEARDOWN_MAX = 200
-
-
 def _dot_segment(key: str) -> bool:
     return any(seg in (".", "..") for seg in key.split("/"))
 
@@ -320,8 +316,8 @@ def _r2_key_path(key: str) -> str:
 
 def _kv_key_path(key: str) -> str:
     """``key`` as one percent-encoded path segment ("/" included). ValidationError
-    for "" / "." / "..", which are not addressable as a segment."""
-    if key in ("", ".", ".."):
+    for "" or any "/"-separated "." / ".." segment (the same rule as R2 keys)."""
+    if not key or _dot_segment(key):
         raise ValidationError("sites.data_bad_kv_key", "That key name can't be used.")
     return quote(key, safe="")
 
@@ -339,7 +335,7 @@ class R2Object:
 
     async def iter_bytes(self) -> AsyncIterator[bytes]:
         try:
-            async for chunk in self._resp.aiter_bytes():
+            async for chunk in self._resp.aiter_raw():
                 yield chunk
         finally:
             await self.aclose()
@@ -1032,12 +1028,11 @@ class CloudflareClient:
         """Delete an R2 bucket. True when it is gone (a 404 included), False when
         Cloudflare refused because it still holds objects.
 
-        Cloudflare only deletes an empty bucket, so this first lists and deletes up to
-        ``_R2_TEARDOWN_MAX`` objects through the REST object API (best effort: a
-        failure there still tries the bucket delete). A key with a "." / ".." segment
-        can't be addressed and is left. A 409 is the not-empty answer; any other
-        failure raises."""
-        await self._empty_r2_bucket(name)
+        Cloudflare only deletes an empty bucket. The REST API can list and delete
+        objects (``r2_list`` / ``r2_delete``), but teardown deliberately doesn't empty
+        a bucket here: the caller sets the expire-all lifecycle rule instead, which
+        leaves a day of grace on the draft-discard path. A 409 is the not-empty
+        answer; any other failure raises."""
         async with self._client() as client:
             resp = await client.delete(self._bucket_url(name))
         if resp.status_code == 404:
@@ -1066,25 +1061,6 @@ class CloudflareClient:
         async with self._client() as client:
             resp = await client.put(f"{self._bucket_url(name)}/lifecycle", json=body)
         self._unwrap(resp)
-
-    async def _empty_r2_bucket(self, name: str) -> None:
-        deleted = 0
-        cursor: str | None = None
-        try:
-            while True:
-                page = await self.r2_list(name, delimiter=None, cursor=cursor, per_page=1000)
-                for obj in page["objects"]:
-                    if _dot_segment(obj["key"]) or not obj["key"]:
-                        continue
-                    if deleted >= _R2_TEARDOWN_MAX:
-                        return
-                    await self.r2_delete(name, obj["key"])
-                    deleted += 1
-                cursor = page["cursor"]
-                if not cursor:
-                    return
-        except Exception as exc:  # noqa: BLE001 - best effort; the bucket delete decides
-            logger.warning("sites: could not empty R2 bucket %s: %s", name, exc)
 
     # -- R2 objects (Sites Data dashboard) ------------------------------------
     # https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/
@@ -1151,7 +1127,8 @@ class CloudflareClient:
         url = self._object_url(bucket, key)
         client = self._client()
         try:
-            resp = await client.send(client.build_request("GET", url), stream=True)
+            request = client.build_request("GET", url, headers={"Accept-Encoding": "identity"})
+            resp = await client.send(request, stream=True)
         except BaseException:
             await client.aclose()
             raise
