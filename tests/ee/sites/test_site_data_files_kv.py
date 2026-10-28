@@ -727,9 +727,9 @@ async def test_upload_charges_the_r2_budget_before_reading_the_body(cf, monkeypa
 @pytest.mark.asyncio
 async def test_upload_spends_one_r2_call(cf, monkeypatch):
     monkeypatch.setattr(budget, "R2_LIMIT", (1, 300))
-    await _upload(_Watched())
+    await _upload(_Watched(), overwrite=True)
     with pytest.raises(CloudError) as exc:
-        await _upload(_Watched())
+        await _upload(_Watched(), overwrite=True)
     assert exc.value.code == "sites.data_busy"
 
 
@@ -740,7 +740,8 @@ async def test_at_most_two_uploads_per_workspace(cf):
     with pytest.raises(CloudError) as exc:
         await _upload(body)
     assert exc.value.code == "sites.data_upload_busy" and exc.value.status_code == 429
-    assert body.read is False and cf.calls == []
+    # Only the existence check (which runs before the slot) reached Cloudflare.
+    assert body.read is False and cf.calls == [("r2_list", "bkt-1")]
     resp = await _call("PUT", "/files/SITE_FILES/object", params={"key": "a"}, content=b"x")
     assert resp.status_code == 429 and _code(resp) == "sites.data_upload_busy"
     other = await budget.claim_upload_slot("ws2")  # another workspace has its own two
@@ -819,6 +820,55 @@ async def test_spool_io_runs_off_the_event_loop(cf, monkeypatch):
     monkeypatch.setattr(anyio.to_thread, "run_sync", _spy)
     await _upload(_Watched(b"x" * 10))
     assert "write" in calls and "read" in calls
+
+
+@pytest.mark.asyncio
+async def test_upload_refuses_an_existing_key_before_reading_the_body(cf, monkeypatch):
+    cf.r2["bkt-1"]["a.bin"] = (b"old", "application/octet-stream")
+    body = _Watched()
+    with pytest.raises(CloudError) as exc:
+        await _upload(body)
+    assert exc.value.code == "sites.data_file_exists" and exc.value.status_code == 409
+    assert body.read is False
+    assert cf.r2["bkt-1"]["a.bin"][0] == b"old"
+    assert [c[0] for c in cf.calls] == ["r2_list"]  # one existence check, no put
+    # No upload slot held and no upload charge spent: two more uploads fit at once,
+    # and the R2 bucket still has room for an upload after the refused one.
+    a = await budget.claim_upload_slot("ws1")
+    b = await budget.claim_upload_slot("ws1")
+    await budget.release_upload_slot(a)
+    await budget.release_upload_slot(b)
+    resp = await _call("PUT", "/files/SITE_FILES/object", params={"key": "a.bin"}, content=b"x")
+    assert resp.status_code == 409 and _code(resp) == "sites.data_file_exists"
+    assert cf.r2["bkt-1"]["a.bin"][0] == b"old"
+
+
+@pytest.mark.asyncio
+async def test_upload_checks_existence_by_exact_key(cf):
+    cf.r2["bkt-1"]["a.bin.bak"] = (b"other", "application/octet-stream")
+    await _upload(_Watched(b"new"))  # only a longer key shares the prefix
+    assert cf.r2["bkt-1"]["a.bin"][0] == b"new"
+
+
+@pytest.mark.asyncio
+async def test_upload_with_overwrite_replaces(cf, audit):
+    cf.r2["bkt-1"]["a.bin"] = (b"old", "application/octet-stream")
+    resp = await _call(
+        "PUT",
+        "/files/SITE_FILES/object",
+        params={"key": "a.bin", "overwrite": "true"},
+        content=b"new!",
+    )
+    assert resp.status_code == 200, resp.text
+    assert cf.r2["bkt-1"]["a.bin"][0] == b"new!" and resp.json()["object"]["size"] == 4
+    assert "r2_list" not in [c[0] for c in cf.calls]  # nothing to check
+
+
+@pytest.mark.asyncio
+async def test_upload_of_a_new_key_succeeds(cf):
+    resp = await _call("PUT", "/files/SITE_FILES/object", params={"key": "new.txt"}, content=b"hi")
+    assert resp.status_code == 200, resp.text
+    assert cf.r2["bkt-1"]["new.txt"] == (b"hi", "text/plain")
 
 
 # --------------------------------------------------------------------------- files: move, delete

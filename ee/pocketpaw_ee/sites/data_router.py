@@ -18,7 +18,7 @@
 #   POST  /restore:undo               {previous_bookmark, confirm_name} -> RestoreOut
 #   GET   /files/{binding}                        ?prefix=&cursor=  -> FileList
 #   GET   /files/{binding}/object?key=            the object, streamed as an attachment
-#   PUT   /files/{binding}/object?key=            raw body (<= 50 MB) -> FileObjectOut
+#   PUT   /files/{binding}/object?key=&overwrite= raw body (<= 50 MB) -> FileObjectOut
 #   POST  /files/{binding}/object:move            {from, to, overwrite?} -> FileObjectOut
 #   DELETE /files/{binding}/object?key=           204
 #   GET   /kv/{binding}/keys                      ?prefix=&cursor=  -> KvKeyList
@@ -483,11 +483,13 @@ async def site_data_file_upload(
     binding: str,
     request: Request,
     key: str = Query(..., max_length=4096),
+    overwrite: bool = Query(False),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(_READ),
     __: object = Depends(_WRITE),
 ) -> FileObjectOut:
-    """Upload the raw request body (at most 50 MB) as ``key``, replacing it."""
+    """Upload the raw request body (at most 50 MB) as ``key``; 409
+    ``sites.data_file_exists`` when ``key`` exists, unless ``overwrite``."""
     declared = request.headers.get("content-length", "")
     return await data_service.upload_file(
         workspace_id=ctx.workspace_id or "",
@@ -498,6 +500,7 @@ async def site_data_file_upload(
         content_type=request.headers.get("content-type"),
         body=request.stream(),
         declared_size=int(declared) if declared.isdigit() else None,
+        overwrite=overwrite,
     )
 
 

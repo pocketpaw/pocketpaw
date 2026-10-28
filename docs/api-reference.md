@@ -4323,10 +4323,16 @@ Files:
   the allowlist below, else `application/octet-stream`. R2 is asked for `identity`
   encoding and the bytes are streamed raw, so `Content-Length` is the stored size.
   `404` when there is no such object.
-- `PUT …/data/files/{binding}/object?key=<key>` with the raw file as the body (at
-  most 50 MB: `413` `sites.data_file_too_large`; the request-body ceiling for this
-  path is 51 MiB) → `{"object": {key, name, size, content_type, modified}}`.
-  Replaces any object at `key`. At most 2 uploads or moves run per workspace at once
+- `PUT …/data/files/{binding}/object?key=<key>&overwrite=false` with the raw file as
+  the body (at most 50 MB: `413` `sites.data_file_too_large`; the request-body ceiling
+  for this path is 51 MiB) → `200` `{"object": {key, name, size, content_type,
+  modified}}`. When an object already exists at `key` and `overwrite` isn't `true`,
+  the answer is `409` `sites.data_file_exists` before any of the body is read (and
+  before the upload slot and the upload's R2 call; the existence check itself is one
+  R2 list call, `prefix=<key>`, one per page, matched exactly). Ask the owner, then
+  send the same request with `overwrite=true` to replace it. The check and the write
+  aren't atomic: a file created at `key` between them is replaced, which at worst
+  replaces a file the owner just confirmed replacing. At most 2 uploads or moves run per workspace at once
   (`429` `sites.data_upload_busy`); the slot and the R2 call are taken before the body
   is read. Audited as `site_data.file_put`.
 - `POST …/data/files/{binding}/object:move` `{"from": "a.txt", "to": "dir/b.txt",

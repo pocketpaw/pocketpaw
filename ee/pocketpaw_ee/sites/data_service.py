@@ -1608,6 +1608,18 @@ async def _read_spool(spool: Any) -> AsyncIterator[bytes]:
         yield chunk
 
 
+async def _file_exists(cf: budget.Budgeted, bucket: str, key: str) -> bool:
+    """Whether ``key`` is in the bucket: one documented list call (``prefix=key``,
+    one per page). ``key`` itself sorts first among the keys it prefixes, so the one
+    row is it when it exists."""
+    found = await cf.r2_list(bucket, prefix=key, delimiter=None, per_page=1)
+    return any(o["key"] == key for o in found["objects"])
+
+
+def _file_exists_error() -> CloudError:
+    return CloudError(409, "sites.data_file_exists", "A file with that name already exists.")
+
+
 async def upload_file(
     *,
     workspace_id: str,
@@ -1618,12 +1630,15 @@ async def upload_file(
     content_type: str | None,
     body: AsyncIterator[bytes],
     declared_size: int | None = None,
+    overwrite: bool = False,
     _cloudflare: Any | None = None,
 ) -> FileObjectOut:
-    """Write ``body`` (at most 50 MB) to ``key``, replacing what is there, under a
-    content type that can't run as a page or script. An upload slot and the R2 call
-    are taken BEFORE the body is read, so a busy workspace or budget reads nothing.
-    ``PUT .../data/files/{binding}/object?key=``."""
+    """Write ``body`` (at most 50 MB) to ``key`` under a content type that can't run
+    as a page or script. An existing ``key`` is a 409 ``sites.data_file_exists`` unless
+    ``overwrite``, checked (one R2 list call) BEFORE the upload slot, the upload's R2
+    charge and any of the body; a busy workspace or budget reads nothing either. The
+    check and the write race: a file created in between is replaced.
+    ``PUT .../data/files/{binding}/object?key=&overwrite=``."""
     key = files_kv.check_file_key(key)
     if declared_size is not None and declared_size > files_kv.MAX_FILE_BYTES:
         raise _too_large()
@@ -1639,6 +1654,8 @@ async def upload_file(
         raise writes.unavailable(reason)
     stored_type = files_kv.stored_content_type(content_type, key)
     cf = _client(target, _cloudflare)
+    if not overwrite and await _file_exists(cf, bucket, key):
+        raise _file_exists_error()
     slot = await budget.claim_upload_slot(target.workspace_id)
     try:
         await cf.charge("r2")
@@ -1712,10 +1729,8 @@ async def _move(
     _cloudflare: Any | None,
 ) -> FileObjectOut:
     cf = _client(target, _cloudflare)
-    if not overwrite:
-        found = await cf.r2_list(bucket, prefix=to_key, delimiter=None, per_page=1)
-        if any(o["key"] == to_key for o in found["objects"]):
-            raise CloudError(409, "sites.data_file_exists", "A file with that name already exists.")
+    if not overwrite and await _file_exists(cf, bucket, to_key):
+        raise _file_exists_error()
     obj = await cf.r2_get(bucket, from_key)
     if obj is None:
         raise NotFound("site_file", from_key)

@@ -83,8 +83,8 @@
   {
     "label": "uploads skip sites.data_write",
     "file": "ee/pocketpaw_ee/sites/data_router.py",
-    "find": "    key: str = Query(..., max_length=4096),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n) -> FileObjectOut:",
-    "replace": "    key: str = Query(..., max_length=4096),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n) -> FileObjectOut:",
+    "find": "    overwrite: bool = Query(False),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n) -> FileObjectOut:",
+    "replace": "    overwrite: bool = Query(False),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n) -> FileObjectOut:",
     "tests": [
       "tests/ee/sites/test_site_data_files_kv.py::test_member_cannot_write",
       "tests/ee/sites/test_site_data_files_kv.py::test_every_files_kv_route_is_guarded"
@@ -148,8 +148,8 @@
   {
     "label": "move overwrites an existing file",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
-    "find": "    if not overwrite:\n        found = await cf.r2_list(",
-    "replace": "    if False:\n        found = await cf.r2_list(",
+    "find": "    if not overwrite and await _file_exists(cf, bucket, to_key):",
+    "replace": "    if False:",
     "tests": [
       "tests/ee/sites/test_site_data_files_kv.py::test_move_refuses_to_overwrite"
     ]
@@ -399,6 +399,42 @@
     "replace": "    if False:",
     "tests": [
       "tests/test_body_size_limit.py::TestSiteDataKvAndMoveCeilings::test_an_oversized_move_is_refused"
+    ]
+  },
+  {
+    "label": "an upload silently replaces an existing file",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not overwrite and await _file_exists(cf, bucket, key):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_refuses_an_existing_key_before_reading_the_body"
+    ]
+  },
+  {
+    "label": "the existence check matches any key under the prefix",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    return any(o[\"key\"] == key for o in found[\"objects\"])",
+    "replace": "    return bool(found[\"objects\"])",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_checks_existence_by_exact_key"
+    ]
+  },
+  {
+    "label": "the existence check runs after the body is read",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not overwrite and await _file_exists(cf, bucket, key):\n        raise _file_exists_error()\n    slot = await budget.claim_upload_slot(target.workspace_id)\n    try:\n        await cf.charge(\"r2\")\n        spool, size = await _spool(body, files_kv.MAX_FILE_BYTES)\n",
+    "replace": "    slot = await budget.claim_upload_slot(target.workspace_id)\n    try:\n        await cf.charge(\"r2\")\n        spool, size = await _spool(body, files_kv.MAX_FILE_BYTES)\n        if not overwrite and await _file_exists(cf, bucket, key):\n            raise _file_exists_error()\n",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_refuses_an_existing_key_before_reading_the_body"
+    ]
+  },
+  {
+    "label": "the overwrite query is ignored",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "        overwrite=overwrite,\n    )",
+    "replace": "    )",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_with_overwrite_replaces"
     ]
   }
 ]
