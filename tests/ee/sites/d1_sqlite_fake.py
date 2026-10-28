@@ -115,7 +115,11 @@ class SqliteD1:
             ) from exc
         columns = [d[0] for d in cur.description or []]
         out = [[list(v) if isinstance(v, bytes) else v for v in tuple(r)] for r in rows]
-        return {"columns": columns, "rows": out, "changes": self.conn.total_changes - before}
+        # D1's meta.changes is SQLite's changes(): the statement's own rows, not a
+        # trigger's.
+        changed = self.conn.total_changes != before
+        own = self.conn.execute("SELECT changes()").fetchone()[0] if changed else 0
+        return {"columns": columns, "rows": out, "changes": own}
 
     async def query_d1_batch(self, *, database_id: str, statements) -> list[list[dict[str, Any]]]:
         self._check_db(database_id)

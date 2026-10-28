@@ -40,7 +40,7 @@ from typing import Any, Literal
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites import project_d1
-from pocketpaw_ee.sites.project_data import MASK, auth_table, is_credential, is_user_table
+from pocketpaw_ee.sites.project_data import MASK, is_credential, is_user_table
 from pocketpaw_ee.sites.site_data import d1, writes
 
 MAX_SQL_BYTES = 20_000
@@ -164,12 +164,8 @@ class Token:
         return fold(self.text if self.type == "word" else self.value)
 
 
-_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
-
-
-def fold(name: str) -> str:
-    """``name`` lower-cased the way SQLite compares names: ASCII letters only."""
-    return name.translate(_ASCII_LOWER)
+fold = d1.fold
+is_login = d1.is_login
 
 
 def _id_char(ch: str) -> bool:
@@ -602,10 +598,6 @@ class Plan:
     tables: frozenset[str] = field(default_factory=frozenset)
 
 
-def is_login(table: d1.Table) -> bool:
-    return bool(auth_table(table.name)) or table.read_only_reason == "login_table"
-
-
 def _masked_source(table: d1.Table) -> str:
     cols = []
     for c in table.columns:
@@ -685,6 +677,24 @@ def plan(stmt: Statement, schema: d1.Schema) -> Plan:
                         "sql_masked_column",
                         f"{target.name} has credential columns: list the columns you insert.",
                     )
+
+    if stmt.kind == "write":
+        # A write may not change sign-in rows or credentials through a foreign-key
+        # action or a trigger either. REPLACE deletes the row it replaces; an upsert's
+        # DO UPDATE updates.
+        replaces = any(
+            _is(t, "REPLACE") and not (_at(toks, j + 1) and toks[j + 1].type == "lparen")
+            for j, t in enumerate(toks)
+        )
+        upserts = any(_is(t, "DO") and _is(_at(toks, j + 1), "UPDATE") for j, t in enumerate(toks))
+        reason = d1.write_exposure(
+            schema,
+            stmt.targets,
+            deletes=stmt.verb == "DELETE" or replaces,
+            updates=stmt.verb == "UPDATE" or upserts,
+        )
+        if reason:
+            raise writes.read_only(reason)
 
     # Rewrite masked sources, parameterise strings holding ';'.
     rewrites: dict[int, tuple[int, str]] = {}
@@ -767,8 +777,30 @@ def shape(
     return names, out, len(rows) > ROW_CAP
 
 
+_STATUS = re.compile(r"^Cloudflare API (\d{3}):")
+# What marks a failure as the statement's own: SQLite's result code name, D1's SQL error
+# prefix, or D1's 75xx query error codes.
+_SQL_FAILURE = re.compile(r"SQLITE_[A-Z_]+|D1_ERROR|\(code 75\d\d\)")
+_AFTER_MARKER = re.compile(r"(SQLITE_[A-Z_]+).*$", re.S)
+
+
+def failure_kind(message: str) -> Literal["sql", "busy", "unreachable"]:
+    """What a ``sites.cloudflare_error`` from running a statement was: the statement
+    failing in D1 (HTTP 400, or a failed statement in a 200, carrying a D1 / SQLite
+    error), Cloudflare's own rate limit (429), or anything else (401 / 403 / 5xx …)."""
+    m = _STATUS.match(str(message or ""))
+    status = int(m.group(1)) if m else None
+    if status == 429:
+        return "busy"
+    if status in (None, 400) and _SQL_FAILURE.search(str(message or "")):
+        return "sql"
+    return "unreachable"
+
+
 def clean_error(message: str) -> str:
-    """D1's error text with any account / database id taken out."""
+    """D1's error text with any account / database id taken out, and nothing after
+    the SQLite result code (where a detail could echo data)."""
     text = re.sub(r"^Cloudflare API \d{3}:\s*", "", str(message or "")).strip()
+    text = _AFTER_MARKER.sub(lambda m: m.group(1), text)
     text = _IDS.sub("…", text)
     return text[:500] or "D1 refused the statement."

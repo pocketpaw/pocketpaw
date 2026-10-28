@@ -236,5 +236,104 @@
       "tests/ee/sites/test_site_data_console.py::test_console_reads_do_not_count_as_changes",
       "tests/ee/sites/test_site_data_console.py::test_every_run_is_audited"
     ]
+  },
+  {
+    "label": "a foreign-key cascade into a login table is allowed",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                if is_login(child) or c.name in child.masked:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_write_that_cascades_into_a_login_table_is_refused"
+    ]
+  },
+  {
+    "label": "a cascade chain stops at the first ordinary table",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                queue.append((fold(child.name), True, True))",
+    "replace": "                pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_cascade_chain_through_an_ordinary_table_is_followed"
+    ]
+  },
+  {
+    "label": "a trigger that writes a login table is allowed",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                if is_login(t):",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_write_whose_trigger_touches_a_login_table_is_refused"
+    ]
+  },
+  {
+    "label": "a trigger that copies a credential is allowed",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                if {fold(c) for c in t.masked} & mentioned:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_trigger_copying_a_credential_is_refused"
+    ]
+  },
+  {
+    "label": "a user delete's own login rows count as a refused cascade",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                if keep_user_cascade and parent is not None and is_users(parent.name):",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_user_delete_keeps_its_deliberate_login_cascade"
+    ]
+  },
+  {
+    "label": "console DELETE / REPLACE don't check ON DELETE actions",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "            deletes=stmt.verb == \"DELETE\" or replaces,",
+    "replace": "            deletes=False,",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_write_that_cascades_into_a_login_table_is_refused"
+    ]
+  },
+  {
+    "label": "the Rows tab delete doesn't check cascades or triggers",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "        schema, [table.name], deletes=True, updates=False, keep_user_cascade=True",
+    "replace": "        schema, [table.name], deletes=False, updates=False, keep_user_cascade=True",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_delete_that_cascades_into_a_login_table_is_refused"
+    ]
+  },
+  {
+    "label": "the Rows tab delete refuses a user's deliberate login cascade",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "        schema, [table.name], deletes=True, updates=False, keep_user_cascade=True",
+    "replace": "        schema, [table.name], deletes=True, updates=False, keep_user_cascade=False",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_user_delete_keeps_its_deliberate_login_cascade"
+    ]
+  },
+  {
+    "label": "Cloudflare's 429 is reported as a SQL error",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if status == 429:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_cloudflare_429_is_the_busy_answer"
+    ]
+  },
+  {
+    "label": "every Cloudflare failure is reported as a SQL error",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if status in (None, 400) and _SQL_FAILURE.search(str(message or \"\")):",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_non_sql_cloudflare_failures_are_502"
+    ]
+  },
+  {
+    "label": "SQL errors keep what follows the SQLite code",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    text = _AFTER_MARKER.sub(lambda m: m.group(1), text)",
+    "replace": "    text = text",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_sql_errors_keep_the_message_up_to_the_sqlite_marker"
+    ]
   }
 ]

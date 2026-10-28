@@ -62,6 +62,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import anyio.to_thread
+import httpx
 
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
@@ -2000,8 +2001,13 @@ async def delete_kv_key(
 # Reads need what reading rows needs; writes need ``sites.data_write`` (passed in by
 # the router), edit access, a ``confirm`` (``unbounded`` for an UPDATE / DELETE with no
 # WHERE), and take a restore point first. One run per user at a time
-# (``budget.claim_once``, 35 s TTL, 429 ``sites.data_sql_busy``); D1's own error is 422
-# ``sites.data_sql_error`` with ids stripped. Every run that reaches D1 records
+# (``budget.claim_once``, 35 s TTL, 429 ``sites.data_sql_busy``). Only the statement's
+# own failure in D1 (a 400 carrying a D1 / SQLite error) is 422 ``sites.data_sql_error``
+# (ids and anything after the SQLite code stripped); Cloudflare's 429 is
+# ``sites.data_busy``; any other failure (401 / 403 / 5xx / timeout) is 502
+# ``sites.cloudflare_error`` with a generic message, logged. Writes are refused when a
+# foreign-key action or a trigger would reach sign-in data (``d1.write_exposure``).
+# Every run that reaches D1 records
 # ``site_data.sql`` (target ``<pocket>``, the SQL cut at 2 KB, changes, restore point,
 # database id). A write that landed uses target type ``site_data`` (its restore point
 # is one ``restore`` accepts, and it counts in ``changes_since``); reads and failed
@@ -2009,6 +2015,11 @@ async def delete_kv_key(
 # indexes (``PRAGMA index_list`` / ``index_info``), CREATE text.
 
 _SQL_TTL_S = 35  # a little over D1's 30 s statement timeout
+_CF_BUSY_RETRY_S = 60  # Cloudflare's own 429: its window is minutes, not seconds
+
+
+def _unreachable() -> CloudError:
+    return CloudError(502, "sites.cloudflare_error", "Couldn't reach the site's database.")
 
 
 async def run_sql(
@@ -2076,9 +2087,21 @@ async def run_sql(
             )
         except budget.DataBusy:
             raise
+        except httpx.HTTPError as exc:  # a timeout or a dropped connection
+            logger.warning("site_data: console call failed for %s: %r", pocket_id, exc)
+            await _sql_audit(target, user_id, stmt, sql, restore_point, error="unreachable")
+            raise _unreachable() from exc
         except ValidationError as exc:
             if exc.code != "sites.cloudflare_error":
                 raise
+            kind = console.failure_kind(exc.message)
+            if kind == "busy":
+                raise budget.DataBusy(_CF_BUSY_RETRY_S, scope="global") from exc
+            if kind == "unreachable":
+                # Cloudflare's text (auth, outage) is for the operator, not the page.
+                logger.warning("site_data: console call failed for %s: %s", pocket_id, exc.message)
+                await _sql_audit(target, user_id, stmt, sql, restore_point, error="unreachable")
+                raise _unreachable() from exc
             message = console.clean_error(exc.message)
             await _sql_audit(target, user_id, stmt, sql, restore_point, error=message)
             raise ValidationError("sites.data_sql_error", message) from exc

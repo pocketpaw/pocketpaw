@@ -4105,7 +4105,9 @@ refuse unknown fields. Every returned row is masked like a read and carries `__k
   without Time Travel.
   This also covers `twoFactor`, `passkey` and `apikey` rows: the matching login
   tables with a `userId` / `user_id` column (through its foreign key when it has
-  one).
+  one). Any other delete whose foreign-key `ON DELETE` action or trigger would
+  reach a login table or a masked column is `403` `sites.data_read_only` with
+  `details.reason` `cascades_to_login_table` / `trigger_on_table`.
 - `POST …/data/tables/{table}/rows:duplicate` `{"key": 3, "values": {}}` → `{"row"}`:
   a copy without generated columns and the key; `values` overrides copied fields
   and must carry a new key for a table whose key the database doesn't fill.
@@ -4328,14 +4330,33 @@ What may run (refusals are checked before any Cloudflare call):
   `sites.data_sql_masked_column`. A member gets `403` `sites.data_write_forbidden`,
   a caller without edit access `403` `pocket.access_denied`. A restore point is taken
   first and returned as `restore_point` (null when the database has none); `changes`
-  is D1's `meta.changes`. `RETURNING` rows are masked and capped like a read's.
+  is D1's `meta.changes` (the statement's own rows, not a trigger's). `RETURNING`
+  rows are masked and capped like a read's.
+- **What counts as unbounded.** Only a missing top-level `WHERE` makes an `UPDATE` /
+  `DELETE` unbounded. An always-true `WHERE` (`WHERE 1`, `WHERE id = id`) is accepted
+  as a bounded write on purpose: someone typed it, so it is explicit, it still needs
+  `confirm: "write"`, and a restore point is taken before it runs. The console does
+  not try to prove a condition true or false.
+- **Cascades and triggers.** A write is also `403` `sites.data_read_only` when it
+  would change sign-in data indirectly: `details.reason: "cascades_to_login_table"`
+  when a foreign key with `ON DELETE` (for `DELETE`, `REPLACE`, `INSERT OR REPLACE`)
+  or `ON UPDATE` (for `UPDATE`, an upsert's `DO UPDATE`) `CASCADE` / `SET NULL` /
+  `SET DEFAULT` reaches a login table or a masked column, following chains through
+  ordinary tables; `"trigger_on_table"` when a trigger on a table the write reaches
+  mentions a login table or a masked column. The Rows tab's delete
+  (`POST …/rows:delete`) applies the same check, except that deleting a user still
+  takes that user's own login rows with it.
 - Reads of `SELECT` / `VALUES` run as `SELECT * FROM (…) LIMIT 501`; at most 500 rows
   come back and `truncated` says there were more. A repeated column name comes back
   as `id`, `id:1`, …. Integers beyond 2^53 come back as digit strings.
-- D1's own error (syntax, missing column, constraint) is `422`
-  `sites.data_sql_error` with D1's message, account and database ids removed.
-  One run per user at a time (`429` `sites.data_sql_busy`, freed after 35 s if a run
-  dies); `429` `sites.data_busy` when the Cloudflare budget is spent; `409`
+- Only the statement's own failure in D1 (an HTTP 400 carrying a D1 / `SQLITE_*`
+  error: syntax, missing column, constraint) is `422` `sites.data_sql_error`, with
+  D1's message up to its `SQLITE_*` code, account and database ids removed.
+  Cloudflare's own `429` is `429` `sites.data_busy`; any other failure (`401`, `403`,
+  `5xx`, a timeout) is `502` `sites.cloudflare_error` "Couldn't reach the site's
+  database." (Cloudflare's text is logged server-side only). One run per user at a
+  time (`429` `sites.data_sql_busy`, freed after 35 s if a run dies); `429`
+  `sites.data_busy` when the dashboard's Cloudflare budget is spent; `409`
   `sites.data_unavailable` in local mode or before publish.
 - Every run that reaches D1 is audited as `site_data.sql` (target `<pocket_id>`,
   metadata `{kind, verb, sql (first 2 KB), restore_point, database_id, changes,

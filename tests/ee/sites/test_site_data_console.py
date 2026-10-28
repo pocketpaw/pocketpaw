@@ -1005,3 +1005,208 @@ async def test_sqlite_folds_only_ascii_case(db):
     assert MASK in p.sql
     p = console.plan(console.classify('SELECT label FROM "\u00e4"'), schema)
     assert MASK not in p.sql
+
+
+# --------------------------------------------------------------------------- cascades and triggers
+
+
+def _org_cascade(cf: SqliteD1) -> None:
+    """An ordinary ``orgs`` table whose delete cascades into the login ``session``."""
+    cf.execute("CREATE TABLE orgs (id INTEGER PRIMARY KEY, name TEXT)")
+    cf.execute("INSERT INTO orgs VALUES (1, 'acme')")
+    cf.execute(
+        "ALTER TABLE session ADD COLUMN org_id INTEGER REFERENCES orgs(id) ON DELETE CASCADE"
+    )
+    cf.execute("UPDATE session SET org_id = 1")
+
+
+@pytest.mark.asyncio
+async def test_a_write_that_cascades_into_a_login_table_is_refused(site_doc, db, audit):
+    _org_cascade(db)
+    err = await _raises(
+        "sites.data_read_only", 403, _run(db, "DELETE FROM orgs WHERE id = 1", confirm="write")
+    )
+    assert err.details == {"reason": "cascades_to_login_table"}
+    assert db.rows("SELECT count(*) AS n FROM session") == [{"n": 1}]
+    # REPLACE deletes the conflicting row first, so it cascades the same way.
+    await _raises(
+        "sites.data_read_only",
+        403,
+        _run(db, "REPLACE INTO orgs (id, name) VALUES (1, 'x')", confirm="write"),
+    )
+    # The FK only acts ON DELETE: renaming the org touches no session row.
+    res = await _run(db, "UPDATE orgs SET name = 'b' WHERE id = 1", confirm="write")
+    assert res.changes == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cascade_chain_through_an_ordinary_table_is_followed(site_doc, db, audit):
+    db.execute("CREATE TABLE regions (id INTEGER PRIMARY KEY)")
+    db.execute(
+        "CREATE TABLE orgs (id INTEGER PRIMARY KEY, region_id INTEGER "
+        "REFERENCES regions(id) ON DELETE CASCADE)"
+    )
+    db.execute(
+        "ALTER TABLE session ADD COLUMN org_id INTEGER REFERENCES orgs(id) ON DELETE SET NULL"
+    )
+    err = await _raises(
+        "sites.data_read_only", 403, _run(db, "DELETE FROM regions WHERE id = 1", confirm="write")
+    )
+    assert err.details == {"reason": "cascades_to_login_table"}
+
+
+@pytest.mark.asyncio
+async def test_a_write_whose_trigger_touches_a_login_table_is_refused(site_doc, db, audit):
+    db.execute(
+        "CREATE TRIGGER notes_ins AFTER INSERT ON notes BEGIN "
+        'UPDATE "user" SET name = NEW.body; END'
+    )
+    err = await _raises(
+        "sites.data_read_only",
+        403,
+        _run(db, "INSERT INTO notes (body) VALUES ('pwned')", confirm="write"),
+    )
+    assert err.details == {"reason": "trigger_on_table"}
+    assert db.rows("SELECT name FROM \"user\" WHERE id = 'u1'") == [{"name": "Ann"}]
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_copying_a_credential_is_refused(site_doc, db, audit):
+    db.execute(
+        "CREATE TRIGGER leak AFTER UPDATE ON api_clients BEGIN "
+        "INSERT INTO notes (body) VALUES (NEW.api_key); END"
+    )
+    err = await _raises(
+        "sites.data_read_only",
+        403,
+        _run(db, "UPDATE api_clients SET label = 'x' WHERE id = 1", confirm="write"),
+    )
+    assert err.details == {"reason": "trigger_on_table"}
+
+
+@pytest.mark.asyncio
+async def test_a_harmless_trigger_does_not_block_writes(site_doc, db, audit):
+    db.execute(
+        "CREATE TRIGGER stamp AFTER INSERT ON notes BEGIN "
+        "UPDATE customers SET vip = vip + 1 WHERE id = 1; END"
+    )
+    res = await _run(db, "INSERT INTO notes (body) VALUES ('ok')", confirm="write")
+    assert res.changes == 1
+
+
+async def _grid_delete(cf: SqliteD1, table: str, keys: list[Any]):
+    with _pocket():
+        return await data_service.delete_rows(
+            workspace_id="ws1",
+            user_id="u-admin",
+            pocket_id="pk1",
+            table=table,
+            keys=keys,
+            _cloudflare=cf,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rows_tab_delete_that_cascades_into_a_login_table_is_refused(site_doc, db, audit):
+    _org_cascade(db)
+    err = await _raises("sites.data_read_only", 403, _grid_delete(db, "orgs", [1]))
+    assert err.details == {"reason": "cascades_to_login_table"}
+    assert db.rows("SELECT count(*) AS n FROM session") == [{"n": 1}]
+
+
+@pytest.mark.asyncio
+async def test_rows_tab_delete_with_a_login_trigger_is_refused(site_doc, db, audit):
+    db.execute("CREATE TRIGGER wipe AFTER DELETE ON notes BEGIN DELETE FROM session; END")
+    err = await _raises("sites.data_read_only", 403, _grid_delete(db, "notes", [1]))
+    assert err.details == {"reason": "trigger_on_table"}
+
+
+@pytest.mark.asyncio
+async def test_rows_tab_user_delete_keeps_its_deliberate_login_cascade(site_doc, db, audit):
+    db.execute(
+        "CREATE TABLE twofactor (id TEXT PRIMARY KEY, secret TEXT, "
+        'user_id TEXT REFERENCES "user"(id) ON DELETE CASCADE)'
+    )
+    out = await _grid_delete(db, "user", ["u2"])
+    assert out.deleted == 1
+
+
+# --------------------------------------------------------------------------- error mapping
+
+
+def _failing(cf: SqliteD1, exc: Exception) -> None:
+    async def _raw(**kw):
+        raise exc
+
+    cf.query_d1_raw = _raw  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Cloudflare API 401: Authentication error (code 10000)",
+        "Cloudflare API 403: Unauthorized to access requested resource (code 9109)",
+        "Cloudflare API 500: Internal server error (code 7500)",
+        "Cloudflare API 503: no error detail",
+        "Cloudflare API 400: Invalid request body (code 1001)",
+    ],
+)
+async def test_non_sql_cloudflare_failures_are_502(site_doc, db, audit, message):
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    _failing(db, ValidationError("sites.cloudflare_error", message))
+    err = await _raises("sites.cloudflare_error", 502, _run(db, "SELECT 1"))
+    assert err.message == "Couldn't reach the site's database."
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_is_502(site_doc, db, audit):
+    import httpx
+
+    _failing(db, httpx.ReadTimeout("timed out"))
+    err = await _raises("sites.cloudflare_error", 502, _run(db, "SELECT 1"))
+    assert "timed out" not in err.message
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_429_is_the_busy_answer(site_doc, db, audit):
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    _failing(db, ValidationError("sites.cloudflare_error", "Cloudflare API 429: Too many requests"))
+    err = await _raises("sites.data_busy", 429, _run(db, "SELECT 1"))
+    assert err.details["retry_after"] > 0
+
+
+@pytest.mark.asyncio
+async def test_sql_errors_keep_the_message_up_to_the_sqlite_marker(site_doc, db, audit):
+    err = await _raises("sites.data_sql_error", 422, _run(db, "SELECT nope FROM notes"))
+    assert err.message.endswith("SQLITE_ERROR"), err.message
+    assert "database" not in err.message and "code 7500" not in err.message
+    assert (
+        console.clean_error(
+            'Cloudflare API 400: UNIQUE constraint failed: t.c: SQLITE_CONSTRAINT x="secret"'
+        )
+        == "UNIQUE constraint failed: t.c: SQLITE_CONSTRAINT"
+    )
+
+
+# --------------------------------------------------------------------------- no ';' sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT ';' AS s",
+        "SELECT * FROM notes WHERE body = 'a;b' OR tag = ';;'",
+        "SELECT ';DROP TABLE notes;--' AS s, 'x' AS t",
+        "INSERT INTO notes (body) VALUES ('one; two')",
+        "UPDATE notes SET body = 'x;' WHERE tag = ';'",
+        "SELECT * FROM account WHERE id = 'a;1'",
+        "WITH x AS (SELECT ';' AS v) SELECT v FROM x;",
+    ],
+)
+async def test_the_planned_sql_never_holds_a_semicolon(db, sql):
+    p = console.plan(console.classify(sql), await _schema(db))
+    assert ";" not in p.sql and any(";" in v for v in p.params)
