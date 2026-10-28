@@ -42,8 +42,17 @@
 #     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``) and, opt-in,
 #     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``); NEW databases only.
 #   * KV and R2 for ``binding_provisioner``: namespaces (find by title, create,
-#     delete) and buckets (exists, create, delete, expire-all lifecycle). The REST API
-#     has no object list/delete for R2, so a non-empty bucket delete reports False.
+#     delete) and buckets (exists, create, delete, expire-all lifecycle). A bucket
+#     delete first lists and deletes up to ``_R2_TEARDOWN_MAX`` objects; one that is
+#     still not empty reports False (the caller then sets the expire-all rule).
+#   * R2 objects and KV keys for the Sites Data dashboard: ``r2_list`` / ``r2_get``
+#     (a stream, ``R2Object``) / ``r2_put`` / ``r2_delete`` and ``kv_list_keys`` /
+#     ``kv_get`` (``KvValue``: capped bytes, full size, UTF-8 text) / ``kv_metadata``
+#     / ``kv_put`` (raw, or multipart value + metadata) / ``kv_delete``. R2 keys go in
+#     the path with "/" literal (``_r2_key_path``), KV keys fully percent-encoded
+#     (``_kv_key_path``); a "." / ".." segment is refused before any request, because
+#     httpx collapses dot segments and would send the call to another URL
+#     (``objects/../..`` is the bucket itself).
 #   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html);
 #     ``browser_run_cdp`` gives the Browser Run CDP socket + auth for play-tests.
 #   * Analytics Engine: ``query_analytics_sql`` sends raw SQL and reads a body with
@@ -63,9 +72,10 @@ import logging
 import mimetypes
 import os
 import posixpath
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -288,6 +298,63 @@ def _map_status(cf_status: str, ssl_status: str) -> HostnameStatus:
     if cf_status in {"active"} or ssl_status in {"pending_validation", "initializing"}:
         return HostnameStatus.VERIFYING
     return HostnameStatus.ERROR
+
+
+# How many objects ``delete_r2_bucket`` deletes itself before leaving the rest to
+# the expire-all lifecycle rule: teardown spends the publish token's request budget.
+_R2_TEARDOWN_MAX = 200
+
+
+def _dot_segment(key: str) -> bool:
+    return any(seg in (".", "..") for seg in key.split("/"))
+
+
+def _r2_key_path(key: str) -> str:
+    """``key`` as the path tail of an R2 object URL: "/" kept literal (R2 reads a
+    %2F as part of the name), everything else percent-encoded. ValidationError for
+    an empty key or a "." / ".." segment, which httpx would resolve away."""
+    if not key or _dot_segment(key):
+        raise ValidationError("sites.data_bad_file_key", "That file name can't be used.")
+    return quote(key, safe="/")
+
+
+def _kv_key_path(key: str) -> str:
+    """``key`` as one percent-encoded path segment ("/" included). ValidationError
+    for "" / "." / "..", which are not addressable as a segment."""
+    if key in ("", ".", ".."):
+        raise ValidationError("sites.data_bad_kv_key", "That key name can't be used.")
+    return quote(key, safe="")
+
+
+@dataclass
+class R2Object:
+    """An open R2 download. ``iter_bytes`` streams the body and closes the connection
+    when done; call ``aclose`` to abandon it unread."""
+
+    content_type: str
+    size: int | None
+    etag: str
+    _resp: httpx.Response
+    _client: httpx.AsyncClient
+
+    async def iter_bytes(self) -> AsyncIterator[bytes]:
+        try:
+            async for chunk in self._resp.aiter_bytes():
+                yield chunk
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._resp.aclose()
+        await self._client.aclose()
+
+
+@dataclass(frozen=True)
+class KvValue:
+    data: bytes  # at most ``max_bytes`` of the value
+    size: int  # the whole value's size
+    truncated: bool  # ``data`` is only the start of the value
+    text: str | None  # ``data`` decoded as UTF-8, when whole and valid
 
 
 class CloudflareClient:
@@ -965,9 +1032,12 @@ class CloudflareClient:
         """Delete an R2 bucket. True when it is gone (a 404 included), False when
         Cloudflare refused because it still holds objects.
 
-        Cloudflare only deletes an empty bucket, and its REST API has no object
-        list or delete (that is the S3 API, a different credential), so this cannot
-        empty one itself. A 409 is the not-empty answer; any other failure raises."""
+        Cloudflare only deletes an empty bucket, so this first lists and deletes up to
+        ``_R2_TEARDOWN_MAX`` objects through the REST object API (best effort: a
+        failure there still tries the bucket delete). A key with a "." / ".." segment
+        can't be addressed and is left. A 409 is the not-empty answer; any other
+        failure raises."""
+        await self._empty_r2_bucket(name)
         async with self._client() as client:
             resp = await client.delete(self._bucket_url(name))
         if resp.status_code == 404:
@@ -995,6 +1065,268 @@ class CloudflareClient:
         }
         async with self._client() as client:
             resp = await client.put(f"{self._bucket_url(name)}/lifecycle", json=body)
+        self._unwrap(resp)
+
+    async def _empty_r2_bucket(self, name: str) -> None:
+        deleted = 0
+        cursor: str | None = None
+        try:
+            while True:
+                page = await self.r2_list(name, delimiter=None, cursor=cursor, per_page=1000)
+                for obj in page["objects"]:
+                    if _dot_segment(obj["key"]) or not obj["key"]:
+                        continue
+                    if deleted >= _R2_TEARDOWN_MAX:
+                        return
+                    await self.r2_delete(name, obj["key"])
+                    deleted += 1
+                cursor = page["cursor"]
+                if not cursor:
+                    return
+        except Exception as exc:  # noqa: BLE001 - best effort; the bucket delete decides
+            logger.warning("sites: could not empty R2 bucket %s: %s", name, exc)
+
+    # -- R2 objects (Sites Data dashboard) ------------------------------------
+    # https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/
+
+    def _object_url(self, bucket: str, key: str) -> str:
+        return f"{self._bucket_url(bucket)}/objects/{_r2_key_path(key)}"
+
+    async def r2_list(
+        self,
+        bucket: str,
+        *,
+        prefix: str = "",
+        delimiter: str | None = "/",
+        cursor: str | None = None,
+        per_page: int = 200,
+    ) -> dict:
+        """One page of objects under ``prefix``: ``{objects: [{key, size, etag,
+        last_modified, content_type}], folders: [full prefixes ending "/"], cursor
+        (None on the last page), truncated}``. ``delimiter=None`` lists keys flat."""
+        params: dict[str, Any] = {}
+        if prefix:
+            params["prefix"] = prefix
+        if delimiter:
+            params["delimiter"] = delimiter
+        if cursor:
+            params["cursor"] = cursor
+        params["per_page"] = max(1, min(int(per_page), 1000))
+        async with self._client() as client:
+            resp = await client.get(f"{self._bucket_url(bucket)}/objects", params=params)
+        rows = self._unwrap(resp)
+        info = resp.json().get("result_info") or {}
+        objects = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or not isinstance(row.get("key"), str):
+                continue
+            meta = row.get("http_metadata")
+            meta = meta if isinstance(meta, dict) else {}
+            try:
+                size = int(row.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            objects.append(
+                {
+                    "key": row["key"],
+                    "size": size,
+                    "etag": str(row.get("etag") or ""),
+                    "last_modified": row.get("last_modified"),
+                    "content_type": str(meta.get("contentType") or ""),
+                }
+            )
+        folders = [f for f in (info.get("delimited") or []) if isinstance(f, str)]
+        truncated = bool(info.get("is_truncated"))
+        next_cursor = info.get("cursor") if truncated else None
+        return {
+            "objects": objects,
+            "folders": folders,
+            "cursor": str(next_cursor) if next_cursor else None,
+            "truncated": truncated,
+        }
+
+    async def r2_get(self, bucket: str, key: str) -> R2Object | None:
+        """Open a download of one object (None when there is none). The body is not
+        read here: iterate ``R2Object.iter_bytes`` or call ``aclose``."""
+        url = self._object_url(bucket, key)
+        client = self._client()
+        try:
+            resp = await client.send(client.build_request("GET", url), stream=True)
+        except BaseException:
+            await client.aclose()
+            raise
+        if resp.status_code // 100 != 2:
+            try:
+                await resp.aread()
+            finally:
+                await resp.aclose()
+                await client.aclose()
+            if resp.status_code == 404:
+                return None
+            self._unwrap(resp)
+        length = resp.headers.get("content-length", "")
+        return R2Object(
+            content_type=resp.headers.get("content-type", ""),
+            size=int(length) if length.isdigit() else None,
+            etag=resp.headers.get("etag", "").strip('"'),
+            _resp=resp,
+            _client=client,
+        )
+
+    async def r2_put(
+        self,
+        bucket: str,
+        key: str,
+        body: bytes | AsyncIterable[bytes],
+        *,
+        content_type: str,
+        size: int | None = None,
+    ) -> dict:
+        """Write one object with ``content_type``. A streamed ``body`` needs its
+        ``size``, sent as Content-Length (never a chunked body). Returns ``{key, size,
+        etag, uploaded}`` (Cloudflare answers ``size`` as a string)."""
+        headers = {"Content-Type": content_type}
+        if not isinstance(body, bytes | bytearray):
+            if size is None:
+                raise ValueError("r2_put: a streamed body needs its size")
+            headers["Content-Length"] = str(size)
+        url = self._object_url(bucket, key)
+        async with httpx.AsyncClient(
+            headers=self._headers, transport=self._transport, timeout=120.0
+        ) as client:
+            resp = await client.put(url, content=body, headers=headers)
+        result = self._unwrap(resp)
+        result = result if isinstance(result, dict) else {}
+        try:
+            stored = int(result.get("size") or size or 0)
+        except (TypeError, ValueError):
+            stored = size or 0
+        return {
+            "key": str(result.get("key") or key),
+            "size": stored,
+            "etag": str(result.get("etag") or ""),
+            "uploaded": result.get("uploaded"),
+        }
+
+    async def r2_delete(self, bucket: str, key: str) -> None:
+        """Delete one object. Idempotent on a 404."""
+        url = self._object_url(bucket, key)
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    # -- KV keys (Sites Data dashboard) ---------------------------------------
+
+    def _kv_url(self, namespace_id: str) -> str:
+        return f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces/{namespace_id}"
+
+    async def kv_list_keys(
+        self, namespace_id: str, *, prefix: str = "", cursor: str | None = None, limit: int = 200
+    ) -> dict:
+        """One page of keys: ``{keys: [{name, expiration, metadata}], cursor}`` (cursor
+        None on the last page). ``limit`` is clamped to Cloudflare's 10-1000."""
+        params: dict[str, Any] = {}
+        if prefix:
+            params["prefix"] = prefix
+        if cursor:
+            params["cursor"] = cursor
+        params["limit"] = max(10, min(int(limit), 1000))
+        async with self._client() as client:
+            resp = await client.get(f"{self._kv_url(namespace_id)}/keys", params=params)
+        rows = self._unwrap(resp)
+        info = resp.json().get("result_info") or {}
+        keys = [
+            {
+                "name": row["name"],
+                "expiration": row.get("expiration"),
+                "metadata": row.get("metadata"),
+            }
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict) and isinstance(row.get("name"), str)
+        ]
+        next_cursor = info.get("cursor")
+        return {"keys": keys, "cursor": str(next_cursor) if next_cursor else None}
+
+    async def kv_get(
+        self, namespace_id: str, key: str, *, max_bytes: int | None = None
+    ) -> KvValue | None:
+        """A key's value (None when there is none). Reads the whole value to learn its
+        size but keeps at most ``max_bytes`` of it."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        kept = bytearray()
+        size = 0
+        async with self._client() as client, client.stream("GET", url) as resp:
+            if resp.status_code // 100 != 2:
+                await resp.aread()
+                if resp.status_code == 404:
+                    return None
+                self._unwrap(resp)
+            async for chunk in resp.aiter_bytes():
+                size += len(chunk)
+                room = len(chunk) if max_bytes is None else max_bytes - len(kept)
+                if room > 0:
+                    kept += chunk[:room]
+        truncated = len(kept) < size
+        text: str | None = None
+        if not truncated:
+            try:
+                text = bytes(kept).decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+        return KvValue(data=bytes(kept), size=size, truncated=truncated, text=text)
+
+    async def kv_metadata(self, namespace_id: str, key: str) -> Any:
+        """A key's metadata (None when the key or its metadata is missing)."""
+        url = f"{self._kv_url(namespace_id)}/metadata/{_kv_key_path(key)}"
+        async with self._client() as client:
+            resp = await client.get(url)
+        if resp.status_code == 404:
+            return None
+        result = self._unwrap(resp)
+        return result if result != {} else None
+
+    async def kv_put(
+        self,
+        namespace_id: str,
+        key: str,
+        value: bytes,
+        *,
+        metadata: Any = None,
+        expiration_ttl: int | None = None,
+    ) -> None:
+        """Write a key: the raw value, or a multipart ``value`` + ``metadata`` (JSON)
+        when ``metadata`` is given. A write replaces the key's value, metadata and
+        expiry together. ``expiration_ttl`` (seconds, >= 60) rides in the query."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        params = {"expiration_ttl": int(expiration_ttl)} if expiration_ttl else None
+        async with self._client() as client:
+            if metadata is None:
+                resp = await client.put(
+                    url,
+                    params=params,
+                    content=value,
+                    headers={"Content-Type": "application/octet-stream"},
+                )
+            else:
+                resp = await client.put(
+                    url,
+                    params=params,
+                    files={
+                        "value": (None, value),
+                        "metadata": (None, json.dumps(metadata), "application/json"),
+                    },
+                )
+        self._unwrap(resp)
+
+    async def kv_delete(self, namespace_id: str, key: str) -> None:
+        """Delete a key. Idempotent on a 404."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
         self._unwrap(resp)
 
     async def capture_screenshot(
