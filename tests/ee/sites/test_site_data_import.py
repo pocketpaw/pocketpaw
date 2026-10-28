@@ -274,7 +274,12 @@ async def test_empty_cell_in_a_not_null_column_with_a_default(site_doc, xdb, aud
 @pytest.mark.parametrize(
     ("table", "mapping", "field", "message"),
     [
-        ("api_clients", {"name": "name", "secret": "api_key"}, "secret", "Credentials"),
+        (
+            "api_clients",
+            {"name": "name", "secret": "api_key"},
+            "secret",
+            "Credentials can't be imported",
+        ),
         ("orders", {"note": "note", "x2": "total_x2"}, "x2", "Filled in"),
         ("orders", {"note": "note", "x2": "photo"}, "x2", "Files"),
         ("orders", {"note": "note", "x2": "nope"}, "x2", "no column"),

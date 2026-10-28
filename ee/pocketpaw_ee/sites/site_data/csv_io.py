@@ -382,11 +382,11 @@ def plan(table: d1.Table, rows: list[Row], mode: str) -> list[Chunk]:
             insert = (f"INSERT INTO {ident} ({names}) VALUES {values_sql}{tail}", params)
             statements = [insert]
             keys = [r.values[key] for r in part if key and r.values.get(key) is not None]
-            if keys:
+            if key is not None and keys:
                 key_marks = ", ".join("?" for _ in keys)
                 select = (
                     f'SELECT {quote_ident(key)} AS "__key" FROM {ident} '  # noqa: S608
-                    f"WHERE {quote_ident(key)} IN ({key_marks})",  # type: ignore[arg-type]
+                    f"WHERE {quote_ident(key)} IN ({key_marks})",
                     keys,
                 )
                 statements = [select, insert]

@@ -1,32 +1,38 @@
 # ee/pocketpaw_ee/sites/data_service.py — the one entry point of the Sites Data
-# dashboard: which site, which lane, which stores, and the read operations over them
-# (inventory, one table's schema, a page of rows).
+# dashboard: which site, which lane, which stores; reads (inventory, schema, a page
+# of rows), row writes, CSV import / export, and point-in-time restore.
 #
 # ``resolve_target`` reads the pocket through the pockets service (NotFound /
 # Forbidden for a missing or unreadable pocket, NotFound for another workspace's),
-# picks the lane and the Site doc's D1 / KV / R2 ids. Lanes:
+# picks the lane and the Site doc's D1 / KV / R2 ids and the site's name. Lanes:
 #   * project — engine ``project`` with a database: tables come from introspecting
 #     the live D1 (``site_data.d1``). No database at all is ``sites.not_dynamic``.
 #   * dynamic — a ripple / svelte site with declared ``objects``: the spec is the
-#     table whitelist, cross-checked against the live PRAGMA; a declared table the
-#     database doesn't have yet lists with ``row_count=0`` and reads empty.
+#     table whitelist, cross-checked against the live PRAGMA.
 # Local mode answers ``available=false`` / ``live_on_cloudflare_only`` and a site with
-# no database yet ``not_published`` on every read, with no Cloudflare call.
+# no database yet ``not_published``, with no Cloudflare call.
 #
-# Writes (insert, update with the conflict check, delete, duplicate) go through
-# ``site_data.writes`` after ``_writable_table``: the caller needs EDIT access to the
-# pocket (``pockets.service.has_edit_access``; reading it is not enough, 403
-# ``pocket.access_denied``), an unknown table is NotFound before any row SQL, a
-# site whose database can't be reached is 409 ``sites.data_unavailable``
-# (``details.reason``), and a read-only table is ``sites.data_read_only`` (403 for
-# login tables, 422 otherwise). The ``sites.data_write`` permission is the router's
-# job. Each written row records one audit event (``site_data.row_insert`` /
-# ``row_update`` / ``row_delete``, target ``<pocket>:<table>:<key>``, credentials
-# removed); an audit failure never fails the write. ``row_history`` reads those
-# events back for one row. A write drops the inventory's cached row counts.
+# Writes (rows and imports) go through ``_writable_table``: EDIT access to the pocket
+# (403 ``pocket.access_denied``), a known table (404 before any row SQL), a reachable
+# database (409 ``sites.data_unavailable``), an editable table (``sites.data_read_only``).
+# Imports also refuse every login table. Each written row records one audit event
+# (``site_data.row_*``, target ``<pocket>:<table>:<key>``, credentials removed), an
+# import one ``site_data.import`` (counts and mapping, no values, target
+# ``<pocket>:<table>``); an audit failure never fails the write. A bulk delete and an
+# import take a Time Travel bookmark first and return it as ``restore_point``
+# (null when the database has none). Export reads 500 rows a call, credentials left out.
+#
+# Restore (``restore_status`` / ``restore`` / ``restore_undo``) needs edit access
+# here and ``sites.data_restore`` in the router; a ``production`` D1, a moment inside
+# ``PAW_CF_D1_TT_DAYS`` (default 30), ``confirm_name`` equal to the site's name (case
+# and spaces ignored), and at most 3 restores per database per 10 minutes. Each
+# restore is audited (target ``<pocket>``) with its ``previous_bookmark`` and database
+# id; undo only accepts a bookmark this site's own restore events recorded for this
+# database. A restore drops every cache of the database.
 #
 # Every Cloudflare call goes through ``site_data.budget`` (429 ``sites.data_busy``)
-# on the data-token client (``service._data_cf_client``).
+# on the data-token client (``service._data_cf_client``); long imports and exports
+# wait out a spent budget a few times (``_patient``).
 from __future__ import annotations
 
 import asyncio
@@ -386,12 +392,11 @@ class _Writable:
     kinds: dict[str, str]
 
 
-async def _writable_table(
-    *, workspace_id: str, user_id: str, pocket_id: str, table: str, _cloudflare: Any | None
-) -> _Writable:
-    """The site and the editable live table a write addresses, or the refusal: no
-    edit access to the pocket 403, an unknown table 404, an unreachable database
-    409, a read-only table."""
+async def _editable_target(
+    *, workspace_id: str, user_id: str, pocket_id: str, _cloudflare: Any | None
+) -> DataTarget:
+    """The site, or 403 ``pocket.access_denied`` when the caller can read the pocket
+    but not edit it (every write and restore needs edit access)."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     target = await resolve_target(
@@ -399,6 +404,18 @@ async def _writable_table(
     )
     if not await pockets_service.has_edit_access(pocket_id, user_id):
         raise Forbidden("pocket.access_denied", "You don't have edit access to this site.")
+    return target
+
+
+async def _writable_table(
+    *, workspace_id: str, user_id: str, pocket_id: str, table: str, _cloudflare: Any | None
+) -> _Writable:
+    """The site and the editable live table a write addresses, or the refusal: no
+    edit access to the pocket 403, an unknown table 404, an unreachable database
+    409, a read-only table."""
+    target = await _editable_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
     if target.lane == "dynamic" and target.spec_object(table) is None:
         raise NotFound("site_table", table)
     if target.reason:
@@ -1013,19 +1030,6 @@ def _iso(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-async def _restorable(
-    *, workspace_id: str, user_id: str, pocket_id: str, _cloudflare: Any | None
-) -> DataTarget:
-    from pocketpaw_ee.cloud.pockets import service as pockets_service
-
-    target = await resolve_target(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
-    )
-    if not await pockets_service.has_edit_access(pocket_id, user_id):
-        raise Forbidden("pocket.access_denied", "You don't have edit access to this site.")
-    return target
-
-
 async def _unavailable_reason(target: DataTarget, cf: budget.Budgeted | None) -> str:
     if target.reason:
         return target.reason
@@ -1050,23 +1054,25 @@ async def restore_status(
     ``GET .../data/restore?at=<iso>``."""
     from pocketpaw_ee.cloud.audit import service as audit_service
 
-    target = await _restorable(
+    target = await _editable_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
     days = window_days()
     now = datetime.now(UTC)
     moment = _moment(at, now, days) if at else None
-    base = {
-        "pocket_id": pocket_id,
-        "site_name": target.site_name,
-        "window_days": days,
-        "earliest": (now - timedelta(days=days)).isoformat(),
-        "at": moment.isoformat() if moment else None,
-    }
     cf = None if target.reason else _client(target, _cloudflare)
     reason = await _unavailable_reason(target, cf)
+    status = RestoreStatus(
+        pocket_id=pocket_id,
+        available=not reason,
+        reason=reason,
+        site_name=target.site_name,
+        window_days=days,
+        earliest=(now - timedelta(days=days)).isoformat(),
+        at=moment.isoformat() if moment else None,
+    )
     if reason or cf is None or moment is None:
-        return RestoreStatus(available=not reason, reason=reason, **base)
+        return status
     bookmark = await cf.d1_bookmark(target.d1_id, _iso(moment))
     changes = await audit_service.count_target_events(
         target.workspace_id,
@@ -1075,7 +1081,7 @@ async def restore_status(
         since=moment,
         action_prefix="site_data.",
     )
-    return RestoreStatus(available=True, bookmark=bookmark, changes_since=changes, **base)
+    return status.model_copy(update={"bookmark": bookmark, "changes_since": changes})
 
 
 async def _do_restore(
@@ -1119,7 +1125,7 @@ async def restore(
     """Put the site's whole database back the way it was at ``at``, in place.
     ``confirm_name`` must be the site's name. Returns the ``previous_bookmark``
     that undoes it. ``POST .../data/restore``."""
-    target = await _restorable(
+    target = await _editable_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
     if not _same_name(confirm_name, target.site_name):
@@ -1144,7 +1150,7 @@ async def restore_undo(
     ``previous_bookmark``; any other bookmark is refused. ``POST .../data/restore:undo``."""
     from pocketpaw_ee.cloud.audit import service as audit_service
 
-    target = await _restorable(
+    target = await _editable_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
     unknown = _restore_error("unknown_bookmark", "That isn't a restore of this site to undo.")
