@@ -71,7 +71,8 @@ dependencies = [
     # soul_protocol.engine.journal for fleet installer event emission (#947).
     # Promoted from optional extra to base dep in v0.3.1 integration work;
     # the runtime now takes a hard dependency on the journal primitives.
-    "soul-protocol[engine]>=0.3.1",
+    # Updated to v0.5.0: game profiles, dedup-aware writes, health audit, eternal storage fixes.
+    "soul-protocol[engine]>=0.5.0",
     # NOTE: livekit-agents / livekit-plugins-deepgram moved to ee/pyproject.toml
     # in the OSS-EE split (Phase 4) — only ee/pocketpaw_ee/cloud/livekit imports them.
     "cel-python>=0.5.0",
@@ -155,7 +156,7 @@ memory = [
     "ollama>=0.6.1",
 ]
 soul = [
-    "soul-protocol[engine]>=0.3.0",
+    "soul-protocol[engine]>=0.5.0",
 ]
 
 # --- Channel extras ---
@@ -270,7 +271,7 @@ all-tools = [
     # graph
     "networkx>=3.0",
     # soul
-    "soul-protocol[engine]>=0.3.0",
+    "soul-protocol[engine]>=0.5.0",
 ]
 all-backends = [
     "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
@@ -306,7 +307,7 @@ all = [
     "sarvamai>=0.1.25",
     "mcp>=1.0.0",
     # soul
-    "soul-protocol[engine]>=0.3.0",
+    "soul-protocol[engine]>=0.5.0",
     # backends
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
