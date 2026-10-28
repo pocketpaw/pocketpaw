@@ -528,8 +528,32 @@ async def test_expected_unknown_column_is_422(site_doc, db, audit):
 @pytest.mark.asyncio
 async def test_delete_returns_count_and_keys(site_doc, db, audit):
     res = await _delete(db, "notes", [1, "2", 2])
-    assert res.deleted == 2 and sorted(res.keys) == [1, 2] and res.restore_point is None
+    assert res.deleted == 2 and sorted(res.keys) == [1, 2]
     assert db.rows("SELECT COUNT(*) AS n FROM notes") == [{"n": 0}]
+    # A bulk delete takes a restore point first: restoring it brings both rows back.
+    assert res.restore_point
+    await db.d1_restore(_DB, bookmark=res.restore_point)
+    assert db.rows("SELECT COUNT(*) AS n FROM notes") == [{"n": 2}]
+
+
+@pytest.mark.asyncio
+async def test_single_row_delete_has_no_restore_point(site_doc, db, audit):
+    res = await _delete(db, "notes", [1, "1"])
+    assert res.deleted == 1 and res.restore_point is None
+    assert db.restores == [] and db._snapshots == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_without_time_travel_still_deletes(site_doc, db, audit):
+    db.version = "alpha"
+    res = await _delete(db, "notes", [1, 2])
+    assert res.deleted == 2 and res.restore_point is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_audits_its_restore_point(site_doc, db, audit):
+    res = await _delete(db, "notes", [1, 2])
+    assert [e["metadata"]["restore_point"] for e in audit] == [res.restore_point] * 2
 
 
 @pytest.mark.asyncio
@@ -542,8 +566,8 @@ async def test_delete_chunks_at_90_keys_in_one_batch(site_doc, audit):
     deletes = [(s, p) for s, p in cf.sql if s.startswith("DELETE")]
     assert [len(p) for _, p in deletes] == [90, 90, 20]
     assert cf.rows("SELECT COUNT(*) AS n FROM t") == [{"n": 100}]
-    # introspection (master + PRAGMA batch) and ONE delete batch
-    assert cf.calls - calls == 3
+    # introspection (master + PRAGMA batch), the restore point and ONE delete batch
+    assert cf.calls - calls == 4
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1071,8 @@ async def test_route_shapes(routed):
     dup = await _call(app, "POST", "/tables/customers/rows:duplicate", {"key": 3})
     assert dup.json()["row"]["__key"] == 4 and dup.json()["row"]["name"] == "Cy"
     gone = await _call(app, "POST", "/tables/customers/rows:delete", {"keys": [3, 4]})
-    assert gone.json() == {"deleted": 2, "keys": [3, 4], "restore_point": None}
+    assert gone.json()["deleted"] == 2 and gone.json()["keys"] == [3, 4]
+    assert gone.json()["restore_point"]
     bad = await _call(app, "POST", "/tables/customers/rows", {"values": {"email": "x"}})
     assert bad.status_code == 422
     assert bad.json()["error"]["details"]["fields"] == {"name": "Required."}
@@ -1138,8 +1163,10 @@ def test_every_write_route_requires_sites_data_write():
     for route in router.routes:
         methods = getattr(route, "methods", set())
         guards = {getattr(d.call, "__name__", "") for d in route.dependant.dependencies}
-        is_write = bool(methods & {"POST", "PATCH", "PUT", "DELETE"})
+        is_restore = "/restore" in route.path
+        is_write = bool(methods & {"POST", "PATCH", "PUT", "DELETE"}) and not is_restore
         assert ("require_action_sites_data_write" in guards) == is_write, route.path
+        assert ("require_action_sites_data_restore" in guards) == is_restore, route.path
 
 
 # --------------------------------------------------------------------------- adversarial

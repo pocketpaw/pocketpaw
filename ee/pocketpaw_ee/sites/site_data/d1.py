@@ -151,6 +151,13 @@ def forget_counts(database_id: str) -> None:
         _counts_cache.pop(key, None)
 
 
+def forget_database(database_id: str) -> None:
+    """Drop everything cached about ``database_id`` (after a restore rewrote it)."""
+    forget_counts(database_id)
+    for key in [k for k in _schema_cache if k[0] == database_id]:
+        _schema_cache.pop(key, None)
+
+
 def _remember(cache: dict, key: tuple[str, ...], ttl: float, value: Any) -> None:
     if len(cache) >= _CACHE_MAX:
         cache.pop(next(iter(cache)))
@@ -668,15 +675,18 @@ def build_page_query(
     limit: int | None = None,
     offset: int | None = 0,
     spec_fields: dict[str, str] | None = None,
+    max_limit: int = LIMIT_MAX,
 ) -> PageQuery:
     """The rows-page SELECT and its capped COUNT for ``table`` (TDD §5.3). Raises a
     422 for a column not in the schema, a masked column, a bad operator or value,
-    or out-of-range paging, before any SQL is built."""
+    or out-of-range paging, before any SQL is built. ``max_limit`` is the server's
+    own page size cap (the CSV export reads 500 at a time); callers never pass a
+    client's value there."""
     spec_fields = spec_fields or {}
     limit = LIMIT_DEFAULT if limit is None else limit
     offset = offset or 0
-    if not 1 <= limit <= LIMIT_MAX:
-        raise _bad("bad_paging", f"limit must be between 1 and {LIMIT_MAX}.")
+    if not 1 <= limit <= max_limit:
+        raise _bad("bad_paging", f"limit must be between 1 and {max_limit}.")
     if not 0 <= offset <= OFFSET_MAX:
         raise _bad("bad_paging", "That page is too far in. Add a filter to narrow the rows.")
     direction = (direction or "").lower() or None

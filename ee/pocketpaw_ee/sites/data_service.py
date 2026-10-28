@@ -31,20 +31,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound
+from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound, ValidationError
 from pocketpaw_ee.sites import service as sites_service
-from pocketpaw_ee.sites.project_data import masked_columns
-from pocketpaw_ee.sites.site_data import budget, d1, writes
+from pocketpaw_ee.sites.project_data import auth_table, masked_columns
+from pocketpaw_ee.sites.site_data import budget, csv_io, d1, writes
 from pocketpaw_ee.sites.site_data.dto import (
     ColumnInfo,
     ConnectorRef,
     DataInventory,
     DeleteRowsOut,
     HistoryEvent,
+    ImportFailure,
+    ImportPreview,
+    ImportResult,
+    RestoreOut,
+    RestoreStatus,
     RowHistory,
     RowOut,
     RowPage,
@@ -69,6 +77,7 @@ class DataTarget:
     r2: dict[str, str] = field(default_factory=dict)  # binding -> bucket name
     spec_objects: list[dict[str, Any]] = field(default_factory=list)  # dynamic lane only
     reason: str = ""  # why the database can't be read now; "" when it can
+    site_name: str = ""  # the Site doc's name, else the pocket's (restore's confirm)
 
     def spec_object(self, table: str) -> dict[str, Any] | None:
         return next((o for o in self.spec_objects if o.get("name") == table), None)
@@ -117,6 +126,7 @@ async def resolve_target(
         r2=dict(getattr(doc, "r2_buckets", None) or {}),
         spec_objects=objects,
         reason=reason,
+        site_name=(getattr(doc, "name", "") or "").strip() or str(pocket.get("name") or "").strip(),
     )
 
 
@@ -520,6 +530,8 @@ async def delete_rows(
         _cloudflare=_cloudflare,
     )
     row_keys = writes.delete_keys(w.table, w.kinds, keys)
+    # One row is undone by re-inserting it; a bulk delete gets a restore point.
+    restore_point = await _restore_point(w) if len(row_keys) > 1 else None
     deleted, cascade = await writes.delete(w.cf, w.target.d1_id, w.schema, w.table, row_keys)
     d1.forget_counts(w.target.d1_id)
     gone = {r.get("__key") for r in deleted}
@@ -528,13 +540,19 @@ async def delete_rows(
     async def _one(row: dict[str, Any]) -> None:
         async with slots:
             key = row.get("__key")
-            extra = {"cascade": cascade[key]} if key in cascade else None
+            extra: dict[str, Any] = {"cascade": cascade[key]} if key in cascade else {}
+            if restore_point:
+                extra["restore_point"] = restore_point
             await _audit(
                 w, user_id, "site_data.row_delete", key, before=row, after=None, extra=extra
             )
 
     await asyncio.gather(*(_one(r) for r in deleted))
-    return DeleteRowsOut(deleted=len(deleted), keys=[k for k in row_keys if k in gone])
+    return DeleteRowsOut(
+        deleted=len(deleted),
+        keys=[k for k in row_keys if k in gone],
+        restore_point=restore_point,
+    )
 
 
 async def duplicate_row(
@@ -627,3 +645,523 @@ async def row_history(
             )
         )
     return RowHistory(events=out)
+
+
+# --------------------------------------------------------------------------- restore points
+
+_BUSY_RETRIES = 3
+_BUSY_MAX_SLEEP_S = 30
+
+
+async def _restore_point(w: _Writable) -> str | None:
+    """The database's current bookmark, taken before a bulk write, or None when it
+    has no Time Travel (an alpha database) or Cloudflare can't answer. A spent
+    budget still refuses the write: nothing has been written yet."""
+    try:
+        return await w.cf.d1_bookmark(w.target.d1_id)
+    except budget.DataBusy:
+        raise
+    except CloudError:
+        logger.warning("site_data: no restore point for %s", w.target.pocket_id, exc_info=True)
+        return None
+
+
+async def _patient(call: Any) -> Any:
+    """Await ``call()``, waiting out a spent data budget a few times (a long import
+    or export spans more calls than one minute's workspace budget)."""
+    for attempt in range(_BUSY_RETRIES + 1):
+        try:
+            return await call()
+        except budget.DataBusy as exc:
+            if attempt == _BUSY_RETRIES:
+                raise
+            wait = int((exc.details or {}).get("retry_after") or 1)
+            await asyncio.sleep(min(max(wait, 1), _BUSY_MAX_SLEEP_S))
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+# --------------------------------------------------------------------------- CSV import
+
+
+async def _importable(
+    *, workspace_id: str, user_id: str, pocket_id: str, table: str, _cloudflare: Any | None
+) -> _Writable:
+    """``_writable_table``, and never a login table: sign-in data isn't imported."""
+    w = await _writable_table(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        table=table,
+        _cloudflare=_cloudflare,
+    )
+    if auth_table(w.table.name) or not d1.insertable(w.table):
+        raise writes.read_only("login_table")
+    return w
+
+
+async def _formats(w: _Writable, columns: list[str]) -> dict[str, tuple[str, str | None]]:
+    return await writes.time_formats(w.cf, w.target.d1_id, w.table, w.kinds, columns)
+
+
+async def import_preview(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    filename: str,
+    data: bytes,
+    _cloudflare: Any | None = None,
+) -> ImportPreview:
+    """Read an uploaded CSV, keep it 15 minutes, and say how it would import: the
+    first 20 rows, an auto-matched mapping and the cell errors under it. Writes
+    nothing. ``POST .../data/tables/{table}/import:preview``."""
+    w = await _importable(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        table=table,
+        _cloudflare=_cloudflare,
+    )
+    text = csv_io.decode(data)
+    parsed = csv_io.parse(text)
+    targets = csv_io.targets(w.table, w.kinds)
+    auto = csv_io.auto_mapping(parsed.header, [t.name for t in targets])
+    mapped = {src: dest for src, dest in auto.items() if dest is not None}
+    formats = await _formats(w, list(mapped.values()))
+    _rows, errors, bad = csv_io.check_rows(w.table, w.kinds, parsed, mapped, formats)
+    name = (filename or "upload.csv")[:200]
+    upload_id = await csv_io.save_upload(
+        workspace_id=w.target.workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+        table=w.table.name,
+        filename=name,
+        text=text,
+    )
+    return ImportPreview(
+        pocket_id=pocket_id,
+        table=w.table.name,
+        upload_id=upload_id,
+        expires_in=csv_io.UPLOAD_TTL_S,
+        filename=name,
+        header=parsed.header,
+        rows=[cells for _n, cells in parsed.rows[: csv_io.PREVIEW_ROWS]],
+        total_rows=len(parsed.rows),
+        mapping=auto,
+        targets=targets,
+        key=csv_io.upsert_key(w.table),
+        errors=errors,
+        error_count=bad,
+    )
+
+
+_BATCH_REFUSED = (
+    "The database refused these rows: a value may already be taken, or point at a row "
+    "that doesn't exist."
+)
+
+
+async def import_commit(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    upload_id: str,
+    mapping: dict[str, str | None],
+    mode: str = "insert",
+    _cloudflare: Any | None = None,
+) -> ImportResult:
+    """Write a previewed upload's rows under ``mapping``: ``insert`` adds them,
+    ``upsert`` updates the rows whose key matches and adds the rest. Each D1 batch
+    (at most 50 statements) lands whole or not at all; a refused batch fails its rows
+    and the rest go on. A restore point is taken before the first write.
+    ``POST .../data/tables/{table}/import``."""
+    w = await _importable(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        table=table,
+        _cloudflare=_cloudflare,
+    )
+    filename, text = await csv_io.load_upload(
+        upload_id,
+        workspace_id=w.target.workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+        table=w.table.name,
+    )
+    parsed = csv_io.parse(text)
+    mapped = csv_io.check_mapping(w.table, w.kinds, parsed.header, mapping, mode)
+    formats = await _formats(w, list(mapped.values()))
+    rows, _errors, _bad = csv_io.check_rows(w.table, w.kinds, parsed, mapped, formats)
+    failed: dict[int, str] = {}
+    for e in _errors:
+        failed.setdefault(e.row, f"{e.column}: {e.error}" if e.column else e.error)
+    failed_count = _bad
+
+    restore_point = await _restore_point(w) if rows else None
+    key = csv_io.upsert_key(w.table) if mode == "upsert" else None
+    inserted = updated = 0
+    seen: set[Any] = set()
+    pending = csv_io.batches(csv_io.plan(w.table, rows, mode))
+    for index, batch in enumerate(pending):
+        statements = [st for chunk in batch for st in chunk.statements]
+        try:
+            results = await _patient(
+                lambda st=statements: w.cf.query_d1_batch(database_id=w.target.d1_id, statements=st)
+            )
+        except budget.DataBusy:
+            for rest in pending[index:]:
+                for chunk in rest:
+                    for row in chunk.rows:
+                        failed.setdefault(row.number, "Not imported: the site's data is busy.")
+                        failed_count += 1
+            break
+        except ValidationError as exc:
+            if exc.code != "sites.cloudflare_error":
+                raise
+            for chunk in batch:
+                for row in chunk.rows:
+                    failed.setdefault(row.number, _BATCH_REFUSED)
+                    failed_count += 1
+            continue
+        at = 0
+        for chunk in batch:
+            existing: set[Any] = set()
+            if len(chunk.statements) == 2:
+                existing = {r.get("__key") for r in results[at]}
+            at += len(chunk.statements)
+            for row in chunk.rows:
+                k = row.values.get(key) if key else None
+                if k is not None and (k in existing or k in seen):
+                    updated += 1
+                else:
+                    inserted += 1
+                if k is not None:
+                    seen.add(k)
+
+    d1.forget_counts(w.target.d1_id)
+    await csv_io.drop_upload(upload_id)
+    await _audit_event(
+        w.target,
+        user_id,
+        "site_data.import",
+        f"{pocket_id}:{w.table.name}",
+        {
+            "table": w.table.name,
+            "mode": mode,
+            "filename": filename,
+            "mapping": mapped,
+            "rows": len(parsed.rows),
+            "inserted": inserted,
+            "updated": updated,
+            "failed": failed_count,
+            "restore_point": restore_point,
+        },
+    )
+    return ImportResult(
+        inserted=inserted,
+        updated=updated,
+        failed=[ImportFailure(row=n, error=m) for n, m in sorted(failed.items())][
+            : csv_io.MAX_ERRORS
+        ],
+        failed_count=failed_count,
+        restore_point=restore_point,
+    )
+
+
+async def _audit_event(
+    target: DataTarget, user_id: str, action: str, target_id: str, metadata: dict[str, Any]
+) -> None:
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    try:
+        await audit_service.record(
+            target.workspace_id,
+            user_id,
+            action,
+            target_type=_AUDIT_TARGET,
+            target_id=target_id,
+            metadata=metadata,
+        )
+    except Exception:  # noqa: BLE001 — the change landed; a lost audit row must not undo it
+        logger.warning("site_data: audit failed for %s", action, exc_info=True)
+
+
+# --------------------------------------------------------------------------- CSV export
+
+
+async def export_csv(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    q: str | None = None,
+    sort: str | None = None,
+    dir: str | None = None,  # noqa: A002 — the query parameter's name
+    f: str | None = None,
+    _cloudflare: Any | None = None,
+) -> tuple[str, AsyncIterator[bytes]]:
+    """``(filename, body)``: the rows under the search, filters and sort as CSV,
+    500 per D1 read, at most 100,000, credential columns left out. The first page is
+    read before this returns, so a bad query or a busy budget is a clean error.
+    ``GET .../data/tables/{table}/export.csv``."""
+    filters = d1.parse_filters(f)
+    target = await resolve_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    if target.lane == "dynamic" and target.spec_object(table) is None:
+        raise NotFound("site_table", table)
+    if target.reason:
+        raise writes.unavailable(target.reason)
+    cf = _client(target, _cloudflare)
+    t = await _live_table(target, table, cf)
+    filename = csv_io.export_filename(table, datetime.now(UTC).date())
+    if t is None:  # declared, not created yet: a header and no rows
+        names = list(_spec_fields(target.spec_object(table)))
+        hidden = masked_columns(table, names)
+        header = csv_io.header_line([n for n in names if n not in hidden]).encode("utf-8")
+
+        async def _empty() -> AsyncIterator[bytes]:
+            yield header
+
+        return filename, _empty()
+
+    fields = _spec_fields(target.spec_object(table))
+    columns = csv_io.export_columns(t)
+
+    def _query(offset: int) -> d1.PageQuery:
+        return d1.build_page_query(
+            t,
+            q=q,
+            sort=sort,
+            direction=dir,
+            filters=filters,
+            limit=csv_io.EXPORT_PAGE,
+            offset=offset,
+            spec_fields=fields,
+            max_limit=csv_io.EXPORT_PAGE,
+        )
+
+    async def _page(offset: int) -> list[dict[str, Any]]:
+        query = _query(offset)
+        return await _patient(
+            lambda: cf.query_d1(database_id=target.d1_id, sql=query.sql, params=query.params)
+        )
+
+    first = await _page(0)
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield csv_io.header_line(columns).encode("utf-8")
+        rows, offset, sent = first, 0, 0
+        while True:
+            chunk = rows[: csv_io.EXPORT_MAX_ROWS - sent]
+            if chunk:
+                yield csv_io.rows_text(chunk, columns).encode("utf-8")
+            sent += len(chunk)
+            if len(rows) < csv_io.EXPORT_PAGE or sent >= csv_io.EXPORT_MAX_ROWS:
+                return
+            offset += csv_io.EXPORT_PAGE
+            rows = await _page(offset)
+
+    return filename, _body()
+
+
+# --------------------------------------------------------------------------- restore
+
+_TT_DAYS_ENV = "PAW_CF_D1_TT_DAYS"
+_TT_DAYS_DEFAULT = 30
+_CLOCK_SKEW = timedelta(minutes=1)
+_BOOKMARK = re.compile(r"^[A-Za-z0-9-]{1,200}$")
+_RESTORE_ACTIONS = ["site_data.restore", "site_data.restore_undo"]
+_REASON_NOT_PRODUCTION = "not_production"
+
+
+def window_days() -> int:
+    """How far back Time Travel reaches: ``PAW_CF_D1_TT_DAYS`` (30 on a paid
+    account, 7 on free), clamped to 1-30."""
+    raw = (os.environ.get(_TT_DAYS_ENV) or "").strip()
+    try:
+        days = int(raw) if raw else _TT_DAYS_DEFAULT
+    except ValueError:
+        logger.warning("%s=%r is not an int; using %d", _TT_DAYS_ENV, raw, _TT_DAYS_DEFAULT)
+        days = _TT_DAYS_DEFAULT
+    return max(1, min(days, 30))
+
+
+def _restore_error(code: str, message: str) -> ValidationError:
+    return ValidationError(f"sites.data_restore_{code}", message)
+
+
+def _moment(at: str, now: datetime, days: int) -> datetime:
+    """``at`` as a UTC moment inside the Time Travel window, or a 422."""
+    try:
+        text = at.strip()
+        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
+    except (AttributeError, ValueError):
+        raise _restore_error("bad_time", "Pick a time like 2026-10-27T15:30:00Z.") from None
+    moment = moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+    if moment < now - timedelta(days=days) or moment > now + _CLOCK_SKEW:
+        raise _restore_error("out_of_window", f"Pick a time within the last {days} days.")
+    return moment
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def _restorable(
+    *, workspace_id: str, user_id: str, pocket_id: str, _cloudflare: Any | None
+) -> DataTarget:
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    target = await resolve_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    if not await pockets_service.has_edit_access(pocket_id, user_id):
+        raise Forbidden("pocket.access_denied", "You don't have edit access to this site.")
+    return target
+
+
+async def _unavailable_reason(target: DataTarget, cf: budget.Budgeted | None) -> str:
+    if target.reason:
+        return target.reason
+    info = await cf.d1_info(target.d1_id) if cf is not None else {}
+    return "" if (info or {}).get("version") == "production" else _REASON_NOT_PRODUCTION
+
+
+def _same_name(given: str, expected: str) -> bool:
+    return bool(expected) and given.strip().casefold() == expected.strip().casefold()
+
+
+async def restore_status(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    at: str | None = None,
+    _cloudflare: Any | None = None,
+) -> RestoreStatus:
+    """Whether the site's database can be restored, how far back, and (for ``at``)
+    the bookmark it would go to and how many dashboard changes came since.
+    ``GET .../data/restore?at=<iso>``."""
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    target = await _restorable(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    days = window_days()
+    now = datetime.now(UTC)
+    moment = _moment(at, now, days) if at else None
+    base = {
+        "pocket_id": pocket_id,
+        "site_name": target.site_name,
+        "window_days": days,
+        "earliest": (now - timedelta(days=days)).isoformat(),
+        "at": moment.isoformat() if moment else None,
+    }
+    cf = None if target.reason else _client(target, _cloudflare)
+    reason = await _unavailable_reason(target, cf)
+    if reason or cf is None or moment is None:
+        return RestoreStatus(available=not reason, reason=reason, **base)
+    bookmark = await cf.d1_bookmark(target.d1_id, _iso(moment))
+    changes = await audit_service.count_target_events(
+        target.workspace_id,
+        target_type=_AUDIT_TARGET,
+        target_root=pocket_id,
+        since=moment,
+        action_prefix="site_data.",
+    )
+    return RestoreStatus(available=True, bookmark=bookmark, changes_since=changes, **base)
+
+
+async def _do_restore(
+    target: DataTarget,
+    cf: budget.Budgeted,
+    user_id: str,
+    action: str,
+    *,
+    bookmark: str | None = None,
+    timestamp: str | None = None,
+) -> RestoreOut:
+    await budget.acquire_restore(target.d1_id)
+    result = await cf.d1_restore(target.d1_id, bookmark=bookmark, timestamp=timestamp)
+    d1.forget_database(target.d1_id)
+    out = RestoreOut(
+        bookmark=str(result.get("bookmark") or ""),
+        previous_bookmark=str(result["previous_bookmark"]),
+    )
+    meta: dict[str, Any] = {
+        "database_id": target.d1_id,
+        "bookmark": out.bookmark,
+        "previous_bookmark": out.previous_bookmark,
+    }
+    if timestamp:
+        meta["at"] = timestamp
+    if bookmark:
+        meta["undoes"] = bookmark
+    await _audit_event(target, user_id, action, target.pocket_id, meta)
+    return out
+
+
+async def restore(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    at: str,
+    confirm_name: str,
+    _cloudflare: Any | None = None,
+) -> RestoreOut:
+    """Put the site's whole database back the way it was at ``at``, in place.
+    ``confirm_name`` must be the site's name. Returns the ``previous_bookmark``
+    that undoes it. ``POST .../data/restore``."""
+    target = await _restorable(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    if not _same_name(confirm_name, target.site_name):
+        raise _restore_error("confirm_mismatch", "Type the site's name to confirm the restore.")
+    moment = _moment(at, datetime.now(UTC), window_days())
+    cf = None if target.reason else _client(target, _cloudflare)
+    reason = await _unavailable_reason(target, cf)
+    if reason or cf is None:
+        raise writes.unavailable(reason or _REASON_NOT_PUBLISHED)
+    return await _do_restore(target, cf, user_id, "site_data.restore", timestamp=_iso(moment))
+
+
+async def restore_undo(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    previous_bookmark: str,
+    _cloudflare: Any | None = None,
+) -> RestoreOut:
+    """Go back to the bookmark a restore of THIS site recorded as its
+    ``previous_bookmark``; any other bookmark is refused. ``POST .../data/restore:undo``."""
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    target = await _restorable(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    unknown = _restore_error("unknown_bookmark", "That isn't a restore of this site to undo.")
+    if not isinstance(previous_bookmark, str) or not _BOOKMARK.match(previous_bookmark):
+        raise unknown
+    if target.reason:
+        raise writes.unavailable(target.reason)
+    recorded = await audit_service.find_target_event(
+        target.workspace_id,
+        target_type=_AUDIT_TARGET,
+        target_id=pocket_id,
+        actions=_RESTORE_ACTIONS,
+        metadata={"previous_bookmark": previous_bookmark, "database_id": target.d1_id},
+    )
+    if recorded is None:
+        raise unknown
+    cf = _client(target, _cloudflare)
+    return await _do_restore(
+        target, cf, user_id, "site_data.restore_undo", bookmark=previous_bookmark
+    )
