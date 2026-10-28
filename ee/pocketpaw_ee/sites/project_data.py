@@ -14,10 +14,14 @@
 #     this database (an unknown name is a 404 before any read), and it is quoted.
 #   * Internal tables stay hidden: SQLite's, Cloudflare's (``_cf_*``,
 #     ``d1_migrations``), drizzle's (``__drizzle*``) and ours (``_paw_*``).
-#   * Auth tables (better-auth's ``user`` / ``session`` / ``account`` /
-#     ``verification`` and the dynamic lane's ``users`` / ``sessions``) never show a
-#     credential: a column named like password / token / secret / hash / key, and
-#     ``verification.value``, reads ``MASK``.
+#   * No table shows a credential. On EVERY table a column named like a credential
+#     (``CREDENTIAL``: password, passwd, secret, token, private key, api key, backup
+#     codes, ``hash`` / ``*_hash``; camelCase is read as snake_case) reads ``MASK``.
+#     Auth tables (``auth_table``: better-auth's user / session / account /
+#     verification and its twoFactor / passkey / apikey / jwks plugins, any casing,
+#     ``_`` ignored, an ``auth`` prefix allowed, plus plurals) mask more broadly: any
+#     column named like password / token / secret / hash / key, and
+#     ``verification.value``.
 from __future__ import annotations
 
 import re
@@ -33,12 +37,50 @@ _HIDDEN_PREFIXES = ("sqlite_", "_cf_", "__drizzle", "_paw_")
 _HIDDEN_NAMES = frozenset({"d1_migrations"})
 
 AUTH_TABLES = frozenset(
-    {"user", "users", "session", "sessions", "account", "accounts", "verification", "verifications"}
+    {
+        "user",
+        "users",
+        "session",
+        "sessions",
+        "account",
+        "accounts",
+        "verification",
+        "verifications",
+        "twofactor",
+        "twofactors",
+        "passkey",
+        "passkeys",
+        "apikey",
+        "apikeys",
+        "jwks",
+    }
 )
 _SENSITIVE = re.compile(r"password|token|secret|hash|key", re.I)
+# Credential names on any table: narrower, so ``key`` / ``primary_key`` /
+# ``settings_key`` in an ordinary table stay visible. Matched on the snake_case name.
+CREDENTIAL = re.compile(
+    r"password|passwd|secret|token|private_?key|api_?key|backup_?codes|_hash$|^hash$"
+)
 # Columns that hold a credential under a harmless name: better-auth keeps the
 # one-time token of an email verification or password reset in ``value``.
 _AUTH_EXTRA = {"verification": frozenset({"value"}), "verifications": frozenset({"value"})}
+_CAMEL = re.compile(r"(?<=[a-z0-9])([A-Z])")
+
+
+def auth_table(name: str) -> str:
+    """The ``AUTH_TABLES`` name ``name`` stands for (``twoFactor`` → ``twofactor``,
+    ``auth_user`` → ``user``), or "" for an ordinary table."""
+    low = name.lower().replace("_", "")
+    if low in AUTH_TABLES:
+        return low
+    if low.startswith("auth") and low[4:] in AUTH_TABLES:
+        return low[4:]
+    return ""
+
+
+def is_credential(column: str) -> bool:
+    """Whether ``column`` is named like a credential, on any table."""
+    return bool(CREDENTIAL.search(_CAMEL.sub(r"_\1", column).lower()))
 
 
 def is_user_table(name: str) -> bool:
@@ -53,17 +95,16 @@ def quote_ident(name: str) -> str:
 
 def masked_columns(table: str, columns: list[str] | set[str]) -> set[str]:
     """The columns of ``table`` whose values the viewer must not show."""
-    low = table.lower()
-    if low not in AUTH_TABLES:
-        return set()
-    extra = _AUTH_EXTRA.get(low, frozenset())
-    return {c for c in columns if _SENSITIVE.search(c) or c.lower() in extra}
+    out = {c for c in columns if is_credential(c)}
+    base = auth_table(table)
+    if base:
+        extra = _AUTH_EXTRA.get(base, frozenset())
+        out |= {c for c in columns if _SENSITIVE.search(c) or c.lower() in extra}
+    return out
 
 
 def mask_rows(table: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """``rows`` with every sensitive non-null value replaced by ``MASK``."""
-    if table.lower() not in AUTH_TABLES:
-        return rows
     out: list[dict[str, Any]] = []
     for row in rows:
         hidden = masked_columns(table, set(row))

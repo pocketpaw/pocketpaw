@@ -2,17 +2,18 @@
 # for the Data dashboard: insert, update with an optimistic conflict check, delete by
 # key, duplicate, the value coercion they share, and the audit form of a row.
 #
-# ``sites.data_service`` resolves the site, checks the table is editable and calls
-# these with the introspected ``d1.Table``. Each operation is ONE Cloudflare call
-# (plus one sample read when a date is written, to match how the column stores
-# dates), and every multi-statement write is one ``query_d1_batch``, which D1 runs
-# atomically (spike S2): a bulk delete, or a user delete with its sessions and
-# accounts, lands whole or not at all.
+# ``sites.data_service`` resolves the site, checks edit access and that the table is
+# editable, and calls these with the introspected ``d1.Table``. Each operation is ONE
+# Cloudflare call (plus one sample read when a date is written, to match how the
+# column stores dates), and every multi-statement write is one ``query_d1_batch``,
+# which D1 runs atomically (spike S2): a bulk delete, or a user delete with the
+# user's sessions, accounts and other login rows, lands whole or not at all.
 #
 # Update: ``UPDATE "t" SET … WHERE <key> = ? AND "c" IS ? … RETURNING …`` in a
 # batch after a ``SELECT`` of the same row, so the row before the change comes back
 # in the same call. No row updated → the row is gone (404) or changed since the
-# owner read it (409 ``sites.data_conflict`` with the current, masked row).
+# owner read it (409 ``sites.data_conflict`` with the current, masked row). Changing
+# a user's email clears its ``emailVerified`` flag in the same statement.
 #
 # Invariants:
 #   * Every identifier comes from the introspected ``Table`` and is quoted with
@@ -23,28 +24,49 @@
 #   * ``expected`` must cover every column in ``set``; an update can't skip the
 #     conflict check by leaving it out.
 #   * Booleans always bind as 0 / 1: D1 stores a bound JSON ``true`` as the text
-#     "true" (spike S1).
+#     "true" (spike S1). Integers bind only inside int64.
+#   * Bad input is a 422, never a 500: numeric strings are capped at 40 characters,
+#     values (set and expected) at 1 MB, text keys at 512 characters, and JSON
+#     nesting, huge dates and out-of-range numbers are refused before binding.
 #   * A delete takes at most 500 keys, 90 per statement.
 from __future__ import annotations
 
 import json
 import math
 import re
+from collections import Counter
 from datetime import UTC, date, datetime
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
-from pocketpaw_ee.sites.project_data import quote_ident
+from pocketpaw_ee.sites.project_data import auth_table, quote_ident
 from pocketpaw_ee.sites.site_data import d1
 
 MAX_KEYS = 500
 KEYS_PER_STATEMENT = 90
 MAX_VALUE_BYTES = 1_000_000
+MAX_NUMBER_CHARS = 40
+MAX_TEXT_KEY = 512
+MAX_FIELD_ERRORS = 20
 AUDIT_VALUE_MAX = 1024
+INT64_MIN, INT64_MAX = -(2**63), 2**63 - 1
 _SAMPLE_ROWS = 20
 
-# Login tables whose rows go when their user is deleted (signing the user out).
-CASCADE_TABLES = frozenset({"session", "sessions", "account", "accounts"})
+# Login tables (``auth_table`` names) whose rows go when their user is deleted.
+CASCADE_TABLES = frozenset(
+    {
+        "session",
+        "sessions",
+        "account",
+        "accounts",
+        "twofactor",
+        "twofactors",
+        "passkey",
+        "passkeys",
+        "apikey",
+        "apikeys",
+    }
+)
 
 _INT = re.compile(r"^[+-]?\d+$")
 _TRUE = frozenset({"true", "1", "yes", "on", "t", "y"})
@@ -56,9 +78,14 @@ _TZ_SUFFIX = re.compile(r"[+-]\d{2}:?\d{2}$")
 
 
 def invalid(fields: dict[str, str]) -> ValidationError:
-    return ValidationError(
-        "sites.data_invalid_values", "Some values can't be saved.", {"fields": fields}
-    )
+    details: dict[str, Any] = {"fields": dict(list(fields.items())[:MAX_FIELD_ERRORS])}
+    if len(fields) > MAX_FIELD_ERRORS:
+        details["truncated"] = True
+    return ValidationError("sites.data_invalid_values", "Some values can't be saved.", details)
+
+
+def bad_key(message: str = "That isn't a row ID of this table.") -> ValidationError:
+    return ValidationError("sites.data_bad_key", message)
 
 
 def unavailable(reason: str) -> CloudError:
@@ -124,28 +151,46 @@ def kinds_of(table: d1.Table, spec_fields: dict[str, str] | None = None) -> dict
     return out
 
 
+def _in_int64(n: int) -> bool:
+    return INT64_MIN <= n <= INT64_MAX
+
+
 def key_value(table: d1.Table, kinds: dict[str, str], raw: Any) -> Any:
-    """A row key from the URL or a body, as the key column's type. A value that can't
-    be a key of this table is NotFound (no row has it)."""
+    """A row key from the URL or a body, as the key column's type. A value that no
+    row of this table can have is NotFound; one too long or out of range for any key
+    is 422 ``sites.data_bad_key``."""
     if raw is None or isinstance(raw, bool) or not isinstance(raw, str | int | float):
-        raise NotFound("site_row", str(raw))
+        raise NotFound("site_row", "")
+    if isinstance(raw, str) and len(raw) > MAX_TEXT_KEY:
+        raise bad_key("Row IDs are at most 512 characters.")
     if table.key == "rowid" or (table.key and table.key == table.rowid_alias):
-        if isinstance(raw, int):
-            return raw
-        if isinstance(raw, str) and _INT.match(raw.strip()):
-            return int(raw.strip())
-        if isinstance(raw, float) and raw.is_integer():
-            return int(raw)
-        raise NotFound("site_row", str(raw))
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not _INT.match(s):
+                raise NotFound("site_row", raw[:64])
+            if len(s) > MAX_NUMBER_CHARS:
+                raise bad_key()
+            raw = int(s)
+        elif isinstance(raw, float):
+            if not raw.is_integer():
+                raise NotFound("site_row", str(raw))
+            raw = int(raw)
+        if not _in_int64(raw):
+            raise bad_key()
+        return raw
     kind = kinds.get(table.key or "", "text")
     if kind in ("integer", "real", "boolean"):
         try:
             return _number(raw, integer=kind != "real")
         except ValueError:
-            return str(raw)
+            if isinstance(raw, int):
+                raise bad_key() from None
+            return raw if isinstance(raw, str) else str(raw)
+    if isinstance(raw, int) and not _in_int64(raw):
+        raise bad_key()
     if kind == "any":
         return raw
-    return str(raw) if not isinstance(raw, str) else raw
+    return raw if isinstance(raw, str) else str(raw)
 
 
 def target_key(key: Any) -> str:
@@ -156,17 +201,33 @@ def target_key(key: Any) -> str:
 # --------------------------------------------------------------------------- coercion
 
 
+def _int64(n: int) -> int:
+    if not _in_int64(n):
+        raise ValueError("That number is too large.")
+    return n
+
+
 def _number(value: Any, *, integer: bool) -> int | float:
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
-        return value
+        if integer:
+            return _int64(value)
+        try:
+            return _int64(value) if _in_int64(value) else float(value)
+        except OverflowError as exc:
+            raise ValueError("That number is too large.") from exc
     if isinstance(value, float):
         f = value
     elif isinstance(value, str) and value.strip():
         s = value.strip()
+        if len(s) > MAX_NUMBER_CHARS:
+            raise ValueError("That number is too long.")
         if _INT.match(s):
-            return int(s)
+            n = int(s)
+            if integer or _in_int64(n):
+                return _int64(n)
+            return float(n)
         try:
             f = float(s)
         except ValueError as exc:
@@ -178,7 +239,7 @@ def _number(value: Any, *, integer: bool) -> int | float:
     if integer:
         if not f.is_integer():
             raise ValueError("Enter a whole number.")
-        return int(f)
+        return _int64(int(f))
     return f
 
 
@@ -196,28 +257,32 @@ def _bool(value: Any) -> int:
     raise ValueError("Use true or false.")
 
 
+_BAD_DATE = "Enter a date like 2026-01-31."
+
+
 def _moment(value: Any) -> datetime:
-    if isinstance(value, str) and _INT.match(value.strip()):
-        value = int(value.strip())
-    if isinstance(value, int | float) and not isinstance(value, bool):
-        if not math.isfinite(value):
-            raise ValueError("Enter a date like 2026-01-31.")
-        secs = value / 1000 if abs(value) > 1e11 else value
-        try:
+    try:
+        if isinstance(value, str) and _INT.match(value.strip()):
+            if len(value.strip()) > MAX_NUMBER_CHARS:
+                raise ValueError(_BAD_DATE)
+            value = int(value.strip())
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(_BAD_DATE)
+            secs = value / 1000 if abs(value) > 1e11 else value
             return datetime.fromtimestamp(secs, UTC)
-        except (OverflowError, OSError, ValueError) as exc:
-            raise ValueError("That date is out of range.") from exc
-    if isinstance(value, str) and value.strip():
-        s = value.strip()
-        try:
+        if isinstance(value, str) and value.strip():
+            s = value.strip()
+            if len(s) > 64:
+                raise ValueError(_BAD_DATE)
             if len(s) == 10:
                 d = date.fromisoformat(s)
                 return datetime(d.year, d.month, d.day, tzinfo=UTC)
             dt = datetime.fromisoformat(s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s)
-        except ValueError as exc:
-            raise ValueError("Enter a date like 2026-01-31.") from exc
-        return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
-    raise ValueError("Enter a date like 2026-01-31.")
+            return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError(_BAD_DATE) from exc
+    raise ValueError(_BAD_DATE)
 
 
 def _iso(kind: str, moment: datetime, sample: str | None) -> str:
@@ -237,17 +302,36 @@ def _iso(kind: str, moment: datetime, sample: str | None) -> str:
 
 def _time(kind: str, time_format: str, value: Any, sample: str | None) -> int | str:
     moment = _moment(value)
-    if time_format == "epoch_ms":
-        return round(moment.timestamp() * 1000)
-    if time_format == "epoch_s":
-        return int(moment.timestamp())
+    try:
+        if time_format == "epoch_ms":
+            return _int64(round(moment.timestamp() * 1000))
+        if time_format == "epoch_s":
+            return _int64(int(moment.timestamp()))
+    except (OverflowError, OSError) as exc:
+        raise ValueError(_BAD_DATE) from exc
     return _iso(kind, moment, sample)
 
 
 def _cap(text: str) -> str:
-    if len(text.encode("utf-8")) > MAX_VALUE_BYTES:
+    if len(text) > MAX_VALUE_BYTES or len(text.encode("utf-8")) > MAX_VALUE_BYTES:
         raise ValueError("That value is too long.")
     return text
+
+
+def _dumps(value: Any) -> str:
+    """JSON text of ``value``, capped; ValueError for anything JSON can't hold."""
+    try:
+        return _cap(json.dumps(value, ensure_ascii=False, allow_nan=False))
+    except (RecursionError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("That isn't valid JSON.") from exc
+
+
+def _loads(text: str) -> Any:
+    _cap(text)
+    try:
+        return json.loads(text)
+    except (RecursionError, ValueError) as exc:
+        raise ValueError("That isn't valid JSON.") from exc
 
 
 def coerce(kind: str, time_format: str, value: Any, *, sample: str | None = None) -> Any:
@@ -270,17 +354,11 @@ def coerce(kind: str, time_format: str, value: Any, *, sample: str | None = None
     if kind in ("datetime", "date"):
         return _time(kind, time_format or "iso", value, sample)
     if kind == "json":
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except ValueError as exc:
-                raise ValueError("That isn't valid JSON.") from exc
-        try:
-            return _cap(json.dumps(value, ensure_ascii=False, allow_nan=False))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("That isn't valid JSON.") from exc
+        return _dumps(_loads(value) if isinstance(value, str) else value)
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("Enter a number.")
+    if isinstance(value, int) and not _in_int64(value):
+        raise ValueError("That number is too large.")
     if kind == "any" and isinstance(value, int | float):
         return value
     if isinstance(value, str):
@@ -288,14 +366,14 @@ def coerce(kind: str, time_format: str, value: Any, *, sample: str | None = None
     if isinstance(value, int | float):
         return str(value)
     if isinstance(value, dict | list):
-        return _cap(json.dumps(value, ensure_ascii=False))
+        return _dumps(value)
     raise ValueError("That value can't be stored here.")
 
 
 def expected_value(kind: str, value: Any) -> Any:
     """An ``expected`` value as it was read: bound as sent, except booleans (stored
     0 / 1) and JSON values sent parsed. Not reformatted, so a value the owner saw
-    compares equal to what the row holds."""
+    compares equal to what the row holds. Capped like a ``set`` value."""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -303,10 +381,14 @@ def expected_value(kind: str, value: Any) -> Any:
     if isinstance(value, dict | list):
         if kind not in ("json", "text", "longtext", "any"):
             raise ValueError("That value can't be compared.")
-        return json.dumps(value, ensure_ascii=False)
+        return _dumps(value)
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("Enter a number.")
-    if isinstance(value, str | int | float):
+    if isinstance(value, int):
+        return _int64(value)
+    if isinstance(value, str):
+        return _cap(value)
+    if isinstance(value, float):
         return value
     raise ValueError("That value can't be compared.")
 
@@ -318,8 +400,8 @@ def _why(table: d1.Table, column: d1.Column, kind: str) -> str:
         return "Credentials can't be edited here."
     if kind == "blob":
         return "Files can't be edited here."
-    if table.name.lower() in d1.USER_TABLES:
-        return "Only a user's name, email, image and verified flag can be edited."
+    if d1.is_users(table.name):
+        return "Only a user's name, email and image can be edited."
     return "This column can't be edited."
 
 
@@ -332,6 +414,8 @@ def _writable_values(
             errors[name] = "Unknown column."
         elif not d1.column_writable(table, col, kinds[name]):
             errors[name] = _why(table, col, kinds[name])
+        if len(errors) > MAX_FIELD_ERRORS:
+            raise invalid(errors)
 
 
 async def _time_formats(
@@ -435,6 +519,28 @@ async def insert(
     return rows[0]
 
 
+def _email_reset(
+    table: d1.Table, kinds: dict[str, str], coerced: dict[str, Any], checks: dict[str, Any]
+) -> dict[str, Any]:
+    """On a user table, a changed email clears the email-verified flag (else a writer
+    could set someone's email to their own and sign in as them)."""
+    if not d1.is_users(table.name):
+        return {}
+    email = next((n for n in coerced if d1.norm(n) == "email"), None)
+    if email is None or checks.get(email) == coerced[email]:
+        return {}
+    flag = next(
+        (c for c in table.columns if d1.norm(c.name) == "emailverified" and c.name not in coerced),
+        None,
+    )
+    if flag is None:
+        return {}
+    clear: Any = 0
+    if kinds.get(flag.name) in ("text", "longtext", "datetime", "date") and not flag.notnull:
+        clear = None
+    return {flag.name: clear}
+
+
 async def update(
     cf: Any,
     database_id: str,
@@ -473,6 +579,8 @@ async def update(
                 checks[name] = expected_value(kinds[name], value)
             except ValueError as exc:
                 errors[name] = str(exc)
+        if len(errors) > MAX_FIELD_ERRORS:
+            raise invalid(errors)
     for name in set_:
         if name not in expected and name not in errors:
             errors[name] = "Send the value you saw, so a newer change isn't overwritten."
@@ -480,10 +588,11 @@ async def update(
     if errors:
         raise invalid(errors)
 
+    assignments = {**coerced, **_email_reset(table, kinds, coerced, checks)}
     ident = quote_ident(table.name)
-    assign = ", ".join(f"{quote_ident(n)} = ?" for n in coerced)
+    assign = ", ".join(f"{quote_ident(n)} = ?" for n in assignments)
     conds = "".join(f" AND {quote_ident(n)} IS ?" for n in checks)
-    params = [*coerced.values(), key, *checks.values()]
+    params = [*assignments.values(), key, *checks.values()]
     _check_params(params)
     select = f"SELECT {_returning(table)} FROM {ident} WHERE {table.key_sql} = ?"  # noqa: S608
     sql = (
@@ -502,25 +611,23 @@ async def update(
 
 def _cascades(schema: d1.Schema, table: d1.Table) -> list[tuple[str, str, str]]:
     """``(child table, its user-id column, the user column it holds)`` for the login
-    tables whose rows belong to a user of ``table``."""
-    if table.name.lower() not in d1.USER_TABLES:
+    tables whose rows belong to a user of ``table``: an FK to this table when there
+    is one, else any session / account (or plugin) table with a ``userId`` /
+    ``user_id`` column, whatever the user table is called."""
+    if not d1.is_users(table.name):
         return []
     out: list[tuple[str, str, str]] = []
     for child in schema.tables.values():
-        if child.name.lower() not in CASCADE_TABLES:
+        if auth_table(child.name) not in CASCADE_TABLES:
             continue
-        col = next((c for c in child.columns if c.name.replace("_", "").lower() == "userid"), None)
+        col = next((c for c in child.columns if d1.norm(c.name) == "userid"), None)
         if col is None:
             continue
-        parent_col: str | None
+        parent_col = ""
         if col.references:
             parent, _, parent_col = col.references.partition(".")
-            if parent != table.name:
+            if parent.lower() != table.name.lower():
                 continue
-        elif child.name.lower().endswith("s") != table.name.lower().endswith("s"):
-            continue  # no FK: pair user/session and users/sessions
-        else:
-            parent_col = None
         if not parent_col:
             parent_col = table.key if table.key and table.key != "rowid" else "id"
         if table.column(parent_col) is None:
@@ -530,7 +637,8 @@ def _cascades(schema: d1.Schema, table: d1.Table) -> list[tuple[str, str, str]]:
 
 
 def delete_keys(table: d1.Table, kinds: dict[str, str], keys: Any) -> list[Any]:
-    """The request's keys, coerced and de-duplicated; 422 when none or over 500."""
+    """The request's keys, coerced and de-duplicated; 422 when none, over 500, or
+    one isn't a possible key of this table."""
     if not isinstance(keys, list) or not keys:
         raise invalid({"keys": "Pick at least one row."})
     if len(keys) > MAX_KEYS:
@@ -541,8 +649,9 @@ def delete_keys(table: d1.Table, kinds: dict[str, str], keys: Any) -> list[Any]:
     for raw in keys:
         try:
             key = key_value(table, kinds, raw)
-        except NotFound:
-            raise invalid({"keys": f"{raw!r} isn't a row ID of this table."}) from None
+        except (NotFound, ValidationError):
+            shown = repr(raw) if len(str(raw)) <= 60 else repr(str(raw)[:57] + "...")
+            raise invalid({"keys": f"{shown} isn't a row ID of this table."}) from None
         if key not in out:
             out.append(key)
     return out
@@ -550,23 +659,27 @@ def delete_keys(table: d1.Table, kinds: dict[str, str], keys: Any) -> list[Any]:
 
 async def delete(
     cf: Any, database_id: str, schema: d1.Schema, table: d1.Table, keys: list[Any]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[Any, dict[str, int]]]:
     """Delete the rows with ``keys`` (already through ``delete_keys``), in chunks of
-    90, in one atomic batch; a user's sessions and accounts go first in the same
-    batch. Returns the deleted rows (raw, with ``__key``)."""
+    90, in one atomic batch; a user's login rows go first in the same batch. Returns
+    the deleted rows (raw, with ``__key``) and, for a user table, how many rows of
+    each login table went with each deleted row (by ``__key``)."""
     ident = quote_ident(table.name)
     cascades = _cascades(schema, table)
     statements: list[tuple[str, list[Any]]] = []
     mains: list[int] = []
+    children: list[tuple[int, str]] = []
     for i in range(0, len(keys), KEYS_PER_STATEMENT):
         chunk = keys[i : i + KEYS_PER_STATEMENT]
         marks = ", ".join("?" for _ in chunk)
         for child, child_col, parent_col in cascades:
+            children.append((len(statements), child))
             statements.append(
                 (
                     f"DELETE FROM {quote_ident(child)} WHERE {quote_ident(child_col)} IN "  # noqa: S608
                     f"(SELECT {quote_ident(parent_col)} FROM {ident} "
-                    f"WHERE {table.key_sql} IN ({marks}))",
+                    f"WHERE {table.key_sql} IN ({marks})) "
+                    f'RETURNING {quote_ident(child_col)} AS "__u"',
                     list(chunk),
                 )
             )
@@ -579,7 +692,19 @@ async def delete(
             )
         )
     results = await _write(cf.query_d1_batch(database_id=database_id, statements=statements))
-    return [row for i in mains for row in (results[i] if i < len(results) else [])]
+    deleted = [row for i in mains for row in (results[i] if i < len(results) else [])]
+    if not cascades:
+        return deleted, {}
+    gone: dict[str, Counter] = {child: Counter() for child, _, _ in cascades}
+    for index, child in children:
+        for r in results[index] if index < len(results) else []:
+            gone[child][r.get("__u")] += 1
+    parent_of = {child: parent_col for child, _, parent_col in cascades}
+    per_row = {
+        row.get("__key"): {child: gone[child][row.get(parent_of[child])] for child in gone}
+        for row in deleted
+    }
+    return deleted, per_row
 
 
 async def duplicate(
@@ -640,7 +765,10 @@ def _audit_value(value: Any) -> Any:
     if isinstance(value, bytes | bytearray | memoryview):
         return f"<{len(bytes(value))} bytes>"
     if isinstance(value, dict | list):
-        value = json.dumps(value, ensure_ascii=False, default=str)
+        try:
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        except (RecursionError, ValueError, TypeError):
+            value = "<unreadable>"
     if isinstance(value, str) and len(value) > AUDIT_VALUE_MAX:
         return value[:AUDIT_VALUE_MAX] + "…"
     return value

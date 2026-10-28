@@ -16,6 +16,7 @@
 # adversarial pass (masked column writes, another table, conflict bypass, >500 keys).
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +36,7 @@ from pocketpaw_ee.sites.site_data import budget, d1, writes  # noqa: E402
 from tests.ee.sites.d1_sqlite_fake import SqliteD1  # noqa: E402
 
 _PATCH_GET = "pocketpaw_ee.cloud.pockets.service.get"
+_PATCH_EDIT = "pocketpaw_ee.cloud.pockets.service.has_edit_access"
 _DB = "11111111-2222-3333-4444-555555555555"
 
 _PROJECT_WIRE = {
@@ -107,7 +109,7 @@ def site_doc(monkeypatch):
 
 @pytest.fixture
 def db() -> SqliteD1:
-    return SqliteD1(_DDL, database_id=_DB, foreign_keys=True)
+    return SqliteD1(_DDL, database_id=_DB)
 
 
 @pytest.fixture
@@ -124,8 +126,23 @@ def audit(monkeypatch):
     return events
 
 
-def _pocket(wire=_PROJECT_WIRE):
-    return patch(_PATCH_GET, new=AsyncMock(return_value=wire))
+class _pocket:  # noqa: N801 — reads like the patch it is
+    """The pocket read (and, for writes, the pocket edit check) stubbed."""
+
+    def __init__(self, wire=_PROJECT_WIRE, *, can_edit: bool = True) -> None:
+        self._patches = [
+            patch(_PATCH_GET, new=AsyncMock(return_value=wire)),
+            patch(_PATCH_EDIT, new=AsyncMock(return_value=can_edit)),
+        ]
+
+    def __enter__(self):
+        for p in self._patches:
+            p.start()
+        return self
+
+    def __exit__(self, *exc):
+        for p in reversed(self._patches):
+            p.stop()
 
 
 def _kw(cf, table, **kw):
@@ -637,16 +654,10 @@ async def test_unknown_table_is_404_before_any_write_sql(site_doc, db, audit):
 
 @pytest.mark.asyncio
 async def test_user_table_edits_only_profile_columns(site_doc, db, audit):
-    res = await _update(
-        db,
-        "user",
-        "u1",
-        {"name": "Ann B", "emailVerified": False},
-        {"name": "Ann", "emailVerified": 1},
-    )
-    assert res.row["name"] == "Ann B" and res.row["emailVerified"] == 0
+    res = await _update(db, "user", "u1", {"name": "Ann B"}, {"name": "Ann"})
+    assert res.row["name"] == "Ann B"
     assert res.row["twoFactorSecret"] == "•••"  # the returned row is masked
-    for col, val in (("id", "u9"), ("createdAt", 1)):
+    for col, val in (("id", "u9"), ("createdAt", 1), ("emailVerified", 1)):
         err = await _raises(
             "sites.data_invalid_values", 422, _update(db, "user", "u1", {col: val}, {col: None})
         )
@@ -725,7 +736,7 @@ async def test_login_table_schema_flags_match_the_write_rules(site_doc, db, audi
             workspace_id="ws1", user_id="u1", pocket_id="pk1", table="orders", _cloudflare=db
         )
     writable = {c.name for c in user.columns if c.writable}
-    assert writable == {"name", "email", "emailVerified", "image"}
+    assert writable == {"name", "email", "image"}
     assert user.editable is True and user.insertable is False
     assert session.editable is False and not any(c.writable for c in session.columns)
     assert session.insertable is False
@@ -968,7 +979,7 @@ def _app(role: str = "member") -> FastAPI:
 
 @pytest.fixture
 def routed(site_doc, monkeypatch, audit):
-    cf = SqliteD1(_DDL, database_id=_DB, foreign_keys=True)
+    cf = SqliteD1(_DDL, database_id=_DB)
     monkeypatch.setattr(sites_service, "_data_cf_client", lambda: cf)
     monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
     return cf
@@ -1217,3 +1228,373 @@ def test_a_masked_column_is_never_writable_even_where_the_table_allows_it():
         assert d1.column_writable(table, col, "text") is False
         unmasked = d1.Table(**{**table.__dict__, "masked": frozenset()})
         assert d1.column_writable(unmasked, col, "text") is True
+
+
+# ------------------------------------------------- review: credentials everywhere
+
+_CRED_DDL = """
+CREATE TABLE "twoFactor" (id TEXT PRIMARY KEY, secret TEXT, "backupCodes" TEXT,
+  "userId" TEXT);
+CREATE TABLE apikey (id TEXT PRIMARY KEY, key TEXT, name TEXT);
+CREATE TABLE jwks (id TEXT PRIMARY KEY, "publicKey" TEXT, "privateKey" TEXT);
+CREATE TABLE passkey (id TEXT PRIMARY KEY, "publicKey" TEXT, name TEXT);
+CREATE TABLE auth_user (id TEXT PRIMARY KEY, name TEXT, email TEXT, password TEXT);
+CREATE TABLE admins (id INTEGER PRIMARY KEY, name TEXT, password TEXT, api_key TEXT,
+  "resetToken" TEXT, pin_hash TEXT, key TEXT, primary_key TEXT);
+INSERT INTO "twoFactor" VALUES ('t1', 'totp', 'codes', 'u1');
+INSERT INTO apikey VALUES ('k1', 'sk_live_x', 'ci');
+INSERT INTO jwks VALUES ('j1', 'pub', 'priv');
+INSERT INTO auth_user VALUES ('u1', 'Ann', 'ann@x.io', 'scrypt$z');
+INSERT INTO admins VALUES (1, 'root', 'hunter2', 'ak_1', 'rt_1', 'h', 'theme', 'pk');
+"""
+
+
+@pytest.fixture
+def creds() -> SqliteD1:
+    return SqliteD1(_CRED_DDL, database_id=_DB)
+
+
+async def _schema_of(cf, table):
+    with _pocket():
+        return await data_service.get_table_schema(
+            workspace_id="ws1", user_id="u1", pocket_id="pk1", table=table, _cloudflare=cf
+        )
+
+
+async def _rows_of(cf, table, **kw):
+    with _pocket():
+        return await data_service.get_rows(
+            workspace_id="ws1", user_id="u1", pocket_id="pk1", table=table, _cloudflare=cf, **kw
+        )
+
+
+def _masked_names(schema) -> set[str]:
+    return {c.name for c in schema.columns if c.masked}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("table", "secrets"),
+    [
+        ("twoFactor", {"secret", "backupCodes"}),
+        ("apikey", {"key"}),
+        ("jwks", {"privateKey"}),
+        ("passkey", {"publicKey"}),
+    ],
+)
+async def test_auth_plugin_tables_are_masked_and_read_only(site_doc, creds, audit, table, secrets):
+    s = await _schema_of(creds, table)
+    assert s.editable is False and s.read_only_reason == "login_table"
+    assert _masked_names(s) >= secrets
+    page = await _rows_of(creds, table)
+    for row in page.rows:
+        for col in secrets:
+            assert row[col] in ("•••", None)
+    err = await _raises("sites.data_read_only", 403, _delete(creds, table, ["x"]))
+    assert err.details["reason"] == "login_table"
+
+
+@pytest.mark.asyncio
+async def test_a_renamed_user_table_is_a_user_table(site_doc, creds, audit):
+    s = await _schema_of(creds, "auth_user")
+    assert {c.name for c in s.columns if c.writable} == {"name", "email"}
+    assert s.insertable is False
+    assert "password" in _masked_names(s)
+    page = await _rows_of(creds, "auth_user")
+    assert page.rows[0]["password"] == "•••"
+
+
+@pytest.mark.asyncio
+async def test_credential_columns_on_any_table_are_masked_and_locked(site_doc, creds, audit):
+    s = await _schema_of(creds, "admins")
+    assert s.editable is True
+    assert _masked_names(s) == {"password", "api_key", "resetToken", "pin_hash"}
+    assert {c.name for c in s.columns if c.writable} == {"name", "key", "primary_key"}
+    page = await _rows_of(creds, "admins")
+    row = page.rows[0]
+    assert row["password"] == "•••" and row["api_key"] == "•••" and row["resetToken"] == "•••"
+    assert row["key"] == "theme" and row["primary_key"] == "pk"
+    assert (await _rows_of(creds, "admins", q="hunter2")).rows == []  # not searched
+    with pytest.raises(CloudError):
+        await _rows_of(creds, "admins", f='[{"col": "password", "op": "eq", "value": "x"}]')
+    for col in ("password", "api_key"):
+        err = await _raises(
+            "sites.data_invalid_values", 422, _update(creds, "admins", "1", {col: "x"}, {col: None})
+        )
+        assert col in err.details["fields"]
+    await _update(creds, "admins", "1", {"name": "admin"}, {"name": "root"})
+    (ev,) = audit
+    for side in (ev["metadata"]["before"], ev["metadata"]["after"]):
+        assert not {"password", "api_key", "resetToken", "pin_hash"} & set(side)
+    assert "hunter2" not in repr(ev) and "ak_1" not in repr(ev)
+
+
+def test_credential_pattern_is_narrow():
+    from pocketpaw_ee.sites.project_data import masked_columns
+
+    cols = [
+        "key",
+        "primary_key",
+        "settings_key",
+        "keyboard",
+        "name",
+        "hash",
+        "pinHash",
+        "passwd",
+        "clientSecret",
+        "refresh_token",
+        "privateKey",
+        "apiKey",
+        "backup_codes",
+        "hashtag",
+    ]
+    assert masked_columns("anything", cols) == {
+        "hash",
+        "pinHash",
+        "passwd",
+        "clientSecret",
+        "refresh_token",
+        "privateKey",
+        "apiKey",
+        "backup_codes",
+    }
+
+
+# --------------------------------------------------------------------------- review: edit access
+
+
+@pytest.mark.asyncio
+async def test_writes_need_edit_access_to_the_pocket(site_doc, db, audit):
+    for coro_of in (
+        lambda: data_service.insert_row(**_kw(db, "customers", values={"name": "x"})),
+        lambda: data_service.delete_rows(**_kw(db, "notes", keys=[1])),
+    ):
+        with _pocket(can_edit=False):
+            with pytest.raises(CloudError) as exc:
+                await coro_of()
+        assert exc.value.status_code == 403 and exc.value.code == "pocket.access_denied"
+    assert _writes(db) == [] and audit == []
+
+
+# --------------------------------------------------------------------------- review: email takeover
+
+
+@pytest.mark.asyncio
+async def test_changing_a_users_email_clears_email_verified(site_doc, db, audit):
+    res = await _update(db, "user", "u1", {"email": "new@x.io"}, {"email": "ann@x.io"})
+    assert res.row["email"] == "new@x.io" and res.row["emailVerified"] == 0
+    updates = [s for s in _writes(db) if s.startswith("UPDATE")]
+    assert len(updates) == 1 and '"emailVerified" = ?' in updates[0]
+    # an unchanged email leaves the flag alone
+    db.execute('UPDATE "user" SET "emailVerified" = 1 WHERE id = ?', ["u1"])
+    await _update(db, "user", "u1", {"email": "new@x.io"}, {"email": "new@x.io"})
+    assert db.rows('SELECT "emailVerified" AS v FROM "user" WHERE id = ?', ["u1"]) == [{"v": 1}]
+
+
+@pytest.mark.asyncio
+async def test_email_verified_snake_case_is_cleared_too(site_doc, audit):
+    cf = SqliteD1(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, email_verified INTEGER);"
+        "INSERT INTO users VALUES (1, 'a@x.io', 1);",
+        database_id=_DB,
+    )
+    await _raises(
+        "sites.data_invalid_values",
+        422,
+        _update(cf, "users", "1", {"email_verified": 1}, {"email_verified": 1}),
+    )
+    await _update(cf, "users", "1", {"email": "b@x.io"}, {"email": "a@x.io"})
+    assert cf.rows("SELECT email_verified AS v FROM users") == [{"v": 0}]
+
+
+# --------------------------------------------------------------------------- review: no 500s
+
+
+@pytest.mark.asyncio
+async def test_deeply_nested_json_is_422(site_doc, db, audit):
+    await _raises(
+        "sites.data_invalid_values",
+        422,
+        _update(db, "orders", "1", {"meta_json": "[" * 100_000}, {"meta_json": None}),
+    )
+    nested: Any = []
+    for _ in range(100_000):
+        nested = [nested]
+    await _raises(
+        "sites.data_invalid_values",
+        422,
+        _update(db, "orders", "1", {"meta_json": nested}, {"meta_json": None}),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [10**400, "1" * 39, -(10**30), 1e300])
+async def test_huge_datetime_is_422(site_doc, db, audit, value):
+    await _raises(
+        "sites.data_invalid_values",
+        422,
+        _update(db, "orders", "1", {"created_at": value}, {"created_at": 1767225600}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_huge_rowid_keys_are_422(site_doc, db, audit):
+    huge = "1" * 5000
+    await _raises("sites.data_bad_key", 422, _update(db, "notes", huge, {"tag": "x"}, {"tag": "a"}))
+    await _raises("sites.data_invalid_values", 422, _delete(db, "notes", [huge]))
+    await _raises(
+        "sites.data_bad_key", 422, _update(db, "notes", str(2**63), {"tag": "x"}, {"tag": "a"})
+    )
+    await _raises("sites.data_invalid_values", 422, _delete(db, "notes", [2**63]))
+    assert _writes(db) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [2**63, -(2**63) - 1, "9" * 41, 10**400])
+async def test_integers_outside_int64_are_422(site_doc, db, audit, value):
+    err = await _raises(
+        "sites.data_invalid_values", 422, _update(db, "skus", "A-1", {"qty": value}, {"qty": 4})
+    )
+    assert "qty" in err.details["fields"]
+
+
+@pytest.mark.asyncio
+async def test_int64_bounds_are_fine(site_doc, db, audit):
+    await _update(db, "skus", "A-1", {"qty": 2**63 - 1}, {"qty": 4})
+    assert db.rows("SELECT qty FROM skus") == [{"qty": 2**63 - 1}]
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_expected_and_untyped_values_are_422(site_doc, audit):
+    cf = SqliteD1(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, v);INSERT INTO t VALUES (1, 1);",
+        database_id=_DB,
+    )
+    await _raises("sites.data_invalid_values", 422, _update(cf, "t", "1", {"v": 2**64}, {"v": 1}))
+    await _raises("sites.data_invalid_values", 422, _update(cf, "t", "1", {"v": 2}, {"v": 2**64}))
+
+
+# --------------------------------------------------------------------------- review: cascade
+
+
+@pytest.mark.asyncio
+async def test_cascade_without_fk_ignores_plurality(site_doc, audit):
+    cf = SqliteD1(
+        "CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT);"
+        'CREATE TABLE session (id TEXT PRIMARY KEY, "userId" TEXT);'
+        "INSERT INTO users VALUES ('u1', 'a');"
+        "INSERT INTO session VALUES ('s1', 'u1'), ('s2', 'u1');",
+        database_id=_DB,
+    )
+    await _delete(cf, "users", ["u1"])
+    assert cf.rows("SELECT COUNT(*) AS n FROM session") == [{"n": 0}]
+    (ev,) = audit
+    assert ev["metadata"]["cascade"] == {"session": 2}
+
+
+@pytest.mark.asyncio
+async def test_cascade_matches_fk_parent_case_insensitively(site_doc, audit):
+    cf = SqliteD1(
+        'CREATE TABLE "user" (id TEXT PRIMARY KEY, name TEXT);'
+        'CREATE TABLE sessions (id TEXT PRIMARY KEY, "userId" TEXT REFERENCES "User"(id));'
+        "INSERT INTO \"user\" VALUES ('u1', 'a');"
+        "INSERT INTO sessions VALUES ('s1', 'u1');",
+        database_id=_DB,
+    )
+    await _delete(cf, "user", ["u1"])
+    assert cf.rows("SELECT COUNT(*) AS n FROM sessions") == [{"n": 0}]
+
+
+@pytest.mark.asyncio
+async def test_user_delete_audit_records_cascade_counts(site_doc, db, audit):
+    await _delete(db, "user", ["u1", "u2"])
+    by_key = {e["target_id"]: e["metadata"]["cascade"] for e in audit}
+    assert by_key == {
+        "pk1:user:u1": {"session": 2, "account": 1},
+        "pk1:user:u2": {"session": 1, "account": 1},
+    }
+
+
+# --------------------------------------------------------------------------- review: size caps
+
+
+@pytest.mark.asyncio
+async def test_expected_values_are_size_capped(site_doc, db, audit):
+    too_big = "x" * (writes.MAX_VALUE_BYTES + 1)
+    err = await _raises(
+        "sites.data_invalid_values",
+        422,
+        _update(db, "customers", "1", {"email": "x"}, {"email": too_big}),
+    )
+    assert "email" in err.details["fields"]
+
+
+@pytest.mark.asyncio
+async def test_text_keys_are_capped_at_512(site_doc, db, audit):
+    await _raises("sites.data_bad_key", 422, _update(db, "skus", "k" * 513, {"qty": 1}, {"qty": 4}))
+    await _raises("sites.data_invalid_values", 422, _delete(db, "skus", ["k" * 513]))
+    with pytest.raises(NotFound):  # 512 is a legal key that just doesn't exist
+        await _update(db, "skus", "k" * 512, {"qty": 1}, {"qty": 4})
+
+
+@pytest.mark.asyncio
+async def test_error_map_is_capped_at_20(site_doc, db, audit):
+    err = await _raises(
+        "sites.data_invalid_values",
+        422,
+        _insert(db, "customers", {f"c{i}": 1 for i in range(200)}),
+    )
+    assert len(err.details["fields"]) == 20 and err.details["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_write_bodies_over_1mb_are_refused(routed):
+    big = {"set": {"name": "x" * 600_000}, "expected": {"name": "y" * 600_000}}
+    resp = await _call(_app("admin"), "PATCH", "/tables/customers/rows/1", big)
+    assert resp.status_code == 413, resp.text
+    assert resp.json()["error"]["code"] == "sites.data_body_too_large"
+    assert _writes(routed) == []
+
+
+@pytest.mark.asyncio
+async def test_deeply_nested_body_is_not_a_500(routed):
+    app = _app("admin")
+    body = '{"values": {"name": ' + "[" * 100_000 + "]" * 100_000 + "}}"
+    base = "/api/v1/sites/by-pocket/pk1/data"
+    with _pocket():
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.post(
+                base + "/tables/customers/rows",
+                content=body,
+                headers={"content-type": "application/json"},
+            )
+    assert 400 <= resp.status_code < 500, resp.status_code
+
+
+def test_the_fake_enforces_foreign_keys_by_default():
+    cf = SqliteD1(
+        "CREATE TABLE p (id INTEGER PRIMARY KEY); CREATE TABLE c (p INTEGER REFERENCES p(id));"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        cf.execute("INSERT INTO c VALUES (9)")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("table", ["two_factor", "TwoFactors", "api_keys", "auth_session"])
+async def test_auth_tables_are_read_only_whatever_their_spelling(site_doc, audit, table):
+    from pocketpaw_ee.sites.project_data import quote_ident
+
+    cf = SqliteD1(f"CREATE TABLE {quote_ident(table)} (id TEXT PRIMARY KEY, label TEXT);")
+    err = await _raises("sites.data_read_only", 403, _insert(cf, table, {"id": "x"}))
+    assert err.details["reason"] == "login_table"
+
+
+@pytest.mark.asyncio
+async def test_a_long_numeric_key_is_refused_even_when_its_value_is_small(site_doc, db, audit):
+    """The 40-character cap stands on its own: ``int()`` on a huge digit string is
+    slow (and refused past Python's digit limit), whatever value it would yield."""
+    padded = "0" * 50 + "1"
+    await _raises(
+        "sites.data_bad_key", 422, _update(db, "notes", padded, {"tag": "x"}, {"tag": "a"})
+    )
+    assert _writes(db) == []

@@ -14,8 +14,10 @@
 # no database yet ``not_published`` on every read, with no Cloudflare call.
 #
 # Writes (insert, update with the conflict check, delete, duplicate) go through
-# ``site_data.writes`` after ``_writable_table``: an unknown table is NotFound before
-# any row SQL, a site whose database can't be reached is 409 ``sites.data_unavailable``
+# ``site_data.writes`` after ``_writable_table``: the caller needs EDIT access to the
+# pocket (``pockets.service.has_edit_access``; reading it is not enough, 403
+# ``pocket.access_denied``), an unknown table is NotFound before any row SQL, a
+# site whose database can't be reached is 409 ``sites.data_unavailable``
 # (``details.reason``), and a read-only table is ``sites.data_read_only`` (403 for
 # login tables, 422 otherwise). The ``sites.data_write`` permission is the router's
 # job. Each written row records one audit event (``site_data.row_insert`` /
@@ -33,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC
 from typing import Any, Literal
 
-from pocketpaw_ee.cloud._core.errors import CloudError, NotFound
+from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.project_data import masked_columns
 from pocketpaw_ee.sites.site_data import budget, d1, writes
@@ -377,11 +379,16 @@ class _Writable:
 async def _writable_table(
     *, workspace_id: str, user_id: str, pocket_id: str, table: str, _cloudflare: Any | None
 ) -> _Writable:
-    """The site and the editable live table a write addresses, or the refusal: an
-    unknown table 404, an unreachable database 409, a read-only table."""
+    """The site and the editable live table a write addresses, or the refusal: no
+    edit access to the pocket 403, an unknown table 404, an unreachable database
+    409, a read-only table."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
     target = await resolve_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
+    if not await pockets_service.has_edit_access(pocket_id, user_id):
+        raise Forbidden("pocket.access_denied", "You don't have edit access to this site.")
     if target.lane == "dynamic" and target.spec_object(table) is None:
         raise NotFound("site_table", table)
     if target.reason:
@@ -513,15 +520,17 @@ async def delete_rows(
         _cloudflare=_cloudflare,
     )
     row_keys = writes.delete_keys(w.table, w.kinds, keys)
-    deleted = await writes.delete(w.cf, w.target.d1_id, w.schema, w.table, row_keys)
+    deleted, cascade = await writes.delete(w.cf, w.target.d1_id, w.schema, w.table, row_keys)
     d1.forget_counts(w.target.d1_id)
     gone = {r.get("__key") for r in deleted}
     slots = asyncio.Semaphore(_AUDIT_CONCURRENCY)
 
     async def _one(row: dict[str, Any]) -> None:
         async with slots:
+            key = row.get("__key")
+            extra = {"cascade": cascade[key]} if key in cascade else None
             await _audit(
-                w, user_id, "site_data.row_delete", row.get("__key"), before=row, after=None
+                w, user_id, "site_data.row_delete", key, before=row, after=None, extra=extra
             )
 
     await asyncio.gather(*(_one(r) for r in deleted))

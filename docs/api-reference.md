@@ -4005,7 +4005,8 @@ plurals) a non-null value in a column named like `password`, `token`, `secret`,
 The reads and row writes behind the Data page. Same guards as the routes above
 (`fabric.read` plus the pockets read check); every write also needs
 `sites.data_write` (admin, or a per-member override), else `403`
-`sites.data_write_forbidden`. Another workspace's pocket is a `404`. Every read
+`sites.data_write_forbidden`, and edit access to the pocket (owner, team,
+`shared_with` or workspace-visible), else `403` `pocket.access_denied`. Another workspace's pocket is a `404`. Every read
 answers `available: false` with `reason` `live_on_cloudflare_only` (local mode) or
 `not_published` (no database yet) instead of erroring; a write answers `409`
 `sites.data_unavailable` with `error.details.reason` set to the same value.
@@ -4026,10 +4027,16 @@ answers `available: false` with `reason` `live_on_cloudflare_only` (local mode) 
   one, or `null` (read only, `read_only_reason: "no_key"`). Login tables
   (`session`, `account`, `verification` and plurals) read `login_table`; a declared
   table of a dynamic site that the database doesn't have yet reads `not_created`.
-  `writable` is the server's own rule: false for generated columns, the rowid alias,
-  credentials, blobs, and on `user` / `users` every column but `name`, `email`,
-  `image` and `emailVerified` / `email_verified`. A primary-key column is writable
-  on insert but never changed by an update.
+  So do better-auth's plugin tables (`twoFactor`, `passkey`, `apikey`, `jwks`).
+  Table names match in any casing, with `_` ignored and an `auth` prefix allowed
+  (`auth_user` is a user table). `masked` columns read `"•••"` and can't be searched,
+  filtered, sorted, written or audited. On every table that is a column named like a
+  credential (password, passwd, secret, token, private key, api key, backup codes,
+  `hash` / `*_hash`; camelCase counts), and on login tables anything named like
+  password / token / secret / hash / key. `writable` is the server's own rule: false
+  for generated columns, the rowid alias, credentials, blobs, and on user tables
+  every column but `name`, `email` and `image`. A primary-key column is writable on
+  insert but never changed by an update.
 - `GET /sites/by-pocket/{pocket_id}/data/tables/{table}/rows?q=&sort=&dir=&f=&limit=&offset=` →
   `{pocket_id, table, available, reason, columns, rows, total, limit, offset,
   search_truncated}`. Each row carries `__key` (the value later write routes address
@@ -4070,12 +4077,16 @@ refuse unknown fields. Every returned row is masked like a read and carries `__k
   `expected` holds the values the owner saw and must include every column in `set`
   (it may pin more); `null` matches `NULL`. If the row changed since, `409`
   `sites.data_conflict` with `error.details.current` (the row now, masked); if it is
-  gone, `404`. The key column can't be changed.
+  gone, `404`. The key column can't be changed. On a user table, changing `email`
+  also clears its `emailVerified` / `email_verified` flag in the same statement.
 - `POST …/data/tables/{table}/rows:delete` `{"keys": [3, 4]}` →
   `{"deleted": 2, "keys": [3, 4], "restore_point": null}`. 1 to 500 keys (more is
   `422` `sites.data_too_many_keys`), all deleted or none. Deleting from `user` /
   `users` also deletes that user's `session(s)` and `account(s)` rows in the same
   batch (signing them out). `restore_point` stays `null` until restore points ship.
+  This also covers `twoFactor`, `passkey` and `apikey` rows: the matching login
+  tables with a `userId` / `user_id` column (through its foreign key when it has
+  one).
 - `POST …/data/tables/{table}/rows:duplicate` `{"key": 3, "values": {}}` → `{"row"}`:
   a copy without generated columns and the key; `values` overrides copied fields
   and must carry a new key for a table whose key the database doesn't fill.
@@ -4085,8 +4096,12 @@ refuse unknown fields. Every returned row is masked like a read and carries `__k
   site's visitors are not recorded.
 
 Write errors: `422` `sites.data_invalid_values` with `error.details.fields` (`{column:
-message}`) for an unknown, non-writable, missing or unstorable value or a missing
-`expected`; `422` `sites.data_nothing_to_change` for an empty `set`; `422`
+message}`, at most 20, with `error.details.truncated: true` past that) for an
+unknown, non-writable, missing or unstorable value or a missing `expected`. Values
+(in `set` or `expected`) are capped at 1 MB, numbers at int64 and 40 characters,
+JSON at Python's nesting limit. `422` `sites.data_bad_key` for a key over 512
+characters or out of range. `413` `sites.data_body_too_large` for a write body over
+1 MB; `422` `sites.data_nothing_to_change` for an empty `set`; `422`
 `sites.data_write_failed` when the database refuses the change (a duplicate unique
 value, rows that still reference this one); `sites.data_read_only` with
 `error.details.reason` — `403` for login tables (`session`, `account`,
@@ -4094,8 +4109,9 @@ value, rows that still reference this one); `sites.data_read_only` with
 `not_created`. Each written row records one workspace audit event
 (`site_data.row_insert`, `site_data.row_update`, `site_data.row_delete`; target
 `site_data` / `<pocket_id>:<table>:<key>`; metadata `{table, keys, before, after}`
-with credential columns removed and values capped at 1 KB). A write drops the
-inventory's cached row counts.
+with credential columns removed and values capped at 1 KB; a user delete also
+carries `cascade: {table: rows deleted}`). A write drops the inventory's cached
+row counts.
 
 ### Project builds — `/sites/by-pocket/{pocket_id}/builds`
 

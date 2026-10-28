@@ -16,7 +16,8 @@
 #     back, and nothing of it lands;
 #   * a failing statement surfaces as ``ValidationError("sites.cloudflare_error")``,
 #     what ``CloudflareClient`` raises for a ``success: false`` result;
-#   * ``foreign_keys=True`` turns on FK enforcement (D1 enforces foreign keys).
+#   * foreign keys are enforced, as D1 enforces them (``foreign_keys=False`` to
+#     seed a database that breaks them).
 from __future__ import annotations
 
 import sqlite3
@@ -28,7 +29,7 @@ D1_MAX_PARAMS = 100
 
 
 class SqliteD1:
-    def __init__(self, ddl: str = "", *, database_id: str = "", foreign_keys: bool = False):
+    def __init__(self, ddl: str = "", *, database_id: str = "", foreign_keys: bool = True):
         # Autocommit: every statement outside a batch lands at once, like D1.
         self.conn = sqlite3.connect(":memory:", isolation_level=None)
         self.conn.row_factory = sqlite3.Row

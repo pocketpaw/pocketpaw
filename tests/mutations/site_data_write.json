@@ -4,132 +4,333 @@
     "file": "ee/pocketpaw_ee/sites/data_router.py",
     "find": "    body: InsertRowBody,\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n",
     "replace": "    body: InsertRowBody,\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "write guard checks fabric.read instead of sites.data_write",
     "file": "ee/pocketpaw_ee/sites/data_router.py",
     "find": "_WRITE = require_action_any_workspace(\"sites.data_write\")",
     "replace": "_WRITE = require_action_any_workspace(\"fabric.read\")",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "a table not in the schema is not refused",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
     "find": "    t = schema.tables.get(table)\n    if t is None:\n        if target.lane == \"project\":\n            raise NotFound(\"site_table\", table)\n        raise writes.read_only(\"not_created\")",
     "replace": "    t = schema.tables.get(table) or next(iter(schema.tables.values()))\n    if t is None:\n        if target.lane == \"project\":\n            raise NotFound(\"site_table\", table)\n        raise writes.read_only(\"not_created\")",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "read-only tables accept writes",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
     "find": "    if not t.editable:\n        raise writes.read_only(t.read_only_reason)",
     "replace": "    if False:\n        raise writes.read_only(t.read_only_reason)",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "an unknown column name is not refused",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
     "find": "        if col is None:\n            errors[name] = \"Unknown column.\"\n        elif not d1.column_writable(table, col, kinds[name]):",
     "replace": "        if col is None:\n            continue\n        elif not d1.column_writable(table, col, kinds[name]):",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "masked (credential) columns become writable",
     "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
     "find": "    if column.name in table.masked or kind == \"blob\":",
     "replace": "    if kind == \"blob\":",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "user tables allow every column",
     "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
-    "find": "        return column.name.replace(\"_\", \"\").lower() in USER_WRITABLE",
+    "find": "        return norm(column.name) in USER_WRITABLE",
     "replace": "        return True",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "a masked column may appear in expected",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
     "find": "        elif name in table.masked:\n            errors[name] = \"Credentials can't be compared.\"",
     "replace": "        elif False:\n            errors[name] = \"Credentials can't be compared.\"",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "audit keeps credential columns",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
     "find": "if k != \"__key\" and k not in hidden}",
     "replace": "if k != \"__key\"}",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "the conflict clause compares with = (NULL never matches)",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
     "find": "    conds = \"\".join(f\" AND {quote_ident(n)} IS ?\" for n in checks)",
     "replace": "    conds = \"\".join(f\" AND {quote_ident(n)} = ?\" for n in checks)",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "the conflict clause is dropped",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
-    "find": "    params = [*coerced.values(), key, *checks.values()]",
-    "replace": "    conds = \"\"\n    params = [*coerced.values(), key]",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "find": "    params = [*assignments.values(), key, *checks.values()]",
+    "replace": "    conds = \"\"\n    params = [*assignments.values(), key]",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "a set column without an expected value is accepted",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
     "find": "        if name not in expected and name not in errors:",
     "replace": "        if False:",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "booleans bind as sent (D1 stores JSON true as text)",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
     "find": "    if kind == \"boolean\":\n        return _bool(value)",
     "replace": "    if kind == \"boolean\":\n        return value",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "the 500-key cap is lifted",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
     "find": "    if len(keys) > MAX_KEYS:",
     "replace": "    if len(keys) > MAX_KEYS * 10:",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "delete chunks at 100 keys",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
     "find": "KEYS_PER_STATEMENT = 90",
     "replace": "KEYS_PER_STATEMENT = 100",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "user delete no longer cascades sessions and accounts",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
-    "find": "    if table.name.lower() not in d1.USER_TABLES:\n        return []\n    out: list[tuple[str, str, str]] = []",
+    "find": "    if not d1.is_users(table.name):\n        return []\n    out: list[tuple[str, str, str]] = []",
     "replace": "    if True:\n        return []\n    out: list[tuple[str, str, str]] = []",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "users can be inserted",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
     "find": "    if not d1.insertable(w.table):\n        raise writes.read_only(\"login_table\")\n    row = await writes.insert(",
     "replace": "    row = await writes.insert(",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "a rowid key from the URL is not checked to be an integer",
     "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
-    "find": "        if isinstance(raw, float) and raw.is_integer():\n            return int(raw)\n        raise NotFound(\"site_row\", str(raw))",
-    "replace": "        if isinstance(raw, float) and raw.is_integer():\n            return int(raw)\n        return raw",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "find": "            if not _INT.match(s):\n                raise NotFound(\"site_row\", raw[:64])",
+    "replace": "            if not _INT.match(s):\n                return raw",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   },
   {
     "label": "history ignores which table the event was about",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
     "find": "        target_id=f\"{pocket_id}:{table}:{key_text}\",",
     "replace": "        target_id=f\"{pocket_id}:{key_text}\",",
-    "tests": ["tests/ee/sites/test_site_data_write.py"]
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "credential-named columns on ordinary tables are not masked",
+    "file": "ee/pocketpaw_ee/sites/project_data.py",
+    "find": "    out = {c for c in columns if is_credential(c)}",
+    "replace": "    out: set[str] = set()",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py",
+      "tests/ee/sites/test_site_data_read.py"
+    ]
+  },
+  {
+    "label": "the credential pattern loses api keys",
+    "file": "ee/pocketpaw_ee/sites/project_data.py",
+    "find": "password|passwd|secret|token|private_?key|api_?key|backup_?codes|_hash$|^hash$",
+    "replace": "password|passwd|secret|token|private_?key|backup_?codes|_hash$|^hash$",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "auth table names are matched case- and underscore-sensitively",
+    "file": "ee/pocketpaw_ee/sites/project_data.py",
+    "find": "    low = name.lower().replace(\"_\", \"\")\n    if low in AUTH_TABLES:",
+    "replace": "    low = name\n    if low in AUTH_TABLES:",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "an auth_ prefixed table is not an auth table",
+    "file": "ee/pocketpaw_ee/sites/project_data.py",
+    "find": "    if low.startswith(\"auth\") and low[4:] in AUTH_TABLES:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "auth plugin tables are not read only",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "    elif auth_table(name) in LOGIN_READ_ONLY:",
+    "replace": "    elif name.lower() in LOGIN_READ_ONLY:",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "writes only need read access to the pocket",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not await pockets_service.has_edit_access(pocket_id, user_id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "emailVerified becomes writable",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "USER_WRITABLE = frozenset({\"name\", \"email\", \"image\"})",
+    "replace": "USER_WRITABLE = frozenset({\"name\", \"email\", \"image\", \"emailverified\"})",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "changing an email keeps it verified",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "    if email is None or checks.get(email) == coerced[email]:\n        return {}",
+    "replace": "    if True:\n        return {}",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "integers outside int64 bind",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "    if not _in_int64(n):\n        raise ValueError(\"That number is too large.\")\n    return n",
+    "replace": "    return n",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "deeply nested JSON text crashes the parser",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "    except (RecursionError, ValueError) as exc:\n        raise ValueError(\"That isn't valid JSON.\") from exc",
+    "replace": "    except ValueError as exc:\n        raise ValueError(\"That isn't valid JSON.\") from exc",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "a huge date number overflows",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "    except (OverflowError, OSError, ValueError) as exc:\n        raise ValueError(_BAD_DATE) from exc\n    raise ValueError(_BAD_DATE)",
+    "replace": "    except ValueError as exc:\n        raise ValueError(_BAD_DATE) from exc\n    raise ValueError(_BAD_DATE)",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "a rowid key of thousands of digits reaches int()",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "            if len(s) > MAX_NUMBER_CHARS:\n                raise bad_key()",
+    "replace": "            if False:\n                raise bad_key()",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "text keys are not length-capped",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "    if isinstance(raw, str) and len(raw) > MAX_TEXT_KEY:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "expected values are not size-capped",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "    if isinstance(value, str):\n        return _cap(value)\n    if isinstance(value, float):\n        return value",
+    "replace": "    if isinstance(value, str):\n        return value\n    if isinstance(value, float):\n        return value",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "the field-error map is not capped",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "MAX_FIELD_ERRORS = 20",
+    "replace": "MAX_FIELD_ERRORS = 2000",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "the write body cap is lifted",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "MAX_WRITE_BODY = 1_000_000",
+    "replace": "MAX_WRITE_BODY = 100_000_000",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "cascade FK parent names compare case-sensitively",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "            if parent.lower() != table.name.lower():",
+    "replace": "            if parent != table.name:",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
+  },
+  {
+    "label": "delete audit drops the cascade counts",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            extra = {\"cascade\": cascade[key]} if key in cascade else None",
+    "replace": "            extra = None",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py"
+    ]
   }
 ]

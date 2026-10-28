@@ -36,6 +36,7 @@ from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.project_data import (
+    auth_table,
     is_user_table,
     mask_rows,
     masked_columns,
@@ -57,14 +58,42 @@ SCHEMA_TTL_S = 60.0
 COUNTS_TTL_S = 30.0
 _CACHE_MAX = 256
 
-# Login tables the dashboard never edits (better-auth's and the dynamic lane's).
+# Login tables the dashboard never edits (better-auth's, its plugins' and the
+# dynamic lane's), as ``project_data.auth_table`` names them.
 LOGIN_READ_ONLY = frozenset(
-    {"session", "sessions", "account", "accounts", "verification", "verifications"}
+    {
+        "session",
+        "sessions",
+        "account",
+        "accounts",
+        "verification",
+        "verifications",
+        "twofactor",
+        "twofactors",
+        "passkey",
+        "passkeys",
+        "apikey",
+        "apikeys",
+        "jwks",
+    }
 )
 # User tables: editable, but only their profile columns, and rows can't be added
-# (people sign up on the site). Names compare lowercased with "_" removed.
+# (people sign up on the site). Column names compare lowercased with "_" removed.
+# ``emailVerified`` is deliberately NOT writable: setting a new email AND marking it
+# verified would take the account over; changing the email clears it instead.
 USER_TABLES = frozenset({"user", "users"})
-USER_WRITABLE = frozenset({"name", "email", "image", "emailverified"})
+USER_WRITABLE = frozenset({"name", "email", "image"})
+
+
+def is_users(name: str) -> bool:
+    """Whether ``name`` is a user table (``user``, ``Users``, ``auth_user`` …)."""
+    return auth_table(name) in USER_TABLES
+
+
+def norm(column: str) -> str:
+    """A column name compared loosely: lowercased, ``_`` removed."""
+    return column.replace("_", "").lower()
+
 
 _WITHOUT_ROWID = re.compile(r"\bWITHOUT\s+ROWID\b", re.I)
 _ROWID_ALIASES = ("rowid", "_rowid_", "oid")
@@ -145,14 +174,14 @@ def column_writable(table: Table, column: Column, kind: str) -> bool:
         return False
     if column.name in table.masked or kind == "blob":
         return False
-    if table.name.lower() in USER_TABLES:
-        return column.name.replace("_", "").lower() in USER_WRITABLE
+    if is_users(table.name):
+        return norm(column.name) in USER_WRITABLE
     return True
 
 
 def insertable(table: Table) -> bool:
     """Whether rows can be added (and duplicated): editable, and not a user table."""
-    return table.editable and table.name.lower() not in USER_TABLES
+    return table.editable and not is_users(table.name)
 
 
 # --------------------------------------------------------------------------- introspection
@@ -206,7 +235,7 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
 
     if key is None:
         reason = "no_key"
-    elif name.lower() in LOGIN_READ_ONLY:
+    elif auth_table(name) in LOGIN_READ_ONLY:
         reason = "login_table"
     else:
         reason = ""
