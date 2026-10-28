@@ -354,16 +354,23 @@ async def find_target_event(
     workspace_id: str,
     *,
     target_type: str,
-    target_id: str,
     actions: list[str],
     metadata: dict[str, Any],
+    target_id: str | None = None,
+    target_root: str | None = None,
 ) -> AuditEventDomain | None:
-    """The newest of the workspace's events on exactly this target, with one of
+    """The newest of the workspace's events on exactly ``target_id`` (or on
+    ``target_root`` and the targets under it, ``<root>:…``), with one of
     ``actions``, whose metadata holds every ``metadata`` key with that exact value."""
+    if (target_id is None) == (target_root is None):
+        raise ValueError("find_target_event takes exactly one of target_id / target_root")
+    target: Any = target_id
+    if target_root is not None:
+        target = {"$regex": "^" + re.escape(target_root) + "(:|$)"}
     query: dict[str, Any] = {
         "workspace": workspace_id,
         "target_type": target_type,
-        "target_id": target_id,
+        "target_id": target,
         "action": {"$in": list(actions)},
     }
     for key, value in metadata.items():

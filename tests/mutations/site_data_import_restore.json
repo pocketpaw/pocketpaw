@@ -11,10 +11,11 @@
   {
     "label": "undo provenance reads other workspaces' audit events",
     "file": "ee/pocketpaw_ee/cloud/audit/service.py",
-    "find": "    query: dict[str, Any] = {\n        \"workspace\": workspace_id,\n        \"target_type\": target_type,\n        \"target_id\": target_id,\n        \"action\": {\"$in\": list(actions)},",
-    "replace": "    query: dict[str, Any] = {\n        \"target_type\": target_type,\n        \"target_id\": target_id,\n        \"action\": {\"$in\": list(actions)},",
+    "find": "    query: dict[str, Any] = {\n        \"workspace\": workspace_id,\n        \"target_type\": target_type,\n        \"target_id\": target,\n",
+    "replace": "    query: dict[str, Any] = {\n        \"target_type\": target_type,\n        \"target_id\": target,\n",
     "tests": [
-      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_another_sites_or_workspaces_bookmark"
+      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_another_sites_or_workspaces_bookmark",
+      "tests/ee/sites/test_site_data_restore.py::test_a_foreign_pockets_restore_point_is_refused"
     ]
   },
   {
@@ -396,6 +397,88 @@
     "replace": "            if False:\n                r[c] = MASK",
     "tests": [
       "tests/ee/sites/test_site_data_import.py::test_a_lucia_style_session_table_is_a_login_table"
+    ]
+  },
+  {
+    "label": "any recorded restore point is accepted, whoever's it is",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if event is None:\n        raise unknown\n    at = event.at",
+    "replace": "    if False:\n        raise unknown\n    at = event.at",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_foreign_pockets_restore_point_is_refused",
+      "tests/ee/sites/test_site_data_restore.py::test_a_made_up_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "restore points of another database are accepted",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        metadata={\"restore_point\": restore_point, \"database_id\": target.d1_id},",
+    "replace": "        metadata={\"restore_point\": restore_point},",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_foreign_pockets_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "restore points are looked up across every pocket",
+    "file": "ee/pocketpaw_ee/cloud/audit/service.py",
+    "find": "        target = {\"$regex\": \"^\" + re.escape(target_root) + \"(:|$)\"}\n    query",
+    "replace": "        target = {\"$exists\": True}\n    query",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_foreign_pockets_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "a restore or undo event's bookmark counts as a restore point",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\"]",
+    "replace": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\", \"site_data.restore\", \"site_data.restore_undo\"]",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_restore_or_undo_bookmark_is_not_a_restore_point"
+    ]
+  },
+  {
+    "label": "a restore point outside the Time Travel window is accepted",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if at < now - timedelta(days=days):\n        raise unknown",
+    "replace": "    if False:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_restore_point_outside_the_window_is_refused"
+    ]
+  },
+  {
+    "label": "a restore point skips the bookmark shape check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not isinstance(restore_point, str) or not _BOOKMARK.match(restore_point):\n        raise unknown",
+    "replace": "    if False:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_made_up_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "restore takes both at and restore_point",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if (at is None) == (restore_point is None):\n        raise _bad_request()",
+    "replace": "    if False:\n        raise _bad_request()",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_both_or_neither_of_at_and_restore_point_is_a_bad_request"
+    ]
+  },
+  {
+    "label": "a bulk delete's restore point is not tied to its database",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "                extra[\"database_id\"] = w.target.d1_id",
+    "replace": "                pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_restore_to_a_bulk_deletes_restore_point"
+    ]
+  },
+  {
+    "label": "Content-Disposition is hidden from cross-origin callers",
+    "file": "src/pocketpaw/api/cors.py",
+    "find": "        expose_headers=list(EXPOSE_HEADERS),",
+    "replace": "",
+    "tests": [
+      "tests/test_api_cors.py::TestExposedHeaders"
     ]
   }
 ]

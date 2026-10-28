@@ -29,7 +29,9 @@
 # ``PAW_CF_D1_TT_DAYS`` (default 30), ``confirm_name`` equal to the site's name (case
 # and spaces ignored), and at most 3 restores per database per 10 minutes. Each
 # restore is audited (target ``<pocket>``) with its ``previous_bookmark`` and database
-# id; undo takes the confirm name too and only the newest such event's bookmark,
+# id. Instead of ``at`` a restore can name a ``restore_point``: only one this
+# site's own import / bulk delete event recorded for this database inside the
+# window. Undo takes the confirm name too and only the newest restore event's bookmark,
 # within 24 h and once (a ``budget.claim_once`` marker). A moment before the
 # database's ``created_at`` or its history (Cloudflare 7400) is out of window. A
 # restore drops every cache of the database.
@@ -571,6 +573,7 @@ async def delete_rows(
             extra: dict[str, Any] = {"cascade": cascade[key]} if key in cascade else {}
             if restore_point:
                 extra["restore_point"] = restore_point
+                extra["database_id"] = w.target.d1_id
             await _audit(
                 w, user_id, "site_data.row_delete", key, before=row, after=None, extra=extra
             )
@@ -933,6 +936,7 @@ async def import_commit(
             "failed": failed_count,
             "stopped": written.stopped,
             "restore_point": restore_point,
+            "database_id": w.target.d1_id,
         },
     )
     return ImportResult(
@@ -1142,6 +1146,42 @@ async def _database_state(
     return reason, _created(info)
 
 
+_RESTORE_POINT_ACTIONS = ["site_data.import", "site_data.row_delete"]
+
+
+def _bad_request() -> ValidationError:
+    return _restore_error("bad_request", "Send either at or restore_point.")
+
+
+async def _recorded_restore_point(
+    target: DataTarget, restore_point: str, now: datetime, days: int
+) -> datetime:
+    """When this site's own import or bulk delete recorded ``restore_point`` for its
+    current database, inside the Time Travel window; else 422
+    ``sites.data_restore_unknown_bookmark``. The bookmark shape is checked before
+    it reaches the audit query."""
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    unknown = _restore_error("unknown_bookmark", "That isn't a restore point of this site.")
+    if not isinstance(restore_point, str) or not _BOOKMARK.match(restore_point):
+        raise unknown
+    if target.reason:
+        raise writes.unavailable(target.reason)
+    event = await audit_service.find_target_event(
+        target.workspace_id,
+        target_type=_AUDIT_TARGET,
+        target_root=target.pocket_id,
+        actions=_RESTORE_POINT_ACTIONS,
+        metadata={"restore_point": restore_point, "database_id": target.d1_id},
+    )
+    if event is None:
+        raise unknown
+    at = event.at if event.at.tzinfo is not None else event.at.replace(tzinfo=UTC)
+    if at < now - timedelta(days=days):
+        raise unknown
+    return at
+
+
 def _same_name(given: str, expected: str) -> bool:
     return bool(expected) and given.strip().casefold() == expected.strip().casefold()
 
@@ -1152,19 +1192,25 @@ async def restore_status(
     user_id: str,
     pocket_id: str,
     at: str | None = None,
+    restore_point: str | None = None,
     _cloudflare: Any | None = None,
 ) -> RestoreStatus:
-    """Whether the site's database can be restored, how far back, and (for ``at``)
-    the bookmark it would go to and how many dashboard changes came since.
-    ``GET .../data/restore?at=<iso>``."""
+    """Whether the site's database can be restored, how far back, and (for ``at``,
+    or a ``restore_point`` this site's import / bulk delete recorded) the bookmark it
+    would go to and how many dashboard changes came since.
+    ``GET .../data/restore?at=<iso>`` or ``?restore_point=<bookmark>``."""
     from pocketpaw_ee.cloud.audit import service as audit_service
 
+    if at is not None and restore_point is not None:
+        raise _bad_request()
     target = await _editable_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
     days = window_days()
     now = datetime.now(UTC)
     moment = _moment(at, now, days) if at else None
+    if restore_point is not None:
+        moment = await _recorded_restore_point(target, restore_point, now, days)
     cf = None if target.reason else _client(target, _cloudflare)
     reason, created = await _database_state(target, cf)
     earliest = now - timedelta(days=days)
@@ -1183,7 +1229,7 @@ async def restore_status(
     )
     if reason or cf is None or moment is None:
         return status
-    bookmark = await cf.d1_bookmark(target.d1_id, _iso(moment))
+    bookmark = restore_point or await cf.d1_bookmark(target.d1_id, _iso(moment))
     changes = await audit_service.count_target_events(
         target.workspace_id,
         target_type=_AUDIT_TARGET,
@@ -1202,6 +1248,7 @@ async def _do_restore(
     *,
     bookmark: str | None = None,
     timestamp: str | None = None,
+    meta_extra: dict[str, Any] | None = None,
 ) -> RestoreOut:
     await budget.acquire_restore(target.d1_id)
     result = await cf.d1_restore(target.d1_id, bookmark=bookmark, timestamp=timestamp)
@@ -1217,8 +1264,7 @@ async def _do_restore(
     }
     if timestamp:
         meta["at"] = timestamp
-    if bookmark:
-        meta["undoes"] = bookmark
+    meta.update(meta_extra or {})
     await _audit_event(target, user_id, action, target.pocket_id, meta)
     return out
 
@@ -1228,23 +1274,41 @@ async def restore(
     workspace_id: str,
     user_id: str,
     pocket_id: str,
-    at: str,
     confirm_name: str,
+    at: str | None = None,
+    restore_point: str | None = None,
     _cloudflare: Any | None = None,
 ) -> RestoreOut:
-    """Put the site's whole database back the way it was at ``at``, in place.
-    ``confirm_name`` must be the site's name. Returns the ``previous_bookmark``
-    that undoes it. ``POST .../data/restore``."""
+    """Put the site's whole database back the way it was at ``at``, or at a
+    ``restore_point`` this site's own import / bulk delete recorded (exactly one;
+    422 ``sites.data_restore_bad_request`` otherwise), in place. ``confirm_name``
+    must be the site's name. Returns the ``previous_bookmark`` that undoes it.
+    ``POST .../data/restore``."""
+    if (at is None) == (restore_point is None):
+        raise _bad_request()
     target = await _editable_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
     if not _same_name(confirm_name, target.site_name):
         raise _restore_error("confirm_mismatch", "Type the site's name to confirm the restore.")
-    moment = _moment(at, datetime.now(UTC), window_days())
+    now = datetime.now(UTC)
+    if restore_point is not None:
+        moment = await _recorded_restore_point(target, restore_point, now, window_days())
+    else:
+        moment = _moment(at or "", now, window_days())
     cf = None if target.reason else _client(target, _cloudflare)
     reason, created = await _database_state(target, cf)
     if reason or cf is None:
         raise writes.unavailable(reason or _REASON_NOT_PUBLISHED)
+    if restore_point is not None:
+        return await _do_restore(
+            target,
+            cf,
+            user_id,
+            "site_data.restore",
+            bookmark=restore_point,
+            meta_extra={"restore_point": restore_point, "at": moment.isoformat()},
+        )
     _not_before_creation(moment, created)
     return await _do_restore(target, cf, user_id, "site_data.restore", timestamp=_iso(moment))
 
@@ -1291,7 +1355,12 @@ async def restore_undo(
     cf = _client(target, _cloudflare)
     try:
         return await _do_restore(
-            target, cf, user_id, "site_data.restore_undo", bookmark=previous_bookmark
+            target,
+            cf,
+            user_id,
+            "site_data.restore_undo",
+            bookmark=previous_bookmark,
+            meta_extra={"undoes": previous_bookmark},
         )
     except BaseException:
         await budget.release(claim)

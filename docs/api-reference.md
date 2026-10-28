@@ -4090,7 +4090,8 @@ refuse unknown fields. Every returned row is masked like a read and carries `__k
   500 keys (more is `422` `sites.data_too_many_keys`), all deleted or none. Deleting
   from `user` / `users` also deletes that user's `session(s)` and `account(s)` rows
   in the same batch (signing them out). A delete of 2+ rows takes a Time Travel
-  bookmark first and returns it as `restore_point` (also in each row's audit event);
+  bookmark first and returns it as `restore_point` (also in each row's audit event,
+  with `database_id`; `POST …/data/restore` accepts it);
   one row is undone by re-inserting it, so it stays `null`, as it does on a database
   without Time Travel.
   This also covers `twoFactor`, `passkey` and `apikey` rows: the matching login
@@ -4177,9 +4178,11 @@ row counts.
   dropped) the response is still `200` with `stopped: true`, the rows not sent
   listed in `failed` as "Not imported", and the restore point to go back to. One audit
   event `site_data.import` (target `<pocket_id>:<table>`; metadata `{table, mode,
-  filename, mapping, rows, inserted, updated, failed, restore_point}`, no values).
+  filename, mapping, rows, inserted, updated, failed, stopped, restore_point,
+  database_id}`, no values).
 - `GET …/data/tables/{table}/export.csv?q=&sort=&dir=&f=` (read) → `text/csv` stream,
-  `Content-Disposition: attachment; filename="<table>-<yyyy-mm-dd>.csv"`. Same
+  `Content-Disposition: attachment; filename="<table>-<yyyy-mm-dd>.csv"` (exposed to
+  cross-origin callers through `Access-Control-Expose-Headers`). Same
   search, filters and sort as `/rows`; UTF-8 with a BOM, CRLF lines, read 500 rows
   at a time: by key (`WHERE key < last`) in the default order, at most 100,000 rows;
   by `OFFSET` under an owner-chosen `sort`, at most 20,000. Credential columns are
@@ -4208,7 +4211,7 @@ Point-in-time restore of the site's whole D1 database (Cloudflare Time Travel). 
 three routes require `sites.data_restore` (ADMIN, `403`
 `sites.data_restore_forbidden`) and edit access to the pocket.
 
-- `GET …/data/restore?at=<iso>` →
+- `GET …/data/restore?at=<iso>` or `?restore_point=<bookmark>` →
 
   ```json
   {
@@ -4225,13 +4228,26 @@ three routes require `sites.data_restore` (ADMIN, `403`
   that window's start and the database's `created_at`. Without `at`, `at`,
   `bookmark` and `changes_since` are `null`. `changes_since` counts the dashboard's
   own `site_data.*` audit events for this site since `at`; visitors' writes are never
-  counted. `site_name` is what `confirm_name` must match.
-- `POST …/data/restore` `{"at": "2026-10-27T10:00:00Z", "confirm_name": "Shop"}` →
+  counted. `site_name` is what `confirm_name` must match. With `restore_point` (a
+  `restore_point` an import or bulk delete of this site returned) instead of `at`,
+  `bookmark` is that restore point, `at` the server time of the event that recorded
+  it, and `changes_since` counts from then; an unknown one is `422`
+  `sites.data_restore_unknown_bookmark`, and sending both is `422`
+  `sites.data_restore_bad_request`.
+- `POST …/data/restore` `{"at": "2026-10-27T10:00:00Z", "confirm_name": "Shop"}` or
+  `{"restore_point": "00000085-…", "confirm_name": "Shop"}` (exactly one of `at` and
+  `restore_point`, else `422` `sites.data_restore_bad_request`) →
   `{"bookmark": "00000085-…", "previous_bookmark": "00000091-…"}`. Restores the
   database in place (in-flight queries on the live site are cancelled).
   `confirm_name` must equal the site's name (case and outer spaces ignored).
-  Audited as `site_data.restore` (target `<pocket_id>`, metadata `{database_id, at,
-  bookmark, previous_bookmark}`).
+  A `restore_point` restores to exactly the bookmark an import or bulk delete took
+  before its first write, so a client clock running ahead can't miss it. It must be
+  one this site's own `site_data.import` / `site_data.row_delete` event recorded
+  (`metadata.restore_point`) for the current database inside the Time Travel
+  window; anything else, a restore's or an undo's bookmark included, is `422`
+  `sites.data_restore_unknown_bookmark`. Audited as `site_data.restore` (target
+  `<pocket_id>`, metadata `{database_id, at, bookmark, previous_bookmark}`, plus
+  `restore_point` when one was named); undo works the same either way.
 - `POST …/data/restore:undo` `{"previous_bookmark": "00000091-…", "confirm_name": "Shop"}`
   → `{"bookmark", "previous_bookmark"}`. Undoes only the NEWEST restore (or undo) of
   this site's current database, within 24 hours of it, and only once:

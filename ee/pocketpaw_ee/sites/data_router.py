@@ -13,8 +13,8 @@
 #   POST  /tables/{table}/import:preview          multipart ``file`` -> ImportPreview
 #   POST  /tables/{table}/import                  {upload_id, mapping, mode} -> ImportResult
 #   GET   /tables/{table}/export.csv              ?q=&sort=&dir=&f=  -> text/csv stream
-#   GET   /restore                                ?at=<iso>  -> RestoreStatus
-#   POST  /restore                                {at, confirm_name} -> RestoreOut
+#   GET   /restore             ?at=<iso> | ?restore_point=<bookmark> -> RestoreStatus
+#   POST  /restore             {at | restore_point, confirm_name} -> RestoreOut
 #   POST  /restore:undo               {previous_bookmark, confirm_name} -> RestoreOut
 #
 # Thin handlers over ``sites.data_service``; errors are CloudErrors mapped by
@@ -350,13 +350,18 @@ _RESTORE = require_action_any_workspace("sites.data_restore")
 async def site_data_restore_status(
     pocket_id: str,
     at: str | None = Query(None, max_length=64),
+    restore_point: str | None = Query(None, max_length=200),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(_READ),
     __: object = Depends(_RESTORE),
 ) -> RestoreStatus:
     """Whether the database can be restored, how far back, and what ``at`` would do."""
     return await data_service.restore_status(
-        workspace_id=ctx.workspace_id or "", user_id=ctx.user_id, pocket_id=pocket_id, at=at
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        at=at,
+        restore_point=restore_point,
     )
 
 
@@ -374,6 +379,7 @@ async def site_data_restore(
         user_id=ctx.user_id,
         pocket_id=pocket_id,
         at=body.at,
+        restore_point=body.restore_point,
         confirm_name=body.confirm_name,
     )
 

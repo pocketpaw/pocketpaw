@@ -228,7 +228,10 @@ class RestoreStatus(BaseModel):
 
 
 class RestoreBody(_Body):
-    at: str = Field(max_length=64)
+    # Exactly one of ``at`` (a moment) and ``restore_point`` (a bookmark this site's
+    # import / bulk delete returned): 422 ``sites.data_restore_bad_request`` otherwise.
+    at: str | None = Field(default=None, max_length=64)
+    restore_point: str | None = Field(default=None, max_length=200)
     confirm_name: str = Field(max_length=500)
 
 

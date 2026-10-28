@@ -64,9 +64,10 @@ def _kw(cf, **kw):
     }
 
 
-async def _status(cf, at=None, wire=_PROJECT_WIRE, **kw):
+async def _status(cf, at=None, wire=_PROJECT_WIRE, restore_point=None, **kw):
+    extra = {"restore_point": restore_point} if restore_point is not None else {}
     with _pocket(wire, **kw):
-        return await data_service.restore_status(**_kw(cf, at=at))
+        return await data_service.restore_status(**_kw(cf, at=at, **extra))
 
 
 async def _restore(cf, at, name="Shop", pocket_id="pk1"):
@@ -317,6 +318,8 @@ def routed_tt(site_doc, monkeypatch, tt):
 _RESTORE_CALLS = [
     ("GET", "/restore", None),
     ("POST", "/restore", {"at": "2026-10-27T10:00:00Z", "confirm_name": "Shop"}),
+    ("POST", "/restore", {"restore_point": "00000001-ab", "confirm_name": "Shop"}),
+    ("GET", "/restore?restore_point=00000001-ab", None),
     ("POST", "/restore:undo", {"previous_bookmark": "00000001-ab", "confirm_name": "Shop"}),
 ]
 
@@ -488,3 +491,232 @@ async def test_a_cached_schema_follows_a_restore_done_by_another_worker(site_doc
     with _pocket():
         after = await data_service.get_table_schema(**_kw(cf, table="t"))
     assert [c.name for c in after.columns] == ["id", "a"]
+
+
+# --------------------------------------------------------------------------- by restore point
+#
+# The UI's "Restore to before this import / bulk delete" sends the restore_point the
+# server took just before the first write, never the browser's clock.
+
+
+async def _import_two(cf) -> str:
+    """Import two notes; returns the import's restore point."""
+    with _pocket():
+        p = await data_service.import_preview(
+            **_kw(cf, table="notes", filename="n.csv", data=b"body\nnew1\nnew2\n")
+        )
+        res = await data_service.import_commit(
+            **_kw(cf, table="notes", upload_id=p.upload_id, mapping=p.mapping)
+        )
+    assert res.inserted == 2 and res.restore_point
+    return res.restore_point
+
+
+async def _restore_rp(cf, restore_point, name="Shop", pocket_id="pk1", **extra):
+    with _pocket():
+        return await data_service.restore(
+            **_kw(cf, restore_point=restore_point, confirm_name=name, pocket_id=pocket_id, **extra)
+        )
+
+
+@pytest.mark.asyncio
+async def test_restore_to_an_imports_restore_point(site_doc, tt, beanie_test_db):
+    rp = await _import_two(tt)
+    tt.execute("INSERT INTO notes (body) VALUES ('after')")  # a later change, also undone
+    assert _notes(tt) == 3
+    out = await _restore_rp(tt, rp, name=" shop ")
+    assert _notes(tt) == 0  # exactly the moment before the import's first write
+    assert tt.restores[-1] == {"bookmark": rp, "timestamp": None, "to": rp}
+    (event,) = await _events("site_data.restore")
+    assert event.metadata["restore_point"] == rp
+    assert event.metadata["previous_bookmark"] == out.previous_bookmark
+    assert event.metadata["database_id"] == _DB
+    await _undo(tt, out.previous_bookmark)  # undo works as for a timestamp restore
+    assert _notes(tt) == 3
+
+
+@pytest.mark.asyncio
+async def test_restore_to_a_bulk_deletes_restore_point(site_doc, tt, beanie_test_db):
+    tt.execute("INSERT INTO notes (body) VALUES ('a'), ('b')")
+    ids = [r["rowid"] for r in tt.rows("SELECT rowid FROM notes")]
+    with _pocket():
+        res = await data_service.delete_rows(**_kw(tt, table="notes", keys=ids))
+    assert res.restore_point and _notes(tt) == 0
+    await _restore_rp(tt, res.restore_point)
+    assert _notes(tt) == 2
+
+
+@pytest.mark.asyncio
+async def test_import_and_bulk_delete_events_record_their_restore_point(
+    site_doc, tt, beanie_test_db
+):
+    rp = await _import_two(tt)
+    (imp,) = await _events("site_data.import")
+    assert imp.metadata["restore_point"] == rp and imp.metadata["database_id"] == _DB
+    keys = [r["rowid"] for r in tt.rows("SELECT rowid FROM notes")]
+    with _pocket():
+        res = await data_service.delete_rows(**_kw(tt, table="notes", keys=keys))
+    deletes = await _events("site_data.row_delete")
+    assert len(deletes) == 2
+    assert {e.metadata.get("restore_point") for e in deletes} == {res.restore_point}
+    assert {e.metadata.get("database_id") for e in deletes} == {_DB}
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_pockets_restore_point_is_refused(site_doc, tt, beanie_test_db):
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    stolen = tt.mark()
+    for ws, target in [("ws1", "pk2:notes"), ("ws2", "pk1:notes"), ("ws1", "pk10:notes")]:
+        await audit_service.record(
+            ws,
+            "u",
+            "site_data.import",
+            target_type="site_data",
+            target_id=target,
+            metadata={"restore_point": stolen, "database_id": _DB},
+        )
+    await _raises("sites.data_restore_unknown_bookmark", 422, _restore_rp(tt, stolen))
+    # this pocket, but a restore point of another (re-provisioned) database
+    await audit_service.record(
+        "ws1",
+        "u",
+        "site_data.import",
+        target_type="site_data",
+        target_id="pk1:notes",
+        metadata={"restore_point": stolen, "database_id": "other-db"},
+    )
+    await _raises("sites.data_restore_unknown_bookmark", 422, _restore_rp(tt, stolen))
+    assert tt.restores == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bookmark", ["00000001-deadbeef", "x" * 201, "a'b", "$ne", "a/b", ""])
+async def test_a_made_up_restore_point_is_refused(
+    site_doc, tt, beanie_test_db, bookmark, monkeypatch
+):
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    real = tt._snapshots[0][1]  # a real bookmark of this database, no event recorded it
+    await _raises("sites.data_restore_unknown_bookmark", 422, _restore_rp(tt, real))
+    queried: list[dict] = []
+    real_find = audit_service.find_target_event
+
+    async def _spy(*a, **kw):
+        queried.append(kw)
+        return await real_find(*a, **kw)
+
+    monkeypatch.setattr(audit_service, "find_target_event", _spy)
+    await _raises("sites.data_restore_unknown_bookmark", 422, _restore_rp(tt, bookmark))
+    if bookmark != "00000001-deadbeef":  # a bad shape never reaches the audit query
+        assert queried == []
+    assert tt.restores == []
+
+
+@pytest.mark.asyncio
+async def test_a_restore_or_undo_bookmark_is_not_a_restore_point(site_doc, tt, beanie_test_db):
+    rp = await _import_two(tt)
+    out = await _restore_rp(tt, rp)
+    undo = await _undo(tt, out.previous_bookmark)
+    for bookmark in (out.previous_bookmark, out.bookmark, undo.previous_bookmark):
+        if bookmark == rp:
+            continue  # the import's own point stays valid
+        await _raises("sites.data_restore_unknown_bookmark", 422, _restore_rp(tt, bookmark))
+    # Only import / bulk-delete events vouch for a restore point, even when a restore
+    # or undo event carries one in its metadata.
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    planted = tt.mark()
+    for action in ("site_data.restore", "site_data.restore_undo", "site_data.row_update"):
+        await audit_service.record(
+            "ws1",
+            "u",
+            action,
+            target_type="site_data",
+            target_id="pk1",
+            metadata={"restore_point": planted, "database_id": _DB},
+        )
+    await _raises("sites.data_restore_unknown_bookmark", 422, _restore_rp(tt, planted))
+    assert len(tt.restores) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_restore_point_outside_the_window_is_refused(site_doc, tt, beanie_test_db):
+    from pocketpaw_ee.cloud.models.audit_event import AuditEvent
+
+    old = tt.mark()
+    await AuditEvent(
+        workspace="ws1",
+        actor_id="u",
+        action="site_data.import",
+        target_type="site_data",
+        target_id="pk1:notes",
+        metadata={"restore_point": old, "database_id": _DB},
+        at=datetime.now(UTC) - timedelta(days=31),
+    ).insert()
+    await _raises("sites.data_restore_unknown_bookmark", 422, _restore_rp(tt, old))
+    with pytest.raises(CloudError) as exc:
+        await _status(tt, restore_point=old)
+    assert exc.value.code == "sites.data_restore_unknown_bookmark"
+    assert tt.restores == []
+
+
+@pytest.mark.asyncio
+async def test_both_or_neither_of_at_and_restore_point_is_a_bad_request(
+    site_doc, tt, beanie_test_db
+):
+    rp = await _import_two(tt)
+    with _pocket():
+        for kw in ({"at": _ago(hours=1), "restore_point": rp}, {}):
+            with pytest.raises(CloudError) as exc:
+                await data_service.restore(**_kw(tt, confirm_name="Shop", **kw))
+            assert (exc.value.code, exc.value.status_code) == (
+                "sites.data_restore_bad_request",
+                422,
+            )
+    with pytest.raises(CloudError) as exc:
+        await _status(tt, at=_ago(hours=1), restore_point=rp)
+    assert exc.value.code == "sites.data_restore_bad_request"
+    assert tt.restores == []
+
+
+@pytest.mark.asyncio
+async def test_restore_point_confirm_mismatch(site_doc, tt, beanie_test_db):
+    rp = await _import_two(tt)
+    await _raises("sites.data_restore_confirm_mismatch", 422, _restore_rp(tt, rp, name="Shopp"))
+    assert tt.restores == []
+
+
+@pytest.mark.asyncio
+async def test_status_for_a_restore_point(site_doc, tt, beanie_test_db):
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    rp = await _import_two(tt)
+    (imp,) = await _events("site_data.import")
+    await audit_service.record(
+        "ws1", "u", "site_data.row_update", target_type="site_data", target_id="pk1:notes:1"
+    )
+    s = await _status(tt, restore_point=rp)
+    assert s.available and s.bookmark == rp
+    at = imp.at if imp.at.tzinfo else imp.at.replace(tzinfo=UTC)
+    assert abs(datetime.fromisoformat(s.at) - at) < timedelta(seconds=1)
+    assert s.changes_since == 2  # the import itself and the update after it
+
+
+@pytest.mark.asyncio
+async def test_route_restore_by_restore_point(routed_tt, beanie_test_db):
+    app = _app("admin")
+    rp = await _import_two(routed_tt)
+    status = await _call(app, "GET", f"/restore?restore_point={rp}")
+    assert status.status_code == 200, status.text
+    assert status.json()["bookmark"] == rp
+    done = await _call(app, "POST", "/restore", {"restore_point": rp, "confirm_name": "Shop"})
+    assert done.status_code == 200, done.text
+    assert _notes(routed_tt) == 0
+    both = await _call(
+        app, "POST", "/restore", {"restore_point": rp, "at": _ago(hours=1), "confirm_name": "Shop"}
+    )
+    assert both.status_code == 422
+    assert both.json()["error"]["code"] == "sites.data_restore_bad_request"
+    neither = await _call(app, "POST", "/restore", {"confirm_name": "Shop"})
+    assert neither.json()["error"]["code"] == "sites.data_restore_bad_request"
