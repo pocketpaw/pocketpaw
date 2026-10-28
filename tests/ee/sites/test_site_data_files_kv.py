@@ -429,50 +429,119 @@ def test_good_file_keys_pass(key):
 # --------------------------------------------------------------------------- files: types
 
 
+ALLOWED = [
+    ("image/png", "a.png"),
+    ("image/jpeg", "a.jpg"),
+    ("image/gif", "a.gif"),
+    ("image/webp", "a.webp"),
+    ("image/avif", "a.avif"),
+    ("image/bmp", "a.bmp"),
+    ("image/x-icon", "a.ico"),
+    ("image/vnd.microsoft.icon", "a.ico"),
+    ("application/pdf", "a.pdf"),
+    ("text/plain", "a.txt"),
+    ("text/csv", "a.csv"),
+    ("application/json", "a.json"),
+    ("audio/mpeg", "a.mp3"),
+    ("audio/ogg", "a.ogg"),
+    ("video/mp4", "a.mp4"),
+    ("video/webm", "a.webm"),
+    ("font/woff", "a.woff"),
+    ("font/woff2", "a.woff2"),
+    ("font/ttf", "a.ttf"),
+    ("font/otf", "a.otf"),
+    ("application/zip", "a.zip"),
+    ("application/gzip", "a.gz"),
+    ("text/css", "a.css"),
+]
+
+REFUSED_TYPES = [
+    "text/html",
+    "TEXT/HTML",
+    "text/html; charset=utf-8",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "text/xml",
+    "application/xml",
+    "text/xsl",  # an XML type in Blink: XHTML-namespaced script runs
+    "text/xsl; charset=utf-8",
+    "application/xslt+xml",
+    "text/javascript",
+    "application/javascript",
+    "text/livescript",
+    "text/jscript",
+    "text/vbscript",
+    "message/rfc822",
+    "application/x-mimearchive",
+    "multipart/related",
+    "multipart/x-mixed-replace",
+    "text/vnd.wap.wml",
+    "text/x-component",
+    "application/x-shockwave-flash",
+    "application/wasm",
+    "application/postscript",
+    "audio/x-script",
+    "video/vnd.foo+xml",
+    "video/x-xmlish",
+    "image/tiff",
+    "not a type",
+    "image/png/x",
+]
+
+
+@pytest.mark.parametrize(("mime", "key"), ALLOWED)
+def test_allowed_types_are_kept(mime, key):
+    assert files_kv.stored_content_type(mime, key) == mime
+    assert files_kv.stored_content_type(mime.upper(), key) == mime
+    assert files_kv.stored_content_type(mime + "; charset=utf-8", key) == mime
+    assert files_kv.stored_content_type(" " + mime + " ;q=1", key) == mime
+    assert files_kv.stored_content_type("", key) in (mime, "image/vnd.microsoft.icon")
+    assert files_kv.download_content_type(mime, key) == mime
+    assert files_kv.download_content_type(mime.upper() + ";x=y", key) == mime
+
+
+@pytest.mark.parametrize("mime", REFUSED_TYPES)
+@pytest.mark.parametrize("key", ["a.png", "a", "a.bin"])
+def test_every_other_type_is_octet_stream(mime, key):
+    assert files_kv.stored_content_type(mime, key) == files_kv.OCTET
+    assert files_kv.download_content_type(mime, key) == files_kv.OCTET
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "page.html",
+        "x.HTM",
+        "logo.svg",
+        "a.xml",
+        "a.xsl",
+        "a.js",
+        "a.mjs",
+        "a.eml",  # message/rfc822
+        "a.mht",
+        "a.wasm",
+        "a.ps",
+    ],
+)
+def test_a_harmful_extension_forces_octet_stream(key):
+    for mime in ("image/png", "text/plain", ""):
+        assert files_kv.stored_content_type(mime, key) == files_kv.OCTET
+        assert files_kv.download_content_type(mime or "image/png", key) == files_kv.OCTET
+
+
 @pytest.mark.parametrize(
     ("declared", "key", "stored"),
     [
-        ("text/html", "page.png", "application/octet-stream"),
-        ("image/png", "page.html", "application/octet-stream"),
-        ("image/svg+xml", "logo.svg", "application/octet-stream"),
-        ("", "logo.svg", "application/octet-stream"),
-        ("text/plain", "x.HTM", "application/octet-stream"),
-        ("application/javascript", "a.txt", "application/octet-stream"),
-        ("text/javascript; charset=utf-8", "a.bin", "application/octet-stream"),
-        ("application/xhtml+xml", "a", "application/octet-stream"),
-        ("text/xml", "a", "application/octet-stream"),
-        ("application/x-shockwave-flash", "a", "application/octet-stream"),
-        ("multipart/x-mixed-replace", "a", "application/octet-stream"),
-        ("text/plain", "x.mjs", "application/octet-stream"),
-        ("not a type", "a.png", "application/octet-stream"),
-        ("image/png", "a.png", "image/png"),
+        ("image/png", "photo.jpg", "image/png"),
         ("", "photo.jpg", "image/jpeg"),
         ("application/octet-stream", "doc.pdf", "application/pdf"),
-        ("text/plain; charset=utf-8", "notes.txt", "text/plain"),
-        ("text/css", "site.css", "text/css"),
         ("", "noext", "application/octet-stream"),
+        ("", "a.unknownext", "application/octet-stream"),
+        ("text/plain", "notes.unknownext", "text/plain"),
     ],
 )
 def test_stored_content_type(declared, key, stored):
     assert files_kv.stored_content_type(declared, key) == stored
-
-
-@pytest.mark.parametrize(
-    ("stored", "key", "served"),
-    [
-        ("image/png", "a.png", "image/png"),
-        ("application/pdf", "a.pdf", "application/pdf"),
-        ("text/plain", "a.txt", "text/plain"),
-        ("text/html", "a.html", "application/octet-stream"),
-        ("image/svg+xml", "a.svg", "application/octet-stream"),
-        ("text/plain", "a.html", "application/octet-stream"),  # written by the site itself
-        ("image/png", "a.svg", "application/octet-stream"),
-        ("text/css", "a.css", "application/octet-stream"),
-        ("", "a.png", "application/octet-stream"),
-    ],
-)
-def test_download_content_type(stored, key, served):
-    assert files_kv.download_content_type(stored, key) == served
 
 
 @pytest.mark.asyncio

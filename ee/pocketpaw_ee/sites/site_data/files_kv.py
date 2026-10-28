@@ -5,15 +5,16 @@
 #     "." or ".." segment, no backslash, no control character. Anything else is a 422
 #     ``sites.data_bad_file_key`` before any Cloudflare call. List prefixes are looser
 #     (``check_prefix``: may be empty or end in "/").
-#   * Content types: an upload is stored with the type the request declared, else the
-#     one its extension implies, unless either is script-capable (HTML, SVG, XML,
-#     JavaScript, Flash, multipart …) or the key's extension is: those are stored as
+#   * Content types are an ALLOWLIST (``SAFE_TYPES`` plus ``audio/*`` / ``video/*``
+#     without "xml" or "script"; parameters and case ignored). An upload keeps the type
+#     the request declared, else the one its extension implies, only when that type is
+#     allowed AND the key's extension is harmless (not in ``RISKY_EXTENSIONS``, and any
+#     type it implies is allowed too); everything else is stored as
 #     ``application/octet-stream``, so a bucket served publicly can't host a page or a
-#     script (``stored_content_type``). A download answers the stored type only for
-#     images, PDF and plain text with a harmless extension, else octet-stream
-#     (``download_content_type``); the router always adds ``attachment``, ``nosniff``
-#     and a sandboxing CSP. ``download_filename`` is the key's last segment, made
-#     header-safe like the CSV export's name.
+#     script (``stored_content_type``). A download applies the same rule to the stored
+#     type (``download_content_type``); the router always adds ``attachment``,
+#     ``nosniff`` and a sandboxing CSP. ``download_filename`` is the key's last
+#     segment, made header-safe like the CSV export's name.
 #   * KV keys (``check_kv_key``): 1-512 UTF-8 bytes, not "." or "..". A key named like
 #     a credential (``project_data.is_credential``: password, secret, token, api key
 #     …) is masked: its value reads ``MASK``, its metadata is hidden, and it can't be
@@ -48,17 +49,9 @@ RISKY_EXTENSIONS = frozenset(
         "htc", "swf", "php",
     }
 )  # fmt: skip
-_RISKY_TYPES = frozenset(
-    {
-        "application/x-shockwave-flash",
-        "application/hta",
-        "text/x-component",
-        "text/jscript",
-        "text/vbscript",
-    }
-)
-# Types a download may keep (with a harmless extension); every other one is octet-stream.
-INLINE_TYPES = frozenset(
+# The only types an object is stored or served as (besides audio/* and video/*);
+# every other one, known or not, is octet-stream.
+SAFE_TYPES = frozenset(
     {
         "image/png",
         "image/jpeg",
@@ -70,8 +63,28 @@ INLINE_TYPES = frozenset(
         "image/vnd.microsoft.icon",
         "application/pdf",
         "text/plain",
+        "text/csv",
+        "application/json",
+        "font/woff",
+        "font/woff2",
+        "font/ttf",
+        "font/otf",
+        "application/zip",
+        "application/gzip",
+        "text/css",
     }
 )
+# A fixed table, never the OS one (Windows reads the registry), plus what it lacks.
+_GUESS = mimetypes.MimeTypes()
+_EXTRA_TYPES = {
+    "webp": "image/webp",
+    "woff": "font/woff",
+    "woff2": "font/woff2",
+    "ttf": "font/ttf",
+    "otf": "font/otf",
+    "gz": "application/gzip",
+    "ogg": "audio/ogg",
+}
 
 
 def _bad_file_key(message: str) -> ValidationError:
@@ -112,44 +125,53 @@ def _base_type(content_type: str | None) -> str:
     return (content_type or "").split(";", 1)[0].strip().lower()
 
 
-def risky_type(mime: str) -> bool:
-    """Whether a browser could render ``mime`` as a page or run it as a script."""
-    if not _MIME.match(mime):
+def safe_type(mime: str) -> bool:
+    """Whether ``mime`` (a base type, lowercased) is on the allowlist."""
+    if mime in SAFE_TYPES:
         return True
+    if not _MIME.match(mime):
+        return False
     main, sub = mime.split("/", 1)
-    return (
-        mime in _RISKY_TYPES
-        or main == "multipart"
-        or "html" in sub
-        or "javascript" in sub
-        or "ecmascript" in sub
-        or sub == "xml"
-        or sub.endswith("+xml")
-        or "svg" in sub
-    )
+    return main in ("audio", "video") and "xml" not in sub and "script" not in sub
 
 
-def risky_extension(key: str) -> bool:
-    return _extension(key) in RISKY_EXTENSIONS
+def guessed_type(key: str) -> str:
+    """The type the key's extension implies ("" when it implies none)."""
+    name = key.rsplit("/", 1)[-1]
+    extra = _EXTRA_TYPES.get(_extension(name))
+    if extra:
+        return extra
+    mime, encoding = _GUESS.guess_type(name, strict=False)
+    if encoding == "gzip" and not mime:
+        return "application/gzip"
+    return _base_type(mime)
+
+
+def harmless_extension(key: str) -> bool:
+    """Not a page / script extension, and any type it implies is allowed."""
+    if _extension(key) in RISKY_EXTENSIONS:
+        return False
+    guess = guessed_type(key)
+    return not guess or guess == OCTET or safe_type(guess)
 
 
 def stored_content_type(declared: str | None, key: str) -> str:
     """The Content-Type to store an upload under: the declared one, else the
-    extension's guess; octet-stream when either is risky or the key's extension is."""
-    if risky_extension(key):
+    extension's guess, when that is allowed and the extension is harmless; else
+    octet-stream."""
+    if not harmless_extension(key):
         return OCTET
     mime = _base_type(declared)
     if not mime or mime == OCTET:
-        mime = _base_type(mimetypes.guess_type(key.rsplit("/", 1)[-1])[0]) or OCTET
-    if mime == OCTET or risky_type(mime):
-        return OCTET
-    return mime
+        mime = guessed_type(key) or OCTET
+    return mime if safe_type(mime) else OCTET
 
 
 def download_content_type(stored: str | None, key: str) -> str:
-    """The Content-Type a download is served with."""
+    """The Content-Type a download is served with: the stored one under the same
+    allowlist, else octet-stream."""
     mime = _base_type(stored)
-    if mime in INLINE_TYPES and not risky_extension(key):
+    if safe_type(mime) and harmless_extension(key):
         return mime
     return OCTET
 
@@ -183,7 +205,6 @@ def masked_kv_key(name: str) -> bool:
 
 
 __all__ = [
-    "INLINE_TYPES",
     "MASK",
     "MAX_FILE_BYTES",
     "MAX_KV_EDIT_BYTES",
@@ -191,6 +212,7 @@ __all__ = [
     "MIN_TTL",
     "OCTET",
     "RISKY_EXTENSIONS",
+    "SAFE_TYPES",
     "check_file_key",
     "check_kv_key",
     "check_prefix",
@@ -198,7 +220,7 @@ __all__ = [
     "download_content_type",
     "download_filename",
     "masked_kv_key",
-    "risky_extension",
-    "risky_type",
+    "harmless_extension",
+    "safe_type",
     "stored_content_type",
 ]
