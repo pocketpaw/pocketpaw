@@ -521,6 +521,17 @@ def test_every_other_type_is_octet_stream(mime, key):
         "a.mht",
         "a.wasm",
         "a.ps",
+        # No type in the guess table: only RISKY_EXTENSIONS catches these.
+        "a.xhtml",
+        "a.shtml",
+        "a.xslt",
+        "a.rss",
+        "a.cjs",
+        "a.jsx",
+        "a.hta",
+        "a.htc",
+        "a.vbs",
+        "a.php",
     ],
 )
 def test_a_harmful_extension_forces_octet_stream(key):

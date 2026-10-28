@@ -317,7 +317,7 @@ def _r2_key_path(key: str) -> str:
 def _kv_key_path(key: str) -> str:
     """``key`` as one percent-encoded path segment ("/" included). ValidationError
     for "" or any "/"-separated "." / ".." segment (the same rule as R2 keys)."""
-    if not key or _dot_segment(key):
+    if key == "" or _dot_segment(key):
         raise ValidationError("sites.data_bad_kv_key", "That key name can't be used.")
     return quote(key, safe="")
 
