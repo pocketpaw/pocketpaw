@@ -14,9 +14,9 @@
 # The buckets live in Redis (the shared ``get_redis()`` client, one Lua script so
 # check-and-charge is atomic across processes) when ``POCKETPAW_REDIS_URL`` is set,
 # and in this process otherwise. A Redis error falls back to the in-process buckets
-# rather than failing the read. ``Budgeted`` wraps a D1 client so each API call (a
-# whole batch counts once, and so does each Time Travel call) is charged before it
-# is made.
+# rather than failing the read. ``Budgeted`` wraps the Cloudflare client so each D1,
+# KV and R2 API call (a whole batch counts once, and so does each Time Travel call
+# and each R2 download however long it streams) is charged before it is made.
 #
 # ``acquire_restore`` is a separate, stricter cap on the same machinery: at most 3
 # Time Travel restores per database per 10 minutes (Cloudflare allows 10), bucket
@@ -196,7 +196,8 @@ async def acquire_restore(database_id: str) -> None:
 
 
 class Budgeted:
-    """A D1 client whose every API call spends one token for ``workspace_id`` first."""
+    """A Cloudflare client whose every D1 / KV / R2 call spends one token for
+    ``workspace_id`` first."""
 
     def __init__(self, cf: Any, workspace_id: str) -> None:
         self._cf = cf
@@ -223,6 +224,42 @@ class Budgeted:
     ) -> Any:
         await acquire("d1", self._workspace_id)
         return await self._cf.d1_restore(database_id, bookmark=bookmark, timestamp=timestamp)
+
+    async def r2_list(self, bucket: str, **kw: Any) -> Any:
+        await acquire("r2", self._workspace_id)
+        return await self._cf.r2_list(bucket, **kw)
+
+    async def r2_get(self, bucket: str, key: str) -> Any:
+        await acquire("r2", self._workspace_id)
+        return await self._cf.r2_get(bucket, key)
+
+    async def r2_put(self, bucket: str, key: str, body: Any, **kw: Any) -> Any:
+        await acquire("r2", self._workspace_id)
+        return await self._cf.r2_put(bucket, key, body, **kw)
+
+    async def r2_delete(self, bucket: str, key: str) -> None:
+        await acquire("r2", self._workspace_id)
+        await self._cf.r2_delete(bucket, key)
+
+    async def kv_list_keys(self, namespace_id: str, **kw: Any) -> Any:
+        await acquire("kv", self._workspace_id)
+        return await self._cf.kv_list_keys(namespace_id, **kw)
+
+    async def kv_get(self, namespace_id: str, key: str, **kw: Any) -> Any:
+        await acquire("kv", self._workspace_id)
+        return await self._cf.kv_get(namespace_id, key, **kw)
+
+    async def kv_metadata(self, namespace_id: str, key: str) -> Any:
+        await acquire("kv", self._workspace_id)
+        return await self._cf.kv_metadata(namespace_id, key)
+
+    async def kv_put(self, namespace_id: str, key: str, value: bytes, **kw: Any) -> None:
+        await acquire("kv", self._workspace_id)
+        await self._cf.kv_put(namespace_id, key, value, **kw)
+
+    async def kv_delete(self, namespace_id: str, key: str) -> None:
+        await acquire("kv", self._workspace_id)
+        await self._cf.kv_delete(namespace_id, key)
 
 
 # --------------------------------------------------------------------------- one-shot claims

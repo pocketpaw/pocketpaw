@@ -33,6 +33,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -71,6 +72,11 @@ MAX_COLUMNS = 60
 NEW_KEYS_PER_REQUEST = 5
 NEW_KEYS_PER_DAY = 10
 _SPREADSHEET_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
+# Stricter, for the dashboard link (a Drive file id is 44 characters today).
+_DASH_SHEET_ID = re.compile(r"[A-Za-z0-9_-]{20,100}")
+_DASH_SHEET_URL = re.compile(
+    r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]{20,100})/edit"
+)
 # C0 controls except newline, plus DEL and C1.
 _CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 _SPACES = re.compile(r"\s+")
@@ -323,6 +329,14 @@ class GoogleSheetsProvider(BaseProvider):
             write=True,
         ),
     }
+
+    def dashboard_url(self, settings: Mapping[str, Any]) -> str | None:
+        """The site's spreadsheet, from the stored id or the readonly link we wrote."""
+        sheet = str(settings.get("spreadsheet_id") or "")
+        if not _DASH_SHEET_ID.fullmatch(sheet):
+            found = _DASH_SHEET_URL.fullmatch(str(settings.get("spreadsheet_url") or ""))
+            sheet = found.group(1) if found else ""
+        return f"https://docs.google.com/spreadsheets/d/{sheet}" if sheet else None
 
     def availability(self) -> Availability:
         client_id, secret = oauth_http.client_credentials(ENV_PREFIX)

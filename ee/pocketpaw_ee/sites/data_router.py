@@ -16,6 +16,15 @@
 #   GET   /restore             ?at=<iso> | ?restore_point=<bookmark> -> RestoreStatus
 #   POST  /restore             {at | restore_point, confirm_name} -> RestoreOut
 #   POST  /restore:undo               {previous_bookmark, confirm_name} -> RestoreOut
+#   GET   /files/{binding}                        ?prefix=&cursor=  -> FileList
+#   GET   /files/{binding}/object?key=            the object, streamed as an attachment
+#   PUT   /files/{binding}/object?key=            raw body (<= 50 MB) -> FileObjectOut
+#   POST  /files/{binding}/object:move            {from, to, overwrite?} -> FileObjectOut
+#   DELETE /files/{binding}/object?key=           204
+#   GET   /kv/{binding}/keys                      ?prefix=&cursor=  -> KvKeyList
+#   GET   /kv/{binding}/keys/{key}                KvKeyValue
+#   PUT   /kv/{binding}/keys/{key}      {value, metadata?, expiration_ttl?} -> KvPutOut
+#   DELETE /kv/{binding}/keys/{key}               204
 #
 # Thin handlers over ``sites.data_service``; errors are CloudErrors mapped by
 # ``_core.http`` (422 for a bad query or value, 404 for an unknown table, row or
@@ -27,7 +36,10 @@
 # ``sites.data_csv_too_large``). The three restore routes require
 # ``sites.data_restore`` (ADMIN) instead. ``can_write`` /
 # ``can_restore`` on the inventory come from the non-raising checks. ``{key}`` is
-# the row's ``__key``, URL-encoded; it may contain ``/``.
+# the row's ``__key`` (or the KV key), URL-encoded; it may contain ``/``. A file
+# upload streams its raw body (413 ``sites.data_file_too_large`` past 50 MB; the body
+# ceiling middleware stops a bigger one first), a KV write is capped at 3 MB of JSON,
+# and a download always answers ``attachment``, ``nosniff`` and a sandboxing CSP.
 #
 # Mounting: ``sites.router`` includes this router BEFORE its own routes, so it is
 # mounted (and plan-gated) wherever the sites router is. That order matters:
@@ -38,7 +50,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
@@ -51,10 +63,17 @@ from pocketpaw_ee.sites.site_data.dto import (
     DeleteRowsBody,
     DeleteRowsOut,
     DuplicateRowBody,
+    FileList,
+    FileObjectOut,
     ImportBody,
     ImportPreview,
     ImportResult,
     InsertRowBody,
+    KvKeyList,
+    KvKeyValue,
+    KvPutBody,
+    KvPutOut,
+    MoveFileBody,
     RestoreBody,
     RestoreOut,
     RestoreStatus,
@@ -400,3 +419,217 @@ async def site_data_restore_undo(
         previous_bookmark=body.previous_bookmark,
         confirm_name=body.confirm_name,
     )
+
+
+# --------------------------------------------------------------------------- files (R2)
+
+# What a download may never do: render, run, or be cached on the way.
+_DOWNLOAD_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    "Cache-Control": "no-store",
+}
+
+
+@router.get(_BASE + "/files/{binding}", response_model=FileList)
+async def site_data_files(
+    pocket_id: str,
+    binding: str,
+    prefix: str | None = Query(None, max_length=1100),
+    cursor: str | None = Query(None, max_length=2048),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+) -> FileList:
+    """One folder of a file store: sub-folders and objects, 200 per page."""
+    return await data_service.list_files(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        prefix=prefix,
+        cursor=cursor,
+    )
+
+
+@router.get(_BASE + "/files/{binding}/object")
+async def site_data_file_download(
+    pocket_id: str,
+    binding: str,
+    key: str = Query(..., max_length=4096),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+) -> StreamingResponse:
+    """The object as a download (never rendered inline)."""
+    got = await data_service.download_file(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        key=key,
+    )
+    headers = {"Content-Disposition": got.disposition, **_DOWNLOAD_HEADERS}
+    if got.size is not None:
+        headers["Content-Length"] = str(got.size)
+    return StreamingResponse(got.body, media_type=got.content_type, headers=headers)
+
+
+@router.put(_BASE + "/files/{binding}/object", response_model=FileObjectOut)
+async def site_data_file_upload(
+    pocket_id: str,
+    binding: str,
+    request: Request,
+    key: str = Query(..., max_length=4096),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
+) -> FileObjectOut:
+    """Upload the raw request body (at most 50 MB) as ``key``, replacing it."""
+    declared = request.headers.get("content-length", "")
+    return await data_service.upload_file(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        key=key,
+        content_type=request.headers.get("content-type"),
+        body=request.stream(),
+        declared_size=int(declared) if declared.isdigit() else None,
+    )
+
+
+@router.post(_BASE + "/files/{binding}/object:move", response_model=FileObjectOut)
+async def site_data_file_move(
+    pocket_id: str,
+    binding: str,
+    body: MoveFileBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
+    ___: None = Depends(_write_body_limit),
+) -> FileObjectOut:
+    """Rename / move an object; 409 ``sites.data_file_exists`` unless ``overwrite``."""
+    return await data_service.move_file(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        from_key=body.from_,
+        to_key=body.to,
+        overwrite=body.overwrite,
+    )
+
+
+@router.delete(_BASE + "/files/{binding}/object", status_code=204)
+async def site_data_file_delete(
+    pocket_id: str,
+    binding: str,
+    key: str = Query(..., max_length=4096),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
+) -> Response:
+    """Delete an object (files can't be restored)."""
+    await data_service.delete_file(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        key=key,
+    )
+    return Response(status_code=204)
+
+
+# --------------------------------------------------------------------------- key-values (KV)
+
+# A 1 MB value (``files_kv.MAX_KV_EDIT_BYTES``) plus JSON escaping and metadata.
+MAX_KV_BODY = 3 * 1024 * 1024
+
+
+async def _kv_body_limit(request: Request) -> None:
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_KV_BODY:
+        raise PayloadTooLarge("sites.data_kv_value_too_large", "A value can be at most 1 MB here.")
+    if len(await request.body()) > MAX_KV_BODY:
+        raise PayloadTooLarge("sites.data_kv_value_too_large", "A value can be at most 1 MB here.")
+
+
+@router.get(_BASE + "/kv/{binding}/keys", response_model=KvKeyList)
+async def site_data_kv_keys(
+    pocket_id: str,
+    binding: str,
+    prefix: str | None = Query(None, max_length=600),
+    cursor: str | None = Query(None, max_length=2048),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+) -> KvKeyList:
+    """A page of keys (200) under ``prefix``; credential-named keys are ``masked``."""
+    return await data_service.list_kv_keys(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        prefix=prefix,
+        cursor=cursor,
+    )
+
+
+@router.get(_BASE + "/kv/{binding}/keys/{key:path}", response_model=KvKeyValue)
+async def site_data_kv_key(
+    pocket_id: str,
+    binding: str,
+    key: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+) -> KvKeyValue:
+    """One key's value, metadata and expiry."""
+    return await data_service.get_kv_key(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        key=key,
+    )
+
+
+@router.put(_BASE + "/kv/{binding}/keys/{key:path}", response_model=KvPutOut)
+async def site_data_kv_put(
+    pocket_id: str,
+    binding: str,
+    key: str,
+    body: KvPutBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
+    ___: None = Depends(_kv_body_limit),
+) -> KvPutOut:
+    """Write a key's value, metadata and expiry together (live within about a minute)."""
+    return await data_service.put_kv_key(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        key=key,
+        value=body.value,
+        metadata=body.metadata,
+        expiration_ttl=body.expiration_ttl,
+    )
+
+
+@router.delete(_BASE + "/kv/{binding}/keys/{key:path}", status_code=204)
+async def site_data_kv_delete(
+    pocket_id: str,
+    binding: str,
+    key: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
+) -> Response:
+    """Delete a key."""
+    await data_service.delete_kv_key(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        binding=binding,
+        key=key,
+    )
+    return Response(status_code=204)

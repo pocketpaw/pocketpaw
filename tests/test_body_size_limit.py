@@ -373,3 +373,48 @@ class TestSiteDataCsvPreviewCeiling:
         ]:
             scope = _scope([(b"content-length", b"50")], method=method, path=path)
             assert _status(await _drive(mw, scope, [b"x" * 50])) == 413, f"{method} {path}"
+
+
+class TestSiteDataFileUploadCeiling:
+    """``PUT /api/v1/sites/by-pocket/{id}/data/files/{binding}/object`` takes one raw
+    file of at most 50 MiB, so it gets a 51 MiB ceiling instead of the global one.
+    Matched on shape (method and path); a miss keeps the global bound.
+
+    Mutations: tests/mutations/site_data_files_kv.json.
+    """
+
+    _PATH = "/api/v1/sites/by-pocket/pk_1/data/files/SITE_FILES/object"
+
+    async def test_an_oversized_upload_is_refused_before_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**10)
+        declared = str(52 * 1024 * 1024).encode()
+        scope = _scope([(b"content-length", declared)], method="PUT", path=self._PATH)
+        sent = await _drive(mw, scope, [b"x"])
+        assert _status(sent) == 413 and app.called is False
+
+    async def test_a_chunked_oversized_upload_is_refused(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**10)
+        chunks = [b"x" * (4 * 1024 * 1024)] * 13
+        sent = await _drive(mw, _scope([], method="PUT", path=self._PATH), chunks)
+        assert _status(sent) == 413
+
+    async def test_a_fifty_mib_upload_reaches_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10)
+        size = 50 * 1024 * 1024
+        scope = _scope([(b"content-length", str(size).encode())], method="PUT", path=self._PATH)
+        sent = await _drive(mw, scope, [b"x" * size])
+        assert _status(sent) == 200 and app.body_bytes == size
+
+    async def test_other_routes_keep_the_global_ceiling(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10)
+        for method, path in [
+            ("POST", self._PATH),
+            ("PUT", "/api/v1/sites/by-pocket/pk_1/data/files/a/b/object"),
+            ("PUT", "/api/v1/sites/by-pocket/pk_1/data/kv/CACHE/keys/object"),
+        ]:
+            scope = _scope([(b"content-length", b"50")], method=method, path=path)
+            assert _status(await _drive(mw, scope, [b"x" * 50])) == 413, f"{method} {path}"

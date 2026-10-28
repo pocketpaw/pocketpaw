@@ -60,6 +60,8 @@ ANON_SECRET = "SUPABASE_ANON_KEY"
 SERVICE_SECRET = "SUPABASE_SERVICE_ROLE_KEY"
 # Supabase refs are 20 lowercase letters; this only has to keep a host label safe.
 REF_RE = re.compile(r"[a-z0-9]{1,63}")
+# Stricter, for the dashboard link: a real ref is 20 lowercase letters.
+_DASH_REF = re.compile(r"[a-z]{20}")
 
 _DESCRIPTIONS = {
     URL_SECRET: "Your Supabase project URL. Set by the Supabase integration.",
@@ -157,6 +159,11 @@ class SupabaseProvider(BaseProvider):
             help="Site secrets you set yourself. Supabase leaves them as they are.",
         ),
     )
+
+    def dashboard_url(self, settings: Mapping[str, Any]) -> str | None:
+        """The project's Supabase dashboard, from the stored ``project_ref``."""
+        ref = str(settings.get(PROJECT_REF) or "")
+        return f"https://supabase.com/dashboard/project/{ref}" if _DASH_REF.fullmatch(ref) else None
 
     def availability(self) -> Availability:
         client_id, secret = oauth_http.client_credentials(ENV_PREFIX)

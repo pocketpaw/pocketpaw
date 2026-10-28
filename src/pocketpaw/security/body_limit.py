@@ -29,10 +29,11 @@
 # the container's disk before any of those checks execute. The limit was never
 # wrong; it was just downstream of the damage.
 #
-# The Sites Data CSV preview (``POST …/data/tables/{table}/import:preview``) is
-# the second shape-matched route, for the same reason: it takes one CSV of at
-# most 5 MB, so it gets 6 MiB instead of the global ~1.27 GB, and a miss falls back
-# to the global ceiling.
+# Two Sites Data routes are shape-matched for the same reason, and a miss falls back
+# to the global ceiling: the CSV preview (``POST …/data/tables/{table}/import:preview``,
+# one CSV of at most 5 MB) gets 6 MiB, and the file upload (``PUT
+# …/data/files/{binding}/object``, one raw file of at most 50 MiB) gets 51 MiB,
+# instead of the global ~1.27 GB.
 #
 # Two things this deliberately does NOT do, so nobody mistakes it for a
 # complete fix:
@@ -79,6 +80,13 @@ _SITE_DATA_CSV_PATH_RE = re.compile(
     r"^/api/v1/sites/by-pocket/[^/]+/data/tables/[^/]+/import:preview$"
 )
 _SITE_DATA_CSV_BYTES = 6 * 1024 * 1024
+
+#: ``PUT /api/v1/sites/by-pocket/{pocket_id}/data/files/{binding}/object``, the Sites
+#: Data file upload: one raw body of at most 50 MiB
+#: (``pocketpaw_ee.sites.site_data.files_kv.MAX_FILE_BYTES``, pinned by an EE test),
+#: plus 1 MiB of slack. The object key rides in the query string, not the path.
+_SITE_DATA_FILE_PATH_RE = re.compile(r"^/api/v1/sites/by-pocket/[^/]+/data/files/[^/]+/object$")
+_SITE_DATA_FILE_BYTES = 51 * 1024 * 1024
 
 #: Framing slack on a relay part. The body is raw bytes with no envelope, so
 #: unlike ``_MULTIPART_OVERHEAD_BYTES`` there is nothing real to cover — 1 MiB
@@ -163,6 +171,13 @@ def _is_site_data_csv(scope: Scope) -> bool:
     return bool(_SITE_DATA_CSV_PATH_RE.match(scope.get("path", "") or ""))
 
 
+def _is_site_data_file(scope: Scope) -> bool:
+    """True for the Sites Data file upload."""
+    if scope.get("method") != "PUT":
+        return False
+    return bool(_SITE_DATA_FILE_PATH_RE.match(scope.get("path", "") or ""))
+
+
 def _is_relay_part(scope: Scope) -> bool:
     """True for the one route whose body is a bare multipart part."""
     if scope.get("method") != "PUT":
@@ -215,6 +230,8 @@ class BodySizeLimitMiddleware:
             return self.relay_part_bytes
         if _is_site_data_csv(scope):
             return _SITE_DATA_CSV_BYTES
+        if _is_site_data_file(scope):
+            return _SITE_DATA_FILE_BYTES
         return self.max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

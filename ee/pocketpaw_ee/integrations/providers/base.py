@@ -14,6 +14,9 @@
 #     returns readonly settings; raising leaves the site ``setup_required``
 #   * site_status(binding, connection) -> str | None   override the computed status
 #   * connection_attention(connection) -> str | None   ConnectionView hint (meta)
+#   * dashboard_url(settings) -> str | None   the provider's own page for a binding
+#     (Sites Data "Open in …"), from its VISIBLE settings only, ids fullmatched
+#     against a strict pattern, never a token in the URL
 #   * resume_url(connection, state, redirect_uri) -> str | None   (async) finishes an
 #     unfinished setup; sends the browser back to ``redirect_uri`` with ``state``
 #   * callback_params: tuple[str, ...]   callback query keys ``complete`` also gets
@@ -335,6 +338,9 @@ class BaseProvider:
         return None
 
     def connection_attention(self, connection: Any) -> str | None:  # noqa: ARG002
+        return None
+
+    def dashboard_url(self, settings: Mapping[str, Any]) -> str | None:  # noqa: ARG002
         return None
 
     async def resume_url(

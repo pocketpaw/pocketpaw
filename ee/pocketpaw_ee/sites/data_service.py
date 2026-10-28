@@ -1,6 +1,7 @@
 # ee/pocketpaw_ee/sites/data_service.py — the one entry point of the Sites Data
 # dashboard: which site, which lane, which stores; reads (inventory, schema, a page
-# of rows), row writes, CSV import / export, and point-in-time restore.
+# of rows), row writes, CSV import / export, point-in-time restore, and the site's
+# R2 files and KV keys.
 #
 # ``resolve_target`` reads the pocket through the pockets service (NotFound /
 # Forbidden for a missing or unreadable pocket, NotFound for another workspace's),
@@ -36,6 +37,12 @@
 # database's ``created_at`` or its history (Cloudflare 7400) is out of window. A
 # restore drops every cache of the database.
 #
+# Files (R2) and key-values (KV): see the section header below. A store is named by a
+# binding the Site doc records (else 404), files are typed so they can't run as a page
+# (``site_data.files_kv``), credential-named KV keys read ``MASK``, and each write is
+# audited under target type ``site_store`` (key, size, type; never contents). The
+# inventory's connectors carry the provider's ``dashboard_url`` when it builds one.
+#
 # Every Cloudflare call goes through ``site_data.budget`` (429 ``sites.data_busy``)
 # on the data-token client (``service._data_cf_client``); long imports and exports
 # wait out their own workspace's spent minute a few times, never the global bucket
@@ -43,9 +50,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import re
+import tempfile
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -55,21 +66,29 @@ from pocketpaw_ee.cloud._core.errors import (
     CloudError,
     Forbidden,
     NotFound,
+    PayloadTooLarge,
     RateLimited,
     ValidationError,
 )
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.project_data import auth_table, masked_columns
-from pocketpaw_ee.sites.site_data import budget, csv_io, d1, writes
+from pocketpaw_ee.sites.site_data import budget, csv_io, d1, files_kv, writes
 from pocketpaw_ee.sites.site_data.dto import (
     ColumnInfo,
     ConnectorRef,
     DataInventory,
     DeleteRowsOut,
+    FileList,
+    FileObject,
+    FileObjectOut,
     HistoryEvent,
     ImportFailure,
     ImportPreview,
     ImportResult,
+    KvKeyList,
+    KvKeyRef,
+    KvKeyValue,
+    KvPutOut,
     RestoreOut,
     RestoreStatus,
     RowHistory,
@@ -213,9 +232,29 @@ async def _connectors(workspace_id: str, user_id: str, pocket_id: str) -> list[C
         logger.warning("site_data: could not list connectors for %s", pocket_id, exc_info=True)
         return []
     return [
-        ConnectorRef(provider=v.provider, status=str(getattr(v.status, "value", v.status)))
+        ConnectorRef(
+            provider=v.provider,
+            status=str(getattr(v.status, "value", v.status)),
+            dashboard_url=_dashboard_url(v.provider, getattr(v, "settings", None) or {}),
+        )
         for v in views
     ]
+
+
+def _dashboard_url(provider_id: str, settings: dict[str, Any]) -> str | None:
+    """The provider's own page for this binding, from its visible settings (never a
+    secret), or None when the provider builds none or the ids don't check out."""
+    from pocketpaw_ee.integrations.providers import get_provider
+
+    build = getattr(get_provider(provider_id), "dashboard_url", None)
+    if build is None:
+        return None
+    try:
+        url = build(settings)
+    except Exception:  # noqa: BLE001 — a link is optional; never fail the inventory
+        logger.warning("site_data: dashboard_url failed for %s", provider_id, exc_info=True)
+        return None
+    return url if isinstance(url, str) and url.startswith("https://") else None
 
 
 async def get_inventory(
@@ -258,13 +297,18 @@ async def get_inventory(
                         read_only_reason=t.read_only_reason,  # type: ignore[arg-type]
                     )
                 )
+    store_writable = can_write and not _store_reason(target)
     return DataInventory(
         pocket_id=pocket_id,
         available=not target.reason,
         reason=target.reason,
         tables=tables,
-        files=[StoreRef(binding=b, label=_label(b)) for b in sorted(target.r2)],
-        kv=[StoreRef(binding=b, label=_label(b)) for b in sorted(target.kv)],
+        files=[
+            StoreRef(binding=b, label=_label(b), writable=store_writable) for b in sorted(target.r2)
+        ],
+        kv=[
+            StoreRef(binding=b, label=_label(b), writable=store_writable) for b in sorted(target.kv)
+        ],
         connectors=await _connectors(workspace_id, user_id, pocket_id),
         can_write=can_write,
         can_restore=can_restore,
@@ -1365,3 +1409,523 @@ async def restore_undo(
     except BaseException:
         await budget.release(claim)
         raise
+
+
+# --------------------------------------------------------------------------- files and KV
+#
+# A store is addressed by its binding name, which must be one the Site doc records
+# (``target.r2`` / ``target.kv``): any other name is a 404 before any Cloudflare call,
+# so a request can never name another site's bucket or namespace. Lists answer
+# ``available=false`` in local mode; every other route there is a 409
+# ``sites.data_unavailable``. Writes need edit access to the pocket. Their audit
+# events use their own target type (``site_store``, target ``<pocket>:<binding>:<key>``)
+# so a database restore never counts a file or key change, and carry the key, size and
+# content type, never a value or file bytes.
+
+_STORE_AUDIT_TARGET = "site_store"
+_FILE_PAGE = 200
+_KV_PAGE = 200
+_SPOOL_IN_MEMORY = 4 * 1024 * 1024
+_CHUNK = 256 * 1024
+
+
+def _store_reason(target: DataTarget) -> str:
+    """Why the site's stores can't be reached now ("" when they can). Only local
+    mode: R2 and KV don't depend on the database being published."""
+    return _REASON_LOCAL if target.reason == _REASON_LOCAL else ""
+
+
+def _bucket(target: DataTarget, binding: str) -> str:
+    bucket = target.r2.get(binding) if isinstance(binding, str) else None
+    if not bucket:
+        raise NotFound("site_file_store", binding)
+    return bucket
+
+
+def _namespace(target: DataTarget, binding: str) -> str:
+    namespace = target.kv.get(binding) if isinstance(binding, str) else None
+    if not namespace:
+        raise NotFound("site_kv_store", binding)
+    return namespace
+
+
+async def _store_audit(
+    target: DataTarget, user_id: str, action: str, binding: str, key: str, meta: dict[str, Any]
+) -> None:
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    try:
+        await audit_service.record(
+            target.workspace_id,
+            user_id,
+            action,
+            target_type=_STORE_AUDIT_TARGET,
+            target_id=f"{target.pocket_id}:{binding}:{key}",
+            metadata={"binding": binding, "key": key, **meta},
+        )
+    except Exception:  # noqa: BLE001 — the change landed; a lost audit row must not undo it
+        logger.warning("site_data: audit failed for %s", action, exc_info=True)
+
+
+def _file_object(key: str, size: int, content_type: str, modified: Any) -> FileObject:
+    return FileObject(
+        key=key,
+        name=key.rsplit("/", 1)[-1],
+        size=int(size or 0),
+        content_type=content_type or "",
+        modified=str(modified) if modified else None,
+    )
+
+
+async def _store_target(
+    *, workspace_id: str, user_id: str, pocket_id: str, edit: bool, _cloudflare: Any | None
+) -> DataTarget:
+    if edit:
+        return await _editable_target(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            _cloudflare=_cloudflare,
+        )
+    return await resolve_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+
+
+async def list_files(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    prefix: str | None = None,
+    cursor: str | None = None,
+    _cloudflare: Any | None = None,
+) -> FileList:
+    """One folder of a file store: its sub-folders and objects, 200 per page.
+    ``GET .../data/files/{binding}``."""
+    prefix = files_kv.check_prefix(prefix)
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=False,
+        _cloudflare=_cloudflare,
+    )
+    bucket = _bucket(target, binding)
+    reason = _store_reason(target)
+    if reason:
+        return FileList(
+            pocket_id=pocket_id, binding=binding, available=False, reason=reason, prefix=prefix
+        )
+    page = await _client(target, _cloudflare).r2_list(
+        bucket, prefix=prefix, delimiter="/", cursor=cursor or None, per_page=_FILE_PAGE
+    )
+    return FileList(
+        pocket_id=pocket_id,
+        binding=binding,
+        available=True,
+        prefix=prefix,
+        folders=list(page["folders"]),
+        objects=[
+            _file_object(o["key"], o["size"], o["content_type"], o["last_modified"])
+            for o in page["objects"]
+        ],
+        cursor=page["cursor"],
+    )
+
+
+@dataclass(frozen=True)
+class FileDownload:
+    disposition: str  # the Content-Disposition value (always ``attachment``)
+    content_type: str
+    size: int | None
+    body: AsyncIterator[bytes]
+
+
+async def download_file(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    key: str,
+    _cloudflare: Any | None = None,
+) -> FileDownload:
+    """One object as a stream, typed for a safe download (see ``files_kv``).
+    ``GET .../data/files/{binding}/object?key=``."""
+    key = files_kv.check_file_key(key)
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=False,
+        _cloudflare=_cloudflare,
+    )
+    bucket = _bucket(target, binding)
+    if reason := _store_reason(target):
+        raise writes.unavailable(reason)
+    obj = await _client(target, _cloudflare).r2_get(bucket, key)
+    if obj is None:
+        raise NotFound("site_file", key)
+    return FileDownload(
+        disposition=files_kv.content_disposition(key),
+        content_type=files_kv.download_content_type(obj.content_type, key),
+        size=obj.size,
+        body=obj.iter_bytes(),
+    )
+
+
+def _too_large() -> PayloadTooLarge:
+    return PayloadTooLarge("sites.data_file_too_large", "A file can be at most 50 MB here.")
+
+
+async def _spool(chunks: AsyncIterator[bytes], limit: int) -> tuple[Any, int]:
+    """``chunks`` into a temporary file (in memory up to 4 MB), refusing past
+    ``limit`` bytes. Returns the file, rewound, and its size."""
+    spool = tempfile.SpooledTemporaryFile(max_size=_SPOOL_IN_MEMORY)  # noqa: SIM115
+    size = 0
+    try:
+        async for chunk in chunks:
+            size += len(chunk)
+            if size > limit:
+                raise _too_large()
+            spool.write(chunk)
+    except BaseException:
+        spool.close()
+        raise
+    spool.seek(0)
+    return spool, size
+
+
+async def _read_spool(spool: Any) -> AsyncIterator[bytes]:
+    while chunk := spool.read(_CHUNK):
+        yield chunk
+
+
+async def upload_file(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    key: str,
+    content_type: str | None,
+    body: AsyncIterator[bytes],
+    declared_size: int | None = None,
+    _cloudflare: Any | None = None,
+) -> FileObjectOut:
+    """Write ``body`` (at most 50 MB) to ``key``, replacing what is there, under a
+    content type that can't run as a page or script.
+    ``PUT .../data/files/{binding}/object?key=``."""
+    key = files_kv.check_file_key(key)
+    if declared_size is not None and declared_size > files_kv.MAX_FILE_BYTES:
+        raise _too_large()
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=True,
+        _cloudflare=_cloudflare,
+    )
+    bucket = _bucket(target, binding)
+    if reason := _store_reason(target):
+        raise writes.unavailable(reason)
+    stored_type = files_kv.stored_content_type(content_type, key)
+    spool, size = await _spool(body, files_kv.MAX_FILE_BYTES)
+    try:
+        out = await _client(target, _cloudflare).r2_put(
+            bucket, key, _read_spool(spool), content_type=stored_type, size=size
+        )
+    finally:
+        spool.close()
+    await _store_audit(
+        target,
+        user_id,
+        "site_data.file_put",
+        binding,
+        key,
+        {"size": size, "content_type": stored_type},
+    )
+    return FileObjectOut(
+        object=_file_object(key, out.get("size") or size, stored_type, out.get("uploaded"))
+    )
+
+
+async def move_file(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    from_key: str,
+    to_key: str,
+    overwrite: bool = False,
+    _cloudflare: Any | None = None,
+) -> FileObjectOut:
+    """Rename / move an object (at most 50 MB): copy it to ``to_key``, then delete
+    ``from_key``. An existing ``to_key`` is a 409 ``sites.data_file_exists`` unless
+    ``overwrite``. ``POST .../data/files/{binding}/object:move``."""
+    from_key = files_kv.check_file_key(from_key)
+    to_key = files_kv.check_file_key(to_key)
+    if from_key == to_key:
+        raise ValidationError("sites.data_bad_file_key", "Pick a different name.")
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=True,
+        _cloudflare=_cloudflare,
+    )
+    bucket = _bucket(target, binding)
+    if reason := _store_reason(target):
+        raise writes.unavailable(reason)
+    cf = _client(target, _cloudflare)
+    if not overwrite:
+        found = await cf.r2_list(bucket, prefix=to_key, delimiter=None, per_page=1)
+        if any(o["key"] == to_key for o in found["objects"]):
+            raise CloudError(409, "sites.data_file_exists", "A file with that name already exists.")
+    obj = await cf.r2_get(bucket, from_key)
+    if obj is None:
+        raise NotFound("site_file", from_key)
+    if obj.size is not None and obj.size > files_kv.MAX_FILE_BYTES:
+        await obj.aclose()
+        raise _too_large()
+    stored_type = files_kv.stored_content_type(obj.content_type, to_key)
+    spool, size = await _spool(obj.iter_bytes(), files_kv.MAX_FILE_BYTES)
+    try:
+        out = await cf.r2_put(
+            bucket, to_key, _read_spool(spool), content_type=stored_type, size=size
+        )
+    finally:
+        spool.close()
+    await cf.r2_delete(bucket, from_key)
+    await _store_audit(
+        target,
+        user_id,
+        "site_data.file_move",
+        binding,
+        to_key,
+        {"from": from_key, "to": to_key, "size": size, "content_type": stored_type},
+    )
+    return FileObjectOut(
+        object=_file_object(to_key, out.get("size") or size, stored_type, out.get("uploaded"))
+    )
+
+
+async def delete_file(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    key: str,
+    _cloudflare: Any | None = None,
+) -> None:
+    """Delete one object (a missing one is done). ``DELETE .../object?key=``."""
+    key = files_kv.check_file_key(key)
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=True,
+        _cloudflare=_cloudflare,
+    )
+    bucket = _bucket(target, binding)
+    if reason := _store_reason(target):
+        raise writes.unavailable(reason)
+    await _client(target, _cloudflare).r2_delete(bucket, key)
+    await _store_audit(target, user_id, "site_data.file_delete", binding, key, {})
+
+
+def _kv_ref(row: dict[str, Any]) -> KvKeyRef:
+    masked = files_kv.masked_kv_key(row["name"])
+    return KvKeyRef(
+        name=row["name"],
+        expiration=row.get("expiration"),
+        metadata=None if masked else row.get("metadata"),
+        masked=masked,
+    )
+
+
+async def list_kv_keys(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    prefix: str | None = None,
+    cursor: str | None = None,
+    _cloudflare: Any | None = None,
+) -> KvKeyList:
+    """A page of a key-value store's keys (200 at a time) under ``prefix``.
+    ``GET .../data/kv/{binding}/keys``."""
+    prefix = prefix or ""
+    if len(prefix.encode("utf-8")) > files_kv.MAX_KV_KEY_BYTES:
+        raise ValidationError("sites.data_bad_kv_key", "A key name is at most 512 bytes.")
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=False,
+        _cloudflare=_cloudflare,
+    )
+    namespace = _namespace(target, binding)
+    reason = _store_reason(target)
+    if reason:
+        return KvKeyList(
+            pocket_id=pocket_id, binding=binding, available=False, reason=reason, prefix=prefix
+        )
+    page = await _client(target, _cloudflare).kv_list_keys(
+        namespace, prefix=prefix, cursor=cursor or None, limit=_KV_PAGE
+    )
+    return KvKeyList(
+        pocket_id=pocket_id,
+        binding=binding,
+        available=True,
+        prefix=prefix,
+        keys=[_kv_ref(k) for k in page["keys"]],
+        cursor=page["cursor"],
+    )
+
+
+def _is_json(text: str) -> bool:
+    if not text.lstrip().startswith(("{", "[")):
+        return False
+    try:
+        return isinstance(json.loads(text), dict | list)
+    except ValueError:
+        return False
+
+
+async def get_kv_key(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    key: str,
+    _cloudflare: Any | None = None,
+) -> KvKeyValue:
+    """One key: its value (text, or base64 when binary; nothing past 1 MB, ``MASK``
+    when its name looks like a credential), metadata and expiry.
+    ``GET .../data/kv/{binding}/keys/{key}``."""
+    key = files_kv.check_kv_key(key)
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=False,
+        _cloudflare=_cloudflare,
+    )
+    namespace = _namespace(target, binding)
+    if reason := _store_reason(target):
+        raise writes.unavailable(reason)
+    cf = _client(target, _cloudflare)
+    got = await cf.kv_get(namespace, key, max_bytes=files_kv.MAX_KV_EDIT_BYTES)
+    if got is None:
+        raise NotFound("site_kv_key", key)
+    # The list row carries the expiry and metadata (a key sorts first under itself).
+    listed = await cf.kv_list_keys(namespace, prefix=key, limit=10)
+    row = next((k for k in listed["keys"] if k["name"] == key), {"name": key})
+    masked = files_kv.masked_kv_key(key)
+    out = KvKeyValue(
+        binding=binding,
+        name=key,
+        size=got.size,
+        expiration=row.get("expiration"),
+        masked=masked,
+        too_large=got.truncated,
+    )
+    if masked:
+        return out.model_copy(update={"value": files_kv.MASK})
+    update: dict[str, Any] = {"metadata": row.get("metadata")}
+    if not got.truncated:
+        if got.text is not None:
+            update.update(value=got.text, is_json=_is_json(got.text), editable=True)
+        else:
+            update["value_base64"] = base64.b64encode(got.data).decode("ascii")
+    return out.model_copy(update=update)
+
+
+async def put_kv_key(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    key: str,
+    value: str,
+    metadata: Any = None,
+    expiration_ttl: int | None = None,
+    _cloudflare: Any | None = None,
+) -> KvPutOut:
+    """Write a key's text value, metadata and expiry together (a PUT is the whole
+    key: no ``metadata`` clears it, no ``expiration_ttl`` makes it never expire).
+    ``PUT .../data/kv/{binding}/keys/{key}``."""
+    key = files_kv.check_kv_key(key)
+    raw = value.encode("utf-8")
+    if len(raw) > files_kv.MAX_KV_EDIT_BYTES:
+        raise PayloadTooLarge("sites.data_kv_value_too_large", "A value can be at most 1 MB here.")
+    if expiration_ttl is not None and expiration_ttl < files_kv.MIN_TTL:
+        raise ValidationError(
+            "sites.data_bad_kv_ttl", "An expiry must be at least 60 seconds away."
+        )
+    if metadata is not None:
+        packed = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+        if len(packed) > files_kv.MAX_KV_METADATA_BYTES:
+            raise ValidationError(
+                "sites.data_bad_kv_metadata", "Metadata can be at most 1,024 bytes as JSON."
+            )
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=True,
+        _cloudflare=_cloudflare,
+    )
+    namespace = _namespace(target, binding)
+    if reason := _store_reason(target):
+        raise writes.unavailable(reason)
+    if files_kv.masked_kv_key(key):
+        raise Forbidden(
+            "sites.data_masked_key", "Keys named like a password or token can't be edited here."
+        )
+    await _client(target, _cloudflare).kv_put(
+        namespace, key, raw, metadata=metadata, expiration_ttl=expiration_ttl
+    )
+    await _store_audit(
+        target,
+        user_id,
+        "site_data.kv_put",
+        binding,
+        key,
+        {"size": len(raw), "expiration_ttl": expiration_ttl, "has_metadata": metadata is not None},
+    )
+    expiration = int(time.time()) + expiration_ttl if expiration_ttl else None
+    return KvPutOut(key=KvKeyRef(name=key, expiration=expiration, metadata=metadata), size=len(raw))
+
+
+async def delete_kv_key(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    binding: str,
+    key: str,
+    _cloudflare: Any | None = None,
+) -> None:
+    """Delete a key (a missing one is done). ``DELETE .../data/kv/{binding}/keys/{key}``."""
+    key = files_kv.check_kv_key(key)
+    target = await _store_target(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        edit=True,
+        _cloudflare=_cloudflare,
+    )
+    namespace = _namespace(target, binding)
+    if reason := _store_reason(target):
+        raise writes.unavailable(reason)
+    await _client(target, _cloudflare).kv_delete(namespace, key)
+    await _store_audit(target, user_id, "site_data.kv_delete", binding, key, {})

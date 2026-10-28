@@ -1,12 +1,14 @@
 # ee/pocketpaw_ee/sites/site_data/dto.py — wire shapes of the Sites Data dashboard
 # (``sites.data_router``): the inventory, one table's schema, a page of rows, the row
 # write bodies and results, a row's change history, the CSV import preview and
-# commit, and point-in-time restore (status, restore, undo).
+# commit, point-in-time restore (status, restore, undo), and the site's R2 files and
+# KV keys (lists, one object, one key, their write bodies).
 #
-# Every response carries ``available`` / ``reason``: a site with no reachable
+# Every read response carries ``available`` / ``reason``: a site with no reachable
 # database (local mode, not published yet) answers ``available=false`` with
 # ``reason`` ``live_on_cloudflare_only`` / ``not_published`` instead of an error, the
-# same contract as the legacy ``/data`` routes. Each row in a ``RowPage`` carries
+# same contract as the legacy ``/data`` routes (file and KV lists only go
+# unavailable in local mode). Each row in a ``RowPage`` carries
 # ``__key``, the value the write routes address the row by (the single primary key,
 # else the rowid, else null for a read-only table).
 from __future__ import annotations
@@ -61,11 +63,15 @@ class TableSummary(BaseModel):
 class StoreRef(BaseModel):
     binding: str
     label: str
+    # The caller may upload / edit / delete here (``can_write`` and a reachable store).
+    writable: bool = False
 
 
 class ConnectorRef(BaseModel):
     provider: str
     status: str
+    # "Open in <provider>": built from the binding's non-secret settings (a project
+    # ref, base id, sheet id, page id); null when the provider has no such page.
     dashboard_url: str | None = None
 
 
@@ -243,3 +249,82 @@ class RestoreUndoBody(_Body):
 class RestoreOut(BaseModel):
     bookmark: str  # where the database is now
     previous_bookmark: str  # where it was; ``restore:undo`` with this goes back
+
+
+# --------------------------------------------------------------------------- files (R2)
+
+
+class FileObject(BaseModel):
+    key: str  # the full object key, "/"-separated
+    name: str  # the last segment of ``key``
+    size: int
+    content_type: str  # as stored ("" when R2 reports none)
+    modified: str | None = None  # ISO 8601
+
+
+class FileList(BaseModel):
+    pocket_id: str
+    binding: str
+    available: bool
+    reason: str = ""
+    prefix: str = ""
+    folders: list[str] = Field(default_factory=list)  # full prefixes, each ending "/"
+    objects: list[FileObject] = Field(default_factory=list)
+    cursor: str | None = None  # pass back for the next page; null on the last
+
+
+class FileObjectOut(BaseModel):
+    object: FileObject
+
+
+class MoveFileBody(_Body):
+    from_: str = Field(alias="from", max_length=4096)
+    to: str = Field(max_length=4096)
+    overwrite: bool = False
+
+
+# --------------------------------------------------------------------------- key-values (KV)
+
+
+class KvKeyRef(BaseModel):
+    name: str
+    expiration: int | None = None  # epoch seconds
+    metadata: Any = None  # null when masked
+    masked: bool = False  # the name looks like a credential: value and metadata hidden
+
+
+class KvKeyList(BaseModel):
+    pocket_id: str
+    binding: str
+    available: bool
+    reason: str = ""
+    prefix: str = ""
+    keys: list[KvKeyRef] = Field(default_factory=list)
+    cursor: str | None = None
+
+
+class KvKeyValue(BaseModel):
+    binding: str
+    name: str
+    value: str | None = None  # UTF-8 text (``MASK`` when masked); null for binary / too large
+    value_base64: str | None = None  # a binary value up to 1 MB
+    size: int
+    is_json: bool = False  # ``value`` parses as a JSON object or array
+    metadata: Any = None
+    expiration: int | None = None
+    masked: bool = False
+    too_large: bool = False  # over 1 MB: shown as a size only
+    editable: bool = False  # text, at most 1 MB, not masked
+
+
+class KvPutBody(_Body):
+    value: str
+    metadata: Any = None
+    expiration_ttl: int | None = None  # seconds, >= 60; null = never expires
+
+
+class KvPutOut(BaseModel):
+    key: KvKeyRef
+    size: int
+    # The dashboard shows "Changes can take up to a minute to reach your live site."
+    propagation_note: bool = True
