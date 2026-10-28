@@ -830,3 +830,16 @@ async def test_route_import_body_refuses_extra_fields_and_bad_mode(routed):
     ):
         resp = await _call(app, "POST", "/tables/notes/import", body)
         assert resp.status_code == 422, resp.text
+
+
+def test_the_body_ceiling_matches_the_preview_route_and_its_cap():
+    """Core's body ceiling can't import the EE cap, so this pins them together: the
+    ceiling's shape matches the mounted preview route and fits a full 5 MB file."""
+    from pocketpaw_ee.sites.data_router import router
+
+    from pocketpaw.security import body_limit
+
+    (route,) = [r for r in router.routes if r.path.endswith("/import:preview")]
+    path = "/api/v1" + route.path.replace("{pocket_id}", "pk1").replace("{table}", "orders")
+    assert body_limit._SITE_DATA_CSV_PATH_RE.match(path)
+    assert csv_io.MAX_BYTES + 512 * 1024 <= body_limit._SITE_DATA_CSV_BYTES <= 8 * 1024 * 1024

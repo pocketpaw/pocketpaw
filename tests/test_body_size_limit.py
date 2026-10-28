@@ -328,3 +328,48 @@ class TestMultipartRelayPartCeiling:
 
         assert UploadSettings().max_file_bytes == 25 * 1024 * 1024
         assert _configured_ceiling() < 2 * 1024 * 1024 * 1024
+
+
+class TestSiteDataCsvPreviewCeiling:
+    """``POST /api/v1/sites/by-pocket/{id}/data/tables/{table}/import:preview`` takes
+    one CSV of at most 5 MB, so it gets a ~6 MiB ceiling of its own instead of the
+    ~1.27 GB global one: without it a huge multipart body is spooled to disk before
+    the route (or even auth) runs. Matched on shape; a miss keeps the global bound.
+
+    Mutations: tests/mutations/site_data_import_restore.json.
+    """
+
+    _PATH = "/api/v1/sites/by-pocket/pk_1/data/tables/orders/import:preview"
+
+    async def test_an_oversized_csv_upload_is_refused_before_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**9)
+        declared = str(7 * 1024 * 1024).encode()
+        sent = await _drive(mw, _scope([(b"content-length", declared)], path=self._PATH), [b"x"])
+        assert _status(sent) == 413 and app.called is False
+
+    async def test_a_chunked_oversized_csv_upload_is_refused(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**9)
+        chunks = [b"x" * (1024 * 1024)] * 7
+        sent = await _drive(mw, _scope([], path=self._PATH), chunks)
+        assert _status(sent) == 413
+
+    async def test_a_five_mb_csv_upload_reaches_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10)
+        body = b"x" * (5 * 1024 * 1024 + 4096)  # the 5 MB file plus multipart framing
+        declared = str(len(body)).encode()
+        sent = await _drive(mw, _scope([(b"content-length", declared)], path=self._PATH), [body])
+        assert _status(sent) == 200 and app.body_bytes == len(body)
+
+    async def test_other_routes_keep_the_global_ceiling(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10)
+        for method, path in [
+            ("GET", self._PATH),
+            ("POST", "/api/v1/sites/by-pocket/pk_1/data/tables/orders/import"),
+            ("POST", "/api/v1/sites/by-pocket/pk_1/data/tables/a/b/import:preview"),
+        ]:
+            scope = _scope([(b"content-length", b"50")], method=method, path=path)
+            assert _status(await _drive(mw, scope, [b"x" * 50])) == 413, f"{method} {path}"

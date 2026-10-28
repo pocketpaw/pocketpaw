@@ -343,5 +343,23 @@
     "tests": [
       "tests/ee/sites/test_site_data_budget.py::test_a_refusal_names_the_bucket_that_was_full"
     ]
+  },
+  {
+    "label": "the CSV preview gets the global body ceiling",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "        if _is_site_data_csv(scope):\n            return _SITE_DATA_CSV_BYTES",
+    "replace": "        if False:\n            return _SITE_DATA_CSV_BYTES",
+    "tests": [
+      "tests/test_body_size_limit.py::TestSiteDataCsvPreviewCeiling"
+    ]
+  },
+  {
+    "label": "the CSV preview ceiling applies to every method",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "    if scope.get(\"method\") != \"POST\":\n        return False\n    return bool(_SITE_DATA_CSV_PATH_RE",
+    "replace": "    if False:\n        return False\n    return bool(_SITE_DATA_CSV_PATH_RE",
+    "tests": [
+      "tests/test_body_size_limit.py::TestSiteDataCsvPreviewCeiling"
+    ]
   }
 ]

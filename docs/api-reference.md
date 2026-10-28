@@ -4119,7 +4119,8 @@ row counts.
 #### CSV import and export
 
 - `POST …/data/tables/{table}/import:preview` (write), multipart field `file`, at
-  most 5 MB (`413` `sites.data_csv_too_large`) →
+  most 5 MB (`413` `sites.data_csv_too_large`; a request body over 6 MiB is refused
+  before it is read, `413` `request.body_too_large`) →
 
   ```json
   {
