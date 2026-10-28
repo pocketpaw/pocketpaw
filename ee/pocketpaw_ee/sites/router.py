@@ -41,6 +41,7 @@ from pocketpaw_ee.cloud._core.rate_limit import rate_limit_slug_check
 from pocketpaw_ee.cloud.auth.service import resolve_display_names
 from pocketpaw_ee.sites import import_service, ownership, prompt_enhance, site_upgrade
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites.data_router import router as site_data_router
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
@@ -112,6 +113,11 @@ router = APIRouter(
     tags=["Sites"],
     dependencies=[Depends(require_plan_feature("sites"))],
 )
+
+# The Data dashboard routes (``sites.data_router``) go in FIRST so they inherit the
+# plan gate and win the match: ``.../data/inventory`` would otherwise be taken by the
+# legacy ``.../data/{table}`` read below.
+router.include_router(site_data_router)
 
 
 async def _may_buy_site_plan(user: object, workspace_id: str) -> bool:

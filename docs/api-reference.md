@@ -4000,6 +4000,48 @@ publish. In auth tables (`user`, `session`, `account`, `verification` and their
 plurals) a non-null value in a column named like `password`, `token`, `secret`,
 `hash` or `key`, and `verification.value`, reads `"•••"`.
 
+### Site data dashboard — `/sites/by-pocket/{pocket_id}/data/…`
+
+The reads behind the Data page. Same guards as the routes above (`fabric.read` plus
+the pockets read check); another workspace's pocket is a `404`. Every read answers
+`available: false` with `reason` `live_on_cloudflare_only` (local mode) or
+`not_published` (no database yet) instead of erroring.
+
+- `GET /sites/by-pocket/{pocket_id}/data/inventory` →
+  `{pocket_id, available, reason, tables: [{name, row_count, editable, read_only_reason}],
+  files: [{binding, label}], kv: [{binding, label}], connectors: [{provider, status,
+  dashboard_url}], can_write, can_restore}`. `can_write` / `can_restore` are the
+  caller's `sites.data_write` / `sites.data_restore` (both admin).
+- `GET /sites/by-pocket/{pocket_id}/data/tables/{table}` →
+  `{pocket_id, name, available, reason, columns, key, editable, read_only_reason,
+  row_count}`. Each column is `{name, sql_type, kind, time_format, nullable,
+  has_default, auto, primary_key, masked, writable, references}`; `kind` is one of
+  `text`, `longtext`, `integer`, `real`, `boolean`, `datetime`, `date`, `json`,
+  `blob`, sampled from the first page; `time_format` is `epoch_s`, `epoch_ms`, `iso`
+  or empty. `key` is the single primary-key column, `rowid` for a table without
+  one, or `null` (read only, `read_only_reason: "no_key"`). Login tables
+  (`session`, `account`, `verification` and plurals) read `login_table`; a declared
+  table of a dynamic site that the database doesn't have yet reads `not_created`.
+- `GET /sites/by-pocket/{pocket_id}/data/tables/{table}/rows?q=&sort=&dir=&f=&limit=&offset=` →
+  `{pocket_id, table, available, reason, columns, rows, total, limit, offset,
+  search_truncated}`. Each row carries `__key` (the value later write routes address
+  it by). Default order is newest first by key; `sort` must be a column, `dir` is
+  `asc` or `desc`. `q` (≤ 100 characters) matches any text column, case-insensitive.
+  `f` is a JSON list of up to 10 `{col, op, value}`: text columns take `eq`, `ne`,
+  `contains`, `starts`; number and boolean columns `eq`, `ne`, `lt`, `gt`, `lte`,
+  `gte`, `is_true`, `is_false`; date columns `before`, `after`, `on` (ISO date or
+  time, UTC); every column takes `empty` / `not_empty`. `limit` is 1–200 (default
+  50), `offset` 0–100,000. `total` is `null` above 10,000 rows. `search_truncated`
+  is true when a very wide table had more text columns than fit D1's
+  100-parameter cap.
+
+Errors: `404` for an unknown or hidden table (before any row is read), `422`
+`sites.data_*` for a bad sort, filter, search or page (a credential column can't be
+searched, filtered or sorted on, and reads `"•••"`), `429` `sites.data_busy` with
+`error.details.retry_after` (seconds) when the dashboard's Cloudflare budget is spent.
+A table literally named `inventory` is reached through `/data/tables/inventory`.
+Cloudflare calls use `PAW_CF_DATA_API_TOKEN` when set, else `PAW_CF_API_TOKEN`.
+
 ### Project builds — `/sites/by-pocket/{pocket_id}/builds`
 
 Three reads for a `project` pocket's sandbox builds. All take `fabric.write` (owner /

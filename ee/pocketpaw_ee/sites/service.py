@@ -1424,6 +1424,41 @@ def _cf_client():
     )
 
 
+_data_token_warned = False
+
+
+def _data_cf_client():
+    """The Cloudflare client the Data dashboard reads and writes a site's stores with.
+
+    Built from ``PAW_CF_DATA_API_TOKEN`` (D1 / KV / R2 edit only) so dashboard traffic
+    never spends the publish token's rate budget; falls back to ``PAW_CF_API_TOKEN``
+    with a one-time warning (fine in dev, not in production). Needs no zone id. A
+    missing account id or token is a ``ValidationError`` (422), like ``_cf_client``."""
+    import os
+
+    from pocketpaw_ee.sites.cloudflare_client import CloudflareClient
+
+    global _data_token_warned
+    account_id = os.environ.get("PAW_CF_ACCOUNT_ID")
+    api_token = os.environ.get("PAW_CF_DATA_API_TOKEN")
+    if not api_token:
+        api_token = os.environ.get("PAW_CF_API_TOKEN")
+        if api_token and not _data_token_warned:
+            _data_token_warned = True
+            logger.warning(
+                "PAW_CF_DATA_API_TOKEN is not set: the Sites Data dashboard is using the "
+                "publish token, so its traffic shares the publish rate budget"
+            )
+    if not (account_id and api_token):
+        raise ValidationError("sites.cloudflare_unconfigured", "Cloudflare is not configured")
+    return CloudflareClient(
+        account_id=account_id,
+        api_token=api_token,
+        zone_id=os.environ.get("PAW_CF_ZONE_ID", ""),
+        dispatch_namespace=os.environ.get("PAW_CF_DISPATCH_NAMESPACE", "paw-sites"),
+    )
+
+
 def _local_mode() -> bool:
     """Whether publish() takes the LOCAL deploy branch (skip Cloudflare, serve the
     static site from localhost). True when PAW_SITES_LOCAL=1 is set explicitly, or
@@ -12695,10 +12730,11 @@ async def read_site_data_table(
     db_id = stored_db_id or _derive_d1_database_id(workspace_id, pocket_id)
 
     cf = _cloudflare or _cf_client()
-    # ``table`` is whitelisted above (it equals a declared object name), so it is
-    # safe to embed as the FROM identifier — SQLite/D1 cannot bind an identifier as
-    # a placeholder. The LIMIT VALUE binds through ``params``.
-    sql = f"SELECT * FROM {table} LIMIT ?"  # noqa: S608 — table is whitelisted, value is bound
+    # ``table`` is whitelisted above (it equals a declared object name) AND quoted, so
+    # a name like ``order`` or one carrying a quote reads as an identifier — SQLite/D1
+    # cannot bind an identifier as a placeholder. The LIMIT VALUE binds via ``params``.
+    ident = project_data.quote_ident(table)
+    sql = f"SELECT * FROM {ident} LIMIT ?"  # noqa: S608 — table is whitelisted + quoted
     params: list[Any] = [_clamp_rows(limit)]
     if offset > 0:
         sql += " OFFSET ?"
