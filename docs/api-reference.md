@@ -4105,9 +4105,11 @@ refuse unknown fields. Every returned row is masked like a read and carries `__k
   without Time Travel.
   This also covers `twoFactor`, `passkey` and `apikey` rows: the matching login
   tables with a `userId` / `user_id` column (through its foreign key when it has
-  one). Any other delete whose foreign-key `ON DELETE` action or trigger would
-  reach a login table or a masked column is `403` `sites.data_read_only` with
-  `details.reason` `cascades_to_login_table` / `trigger_on_table`.
+  one). Any other delete whose foreign-key `ON DELETE` action or `DELETE` trigger
+  would reach a login table or a masked column is `403` `sites.data_read_only` with
+  `details.reason` `cascades_to_login_table` / `trigger_on_table`; inserts, updates,
+  duplicates and imports are checked the same way for their own events (see the SQL
+  console's cascades and triggers rule).
 - `POST …/data/tables/{table}/rows:duplicate` `{"key": 3, "values": {}}` → `{"row"}`:
   a copy without generated columns and the key; `values` overrides copied fields
   and must carry a new key for a table whose key the database doesn't fill.
@@ -4342,10 +4344,15 @@ What may run (refusals are checked before any Cloudflare call):
   when a foreign key with `ON DELETE` (for `DELETE`, `REPLACE`, `INSERT OR REPLACE`)
   or `ON UPDATE` (for `UPDATE`, an upsert's `DO UPDATE`) `CASCADE` / `SET NULL` /
   `SET DEFAULT` reaches a login table or a masked column, following chains through
-  ordinary tables; `"trigger_on_table"` when a trigger on a table the write reaches
-  mentions a login table or a masked column. The Rows tab's delete
-  (`POST …/rows:delete`) applies the same check, except that deleting a user still
-  takes that user's own login rows with it.
+  ordinary tables; `"trigger_on_table"` when a trigger for the write's event
+  (`INSERT` for an insert, `REPLACE` or upsert; `UPDATE` for an update or `DO UPDATE`;
+  `DELETE` for a delete or `REPLACE`) on a table the write reaches mentions a login
+  table or a masked column. Tables reached further along count with every event. The
+  Rows tab applies the same check to every write: an insert or duplicate (`INSERT`
+  triggers), an update (`UPDATE` triggers and `ON UPDATE` actions), a delete, and a
+  CSV import (`INSERT` triggers, plus `UPDATE` for `upsert`), except that a user's own
+  login rows still go with the user. An import is refused before its upload is
+  claimed, so the same `upload_id` can be committed once the trigger is gone.
 - Reads of `SELECT` / `VALUES` run as `SELECT * FROM (…) LIMIT 501`; at most 500 rows
   come back and `truncated` says there were more. A repeated column name comes back
   as `id`, `id:1`, …. Integers beyond 2^53 come back as digit strings.

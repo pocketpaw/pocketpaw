@@ -16,7 +16,9 @@
 # Writes (rows and imports) go through ``_writable_table``: EDIT access to the pocket
 # (403 ``pocket.access_denied``), a known table (404 before any row SQL), a reachable
 # database (409 ``sites.data_unavailable``), an editable table (``sites.data_read_only``).
-# Imports also refuse every login table. Each written row records one audit event
+# Imports also refuse every login table. Every write (row insert / update / duplicate /
+# delete, import) is refused when a trigger for its event or a foreign-key action
+# would reach sign-in data (``d1.write_exposure``). Each written row records one audit event
 # (``site_data.row_*``, target ``<pocket>:<table>:<key>``, credentials removed), an
 # import one ``site_data.import`` (counts and mapping, no values, target
 # ``<pocket>:<table>``); an audit failure never fails the write. A bulk delete and an
@@ -499,6 +501,22 @@ async def _writable_table(
     return _Writable(target=target, cf=cf, schema=schema, table=t, kinds=kinds)
 
 
+def _refuse_exposure(w: _Writable, *, inserts: bool = False, updates: bool = False) -> None:
+    """403 when the write would reach sign-in data through a trigger for its event or
+    a foreign-key action (``d1.write_exposure``); a user's own login rows are kept, as
+    the delete keeps them. Runs before any row SQL (and before an upload is claimed)."""
+    reason = d1.write_exposure(
+        w.schema,
+        [w.table.name],
+        deletes=False,
+        updates=updates,
+        inserts=inserts,
+        keep_user_cascade=True,
+    )
+    if reason:
+        raise writes.read_only(reason)
+
+
 def _masked(table: d1.Table, row: dict[str, Any]) -> dict[str, Any]:
     return d1.mask_page(table, [row])[0]
 
@@ -553,6 +571,7 @@ async def insert_row(
     )
     if not d1.insertable(w.table):
         raise writes.read_only("login_table")
+    _refuse_exposure(w, inserts=True)
     row = await writes.insert(w.cf, w.target.d1_id, w.table, w.kinds, values)
     d1.forget_counts(w.target.d1_id)
     await _audit(w, user_id, "site_data.row_insert", row.get("__key"), before=None, after=row)
@@ -579,6 +598,7 @@ async def update_row(
         table=table,
         _cloudflare=_cloudflare,
     )
+    _refuse_exposure(w, updates=True)
     row_key = writes.key_value(w.table, w.kinds, key)
     before, after = await writes.update(
         w.cf,
@@ -659,6 +679,7 @@ async def duplicate_row(
     )
     if not d1.insertable(w.table):
         raise writes.read_only("login_table")
+    _refuse_exposure(w, inserts=True)
     source = writes.key_value(w.table, w.kinds, key)
     row = await writes.duplicate(w.cf, w.target.d1_id, w.table, w.kinds, source, values or {})
     d1.forget_counts(w.target.d1_id)
@@ -950,6 +971,8 @@ async def import_commit(
         table=table,
         _cloudflare=_cloudflare,
     )
+    # Before the job slot and the upload are claimed, so a refused upload survives.
+    _refuse_exposure(w, inserts=True, updates=mode == "upsert")
     slot = await _claim_job(w.target.workspace_id)
     try:
         claimed = await csv_io.claim_upload(

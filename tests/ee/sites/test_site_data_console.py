@@ -1210,3 +1210,148 @@ async def test_sql_errors_keep_the_message_up_to_the_sqlite_marker(site_doc, db,
 async def test_the_planned_sql_never_holds_a_semicolon(db, sql):
     p = console.plan(console.classify(sql), await _schema(db))
     assert ";" not in p.sql and any(";" in v for v in p.params)
+
+
+# --------------------------------------------------------------------------- Rows tab writes
+
+_INSERT_TRIGGER = (
+    "CREATE TRIGGER notes_ins AFTER INSERT ON notes BEGIN "
+    "UPDATE \"user\" SET name = NEW.body WHERE id = 'u1'; END"
+)
+_UPDATE_TRIGGER = (
+    "CREATE TRIGGER notes_upd AFTER UPDATE ON notes BEGIN "
+    "UPDATE \"user\" SET name = NEW.body WHERE id = 'u1'; END"
+)
+_HARMLESS = (
+    "CREATE TRIGGER notes_stamp AFTER INSERT ON notes BEGIN "
+    "UPDATE customers SET vip = vip + 1 WHERE id = 1; END; "
+    "CREATE TRIGGER notes_stamp_u AFTER UPDATE ON notes BEGIN "
+    "UPDATE customers SET vip = vip + 1 WHERE id = 1; END"
+)
+
+
+def _grid_kw(cf: SqliteD1, table: str, **kw: Any) -> dict[str, Any]:
+    return {
+        "workspace_id": "ws1",
+        "user_id": "u-admin",
+        "pocket_id": "pk1",
+        "table": table,
+        "_cloudflare": cf,
+        **kw,
+    }
+
+
+async def _grid_insert(cf, values):
+    with _pocket():
+        return await data_service.insert_row(**_grid_kw(cf, "notes", values=values))
+
+
+async def _grid_update(cf, key, set_, expected):
+    with _pocket():
+        return await data_service.update_row(
+            **_grid_kw(cf, "notes", key=key, set=set_, expected=expected)
+        )
+
+
+async def _grid_duplicate(cf, key):
+    with _pocket():
+        return await data_service.duplicate_row(**_grid_kw(cf, "notes", key=key))
+
+
+async def _grid_preview(cf, csv_text: str):
+    with _pocket():
+        return await data_service.import_preview(
+            **_grid_kw(cf, "notes", filename="in.csv", data=csv_text.encode())
+        )
+
+
+async def _grid_commit(cf, upload_id, mapping, mode="insert"):
+    with _pocket():
+        return await data_service.import_commit(
+            **_grid_kw(cf, "notes", upload_id=upload_id, mapping=mapping, mode=mode)
+        )
+
+
+def _user_name(cf: SqliteD1) -> str:
+    return cf.rows("SELECT name FROM \"user\" WHERE id = 'u1'")[0]["name"]
+
+
+@pytest.mark.asyncio
+async def test_rows_tab_insert_and_duplicate_with_a_login_insert_trigger_are_refused(
+    site_doc, db, audit
+):
+    db.execute(_INSERT_TRIGGER)
+    err = await _raises("sites.data_read_only", 403, _grid_insert(db, {"body": "pwned"}))
+    assert err.details == {"reason": "trigger_on_table"}
+    err = await _raises("sites.data_read_only", 403, _grid_duplicate(db, "1"))
+    assert err.details == {"reason": "trigger_on_table"}
+    assert _user_name(db) == "Ann"
+    assert db.rows("SELECT count(*) AS n FROM notes") == [{"n": 2}]
+
+
+@pytest.mark.asyncio
+async def test_rows_tab_update_with_a_login_update_trigger_is_refused(site_doc, db, audit):
+    db.execute(_UPDATE_TRIGGER)
+    err = await _raises(
+        "sites.data_read_only", 403, _grid_update(db, "1", {"tag": "z"}, {"tag": "a"})
+    )
+    assert err.details == {"reason": "trigger_on_table"}
+    assert db.rows("SELECT tag FROM notes WHERE rowid = 1") == [{"tag": "a"}]
+    # An INSERT-only trigger doesn't fire on an update, so it doesn't block one.
+    db.execute("DROP TRIGGER notes_upd")
+    db.execute(_INSERT_TRIGGER)
+    res = await _grid_update(db, "1", {"tag": "z"}, {"tag": "a"})
+    assert res.row["tag"] == "z" and _user_name(db) == "Ann"
+
+
+@pytest.mark.asyncio
+async def test_rows_tab_import_with_a_login_trigger_is_refused_and_keeps_the_upload(
+    site_doc, db, audit
+):
+    db.execute(_INSERT_TRIGGER)
+    preview = await _grid_preview(db, "body,tag\npwned,x\n")
+    before = len(db.sql)
+    err = await _raises(
+        "sites.data_read_only", 403, _grid_commit(db, preview.upload_id, preview.mapping)
+    )
+    assert err.details == {"reason": "trigger_on_table"}
+    assert not any(s.startswith("INSERT") for s, _ in db.sql[before:])
+    assert _user_name(db) == "Ann"
+    # The upload was never claimed: once the trigger is gone, the same upload imports.
+    db.execute("DROP TRIGGER notes_ins")
+    res = await _grid_commit(db, preview.upload_id, preview.mapping)
+    assert res.inserted == 1
+
+
+@pytest.mark.asyncio
+async def test_rows_tab_upsert_import_checks_update_triggers_too(site_doc, db, audit):
+    db.execute(_UPDATE_TRIGGER)
+    preview = await _grid_preview(db, "body,tag\nx,y\n")
+    err = await _raises(
+        "sites.data_read_only",
+        403,
+        _grid_commit(db, preview.upload_id, preview.mapping, mode="upsert"),
+    )
+    assert err.details == {"reason": "trigger_on_table"}
+
+
+@pytest.mark.asyncio
+async def test_rows_tab_writes_with_a_harmless_trigger_are_allowed(site_doc, db, audit):
+    db.conn.executescript(_HARMLESS)
+    assert (await _grid_insert(db, {"body": "ok"})).row["body"] == "ok"
+    assert (await _grid_update(db, "1", {"tag": "z"}, {"tag": "a"})).row["tag"] == "z"
+    assert (await _grid_duplicate(db, "1")).row["body"] == "hello"
+    preview = await _grid_preview(db, "body,tag\nimported,x\n")
+    assert (await _grid_commit(db, preview.upload_id, preview.mapping)).inserted == 1
+
+
+def test_trigger_events_are_read_from_the_create_text():
+    assert d1.trigger_events(_INSERT_TRIGGER) == {"INSERT"}
+    assert d1.trigger_events("CREATE TRIGGER t BEFORE UPDATE OF a, b ON x BEGIN SELECT 1; END") == {
+        "UPDATE"
+    }
+    assert d1.trigger_events(
+        'CREATE TEMP TRIGGER IF NOT EXISTS "on insert" DELETE ON x BEGIN END'
+    ) == {"DELETE"}
+    # Can't tell: every event counts.
+    assert d1.trigger_events("CREATE TRIGGER weird") == {"INSERT", "UPDATE", "DELETE"}

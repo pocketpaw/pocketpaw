@@ -249,7 +249,7 @@
   {
     "label": "a cascade chain stops at the first ordinary table",
     "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
-    "find": "                queue.append((fold(child.name), True, True))",
+    "find": "                queue.append((fold(child.name), True, True, True))",
     "replace": "                pass",
     "tests": [
       "tests/ee/sites/test_site_data_console.py::test_a_cascade_chain_through_an_ordinary_table_is_followed"
@@ -334,6 +334,60 @@
     "replace": "    text = text",
     "tests": [
       "tests/ee/sites/test_site_data_console.py::test_sql_errors_keep_the_message_up_to_the_sqlite_marker"
+    ]
+  },
+  {
+    "label": "a Rows-tab insert skips the trigger check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, inserts=True)\n    row = await writes.insert(",
+    "replace": "    row = await writes.insert(",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_insert_and_duplicate_with_a_login_insert_trigger_are_refused"
+    ]
+  },
+  {
+    "label": "a Rows-tab duplicate skips the trigger check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, inserts=True)\n    source = writes.key_value(",
+    "replace": "    source = writes.key_value(",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_insert_and_duplicate_with_a_login_insert_trigger_are_refused"
+    ]
+  },
+  {
+    "label": "a Rows-tab update skips the trigger check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, updates=True)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_update_with_a_login_update_trigger_is_refused"
+    ]
+  },
+  {
+    "label": "an import skips the trigger check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, inserts=True, updates=mode == \"upsert\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_import_with_a_login_trigger_is_refused_and_keeps_the_upload"
+    ]
+  },
+  {
+    "label": "an upsert import ignores UPDATE triggers",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, inserts=True, updates=mode == \"upsert\")\n",
+    "replace": "    _refuse_exposure(w, inserts=True)\n",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_upsert_import_checks_update_triggers_too"
+    ]
+  },
+  {
+    "label": "every trigger counts whatever event it fires on",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "            if not trigger_events(sql) & events:\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_update_with_a_login_update_trigger_is_refused"
     ]
   }
 ]

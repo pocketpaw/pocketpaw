@@ -692,6 +692,7 @@ def plan(stmt: Statement, schema: d1.Schema) -> Plan:
             stmt.targets,
             deletes=stmt.verb == "DELETE" or replaces,
             updates=stmt.verb == "UPDATE" or upserts,
+            inserts=stmt.verb in ("INSERT", "REPLACE"),
         )
         if reason:
             raise writes.read_only(reason)

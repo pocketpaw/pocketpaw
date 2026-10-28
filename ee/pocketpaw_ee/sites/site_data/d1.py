@@ -242,30 +242,51 @@ def _mentions(sql: str) -> set[str]:
     return out
 
 
+_EVENTS = frozenset({"INSERT", "UPDATE", "DELETE"})
+# Quoted / bracketed names, blanked before the event is read (a trigger may be named
+# "on insert").
+_QUOTED = re.compile(r'"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]')
+_TRIGGER_HEAD = re.compile(
+    r"^\s*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"\S+\s+(?:(?:BEFORE|AFTER|INSTEAD\s+OF)\s+)?(INSERT|UPDATE|DELETE)\b",
+    re.I,
+)
+
+
+def trigger_events(sql: str) -> frozenset[str]:
+    """The event a trigger fires on (``INSERT`` / ``UPDATE`` / ``DELETE``), read from
+    its CREATE text; every event when the text can't be read."""
+    m = _TRIGGER_HEAD.match(_QUOTED.sub("x", sql or ""))
+    return frozenset({m.group(1).upper()}) if m else _EVENTS
+
+
 def write_exposure(
     schema: Schema,
     targets: list[str] | set[str] | frozenset[str],
     *,
     deletes: bool,
     updates: bool,
+    inserts: bool = False,
     keep_user_cascade: bool = False,
 ) -> str:
     """Why writing ``targets`` would change sign-in data or credentials behind the
     dashboard's back, or "" when it can't: ``cascades_to_login_table`` when a foreign
     key with ON DELETE (``deletes``) / ON UPDATE (``updates``) CASCADE / SET NULL / SET
     DEFAULT reaches a login table or a masked column, ``trigger_on_table`` when a
-    trigger on a reached table mentions a login table or a masked column. The walk
-    follows every reached table on (its rows change too, so both actions count from
-    there). ``keep_user_cascade`` lets a user table's own login rows go with it (the
-    Rows tab's deliberate user delete)."""
+    trigger for one of the write's events (``inserts`` / ``updates`` / ``deletes``) on
+    a reached table mentions a login table or a masked column. The walk follows every
+    reached table on with every event (its rows change in ways it can't tell).
+    ``keep_user_cascade`` lets a user table's own login rows go with it (the Rows
+    tab's deliberate user delete, and its profile edits)."""
     by_name = {fold(n): t for n, t in schema.tables.items()}
-    queue = [(fold(t), deletes, updates) for t in targets]
-    seen: set[tuple[str, bool, bool]] = set()
+    queue = [(fold(t), deletes, updates, inserts) for t in targets]
+    seen: set[tuple[str, bool, bool, bool]] = set()
     while queue:
-        name, dels, ups = queue.pop()
-        if (name, dels, ups) in seen:
+        name, dels, ups, ins = item = queue.pop()
+        if item in seen:
             continue
-        seen.add((name, dels, ups))
+        seen.add(item)
+        events = {e for e, on in (("DELETE", dels), ("UPDATE", ups), ("INSERT", ins)) if on}
         parent = by_name.get(name)
         for child in schema.tables.values():
             for c in child.columns:
@@ -279,8 +300,10 @@ def write_exposure(
                         continue
                 if is_login(child) or c.name in child.masked:
                     return "cascades_to_login_table"
-                queue.append((fold(child.name), True, True))
+                queue.append((fold(child.name), True, True, True))
         for sql in schema.triggers.get(name, ()):
+            if not trigger_events(sql) & events:
+                continue
             mentioned = _mentions(sql)
             for other in mentioned:
                 t = by_name.get(other)
@@ -292,7 +315,7 @@ def write_exposure(
                     continue  # the trigger's own table (``ON name``) is the target
                 if is_login(t):
                     return "trigger_on_table"
-                queue.append((other, True, True))
+                queue.append((other, True, True, True))
     return ""
 
 
