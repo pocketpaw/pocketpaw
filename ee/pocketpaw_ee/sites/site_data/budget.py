@@ -15,7 +15,12 @@
 # check-and-charge is atomic across processes) when ``POCKETPAW_REDIS_URL`` is set,
 # and in this process otherwise. A Redis error falls back to the in-process buckets
 # rather than failing the read. ``Budgeted`` wraps a D1 client so each API call (a
-# whole batch counts once) is charged before it is made.
+# whole batch counts once, and so does each Time Travel call) is charged before it
+# is made.
+#
+# ``acquire_restore`` is a separate, stricter cap on the same machinery: at most 3
+# Time Travel restores per database per 10 minutes (Cloudflare allows 10), bucket
+# ``cf:data:restore:<database id>``; refusal is 429 ``sites.data_restore_busy``.
 from __future__ import annotations
 
 import logging
@@ -31,6 +36,7 @@ logger = logging.getLogger(__name__)
 GLOBAL_LIMIT: tuple[int, int] = (900, 300)
 R2_LIMIT: tuple[int, int] = (900, 300)
 WORKSPACE_LIMIT: tuple[int, int] = (120, 60)
+RESTORE_LIMIT: tuple[int, int] = (3, 600)
 
 KINDS = frozenset({"d1", "kv", "r2"})
 
@@ -93,7 +99,9 @@ def _buckets(kind: str, workspace_id: str) -> list[tuple[str, int, int]]:
     return out
 
 
-def _client() -> Any | None:
+def redis_client() -> Any | None:
+    """The Redis client the dashboard shares state through (an injected one first),
+    or None when Redis isn't configured."""
     if _redis is not None:
         return _redis
     from pocketpaw_ee.cloud._core.redis_client import get_redis
@@ -128,12 +136,22 @@ async def _acquire_redis(client: Any, buckets: list[tuple[str, int, int]]) -> fl
     return int(wait_ms or 0) / 1000.0
 
 
-async def acquire(kind: str, workspace_id: str) -> None:
-    """Spend one Cloudflare call of ``kind`` (``d1`` / ``kv`` / ``r2``) for
-    ``workspace_id``, or raise ``DataBusy`` when any bucket it needs is spent."""
-    buckets = _buckets(kind, workspace_id)
+class RestoreBusy(RateLimited):
+    """This database was restored too often just now (429)."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(
+            "sites.data_restore_busy",
+            f"This site's data was restored several times just now. Try again in {retry_after} s.",
+        )
+        self.details = {"retry_after": retry_after}
+
+
+async def _wait(buckets: list[tuple[str, int, int]]) -> float:
+    """Charge every bucket and answer 0, or answer the seconds until the full one
+    resets (charging nothing)."""
     wait = 0.0
-    client = _client()
+    client = redis_client()
     if client is not None:
         try:
             wait = await _acquire_redis(client, buckets)
@@ -142,8 +160,23 @@ async def acquire(kind: str, workspace_id: str) -> None:
             wait = _acquire_local(buckets)
     else:
         wait = _acquire_local(buckets)
+    return wait
+
+
+async def acquire(kind: str, workspace_id: str) -> None:
+    """Spend one Cloudflare call of ``kind`` (``d1`` / ``kv`` / ``r2``) for
+    ``workspace_id``, or raise ``DataBusy`` when any bucket it needs is spent."""
+    wait = await _wait(_buckets(kind, workspace_id))
     if wait > 0:
         raise DataBusy(max(1, math.ceil(wait)))
+
+
+async def acquire_restore(database_id: str) -> None:
+    """Spend one of the database's restores (3 per 10 minutes), or raise
+    ``RestoreBusy``."""
+    wait = await _wait([(f"cf:data:restore:{database_id or '-'}", *RESTORE_LIMIT)])
+    if wait > 0:
+        raise RestoreBusy(max(1, math.ceil(wait)))
 
 
 class Budgeted:
@@ -160,3 +193,17 @@ class Budgeted:
     async def query_d1_batch(self, *, database_id: str, statements: Any) -> Any:
         await acquire("d1", self._workspace_id)
         return await self._cf.query_d1_batch(database_id=database_id, statements=statements)
+
+    async def d1_info(self, database_id: str) -> Any:
+        await acquire("d1", self._workspace_id)
+        return await self._cf.d1_info(database_id)
+
+    async def d1_bookmark(self, database_id: str, timestamp: str | None = None) -> str:
+        await acquire("d1", self._workspace_id)
+        return await self._cf.d1_bookmark(database_id, timestamp)
+
+    async def d1_restore(
+        self, database_id: str, *, bookmark: str | None = None, timestamp: str | None = None
+    ) -> Any:
+        await acquire("d1", self._workspace_id)
+        return await self._cf.d1_restore(database_id, bookmark=bookmark, timestamp=timestamp)

@@ -31,7 +31,10 @@
 #   * Worker routes: ``<hostname>/*`` -> the site's Worker, updated in place on rename.
 #   * D1: ``create_database``, ``find_database`` (exact name, crash recovery),
 #     ``delete_database``, ``query_d1`` and ``query_d1_batch`` (parameterized, never
-#     interpolated SQL), ``export_d1_sql`` (the D1 export API: poll with the bookmark,
+#     interpolated SQL), ``d1_info`` (``version``: Time Travel needs ``production``),
+#     ``d1_bookmark`` / ``d1_restore`` (Time Travel: the bookmark at or before a
+#     moment; an in-place restore that answers the ``previous_bookmark`` undoing it),
+#     ``export_d1_sql`` (the D1 export API: poll with the bookmark,
 #     then fetch the signed URL with a client that carries NO token, since the URL is
 #     another host). ``create_database`` adds the operator's
 #     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``) and, opt-in,
@@ -1135,6 +1138,60 @@ class CloudflareClient:
             found = found if isinstance(found, list) else []
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
+
+    def _d1_url(self, database_id: str) -> str:
+        return f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}"
+
+    async def d1_info(self, database_id: str) -> dict:
+        """The database's details (``GET /d1/database/{id}``): ``version``
+        (``production`` or ``alpha``; Time Travel needs ``production``),
+        ``file_size``, ``name`` …"""
+        async with self._client() as client:
+            resp = await client.get(self._d1_url(database_id))
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def d1_bookmark(self, database_id: str, timestamp: str | None = None) -> str:
+        """The Time Travel bookmark nearest at or before ``timestamp`` (ISO 8601 / RFC
+        3339), or of the database's current state when None.
+        ``GET /d1/database/{id}/time_travel/bookmark``."""
+        params = {"timestamp": timestamp} if timestamp else None
+        async with self._client() as client:
+            resp = await client.get(
+                f"{self._d1_url(database_id)}/time_travel/bookmark", params=params
+            )
+        result = self._unwrap(resp)
+        bookmark = result.get("bookmark") if isinstance(result, dict) else None
+        if not isinstance(bookmark, str) or not bookmark:
+            raise ValidationError("sites.cloudflare_error", "D1 returned no bookmark")
+        return bookmark
+
+    async def d1_restore(
+        self, database_id: str, *, bookmark: str | None = None, timestamp: str | None = None
+    ) -> dict:
+        """Restore the database IN PLACE to ``bookmark`` or ``timestamp`` (exactly
+        one). Destructive: it cancels in-flight queries. Returns ``{bookmark,
+        previous_bookmark, message}``; restoring to ``previous_bookmark`` undoes it.
+        ``POST /d1/database/{id}/time_travel/restore``."""
+        if bool(bookmark) == bool(timestamp):
+            raise ValidationError(
+                "sites.cloudflare_error", "A D1 restore needs exactly one of bookmark or timestamp."
+            )
+        params = {"bookmark": bookmark} if bookmark else {"timestamp": timestamp}
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._d1_url(database_id)}/time_travel/restore", params=params
+            )
+        result = self._unwrap(resp)
+        result = result if isinstance(result, dict) else {}
+        previous = result.get("previous_bookmark")
+        if not isinstance(previous, str) or not previous:
+            raise ValidationError("sites.cloudflare_error", "D1 restore returned no bookmark")
+        return {
+            "bookmark": str(result.get("bookmark") or ""),
+            "previous_bookmark": previous,
+            "message": str(result.get("message") or ""),
+        }
 
     async def export_d1_sql(
         self, database_id: str, *, poll_interval: float = 2.0, max_polls: int = 150
