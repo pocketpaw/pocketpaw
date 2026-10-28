@@ -3925,6 +3925,28 @@ async def test_a_surface_turn_cap_raises_a_paid_run_but_never_a_free_one(monkeyp
     assert all("request_limit" not in limits for limits in seen)
 
 
+async def test_an_uncapped_app_build_has_no_request_limit_unless_free(monkeypatch):
+    """``max_turns=0`` is a Sites app build with no turn cap: a paid run gets no
+    ``request_limit`` at all, while a free run's ``max_requests`` still bounds it
+    at 20. ``None`` stays "no override" (the deployment's own cap).
+
+    Mutation: treat 0 as no override (the run stops at 100), or let the lift
+    skip a free run's bound.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+
+    seen.clear()
+    await _collect(backend, "hi", max_turns=0)
+    assert all("request_limit" not in limits for limits in seen)
+
+    await _collect(backend, "hi", max_turns=0, max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    await _collect(backend, "hi", max_turns=None)
+    assert seen[-1] == {"request_limit": 100}
+
+
 async def test_a_token_limit_the_run_exceeds_stops_it_with_usage_first():
     """A run over its token limit ends in an error, and its usage still reaches
     the caller first so the tokens it did spend are billed."""

@@ -1,13 +1,16 @@
 # tests/cloud/runs/test_run_core_app_build_turn_cap.py — an approved Sites app plan
-# gets a turn long enough to build every milestone, and an honest stop when it isn't.
+# gets an uncapped turn to build every milestone, and an honest stop when a bound
+# (a free run's) still cuts it short.
 #
 # Pins, in run_core and the PLAN.md reader (``sites/app_plan.py``):
 #   * ``next_milestone`` finds the first unticked milestone in the shapes agents
 #     write (nested items under an M-line, M-headings, flat items), None when done;
 #   * a /sites PROJECT turn whose PLAN.md has unticked milestones resolves a
-#     profile with ``max_turns = sites_app_build_max_turns``; a finished plan, no
-#     plan, another engine, another surface or a 0 setting leave it None;
-#   * the cap reaches ``pool.run`` as ``max_turns`` only when set;
+#     profile with ``max_turns = 0`` (no cap) by default, or an operator's
+#     ``sites_app_build_max_turns`` N > 0; a finished plan, no plan, another
+#     engine or another surface leave it None (no override);
+#   * the override, 0 included, reaches ``pool.run`` and ``pool.prewarm`` as
+#     ``max_turns`` only when set;
 #   * a run stopped by its turn limit (or the free run's usage limit) mid-plan ends
 #     with an error that names the next milestone; any other error is unchanged.
 from __future__ import annotations
@@ -102,11 +105,13 @@ async def _resolve(monkeypatch, pocket: Any, ctx: ScopeContext | None = None) ->
 
 
 @pytest.mark.asyncio
-async def test_an_unfinished_app_plan_raises_the_turn_cap(monkeypatch) -> None:
+async def test_an_unfinished_app_plan_lifts_the_turn_cap(monkeypatch) -> None:
     from pocketpaw.config import get_settings
 
+    # 0 = no cap: the agent builds the whole approved plan in this turn.
+    assert get_settings().sites_app_build_max_turns == 0
     profile = await _resolve(monkeypatch, _pocket(NESTED))
-    assert profile.max_turns == get_settings().sites_app_build_max_turns == 300
+    assert profile.max_turns == 0
 
 
 @pytest.mark.asyncio
@@ -120,11 +125,11 @@ async def test_every_other_sites_turn_keeps_the_default_cap(monkeypatch, pocket)
 
 
 @pytest.mark.asyncio
-async def test_a_zero_setting_turns_the_raise_off(monkeypatch) -> None:
+async def test_an_operator_cap_still_caps_an_app_build_at_n(monkeypatch) -> None:
     from pocketpaw.config import get_settings
 
-    monkeypatch.setattr(get_settings(), "sites_app_build_max_turns", 0)
-    assert (await _resolve(monkeypatch, _pocket(NESTED))).max_turns is None
+    monkeypatch.setattr(get_settings(), "sites_app_build_max_turns", 500)
+    assert (await _resolve(monkeypatch, _pocket(NESTED))).max_turns == 500
 
 
 @pytest.mark.asyncio
@@ -136,6 +141,8 @@ async def test_another_surface_never_reads_a_plan() -> None:
 def test_an_entity_override_keeps_the_surface_cap() -> None:
     base = SurfaceProfile(ripple_mode="off", max_turns=300)
     assert compose_entity_profile(base, {"skill_names": ["x"]}).max_turns == 300
+    uncapped = SurfaceProfile(ripple_mode="off", max_turns=0)
+    assert compose_entity_profile(uncapped, {"skill_names": ["x"]}).max_turns == 0
 
 
 async def _drive(monkeypatch, ctx, events: list[Any]) -> tuple[dict[str, Any], list[Any]]:
@@ -191,9 +198,49 @@ async def test_the_cap_reaches_pool_run_only_when_set(monkeypatch) -> None:
     run_kwargs, _ = await _drive(monkeypatch, ctx, [])
     assert run_kwargs["max_turns"] == 300
 
+    # 0 is "no cap", not "no override": it must not be dropped as falsy.
+    ctx.resolved_profile = SurfaceProfile(ripple_mode="off", max_turns=0)
+    run_kwargs, _ = await _drive(monkeypatch, ctx, [])
+    assert run_kwargs["max_turns"] == 0
+
     ctx.resolved_profile = SurfaceProfile(ripple_mode="off")
     run_kwargs, _ = await _drive(monkeypatch, ctx, [])
     assert "max_turns" not in run_kwargs
+
+
+async def _prewarm_kwargs(monkeypatch, ctx) -> dict[str, Any] | None:
+    captured: dict[str, Any] = {}
+
+    class _FakePool:
+        async def get(self, _agent_id):
+            return SimpleNamespace(config={"backend": "claude_agent_sdk"})
+
+        async def prewarm(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(run_core, "get_agent_pool", lambda: _FakePool())
+    monkeypatch.setattr(run_core, "build_behavior_instructions", lambda *a, **k: "INSTR")
+    monkeypatch.setattr(run_core, "attach_agent_identity", lambda **k: None)
+    monkeypatch.setattr(run_core, "detach_agent_identity", lambda *a, **k: None, raising=False)
+    await run_core._prewarm_session(ctx)
+    return captured or None
+
+
+@pytest.mark.asyncio
+async def test_the_prewarm_carries_the_same_override_as_the_run(monkeypatch) -> None:
+    """The turn cap is fixed at connect(), so it is in the warm-client key: an
+    app-build prewarm that dropped the 0 would warm a 100-turn client the run
+    then evicts."""
+    ctx = _sites_ctx()
+    ctx.resolved_profile = SurfaceProfile(ripple_mode="off", max_turns=0)
+    kwargs = await _prewarm_kwargs(monkeypatch, ctx)
+    assert kwargs is not None, "prewarm never ran: check its guards, not the assertion"
+    assert kwargs["max_turns"] == 0
+
+    ctx.resolved_profile = SurfaceProfile(ripple_mode="off")
+    kwargs = await _prewarm_kwargs(monkeypatch, ctx)
+    assert kwargs is not None
+    assert "max_turns" not in kwargs
 
 
 def _errors(frames: list[Any]) -> list[str]:
