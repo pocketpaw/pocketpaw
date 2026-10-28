@@ -661,6 +661,140 @@ def test_the_file_cap_and_the_body_ceiling_agree():
     )
 
 
+class _Watched:
+    """A request body that records whether anyone read it."""
+
+    def __init__(self, data: bytes = b"hello") -> None:
+        self.read = False
+        self._data = data
+
+    async def __aiter__(self):
+        self.read = True
+        yield self._data
+
+
+async def _upload(body, **kw):
+    with _pocket():
+        return await data_service.upload_file(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk1",
+            binding="SITE_FILES",
+            key=kw.pop("key", "a.bin"),
+            content_type=None,
+            body=body.__aiter__(),
+            **kw,
+        )
+
+
+@pytest.mark.asyncio
+async def test_upload_charges_the_r2_budget_before_reading_the_body(cf, monkeypatch):
+    monkeypatch.setattr(budget, "R2_LIMIT", (1, 300))
+    await budget.acquire("r2", "ws1")  # the R2 bucket is now spent
+    body = _Watched()
+    with pytest.raises(CloudError) as exc:
+        await _upload(body)
+    assert exc.value.code == "sites.data_busy" and exc.value.status_code == 429
+    assert body.read is False and cf.calls == []
+
+
+@pytest.mark.asyncio
+async def test_upload_spends_one_r2_call(cf, monkeypatch):
+    monkeypatch.setattr(budget, "R2_LIMIT", (1, 300))
+    await _upload(_Watched())
+    with pytest.raises(CloudError) as exc:
+        await _upload(_Watched())
+    assert exc.value.code == "sites.data_busy"
+
+
+@pytest.mark.asyncio
+async def test_at_most_two_uploads_per_workspace(cf):
+    held = [await budget.claim_upload_slot("ws1"), await budget.claim_upload_slot("ws1")]
+    body = _Watched()
+    with pytest.raises(CloudError) as exc:
+        await _upload(body)
+    assert exc.value.code == "sites.data_upload_busy" and exc.value.status_code == 429
+    assert body.read is False and cf.calls == []
+    resp = await _call("PUT", "/files/SITE_FILES/object", params={"key": "a"}, content=b"x")
+    assert resp.status_code == 429 and _code(resp) == "sites.data_upload_busy"
+    other = await budget.claim_upload_slot("ws2")  # another workspace has its own two
+    await budget.release_upload_slot(other)
+    await budget.release_upload_slot(held.pop())
+    await _upload(_Watched())
+    await budget.release_upload_slot(held.pop())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_upload_gives_its_slot_back(cf, monkeypatch):
+    monkeypatch.setattr(files_kv, "MAX_FILE_BYTES", 2)
+    for _ in range(3):
+        with pytest.raises(CloudError):
+            await _upload(_Watched(b"too big"))
+    a = await budget.claim_upload_slot("ws1")
+    b = await budget.claim_upload_slot("ws1")
+    await budget.release_upload_slot(a)
+    await budget.release_upload_slot(b)
+
+
+@pytest.mark.asyncio
+async def test_a_move_holds_an_upload_slot(cf):
+    cf.r2["bkt-1"]["a.txt"] = (b"A", "text/plain")
+    held = [await budget.claim_upload_slot("ws1"), await budget.claim_upload_slot("ws1")]
+    resp = await _call("POST", "/files/SITE_FILES/object:move", json={"from": "a.txt", "to": "b"})
+    assert resp.status_code == 429 and _code(resp) == "sites.data_upload_busy"
+    for slot in held:
+        await budget.release_upload_slot(slot)
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.n: dict[str, int] = {}
+        self.ttl: dict[str, int] = {}
+
+    async def incr(self, key):
+        self.n[key] = self.n.get(key, 0) + 1
+        return self.n[key]
+
+    async def decr(self, key):
+        self.n[key] -= 1
+        return self.n[key]
+
+    async def expire(self, key, seconds):
+        self.ttl[key] = seconds
+
+
+@pytest.mark.asyncio
+async def test_upload_slots_are_shared_through_redis():
+    redis = _FakeRedis()
+    budget.use_redis(redis)
+    a = await budget.claim_upload_slot("ws1")
+    b = await budget.claim_upload_slot("ws1")
+    with pytest.raises(CloudError) as exc:
+        await budget.claim_upload_slot("ws1")
+    assert exc.value.code == "sites.data_upload_busy"
+    key = "cf:data:upload:ws1"
+    assert redis.n[key] == 2 and redis.ttl[key] > 0  # the refused claim gave its count back
+    await budget.release_upload_slot(a)
+    await budget.release_upload_slot(b)
+    assert redis.n[key] == 0
+
+
+@pytest.mark.asyncio
+async def test_spool_io_runs_off_the_event_loop(cf, monkeypatch):
+    import anyio.to_thread
+
+    calls: list[str] = []
+    real = anyio.to_thread.run_sync
+
+    async def _spy(fn, *args, **kw):
+        calls.append(getattr(fn, "__name__", repr(fn)))
+        return await real(fn, *args, **kw)
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", _spy)
+    await _upload(_Watched(b"x" * 10))
+    assert "write" in calls and "read" in calls
+
+
 # --------------------------------------------------------------------------- files: move, delete
 
 

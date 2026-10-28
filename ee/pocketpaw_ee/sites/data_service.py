@@ -62,6 +62,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+import anyio.to_thread
+
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
     Forbidden,
@@ -1593,7 +1595,7 @@ async def _spool(chunks: AsyncIterator[bytes], limit: int) -> tuple[Any, int]:
             size += len(chunk)
             if size > limit:
                 raise _too_large()
-            spool.write(chunk)
+            await anyio.to_thread.run_sync(spool.write, chunk)  # may hit the disk
     except BaseException:
         spool.close()
         raise
@@ -1602,7 +1604,7 @@ async def _spool(chunks: AsyncIterator[bytes], limit: int) -> tuple[Any, int]:
 
 
 async def _read_spool(spool: Any) -> AsyncIterator[bytes]:
-    while chunk := spool.read(_CHUNK):
+    while chunk := await anyio.to_thread.run_sync(spool.read, _CHUNK):
         yield chunk
 
 
@@ -1619,7 +1621,8 @@ async def upload_file(
     _cloudflare: Any | None = None,
 ) -> FileObjectOut:
     """Write ``body`` (at most 50 MB) to ``key``, replacing what is there, under a
-    content type that can't run as a page or script.
+    content type that can't run as a page or script. An upload slot and the R2 call
+    are taken BEFORE the body is read, so a busy workspace or budget reads nothing.
     ``PUT .../data/files/{binding}/object?key=``."""
     key = files_kv.check_file_key(key)
     if declared_size is not None and declared_size > files_kv.MAX_FILE_BYTES:
@@ -1635,13 +1638,19 @@ async def upload_file(
     if reason := _store_reason(target):
         raise writes.unavailable(reason)
     stored_type = files_kv.stored_content_type(content_type, key)
-    spool, size = await _spool(body, files_kv.MAX_FILE_BYTES)
+    cf = _client(target, _cloudflare)
+    slot = await budget.claim_upload_slot(target.workspace_id)
     try:
-        out = await _client(target, _cloudflare).r2_put(
-            bucket, key, _read_spool(spool), content_type=stored_type, size=size
-        )
+        await cf.charge("r2")
+        spool, size = await _spool(body, files_kv.MAX_FILE_BYTES)
+        try:
+            out = await cf.r2_put(
+                bucket, key, _read_spool(spool), content_type=stored_type, size=size, prepaid=True
+            )
+        finally:
+            spool.close()
     finally:
-        spool.close()
+        await budget.release_upload_slot(slot)
     await _store_audit(
         target,
         user_id,
@@ -1683,6 +1692,25 @@ async def move_file(
     bucket = _bucket(target, binding)
     if reason := _store_reason(target):
         raise writes.unavailable(reason)
+    slot = await budget.claim_upload_slot(target.workspace_id)
+    try:
+        return await _move(
+            target, user_id, binding, bucket, from_key, to_key, overwrite, _cloudflare
+        )
+    finally:
+        await budget.release_upload_slot(slot)
+
+
+async def _move(
+    target: DataTarget,
+    user_id: str,
+    binding: str,
+    bucket: str,
+    from_key: str,
+    to_key: str,
+    overwrite: bool,
+    _cloudflare: Any | None,
+) -> FileObjectOut:
     cf = _client(target, _cloudflare)
     if not overwrite:
         found = await cf.r2_list(bucket, prefix=to_key, delimiter=None, per_page=1)
