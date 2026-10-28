@@ -32,8 +32,8 @@ Call `list_site_templates` and match `when_to_use`.
 
 ## Apps and games
 
-Load `sites-app-plan`: write `PLAN.md` before any UI file, then build one
-milestone at a time.
+Load `sites-app-plan`: write `PLAN.md` before any UI file, then build every
+milestone, back to back.
 
 ## The loop
 

@@ -242,6 +242,19 @@ class Settings(BaseSettings):
         default=100,
         description="Max tool-use turns per query in Claude SDK (0 = unlimited)",
     )
+    sites_app_build_max_turns: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Tool-use turn cap for a /sites project turn whose PLAN.md still has "
+            "unticked milestones: an approved app plan is built through every "
+            "milestone in one turn (a build, previews and a play-test each), which "
+            "can need more than claude_sdk_max_turns. Only raises the backend's own "
+            "cap (claude_sdk_max_turns / pydantic_ai_max_turns), never lowers it; a "
+            "platform-funded free run keeps free_run_max_turns. 0 = no raise. "
+            "Set via POCKETPAW_SITES_APP_BUILD_MAX_TURNS."
+        ),
+    )
     claude_sdk_cli_path: str | None = Field(
         default=None,
         description=(

@@ -179,6 +179,7 @@ def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None
       * ``skill_names`` — UNION (the entity adds its skills to the base set).
       * ``system_message_override`` — entity wins WHEN SET, else base.
       * ``exclusive_tools`` — OR. Like deny, a cap that can only tighten.
+      * ``max_turns`` — the base's, always (an entity cannot raise a turn cap).
 
     ``override`` of ``None`` (no per-entity profile) returns ``base`` unchanged —
     the no-pocket / legacy path, byte-identical to today's behavior.
@@ -228,6 +229,8 @@ def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None
         # never unlock one. Dropping it here would hand a concierge whose site
         # pocket carries any override every builtin back.
         exclusive_tools=base.exclusive_tools or bool(override.get("exclusive_tools")),
+        # The surface's own turn cap; an entity override cannot set one.
+        max_turns=base.max_turns,
     )
 
 

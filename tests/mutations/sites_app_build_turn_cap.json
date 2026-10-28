@@ -1,0 +1,128 @@
+[
+  {
+    "label": "the project refine goes back to one milestone per turn: the agent builds M1, says stage 1 done and waits",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    + \"` and build every unticked milestone in this turn, back to back: build, \"",
+    "replace": "    + \"`, build the next unticked one, back to back: build, \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_project_refine_builds_every_remaining_milestone_in_one_turn"
+    ]
+  },
+  {
+    "label": "the requested cap never reaches the SDK options: an app build still stops at claude_sdk_max_turns",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            \"max_turns\": _effective_max_turns(self.settings.claude_sdk_max_turns, max_turns),",
+    "replace": "            \"max_turns\": _effective_max_turns(self.settings.claude_sdk_max_turns, None),",
+    "tests": [
+      "tests/test_claude_sdk_max_turns.py::test_the_raised_cap_reaches_the_sdk_options_and_the_warm_key"
+    ]
+  },
+  {
+    "label": "max_turns leaves the warm-client key: a client connected at 100 turns serves the 300-turn app build",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            f\"{f':turns={turn_cap}' if turn_cap else ''}\"",
+    "replace": "            f\"\"",
+    "tests": [
+      "tests/test_claude_sdk_max_turns.py::test_the_raised_cap_reaches_the_sdk_options_and_the_warm_key"
+    ]
+  },
+  {
+    "label": "a request lowers the cap: a smaller surface value would cut ordinary turns short",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if requested and requested > configured:",
+    "replace": "    if requested:",
+    "tests": [
+      "tests/test_claude_sdk_max_turns.py::test_a_request_only_raises_the_configured_cap"
+    ]
+  },
+  {
+    "label": "the pool drops the cap: it never reaches the backend",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if max_turns is not None and _declares_param(run_backend.run, \"max_turns\"):\n                run_kwargs[\"max_turns\"] = max_turns",
+    "replace": "            if False:\n                run_kwargs[\"max_turns\"] = max_turns",
+    "tests": [
+      "tests/test_claude_sdk_max_turns.py::test_the_pool_forwards_the_cap_to_a_backend_that_declares_it"
+    ]
+  },
+  {
+    "label": "the pool forwards the cap to any backend: a backend without the parameter dies on an unexpected keyword",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if max_turns is not None and _declares_param(run_backend.run, \"max_turns\"):\n                run_kwargs[\"max_turns\"] = max_turns",
+    "replace": "            if max_turns is not None:\n                run_kwargs[\"max_turns\"] = max_turns",
+    "tests": [
+      "tests/test_claude_sdk_max_turns.py::test_a_backend_without_the_param_keeps_its_own_cap"
+    ]
+  },
+  {
+    "label": "the profile never raises the cap for an unfinished app plan",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    base = _app_build_turn_cap(base, refine_pocket)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_run_core_app_build_turn_cap.py::test_an_unfinished_app_plan_raises_the_turn_cap"
+    ]
+  },
+  {
+    "label": "the cap is raised on every project turn, finished plan or not",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if _sites_next_milestone(pocket) is None:\n        return base\n    from pocketpaw.config",
+    "replace": "    if pocket is None:\n        return base\n    from pocketpaw.config",
+    "tests": [
+      "tests/cloud/runs/test_run_core_app_build_turn_cap.py::test_every_other_sites_turn_keeps_the_default_cap"
+    ]
+  },
+  {
+    "label": "the profile cap never reaches pool.run",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if surface_max_turns:\n            run_kwargs[\"max_turns\"] = surface_max_turns",
+    "replace": "        if False:\n            run_kwargs[\"max_turns\"] = surface_max_turns",
+    "tests": [
+      "tests/cloud/runs/test_run_core_app_build_turn_cap.py::test_the_cap_reaches_pool_run_only_when_set"
+    ]
+  },
+  {
+    "label": "a limit stop mid-plan says nothing about the unfinished app",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                if note:\n                    frame = {**frame, \"message\": f\"{frame['message']} {note}\"}",
+    "replace": "                if False:\n                    frame = {**frame, \"message\": f\"{frame['message']} {note}\"}",
+    "tests": [
+      "tests/cloud/runs/test_run_core_app_build_turn_cap.py::test_a_limit_stop_mid_plan_names_the_next_milestone"
+    ]
+  },
+  {
+    "label": "an entity override drops the surface cap",
+    "file": "ee/pocketpaw_ee/cloud/surface/service.py",
+    "find": "        max_turns=base.max_turns,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_run_core_app_build_turn_cap.py::test_an_entity_override_keeps_the_surface_cap"
+    ]
+  },
+  {
+    "label": "every turn's max_turns enters the warm-client key: an options object that does not echo the setting rebuilds the client on every ordinary turn",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if isinstance(value, int) and not isinstance(value, bool) and value != configured:",
+    "replace": "        if isinstance(value, int) and not isinstance(value, bool):",
+    "tests": [
+      "tests/test_claude_sdk_max_turns.py::test_the_raised_cap_reaches_the_sdk_options_and_the_warm_key"
+    ]
+  },
+  {
+    "label": "the raise is applied after the free run's bound: an unpaid run gets 300 requests instead of 20",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            if max_turns and request_cap > 0 and max_turns > request_cap:\n                request_cap = max_turns\n            if max_requests is not None and max_requests > 0:\n                request_cap = min(request_cap, max_requests) if request_cap > 0 else max_requests\n",
+    "replace": "            if max_requests is not None and max_requests > 0:\n                request_cap = min(request_cap, max_requests) if request_cap > 0 else max_requests\n            if max_turns and request_cap > 0 and max_turns > request_cap:\n                request_cap = max_turns\n",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_surface_turn_cap_raises_a_paid_run_but_never_a_free_one"
+    ]
+  },
+  {
+    "label": "pydantic_ai ignores the surface cap: a paid app build on it still stops at pydantic_ai_max_turns",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            if max_turns and request_cap > 0 and max_turns > request_cap:\n                request_cap = max_turns\n",
+    "replace": "",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_surface_turn_cap_raises_a_paid_run_but_never_a_free_one"
+    ]
+  }
+]

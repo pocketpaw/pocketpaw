@@ -204,7 +204,7 @@ async def test_create_plans_apps_and_games_before_building(engine: str | None) -
     """Regression: a "3D horror game" brief was written in one pass (crude models, an
     unfinished world, no fun) because nothing made the agent plan. Every create, on
     every engine hint, sends an app or game through ``sites-app-plan``: PLAN.md and
-    a user check BEFORE any UI file, then milestones, never one pass. The rule is a
+    a user check BEFORE any UI file, then every milestone in order. The rule is a
     short pointer (the preamble has a size budget); the detail lives in the skill.
 
     THE MUTATION THAT BREAKS THIS: drop ``_APP_PLAN_RULE`` from ``build_step``."""
@@ -216,7 +216,8 @@ async def test_create_plans_apps_and_games_before_building(engine: str | None) -
         assert trigger in rule, trigger
     assert "`PLAN.md`" in rule and "before any UI or game file" in rule
     assert "checks with the user" in rule
-    assert "one milestone at a time" in rule and "never all in one pass" in rule
+    assert "every milestone in order without stopping" in rule
+    assert "looked at before the next" in rule
     assert len(rule) < 300, len(rule)
     # Stated once: the rule rides the build step, not a second copy elsewhere.
     assert preamble.count(rule) == 1, engine
@@ -234,7 +235,7 @@ async def test_frontend_preamble_plans_apps_and_games(pattern: str) -> None:
 
 async def test_project_refine_continues_the_app_plan() -> None:
     """The plan check's go-ahead usually lands on the site's own page, so a project
-    refine reads PLAN.md and builds the next milestone through the same skill. Only
+    refine reads PLAN.md and builds the rest of it through the same skill. Only
     the project lane carries it: older engines never had a plan."""
     preamble = sites_handler._refine_preamble(_refine_meta(), "project")
     assert sites_handler._APP_PLAN_REFINE_RULE in preamble
@@ -243,6 +244,42 @@ async def test_project_refine_continues_the_app_plan() -> None:
     for engine in ("html", "svelte", "react", "ripple"):
         other = sites_handler._refine_preamble(_refine_meta(), engine)
         assert "sites-app-plan" not in other, engine
+
+
+async def test_project_refine_builds_every_remaining_milestone_in_one_turn() -> None:
+    """Regression: after the user clicked "Build this plan" the agent built M1, said
+    "stage 1 done" and waited. The click lands on the site's own page (a project
+    refine), and this rule told it to build "the next unticked one", so it built one
+    milestone and ended the turn. An approved plan is built to the end in ONE turn;
+    only a real blocker or a finished plan ends it.
+
+    THE MUTATION THAT BREAKS THIS: put "build the next unticked one" back."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), "project")
+    rule = sites_handler._APP_PLAN_REFINE_RULE
+    assert rule in preamble
+    lower = " ".join(rule.lower().split())
+    assert "every unticked milestone in this turn" in lower
+    assert "back to back" in lower
+    assert "do not stop between milestones" in lower
+    # The only ways out: a real blocker, or every milestone ticked.
+    assert "real blocker" in lower
+    for blocker in ("a secret", "a decision only the user can make", "a missing fact"):
+        assert blocker in lower, blocker
+    assert "every milestone is ticked" in lower
+    # The per-milestone discipline stays.
+    assert "preview" in lower and "tick" in lower
+    # No wording that licenses a stop after one milestone.
+    assert "the next unticked one" not in lower
+    assert "boundary" not in lower
+    assert "one milestone at a time" not in lower
+
+
+async def test_create_app_rule_does_not_read_as_one_milestone_per_turn() -> None:
+    """The old "builds one milestone at a time" read as one per turn. The create rule says the
+    approved plan is built through every milestone without stopping."""
+    rule = " ".join(sites_handler._APP_PLAN_RULE.split())
+    assert "one milestone at a time" not in rule
+    assert "every milestone" in rule and "without stopping" in rule
 
 
 async def test_new_static_sites_carry_the_lead_form_contract() -> None:

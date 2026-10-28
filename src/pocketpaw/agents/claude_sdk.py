@@ -15,9 +15,9 @@ native-resume launches none. ``prewarm`` therefore takes no history.
 
 Warm-client key (``_client_cache_key``): session key, cwd, model, allowed and denied
 tools, the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
-plugin/skills digest, the tenant scope and any surface-scoped MCP servers the
-client carries. Any change forces a fresh subprocess; the same key gates reuse
-of a supervisor-leased client (WH-1).
+plugin/skills digest, the tenant scope, a raised ``max_turns`` and any
+surface-scoped MCP servers the client carries. Any change forces a fresh
+subprocess; the same key gates reuse of a supervisor-leased client (WH-1).
 Per-run skill dirs are cached per digest and dropped on eviction or cleanup.
 
 Lifecycle invariants:
@@ -38,7 +38,10 @@ Lifecycle invariants:
   * API-error text and error results become one error event (a too-old CLI names
     ``POCKETPAW_CLAUDE_SDK_CLI_PATH``); a max-turns stop names the limit.
 
-Options: permissions are always bypassed (headless), ``cli_path`` comes from
+Options: ``max_turns`` is ``claude_sdk_max_turns``, raised (never lowered) by a
+``max_turns`` the caller passes for one run (a Sites app build, via the surface
+profile); it is fixed at connect(), so a raise is part of the warm-client key.
+Permissions are always bypassed (headless), ``cli_path`` comes from
 ``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
 image-returning tools. The subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
 (unless already set) and ``ENABLE_CLAUDEAI_MCP_SERVERS=false``; ``ENABLE_TOOL_SEARCH``
@@ -749,6 +752,17 @@ _CLI_TOO_OLD_RE = re.compile(
     r"|version (?P<required>[\d.]+) or newer is required",
     re.IGNORECASE,
 )
+
+
+def _effective_max_turns(configured: int, requested: int | None) -> int | None:
+    """The ``max_turns`` a run's options carry: ``claude_sdk_max_turns`` (0 means
+    unlimited, sent as None), raised to ``requested`` when a surface asks for more.
+    A request can only raise the cap, never lower it or limit an unlimited one."""
+    if not configured:
+        return None
+    if requested and requested > configured:
+        return requested
+    return configured
 
 
 def _result_error_text(event: Any, *, max_turns: int | None) -> str:
@@ -2207,6 +2221,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         plugin_digest: str = "",
         tenant_scope: str = "",
         system_prompt_digest: str = "",
+        turn_cap: int | None = None,
     ) -> str:
         """Persistent-client cache key: session + cwd + model + tools + the deny
         set + the prompt's identity + the plugin-identity digest.
@@ -2277,7 +2292,18 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{prompt_key}:"
             f"{plugin_digest}:"
             f"{tenant_scope}"
+            f"{f':turns={turn_cap}' if turn_cap else ''}"
         ) + cls._scoped_servers_key(options)
+
+    def _raised_turn_cap(self, options: Any) -> int | None:
+        """The options' ``max_turns`` when a run RAISED it past ``claude_sdk_max_turns``
+        (``_effective_max_turns``), else None. Only a raise enters the warm-client key,
+        so an ordinary turn keys exactly as it did before the raise existed."""
+        value = getattr(options, "max_turns", None)
+        configured = self.settings.claude_sdk_max_turns or None
+        if isinstance(value, int) and not isinstance(value, bool) and value != configured:
+            return value
+        return None
 
     @staticmethod
     def _scoped_servers_key(options: Any) -> str:
@@ -2347,6 +2373,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             plugin_digest=plugin_digest,
             tenant_scope=self._tenant_scope_key(),
             system_prompt_digest=system_prompt_digest,
+            turn_cap=self._raised_turn_cap(options),
         )
 
         async with self._client_lock:
@@ -2639,6 +2666,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
         tools_enabled: bool = True,
+        max_turns: int | None = None,
     ) -> _BuiltOptions:
         """Assemble the ``ClaudeAgentOptions`` a turn (or a prewarm) will run on.
 
@@ -3045,7 +3073,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "setting_sources": [],
             "hooks": hooks,
             "cwd": str(resolved_cwd),
-            "max_turns": self.settings.claude_sdk_max_turns or None,
+            "max_turns": _effective_max_turns(self.settings.claude_sdk_max_turns, max_turns),
             "max_buffer_size": _SDK_MAX_BUFFER_BYTES,
         }
         if not tools_enabled:
@@ -3365,6 +3393,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         system_prompt_digest: str = "",
         model_override: str | None = None,
         tools_enabled: bool = True,
+        max_turns: int | None = None,
     ) -> None:
         """Eagerly ``connect()`` the warm CLI subprocess for a session before its
         first turn, so the first real ``run`` reuses it instead of paying the
@@ -3437,6 +3466,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 exclusive_mcp_tools=exclusive_mcp_tools,
                 model_override=model_override,
                 tools_enabled=tools_enabled,
+                max_turns=max_turns,
                 stderr_sink=[],
             )
             # Remember the digest we may have adopted a dir under, so a failed
@@ -3664,6 +3694,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Per-turn volatile context (KB hits, scope/participants, uploaded-file
         # text, soul recall). Sent in the query text, never the system prompt.
         turn_context: str = "",
+        # A surface's raised tool-turn cap for this run (``_effective_max_turns``).
+        max_turns: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -3858,6 +3890,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 model_override=model_override,
                 exclusive_mcp_tools=exclusive_mcp_tools,
                 tools_enabled=tools_enabled,
+                max_turns=max_turns,
                 stderr_sink=_stderr_lines,
             )
             options = _built.options
@@ -3909,6 +3942,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     plugin_digest=plugin_digest,
                     tenant_scope=self._tenant_scope_key(),
                     system_prompt_digest=system_prompt_digest,
+                    turn_cap=self._raised_turn_cap(options),
                 )
                 event_stream, _warm_lease = await self._leased_dispatch(
                     message=message,

@@ -122,7 +122,7 @@ def test_the_site_skill_sends_apps_and_games_to_the_plan_skill() -> None:
     assert "`sites-app-plan`" in section
     assert "`PLAN.md`" in section
     assert "before any UI" in section
-    assert "one milestone at a time" in section
+    assert "every milestone, back to back" in section
 
 
 def _app_plan_skill():
@@ -189,6 +189,29 @@ def test_the_app_plan_skill_plans_before_it_builds() -> None:
     assert "apps that are not games" in lower
     assert "facts rule" in lower and "stored-data rule" in lower
     assert "localStorage" in text
+
+
+def test_the_app_plan_skill_builds_every_milestone_after_approval() -> None:
+    """Regression: after "Build this plan" the agent built M1, replied "stage 1 done"
+    and waited. The skill let it ("if the turn runs long, stop at a milestone boundary")
+    and its per-milestone "tell the user what to try" read as a turn-ending report.
+    Once approved, every milestone is built back to back in one turn, with short
+    progress lines and one final report; only a real blocker stops it."""
+    text = _app_plan_skill().read_text("utf-8")
+    lower = " ".join(text.lower().split())
+    assert "stop at a milestone boundary" not in lower
+    assert "every milestone back to back" in lower
+    assert "a milestone boundary is not a reason to stop" in lower
+    assert 'never ask "shall i continue?"' in lower
+    assert "one final report" in lower
+    assert "progress line" in lower
+    # The only stops: a real blocker, or a finished plan.
+    assert "real blocker" in lower
+    for blocker in ("a secret", "a decision only the user can make", "a missing fact"):
+        assert blocker in lower, blocker
+    # The frontmatter and the checklist say the same thing.
+    _, front, _ = text.split("---", 2)
+    assert "one milestone at a time" not in " ".join(front.lower().split())
 
 
 def _registered_providers():

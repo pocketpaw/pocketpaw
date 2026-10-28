@@ -366,6 +366,29 @@ def _backend_error_frame(message: str) -> dict[str, str]:
     return _classify_error(message)
 
 
+# A run its own limit stopped: the Claude SDK's turn cap (``_result_error_text``) or a
+# limited pydantic_ai run's usage limit (``_explain_error``, the bounded free run).
+_RUN_LIMIT_STOP_RE = re.compile(r"tool-turn limit|usage limit for one run", re.IGNORECASE)
+
+
+async def _app_build_stop_note(ctx: ScopeContext, message: str) -> str | None:
+    """What a /sites app build cut off by its run limit still owes the user.
+
+    The agent cannot speak after the limit stops it, so without this the user sees
+    only "stopped after reaching the tool-turn limit" and no sign the app is half
+    built. Reads PLAN.md as the run left it and names the next unticked milestone;
+    None for any other error, surface or a finished plan."""
+    if not _RUN_LIMIT_STOP_RE.search(message or ""):
+        return None
+    milestone = _sites_next_milestone(await _sites_refine_pocket(ctx))
+    if milestone is None:
+        return None
+    return (
+        "The app is not finished: PLAN.md still has unticked milestones, next is "
+        f'{milestone}. Send "continue" and I will carry on from there.'
+    )
+
+
 def _is_provider_exception(exc: BaseException) -> bool:
     for cls in type(exc).__mro__:
         module = getattr(cls, "__module__", "") or ""
@@ -643,34 +666,78 @@ async def _load_entity_profile_override(workspace_id: str, pocket_id: str) -> di
         return override if isinstance(override, dict) else None
 
 
-async def _sites_refine_meta(ctx: ScopeContext) -> SurfaceMeta:
+async def _sites_refine_pocket(ctx: ScopeContext) -> Any | None:
+    """The source pocket of a /sites REFINE, tenant-scoped (it must be in the run's
+    workspace), or None: another surface, no ``pocket_id``, a foreign or missing
+    pocket, or a failed read."""
+    sc = ctx.surface_context
+    if sc is None or sc.kind is not SurfaceKind.SITES or not sc.meta.pocket_id:
+        return None
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.pocket import Pocket
+
+        pocket = await Pocket.get(PydanticObjectId(sc.meta.pocket_id))
+    except Exception:
+        logger.debug("sites refine pocket read failed for %s", sc.meta.pocket_id, exc_info=True)
+        return None
+    if pocket is None or str(getattr(pocket, "workspace", "")) != str(ctx.workspace_id):
+        return None
+    return pocket
+
+
+def _sites_refine_meta(ctx: ScopeContext, pocket: Any | None) -> SurfaceMeta:
     """The surface meta, with a /sites REFINE's ``engine`` set to the source pocket's.
 
     ``meta.engine`` is a create-time hint the refine chat never stamps, so the sites
     profile cannot tell a ripple refine from an html / svelte / react one without
-    this read — and only the latter can drop the inline ripple prompt. Tenant-scoped
-    (the pocket must be in the run's workspace). Any failure keeps the meta as is,
-    which keeps ripple ON: the safe default. Only /sites with a ``pocket_id`` reads.
+    this read — and only the latter can drop the inline ripple prompt. ``pocket`` is
+    ``_sites_refine_pocket``'s; None keeps the meta as is, which keeps ripple ON:
+    the safe default.
     """
     assert ctx.surface_context is not None
     meta = ctx.surface_context.meta
-    if ctx.surface_context.kind is not SurfaceKind.SITES or not meta.pocket_id:
+    if pocket is None:
         return meta
     try:
-        from dataclasses import replace
-
-        from beanie import PydanticObjectId
-
-        from pocketpaw_ee.cloud.models.pocket import Pocket
         from pocketpaw_ee.sites.engines import normalize_engine
 
-        pocket = await Pocket.get(PydanticObjectId(meta.pocket_id))
-        if pocket is None or str(getattr(pocket, "workspace", "")) != str(ctx.workspace_id):
-            return meta
         return replace(meta, engine=normalize_engine(getattr(pocket, "engine", None)))
     except Exception:
         logger.debug("sites refine engine read failed for %s", meta.pocket_id, exc_info=True)
         return meta
+
+
+def _sites_next_milestone(pocket: Any | None) -> str | None:
+    """The next unticked milestone in a PROJECT site's PLAN.md, or None (not a project,
+    no PLAN.md, or every milestone ticked)."""
+    if pocket is None or getattr(pocket, "engine", None) != "project":
+        return None
+    try:
+        from pocketpaw_ee.sites.app_plan import next_milestone_in
+
+        source = getattr(pocket, "source", None)
+        return next_milestone_in(source if isinstance(source, dict) else None)
+    except Exception:
+        logger.debug("PLAN.md read failed", exc_info=True)
+        return None
+
+
+def _app_build_turn_cap(base: SurfaceProfile, pocket: Any | None) -> SurfaceProfile:
+    """Raise the tool-turn cap for a /sites project turn whose PLAN.md has unticked
+    milestones: the agent builds every one of them in this turn (the
+    ``sites-app-plan`` skill), each with a build, previews and a play-test, which can
+    run past ``claude_sdk_max_turns``. ``sites_app_build_max_turns`` (0 = off) only
+    raises a backend's own cap; pydantic_ai applies a free run's ``max_requests``
+    after it, so a free run keeps ``free_run_max_turns``. Every other turn is
+    unchanged."""
+    if _sites_next_milestone(pocket) is None:
+        return base
+    from pocketpaw.config import get_settings  # type: ignore[import-untyped]
+
+    cap = get_settings().sites_app_build_max_turns
+    return replace(base, max_turns=cap) if cap > 0 else base
 
 
 async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
@@ -691,8 +758,10 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
         # profile (ripple on, no deny) — match it exactly.
         return resolve_profile(SurfaceKind.GENERIC, SurfaceMeta())
 
-    meta = await _sites_refine_meta(ctx)
+    refine_pocket = await _sites_refine_pocket(ctx)
+    meta = _sites_refine_meta(ctx, refine_pocket)
     base = resolve_profile(ctx.surface_context.kind, meta)
+    base = _app_build_turn_cap(base, refine_pocket)
     base = await _deny_tools_that_would_only_refuse(ctx, base)
     pocket_id = ctx.surface_context.meta.pocket_id
     if not pocket_id:
@@ -1713,6 +1782,12 @@ async def _prewarm_session(
                 # prewarmed client and paid a second cold connect.
                 model_override=ctx.model_override or None,
                 tools_enabled=ctx.tools_enabled is not False,
+                # The raised turn cap is fixed at connect(), so it is in the key too.
+                **(
+                    {"max_turns": ctx.resolved_profile.max_turns}
+                    if getattr(ctx.resolved_profile, "max_turns", None)
+                    else {}
+                ),
             )
         finally:
             exit_turn_slot(slot_token)
@@ -2258,6 +2333,11 @@ async def _drive_agent_loop(
             run_kwargs["soul_recall"] = False
         if surface_allow_mcp is not None:
             run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp
+        # A surface's raised tool-turn cap (``_app_build_turn_cap``). Withheld when
+        # unset; the pool forwards it only to a backend that declares it.
+        surface_max_turns = getattr(ctx.resolved_profile, "max_turns", None)
+        if surface_max_turns:
+            run_kwargs["max_turns"] = surface_max_turns
         # CX-2 — per-agent EXCLUSIVE tool policy. When the RESOLVED agent declares
         # ``tool_mode="exclusive"``, its OWN ``tools`` become the MCP allow-list and
         # the CX-1 ``exclusive_mcp_tools`` cap fires: the universal grant
@@ -2877,7 +2957,11 @@ async def _drive_agent_loop(
                     message[:200],
                 )
                 ctx.backend_error_detail = message
-                yield ("error", _backend_error_frame(message))
+                frame = _backend_error_frame(message)
+                note = await _app_build_stop_note(ctx, message)
+                if note:
+                    frame = {**frame, "message": f"{frame['message']} {note}"}
+                yield ("error", frame)
                 if sup_acq is not None:
                     # Supervised: a backend ``error`` event is NOT automatically a
                     # crash. The leased ``claude`` client can stay alive and healthy
